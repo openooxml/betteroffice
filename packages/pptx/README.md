@@ -41,7 +41,8 @@ replays the resulting primitives on canvas. Font bytes are supplied by the host
 and registered with the Rust shaper through `openPresentation`.
 
 Beyond rendering, `PresentationHandle` covers editing: version-checked batches
-(`readContent` / `findText` / `validateEdits` / `applyEdits`), text
+(`readContent` / `findText` / `validateEdits` / `applyEdits`), read-only
+structured export (`exportStructured` / `exportMarkdown`), text
 (`insertText` / `deleteText` / `formatText` / `setParagraphAlignment`), slides
 (`insertSlide` / `deleteSlide` / `moveSlide`), shapes
 (`addTextBox` / `addShape` / `addPicture` / `moveShape` / `resizeShape` /
@@ -163,6 +164,65 @@ UTF-16 units; requests hold at most 16 MiB of JSON and reads and searches return
 at most 64 MiB, searches marking the cut with `truncated`. Slide, shape, story and paragraph
 ids anchor targets within one session only, and versions from one session
 never match another.
+
+## Structured export
+
+`exportStructured()` returns the committed deck as JSON with the version it was
+read at, and `exportMarkdown()` renders that same read as Markdown. Neither
+flushes editor input or changes anything. `exportPptxStructured(bytes)`,
+`exportPptxMarkdown(bytes)` and `renderPptxMarkdown(content)` do the same
+headless, with anchors that address the returned snapshot only.
+
+```ts
+const read = deck.exportStructured({ includeNotes: true });
+if (!read.ok) throw new Error(read.failure.message);
+for (const slide of read.content.slides) {
+  for (const shape of slide.shapes) {
+    for (const paragraph of shape.stories.flatMap((story) => story.paragraphs)) {
+      console.log(slide.index, paragraph.list?.kind, paragraph.anchor);
+    }
+  }
+}
+
+const { markdown, anchors } = await exportPptxMarkdown(bytes);
+```
+
+Slides come in deck order with their original index; shapes follow the current
+shape tree depth first, a group's descendants at the group's position and table
+cells row by row. This is the authored order, not a reading order inferred from
+geometry. Paragraphs carry their level, effective alignment, authored
+`bulletJson` and the resolved list marker (inherited from the layout, master
+and text styles and numbered as the renderer numbers them); runs carry
+formatting marks, links, soft line breaks, fields with their cached result and
+zero-width placeholders for inline content such as equations. Tables keep their
+grid, spans and merge continuations with each cell's current story. Pictures,
+video, audio, charts, SmartArt, embedded objects and shape-tree elements the
+deck model does not hold become placeholders with their alternative text and
+relationships; their data is never exported. Layout and master content is not
+exported, and an empty placeholder never shows its prompt text.
+
+Every record carries an anchor: `text` ranges use the story offsets of
+`readContent()`, `notes` and `comment` ranges index their plain text, and
+records seeded from the file carry `provenance` (part, SHA-256, element path,
+`sldId`, `cNvPr` id). Session anchors belong to the returned version and do not
+survive save and reopen. A collaboration session opened from an update seeded by
+an older release, without its source file, may not know which slides are hidden:
+those slides are exported with `hidden: null` and a `visibility-unknown`
+diagnostic, and reopening the session with its source file restores their
+visibility. Hidden slides and shapes, speaker notes (plain text)
+and comments are excluded unless `includeHiddenSlides`, `includeHiddenShapes`,
+`includeNotes` or `includeComments` asks for them, and `includeFormatting:
+false` drops marks. Everything left out or not represented is listed in
+`diagnostics`. `maxBlocks` (10,000 by default; slides, shapes, paragraphs,
+notes and comments count) and `maxBytes` (8 MiB of compact JSON) stop the
+export at a whole record and set `truncated`. Unusable limits come back as an
+`invalid-options` or `limit-exceeded` refusal (`PptxExportError` for the
+headless functions); malformed options throw.
+
+Markdown renders slide headings, title placeholders as headings, paragraphs
+with literal list markers, pipe or entity-escaped HTML tables, object
+placeholders, notes and comments, with a `<!-- pptx-export:N -->` marker before
+each block that `anchors` maps back to its source.
 
 ## Comments
 

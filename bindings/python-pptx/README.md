@@ -170,6 +170,39 @@ back with `"ok": False` and a `code`; a malformed request raises `ValueError`.
 Only an applied batch sets `is_edited`. Versions and ids belong to the open
 session.
 
+## Export structured content
+
+`export_structured` returns the committed deck as structured content with the
+version it was read at, and `export_markdown` renders that same read as
+Markdown; neither changes anything:
+
+```python
+read = deck.export_structured(include_notes=True)
+for slide in read["content"]["slides"]:
+    for shape in slide["shapes"]:
+        for story in shape["stories"]:
+            for paragraph in story["paragraphs"]:
+                print(slide["index"], paragraph["list"], paragraph["anchor"])
+
+markdown = bo.export_pptx_markdown(data)["markdown"]
+```
+
+The dictionaries are the
+[TypeScript export contract](../../packages/pptx/src/structuredExport.ts):
+slides in deck order, shapes in shape-tree order, paragraphs with levels,
+resolved list markers, runs, fields and links, tables with merges, and
+placeholders with alternative text for pictures, media, charts, SmartArt and
+embedded objects. Every record carries an anchor and, when it was read from the
+file, its source part, SHA-256 and element path. Hidden slides and shapes,
+notes and comments are keyword options, and every omission is listed in
+`diagnostics`; a slide whose visibility an older collaboration update does not
+record is exported with `hidden: None` and a `visibility-unknown` diagnostic. Unusable limits come back with `"ok": False`.
+`export_pptx_structured(data, options=...)` and `export_pptx_markdown` read
+bytes with the camelCase wire options and return the content alone,
+`render_pptx_markdown(content)` renders content read earlier, and these raise
+`ExportError` (its `failure` is the refusal) for unusable limits and
+`ParseError` for bytes that are not a PPTX.
+
 ## Lay a slide out
 
 **No font is compiled into the wheel**, so laying out a slide that has text
@@ -325,6 +358,8 @@ edits that merge across replicas, that is the gap this fills.
 | `insert_paragraph_break` | split a paragraph |
 | `add_comment` / `reply_to_comment` / `set_comment_status` / `remove_comment` | comment threads |
 | `comments` / `comment_flavor` / `set_comment_flavor` | read comments, pick the comment system |
+| `export_structured` / `export_markdown` | versioned structured content and Markdown |
+| `export_pptx_structured` / `export_pptx_markdown` / `render_pptx_markdown` | export bytes, render content |
 | `propose` / `proposals` / `preview_proposal` / `render_proposal` | stage and preview agent edits |
 | `accept_proposal` / `reject_proposal` | apply or drop a proposal |
 | `register_font` / `render_slide` / `render_png` | layout and PNG export |
@@ -336,7 +371,7 @@ edits that merge across replicas, that is the gap this fills.
 
 Errors raise `PptxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
-`NotCollaborativeError`, `StaleProposalError`.
+`NotCollaborativeError`, `StaleProposalError`, `ExportError`.
 An unknown slide, shape, or story ID raises `KeyError`; a bad argument — an
 unsupported geometry, an out-of-range client ID, an unknown parse limit —
 raises `ValueError`.

@@ -14,6 +14,7 @@ use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
+use pptx_edit::paragraph::{ListCounters, ParagraphCascade, SlideParents, find_placeholder};
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
 };
@@ -57,7 +58,6 @@ pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
-const MAX_AUTONUM_VALUE: u32 = 32_767 + MAX_TEXT_PARAGRAPHS as u32;
 const MAX_TEXT_RUNS: usize = 100_000;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
@@ -216,41 +216,15 @@ impl SlideRenderer {
         height_emu: i64,
         slide_index: usize,
     ) -> Result<RenderedSlide, RenderError> {
-        let parsed_slide = deck_slide
-            .source_part_path
-            .as_deref()
-            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path));
-        let layout_path = deck_slide
-            .layout_part_path
-            .as_deref()
-            .or_else(|| parsed_slide.and_then(|slide| slide.layout_part_path.as_deref()));
-        let layout = layout_path
-            .and_then(|path| {
-                package
-                    .layouts
-                    .iter()
-                    .find(|layout| layout.part_path == path)
-            })
-            .or_else(|| package.layouts.first());
-        let master = layout
-            .and_then(|layout| layout.master_part_path.as_deref())
-            .and_then(|path| {
-                package
-                    .masters
-                    .iter()
-                    .find(|master| master.part_path == path)
-            })
-            .or_else(|| {
-                layout.and_then(|layout| {
-                    package.masters.iter().find(|master| {
-                        master
-                            .layout_part_paths
-                            .iter()
-                            .any(|path| path == &layout.part_path)
-                    })
-                })
-            })
-            .or_else(|| package.masters.first());
+        let SlideParents {
+            slide: parsed_slide,
+            layout,
+            master,
+        } = SlideParents::resolve(
+            package,
+            deck_slide.source_part_path.as_deref(),
+            deck_slide.layout_part_path.as_deref(),
+        );
         let theme_part = master
             .and_then(|master| master.theme_part_path.as_deref())
             .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
@@ -2083,59 +2057,23 @@ impl BodyCascade<'_> {
             })
     }
 
-    fn paragraph_properties(&self, index: usize, level: u32) -> ParagraphProperties {
-        let mut properties = self
-            .master_slide
-            .and_then(|master| master_style(master, self.placeholder, level))
-            .cloned()
-            .unwrap_or_default();
-        if self.placeholder.is_none() {
-            let level_style = self
-                .default_style
-                .get(level as usize)
-                .or_else(|| self.default_style.first());
-            for source in self.default_paragraph.into_iter().chain(level_style) {
-                merge_paragraph_properties(&mut properties, source);
-            }
+    fn paragraph_properties(
+        &self,
+        index: usize,
+        level: u32,
+        authored: Option<&Bullet>,
+    ) -> ParagraphProperties {
+        ParagraphCascade {
+            primary: self.primary,
+            layout: self.layout,
+            master: self.master,
+            master_slide: self.master_slide,
+            default_style: self.default_style,
+            default_paragraph: self.default_paragraph,
+            placeholder: self.placeholder,
+            style_color: self.style_color,
         }
-        if let Some(color) = self.style_color {
-            properties
-                .default_run
-                .get_or_insert_with(RunProperties::default)
-                .color = Some(color.clone());
-        }
-        for body in [self.master, self.layout, self.primary]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(source) = &body.default_list_style {
-                merge_paragraph_properties(&mut properties, source);
-            }
-            if let Some(source) = body.list_style.get(level as usize) {
-                merge_paragraph_properties(&mut properties, source);
-            }
-            if let Some(source) = body
-                .paragraphs
-                .get(index)
-                .or_else(|| body.paragraphs.get(level as usize))
-                .map(|paragraph| &paragraph.properties)
-            {
-                merge_paragraph_properties(&mut properties, source);
-            }
-        }
-        if let Some(Bullet::AutoNumber { restart, .. }) = &mut properties.bullet {
-            *restart = self
-                .primary
-                .and_then(|body| body.paragraphs.get(index))
-                .is_some_and(|paragraph| {
-                    matches!(
-                        paragraph.properties.bullet,
-                        Some(Bullet::AutoNumber { restart: true, .. })
-                            | Some(Bullet::AutoNumber { start_at: 2.., .. })
-                    )
-                });
-        }
-        properties
+        .properties(index, level, authored)
     }
 }
 
@@ -2318,18 +2256,10 @@ fn resolve_content(
     let line_space_reduction = autofit_line_space_reduction(cascade.autofit());
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
-    let mut numbering = AutoNumbering::default();
+    let mut numbering = ListCounters::default();
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let mut properties = cascade.paragraph_properties(index, paragraph.level);
-        if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
-            properties.bullet = paragraph.bullet.clone();
-            if let Some(Bullet::AutoNumber {
-                restart, start_at, ..
-            }) = &mut properties.bullet
-            {
-                *restart |= *start_at != 1;
-            }
-        }
+        let properties =
+            cascade.paragraph_properties(index, paragraph.level, paragraph.bullet.as_ref());
         let language = properties
             .default_run
             .as_ref()
@@ -2357,15 +2287,13 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        // A blank paragraph between list items is spacing, not an item:
-        // PowerPoint neither marks it nor counts it towards the next number.
-        let marker = paragraph
-            .runs
-            .iter()
-            .any(|run| !run.text.is_empty())
-            .then(|| resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering))
-            .flatten()
-            .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
+        let marker = numbering
+            .next(
+                properties.bullet.as_ref(),
+                paragraph.level,
+                paragraph.runs.iter().any(|run| !run.text.is_empty()),
+            )
+            .map(|marker| symbol_bullet(&marker.text(), properties.bullet_font.as_ref(), theme));
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
@@ -4156,45 +4084,6 @@ fn find_node(nodes: &[ShapeNode], id: u32) -> Option<&ShapeNode> {
     None
 }
 
-fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Option<&'a ShapeNode> {
-    for node in nodes {
-        if node_placeholder(node).is_some_and(|value| placeholders_match(value, target)) {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_placeholder(&group.children, target)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
-/// A slide holds one of each of these, so they inherit by type: PowerPoint
-/// writes a slide number as `idx="12"` over a master's `idx="4"` and still
-/// draws it where the master put it (#797).
-const SINGLETON_PLACEHOLDERS: [&str; 5] = ["title", "sldNum", "dt", "ftr", "hdr"];
-
-fn placeholders_match(left: &Placeholder, right: &Placeholder) -> bool {
-    let left_type = normalize_placeholder_type(left.placeholder_type.as_deref());
-    let right_type = normalize_placeholder_type(right.placeholder_type.as_deref());
-    if SINGLETON_PLACEHOLDERS.contains(&left_type) || SINGLETON_PLACEHOLDERS.contains(&right_type) {
-        return left_type == right_type;
-    }
-    match (left.index, right.index) {
-        (Some(left), Some(right)) => left == right,
-        _ => left_type == right_type,
-    }
-}
-
-fn normalize_placeholder_type(value: Option<&str>) -> &str {
-    match value.unwrap_or("body") {
-        "ctrTitle" => "title",
-        "obj" => "body",
-        value => value,
-    }
-}
-
 fn node_base(node: &ShapeNode) -> &pptx_parse::ShapeBase {
     match node {
         ShapeNode::Shape(shape) => &shape.base,
@@ -4413,105 +4302,6 @@ fn body_text_effects(body: &TextBody) -> Option<&ShapeEffects> {
         .chain(level_defaults)
         .find_map(|properties| properties.effects.as_ref())
         .filter(|effects| effects.outer_shadow.is_some())
-}
-
-fn master_style<'a>(
-    master: &'a SlideMaster,
-    placeholder: Option<&Placeholder>,
-    level: u32,
-) -> Option<&'a ParagraphProperties> {
-    let styles = match placeholder {
-        Some(placeholder) => {
-            match normalize_placeholder_type(placeholder.placeholder_type.as_deref()) {
-                "title" => &master.text_styles.title,
-                "body" | "subTitle" => &master.text_styles.body,
-                _ => &master.text_styles.other,
-            }
-        }
-        None => &master.text_styles.other,
-    };
-    styles.get(level as usize).or_else(|| styles.first())
-}
-
-fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &ParagraphProperties) {
-    if source.alignment.is_some() {
-        target.alignment.clone_from(&source.alignment);
-    }
-    if source.margin_left.is_some() {
-        target.margin_left = source.margin_left;
-    }
-    if source.margin_right.is_some() {
-        target.margin_right = source.margin_right;
-    }
-    if source.indent.is_some() {
-        target.indent = source.indent;
-    }
-    if source.bullet.is_some() {
-        target.bullet.clone_from(&source.bullet);
-    }
-    if source.line_spacing.is_some() {
-        target.line_spacing = source.line_spacing;
-    }
-    if source.space_before.is_some() {
-        target.space_before = source.space_before;
-    }
-    if source.space_after.is_some() {
-        target.space_after = source.space_after;
-    }
-    if source.bullet_font.is_some() {
-        target.bullet_font.clone_from(&source.bullet_font);
-    }
-    if source.bullet_color.is_some() {
-        target.bullet_color.clone_from(&source.bullet_color);
-    }
-    if source.bullet_size.is_some() {
-        target.bullet_size.clone_from(&source.bullet_size);
-    }
-    if source.default_tab_size.is_some() {
-        target.default_tab_size = source.default_tab_size;
-    }
-    if source.tab_stops.is_some() {
-        target.tab_stops.clone_from(&source.tab_stops);
-    }
-    if let Some(source) = &source.default_run {
-        let target = target
-            .default_run
-            .get_or_insert_with(RunProperties::default);
-        merge_run_properties(target, source);
-    }
-}
-
-fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
-    if source.font_size_pt.is_some() {
-        target.font_size_pt = source.font_size_pt;
-    }
-    if source.bold.is_some() {
-        target.bold = source.bold;
-    }
-    if source.italic.is_some() {
-        target.italic = source.italic;
-    }
-    if source.underline.is_some() {
-        target.underline.clone_from(&source.underline);
-    }
-    if source.font_family.is_some() {
-        target.font_family.clone_from(&source.font_family);
-    }
-    if source.color.is_some() {
-        target.color.clone_from(&source.color);
-    }
-    if source.language.is_some() {
-        target.language.clone_from(&source.language);
-    }
-    if source.spacing_pt.is_some() {
-        target.spacing_pt = source.spacing_pt;
-    }
-    if source.baseline_pct.is_some() {
-        target.baseline_pct = source.baseline_pct;
-    }
-    if source.caps.is_some() {
-        target.caps = source.caps;
-    }
 }
 
 /// A run that carries an `a:hlinkClick` is drawn in the theme's `hlink` colour
@@ -5127,119 +4917,6 @@ fn symbol_bullet(marker: &str, font: Option<&BulletFont>, theme: &Theme) -> Stri
         .collect()
 }
 
-/// Per-level `a:buAutoNum` state: the number last drawn and the `startAt`
-/// the run was seeded from.
-#[derive(Default)]
-struct AutoNumbering {
-    numbers: [u32; 9],
-    starts: [u32; 9],
-}
-
-/// Resolves a marker once per paragraph.
-fn resolve_marker(
-    bullet: Option<&Bullet>,
-    level: u32,
-    numbering: &mut AutoNumbering,
-) -> Option<String> {
-    let level = (level as usize).min(numbering.numbers.len() - 1);
-    numbering.numbers[level + 1..].fill(0);
-    numbering.starts[level + 1..].fill(0);
-    match bullet {
-        Some(Bullet::AutoNumber {
-            scheme,
-            start_at,
-            restart,
-        }) => {
-            let start = (*start_at).clamp(1, 32_767);
-            // PowerPoint writes the list's `startAt` on every one of its
-            // paragraphs, so repeating the seed continues the run; only a
-            // different declared start opens a new list.
-            numbering.numbers[level] = match numbering.numbers[level] {
-                0 => start,
-                _ if *restart && numbering.starts[level] != start => start,
-                current => current.saturating_add(1),
-            };
-            if numbering.numbers[level] == start {
-                numbering.starts[level] = start;
-            }
-            Some(format_autonum(numbering.numbers[level], scheme))
-        }
-        _ => {
-            numbering.numbers[level] = 0;
-            numbering.starts[level] = 0;
-            match bullet {
-                Some(Bullet::Character { value }) if !value.trim().is_empty() => {
-                    Some(value.clone())
-                }
-                _ => None,
-            }
-        }
-    }
-}
-
-/// Formats Latin, Roman and decimal markers.
-fn format_autonum(value: u32, scheme: &str) -> String {
-    let value = value.clamp(1, MAX_AUTONUM_VALUE);
-    let (numeral, suffix) = ["ParenBoth", "ParenR", "Period", "Plain"]
-        .into_iter()
-        .find_map(|suffix| Some((scheme.strip_suffix(suffix)?, suffix)))
-        .unwrap_or((scheme, "Period"));
-    let body = match numeral {
-        "alphaLc" => format_alpha(value, false),
-        "alphaUc" => format_alpha(value, true),
-        "romanLc" => format_roman(value, false),
-        "romanUc" => format_roman(value, true),
-        "arabic" => value.to_string(),
-        _ => return format!("{value}."),
-    };
-    match suffix {
-        "ParenBoth" => format!("({body})"),
-        "ParenR" => format!("{body})"),
-        "Plain" => body,
-        _ => format!("{body}."),
-    }
-}
-
-fn format_alpha(value: u32, upper: bool) -> String {
-    let base = if upper { b'A' } else { b'a' };
-    let mut value = value.max(1);
-    let mut out = Vec::new();
-    while value > 0 {
-        let index = (value - 1) % 26;
-        out.push(base + index as u8);
-        value = (value - 1) / 26;
-    }
-    out.reverse();
-    String::from_utf8(out).unwrap_or_default()
-}
-
-fn format_roman(value: u32, upper: bool) -> String {
-    const NUMERALS: [(u32, &str); 13] = [
-        (1000, "m"),
-        (900, "cm"),
-        (500, "d"),
-        (400, "cd"),
-        (100, "c"),
-        (90, "xc"),
-        (50, "l"),
-        (40, "xl"),
-        (10, "x"),
-        (9, "ix"),
-        (5, "v"),
-        (4, "iv"),
-        (1, "i"),
-    ];
-    let mut value = value.max(1);
-    let mut out = String::new();
-    for (amount, numeral) in NUMERALS {
-        while value >= amount {
-            out.push_str(numeral);
-            value -= amount;
-        }
-    }
-    if upper { out.to_uppercase() } else { out }
-}
-
 fn normalize_family(value: &str) -> String {
     value.trim().to_lowercase()
 }
@@ -5516,185 +5193,6 @@ mod tests {
                 rect_covering_text(rect, None).h
             ),
             (rect.y, rect.h)
-        );
-    }
-
-    #[test]
-    fn autonumbering_counts_per_level_and_resumes_across_other_levels() {
-        let mut counters = AutoNumbering::default();
-        let number = |level, counters: &mut AutoNumbering| {
-            resolve_marker(
-                Some(&Bullet::AutoNumber {
-                    scheme: "arabicPeriod".to_owned(),
-                    start_at: 1,
-                    restart: false,
-                }),
-                level,
-                counters,
-            )
-        };
-        let dash = |level, counters: &mut AutoNumbering| {
-            resolve_marker(
-                Some(&Bullet::Character {
-                    value: "-".to_owned(),
-                }),
-                level,
-                counters,
-            )
-        };
-        assert_eq!(number(0, &mut counters).as_deref(), Some("1."));
-        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
-        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
-        assert_eq!(number(0, &mut counters).as_deref(), Some("2."));
-        assert_eq!(number(0, &mut counters).as_deref(), Some("3."));
-        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
-        assert_eq!(number(1, &mut counters).as_deref(), Some("2."));
-        assert_eq!(number(0, &mut counters).as_deref(), Some("4."));
-        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
-        assert_eq!(resolve_marker(Some(&Bullet::None), 0, &mut counters), None);
-    }
-
-    #[test]
-    fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
-        let mut counters = AutoNumbering::default();
-        let number = |counters: &mut AutoNumbering| {
-            resolve_marker(
-                Some(&Bullet::AutoNumber {
-                    scheme: "arabicPeriod".to_owned(),
-                    start_at: 7,
-                    restart: false,
-                }),
-                0,
-                counters,
-            )
-        };
-        assert_eq!(number(&mut counters).as_deref(), Some("7."));
-        assert_eq!(number(&mut counters).as_deref(), Some("8."));
-        let mut counters = AutoNumbering::default();
-        let last_start = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 32_767,
-            restart: false,
-        };
-        assert_eq!(
-            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
-            Some("32767.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
-            Some("32768.")
-        );
-    }
-
-    #[test]
-    fn autonumber_schemes_format_their_numeral_and_suffix() {
-        assert_eq!(format_autonum(4, "arabicPeriod"), "4.");
-        assert_eq!(format_autonum(4, "arabicParenR"), "4)");
-        assert_eq!(format_autonum(4, "arabicParenBoth"), "(4)");
-        assert_eq!(format_autonum(4, "arabicPlain"), "4");
-        assert_eq!(format_autonum(1, "alphaLcParenR"), "a)");
-        assert_eq!(format_autonum(27, "alphaUcPeriod"), "AA.");
-        assert_eq!(format_autonum(9, "romanLcPeriod"), "ix.");
-        assert_eq!(format_autonum(2024, "romanUcPeriod"), "MMXXIV.");
-        assert_eq!(format_autonum(3, "somethingElse"), "3.");
-        assert_eq!(format_autonum(3, "somethingElsePlain"), "3.");
-        assert_eq!(format_autonum(3, "somethingElseParenBoth"), "3.");
-    }
-
-    #[test]
-    fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
-        let mut counters = AutoNumbering::default();
-        let number = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 1,
-            restart: false,
-        };
-        let restart = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 7,
-            restart: true,
-        };
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&restart), 0, &mut counters).as_deref(),
-            Some("7.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("8.")
-        );
-        assert_eq!(resolve_marker(None, 0, &mut counters), None);
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(
-                Some(&Bullet::Character {
-                    value: "•".to_owned()
-                }),
-                0,
-                &mut counters
-            )
-            .as_deref(),
-            Some("•")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
-            Some("1.")
-        );
-        assert_eq!(
-            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
-            Some("1.")
-        );
-    }
-
-    /// `pptarena-018-original` slide 11 declares `startAt="4"` on all four of
-    /// its paragraphs and PowerPoint renders 4, 5, 6, 7;
-    /// `pptarena-034-original` slide 11 declares `startAt="1"` on all five and
-    /// PowerPoint renders a) through e).
-    #[test]
-    fn a_repeated_declared_start_continues_the_list() {
-        let mut counters = AutoNumbering::default();
-        let arabic = Bullet::AutoNumber {
-            scheme: "arabicPeriod".to_owned(),
-            start_at: 4,
-            restart: true,
-        };
-        let alpha = Bullet::AutoNumber {
-            scheme: "alphaLcParenR".to_owned(),
-            start_at: 1,
-            restart: true,
-        };
-        assert_eq!(
-            (0..4)
-                .filter_map(|_| resolve_marker(Some(&arabic), 0, &mut counters))
-                .collect::<Vec<_>>(),
-            ["4.", "5.", "6.", "7."]
-        );
-        let mut counters = AutoNumbering::default();
-        assert_eq!(
-            (0..5)
-                .filter_map(|_| resolve_marker(Some(&alpha), 0, &mut counters))
-                .collect::<Vec<_>>(),
-            ["a)", "b)", "c)", "d)", "e)"]
-        );
-    }
-
-    #[test]
-    fn autonumber_roman_markers_bound_untrusted_start_values() {
-        assert_eq!(format_autonum(0, "arabicPeriod"), "1.");
-        assert_eq!(format_autonum(u32::MAX, "romanUcPeriod").len(), 61);
-        assert_eq!(
-            format_autonum(u32::MAX, "romanUcPeriod"),
-            format!("{}DCCLXVII.", "M".repeat(52))
         );
     }
 
@@ -9252,16 +8750,28 @@ mod tests {
             orientation: None,
             size: None,
         };
-        assert!(!placeholders_match(&indexed, &same_index));
-        assert!(placeholders_match(&centered_title, &title));
+        assert!(!pptx_edit::paragraph::placeholders_match(
+            &indexed,
+            &same_index
+        ));
+        assert!(pptx_edit::paragraph::placeholders_match(
+            &centered_title,
+            &title
+        ));
         let slide_number = |index| Placeholder {
             placeholder_type: Some("sldNum".to_owned()),
             index: Some(index),
             orientation: None,
             size: None,
         };
-        assert!(placeholders_match(&slide_number(12), &slide_number(4)));
-        assert!(!placeholders_match(&slide_number(12), &indexed));
+        assert!(pptx_edit::paragraph::placeholders_match(
+            &slide_number(12),
+            &slide_number(4)
+        ));
+        assert!(!pptx_edit::paragraph::placeholders_match(
+            &slide_number(12),
+            &indexed
+        ));
 
         let snapshot = ShapeSnapshot {
             id: "placeholder".to_owned(),

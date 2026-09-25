@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
+use crate::structured::{PptxExportOptions, export_outcome_json};
 use crate::{
     CommentFlavor, DeckSession, DeckSnapshot, EditCtx, EditRequest, FindRequest, MAX_REQUEST_BYTES,
     PictureDraft, PresetShapeDraft, ReadRequest, ShapeDraft, ShapeReceipt, ShapeRect, ShapeStroke,
@@ -414,6 +415,25 @@ impl PptxDocument {
         }
         let request: EditRequest = parse_args(request)?;
         outcome_json(&self.session.apply_edits(&request).map_err(js_error)?).map_err(js_error)
+    }
+
+    /// Structured export of the committed deck: `{"includeHiddenSlides"?,"includeHiddenShapes"?,
+    /// "includeNotes"?,"includeComments"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
+    /// `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Nothing changes.
+    #[wasm_bindgen(js_name = exportStructuredJson)]
+    pub fn export_structured_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: PptxExportOptions = parse_args(options)?;
+        export_outcome_json(&self.session.export_structured(&options).map_err(js_error)?)
+            .map_err(js_error)
+    }
+
+    /// `exportStructuredJson` rendered as Markdown from the same read:
+    /// `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
+    #[wasm_bindgen(js_name = exportMarkdownJson)]
+    pub fn export_markdown_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: PptxExportOptions = parse_args(options)?;
+        export_outcome_json(&self.session.export_markdown(&options).map_err(js_error)?)
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = searchTextJson)]
@@ -1149,6 +1169,42 @@ mod tests {
         assert_eq!(refused["ok"], false);
         assert_eq!(refused["failure"]["code"], "limit-exceeded");
         assert_eq!(refused["version"], document.document_version().as_str());
+    }
+
+    #[test]
+    fn export_envelopes_carry_the_version_or_a_refusal() {
+        let document = PptxDocument::open_collaborative(DECK, 94.0).unwrap();
+        let version = document.document_version();
+        let read = envelope(&document.export_structured_json("{}").unwrap());
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["version"], version.as_str());
+        assert_eq!(read["content"]["schemaVersion"], 1);
+        assert_eq!(read["content"]["anchorScope"], "session");
+        assert_eq!(read["content"]["readingOrder"], "shapeTree");
+        let markdown = envelope(&document.export_markdown_json("{}").unwrap());
+        assert_eq!(markdown["ok"], true);
+        assert!(
+            markdown["content"]["markdown"]
+                .as_str()
+                .unwrap()
+                .starts_with("<!-- pptx-export:0 -->")
+        );
+        let refused = envelope(
+            &document
+                .export_structured_json(r#"{"maxBytes":8}"#)
+                .unwrap(),
+        );
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["version"], version.as_str());
+        assert_eq!(refused["failure"]["code"], "invalid-options");
+        assert!(
+            refused["failure"]
+                .as_object()
+                .unwrap()
+                .get("target")
+                .is_some_and(Value::is_null)
+        );
+        assert_eq!(document.document_version(), version);
     }
 
     #[test]

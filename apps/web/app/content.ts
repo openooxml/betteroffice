@@ -98,7 +98,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with version-checked atomic edit batches, opt-in operation timings, manual undo boundaries, and comment repositioning.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with version-checked atomic edit batches, structured JSON and Markdown export with anchors, opt-in operation timings, manual undo boundaries, and comment repositioning.",
   },
   {
     name: "@betteroffice/pptx-react",

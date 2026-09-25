@@ -47,6 +47,17 @@ describe("llms.txt", () => {
     expect(missing).toEqual([]);
   });
 
+  test("states the PPTX structured export", () => {
+    for (const phrase of [
+      "`exportStructured`/`exportMarkdown`",
+      "`exportPptxStructured`/`exportPptxMarkdown`/`renderPptxMarkdown`",
+      "omissions are listed as diagnostics",
+      "`export_structured`/`export_markdown` and `export_pptx_structured`",
+    ]) {
+      expect(LLMS).toContain(phrase);
+    }
+  });
+
   test("tells no one to install a distribution that is not on PyPI", () => {
     const real = new Set(PYPI_DISTRIBUTIONS);
     const claimed = [...LLMS.matchAll(/pip install (betteroffice-[a-z0-9-]+)/g)].map(

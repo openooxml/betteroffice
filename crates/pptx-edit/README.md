@@ -18,6 +18,14 @@ transaction (one undo step by default) or returns an `EditRefusal` with the deck
 history and id allocation untouched. `validate_edits` runs the same checks
 without changing anything. Proposal previews and acceptance share the staging.
 
+`structured` exports the committed deck read-only: `DeckSession::export_structured`
+and `export_markdown` for a session, `export_pptx_structured` and
+`export_pptx_markdown` for bytes, and `render_pptx_markdown` for content read
+earlier. One walker reads the current shape tree, projects stories as
+`read_content` does, maps seeded shapes back to their retained source XML, and
+admits records within block and byte budgets. `paragraph` holds the
+paragraph-property cascade and list numbering the renderer shares.
+
 State vectors, diffs, and updates are standard Yrs v1, so any transport that
 speaks Yjs sync-v1 works.
 

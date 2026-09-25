@@ -36,6 +36,17 @@ export class PptxDocument {
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
     /**
+     * `exportStructuredJson` rendered as Markdown from the same read:
+     * `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
+     */
+    exportMarkdownJson(options: string): string;
+    /**
+     * Structured export of the committed deck: `{"includeHiddenSlides"?,"includeHiddenShapes"?,
+     * "includeNotes"?,"includeComments"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
+     * `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Nothing changes.
+     */
+    exportStructuredJson(options: string): string;
+    /**
      * `{"text","within"?,"limit"?}` -> `{"ok":true,"version","matches","truncated"}`.
      */
     findTextJson(request: string): string;
@@ -126,7 +137,24 @@ export function compileSlideJson(slide_json: string): string;
 
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
 
+/**
+ * `exportPptxStructuredJson` rendered as Markdown.
+ */
+export function exportPptxMarkdownJson(data: Uint8Array, options: string): string;
+
+/**
+ * Structured export of PPTX bytes as a snapshot, with the options of
+ * `PptxDocument.exportStructuredJson`: `{"ok":true,"content"}` or `{"ok":false,"failure"}`.
+ * Bytes that are not a readable PPTX throw.
+ */
+export function exportPptxStructuredJson(data: Uint8Array, options: string): string;
+
 export function parsePptxJson(data: Uint8Array): string;
+
+/**
+ * Renders schema-version-1 structured content as Markdown; `options` is `{"maxBytes"?}`.
+ */
+export function renderPptxMarkdownJson(content: string, options: string): string;
 
 export function rendererVersion(): string;
 
@@ -137,6 +165,8 @@ export interface InitOutput {
     readonly __wbg_pptxrenderer_free: (a: number, b: number) => void;
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
+    readonly exportPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly exportPptxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly parsePptxJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -145,6 +175,7 @@ export interface InitOutput {
     readonly pptxrenderer_layoutSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_new: () => number;
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly renderPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly rendererVersion: () => [number, number];
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
     readonly pptxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -171,6 +202,8 @@ export interface InitOutput {
     readonly pptxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly pptxdocument_encodeStateVector: (a: number) => [number, number];
+    readonly pptxdocument_exportMarkdownJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_formatTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertParagraphBreakJson: (a: number, b: number, c: number) => [number, number, number, number];

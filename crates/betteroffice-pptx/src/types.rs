@@ -1,3 +1,13 @@
+pub use pptx_edit::structured::{
+    AnchorScope, CellPosition, ExportComment, ExportDiagnostic, ExportDiagnosticCode, ExportError,
+    ExportFailure, ExportFailureCode, ExportLink, ExportList, ExportMark, ExportNotes,
+    ExportObject, ExportObjectKind, ExportParagraph, ExportPlaceholder, ExportRead, ExportRefusal,
+    ExportRun, ExportRunKind, ExportSeverity, ExportShape, ExportShapeKind, ExportSlide,
+    ExportStory, ExportTable, ExportTableCell, ExportTableRow, IncludedContent, MarkdownAnchor,
+    PptxAnchor, PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxMarkdownOptions,
+    PptxStructuredContent, ReadingOrder, SourceProvenance, TextSpan, export_outcome_json,
+    snapshot_outcome_json,
+};
 pub use pptx_edit::{
     CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx, EditError,
     EditOrigin, ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft,

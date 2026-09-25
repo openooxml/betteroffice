@@ -20,6 +20,7 @@ mod deck;
 mod effects;
 mod model;
 mod outline_gradients;
+pub mod paragraph;
 mod proposal_diff;
 mod proposals;
 mod save;
@@ -27,6 +28,7 @@ mod search;
 mod source_run_properties;
 mod staging;
 mod story;
+pub mod structured;
 mod target;
 mod undo;
 

@@ -1,0 +1,2509 @@
+{
+  "schemaVersion": 1,
+  "anchorScope": "snapshot",
+  "readingOrder": "shapeTree",
+  "included": {
+    "hiddenSlides": true,
+    "hiddenShapes": false,
+    "notes": true,
+    "comments": true,
+    "formatting": true
+  },
+  "slides": [
+    {
+      "id": "s0",
+      "index": 0,
+      "anchor": {
+        "kind": "slide",
+        "slideId": "slide:0:256"
+      },
+      "name": null,
+      "hidden": false,
+      "provenance": {
+        "part": "ppt/slides/slide1.xml",
+        "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+        "path": [],
+        "sldId": 256,
+        "sourceId": null
+      },
+      "shapes": [
+        {
+          "id": "s0.h0",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:0"
+          },
+          "kind": "shape",
+          "name": "Title",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": {
+            "type": "title",
+            "index": null
+          },
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              2
+            ],
+            "sldId": 256,
+            "sourceId": 2
+          },
+          "stories": [
+            {
+              "id": "s0.h0.t0",
+              "anchor": {
+                "kind": "text",
+                "slideId": "slide:0:256",
+                "shapeId": "slide:0:256:shape:0",
+                "storyId": "story:slide:0:256:shape:0:0",
+                "range": {
+                  "start": 0,
+                  "end": 16
+                }
+              },
+              "paragraphs": [
+                {
+                  "id": "s0.h0.t0.p0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:0",
+                    "storyId": "story:slide:0:256:shape:0:0",
+                    "range": {
+                      "start": 0,
+                      "end": 16
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:0:0:0",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": null,
+                  "list": null,
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:0",
+                        "storyId": "story:slide:0:256:shape:0:0",
+                        "range": {
+                          "start": 0,
+                          "end": 16
+                        }
+                      },
+                      "marks": [
+                        {
+                          "kind": "bold"
+                        }
+                      ],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Quarterly review"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "table": null,
+          "object": null,
+          "children": []
+        },
+        {
+          "id": "s0.h1",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:1"
+          },
+          "kind": "shape",
+          "name": "Body",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": {
+            "type": "body",
+            "index": 1
+          },
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              3
+            ],
+            "sldId": 256,
+            "sourceId": 3
+          },
+          "stories": [
+            {
+              "id": "s0.h1.t0",
+              "anchor": {
+                "kind": "text",
+                "slideId": "slide:0:256",
+                "shapeId": "slide:0:256:shape:1",
+                "storyId": "story:slide:0:256:shape:1:0",
+                "range": {
+                  "start": 0,
+                  "end": 37
+                }
+              },
+              "paragraphs": [
+                {
+                  "id": "s0.h1.t0.p0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:1",
+                    "storyId": "story:slide:0:256:shape:1:0",
+                    "range": {
+                      "start": 0,
+                      "end": 11
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:1:0:0",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": null,
+                  "list": {
+                    "kind": "bullet",
+                    "character": "•",
+                    "font": "Arial"
+                  },
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:1",
+                        "storyId": "story:slide:0:256:shape:1:0",
+                        "range": {
+                          "start": 0,
+                          "end": 11
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "First point"
+                    }
+                  ]
+                },
+                {
+                  "id": "s0.h1.t0.p1",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:1",
+                    "storyId": "story:slide:0:256:shape:1:0",
+                    "range": {
+                      "start": 12,
+                      "end": 24
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:1:0:1",
+                  "level": 1,
+                  "alignment": null,
+                  "bulletJson": null,
+                  "list": {
+                    "kind": "bullet",
+                    "character": "–",
+                    "font": null
+                  },
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:1",
+                        "storyId": "story:slide:0:256:shape:1:0",
+                        "range": {
+                          "start": 12,
+                          "end": 24
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Sub point 😀"
+                    }
+                  ]
+                },
+                {
+                  "id": "s0.h1.t0.p2",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:1",
+                    "storyId": "story:slide:0:256:shape:1:0",
+                    "range": {
+                      "start": 25,
+                      "end": 37
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:1:0:2",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": null,
+                  "list": {
+                    "kind": "bullet",
+                    "character": "•",
+                    "font": "Arial"
+                  },
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:1",
+                        "storyId": "story:slide:0:256:shape:1:0",
+                        "range": {
+                          "start": 25,
+                          "end": 37
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Second point"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "table": null,
+          "object": null,
+          "children": []
+        },
+        {
+          "id": "s0.h2",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:2"
+          },
+          "kind": "shape",
+          "name": "Numbered",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              4
+            ],
+            "sldId": 256,
+            "sourceId": 4
+          },
+          "stories": [
+            {
+              "id": "s0.h2.t0",
+              "anchor": {
+                "kind": "text",
+                "slideId": "slide:0:256",
+                "shapeId": "slide:0:256:shape:2",
+                "storyId": "story:slide:0:256:shape:2:0",
+                "range": {
+                  "start": 0,
+                  "end": 16
+                }
+              },
+              "paragraphs": [
+                {
+                  "id": "s0.h2.t0.p0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:2",
+                    "storyId": "story:slide:0:256:shape:2:0",
+                    "range": {
+                      "start": 0,
+                      "end": 5
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:2:0:0",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": "{\"type\":\"autoNumber\",\"scheme\":\"arabicPeriod\",\"startAt\":3,\"restart\":true}",
+                  "list": {
+                    "kind": "number",
+                    "scheme": "arabicPeriod",
+                    "startAt": 3,
+                    "value": 3,
+                    "marker": "3."
+                  },
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:2",
+                        "storyId": "story:slide:0:256:shape:2:0",
+                        "range": {
+                          "start": 0,
+                          "end": 5
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Three"
+                    }
+                  ]
+                },
+                {
+                  "id": "s0.h2.t0.p1",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:2",
+                    "storyId": "story:slide:0:256:shape:2:0",
+                    "range": {
+                      "start": 6,
+                      "end": 10
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:2:0:1",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": "{\"type\":\"autoNumber\",\"scheme\":\"arabicPeriod\",\"startAt\":3,\"restart\":true}",
+                  "list": {
+                    "kind": "number",
+                    "scheme": "arabicPeriod",
+                    "startAt": 3,
+                    "value": 4,
+                    "marker": "4."
+                  },
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:2",
+                        "storyId": "story:slide:0:256:shape:2:0",
+                        "range": {
+                          "start": 6,
+                          "end": 10
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Four"
+                    }
+                  ]
+                },
+                {
+                  "id": "s0.h2.t0.p2",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:2",
+                    "storyId": "story:slide:0:256:shape:2:0",
+                    "range": {
+                      "start": 11,
+                      "end": 11
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:2:0:2",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": "{\"type\":\"autoNumber\",\"scheme\":\"arabicPeriod\",\"startAt\":3,\"restart\":true}",
+                  "list": null,
+                  "runs": []
+                },
+                {
+                  "id": "s0.h2.t0.p3",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:2",
+                    "storyId": "story:slide:0:256:shape:2:0",
+                    "range": {
+                      "start": 12,
+                      "end": 16
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:2:0:3",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": "{\"type\":\"autoNumber\",\"scheme\":\"arabicPeriod\",\"startAt\":3,\"restart\":true}",
+                  "list": {
+                    "kind": "number",
+                    "scheme": "arabicPeriod",
+                    "startAt": 3,
+                    "value": 5,
+                    "marker": "5."
+                  },
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:2",
+                        "storyId": "story:slide:0:256:shape:2:0",
+                        "range": {
+                          "start": 12,
+                          "end": 16
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Five"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "table": null,
+          "object": null,
+          "children": []
+        },
+        {
+          "id": "s0.h3",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:3"
+          },
+          "kind": "shape",
+          "name": "Roman",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              5
+            ],
+            "sldId": 256,
+            "sourceId": 5
+          },
+          "stories": [
+            {
+              "id": "s0.h3.t0",
+              "anchor": {
+                "kind": "text",
+                "slideId": "slide:0:256",
+                "shapeId": "slide:0:256:shape:3",
+                "storyId": "story:slide:0:256:shape:3:0",
+                "range": {
+                  "start": 0,
+                  "end": 7
+                }
+              },
+              "paragraphs": [
+                {
+                  "id": "s0.h3.t0.p0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:3",
+                    "storyId": "story:slide:0:256:shape:3:0",
+                    "range": {
+                      "start": 0,
+                      "end": 3
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:3:0:0",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": "{\"type\":\"autoNumber\",\"scheme\":\"romanUcPeriod\",\"startAt\":1}",
+                  "list": {
+                    "kind": "number",
+                    "scheme": "romanUcPeriod",
+                    "startAt": 1,
+                    "value": 1,
+                    "marker": "I."
+                  },
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:3",
+                        "storyId": "story:slide:0:256:shape:3:0",
+                        "range": {
+                          "start": 0,
+                          "end": 3
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "One"
+                    }
+                  ]
+                },
+                {
+                  "id": "s0.h3.t0.p1",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:3",
+                    "storyId": "story:slide:0:256:shape:3:0",
+                    "range": {
+                      "start": 4,
+                      "end": 7
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:3:0:1",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": "{\"type\":\"autoNumber\",\"scheme\":\"romanUcPeriod\",\"startAt\":1}",
+                  "list": {
+                    "kind": "number",
+                    "scheme": "romanUcPeriod",
+                    "startAt": 1,
+                    "value": 2,
+                    "marker": "II."
+                  },
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:3",
+                        "storyId": "story:slide:0:256:shape:3:0",
+                        "range": {
+                          "start": 4,
+                          "end": 7
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Two"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "table": null,
+          "object": null,
+          "children": []
+        },
+        {
+          "id": "s0.h4",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:4"
+          },
+          "kind": "shape",
+          "name": "Circled",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              6
+            ],
+            "sldId": 256,
+            "sourceId": 6
+          },
+          "stories": [
+            {
+              "id": "s0.h4.t0",
+              "anchor": {
+                "kind": "text",
+                "slideId": "slide:0:256",
+                "shapeId": "slide:0:256:shape:4",
+                "storyId": "story:slide:0:256:shape:4:0",
+                "range": {
+                  "start": 0,
+                  "end": 3
+                }
+              },
+              "paragraphs": [
+                {
+                  "id": "s0.h4.t0.p0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:4",
+                    "storyId": "story:slide:0:256:shape:4:0",
+                    "range": {
+                      "start": 0,
+                      "end": 3
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:4:0:0",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": "{\"type\":\"autoNumber\",\"scheme\":\"circleNumDbPlain\",\"startAt\":1}",
+                  "list": {
+                    "kind": "number",
+                    "scheme": "circleNumDbPlain",
+                    "startAt": 1,
+                    "value": 1,
+                    "marker": null
+                  },
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:4",
+                        "storyId": "story:slide:0:256:shape:4:0",
+                        "range": {
+                          "start": 0,
+                          "end": 3
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Odd"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "table": null,
+          "object": null,
+          "children": []
+        },
+        {
+          "id": "s0.h5",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:5"
+          },
+          "kind": "shape",
+          "name": "Linked",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              7
+            ],
+            "sldId": 256,
+            "sourceId": 7
+          },
+          "stories": [
+            {
+              "id": "s0.h5.t0",
+              "anchor": {
+                "kind": "text",
+                "slideId": "slide:0:256",
+                "shapeId": "slide:0:256:shape:5",
+                "storyId": "story:slide:0:256:shape:5:0",
+                "range": {
+                  "start": 0,
+                  "end": 29
+                }
+              },
+              "paragraphs": [
+                {
+                  "id": "s0.h5.t0.p0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:5",
+                    "storyId": "story:slide:0:256:shape:5:0",
+                    "range": {
+                      "start": 0,
+                      "end": 29
+                    }
+                  },
+                  "paragraphId": "para:story:slide:0:256:shape:5:0:0",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": null,
+                  "list": null,
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:5",
+                        "storyId": "story:slide:0:256:shape:5:0",
+                        "range": {
+                          "start": 0,
+                          "end": 4
+                        }
+                      },
+                      "marks": [],
+                      "link": {
+                        "href": "https://example.com/docs?a=1&b=2",
+                        "external": true
+                      },
+                      "kind": "text",
+                      "text": "Docs"
+                    },
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:5",
+                        "storyId": "story:slide:0:256:shape:5:0",
+                        "range": {
+                          "start": 4,
+                          "end": 10
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": " page "
+                    },
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:5",
+                        "storyId": "story:slide:0:256:shape:5:0",
+                        "range": {
+                          "start": 10,
+                          "end": 11
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "field",
+                      "fieldType": "slidenum",
+                      "text": "1"
+                    },
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:5",
+                        "storyId": "story:slide:0:256:shape:5:0",
+                        "range": {
+                          "start": 11,
+                          "end": 12
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "lineBreak"
+                    },
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:5",
+                        "storyId": "story:slide:0:256:shape:5:0",
+                        "range": {
+                          "start": 12,
+                          "end": 16
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "next"
+                    },
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:5",
+                        "storyId": "story:slide:0:256:shape:5:0",
+                        "range": {
+                          "start": 16,
+                          "end": 16
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "unsupported",
+                      "element": "a14:m"
+                    },
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:5",
+                        "storyId": "story:slide:0:256:shape:5:0",
+                        "range": {
+                          "start": 16,
+                          "end": 29
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": " end <script>"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "table": null,
+          "object": null,
+          "children": []
+        },
+        {
+          "id": "s0.h6",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:6"
+          },
+          "kind": "group",
+          "name": "Group",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              8
+            ],
+            "sldId": 256,
+            "sourceId": 10
+          },
+          "stories": [],
+          "table": null,
+          "object": null,
+          "children": [
+            {
+              "id": "s0.h6.h0",
+              "anchor": {
+                "kind": "shape",
+                "slideId": "slide:0:256",
+                "shapeId": "slide:0:256:shape:6.0"
+              },
+              "kind": "shape",
+              "name": "Nested",
+              "title": null,
+              "description": null,
+              "hidden": false,
+              "placeholder": null,
+              "provenance": {
+                "part": "ppt/slides/slide1.xml",
+                "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+                "path": [
+                  0,
+                  0,
+                  8,
+                  2
+                ],
+                "sldId": 256,
+                "sourceId": 11
+              },
+              "stories": [
+                {
+                  "id": "s0.h6.h0.t0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:0:256",
+                    "shapeId": "slide:0:256:shape:6.0",
+                    "storyId": "story:slide:0:256:shape:6.0:0",
+                    "range": {
+                      "start": 0,
+                      "end": 11
+                    }
+                  },
+                  "paragraphs": [
+                    {
+                      "id": "s0.h6.h0.t0.p0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:6.0",
+                        "storyId": "story:slide:0:256:shape:6.0:0",
+                        "range": {
+                          "start": 0,
+                          "end": 11
+                        }
+                      },
+                      "paragraphId": "para:story:slide:0:256:shape:6.0:0:0",
+                      "level": 0,
+                      "alignment": null,
+                      "bulletJson": null,
+                      "list": null,
+                      "runs": [
+                        {
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:0:256",
+                            "shapeId": "slide:0:256:shape:6.0",
+                            "storyId": "story:slide:0:256:shape:6.0:0",
+                            "range": {
+                              "start": 0,
+                              "end": 11
+                            }
+                          },
+                          "marks": [],
+                          "link": null,
+                          "kind": "text",
+                          "text": "Nested text"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "table": null,
+              "object": null,
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "s0.x0",
+          "anchor": {
+            "kind": "sourcePart",
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              10
+            ]
+          },
+          "kind": "unknown",
+          "name": "Ink",
+          "title": null,
+          "description": "Signature",
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              10
+            ],
+            "sldId": 256,
+            "sourceId": null
+          },
+          "stories": [],
+          "table": null,
+          "object": {
+            "id": "s0.x0.o",
+            "kind": "unknown",
+            "element": "p:contentPart",
+            "uri": null,
+            "relationshipIds": [
+              "rIdInk"
+            ],
+            "parts": [
+              "ppt/ink/ink1.xml"
+            ],
+            "externalTargets": []
+          },
+          "children": []
+        },
+        {
+          "id": "s0.h8",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:8"
+          },
+          "kind": "graphicFrame",
+          "name": "Table",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              11
+            ],
+            "sldId": 256,
+            "sourceId": 40
+          },
+          "stories": [],
+          "table": {
+            "columns": 2,
+            "rows": [
+              {
+                "cells": [
+                  {
+                    "id": "s0.h8.r0c0",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:0:256",
+                      "shapeId": "slide:0:256:shape:8",
+                      "storyId": "story:slide:0:256:shape:8:table:0:0",
+                      "range": {
+                        "start": 0,
+                        "end": 13
+                      }
+                    },
+                    "row": 0,
+                    "column": 0,
+                    "gridSpan": 2,
+                    "rowSpan": 1,
+                    "merged": false,
+                    "mergeOrigin": null,
+                    "story": {
+                      "id": "s0.h8.r0c0.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:8",
+                        "storyId": "story:slide:0:256:shape:8:table:0:0",
+                        "range": {
+                          "start": 0,
+                          "end": 13
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s0.h8.r0c0.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:0:256",
+                            "shapeId": "slide:0:256:shape:8",
+                            "storyId": "story:slide:0:256:shape:8:table:0:0",
+                            "range": {
+                              "start": 0,
+                              "end": 13
+                            }
+                          },
+                          "paragraphId": "para:story:slide:0:256:shape:8:table:0:0:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": [
+                            {
+                              "anchor": {
+                                "kind": "text",
+                                "slideId": "slide:0:256",
+                                "shapeId": "slide:0:256:shape:8",
+                                "storyId": "story:slide:0:256:shape:8:table:0:0",
+                                "range": {
+                                  "start": 0,
+                                  "end": 13
+                                }
+                              },
+                              "marks": [],
+                              "link": null,
+                              "kind": "text",
+                              "text": "Merged header"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "s0.h8.r0c1",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:0:256",
+                      "shapeId": "slide:0:256:shape:8",
+                      "storyId": "story:slide:0:256:shape:8:table:0:1",
+                      "range": {
+                        "start": 0,
+                        "end": 5
+                      }
+                    },
+                    "row": 0,
+                    "column": 1,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "merged": true,
+                    "mergeOrigin": {
+                      "row": 0,
+                      "column": 0
+                    },
+                    "story": {
+                      "id": "s0.h8.r0c1.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:8",
+                        "storyId": "story:slide:0:256:shape:8:table:0:1",
+                        "range": {
+                          "start": 0,
+                          "end": 5
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s0.h8.r0c1.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:0:256",
+                            "shapeId": "slide:0:256:shape:8",
+                            "storyId": "story:slide:0:256:shape:8:table:0:1",
+                            "range": {
+                              "start": 0,
+                              "end": 5
+                            }
+                          },
+                          "paragraphId": "para:story:slide:0:256:shape:8:table:0:1:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": [
+                            {
+                              "anchor": {
+                                "kind": "text",
+                                "slideId": "slide:0:256",
+                                "shapeId": "slide:0:256:shape:8",
+                                "storyId": "story:slide:0:256:shape:8:table:0:1",
+                                "range": {
+                                  "start": 0,
+                                  "end": 5
+                                }
+                              },
+                              "marks": [],
+                              "link": null,
+                              "kind": "text",
+                              "text": "ghost"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "cells": [
+                  {
+                    "id": "s0.h8.r1c0",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:0:256",
+                      "shapeId": "slide:0:256:shape:8",
+                      "storyId": "story:slide:0:256:shape:8:table:1:0",
+                      "range": {
+                        "start": 0,
+                        "end": 5
+                      }
+                    },
+                    "row": 1,
+                    "column": 0,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "merged": false,
+                    "mergeOrigin": null,
+                    "story": {
+                      "id": "s0.h8.r1c0.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:8",
+                        "storyId": "story:slide:0:256:shape:8:table:1:0",
+                        "range": {
+                          "start": 0,
+                          "end": 5
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s0.h8.r1c0.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:0:256",
+                            "shapeId": "slide:0:256:shape:8",
+                            "storyId": "story:slide:0:256:shape:8:table:1:0",
+                            "range": {
+                              "start": 0,
+                              "end": 5
+                            }
+                          },
+                          "paragraphId": "para:story:slide:0:256:shape:8:table:1:0:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": [
+                            {
+                              "anchor": {
+                                "kind": "text",
+                                "slideId": "slide:0:256",
+                                "shapeId": "slide:0:256:shape:8",
+                                "storyId": "story:slide:0:256:shape:8:table:1:0",
+                                "range": {
+                                  "start": 0,
+                                  "end": 5
+                                }
+                              },
+                              "marks": [],
+                              "link": null,
+                              "kind": "text",
+                              "text": "A <b>"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "s0.h8.r1c1",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:0:256",
+                      "shapeId": "slide:0:256:shape:8",
+                      "storyId": "story:slide:0:256:shape:8:table:1:1",
+                      "range": {
+                        "start": 0,
+                        "end": 1
+                      }
+                    },
+                    "row": 1,
+                    "column": 1,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "merged": false,
+                    "mergeOrigin": null,
+                    "story": {
+                      "id": "s0.h8.r1c1.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:0:256",
+                        "shapeId": "slide:0:256:shape:8",
+                        "storyId": "story:slide:0:256:shape:8:table:1:1",
+                        "range": {
+                          "start": 0,
+                          "end": 1
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s0.h8.r1c1.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:0:256",
+                            "shapeId": "slide:0:256:shape:8",
+                            "storyId": "story:slide:0:256:shape:8:table:1:1",
+                            "range": {
+                              "start": 0,
+                              "end": 1
+                            }
+                          },
+                          "paragraphId": "para:story:slide:0:256:shape:8:table:1:1:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": [
+                            {
+                              "anchor": {
+                                "kind": "text",
+                                "slideId": "slide:0:256",
+                                "shapeId": "slide:0:256:shape:8",
+                                "storyId": "story:slide:0:256:shape:8:table:1:1",
+                                "range": {
+                                  "start": 0,
+                                  "end": 1
+                                }
+                              },
+                              "marks": [],
+                              "link": null,
+                              "kind": "text",
+                              "text": "B"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "object": null,
+          "children": []
+        },
+        {
+          "id": "s0.h9",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:9"
+          },
+          "kind": "graphicFrame",
+          "name": "Revenue chart",
+          "title": null,
+          "description": "Revenue by quarter",
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              12
+            ],
+            "sldId": 256,
+            "sourceId": 50
+          },
+          "stories": [],
+          "table": null,
+          "object": {
+            "id": "s0.h9.o",
+            "kind": "chart",
+            "element": "p:graphicFrame",
+            "uri": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+            "relationshipIds": [
+              "rIdChart"
+            ],
+            "parts": [
+              "ppt/charts/chart1.xml"
+            ],
+            "externalTargets": []
+          },
+          "children": []
+        },
+        {
+          "id": "s0.h10",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:10"
+          },
+          "kind": "graphicFrame",
+          "name": "Process",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              13
+            ],
+            "sldId": 256,
+            "sourceId": 60
+          },
+          "stories": [],
+          "table": null,
+          "object": {
+            "id": "s0.h10.o",
+            "kind": "smartArt",
+            "element": "p:graphicFrame",
+            "uri": "http://schemas.openxmlformats.org/drawingml/2006/diagram",
+            "relationshipIds": [
+              "rIdCs",
+              "rIdDm",
+              "rIdLo",
+              "rIdQs"
+            ],
+            "parts": [
+              "ppt/diagrams/colors1.xml",
+              "ppt/diagrams/data1.xml",
+              "ppt/diagrams/layout1.xml",
+              "ppt/diagrams/quickStyle1.xml"
+            ],
+            "externalTargets": []
+          },
+          "children": []
+        },
+        {
+          "id": "s0.h11",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:11"
+          },
+          "kind": "graphicFrame",
+          "name": "Embedded",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              14
+            ],
+            "sldId": 256,
+            "sourceId": 70
+          },
+          "stories": [],
+          "table": null,
+          "object": {
+            "id": "s0.h11.o",
+            "kind": "embeddedObject",
+            "element": "p:graphicFrame",
+            "uri": "http://schemas.openxmlformats.org/presentationml/2006/ole",
+            "relationshipIds": [
+              "rIdOle"
+            ],
+            "parts": [
+              "ppt/embeddings/oleObject1.bin"
+            ],
+            "externalTargets": []
+          },
+          "children": []
+        },
+        {
+          "id": "s0.h12",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:12"
+          },
+          "kind": "picture",
+          "name": "Logo",
+          "title": "Logo title",
+          "description": "Company logo",
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              15
+            ],
+            "sldId": 256,
+            "sourceId": 80
+          },
+          "stories": [],
+          "table": null,
+          "object": {
+            "id": "s0.h12.o",
+            "kind": "picture",
+            "element": "p:pic",
+            "uri": null,
+            "relationshipIds": [
+              "rIdImg"
+            ],
+            "parts": [
+              "ppt/media/image1.png"
+            ],
+            "externalTargets": []
+          },
+          "children": []
+        },
+        {
+          "id": "s0.h13",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:0:256",
+            "shapeId": "slide:0:256:shape:13"
+          },
+          "kind": "picture",
+          "name": "Clip",
+          "title": null,
+          "description": "Product demo",
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide1.xml",
+            "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+            "path": [
+              0,
+              0,
+              16
+            ],
+            "sldId": 256,
+            "sourceId": 90
+          },
+          "stories": [],
+          "table": null,
+          "object": {
+            "id": "s0.h13.o",
+            "kind": "video",
+            "element": "p:pic",
+            "uri": null,
+            "relationshipIds": [
+              "rIdVideo",
+              "rIdImg"
+            ],
+            "parts": [
+              "ppt/media/image1.png"
+            ],
+            "externalTargets": [
+              "https://example.com/clip.mp4"
+            ]
+          },
+          "children": []
+        }
+      ],
+      "notes": {
+        "id": "s0.notes",
+        "anchor": {
+          "kind": "notes",
+          "slideId": "slide:0:256",
+          "range": {
+            "start": 0,
+            "end": 10
+          }
+        },
+        "text": "Talk track",
+        "provenance": {
+          "part": "ppt/notesSlides/notesSlide1.xml",
+          "partSha256": "7c603f11349740c2b556b76cab0b3218b57da01359d347621c3dda4533be5b2c",
+          "path": [],
+          "sldId": 256,
+          "sourceId": null
+        }
+      },
+      "comments": [
+        {
+          "id": "s0.c0",
+          "anchor": {
+            "kind": "comment",
+            "slideId": "slide:0:256",
+            "commentId": "comment:0:0:1",
+            "range": {
+              "start": 0,
+              "end": 13
+            }
+          },
+          "commentId": "comment:0:0:1",
+          "author": "Ada",
+          "date": "2026-01-02T03:04:05.000",
+          "parentId": null,
+          "resolved": false,
+          "text": "Check numbers"
+        }
+      ]
+    },
+    {
+      "id": "s1",
+      "index": 1,
+      "anchor": {
+        "kind": "slide",
+        "slideId": "slide:1:257"
+      },
+      "name": null,
+      "hidden": true,
+      "provenance": {
+        "part": "ppt/slides/slide2.xml",
+        "partSha256": "d1cfb20e1f9ec7cbea5b0327df5672a21d246cbd4a9002991981ba3e49b912b4",
+        "path": [],
+        "sldId": 257,
+        "sourceId": null
+      },
+      "shapes": [
+        {
+          "id": "s1.h0",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:1:257",
+            "shapeId": "slide:1:257:shape:0"
+          },
+          "kind": "shape",
+          "name": "Backup",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide2.xml",
+            "partSha256": "d1cfb20e1f9ec7cbea5b0327df5672a21d246cbd4a9002991981ba3e49b912b4",
+            "path": [
+              0,
+              0,
+              2
+            ],
+            "sldId": 257,
+            "sourceId": 2
+          },
+          "stories": [
+            {
+              "id": "s1.h0.t0",
+              "anchor": {
+                "kind": "text",
+                "slideId": "slide:1:257",
+                "shapeId": "slide:1:257:shape:0",
+                "storyId": "story:slide:1:257:shape:0:0",
+                "range": {
+                  "start": 0,
+                  "end": 12
+                }
+              },
+              "paragraphs": [
+                {
+                  "id": "s1.h0.t0.p0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:1:257",
+                    "shapeId": "slide:1:257:shape:0",
+                    "storyId": "story:slide:1:257:shape:0:0",
+                    "range": {
+                      "start": 0,
+                      "end": 12
+                    }
+                  },
+                  "paragraphId": "para:story:slide:1:257:shape:0:0:0",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": null,
+                  "list": null,
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:1:257",
+                        "shapeId": "slide:1:257:shape:0",
+                        "storyId": "story:slide:1:257:shape:0:0",
+                        "range": {
+                          "start": 0,
+                          "end": 12
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Backup slide"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "table": null,
+          "object": null,
+          "children": []
+        }
+      ],
+      "notes": null,
+      "comments": []
+    },
+    {
+      "id": "s2",
+      "index": 2,
+      "anchor": {
+        "kind": "slide",
+        "slideId": "slide:2:258"
+      },
+      "name": "Closing",
+      "hidden": false,
+      "provenance": {
+        "part": "ppt/slides/slide3.xml",
+        "partSha256": "8ea221ceaa2ca00637764a77360e039911dab63e92bbcfe73b19c6e0d8bb3969",
+        "path": [],
+        "sldId": 258,
+        "sourceId": null
+      },
+      "shapes": [
+        {
+          "id": "s2.h0",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:2:258",
+            "shapeId": "slide:2:258:shape:0"
+          },
+          "kind": "shape",
+          "name": "Empty body",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": {
+            "type": "body",
+            "index": 1
+          },
+          "provenance": {
+            "part": "ppt/slides/slide3.xml",
+            "partSha256": "8ea221ceaa2ca00637764a77360e039911dab63e92bbcfe73b19c6e0d8bb3969",
+            "path": [
+              0,
+              0,
+              2
+            ],
+            "sldId": 258,
+            "sourceId": 2
+          },
+          "stories": [
+            {
+              "id": "s2.h0.t0",
+              "anchor": {
+                "kind": "text",
+                "slideId": "slide:2:258",
+                "shapeId": "slide:2:258:shape:0",
+                "storyId": "story:slide:2:258:shape:0:0",
+                "range": {
+                  "start": 0,
+                  "end": 0
+                }
+              },
+              "paragraphs": [
+                {
+                  "id": "s2.h0.t0.p0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:2:258",
+                    "shapeId": "slide:2:258:shape:0",
+                    "storyId": "story:slide:2:258:shape:0:0",
+                    "range": {
+                      "start": 0,
+                      "end": 0
+                    }
+                  },
+                  "paragraphId": "para:story:slide:2:258:shape:0:0:0",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": null,
+                  "list": null,
+                  "runs": []
+                }
+              ]
+            }
+          ],
+          "table": null,
+          "object": null,
+          "children": []
+        },
+        {
+          "id": "s2.h1",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:2:258",
+            "shapeId": "slide:2:258:shape:1"
+          },
+          "kind": "shape",
+          "name": "Plain",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide3.xml",
+            "partSha256": "8ea221ceaa2ca00637764a77360e039911dab63e92bbcfe73b19c6e0d8bb3969",
+            "path": [
+              0,
+              0,
+              3
+            ],
+            "sldId": 258,
+            "sourceId": 3
+          },
+          "stories": [
+            {
+              "id": "s2.h1.t0",
+              "anchor": {
+                "kind": "text",
+                "slideId": "slide:2:258",
+                "shapeId": "slide:2:258:shape:1",
+                "storyId": "story:slide:2:258:shape:1:0",
+                "range": {
+                  "start": 0,
+                  "end": 10
+                }
+              },
+              "paragraphs": [
+                {
+                  "id": "s2.h1.t0.p0",
+                  "anchor": {
+                    "kind": "text",
+                    "slideId": "slide:2:258",
+                    "shapeId": "slide:2:258:shape:1",
+                    "storyId": "story:slide:2:258:shape:1:0",
+                    "range": {
+                      "start": 0,
+                      "end": 10
+                    }
+                  },
+                  "paragraphId": "para:story:slide:2:258:shape:1:0:0",
+                  "level": 0,
+                  "alignment": null,
+                  "bulletJson": null,
+                  "list": null,
+                  "runs": [
+                    {
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:2:258",
+                        "shapeId": "slide:2:258:shape:1",
+                        "storyId": "story:slide:2:258:shape:1:0",
+                        "range": {
+                          "start": 0,
+                          "end": 10
+                        }
+                      },
+                      "marks": [],
+                      "link": null,
+                      "kind": "text",
+                      "text": "Last slide"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "table": null,
+          "object": null,
+          "children": []
+        },
+        {
+          "id": "s2.h2",
+          "anchor": {
+            "kind": "shape",
+            "slideId": "slide:2:258",
+            "shapeId": "slide:2:258:shape:2"
+          },
+          "kind": "graphicFrame",
+          "name": "Tall table",
+          "title": null,
+          "description": null,
+          "hidden": false,
+          "placeholder": null,
+          "provenance": {
+            "part": "ppt/slides/slide3.xml",
+            "partSha256": "8ea221ceaa2ca00637764a77360e039911dab63e92bbcfe73b19c6e0d8bb3969",
+            "path": [
+              0,
+              0,
+              4
+            ],
+            "sldId": 258,
+            "sourceId": 4
+          },
+          "stories": [],
+          "table": {
+            "columns": 2,
+            "rows": [
+              {
+                "cells": [
+                  {
+                    "id": "s2.h2.r0c0",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:2:258",
+                      "shapeId": "slide:2:258:shape:2",
+                      "storyId": "story:slide:2:258:shape:2:table:0:0",
+                      "range": {
+                        "start": 0,
+                        "end": 4
+                      }
+                    },
+                    "row": 0,
+                    "column": 0,
+                    "gridSpan": 1,
+                    "rowSpan": 3,
+                    "merged": false,
+                    "mergeOrigin": null,
+                    "story": {
+                      "id": "s2.h2.r0c0.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:2:258",
+                        "shapeId": "slide:2:258:shape:2",
+                        "storyId": "story:slide:2:258:shape:2:table:0:0",
+                        "range": {
+                          "start": 0,
+                          "end": 4
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s2.h2.r0c0.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:2:258",
+                            "shapeId": "slide:2:258:shape:2",
+                            "storyId": "story:slide:2:258:shape:2:table:0:0",
+                            "range": {
+                              "start": 0,
+                              "end": 4
+                            }
+                          },
+                          "paragraphId": "para:story:slide:2:258:shape:2:table:0:0:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": [
+                            {
+                              "anchor": {
+                                "kind": "text",
+                                "slideId": "slide:2:258",
+                                "shapeId": "slide:2:258:shape:2",
+                                "storyId": "story:slide:2:258:shape:2:table:0:0",
+                                "range": {
+                                  "start": 0,
+                                  "end": 4
+                                }
+                              },
+                              "marks": [],
+                              "link": null,
+                              "kind": "text",
+                              "text": "Tall"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "s2.h2.r0c1",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:2:258",
+                      "shapeId": "slide:2:258:shape:2",
+                      "storyId": "story:slide:2:258:shape:2:table:0:1",
+                      "range": {
+                        "start": 0,
+                        "end": 1
+                      }
+                    },
+                    "row": 0,
+                    "column": 1,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "merged": false,
+                    "mergeOrigin": null,
+                    "story": {
+                      "id": "s2.h2.r0c1.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:2:258",
+                        "shapeId": "slide:2:258:shape:2",
+                        "storyId": "story:slide:2:258:shape:2:table:0:1",
+                        "range": {
+                          "start": 0,
+                          "end": 1
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s2.h2.r0c1.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:2:258",
+                            "shapeId": "slide:2:258:shape:2",
+                            "storyId": "story:slide:2:258:shape:2:table:0:1",
+                            "range": {
+                              "start": 0,
+                              "end": 1
+                            }
+                          },
+                          "paragraphId": "para:story:slide:2:258:shape:2:table:0:1:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": [
+                            {
+                              "anchor": {
+                                "kind": "text",
+                                "slideId": "slide:2:258",
+                                "shapeId": "slide:2:258:shape:2",
+                                "storyId": "story:slide:2:258:shape:2:table:0:1",
+                                "range": {
+                                  "start": 0,
+                                  "end": 1
+                                }
+                              },
+                              "marks": [],
+                              "link": null,
+                              "kind": "text",
+                              "text": "a"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "cells": [
+                  {
+                    "id": "s2.h2.r1c0",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:2:258",
+                      "shapeId": "slide:2:258:shape:2",
+                      "storyId": "story:slide:2:258:shape:2:table:1:0",
+                      "range": {
+                        "start": 0,
+                        "end": 1
+                      }
+                    },
+                    "row": 1,
+                    "column": 0,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "merged": true,
+                    "mergeOrigin": {
+                      "row": 0,
+                      "column": 0
+                    },
+                    "story": {
+                      "id": "s2.h2.r1c0.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:2:258",
+                        "shapeId": "slide:2:258:shape:2",
+                        "storyId": "story:slide:2:258:shape:2:table:1:0",
+                        "range": {
+                          "start": 0,
+                          "end": 1
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s2.h2.r1c0.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:2:258",
+                            "shapeId": "slide:2:258:shape:2",
+                            "storyId": "story:slide:2:258:shape:2:table:1:0",
+                            "range": {
+                              "start": 0,
+                              "end": 1
+                            }
+                          },
+                          "paragraphId": "para:story:slide:2:258:shape:2:table:1:0:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": [
+                            {
+                              "anchor": {
+                                "kind": "text",
+                                "slideId": "slide:2:258",
+                                "shapeId": "slide:2:258:shape:2",
+                                "storyId": "story:slide:2:258:shape:2:table:1:0",
+                                "range": {
+                                  "start": 0,
+                                  "end": 1
+                                }
+                              },
+                              "marks": [],
+                              "link": null,
+                              "kind": "text",
+                              "text": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "s2.h2.r1c1",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:2:258",
+                      "shapeId": "slide:2:258:shape:2",
+                      "storyId": "story:slide:2:258:shape:2:table:1:1",
+                      "range": {
+                        "start": 0,
+                        "end": 1
+                      }
+                    },
+                    "row": 1,
+                    "column": 1,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "merged": false,
+                    "mergeOrigin": null,
+                    "story": {
+                      "id": "s2.h2.r1c1.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:2:258",
+                        "shapeId": "slide:2:258:shape:2",
+                        "storyId": "story:slide:2:258:shape:2:table:1:1",
+                        "range": {
+                          "start": 0,
+                          "end": 1
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s2.h2.r1c1.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:2:258",
+                            "shapeId": "slide:2:258:shape:2",
+                            "storyId": "story:slide:2:258:shape:2:table:1:1",
+                            "range": {
+                              "start": 0,
+                              "end": 1
+                            }
+                          },
+                          "paragraphId": "para:story:slide:2:258:shape:2:table:1:1:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": [
+                            {
+                              "anchor": {
+                                "kind": "text",
+                                "slideId": "slide:2:258",
+                                "shapeId": "slide:2:258:shape:2",
+                                "storyId": "story:slide:2:258:shape:2:table:1:1",
+                                "range": {
+                                  "start": 0,
+                                  "end": 1
+                                }
+                              },
+                              "marks": [],
+                              "link": null,
+                              "kind": "text",
+                              "text": "b"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "cells": [
+                  {
+                    "id": "s2.h2.r2c0",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:2:258",
+                      "shapeId": "slide:2:258:shape:2",
+                      "storyId": "story:slide:2:258:shape:2:table:2:0",
+                      "range": {
+                        "start": 0,
+                        "end": 0
+                      }
+                    },
+                    "row": 2,
+                    "column": 0,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "merged": true,
+                    "mergeOrigin": {
+                      "row": 0,
+                      "column": 0
+                    },
+                    "story": {
+                      "id": "s2.h2.r2c0.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:2:258",
+                        "shapeId": "slide:2:258:shape:2",
+                        "storyId": "story:slide:2:258:shape:2:table:2:0",
+                        "range": {
+                          "start": 0,
+                          "end": 0
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s2.h2.r2c0.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:2:258",
+                            "shapeId": "slide:2:258:shape:2",
+                            "storyId": "story:slide:2:258:shape:2:table:2:0",
+                            "range": {
+                              "start": 0,
+                              "end": 0
+                            }
+                          },
+                          "paragraphId": "para:story:slide:2:258:shape:2:table:2:0:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": []
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "s2.h2.r2c1",
+                    "anchor": {
+                      "kind": "text",
+                      "slideId": "slide:2:258",
+                      "shapeId": "slide:2:258:shape:2",
+                      "storyId": "story:slide:2:258:shape:2:table:2:1",
+                      "range": {
+                        "start": 0,
+                        "end": 1
+                      }
+                    },
+                    "row": 2,
+                    "column": 1,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "merged": false,
+                    "mergeOrigin": null,
+                    "story": {
+                      "id": "s2.h2.r2c1.t0",
+                      "anchor": {
+                        "kind": "text",
+                        "slideId": "slide:2:258",
+                        "shapeId": "slide:2:258:shape:2",
+                        "storyId": "story:slide:2:258:shape:2:table:2:1",
+                        "range": {
+                          "start": 0,
+                          "end": 1
+                        }
+                      },
+                      "paragraphs": [
+                        {
+                          "id": "s2.h2.r2c1.t0.p0",
+                          "anchor": {
+                            "kind": "text",
+                            "slideId": "slide:2:258",
+                            "shapeId": "slide:2:258:shape:2",
+                            "storyId": "story:slide:2:258:shape:2:table:2:1",
+                            "range": {
+                              "start": 0,
+                              "end": 1
+                            }
+                          },
+                          "paragraphId": "para:story:slide:2:258:shape:2:table:2:1:0",
+                          "level": 0,
+                          "alignment": null,
+                          "bulletJson": null,
+                          "list": null,
+                          "runs": [
+                            {
+                              "anchor": {
+                                "kind": "text",
+                                "slideId": "slide:2:258",
+                                "shapeId": "slide:2:258:shape:2",
+                                "storyId": "story:slide:2:258:shape:2:table:2:1",
+                                "range": {
+                                  "start": 0,
+                                  "end": 1
+                                }
+                              },
+                              "marks": [],
+                              "link": null,
+                              "kind": "text",
+                              "text": "c"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "object": null,
+          "children": []
+        }
+      ],
+      "notes": null,
+      "comments": []
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "inherited-content-omitted",
+      "severity": "info",
+      "anchor": {
+        "kind": "sourcePart",
+        "part": "ppt/slideLayouts/slideLayout1.xml",
+        "partSha256": "89be90375bdbb71cfae3006f314bc63ea911284c4e59443e3e7f195ad5bc00c6",
+        "path": []
+      },
+      "message": "The layout ppt/slideLayouts/slideLayout1.xml draws 1 shape(s) on the slides that use it; layout and master content is not exported."
+    },
+    {
+      "code": "unsupported-numbering",
+      "severity": "warning",
+      "anchor": {
+        "kind": "text",
+        "slideId": "slide:0:256",
+        "shapeId": "slide:0:256:shape:4",
+        "storyId": "story:slide:0:256:shape:4:0",
+        "range": {
+          "start": 0,
+          "end": 3
+        }
+      },
+      "message": "The numbering scheme \"circleNumDbPlain\" cannot be formatted; the list marker is left unresolved."
+    },
+    {
+      "code": "field-cached-result",
+      "severity": "info",
+      "anchor": {
+        "kind": "text",
+        "slideId": "slide:0:256",
+        "shapeId": "slide:0:256:shape:5",
+        "storyId": "story:slide:0:256:shape:5:0",
+        "range": {
+          "start": 10,
+          "end": 11
+        }
+      },
+      "message": "Fields are exported with their cached results and never evaluated."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "text",
+        "slideId": "slide:0:256",
+        "shapeId": "slide:0:256:shape:5",
+        "storyId": "story:slide:0:256:shape:5:0",
+        "range": {
+          "start": 16,
+          "end": 16
+        }
+      },
+      "message": "a14:m in this paragraph is not represented in the export."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "sourcePart",
+        "part": "ppt/slides/slide1.xml",
+        "partSha256": "b90e8ec7297c2870b641901e3d08c5efeeff5708ed5e588ce6a0204fec9f2cea",
+        "path": [
+          0,
+          0,
+          10
+        ]
+      },
+      "message": "p:contentPart in the shape tree is not represented in the export."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "shape",
+        "slideId": "slide:0:256",
+        "shapeId": "slide:0:256:shape:9"
+      },
+      "message": "Charts are exported as placeholders, without their data."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "shape",
+        "slideId": "slide:0:256",
+        "shapeId": "slide:0:256:shape:10"
+      },
+      "message": "SmartArt is exported as a placeholder, without its content."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "shape",
+        "slideId": "slide:0:256",
+        "shapeId": "slide:0:256:shape:11"
+      },
+      "message": "Embedded objects are exported as placeholders, without their data."
+    },
+    {
+      "code": "image-data-omitted",
+      "severity": "info",
+      "anchor": {
+        "kind": "shape",
+        "slideId": "slide:0:256",
+        "shapeId": "slide:0:256:shape:12"
+      },
+      "message": "Image data is not exported; the picture keeps its alternative text."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "shape",
+        "slideId": "slide:0:256",
+        "shapeId": "slide:0:256:shape:13"
+      },
+      "message": "Video is exported as a placeholder, without its media or poster image."
+    },
+    {
+      "code": "hidden-content-excluded",
+      "severity": "info",
+      "anchor": {
+        "kind": "slide",
+        "slideId": "slide:0:256"
+      },
+      "message": "2 hidden shape(s) on this slide were not exported; set includeHiddenShapes to export them."
+    },
+    {
+      "code": "notes-structure-omitted",
+      "severity": "info",
+      "anchor": null,
+      "message": "Speaker notes are exported as plain text: their formatting, lists and notes-page layout are not."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "notes",
+        "slideId": "slide:0:256",
+        "range": {
+          "start": 0,
+          "end": 10
+        }
+      },
+      "message": "The notes page holds 1 more text shape(s) that are not exported."
+    },
+    {
+      "code": "hidden-content-excluded",
+      "severity": "info",
+      "anchor": {
+        "kind": "slide",
+        "slideId": "slide:2:258"
+      },
+      "message": "1 hidden shape(s) on this slide were not exported; set includeHiddenShapes to export them."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "notes",
+        "slideId": "slide:2:258",
+        "range": {
+          "start": 0,
+          "end": 0
+        }
+      },
+      "message": "The notes page holds 1 more text shape(s) that are not exported."
+    }
+  ],
+  "truncated": false
+}

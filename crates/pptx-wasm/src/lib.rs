@@ -2,6 +2,7 @@
 
 use wasm_bindgen::prelude::*;
 
+use pptx_edit::structured;
 pub use pptx_edit::wasm::PptxDocument;
 
 #[wasm_bindgen]
@@ -176,6 +177,38 @@ impl Default for PptxRenderer {
 pub fn parse_pptx_json(data: &[u8]) -> Result<String, JsValue> {
     let package = pptx_parse::parse_pptx(data).map_err(js_error)?;
     serde_json::to_string(&package).map_err(js_error)
+}
+
+/// Structured export of PPTX bytes as a snapshot, with the options of
+/// `PptxDocument.exportStructuredJson`: `{"ok":true,"content"}` or `{"ok":false,"failure"}`.
+/// Bytes that are not a readable PPTX throw.
+#[wasm_bindgen(js_name = exportPptxStructuredJson)]
+pub fn export_pptx_structured_json(data: &[u8], options: &str) -> Result<String, JsValue> {
+    let options = serde_json::from_str(options).map_err(js_error)?;
+    structured::snapshot_outcome_json(structured::export_pptx_structured(data, &options))
+        .map_err(|message| JsValue::from_str(&message))
+}
+
+/// `exportPptxStructuredJson` rendered as Markdown.
+#[wasm_bindgen(js_name = exportPptxMarkdownJson)]
+pub fn export_pptx_markdown_json(data: &[u8], options: &str) -> Result<String, JsValue> {
+    let options = serde_json::from_str(options).map_err(js_error)?;
+    structured::snapshot_outcome_json(structured::export_pptx_markdown(data, &options))
+        .map_err(|message| JsValue::from_str(&message))
+}
+
+/// Renders schema-version-1 structured content as Markdown; `options` is `{"maxBytes"?}`.
+#[wasm_bindgen(js_name = renderPptxMarkdownJson)]
+pub fn render_pptx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
+    let content: structured::PptxStructuredContent =
+        serde_json::from_str(content).map_err(js_error)?;
+    let options: structured::PptxMarkdownOptions =
+        serde_json::from_str(options).map_err(js_error)?;
+    structured::snapshot_outcome_json(
+        structured::render_pptx_markdown(&content, &options)
+            .map_err(structured::ExportError::Refused),
+    )
+    .map_err(|message| JsValue::from_str(&message))
 }
 
 #[wasm_bindgen(js_name = compileSlideJson)]

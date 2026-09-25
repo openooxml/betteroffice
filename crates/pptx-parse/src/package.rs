@@ -69,6 +69,8 @@ fn parse_package(
 
     let mut has_connectors = false;
     let mut slides = Vec::with_capacity(presentation.slides.len());
+    let mut sources = BTreeMap::new();
+    let mut notes_sources = BTreeMap::new();
     for reference in &presentation.slides {
         let root = parse_part(&parts, &reference.part_path, &mut budget)?;
         let slide_relationships = relationships
@@ -83,13 +85,21 @@ fn parse_package(
             &mut budget,
             shape_elements,
         )?;
-        let notes = match crate::notes::slide_notes_part(slide_relationships) {
-            Some(notes_path) => match parts.get(notes_path.as_str()) {
-                Some(bytes) => crate::notes::parse_notes_text(bytes, &notes_path, &mut budget)?,
-                None => String::new(),
-            },
-            None => String::new(),
-        };
+        let mut notes = String::new();
+        if let Some(notes_path) = crate::notes::slide_notes_part(slide_relationships)
+            && let Some(bytes) = parts.get(notes_path.as_str())
+        {
+            let notes_root = parse_xml(bytes, &notes_path, &mut budget)?;
+            notes = crate::notes::notes_text(&notes_root);
+            notes_sources.insert(
+                reference.part_path.clone(),
+                crate::inventory::notes_source(&notes_root, &notes_path),
+            );
+        }
+        sources.insert(
+            reference.part_path.clone(),
+            crate::inventory::slide_source(&root, slide_relationships, shape_elements),
+        );
         slides.push(Slide {
             part_path: reference.part_path.clone(),
             name: data.name,
@@ -104,6 +114,7 @@ fn parse_package(
             shapes: data.shapes,
             color_map_override: parse_color_map_override(&root),
             notes,
+            hidden: Some(!bool_attribute(&root, "show", true)),
         });
     }
 
@@ -270,6 +281,8 @@ fn parse_package(
         } else {
             ShapeElements::WithoutConnectors
         },
+        sources,
+        notes_sources,
     })
 }
 
@@ -1101,6 +1114,7 @@ mod tests {
                 shapes: vec![chart_shape(id)],
                 color_map_override: None,
                 notes: String::new(),
+                hidden: Some(false),
             }
         }
 

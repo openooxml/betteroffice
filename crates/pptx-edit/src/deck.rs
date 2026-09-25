@@ -1607,6 +1607,39 @@ fn snapshot_slide<T: ReadTxn>(
     txn: &T,
     slide_id: &str,
 ) -> EditResult<SlideSnapshot> {
+    let SlideParts {
+        mut snapshot,
+        shape_ids,
+        theme,
+    } = slide_parts(slides, package, txn, slide_id)?;
+    let slide = slide_ref(txn, slide_id)?;
+    snapshot.notes = slide_notes(&slide, txn, package);
+    for shape_id in shape_ids {
+        snapshot.shapes.push(snapshot_shape(
+            shapes,
+            stories,
+            txn,
+            &shape_id,
+            &mut HashSet::new(),
+            Some(&theme),
+        )?);
+    }
+    Ok(snapshot)
+}
+
+/// A slide's own fields, without its notes or shapes, and the ids of its live top-level shapes.
+pub(crate) struct SlideParts {
+    pub snapshot: SlideSnapshot,
+    pub shape_ids: Vec<String>,
+    pub theme: Theme,
+}
+
+pub(crate) fn slide_parts<T: ReadTxn>(
+    slides: &MapRef,
+    package: &PptxPackage,
+    txn: &T,
+    slide_id: &str,
+) -> EditResult<SlideParts> {
     let slide = slides
         .get(txn, slide_id)
         .and_then(|value| value.cast::<MapRef>().ok())
@@ -1619,25 +1652,17 @@ fn snapshot_slide<T: ReadTxn>(
         layout_part_path.as_deref(),
     );
     let shape_order = slide_shape_order(&slide, txn)?;
-    let mut shape_snapshots = Vec::new();
-    for shape_id in live_shape_order(&shape_order, txn)? {
-        shape_snapshots.push(snapshot_shape(
-            shapes,
-            stories,
-            txn,
-            &shape_id,
-            &mut HashSet::new(),
-            Some(&theme),
-        )?);
-    }
-    let notes = slide_notes(&slide, txn, package);
-    Ok(SlideSnapshot {
-        id: slide_id.to_owned(),
-        source_part_path,
-        layout_part_path,
-        name: map_string(&slide, txn, "name"),
-        notes,
-        shapes: shape_snapshots,
+    Ok(SlideParts {
+        shape_ids: live_shape_order(&shape_order, txn)?,
+        snapshot: SlideSnapshot {
+            id: slide_id.to_owned(),
+            source_part_path,
+            layout_part_path,
+            name: map_string(&slide, txn, "name"),
+            notes: String::new(),
+            shapes: Vec::new(),
+        },
+        theme,
     })
 }
 
@@ -1734,25 +1759,61 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
             "shape cycle at {shape_id}"
         )));
     }
-    let shape = shapes
-        .get(txn, shape_id)
-        .and_then(|value| value.cast::<MapRef>().ok())
-        .ok_or_else(|| EditError::InvalidState(format!("missing shape {shape_id}")))?;
-    let mut text_snapshots = Vec::new();
-    for story_id in map_string_array(&shape, txn, "textStories")? {
+    let ShapeParts {
+        mut snapshot,
+        story_ids,
+        child_ids,
+    } = shape_parts(shapes, txn, shape_id, theme)?;
+    for story_id in story_ids {
         let story = stories
             .get(txn, &story_id)
             .and_then(|value| value.cast::<TextRef>().ok())
             .ok_or_else(|| EditError::InvalidState(format!("missing story {story_id}")))?;
-        text_snapshots.push(snapshot_story(&story, txn, &story_id)?);
+        snapshot
+            .text_stories
+            .push(snapshot_story(&story, txn, &story_id)?);
     }
-    let mut children = Vec::new();
-    for child_id in map_string_array(&shape, txn, "children")? {
-        children.push(snapshot_shape(
+    for child_id in child_ids {
+        snapshot.children.push(snapshot_shape(
             shapes, stories, txn, &child_id, visiting, theme,
         )?);
     }
     visiting.remove(shape_id);
+    let shape = shape_ref(txn, shape_id)?;
+    snapshot.graphic = optional_json(&shape, txn, "graphicJson")?;
+    snapshot.pending_media = match (
+        map_string(&shape, txn, "pendingMediaBase64"),
+        map_string(&shape, txn, "pendingMediaContentType"),
+    ) {
+        (Some(base64), Some(content_type)) => Some(PendingMedia {
+            content_type,
+            base64,
+        }),
+        _ => None,
+    };
+    Ok(snapshot)
+}
+
+/// A shape's own fields, without its stories, children, graphic payload or unsaved image data,
+/// and the ids of its stories and children.
+pub(crate) struct ShapeParts {
+    pub snapshot: ShapeSnapshot,
+    pub story_ids: Vec<String>,
+    pub child_ids: Vec<String>,
+}
+
+pub(crate) fn shape_parts<T: ReadTxn>(
+    shapes: &MapRef,
+    txn: &T,
+    shape_id: &str,
+    theme: Option<&Theme>,
+) -> EditResult<ShapeParts> {
+    let shape = shapes
+        .get(txn, shape_id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .ok_or_else(|| EditError::InvalidState(format!("missing shape {shape_id}")))?;
+    let story_ids = map_string_array(&shape, txn, "textStories")?;
+    let child_ids = map_string_array(&shape, txn, "children")?;
     let fill: Option<ShapeFill> = optional_json(&shape, txn, "fillJson")?;
     let outline: Option<ShapeOutline> = optional_json(&shape, txn, "outlineJson")?;
     let resolved_fill_color = fill
@@ -1762,7 +1823,7 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
     let resolved_outline_color = outline
         .as_ref()
         .and_then(|outline| resolve_color_value_to_hex_with_theme(outline.color.as_ref(), theme));
-    Ok(ShapeSnapshot {
+    let snapshot = ShapeSnapshot {
         id: shape_id.to_owned(),
         source_id: required_u32(&shape, txn, "sourceId")?,
         kind: parse_shape_kind(&required_string(&shape, txn, "kind")?)?,
@@ -1783,20 +1844,16 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
         outline,
         resolved_outline_color,
         media_part_path: map_string(&shape, txn, "mediaPartPath"),
-        pending_media: match (
-            map_string(&shape, txn, "pendingMediaBase64"),
-            map_string(&shape, txn, "pendingMediaContentType"),
-        ) {
-            (Some(base64), Some(content_type)) => Some(PendingMedia {
-                content_type,
-                base64,
-            }),
-            _ => None,
-        },
+        pending_media: None,
         blip_effects: optional_json(&shape, txn, "blipEffectsJson")?.unwrap_or_default(),
-        graphic: optional_json(&shape, txn, "graphicJson")?,
-        text_stories: text_snapshots,
-        children,
+        graphic: None,
+        text_stories: Vec::new(),
+        children: Vec::new(),
+    };
+    Ok(ShapeParts {
+        snapshot,
+        story_ids,
+        child_ids,
     })
 }
 
@@ -2307,6 +2364,14 @@ fn color_value(color: &str) -> EditResult<ColorValue> {
 fn required_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> EditResult<String> {
     map_string(map, txn, key)
         .ok_or_else(|| EditError::InvalidState(format!("missing string {key}")))
+}
+
+/// A shape's stored graphic payload as JSON text, shared rather than copied.
+pub(crate) fn graphic_json<T: ReadTxn>(txn: &T, shape_id: &str) -> EditResult<Option<Arc<str>>> {
+    Ok(match shape_ref(txn, shape_id)?.get(txn, "graphicJson") {
+        Some(Out::Any(Any::String(json))) => Some(json),
+        _ => None,
+    })
 }
 
 pub(crate) fn map_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<String> {

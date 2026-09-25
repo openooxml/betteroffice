@@ -138,6 +138,36 @@ versions belong to one open session. `PptxEditor` exposes the same
 flushing pending input first. The Rust `Presentation` and the Python binding
 take the same requests.
 
+### PPTX structured export
+
+`exportStructured()` returns the committed deck as JSON with the version it was
+read at, and `exportMarkdown()` renders that same read as Markdown; neither
+flushes input or changes anything. `exportPptxStructured(bytes)`,
+`exportPptxMarkdown(bytes)` and `renderPptxMarkdown(content)` do the same
+headless, anchored to the returned snapshot.
+
+```ts
+import { exportPptxMarkdown } from "@betteroffice/pptx";
+
+const read = deck.exportStructured({ includeNotes: true, includeComments: true });
+if (!read.ok) throw new Error(read.failure.message);
+const titles = read.content.slides.map((slide) => slide.shapes[0]?.name);
+
+const { markdown, anchors } = await exportPptxMarkdown(bytes);
+```
+
+Slides follow deck order and shapes the current shape tree, depth first; this
+is the authored order, not one inferred from geometry. Paragraphs carry levels,
+resolved list markers, runs with marks, links, line breaks and cached field
+results; tables keep spans and merges; pictures, media, charts, SmartArt and
+embedded objects become placeholders with their alternative text. Every record
+carries an anchor (`text` ranges use `readContent()` offsets) and, when read
+from the file, its source part, SHA-256 and element path. Hidden slides and
+shapes, notes and comments are explicit options, layout and master content is
+not exported, and every omission is a diagnostic. `maxBlocks` and `maxBytes`
+stop the export at a whole record and set `truncated`. Markdown marks each
+block with `<!-- pptx-export:N -->`, mapped back to its source in `anchors`.
+
 ## Operation profiles
 
 XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
@@ -158,7 +188,7 @@ interaction separately when investigating input-to-paint latency.
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
-| `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, version-checked atomic edit batches, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
+| `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, version-checked atomic edit batches, structured JSON and Markdown export with anchors, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
 | `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with flushed version-checked edit batches on its editor API. |
 | `@betteroffice/pptx-i18n` | UI locale strings and types for the PPTX React editor. |
 
