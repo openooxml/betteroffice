@@ -80,6 +80,7 @@ pub enum RenderError {
 struct FontFace {
     id: FontId,
     family: String,
+    requested_family: String,
     /// The named family's own advance widths, where this face stands in for a
     /// family that does not already run at them.
     widths: Option<&'static FamilyMetrics>,
@@ -141,15 +142,16 @@ impl SlideRenderer {
             .fonts
             .register(bytes.to_vec())
             .map_err(|error| RenderError::Font(error.to_string()))?;
-        let metrics = family_metrics(&normalize_family(family), bold, italic);
+        let requested = normalize_family(family);
+        let metrics = family_metrics(&requested, bold, italic);
         let face = FontFace {
             id,
             family: family.to_owned(),
+            requested_family: requested.clone(),
             widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
             line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
         };
-        self.faces
-            .insert((normalize_family(family), bold, italic), face.clone());
+        self.faces.insert((requested, bold, italic), face.clone());
         self.fallback.get_or_insert(face);
         self.fallback_family
             .get_or_insert_with(|| normalize_family(family));
@@ -411,9 +413,13 @@ impl SlideRenderer {
             (false, italic),
             (false, false),
         ];
-        for (bold, italic) in styles {
-            if let Some(face) = self.faces.get(&(requested.clone(), bold, italic)) {
-                return Ok(face.clone());
+        for (face_bold, face_italic) in styles {
+            if let Some(face) = self.faces.get(&(requested.clone(), face_bold, face_italic)) {
+                return Ok(if (face_bold, face_italic) == (bold, italic) {
+                    face.clone()
+                } else {
+                    self.with_requested_metrics(face, &requested, bold, italic)
+                });
             }
         }
         self.faces
@@ -426,8 +432,24 @@ impl SlideRenderer {
                     *face_italic,
                 )
             })
-            .map(|(_, face)| face.clone())
+            .map(|(_, face)| self.with_requested_metrics(face, &requested, bold, italic))
             .ok_or(RenderError::NoFont)
+    }
+
+    fn with_requested_metrics(
+        &self,
+        face: &FontFace,
+        requested: &str,
+        bold: bool,
+        italic: bool,
+    ) -> FontFace {
+        let metrics = family_metrics(requested, bold, italic);
+        FontFace {
+            requested_family: requested.to_owned(),
+            widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, face.id, metrics)),
+            line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, face.id, metrics)),
+            ..face.clone()
+        }
     }
 }
 
@@ -2459,45 +2481,30 @@ fn resolve_style(
     })
 }
 
-/// Characters the pitch of a family is measured over: the Latin alphabet in
-/// both cases, the digits, a space and the two commonest marks, unweighted.
+/// Characters used to check whether a registered face matches a metric table.
 const ADVANCE_SAMPLE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,";
 
-/// The mean advance of [`ADVANCE_SAMPLE`] in em for a registered face.
-fn face_advance_em(fonts: &FontStore, id: FontId) -> Option<f32> {
-    let units = f32::from(fonts.metrics(id).ok()?.units_per_em);
-    if units <= 0.0 {
-        return None;
-    }
-    let mut total = 0.0;
-    let mut counted = 0;
-    for character in ADVANCE_SAMPLE.chars() {
-        if let Ok(Some(advance)) = fonts.advance_width(id, character) {
-            total += advance;
-            counted += 1;
-        }
-    }
-    (counted > 0).then(|| total / counted as f32 / units)
-}
-
-/// Whether `id` already advances the way `metrics` does, which makes it the
-/// family itself rather than a stand-in and leaves its own kerning in charge.
+/// Preserve the face's kerning when its individual advances already match.
 fn runs_at_own_widths(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
-    let Some(own) = face_advance_em(fonts, id) else {
+    let Ok(own) = fonts.metrics(id) else {
         return true;
     };
-    let mut total = 0.0;
-    let mut counted = 0;
+    let units = f32::from(own.units_per_em);
+    if units <= 0.0 {
+        return true;
+    }
     for character in ADVANCE_SAMPLE.chars() {
-        if let Some(advance) = family_advance(metrics, character) {
-            total += advance;
-            counted += 1;
+        let Some(wanted) = family_advance(metrics, character) else {
+            continue;
+        };
+        let Ok(Some(advance)) = fonts.advance_width(id, character) else {
+            return false;
+        };
+        if (wanted - advance / units).abs() > 0.002 {
+            return false;
         }
     }
-    let Some(wanted) = (counted > 0).then(|| total / counted as f32) else {
-        return true;
-    };
-    (wanted - own).abs() <= 0.002
+    true
 }
 
 /// Whether `id` already stacks its lines the way `metrics` does.
@@ -2854,6 +2861,7 @@ fn key_spacing(key: &mut Vec<u8>, spacing: &Option<LineSpacing>) {
 
 fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
     key_u32(key, style.face.id.to_u32());
+    key_str(key, &style.face.requested_family);
     key_str(key, &style.family);
     key_f32(key, style.font_size_pt);
     key_f32(key, style.spacing_pt);
@@ -8948,5 +8956,77 @@ mod tests {
         let line = family_line_box(substituted.line.expect("trebuchet ms lines"), 1000.0);
         assert!((line.ascent - 939.0).abs() < 1e-3);
         assert!((line.descent - 222.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn missing_faces_keep_the_requested_family_and_style_metrics() {
+        for registered in ["Arial", "Trebuchet MS"] {
+            let mut renderer = SlideRenderer::new();
+            renderer
+                .register_font(registered, false, false, FONT)
+                .unwrap();
+            for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                let face = renderer.resolve_face("Trebuchet MS", bold, italic).unwrap();
+                let expected = family_metrics("trebuchet ms", bold, italic).unwrap();
+                assert_eq!(renderer.fonts.font_bytes(face.id).unwrap(), FONT);
+                assert!(std::ptr::eq(face.widths.unwrap(), expected));
+                assert!(std::ptr::eq(face.line.unwrap(), expected));
+            }
+            let unknown = renderer
+                .resolve_face("Unknown family", false, false)
+                .unwrap();
+            assert!(unknown.widths.is_none() && unknown.line.is_none());
+        }
+    }
+
+    #[test]
+    fn different_requested_metrics_do_not_share_cached_fallback_layouts() {
+        let session = DeckSession::open(
+            include_bytes!("../tests/fixtures/paragraph-spacing.pptx"),
+            8_020,
+        )
+        .unwrap();
+        let new_renderer = || {
+            let mut renderer = SlideRenderer::new();
+            renderer.register_font("Arial", false, false, FONT).unwrap();
+            renderer
+        };
+        let render = |renderer: &SlideRenderer, family: &str| {
+            let mut snapshot = session.snapshot().unwrap();
+            let story = &mut snapshot.slides[0]
+                .shapes
+                .iter_mut()
+                .find(|shape| shape.source_id == 2)
+                .unwrap()
+                .text_stories[0];
+            for paragraph in &mut story.paragraphs {
+                for run in &mut paragraph.runs {
+                    run.style.font_family = Some(family.to_owned());
+                    run.style.font_size_pt = Some(24.0);
+                    run.text = "MMMMMMMM".to_owned();
+                }
+            }
+            renderer
+                .layout_slide(session.package(), &snapshot, 0)
+                .unwrap()
+                .display_list
+                .primitives
+                .into_iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::TextBox {
+                        object_id: 2,
+                        lines,
+                        ..
+                    } => Some(lines),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let renderer = new_renderer();
+        let trebuchet = render(&renderer, "Trebuchet MS");
+        let consolas = render(&renderer, "Consolas");
+        assert!((trebuchet[0].width - consolas[0].width).abs() > 1.0);
+        assert_eq!(consolas, render(&new_renderer(), "Consolas"));
+        assert_eq!(trebuchet, render(&renderer, "Trebuchet MS"));
     }
 }
