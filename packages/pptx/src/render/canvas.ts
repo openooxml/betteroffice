@@ -428,7 +428,7 @@ function drawCropped(
   if (masked) ctx.restore();
 }
 
-/** Repeats the source from the box's top left, at its own size times the scale. */
+/** Repeats the cropped source from the box's top left, at its own size times the scale. */
 function drawTiled(
   ctx: CanvasRenderingContext2D,
   source: CanvasImageSource,
@@ -438,7 +438,16 @@ function drawTiled(
   const width = sourceWidth(source);
   const height = sourceHeight(source);
   if (width <= 0 || height <= 0) return;
-  const pattern = ctx.createPattern(source, 'repeat');
+  const left = Math.round(clampCrop(image.crop?.left) * width);
+  const top = Math.round(clampCrop(image.crop?.top) * height);
+  const right = width - Math.round(clampCrop(image.crop?.right) * width);
+  const bottom = height - Math.round(clampCrop(image.crop?.bottom) * height);
+  if (right <= left || bottom <= top) return;
+  const cropped = left > 0 || top > 0 || right < width || bottom < height;
+  const pattern = ctx.createPattern(
+    cropped ? croppedTile(source, left, top, right - left, bottom - top) : source,
+    'repeat'
+  );
   if (!pattern) return;
   ctx.save();
   buildImageOutline(ctx, image);
@@ -449,6 +458,25 @@ function drawTiled(
   ctx.fillStyle = pattern;
   ctx.fillRect(image.x, image.y, image.w, image.h);
   ctx.restore();
+}
+
+/** The `a:srcRect` part of a tile's source, which the pattern repeats in its place. */
+function croppedTile(
+  source: CanvasImageSource,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): CanvasImageSource {
+  try {
+    const canvas = offscreen(width, height);
+    const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
+    if (!canvas || !ctx) return source;
+    ctx.drawImage(source, x, y, width, height, 0, 0, width, height);
+    return canvas as CanvasImageSource;
+  } catch {
+    return source;
+  }
 }
 
 /** The picture's own outline when it has one, else its frame. */
