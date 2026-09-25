@@ -462,9 +462,10 @@ fn paints_points<E: ChartXml>(chart: &E) -> bool {
         }
 }
 
-/// Adds an accent point for every category a varied series' `c:dPt`s leave out.
-fn vary_point_colors<E: ChartXml>(chart: &E, series: &mut ChartSeries) {
-    let count = series.categories.len().max(series.values.len());
+/// Adds an accent point for every category a varied series' `c:dPt`s leave out,
+/// each charged to the chart's point budget.
+fn vary_point_colors<E: ChartXml>(chart: &E, series: &mut ChartSeries, budget: &mut Budget) {
+    let count = budget.point_cap(series.categories.len().max(series.values.len()));
     let points = series.points.get_or_insert_with(Vec::new);
     if points.iter().any(|point| point.index.is_none()) {
         return;
@@ -474,6 +475,7 @@ fn vary_point_colors<E: ChartXml>(chart: &E, series: &mut ChartSeries) {
         .filter_map(|point| point.index)
         .map(|index| index as usize)
         .collect();
+    let before = points.len();
     points.extend(
         (0..count)
             .filter(|index| !painted.contains(index))
@@ -483,6 +485,7 @@ fn vary_point_colors<E: ChartXml>(chart: &E, series: &mut ChartSeries) {
                 color: accent_color(chart, index),
             }),
     );
+    budget.spend_points(points.len() - before);
     if points.is_empty() {
         series.points = None;
     }
@@ -582,7 +585,7 @@ fn parse_series<E: ChartXml>(
                 line: parse_line(child(series, "spPr")),
             };
             if varied {
-                vary_point_colors(chart, &mut parsed);
+                vary_point_colors(chart, &mut parsed, budget);
             }
             parsed
         })
@@ -1358,6 +1361,72 @@ mod tests {
             bare.plot_groups[0].series[0].points.as_ref().unwrap()[0].color,
             DEFAULT_SERIES_COLORS[2]
         );
+    }
+
+    /// A pie of `series` series whose values sit at `indexes`, varied by default.
+    fn varied_pie(series: usize, indexes: &[usize], fill: Option<&str>) -> ChartSpace {
+        let one = || {
+            let points = indexes
+                .iter()
+                .map(|index| {
+                    Node::el("c:pt", vec![Node::text("c:v", "1")]).attr("idx", &index.to_string())
+                })
+                .collect();
+            let mut children = vec![Node::el("c:val", vec![Node::el("c:numCache", points)])];
+            if let Some(fill) = fill {
+                children.push(Node::el(
+                    "c:spPr",
+                    vec![Node::el("c:solidFill", vec![Node::val("a:srgbClr", fill)])],
+                ));
+            }
+            Node::el("c:ser", children)
+        };
+        parse_chart_space(&Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![Node::el("c:pieChart", (0..series).map(|_| one()).collect())],
+                )],
+            )],
+        ))
+        .expect("chart space parses")
+    }
+
+    #[test]
+    fn a_pie_series_fill_outranks_varied_colors() {
+        let space = varied_pie(1, &[0, 1, 2], Some("00FF00"));
+        let fills: Vec<String> = plot_chart(
+            &PlotChart::from(&space),
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 200.0,
+            },
+        )
+        .into_iter()
+        .filter_map(|op| match op {
+            PlotOp::Path { fill, .. } => Some(fill),
+            _ => None,
+        })
+        .collect();
+        assert_eq!(fills, ["#00FF00"; 3]);
+        let varied = varied_pie(1, &[0, 1, 2], None);
+        assert_eq!(point_colors(&varied, 0), &DEFAULT_SERIES_COLORS[..3]);
+    }
+
+    #[test]
+    fn varied_points_are_charged_to_the_point_budget() {
+        let space = varied_pie(4, &[MAX_POINTS - 1], None);
+        let generated: usize = space.plot_groups[0]
+            .series
+            .iter()
+            .map(|series| series.points.as_ref().map_or(0, Vec::len))
+            .sum();
+        assert!(generated <= MAX_CHART_POINTS, "{generated}");
+        assert!(generated > 0);
     }
 
     #[test]
