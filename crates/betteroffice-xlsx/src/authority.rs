@@ -315,6 +315,26 @@ pub(crate) struct WorkbookStructure {
 }
 
 impl WorkbookStructure {
+    /// Permit pane changes while keeping every other structural identity pinned.
+    pub(crate) fn same_except_freeze_panes(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.sheet_keys == other.sheet_keys
+            && self.sheet_names == other.sheet_names
+            && self.hyperlinks == other.hyperlinks
+            && self.charts == other.charts
+            && self.merges == other.merges
+            && self.shared_types == other.shared_types
+    }
+
+    pub(crate) fn snapshot_same_except_freeze_panes(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.sheet_keys == other.sheet_keys
+            && self.sheet_names == other.sheet_names
+            && self.hyperlinks == other.hyperlinks
+            && self.charts == other.charts
+            && self.merges == other.merges
+    }
+
     /// Whether two structures describe the same workbook, disregarding the Yrs
     /// branch identities. Replacing a bootstrap rebuilds every shared type, so
     /// those always differ and cannot say whether the structure itself did.
@@ -1223,12 +1243,17 @@ impl WorkbookAuthority {
         let full_sync = ops.iter().any(requires_full_semantic_sync)
             || (ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
                 && ops.iter().any(|op| matches!(op, Op::SetCell { .. })));
-        let structure_delta = i64::try_from(ops.iter().filter(|op| is_structural_op(op)).count())
-            .map_err(|_| "too many structural operations".to_string())?;
+        let structure_delta = i64::try_from(
+            ops.iter()
+                .filter(|op| is_structural_op(op) && !matches!(op, Op::SetFreezePane { .. }))
+                .count(),
+        )
+        .map_err(|_| "too many structural operations".to_string())?;
         let mut authored_cells = HashSet::new();
         let mut formatted_cells = HashSet::new();
         let mut col_widths = HashSet::new();
         let mut row_heights = HashSet::new();
+        let mut freeze_panes = HashSet::new();
         let mut merges = HashSet::new();
         if !full_sync {
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
@@ -1246,6 +1271,9 @@ impl WorkbookAuthority {
                     }
                     (Op::SetRowHeight { row, .. }, Some(key)) => {
                         row_heights.insert((key, *row));
+                    }
+                    (Op::SetFreezePane { .. }, Some(key)) => {
+                        freeze_panes.insert(key);
                     }
                     (Op::MergeCells { .. } | Op::UnmergeCells { .. }, Some(key)) => {
                         merges.insert(key);
@@ -1284,6 +1312,7 @@ impl WorkbookAuthority {
             && formatted_cells.is_empty()
             && col_widths.is_empty()
             && row_heights.is_empty()
+            && freeze_panes.is_empty()
             && merges.is_empty()
         {
             self.apply_history(history);
@@ -1355,6 +1384,15 @@ impl WorkbookAuthority {
                     &mut txn,
                     row,
                     sheet_model.row_heights.get(&row).copied(),
+                );
+            }
+            for key in freeze_panes {
+                let (sheet_map, sheet_model) =
+                    sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                sheet_map.try_update(
+                    &mut txn,
+                    FREEZE_PANE,
+                    freeze_pane_to_any(sheet_model.freeze_pane),
                 );
             }
             for key in merges {
@@ -2309,7 +2347,6 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
-            | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
             | Op::SetCharts { .. }
