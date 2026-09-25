@@ -5902,7 +5902,8 @@ mod tests {
             axes: vec![axis],
             ..PlotChart::default()
         };
-        let labels = texts(&plot_chart(&chart, rect()));
+        let ops = plot_chart(&chart, rect());
+        let labels = texts(&ops);
         for tick in ["245", "255", "265", "275", "285"] {
             assert!(
                 labels.contains(&tick.to_owned()),
@@ -5910,6 +5911,26 @@ mod tests {
             );
         }
         assert!(!labels.contains(&"250".to_owned()), "{labels:?}");
+        let mut grid: Vec<f64> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { y1, y2, color, .. }
+                    if color == CHART_GRID_COLOR && (y1 - y2).abs() < 0.01 =>
+                {
+                    Some(*y1)
+                }
+                _ => None,
+            })
+            .collect();
+        grid.sort_by(f64::total_cmp);
+        let mut marks: Vec<f64> = texts_at(&ops)
+            .into_iter()
+            .filter(|(text, ..)| text.parse::<f64>().is_ok_and(|value| value >= 245.0))
+            .map(|(_, _, baseline, _)| baseline - 3.0)
+            .collect();
+        marks.sort_by(f64::total_cmp);
+        assert_eq!(grid.len(), 5, "{grid:?}");
+        assert_eq!(grid, marks, "every gridline stands on its own label");
     }
 
     #[test]
