@@ -74,7 +74,7 @@ pub fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Opt
         if shape_base(node)
             .placeholder
             .as_ref()
-            .is_some_and(|value| placeholders_match(value, target))
+            .is_some_and(|value| value.matches(target))
         {
             return Some(node);
         }
@@ -85,24 +85,6 @@ pub fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Opt
         }
     }
     None
-}
-
-/// A slide holds one of each of these, so they inherit by type: PowerPoint writes a slide number
-/// as `idx="12"` over a master's `idx="4"` and still draws it where the master put it.
-const SINGLETON_PLACEHOLDERS: [&str; 5] = ["title", "sldNum", "dt", "ftr", "hdr"];
-
-/// Placeholders of a singleton type match by normalized type; others match by index when both
-/// have one, and by normalized type otherwise.
-pub fn placeholders_match(left: &Placeholder, right: &Placeholder) -> bool {
-    let left_type = normalize_placeholder_type(left.placeholder_type.as_deref());
-    let right_type = normalize_placeholder_type(right.placeholder_type.as_deref());
-    if SINGLETON_PLACEHOLDERS.contains(&left_type) || SINGLETON_PLACEHOLDERS.contains(&right_type) {
-        return left_type == right_type;
-    }
-    match (left.index, right.index) {
-        (Some(left), Some(right)) => left == right,
-        _ => left_type == right_type,
-    }
 }
 
 /// A placeholder type with its synonyms folded: `ctrTitle` is `title`, `obj` and an absent type
@@ -267,6 +249,9 @@ pub fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Par
     }
     if source.tab_stops.is_some() {
         target.tab_stops.clone_from(&source.tab_stops);
+    }
+    if source.rtl.is_some() {
+        target.rtl = source.rtl;
     }
     if let Some(source) = &source.default_run {
         let target = target
@@ -692,31 +677,5 @@ mod tests {
         assert_eq!(size(cascade(None).properties(0, 4, None)), Some(27.0));
         let placed = cascade(Some(&body)).properties(0, 1, None);
         assert_eq!((placed.bullet, placed.default_run), (None, None));
-    }
-
-    #[test]
-    fn singleton_placeholders_match_by_type_and_others_by_index() {
-        let placeholder = |kind: &str, index| Placeholder {
-            placeholder_type: Some(kind.to_owned()),
-            index,
-            orientation: None,
-            size: None,
-        };
-        assert!(placeholders_match(
-            &placeholder("sldNum", Some(12)),
-            &placeholder("sldNum", Some(4))
-        ));
-        assert!(!placeholders_match(
-            &placeholder("title", Some(4)),
-            &placeholder("body", Some(4))
-        ));
-        assert!(placeholders_match(
-            &placeholder("ctrTitle", None),
-            &placeholder("title", Some(0))
-        ));
-        assert!(placeholders_match(
-            &placeholder("body", Some(4)),
-            &placeholder("obj", Some(4))
-        ));
     }
 }

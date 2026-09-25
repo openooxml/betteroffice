@@ -86,11 +86,54 @@ struct FontFace {
     widths: Option<&'static FamilyMetrics>,
     /// The same family's `hhea` metrics, which decide where the line box sits.
     line: Option<&'static FamilyMetrics>,
+    /// The face whose own metrics size the line when `line` names none: the
+    /// face itself, or for a coverage fallback the face of the run it stands in.
+    line_id: FontId,
+}
+
+/// A font family the deck asked for that is not registered, the family drawn
+/// instead, and the first shape that asked for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FontSubstitution {
+    pub requested_family: String,
+    pub selected_family: String,
+    pub shape_id: String,
+}
+
+/// Collects one `FontSubstitution` per requested family over a slide.
+#[derive(Default)]
+struct SubstitutionLog {
+    shape_id: String,
+    seen: HashSet<String>,
+    entries: Vec<FontSubstitution>,
+}
+
+impl SubstitutionLog {
+    fn enter_shape(&mut self, shape_id: &str) {
+        self.shape_id.clear();
+        self.shape_id.push_str(shape_id);
+    }
+
+    fn record(&mut self, requested: &str, normalized: &str, selected: &str) {
+        if normalized.is_empty() || self.seen.contains(normalized) {
+            return;
+        }
+        self.seen.insert(normalized.to_owned());
+        self.entries.push(FontSubstitution {
+            requested_family: requested.trim().to_owned(),
+            selected_family: selected.to_owned(),
+            shape_id: self.shape_id.clone(),
+        });
+    }
 }
 
 pub struct SlideRenderer {
     fonts: FontStore,
     faces: HashMap<(String, bool, bool), FontFace>,
+    /// Faces drawn only for characters a run's own face has no glyph for,
+    /// with the weight and slant each was registered for.
+    coverage_faces: Vec<(bool, bool, FontFace)>,
     fallback: Option<FontFace>,
     /// Normalized fallback family.
     fallback_family: Option<String>,
@@ -110,6 +153,7 @@ impl SlideRenderer {
         Self {
             fonts: FontStore::new(),
             faces: HashMap::new(),
+            coverage_faces: Vec::new(),
             fallback: None,
             fallback_family: None,
             font_count: 0,
@@ -150,6 +194,7 @@ impl SlideRenderer {
             requested_family: requested.clone(),
             widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
             line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
+            line_id: id,
         };
         self.faces.insert((requested, bold, italic), face.clone());
         self.fallback.get_or_insert(face);
@@ -160,6 +205,145 @@ impl SlideRenderer {
             cache.clear();
         }
         Ok(id.to_u32())
+    }
+
+    /// Registers a face drawn only where a run's own face has no glyph, the way
+    /// PowerPoint reaches for a script's font when the named one cannot draw a
+    /// character. The first registered face that covers a character draws it.
+    pub fn register_fallback_font(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        bytes: &[u8],
+    ) -> Result<u32, RenderError> {
+        if bytes.len() > MAX_FONT_BYTES {
+            return Err(RenderError::ResourceLimit(format!(
+                "font exceeds {MAX_FONT_BYTES} bytes"
+            )));
+        }
+        if self.font_count >= MAX_FONTS {
+            return Err(RenderError::ResourceLimit(format!(
+                "more than {MAX_FONTS} font faces"
+            )));
+        }
+        let family = family.trim();
+        if family.is_empty() {
+            return Err(RenderError::Font("font family is empty".to_owned()));
+        }
+        let id = self
+            .fonts
+            .register(bytes.to_vec())
+            .map_err(|error| RenderError::Font(error.to_string()))?;
+        self.coverage_faces.push((
+            bold,
+            italic,
+            FontFace {
+                id,
+                family: family.to_owned(),
+                requested_family: normalize_family(family),
+                widths: None,
+                line: None,
+                line_id: id,
+            },
+        ));
+        self.font_count += 1;
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
+        Ok(id.to_u32())
+    }
+
+    /// The fallback face that draws `character` for a run in `face`: one of the
+    /// same weight and slant where there is one, sized on the run's own line.
+    fn coverage_face(
+        &self,
+        face: &FontFace,
+        character: char,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFace> {
+        let covering = || {
+            self.coverage_faces.iter().filter(|(_, _, candidate)| {
+                self.fonts.covers(candidate.id, character).unwrap_or(false)
+            })
+        };
+        covering()
+            .find(|(face_bold, face_italic, _)| (*face_bold, *face_italic) == (bold, italic))
+            .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
+            .or_else(|| covering().next())
+            .map(|(_, _, candidate)| FontFace {
+                line: face.line,
+                line_id: face.line_id,
+                ..candidate.clone()
+            })
+    }
+
+    /// Where `text` in `face` needs a fallback: each piece's byte start and the
+    /// face that draws it, `None` for `face` itself. Spaces and punctuation
+    /// stay with the fallback text around them.
+    fn coverage_pieces(
+        &self,
+        face: &FontFace,
+        text: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Vec<(usize, Option<FontFace>)> {
+        let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
+        if self.coverage_faces.is_empty()
+            || text
+                .chars()
+                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+        {
+            return vec![(0, None)];
+        }
+        for (index, character) in text.char_indices() {
+            let current = pieces.last().and_then(|(_, face)| face.as_ref());
+            let own = self.fonts.covers(face.id, character).unwrap_or(true);
+            let neutral = character.is_whitespace() || character.is_ascii_punctuation();
+            let chosen = match current {
+                Some(current)
+                    if neutral && self.fonts.covers(current.id, character).unwrap_or(false) =>
+                {
+                    Some(current.clone())
+                }
+                _ if own => None,
+                _ => self.coverage_face(face, character, bold, italic),
+            };
+            let same = pieces.last().is_some_and(|(_, last)| {
+                last.as_ref().map(|face| face.id) == chosen.as_ref().map(|face| face.id)
+            });
+            if !same {
+                pieces.push((index, chosen));
+            }
+        }
+        pieces
+    }
+
+    /// Splits `run` where its face has no glyph and a fallback does, so each
+    /// part is shaped, measured and drawn in a face that can draw it.
+    fn split_by_coverage(&self, run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
+        let pieces =
+            self.coverage_pieces(&run.style.face, &run.text, run.style.bold, run.style.italic);
+        if let [(0, None)] = pieces.as_slice() {
+            out.push(run);
+            return;
+        }
+        for (position, (start, face)) in pieces.iter().enumerate() {
+            let end = pieces
+                .get(position + 1)
+                .map_or(run.text.len(), |(next, _)| *next);
+            let mut style = run.style.clone();
+            if let Some(face) = face {
+                style.family = face.family.clone();
+                style.face = face.clone();
+            }
+            out.push(ResolvedRun {
+                text: run.text[*start..end].to_owned(),
+                start: run.start + utf16_len(&run.text[..*start]),
+                style,
+            });
+        }
     }
 
     /// The store holding every registered face, so a raster backend can resolve
@@ -301,6 +485,7 @@ impl SlideRenderer {
             parsed_slide,
             primitives: Vec::new(),
             hit_regions: Vec::new(),
+            substitutions: SubstitutionLog::default(),
             shape_count: 0,
             line_count: 0,
             chart_budget: MAX_CHART_PRIMITIVES,
@@ -374,6 +559,7 @@ impl SlideRenderer {
                 background,
                 primitives: builder.primitives,
             },
+            font_substitutions: builder.substitutions.entries,
             hit_regions: builder.hit_regions,
         })
     }
@@ -383,6 +569,7 @@ impl SlideRenderer {
         family: &str,
         bold: bool,
         italic: bool,
+        substitutions: &mut SubstitutionLog,
     ) -> Result<FontFace, RenderError> {
         let requested = normalize_family(family);
         let styles = [
@@ -400,7 +587,8 @@ impl SlideRenderer {
                 });
             }
         }
-        self.faces
+        let face = self
+            .faces
             .iter()
             .filter(|((name, _, _), _)| Some(name) == self.fallback_family.as_ref())
             .min_by_key(|((_, face_bold, face_italic), _)| {
@@ -411,7 +599,11 @@ impl SlideRenderer {
                 )
             })
             .map(|(_, face)| self.with_requested_metrics(face, &requested, bold, italic))
-            .ok_or(RenderError::NoFont)
+            .ok_or(RenderError::NoFont)?;
+        if normalize_family(&face.family) != requested {
+            substitutions.record(family, &requested, &face.family);
+        }
+        Ok(face)
     }
 
     fn with_requested_metrics(
@@ -487,6 +679,8 @@ impl<'a> BackgroundSource<'a> {
 
 pub struct RenderedSlide {
     pub display_list: SurfaceDisplayList,
+    /// Families the slide asked for that no registered face matched.
+    pub font_substitutions: Vec<FontSubstitution>,
     hit_regions: Vec<HitRegion>,
 }
 
@@ -536,6 +730,7 @@ struct LayoutBuilder<'a> {
     parsed_slide: Option<&'a Slide>,
     primitives: Vec<Primitive>,
     hit_regions: Vec<HitRegion>,
+    substitutions: SubstitutionLog,
     shape_count: usize,
     line_count: usize,
     chart_budget: usize,
@@ -677,15 +872,15 @@ impl<'a> LayoutBuilder<'a> {
                     self.theme,
                     space,
                     rect,
-                    shape.rotation_deg as f32,
-                    shape.flip_h,
-                    shape.flip_v,
+                    resolved.rotation_deg as f32,
+                    resolved.flip_h,
+                    resolved.flip_v,
                 )
             });
         let transform = Transform {
-            rotation_deg: shape.rotation_deg as f32,
-            flip_h: shape.flip_h,
-            flip_v: shape.flip_v,
+            rotation_deg: resolved.rotation_deg as f32,
+            flip_h: resolved.flip_h,
+            flip_v: resolved.flip_v,
         };
         match shape.kind {
             ShapeKind::Shape => {
@@ -1233,12 +1428,14 @@ impl<'a> LayoutBuilder<'a> {
             };
             let (renderer, theme) = (self.renderer, self.theme);
             let default_font = resolve_theme_font_ref(Some(theme), "+mn-lt");
+            self.substitutions.enter_shape(shape_id);
+            let substitutions = &mut self.substitutions;
             let chart = chart_primitive(
                 frame,
                 space,
                 &default_font,
                 self.chart_budget,
-                &mut |text| chart_text_primitive(renderer, theme, shape_id, text),
+                &mut |text| chart_text_primitive(renderer, theme, shape_id, text, substitutions),
             )?;
             if let Primitive::Chart { primitives, .. } = &chart {
                 self.chart_budget -= primitives.len();
@@ -1529,7 +1726,13 @@ impl<'a> LayoutBuilder<'a> {
         if TextFlow::from_body_vert(cascade.vertical()) != TextFlow::Horizontal {
             return Ok(0.0);
         }
-        let resolved = resolve_content(self.renderer, self.theme, content, cascade)?;
+        let resolved = resolve_content(
+            self.renderer,
+            self.theme,
+            content,
+            cascade,
+            &mut SubstitutionLog::default(),
+        )?;
         let left = cascade.inset_left().unwrap_or(DEFAULT_INSET_HORIZONTAL_EMU);
         let right = cascade
             .inset_right()
@@ -1581,7 +1784,14 @@ impl<'a> LayoutBuilder<'a> {
         content: TextContent,
         cascade: BodyCascade<'_>,
     ) -> Result<TextHit, RenderError> {
-        let resolved = resolve_content(self.renderer, self.theme, &content, cascade)?;
+        self.substitutions.enter_shape(shape_id);
+        let resolved = resolve_content(
+            self.renderer,
+            self.theme,
+            &content,
+            cascade,
+            &mut self.substitutions,
+        )?;
         let flow = TextFlow::from_body_vert(cascade.vertical());
         let text_transform = text_transform(transform, flow);
         let text_rect = flow.layout_rect(rect);
@@ -2194,6 +2404,8 @@ struct ResolvedParagraph {
     default_tab_px: f32,
     marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
+    /// `a:pPr/@rtl`: margins, indent, bullet and run order mirror.
+    rtl: bool,
     runs: Vec<ResolvedRun>,
 }
 
@@ -2226,6 +2438,7 @@ fn resolve_content(
     theme: &Theme,
     content: &TextContent,
     cascade: BodyCascade<'_>,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedContent, RenderError> {
     let total_bytes = content
         .paragraphs
@@ -2266,11 +2479,27 @@ fn resolve_content(
             .and_then(|value| value.language.as_deref());
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
-            let style =
-                resolve_style(renderer, theme, &run.style, properties.default_run.as_ref())?;
+            let style = resolve_style(
+                renderer,
+                theme,
+                &run.style,
+                properties.default_run.as_ref(),
+                substitutions,
+            )?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
-            push_cased_runs(&mut runs, &run.text, start, language, style);
+            let mut cased = Vec::new();
+            push_cased_runs(&mut cased, &run.text, start, language, style);
+            if properties.rtl == Some(true) {
+                let mut directed = Vec::new();
+                for run in cased {
+                    split_by_direction(run, &mut directed);
+                }
+                cased = directed;
+            }
+            for run in cased {
+                renderer.split_by_coverage(run, &mut runs);
+            }
         }
         if runs.is_empty() {
             let end_style = cascade
@@ -2280,20 +2509,29 @@ fn resolve_content(
             runs.push(ResolvedRun {
                 text: String::new(),
                 start: story_offset,
-                style: resolve_style(renderer, theme, &end_style, properties.default_run.as_ref())?,
+                style: resolve_style(
+                    renderer,
+                    theme,
+                    &end_style,
+                    properties.default_run.as_ref(),
+                    substitutions,
+                )?,
             });
         }
         let alignment = paragraph
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let marker = numbering
+        let written_marker = numbering
             .next(
                 properties.bullet.as_ref(),
                 paragraph.level,
                 paragraph.runs.iter().any(|run| !run.text.is_empty()),
             )
-            .map(|marker| symbol_bullet(&marker.text(), properties.bullet_font.as_ref(), theme));
+            .map(|marker| marker.text());
+        let marker = written_marker
+            .as_deref()
+            .map(|marker| symbol_bullet(marker, properties.bullet_font.as_ref(), theme));
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
@@ -2311,11 +2549,21 @@ fn resolve_content(
                 properties.indent.unwrap_or_default(),
             ),
             default_tab_px: resolve_default_tab(properties.default_tab_size),
-            bullet_style: marker
-                .is_some()
-                .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
+            bullet_style: written_marker
+                .as_deref()
+                .map(|written| {
+                    resolve_bullet_style(
+                        renderer,
+                        theme,
+                        &properties,
+                        &runs[0].style,
+                        written,
+                        substitutions,
+                    )
+                })
                 .transpose()?,
             marker,
+            rtl: properties.rtl.unwrap_or(false),
             runs,
         });
         story_offset = story_offset.saturating_add(1);
@@ -2413,6 +2661,8 @@ fn resolve_bullet_style(
     theme: &Theme,
     properties: &ParagraphProperties,
     text: &ResolvedStyle,
+    written_marker: &str,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedStyle, RenderError> {
     let mut style = text.clone();
     if let Some(BulletFont::Typeface(family)) = &properties.bullet_font {
@@ -2421,7 +2671,18 @@ fn resolve_bullet_style(
         } else {
             family.clone()
         };
-        style.face = renderer.resolve_face(&family, style.bold, style.italic)?;
+        let emulated = ooxml_text::SymbolFont::named(&family).is_some_and(|font| {
+            written_marker
+                .chars()
+                .all(|character| font.substitute(character).is_some())
+        });
+        let mut ignored = SubstitutionLog::default();
+        let log = if emulated {
+            &mut ignored
+        } else {
+            substitutions
+        };
+        style.face = renderer.resolve_face(&family, style.bold, style.italic, log)?;
         style.family = style.face.family.clone();
     }
     if let Some(BulletColor::Color(color)) = &properties.bullet_color
@@ -2443,6 +2704,7 @@ fn resolve_style(
     theme: &Theme,
     direct: &TextStyle,
     fallback: Option<&RunProperties>,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedStyle, RenderError> {
     let bold = direct
         .bold
@@ -2469,7 +2731,7 @@ fn resolve_style(
             }
         })
         .unwrap_or_else(|| resolve_theme_font_ref(Some(theme), "+mn-lt"));
-    let face = renderer.resolve_face(&family, bold, italic)?;
+    let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let color = direct
         .color
         .as_deref()
@@ -2594,8 +2856,10 @@ fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Optio
     Some(total * size_px)
 }
 
-/// Optional ligatures are off once glyphs are tracked apart.
-fn tracking_features(tracking: f32) -> &'static [ShapeFeature] {
+/// Optional ligatures are off once glyphs are tracked apart or advanced by the
+/// named family's widths: either way every character needs its own cluster, or
+/// the browser draws the substitute's narrower ligature into a wider slot.
+fn ligature_features(separate: bool) -> &'static [ShapeFeature] {
     const OFF: [ShapeFeature; 2] = [
         ShapeFeature {
             tag: *b"liga",
@@ -2606,7 +2870,7 @@ fn tracking_features(tracking: f32) -> &'static [ShapeFeature] {
             value: 0,
         },
     ];
-    if tracking == 0.0 { &[] } else { &OFF }
+    if separate { &OFF } else { &[] }
 }
 
 /// One shaped line of chart text, in the family, weight, slant and pixel size
@@ -2616,6 +2880,7 @@ fn chart_text_primitive(
     theme: &Theme,
     shape_id: &str,
     text: ChartText<'_>,
+    substitutions: &mut SubstitutionLog,
 ) -> Result<Primitive, RenderError> {
     let bold = text.font.weight >= 600;
     let italic = text.font.italic;
@@ -2624,35 +2889,48 @@ fn chart_text_primitive(
     } else {
         text.font.family.clone()
     };
-    let face = renderer.resolve_face(&family, bold, italic)?;
+    let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let size_px = safe_geometry(text.font.size_px as f32).clamp(1.0, 4_096.0);
     let tracking = safe_geometry(text.font.letter_spacing_px as f32);
-    let shaped = shape(
-        &renderer.fonts,
-        face.id,
-        text.text,
-        size_px,
-        tracking_features(tracking),
-    )
-    .map_err(|error| RenderError::Font(error.to_string()))?;
     let metrics = renderer
         .fonts
         .metrics(face.id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
     let line_box = single_line_box(metrics, size_px, &CompatFlags::default());
-    let mut offsets = Vec::with_capacity(shaped.len());
+    let pieces = renderer.coverage_pieces(&face, text.text, bold, italic);
+    let mut shaped_pieces = Vec::with_capacity(pieces.len());
     let mut cursor = 0.0_f32;
     let mut cluster_advance = 0.0_f32;
-    let mut cluster = None;
-    for glyph in &shaped {
-        if cluster.is_some_and(|previous| previous != glyph.cluster) {
-            cursor += tracking.max(-cluster_advance);
-            cluster_advance = 0.0;
+    let mut started = false;
+    for (index, (start, piece_face)) in pieces.iter().enumerate() {
+        let end = pieces
+            .get(index + 1)
+            .map_or(text.text.len(), |(next, _)| *next);
+        let piece_face = piece_face.clone().unwrap_or_else(|| face.clone());
+        let shaped = shape(
+            &renderer.fonts,
+            piece_face.id,
+            &text.text[*start..end],
+            size_px,
+            ligature_features(tracking != 0.0),
+        )
+        .map_err(|error| RenderError::Font(error.to_string()))?;
+        let piece_x = cursor;
+        let mut offsets = Vec::with_capacity(shaped.len());
+        let mut cluster = None;
+        for glyph in &shaped {
+            if started && cluster != Some(glyph.cluster) {
+                cursor += tracking.max(-cluster_advance);
+                cluster_advance = 0.0;
+            }
+            offsets.push(cursor);
+            cursor += glyph.x_advance;
+            cluster_advance += glyph.x_advance;
+            cluster = Some(glyph.cluster);
+            started = true;
         }
-        offsets.push(cursor);
-        cursor += glyph.x_advance;
-        cluster_advance += glyph.x_advance;
-        cluster = Some(glyph.cluster);
+        let piece_x = offsets.first().copied().unwrap_or(piece_x);
+        shaped_pieces.push((*start, end, piece_face, shaped, offsets, piece_x, cursor));
     }
     let advance = cursor;
     let box_x = safe_geometry(text.x as f32);
@@ -2666,36 +2944,44 @@ fn chart_text_primitive(
         _ => box_x,
     };
     let baseline = safe_geometry(text.baseline_y as f32);
-    let glyphs = shaped
-        .iter()
-        .zip(&offsets)
-        .map(|(glyph, offset)| PositionedGlyph {
-            glyph_id: glyph.glyph_id,
-            cluster: glyph.cluster,
-            x: x + offset,
-            advance: glyph.x_advance,
-            x_offset: glyph.x_offset,
-            y_offset: baseline + glyph.y_offset,
-        })
+    let runs: Vec<PositionedTextRun> = shaped_pieces
+        .into_iter()
+        .map(
+            |(start, end, piece_face, shaped, offsets, piece_x, piece_end)| {
+                let glyphs = shaped
+                    .iter()
+                    .zip(&offsets)
+                    .map(|(glyph, offset)| PositionedGlyph {
+                        glyph_id: glyph.glyph_id,
+                        cluster: utf16_len(&text.text[..start + glyph.cluster as usize]),
+                        x: x + offset,
+                        advance: glyph.x_advance,
+                        x_offset: glyph.x_offset,
+                        y_offset: baseline + glyph.y_offset,
+                    })
+                    .collect();
+                PositionedTextRun {
+                    text: text.text[start..end].to_owned(),
+                    start: utf16_len(&text.text[..start]),
+                    end: utf16_len(&text.text[..end]),
+                    x: x + piece_x,
+                    width: (piece_end - piece_x).max(0.0),
+                    font_id: piece_face.id.to_u32(),
+                    font_family: piece_face.family.clone(),
+                    font_size_px: size_px,
+                    bold,
+                    italic,
+                    underline: false,
+                    color: text.color.to_owned(),
+                    letter_spacing_px: tracking,
+                    baseline_offset_px: 0.0,
+                    glyphs,
+                }
+            },
+        )
         .collect();
-    let run = PositionedTextRun {
-        text: text.text.to_owned(),
-        start: 0,
-        end: utf16_len(text.text),
-        x,
-        width: advance.max(0.0),
-        font_id: face.id.to_u32(),
-        font_family: face.family.clone(),
-        font_size_px: size_px,
-        bold,
-        italic,
-        underline: false,
-        color: text.color.to_owned(),
-        letter_spacing_px: tracking,
-        baseline_offset_px: 0.0,
-        glyphs,
-    };
-    let width = run.width;
+    let width = advance.max(0.0);
+    let end = utf16_len(text.text);
     Ok(Primitive::TextBox {
         text_shadow: None,
         object_id: text.object_id,
@@ -2726,12 +3012,15 @@ fn chart_text_primitive(
             height: line_box.height(),
             baseline,
             start: 0,
-            end: run.end,
-            runs: vec![run],
+            end,
+            runs,
             caret_stops: Vec::new(),
         }],
         overflow: false,
-        transform: Transform::default(),
+        transform: Transform {
+            rotation_deg: safe_geometry(text.rotation_deg as f32),
+            ..Transform::default()
+        },
     })
 }
 
@@ -2860,6 +3149,7 @@ fn text_layout_key(
             default_tab_px,
             marker,
             bullet_style,
+            rtl,
             runs,
         } = paragraph;
         key.push(match align {
@@ -2882,6 +3172,7 @@ fn text_layout_key(
             key_f32(&mut key, *stop);
         }
         key_f32(&mut key, *default_tab_px);
+        key.push(u8::from(*rtl));
         key_opt_str(&mut key, marker);
         match bullet_style {
             Some(style) => {
@@ -2950,6 +3241,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
                 requested_family,
                 widths,
                 line,
+                line_id,
             },
         family,
         font_size_pt,
@@ -2963,6 +3255,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
         caps,
     } = style;
     key_u32(key, id.to_u32());
+    key_u32(key, line_id.to_u32());
     key_str(key, face_family);
     key_str(key, requested_family);
     key.push(u8::from(widths.is_some()));
@@ -3002,7 +3295,12 @@ fn layout_content(
             y += spacing_px(paragraph.space_before, paragraph, scale);
         }
         previous = Some(paragraph);
-        let paragraph_x = rect.x + paragraph.margin_left_px.max(0.0);
+        let start_margin = if paragraph.rtl {
+            paragraph.margin_right_px
+        } else {
+            paragraph.margin_left_px
+        };
+        let paragraph_x = rect.x + start_margin.max(0.0);
         let paragraph_width =
             (rect.w - paragraph.margin_left_px.max(0.0) - paragraph.margin_right_px.max(0.0))
                 .max(1.0);
@@ -3227,7 +3525,7 @@ fn layout_paragraph(
         } else {
             0.0
         };
-        let line_start = x + indent;
+        let line_start = if paragraph.rtl { x } else { x + indent };
         let line_room = width - indent;
         let line_x = match paragraph.align {
             TextAlign::Center => line_start + ((line_room - natural_width) / 2.0).max(0.0),
@@ -3254,7 +3552,10 @@ fn layout_paragraph(
         caret_stops.dedup_by(|left, right| {
             left.position == right.position && left.x.to_bits() == right.x.to_bits()
         });
-        let runs = positioned_runs(slice, &advances, line_x, line_y + line_box.ascent, scale);
+        let mut runs = positioned_runs(slice, &advances, line_x, line_y + line_box.ascent, scale);
+        if paragraph.rtl {
+            mirror_line(&mut runs, &mut caret_stops, line_x, line_width);
+        }
         output.push(PositionedTextLine {
             x: line_x,
             y: line_y,
@@ -3271,15 +3572,130 @@ fn layout_paragraph(
         });
         line_y += line_box.height();
     }
-    prepend_bullet(fonts, paragraph, x, &mut output, scale)?;
+    prepend_bullet(fonts, paragraph, (x, width), &mut output, scale)?;
     Ok(output)
+}
+
+/// Lays a right-to-left line out from its right edge, in bidi visual order:
+/// the runs reverse, except that a stretch of consecutive left-to-right runs
+/// keeps its own order. A run of spaces or punctuation reads the way its
+/// strong neighbours agree on, else right to left. A right-to-left run mirrors
+/// glyph by glyph so it paints in reading order; a left-to-right run keeps its
+/// glyphs and moves as a block. Each caret stop sits at the leading edge of
+/// the character after it, or at the trailing edge of the line's last run.
+fn mirror_line(
+    runs: &mut [PositionedTextRun],
+    caret_stops: &mut [CaretStop],
+    line_x: f32,
+    line_width: f32,
+) {
+    let mirror = 2.0 * line_x + line_width;
+    let strong: Vec<Option<bool>> = runs.iter().map(|run| direction(&run.text)).collect();
+    let ltr: Vec<bool> = (0..runs.len())
+        .map(|position| match strong[position] {
+            Some(rtl) => !rtl,
+            None => {
+                let before = strong[..position].iter().rev().find_map(|value| *value);
+                let after = strong[position + 1..].iter().find_map(|value| *value);
+                before == Some(false) && after == Some(false)
+            }
+        })
+        .collect();
+    let old: Vec<f32> = runs.iter().map(|run| run.x).collect();
+    let mut placed: Vec<f32> = runs.iter().map(|run| mirror - run.width - run.x).collect();
+    let mut index = 0;
+    while index < runs.len() {
+        if !ltr[index] {
+            index += 1;
+            continue;
+        }
+        let end = (index..runs.len())
+            .find(|position| !ltr[*position])
+            .unwrap_or(runs.len());
+        let mut x = placed[index..end].iter().copied().fold(f32::MAX, f32::min);
+        for position in index..end {
+            placed[position] = x;
+            x += runs[position].width;
+        }
+        index = end;
+    }
+    let last = runs.len().checked_sub(1);
+    for stop in caret_stops.iter_mut() {
+        let home = (0..runs.len()).find(|&position| {
+            let run = &runs[position];
+            (run.start..run.end).contains(&stop.position)
+                || Some(position) == last && stop.position == run.end
+        });
+        stop.x = match home {
+            Some(position) if ltr[position] => placed[position] + (stop.x - old[position]),
+            _ => mirror - stop.x,
+        };
+    }
+    for (position, run) in runs.iter_mut().enumerate() {
+        if ltr[position] {
+            for glyph in &mut run.glyphs {
+                glyph.x += placed[position] - old[position];
+            }
+        } else {
+            for glyph in &mut run.glyphs {
+                glyph.x = mirror - glyph.x - glyph.advance;
+            }
+        }
+        run.x = placed[position];
+    }
+}
+
+/// The strong direction of `text`: `Some(true)` for right-to-left script,
+/// `Some(false)` for letters and digits of any other, `None` for neither.
+fn direction(text: &str) -> Option<bool> {
+    text.chars().find_map(char_direction)
+}
+
+fn char_direction(character: char) -> Option<bool> {
+    if matches!(
+        character as u32,
+        0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
+    ) {
+        Some(true)
+    } else if character.is_alphanumeric() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Splits a right-to-left paragraph's run where its strong direction turns, so
+/// each part reads one way. Spaces and punctuation stay with the text before.
+fn split_by_direction(run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
+    let mut cuts = vec![0];
+    let mut current = None;
+    for (index, character) in run.text.char_indices() {
+        if let Some(next) = char_direction(character) {
+            if current.is_some_and(|current| current != next) {
+                cuts.push(index);
+            }
+            current = Some(next);
+        }
+    }
+    if cuts.len() == 1 {
+        out.push(run);
+        return;
+    }
+    for (position, start) in cuts.iter().enumerate() {
+        let end = cuts.get(position + 1).copied().unwrap_or(run.text.len());
+        out.push(ResolvedRun {
+            text: run.text[*start..end].to_owned(),
+            start: run.start + utf16_len(&run.text[..*start]),
+            style: run.style.clone(),
+        });
+    }
 }
 
 /// Prepends a marker outside the story's character space.
 fn prepend_bullet(
     fonts: &FontStore,
     paragraph: &ResolvedParagraph,
-    x: f32,
+    (x, width): (f32, f32),
     lines: &mut [PositionedTextLine],
     scale: f32,
 ) -> Result<(), RenderError> {
@@ -3308,6 +3724,7 @@ fn prepend_bullet(
         default_tab_px: resolve_default_tab(None),
         marker: None,
         bullet_style: None,
+        rtl: false,
         runs: vec![ResolvedRun {
             text: value.clone(),
             start: paragraph.runs[0].start,
@@ -3322,6 +3739,15 @@ fn prepend_bullet(
         .iter()
         .map(|cluster| cluster.width)
         .collect::<Vec<_>>();
+    // A right-to-left marker hangs off the right edge the way a left-to-right
+    // one hangs off the left.
+    let bullet_x = if paragraph.rtl {
+        let right =
+            (x + width - paragraph.indent_px).min(x + width + paragraph.margin_left_px.max(0.0));
+        right - advances.iter().sum::<f32>()
+    } else {
+        bullet_x
+    };
     let mut runs = positioned_runs(&clusters, &advances, bullet_x, first.baseline, scale);
     for run in &mut runs {
         run.start = paragraph.runs[0].start;
@@ -3466,7 +3892,7 @@ fn add_shaped_segment(
         run.style.face.id,
         text,
         size_px,
-        tracking_features(tracking),
+        ligature_features(tracking != 0.0 || run.style.face.widths.is_some()),
     )
     .map_err(|error| RenderError::Font(error.to_string()))?;
     let mut starts = shaped
@@ -3640,25 +4066,32 @@ fn positioned_runs(
     let mut output: Vec<PositionedTextRun> = Vec::new();
     let mut cursor_x = line_x;
     let mut trailing_tracking = 0.0_f32;
+    let mut run_direction = None;
     for (index, cluster) in clusters.iter().enumerate() {
         if cluster.text == "\n" {
             continue;
         }
         let baseline_offset_px = cluster.style.baseline_shift_px * scale;
-        let append = output.last().is_some_and(|run| {
-            run.end == cluster.start
-                && run.font_id == cluster.style.face.id.to_u32()
-                && run.letter_spacing_px == cluster.tracking
-                && run.baseline_offset_px == baseline_offset_px
-                && run.font_family == cluster.style.family
-                && run.font_size_px
-                    == points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale))
-                && run.bold == cluster.style.bold
-                && run.italic == cluster.style.italic
-                && run.underline == cluster.style.underline
-                && run.color == cluster.style.color
-        });
+        let turns = matches!(
+            (run_direction, direction(&cluster.text)),
+            (Some(current), Some(next)) if current != next
+        );
+        let append = !turns
+            && output.last().is_some_and(|run| {
+                run.end == cluster.start
+                    && run.font_id == cluster.style.face.id.to_u32()
+                    && run.letter_spacing_px == cluster.tracking
+                    && run.baseline_offset_px == baseline_offset_px
+                    && run.font_family == cluster.style.family
+                    && run.font_size_px
+                        == points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale))
+                    && run.bold == cluster.style.bold
+                    && run.italic == cluster.style.italic
+                    && run.underline == cluster.style.underline
+                    && run.color == cluster.style.color
+            });
         if !append {
+            run_direction = None;
             if let Some(previous) = output.last_mut() {
                 previous.width -= trailing_tracking;
             }
@@ -3680,6 +4113,7 @@ fn positioned_runs(
                 glyphs: Vec::new(),
             });
         }
+        run_direction = run_direction.or_else(|| direction(&cluster.text));
         let Some(run) = output.last_mut() else {
             continue;
         };
@@ -3837,7 +4271,7 @@ fn style_line_box(
         return Ok(family_line_box(named, size_px));
     }
     let metrics = fonts
-        .metrics(style.face.id)
+        .metrics(style.face.line_id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
     Ok(single_line_box(metrics, size_px, &CompatFlags::default()))
 }
@@ -4325,40 +4759,44 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
     }
 }
 
+/// The transform a shape draws at. Without an extent it takes the inherited
+/// one, keeping its own orientation when its node spells out a transform.
 fn resolved_transform_value(
     shape: &ShapeSnapshot,
     original: Option<&ShapeNode>,
     layout: Option<&ShapeNode>,
     master: Option<&ShapeNode>,
 ) -> ShapeTransform {
+    let own = ShapeTransform {
+        x: shape.x,
+        y: shape.y,
+        width: shape.width,
+        height: shape.height,
+        rotation_deg: shape.rotation_deg,
+        flip_h: shape.flip_h,
+        flip_v: shape.flip_v,
+        ..ShapeTransform::default()
+    };
     if shape.width > 0 && shape.height > 0 {
+        return own;
+    }
+    let Some(inherited) = [original, layout, master]
+        .into_iter()
+        .flatten()
+        .map(|node| &node_base(node).transform)
+        .find(|transform| transform.width > 0 && transform.height > 0)
+    else {
+        return own;
+    };
+    if original.is_some_and(|node| node_base(node).transform != ShapeTransform::default()) {
         ShapeTransform {
-            x: shape.x,
-            y: shape.y,
-            width: shape.width,
-            height: shape.height,
-            rotation_deg: shape.rotation_deg,
-            flip_h: shape.flip_h,
-            flip_v: shape.flip_v,
-            ..ShapeTransform::default()
+            rotation_deg: own.rotation_deg,
+            flip_h: own.flip_h,
+            flip_v: own.flip_v,
+            ..inherited.clone()
         }
     } else {
-        [original, layout, master]
-            .into_iter()
-            .flatten()
-            .map(|node| &node_base(node).transform)
-            .find(|transform| transform.width > 0 && transform.height > 0)
-            .cloned()
-            .unwrap_or_else(|| ShapeTransform {
-                x: shape.x,
-                y: shape.y,
-                width: shape.width,
-                height: shape.height,
-                rotation_deg: shape.rotation_deg,
-                flip_h: shape.flip_h,
-                flip_v: shape.flip_v,
-                ..ShapeTransform::default()
-            })
+        inherited.clone()
     }
 }
 
@@ -4981,6 +5419,8 @@ mod tests {
     const NUMBERED_FIXTURE: &[u8] =
         include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
     const STYLE_FIXTURE: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/shape-style.pptx");
+    const STYLE_MATRIX_FIXTURE: &[u8] =
+        include_bytes!("../../pptx-parse/tests/fixtures/style-matrix-deck.pptx");
     const HIDDEN_FIXTURE: &[u8] =
         include_bytes!("../../pptx-edit/tests/fixtures/hidden-shapes.pptx");
     const V2_UPDATE: &[u8] =
@@ -5193,6 +5633,127 @@ mod tests {
                 rect_covering_text(rect, None).h
             ),
             (rect.y, rect.h)
+        );
+    }
+
+    #[test]
+    fn a_character_its_face_cannot_draw_moves_to_a_fallback_that_can() {
+        let arabic: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
+        let mut renderer = renderer();
+        let run = paragraph(
+            &renderer,
+            "l",
+            "Hello \u{645}\u{631}\u{62d}\u{628}\u{627} world",
+        )
+        .runs
+        .remove(0);
+        let mut unchanged = Vec::new();
+        renderer.split_by_coverage(
+            ResolvedRun {
+                text: run.text.clone(),
+                start: 3,
+                style: run.style.clone(),
+            },
+            &mut unchanged,
+        );
+        assert_eq!(unchanged.len(), 1, "no fallback registered, nothing moves");
+
+        renderer
+            .register_fallback_font("Noto Sans Arabic", false, false, arabic)
+            .unwrap();
+        let mut pieces = Vec::new();
+        renderer.split_by_coverage(
+            ResolvedRun {
+                text: run.text.clone(),
+                start: 3,
+                style: run.style.clone(),
+            },
+            &mut pieces,
+        );
+        let parts: Vec<(&str, u32, &str)> = pieces
+            .iter()
+            .map(|piece| {
+                (
+                    piece.text.as_str(),
+                    piece.start,
+                    piece.style.family.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("Hello ", 3, "Arial"),
+                (
+                    "\u{645}\u{631}\u{62d}\u{628}\u{627} ",
+                    9,
+                    "Noto Sans Arabic"
+                ),
+                ("world", 15, "Arial"),
+            ]
+        );
+        assert_eq!(pieces[1].style.face.line_id, run.style.face.id);
+        assert_ne!(pieces[1].style.face.id, run.style.face.id);
+    }
+
+    #[test]
+    fn a_chart_label_draws_what_its_face_lacks_in_a_fallback() {
+        let arabic: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
+        let mut renderer = renderer();
+        renderer
+            .register_fallback_font("Noto Sans Arabic", false, false, arabic)
+            .unwrap();
+        let label = "Sales \u{645}\u{628}\u{64a}\u{639}\u{627}\u{62a}";
+        let primitive = chart_text_primitive(
+            &renderer,
+            &Theme::default(),
+            "chart:1",
+            ChartText {
+                object_id: 1,
+                text: label,
+                x: 10.0,
+                baseline_y: 40.0,
+                width: 200.0,
+                font: ooxml_drawingml::chart::PlotFont {
+                    weight: 400,
+                    size_px: 14.0,
+                    family: "Arial".to_owned(),
+                    italic: false,
+                    letter_spacing_px: 2.0,
+                },
+                color: "#000000",
+                align: PlotTextAlign::Start,
+                rotation_deg: 0.0,
+            },
+            &mut SubstitutionLog::default(),
+        )
+        .unwrap();
+        let Primitive::TextBox { lines, .. } = primitive else {
+            panic!("a text box");
+        };
+        for run in &lines[0].runs {
+            assert_eq!(run.x, run.glyphs[0].x, "a run starts at its first glyph");
+        }
+        let runs: Vec<(&str, &str)> = lines[0]
+            .runs
+            .iter()
+            .map(|run| (run.text.as_str(), run.font_family.as_str()))
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                ("Sales ", "Arial"),
+                (
+                    "\u{645}\u{628}\u{64a}\u{639}\u{627}\u{62a}",
+                    "Noto Sans Arabic"
+                ),
+            ]
+        );
+        assert!(
+            (lines[0].runs[1].x - (lines[0].runs[0].x + lines[0].runs[0].width + 2.0)).abs() < 0.01,
+            "the tracked gap sits between the pieces"
         );
     }
 
@@ -5521,7 +6082,9 @@ mod tests {
     }
 
     fn paragraph(renderer: &SlideRenderer, alignment: &str, text: &str) -> ResolvedParagraph {
-        let face = renderer.resolve_face("Arial", false, false).unwrap();
+        let face = renderer
+            .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+            .unwrap();
         ResolvedParagraph {
             align: parse_align(Some(alignment)),
             justify: is_full_justification(Some(alignment)),
@@ -5537,6 +6100,7 @@ mod tests {
             default_tab_px: resolve_default_tab(None),
             marker: None,
             bullet_style: None,
+            rtl: false,
             runs: vec![ResolvedRun {
                 text: text.to_owned(),
                 start: 0,
@@ -5777,7 +6341,9 @@ mod tests {
     fn adjacent_runs_keep_their_own_paint_attributes() {
         let renderer = renderer();
         let style = ResolvedStyle {
-            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            face: renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
             line_font_size_pt: 14.0,
@@ -5796,7 +6362,9 @@ mod tests {
         variants[3].underline = true;
         variants[4].font_size_pt = 28.0;
         variants[5].family = "Fallback".to_owned();
-        variants[6].face = renderer.resolve_face("Arial", true, false).unwrap();
+        variants[6].face = renderer
+            .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
+            .unwrap();
         for changed in variants {
             let paragraph = ResolvedParagraph {
                 align: TextAlign::Left,
@@ -5813,6 +6381,7 @@ mod tests {
                 default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: [style.clone(), changed.clone(), style.clone()]
                     .into_iter()
                     .enumerate()
@@ -5863,7 +6432,9 @@ mod tests {
     fn identical_adjacent_runs_keep_the_same_display_list() {
         let renderer = renderer();
         let style = ResolvedStyle {
-            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            face: renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
             line_font_size_pt: 14.0,
@@ -5892,6 +6463,7 @@ mod tests {
                 default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: parts
                     .iter()
                     .map(|text| {
@@ -5938,7 +6510,9 @@ mod tests {
             )
             .unwrap();
         let style = ResolvedStyle {
-            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            face: renderer
+                .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+                .unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 24.0,
             line_font_size_pt: 24.0,
@@ -5966,6 +6540,7 @@ mod tests {
                 default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: vec![ResolvedRun {
                     text: text.to_owned(),
                     start: 0,
@@ -6083,7 +6658,9 @@ mod tests {
             .register_font("Arial", true, false, BOLD_FONT)
             .unwrap();
 
-        let resolved = renderer.resolve_face("Segoe UI", true, false).unwrap();
+        let resolved = renderer
+            .resolve_face("Segoe UI", true, false, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), bold);
         assert_eq!(renderer.fonts.font_bytes(resolved.id).unwrap(), BOLD_FONT);
     }
@@ -6096,7 +6673,9 @@ mod tests {
             .register_font("Arial", false, true, ITALIC_FONT)
             .unwrap();
 
-        let resolved = renderer.resolve_face("Segoe UI", false, true).unwrap();
+        let resolved = renderer
+            .resolve_face("Segoe UI", false, true, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), italic);
         assert_eq!(renderer.fonts.font_bytes(resolved.id).unwrap(), ITALIC_FONT);
     }
@@ -6118,9 +6697,13 @@ mod tests {
             .register_font("Georgia", false, false, FONT)
             .unwrap();
 
-        let resolved = renderer.resolve_face(" geORGia ", true, true).unwrap();
+        let resolved = renderer
+            .resolve_face(" geORGia ", true, true, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), georgia);
-        let resolved = renderer.resolve_face("Segoe UI", true, true).unwrap();
+        let resolved = renderer
+            .resolve_face("Segoe UI", true, true, &mut SubstitutionLog::default())
+            .unwrap();
         assert_eq!(resolved.id.to_u32(), bold_italic);
         assert_eq!(renderer.fallback_font().unwrap().to_u32(), regular);
     }
@@ -6157,7 +6740,12 @@ mod tests {
         }
 
         assert!(matches!(
-            SlideRenderer::new().resolve_face("Segoe UI", false, false),
+            SlideRenderer::new().resolve_face(
+                "Segoe UI",
+                false,
+                false,
+                &mut SubstitutionLog::default()
+            ),
             Err(RenderError::NoFont)
         ));
         let package = pptx_parse::parse_pptx(FIXTURE).unwrap();
@@ -6179,7 +6767,10 @@ mod tests {
                     .register_font("Arial", bold, italic, bytes)
                     .unwrap();
             }
-            let bold_id = renderer.resolve_face("Arial", true, false).unwrap().id;
+            let bold_id = renderer
+                .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
+                .unwrap()
+                .id;
             let mut slides = Vec::new();
             for index in 0..snapshot.slides.len() {
                 let mut rendered = renderer.layout_slide(&package, &snapshot, index).unwrap();
@@ -6197,7 +6788,9 @@ mod tests {
                 (false, true, ITALIC_FONT),
                 (true, true, BOLD_FONT),
             ] {
-                let resolved = renderer.resolve_face("Segoe UI", bold, italic).unwrap();
+                let resolved = renderer
+                    .resolve_face("Segoe UI", bold, italic, &mut SubstitutionLog::default())
+                    .unwrap();
                 assert!(
                     renderer.fonts.font_bytes(resolved.id).unwrap() == expected,
                     "wrong fallback for bold={bold}, italic={italic}"
@@ -6602,6 +7195,50 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_without_a_transform_draws_with_the_orientation_it_inherits() {
+        let mut package = pptx_parse::parse_pptx(STYLE_MATRIX_FIXTURE).unwrap();
+        let session = DeckSession::open(STYLE_MATRIX_FIXTURE, 8_320).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let title = snapshot.slides[1].shapes[0].id.clone();
+        let layout = package
+            .layouts
+            .iter_mut()
+            .find(|layout| layout.part_path == "ppt/slideLayouts/slideLayout2.xml")
+            .unwrap();
+        let ShapeNode::Shape(placeholder) = &mut layout.shapes[0] else {
+            panic!("the layout title is a shape")
+        };
+        placeholder.base.transform.rotation_deg = 30.0;
+        placeholder.base.transform.flip_v = true;
+
+        let rendered = renderer().layout_slide(&package, &snapshot, 1).unwrap();
+        assert_eq!(
+            drawn_transform(&rendered, &title),
+            Transform {
+                rotation_deg: 30.0,
+                flip_h: false,
+                flip_v: true,
+            }
+        );
+    }
+
+    fn drawn_transform(rendered: &RenderedSlide, shape_id: &str) -> Transform {
+        rendered
+            .display_list
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape {
+                    shape_id: Some(id),
+                    transform,
+                    ..
+                } if id == shape_id => Some(*transform),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{shape_id} was not drawn"))
+    }
+
+    #[test]
     fn hiding_master_shapes_drops_the_layout_decoration_too() {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_301).unwrap();
@@ -6931,6 +7568,7 @@ mod tests {
                 background: None,
                 primitives: Vec::new(),
             },
+            font_substitutions: Vec::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "rotated".to_owned(),
                 rect: PxRect {
@@ -6981,6 +7619,7 @@ mod tests {
                 background: None,
                 primitives: Vec::new(),
             },
+            font_substitutions: Vec::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "mirrored".to_owned(),
                 rect: PxRect {
@@ -7070,6 +7709,7 @@ mod tests {
                 background: None,
                 primitives: Vec::new(),
             },
+            font_substitutions: Vec::new(),
             hit_regions: vec![HitRegion {
                 shape_id: "sideways".to_owned(),
                 hit_rect: rect,
@@ -8750,28 +9390,16 @@ mod tests {
             orientation: None,
             size: None,
         };
-        assert!(!pptx_edit::paragraph::placeholders_match(
-            &indexed,
-            &same_index
-        ));
-        assert!(pptx_edit::paragraph::placeholders_match(
-            &centered_title,
-            &title
-        ));
+        assert!(!indexed.matches(&same_index));
+        assert!(centered_title.matches(&title));
         let slide_number = |index| Placeholder {
             placeholder_type: Some("sldNum".to_owned()),
             index: Some(index),
             orientation: None,
             size: None,
         };
-        assert!(pptx_edit::paragraph::placeholders_match(
-            &slide_number(12),
-            &slide_number(4)
-        ));
-        assert!(!pptx_edit::paragraph::placeholders_match(
-            &slide_number(12),
-            &indexed
-        ));
+        assert!(slide_number(12).matches(&slide_number(4)));
+        assert!(!slide_number(12).matches(&indexed));
 
         let snapshot = ShapeSnapshot {
             id: "placeholder".to_owned(),
@@ -8785,6 +9413,7 @@ mod tests {
             rotation_deg: 0.0,
             flip_h: false,
             flip_v: false,
+            inherited: None,
             hidden: false,
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
@@ -9074,8 +9703,17 @@ mod tests {
             .register_font("Trebuchet MS", false, false, FONT)
             .unwrap();
         renderer.register_font("Arial", false, false, FONT).unwrap();
-        let substituted = renderer.resolve_face("Trebuchet MS", false, false).unwrap();
-        let plain = renderer.resolve_face("Arial", false, false).unwrap();
+        let substituted = renderer
+            .resolve_face(
+                "Trebuchet MS",
+                false,
+                false,
+                &mut SubstitutionLog::default(),
+            )
+            .unwrap();
+        let plain = renderer
+            .resolve_face("Arial", false, false, &mut SubstitutionLog::default())
+            .unwrap();
         assert!(plain.widths.is_none() && plain.line.is_none());
 
         let metrics = substituted.widths.expect("trebuchet ms widths");
@@ -9093,6 +9731,51 @@ mod tests {
     }
 
     #[test]
+    fn a_run_on_the_named_family_widths_keeps_one_cluster_per_character() {
+        const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Arial", false, false, CARLITO)
+            .unwrap();
+        renderer
+            .register_font("Trebuchet MS", false, false, CARLITO)
+            .unwrap();
+        let text = "Transmigration";
+        let lay = |family: &str| {
+            let mut paragraph = paragraph(&renderer, "l", text);
+            paragraph.runs[0].style.face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            paragraph.runs[0].style.family = family.to_owned();
+            layout_paragraph(
+                &renderer.fonts,
+                &paragraph,
+                0.0,
+                0.0,
+                1_000.0,
+                1.0,
+                false,
+                true,
+            )
+            .unwrap()
+        };
+        assert!(
+            glyph_positions(&lay("Arial")).len() < text.len(),
+            "Carlito ligates ti on its own widths"
+        );
+        let named = lay("Trebuchet MS");
+        let positions = glyph_positions(&named);
+        assert_eq!(positions.len(), text.len());
+        let metrics = family_metrics("trebuchet ms", false, false).unwrap();
+        let size = points_to_px(18.0);
+        let mut pen = positions[0];
+        for (character, x) in text.chars().zip(&positions) {
+            assert!((x - pen).abs() < 0.01, "{character} at {x}, expected {pen}");
+            pen += family_advance(metrics, character).unwrap() * size;
+        }
+    }
+
+    #[test]
     fn missing_faces_keep_the_requested_family_and_style_metrics() {
         for registered in ["Arial", "Trebuchet MS"] {
             let mut renderer = SlideRenderer::new();
@@ -9100,17 +9783,85 @@ mod tests {
                 .register_font(registered, false, false, FONT)
                 .unwrap();
             for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
-                let face = renderer.resolve_face("Trebuchet MS", bold, italic).unwrap();
+                let face = renderer
+                    .resolve_face(
+                        "Trebuchet MS",
+                        bold,
+                        italic,
+                        &mut SubstitutionLog::default(),
+                    )
+                    .unwrap();
                 let expected = family_metrics("trebuchet ms", bold, italic).unwrap();
                 assert_eq!(renderer.fonts.font_bytes(face.id).unwrap(), FONT);
                 assert!(std::ptr::eq(face.widths.unwrap(), expected));
                 assert!(std::ptr::eq(face.line.unwrap(), expected));
             }
             let unknown = renderer
-                .resolve_face("Unknown family", false, false)
+                .resolve_face(
+                    "Unknown family",
+                    false,
+                    false,
+                    &mut SubstitutionLog::default(),
+                )
                 .unwrap();
             assert!(unknown.widths.is_none() && unknown.line.is_none());
         }
+    }
+
+    #[test]
+    fn an_empty_family_draws_the_fallback_without_reporting_it() {
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let mut log = SubstitutionLog::default();
+        renderer.resolve_face("", false, false, &mut log).unwrap();
+        renderer.resolve_face("  ", false, false, &mut log).unwrap();
+        assert!(log.entries.is_empty());
+        renderer
+            .resolve_face("Missing", false, false, &mut log)
+            .unwrap();
+        assert_eq!(log.entries.len(), 1);
+    }
+
+    #[test]
+    fn only_a_different_drawn_family_is_reported() {
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", true, false, FONT).unwrap();
+        let mut log = SubstitutionLog::default();
+        let face = renderer
+            .resolve_face("Arial", false, false, &mut log)
+            .unwrap();
+        assert_eq!(face.family, "Arial");
+        assert!(log.entries.is_empty());
+
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Liberation Sans", false, false, FONT)
+            .unwrap();
+        renderer.register_font("Arial", true, false, FONT).unwrap();
+        renderer
+            .resolve_face("Arial", false, false, &mut log)
+            .unwrap();
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].requested_family, "Arial");
+        assert_eq!(log.entries[0].selected_family, "Liberation Sans");
+    }
+
+    #[test]
+    fn a_symbol_bullet_is_reported_unless_every_character_is_emulated() {
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let text = paragraph(&renderer, "l", "Item").runs[0].style.clone();
+        let properties = ParagraphProperties {
+            bullet_font: Some(BulletFont::Typeface("Wingdings".to_owned())),
+            ..ParagraphProperties::default()
+        };
+        let theme = Theme::default();
+        let mut log = SubstitutionLog::default();
+        resolve_bullet_style(&renderer, &theme, &properties, &text, "\u{a7}", &mut log).unwrap();
+        assert!(log.entries.is_empty());
+        resolve_bullet_style(&renderer, &theme, &properties, &text, "\u{2192}", &mut log).unwrap();
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].requested_family, "Wingdings");
     }
 
     #[test]

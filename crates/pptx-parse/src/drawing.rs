@@ -246,11 +246,7 @@ fn parse_picture(
     let blip_fill = element.child("blipFill");
     let relationship_id = blip_fill
         .and_then(|value| value.child("blip"))
-        .and_then(|value| {
-            value
-                .attribute("r:embed")
-                .or_else(|| value.attribute_local("embed"))
-        })
+        .and_then(|blip| blip_relationship_id(blip, relationships))
         .map(str::to_owned);
     let media_part_path = relationship_id
         .as_deref()
@@ -269,6 +265,43 @@ fn parse_picture(
         shape_effects: properties.and_then(parse_effects),
         style: parse_shape_style(element.child("style"), properties).map(Box::new),
     })
+}
+
+/// The `a:ext` uri Office writes a blip's SVG relationship under.
+const SVG_BLIP_EXTENSION_URI: &str = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}";
+
+/// The image one `a:blip` embeds: its own relationship, else the one its SVG
+/// extension carries.
+fn blip_relationship_id<'a>(
+    blip: &'a XmlElement,
+    relationships: &[Relationship],
+) -> Option<&'a str> {
+    let own = embed_relationship_id(blip);
+    let svg = svg_blip(blip).and_then(embed_relationship_id);
+    [own, svg]
+        .into_iter()
+        .flatten()
+        .find(|id| relationship_target(relationships, id).is_some())
+        .or(own)
+        .or(svg)
+}
+
+fn embed_relationship_id(element: &XmlElement) -> Option<&str> {
+    element
+        .attribute("r:embed")
+        .or_else(|| element.attribute_local("embed"))
+        .filter(|id| !id.is_empty())
+}
+
+fn svg_blip(blip: &XmlElement) -> Option<&XmlElement> {
+    blip.child("extLst")?
+        .children_named("ext")
+        .filter(|extension| {
+            extension
+                .attribute("uri")
+                .is_some_and(|uri| uri.eq_ignore_ascii_case(SVG_BLIP_EXTENSION_URI))
+        })
+        .find_map(|extension| extension.child("svgBlip"))
 }
 
 /// Reads supported bitmap effects in document order.
@@ -898,10 +931,7 @@ pub(crate) fn picture_fill_element(
     }
     let relationship_id = fill
         .child("blip")
-        .and_then(|blip| {
-            blip.attribute("r:embed")
-                .or_else(|| blip.attribute_local("embed"))
-        })
+        .and_then(|blip| blip_relationship_id(blip, relationships))
         .map(str::to_owned)?;
     Some(PictureFill {
         media_part_path: relationship_target(relationships, &relationship_id),
@@ -1375,6 +1405,11 @@ pub(crate) fn parse_paragraph_properties(element: Option<&XmlElement>) -> Paragr
         },
         default_tab_size: numeric_attribute(Some(element), "defTabSz").filter(|size| *size > 0),
         tab_stops: element.child("tabLst").map(parse_tab_stops),
+        rtl: match element.attribute("rtl") {
+            Some("1" | "true") => Some(true),
+            Some("0" | "false") => Some(false),
+            _ => None,
+        },
         default_run: element
             .child("defRPr")
             .map(|value| parse_run_properties(Some(value))),
@@ -1653,6 +1688,47 @@ mod tests {
             panic!("expected a shape");
         };
         assert!(solid.picture_fill.is_none());
+    }
+
+    fn image_relationship(id: &str, file: &str) -> Relationship {
+        Relationship {
+            id: id.to_owned(),
+            relationship_type:
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+                    .to_owned(),
+            target: format!("../media/{file}"),
+            target_mode: crate::TargetMode::Internal,
+            resolved_target: Some(format!("ppt/media/{file}")),
+        }
+    }
+
+    #[test]
+    fn a_blip_fill_on_a_shape_resolves_its_svg_extension_image() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Filled"/><p:nvPr/></p:nvSpPr><p:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:blipFill><a:blip><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId8"/></a:ext></a:extLst></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[image_relationship("rId8", "vector.svg")],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(filled) = &data.shapes[0] else {
+            panic!("expected a shape");
+        };
+        let picture = filled.picture_fill.as_ref().expect("blip resolves");
+        assert_eq!(picture.relationship_id.as_deref(), Some("rId8"));
+        assert_eq!(
+            picture.media_part_path.as_deref(),
+            Some("ppt/media/vector.svg")
+        );
     }
 
     #[test]
@@ -2490,6 +2566,86 @@ mod tests {
         assert_eq!(picture.crop.bottom, 16_720);
         assert_eq!(picture.crop.left, 0);
         assert_eq!(picture.geometry, "ellipse");
+    }
+
+    #[test]
+    fn a_picture_embedded_through_the_svg_extension_resolves_its_media_part() {
+        let picture = svg_extension_picture(
+            br#"<a:blip><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#,
+        );
+        assert_eq!(picture.relationship_id.as_deref(), Some("rId4"));
+        assert_eq!(
+            picture.media_part_path.as_deref(),
+            Some("ppt/media/vector.svg")
+        );
+    }
+
+    #[test]
+    fn an_unusable_blip_relationship_resolves_through_the_svg_extension() {
+        for blip in [
+            br#"<a:blip r:embed=""><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#.as_slice(),
+            br#"<a:blip r:embed="rId99"><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#,
+        ] {
+            let picture = svg_extension_picture(blip);
+            assert_eq!(picture.relationship_id.as_deref(), Some("rId4"));
+            assert_eq!(
+                picture.media_part_path.as_deref(),
+                Some("ppt/media/vector.svg")
+            );
+        }
+    }
+
+    #[test]
+    fn a_blip_with_both_relationships_keeps_the_raster_one() {
+        let picture = svg_extension_picture(
+            br#"<a:blip r:embed="rId2"><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#,
+        );
+        assert_eq!(picture.relationship_id.as_deref(), Some("rId2"));
+        assert_eq!(
+            picture.media_part_path.as_deref(),
+            Some("ppt/media/image1.png")
+        );
+    }
+
+    #[test]
+    fn a_blip_extension_this_parser_does_not_know_leaves_the_picture_unembedded() {
+        for blip in [
+            br#"<a:blip><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><a14:useLocalDpi xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" val="0"/></a:ext></a:extLst></a:blip>"#.as_slice(),
+            br#"<a:blip><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#,
+            br#"<a:blip><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main"/></a:ext></a:extLst></a:blip>"#,
+            br#"<a:blip><a:extLst><a:ext/></a:extLst></a:blip>"#,
+            br#"<a:blip><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:blip>"#,
+        ] {
+            let picture = svg_extension_picture(blip);
+            assert_eq!(picture.relationship_id, None);
+            assert_eq!(picture.media_part_path, None);
+        }
+    }
+
+    fn svg_extension_picture(blip: &[u8]) -> Picture {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let mut slide = br#"<p:sld><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Vector"/><p:nvPr/></p:nvPicPr><p:blipFill>"#.to_vec();
+        slide.extend_from_slice(blip);
+        slide.extend_from_slice(
+            br#"<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr/></p:pic></p:spTree></p:cSld></p:sld>"#,
+        );
+        let root = parse_xml(&slide, "ppt/slides/slide1.xml", &mut budget).unwrap();
+        let data = common_slide_data(
+            &root,
+            &[
+                image_relationship("rId2", "image1.png"),
+                image_relationship("rId4", "vector.svg"),
+            ],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Picture(picture) = &data.shapes[0] else {
+            panic!("expected picture");
+        };
+        picture.clone()
     }
 
     #[test]

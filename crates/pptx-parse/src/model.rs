@@ -346,6 +346,37 @@ pub struct Placeholder {
     pub size: Option<String>,
 }
 
+/// A slide holds one of each of these, so they inherit by type: PowerPoint
+/// writes a slide number as `idx="12"` over a master's `idx="4"` and still
+/// draws it where the master put it (#797).
+const SINGLETON_PLACEHOLDERS: [&str; 5] = ["title", "sldNum", "dt", "ftr", "hdr"];
+
+impl Placeholder {
+    /// Whether this placeholder and `other` fill the same slot, so one
+    /// inherits from the other.
+    pub fn matches(&self, other: &Placeholder) -> bool {
+        let left_type = normalize_placeholder_type(self.placeholder_type.as_deref());
+        let right_type = normalize_placeholder_type(other.placeholder_type.as_deref());
+        if SINGLETON_PLACEHOLDERS.contains(&left_type)
+            || SINGLETON_PLACEHOLDERS.contains(&right_type)
+        {
+            return left_type == right_type;
+        }
+        match (self.index, other.index) {
+            (Some(left), Some(right)) => left == right,
+            _ => left_type == right_type,
+        }
+    }
+}
+
+fn normalize_placeholder_type(value: Option<&str>) -> &str {
+    match value.unwrap_or("body") {
+        "ctrTitle" => "title",
+        "obj" => "body",
+        value => value,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Shape {
@@ -834,6 +865,9 @@ pub struct ParagraphProperties {
     /// stops the list style would otherwise contribute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_stops: Option<Vec<i64>>,
+    /// `a:pPr/@rtl`: the paragraph reads right to left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
     pub default_run: Option<RunProperties>,
 }
 

@@ -1,5 +1,7 @@
 //! `c:chartSpace` parsing, generic over the host's XML element type.
 
+use std::collections::HashSet;
+
 use super::model::{
     ChartAxes, ChartAxis, ChartDataLabels, ChartFill, ChartLabelRun, ChartLegend, ChartLine,
     ChartManualLayout, ChartMarker, ChartPlotGroup, ChartPoint, ChartPointLabel, ChartSeries,
@@ -89,10 +91,22 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
     }
     let plot_layout = parse_plot_layout(plot_area);
     let budget = &mut Budget::new();
-    let plot_groups = chart_elements
-        .into_iter()
-        .map(|chart| parse_plot_group(chart, budget))
+    let mut plot_groups = chart_elements
+        .iter()
+        .map(|chart| parse_plot_group(*chart, budget))
         .collect::<Vec<_>>();
+    // Colours come last, from what the data left of the budget, so varying
+    // them can never cost a later group its values.
+    for (chart, group) in chart_elements.iter().zip(&mut plot_groups) {
+        if !paints_points(*chart) {
+            continue;
+        }
+        for (element, series) in children(*chart, "ser").zip(&mut group.series) {
+            if explicit_fill(element).is_none() {
+                vary_point_colors(*chart, series, budget);
+            }
+        }
+    }
     let first_type = plot_groups[0].chart_type.as_deref();
     let chart_type = match first_type {
         Some("bar" | "column" | "line" | "pie" | "doughnut") => first_type.unwrap().to_owned(),
@@ -427,14 +441,75 @@ fn parse_series_name<E: ChartXml>(series: &E) -> Option<String> {
     text_from_rich_text(child(series, "tx"))
 }
 
-/// A series the deck gives no `c:spPr` is drawn in the theme's accents, cycled
-/// in order — the deck's own palette, not Office's current default one.
-fn parse_series_color<E: ChartXml>(series: &E, index: usize) -> String {
-    child(series, "spPr")
+fn explicit_fill<E: ChartXml>(element: &E) -> Option<String> {
+    child(element, "spPr")
         .and_then(|properties| first_deep(properties, "solidFill", 0))
         .and_then(E::solid_fill_hex)
-        .or_else(|| series.theme_color_hex(&format!("accent{}", index % 6 + 1)))
+}
+
+/// A series or point the deck gives no `c:spPr` is drawn in the theme's
+/// accents, cycled in order — the deck's own palette, not Office's current
+/// default one.
+fn accent_color<E: ChartXml>(element: &E, index: usize) -> String {
+    element
+        .theme_color_hex(&format!("accent{}", index % 6 + 1))
         .unwrap_or_else(|| DEFAULT_SERIES_COLORS[index % DEFAULT_SERIES_COLORS.len()].to_owned())
+}
+
+/// Office varies colors unless `c:varyColors` says `0`, including when the
+/// element is missing.
+fn varies_by_point<E: ChartXml>(chart: &E) -> bool {
+    !matches!(val_attr(child(chart, "varyColors")), Some("0" | "false"))
+}
+
+/// Whether each point takes its own accent: every pie, and a bar group's
+/// only series.
+fn paints_points<E: ChartXml>(chart: &E) -> bool {
+    let kind = chart.local_name().replace("3DChart", "Chart");
+    varies_by_point(chart)
+        && match kind.as_str() {
+            "pieChart" | "doughnutChart" | "ofPieChart" => true,
+            "barChart" => children(chart, "ser").take(2).count() == 1,
+            _ => false,
+        }
+}
+
+/// Adds an accent point for every plotted value a varied series' `c:dPt`s leave
+/// out, each charged to the chart's point budget.
+fn vary_point_colors<E: ChartXml>(chart: &E, series: &mut ChartSeries, budget: &mut Budget) {
+    let plotted: Vec<usize> = series
+        .values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| value.is_finite())
+        .map(|(index, _)| index)
+        .collect();
+    let points = series.points.get_or_insert_with(Vec::new);
+    if points.iter().any(|point| point.index.is_none()) {
+        return;
+    }
+    let painted: HashSet<usize> = points
+        .iter()
+        .filter_map(|point| point.index)
+        .map(|index| index as usize)
+        .collect();
+    let before = points.len();
+    let room = budget.point_cap(plotted.len());
+    points.extend(
+        plotted
+            .into_iter()
+            .filter(|index| !painted.contains(index))
+            .take(room)
+            .map(|index| ChartPoint {
+                index: Some(index as f64),
+                explosion: None,
+                color: accent_color(chart, index),
+            }),
+    );
+    budget.spend_points(points.len() - before);
+    if points.is_empty() {
+        series.points = None;
+    }
 }
 
 fn parse_series<E: ChartXml>(
@@ -444,6 +519,7 @@ fn parse_series<E: ChartXml>(
     budget: &mut Budget,
 ) -> Vec<ChartSeries> {
     let cap = budget.series_cap();
+    let varies = paints_points(chart);
     let series = children(chart, "ser")
         .enumerate()
         .take(cap)
@@ -459,6 +535,10 @@ fn parse_series<E: ChartXml>(
                 .and_then(|marker| child(marker, "spPr"))
                 .and_then(|properties| first_deep(properties, "solidFill", 0))
                 .and_then(E::solid_fill_hex);
+            // Varied colours only replace automatic ones: a series that paints
+            // itself lends that fill to every point without its own.
+            let series_fill = explicit_fill(series);
+            let varied = varies && series_fill.is_none();
             let points = take_points(children(series, "dPt"), budget, |point| {
                 let point_index = match child(point, "idx") {
                     Some(idx) => Some(parse_index(val_attr(Some(idx)))?),
@@ -467,7 +547,14 @@ fn parse_series<E: ChartXml>(
                 Some(ChartPoint {
                     index: point_index,
                     explosion: parse_number(val_attr(child(point, "explosion"))),
-                    color: parse_series_color(point, index),
+                    color: explicit_fill(point)
+                        .or_else(|| series_fill.clone())
+                        .unwrap_or_else(|| match point_index {
+                            Some(point_index) if varied => {
+                                accent_color(point, point_index as usize)
+                            }
+                            _ => accent_color(point, index),
+                        }),
                 })
             });
             let uses_x_as_category = category.is_none() && x_value.is_some();
@@ -484,7 +571,9 @@ fn parse_series<E: ChartXml>(
                 name: parse_series_name(series),
                 categories,
                 values,
-                color: parse_series_color(series, index),
+                color: series_fill
+                    .clone()
+                    .unwrap_or_else(|| accent_color(series, index)),
                 index: parse_index(val_attr(child(series, "idx"))),
                 order: parse_index(val_attr(child(series, "order"))),
                 category_formula: child_formula(category.or(x_value)),
@@ -639,6 +728,7 @@ fn parse_legend<E: ChartXml>(chart_space: &E) -> Option<ChartLegend> {
         Some("r") => Some("right"),
         Some("t") => Some("top"),
         Some("b") => Some("bottom"),
+        Some("tr") => Some("topRight"),
         _ => None,
     };
     Some(ChartLegend {
@@ -680,6 +770,9 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
             .filter(|value| matches!(*value, "min" | "max" | "autoZero"))
             .map(str::to_owned),
         crosses_at: parse_number(val_attr(child(axis, "crossesAt"))),
+        cross_between: val_attr(child(axis, "crossBetween"))
+            .filter(|value| matches!(*value, "between" | "midCat"))
+            .map(str::to_owned),
         major_unit: parse_number(val_attr(child(axis, "majorUnit"))),
         minor_unit: parse_number(val_attr(child(axis, "minorUnit"))),
         logarithmic_base: parse_number(val_attr(scaling.and_then(|value| child(value, "logBase")))),
@@ -693,6 +786,12 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
         hidden: val_attr(child(axis, "delete")) == Some("1"),
         major_gridlines: child(axis, "majorGridlines").is_some(),
         minor_gridlines: child(axis, "minorGridlines").is_some(),
+        major_gridline_line: parse_line(
+            child(axis, "majorGridlines").and_then(|gridlines| child(gridlines, "spPr")),
+        ),
+        minor_gridline_line: parse_line(
+            child(axis, "minorGridlines").and_then(|gridlines| child(gridlines, "spPr")),
+        ),
         text: parse_text_properties(child(axis, "txPr")),
         line: parse_line(child(axis, "spPr")),
     }
@@ -783,14 +882,15 @@ fn parse_plot_group<E: ChartXml>(chart: &E, budget: &mut Budget) -> ChartPlotGro
         })
         .take(MAX_AXIS_IDS)
         .collect::<Vec<_>>();
+    let series = parse_series(chart, grouping.as_deref(), &axis_ids, budget);
     ChartPlotGroup {
         chart_type: plot_type_for(chart),
         grouping: grouping.clone(),
         overlap: parse_number(val_attr(child(chart, "overlap"))),
         gap_width: parse_number(val_attr(child(chart, "gapWidth"))),
-        series: parse_series(chart, grouping.as_deref(), &axis_ids, budget),
+        series,
         axis_ids,
-        vary_colors: val_attr(child(chart, "varyColors")) == Some("1"),
+        vary_colors: varies_by_point(chart),
         first_slice_angle: parse_number(val_attr(child(chart, "firstSliceAng"))),
         hole_size: parse_number(val_attr(child(chart, "holeSize"))),
         show_data_labels: shows_data_labels(chart),
@@ -1135,7 +1235,10 @@ mod tests {
                 "c:chart",
                 vec![Node::el(
                     "c:plotArea",
-                    vec![Node::el("c:pieChart", vec![Node::el("c:ser", series)])],
+                    vec![Node::el(
+                        "c:pieChart",
+                        vec![Node::val("c:varyColors", "0"), Node::el("c:ser", series)],
+                    )],
                 )],
             )],
         )
@@ -1178,6 +1281,373 @@ mod tests {
         let points = space.plot_groups[0].series[0].points.as_ref().unwrap();
         assert_eq!(points[0].index, None);
         assert_eq!(red_wedges(&space), 2);
+    }
+
+    /// A three-category column chart of `series` series, each carrying `points`.
+    fn columns(series: usize, vary: Option<&str>, points: Vec<Node>) -> ChartSpace {
+        let cache = |values: [&str; 3]| {
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    Node::el("c:pt", vec![Node::text("c:v", value)]).attr("idx", &index.to_string())
+                })
+                .collect::<Vec<_>>()
+        };
+        let one = || {
+            let mut children = vec![
+                Node::el(
+                    "c:cat",
+                    vec![Node::el("c:strCache", cache(["North", "South", "East"]))],
+                ),
+                Node::el(
+                    "c:val",
+                    vec![Node::el("c:numCache", cache(["3", "1", "2"]))],
+                ),
+            ];
+            children.extend(points.clone());
+            Node::el("c:ser", children)
+        };
+        let mut group = vary
+            .map(|value| vec![Node::val("c:varyColors", value)])
+            .unwrap_or_default();
+        group.extend((0..series).map(|_| one()));
+        parse_chart_space(&Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![
+                    Node::el("c:plotArea", vec![Node::el("c:barChart", group)]),
+                    Node::el("c:legend", vec![Node::val("c:legendPos", "r")]),
+                ],
+            )],
+        ))
+        .expect("chart space parses")
+    }
+
+    fn point_colors(space: &ChartSpace, series: usize) -> Vec<String> {
+        space.plot_groups[0].series[series]
+            .points
+            .iter()
+            .flatten()
+            .map(|point| point.color.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_lone_column_series_varies_its_colors_unless_told_not_to() {
+        let palette: Vec<String> = DEFAULT_SERIES_COLORS[..3]
+            .iter()
+            .map(|color| color.to_string())
+            .collect();
+        assert_eq!(point_colors(&columns(1, None, Vec::new()), 0), palette);
+        assert_eq!(point_colors(&columns(1, Some("1"), Vec::new()), 0), palette);
+        assert!(point_colors(&columns(1, Some("0"), Vec::new()), 0).is_empty());
+        assert!(point_colors(&columns(2, None, Vec::new()), 0).is_empty());
+
+        let painted = columns(1, None, vec![red_point(Some("1"))]);
+        assert_eq!(
+            point_colors(&painted, 0),
+            [
+                "#FF0000",
+                DEFAULT_SERIES_COLORS[0],
+                DEFAULT_SERIES_COLORS[2]
+            ]
+        );
+        let green = || {
+            Node::el(
+                "c:spPr",
+                vec![Node::el(
+                    "c:solidFill",
+                    vec![Node::val("a:srgbClr", "00FF00")],
+                )],
+            )
+        };
+        assert!(point_colors(&columns(1, None, vec![green()]), 0).is_empty());
+        let inherited = columns(
+            1,
+            None,
+            vec![green(), Node::el("c:dPt", vec![Node::val("c:idx", "2")])],
+        );
+        assert_eq!(point_colors(&inherited, 0), ["#00FF00"]);
+        let bare = columns(
+            1,
+            None,
+            vec![Node::el("c:dPt", vec![Node::val("c:idx", "2")])],
+        );
+        assert_eq!(
+            bare.plot_groups[0].series[0].points.as_ref().unwrap()[0].color,
+            DEFAULT_SERIES_COLORS[2]
+        );
+    }
+
+    /// A pie of `series` series whose values sit at `indexes`, varied by default.
+    fn varied_pie(series: usize, indexes: &[usize], fill: Option<&str>) -> ChartSpace {
+        let one = || {
+            let points = indexes
+                .iter()
+                .map(|index| {
+                    Node::el("c:pt", vec![Node::text("c:v", "1")]).attr("idx", &index.to_string())
+                })
+                .collect();
+            let mut children = vec![Node::el("c:val", vec![Node::el("c:numCache", points)])];
+            if let Some(fill) = fill {
+                children.push(Node::el(
+                    "c:spPr",
+                    vec![Node::el("c:solidFill", vec![Node::val("a:srgbClr", fill)])],
+                ));
+            }
+            Node::el("c:ser", children)
+        };
+        parse_chart_space(&Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![Node::el("c:pieChart", (0..series).map(|_| one()).collect())],
+                )],
+            )],
+        ))
+        .expect("chart space parses")
+    }
+
+    #[test]
+    fn a_pie_series_fill_outranks_varied_colors() {
+        let space = varied_pie(1, &[0, 1, 2], Some("00FF00"));
+        let fills: Vec<String> = plot_chart(
+            &PlotChart::from(&space),
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 200.0,
+            },
+        )
+        .into_iter()
+        .filter_map(|op| match op {
+            PlotOp::Path { fill, .. } => Some(fill),
+            _ => None,
+        })
+        .collect();
+        assert_eq!(fills, ["#00FF00"; 3]);
+        let varied = varied_pie(1, &[0, 1, 2], None);
+        assert_eq!(point_colors(&varied, 0), &DEFAULT_SERIES_COLORS[..3]);
+    }
+
+    #[test]
+    fn varied_colours_never_cost_a_later_group_its_values() {
+        let cache = |count: usize| {
+            Node::el(
+                "c:val",
+                vec![Node::el(
+                    "c:numCache",
+                    (0..count)
+                        .map(|index| {
+                            Node::el("c:pt", vec![Node::text("c:v", "1")])
+                                .attr("idx", &index.to_string())
+                        })
+                        .collect(),
+                )],
+            )
+        };
+        let space = parse_chart_space(&Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![
+                        Node::el(
+                            "c:pieChart",
+                            vec![Node::el("c:ser", vec![cache(MAX_POINTS)])],
+                        ),
+                        Node::el("c:barChart", vec![Node::el("c:ser", vec![cache(60_000)])]),
+                    ],
+                )],
+            )],
+        ))
+        .expect("chart space parses");
+        let later = &space.plot_groups[1].series[0].values;
+        assert_eq!(later.len(), 60_000);
+        assert!(later.iter().all(|value| value.is_finite()));
+        let coloured = space.plot_groups[0].series[0]
+            .points
+            .as_ref()
+            .map_or(0, Vec::len);
+        assert_eq!(coloured, MAX_CHART_POINTS - MAX_POINTS - 60_000);
+    }
+
+    #[test]
+    fn varied_points_are_charged_to_the_point_budget() {
+        let space = varied_pie(4, &[MAX_POINTS - 1], None);
+        let generated: usize = space.plot_groups[0]
+            .series
+            .iter()
+            .map(|series| series.points.as_ref().map_or(0, Vec::len))
+            .sum();
+        assert!(generated <= MAX_CHART_POINTS, "{generated}");
+        assert!(generated > 0);
+    }
+
+    #[test]
+    fn a_varied_column_chart_paints_each_bar_and_lists_its_categories() {
+        let space = columns(1, None, Vec::new());
+        let ops = plot_chart(
+            &PlotChart::from(&space),
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 400.0,
+                h: 300.0,
+            },
+        );
+        let fills: HashSet<&str> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { fill, h, .. } if *h > 10.0 => Some(fill.as_str()),
+                _ => None,
+            })
+            .collect();
+        for color in &DEFAULT_SERIES_COLORS[..3] {
+            assert!(fills.contains(color), "{color} bar missing from {fills:?}");
+        }
+        let texts: Vec<&str> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.iter().filter(|text| **text == "South").count(), 2);
+        let swatches: HashSet<&str> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { fill, h, .. } if *h < 10.0 => Some(fill.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(swatches.len(), 3, "one swatch colour per category");
+    }
+
+    /// A three-point line chart whose value axis writes `crossBetween` as given.
+    fn line_chart_crossing(cross_between: Option<&str>) -> Node {
+        let points = ["1", "2", "3"]
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                Node::el("c:pt", vec![Node::text("c:v", value)]).attr("idx", &index.to_string())
+            })
+            .collect();
+        let series = Node::el(
+            "c:ser",
+            vec![
+                Node::val("c:idx", "0"),
+                Node::el("c:marker", vec![Node::val("c:symbol", "diamond")]),
+                Node::el(
+                    "c:val",
+                    vec![Node::el("c:numRef", vec![Node::el("c:numCache", points)])],
+                ),
+            ],
+        );
+        let mut value_axis = vec![Node::val("c:axId", "2"), Node::val("c:crossAx", "1")];
+        value_axis.extend(cross_between.map(|value| Node::val("c:crossBetween", value)));
+        Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![
+                        Node::el(
+                            "c:lineChart",
+                            vec![series, Node::val("c:axId", "1"), Node::val("c:axId", "2")],
+                        ),
+                        Node::el(
+                            "c:catAx",
+                            vec![Node::val("c:axId", "1"), Node::val("c:crossAx", "2")],
+                        ),
+                        Node::el("c:valAx", value_axis),
+                    ],
+                )],
+            )],
+        )
+    }
+
+    #[test]
+    fn a_line_reads_where_its_points_cross_from_the_chart_xml() {
+        let markers = |cross_between| {
+            let space = parse_chart_space(&line_chart_crossing(cross_between)).expect("chart");
+            let rect = PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 200.0,
+            };
+            plot_chart(&PlotChart::from(&space), rect)
+                .into_iter()
+                .filter_map(|op| match op {
+                    PlotOp::Path { x, w, h, .. } if (w - h).abs() < 0.01 => Some(x + w / 2.0),
+                    _ => None,
+                })
+                .collect::<Vec<f64>>()
+        };
+        let on_ticks = markers(Some("midCat"));
+        let mid_band = markers(None);
+        assert_eq!(on_ticks.len(), 3);
+        assert_eq!(mid_band, markers(Some("between")));
+        let (tick_step, band) = (on_ticks[1] - on_ticks[0], mid_band[1] - mid_band[0]);
+        assert!(
+            (band / tick_step - 2.0 / 3.0).abs() < 1e-6,
+            "{on_ticks:?} {mid_band:?}"
+        );
+        assert!((mid_band[0] - on_ticks[0] - band / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_gridline_reads_the_line_its_sp_pr_draws() {
+        let gridlines = |kind: &str, line: Node| {
+            Node::el(
+                kind,
+                vec![Node::el("c:spPr", vec![Node::el("a:ln", vec![line])])],
+            )
+        };
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![
+                        Node::el("c:barChart", vec![Node::val("c:axId", "1")]),
+                        Node::el(
+                            "c:valAx",
+                            vec![
+                                Node::val("c:axId", "1"),
+                                gridlines("c:majorGridlines", Node::el("a:noFill", Vec::new())),
+                                gridlines(
+                                    "c:minorGridlines",
+                                    Node::el("a:solidFill", vec![Node::val("a:srgbClr", "112233")]),
+                                ),
+                            ],
+                        ),
+                    ],
+                )],
+            )],
+        );
+        let space = parse_chart_space(&space).expect("chart space parses");
+        let axis = &space.axis_list.as_ref().expect("axes")[0];
+        assert!(axis.major_gridlines && axis.minor_gridlines);
+        assert!(
+            axis.major_gridline_line
+                .as_ref()
+                .is_some_and(|line| line.none)
+        );
+        assert!(
+            axis.minor_gridline_line
+                .as_ref()
+                .is_some_and(|line| !line.none)
+        );
     }
 
     #[test]

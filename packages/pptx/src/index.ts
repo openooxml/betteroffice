@@ -127,6 +127,7 @@ export type {
   ImageEffect,
   ImageCrop,
   ImagePrimitive,
+  InheritedGeometry,
   LayoutProfile,
   Paint,
   ParagraphAlignment,

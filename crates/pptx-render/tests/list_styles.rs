@@ -130,6 +130,193 @@ fn a_default_text_style_given_only_as_def_ppr_reaches_text_outside_placeholders(
     assert_eq!(lines(&list, 4)[0].runs.last().unwrap().font_size_px, 36.0);
 }
 
+#[test]
+fn a_right_to_left_paragraph_hangs_its_marker_off_the_right_edge() {
+    let session = DeckSession::open(DECK, 2945).unwrap();
+    let renderer = renderer();
+    let snapshot = session.snapshot().unwrap();
+    let ltr = renderer
+        .layout_slide(session.package(), &snapshot, 0)
+        .unwrap()
+        .display_list;
+    let mut package = session.package().clone();
+    for shape in &mut package.slides[0].shapes {
+        if let ShapeNode::Shape(shape) = shape
+            && let Some(body) = &mut shape.text
+        {
+            for paragraph in &mut body.paragraphs {
+                paragraph.properties.rtl = Some(true);
+            }
+        }
+    }
+    let rtl = renderer
+        .layout_slide(&package, &snapshot, 0)
+        .unwrap()
+        .display_list;
+    let marker = |line: &PositionedTextLine| {
+        let run = line.runs.iter().find(|run| run.text == "•").unwrap();
+        (run.x, run.x + run.width)
+    };
+    let text = |line: &PositionedTextLine| {
+        line.runs
+            .iter()
+            .filter(|run| run.text != "•")
+            .fold((f32::MAX, f32::MIN), |(left, right), run| {
+                (left.min(run.x), right.max(run.x + run.width))
+            })
+    };
+    let (ltr, rtl) = (&lines(&ltr, 3)[0], &lines(&rtl, 3)[0]);
+    assert!(
+        marker(ltr).1 <= text(ltr).0,
+        "left to right, the marker leads on the left"
+    );
+    assert!(
+        marker(rtl).0 >= text(rtl).1,
+        "right to left, it leads on the right"
+    );
+    // The body is 600 px wide with no insets, and its markers hang to the edge.
+    assert!((marker(rtl).1 - (marker(ltr).0 + 600.0)).abs() < 0.01);
+    assert!(
+        text(rtl).0 < text(ltr).0,
+        "the left margin no longer holds the text"
+    );
+}
+
+#[test]
+fn a_right_to_left_paragraph_read_from_xml_paints_and_carets_in_reading_order() {
+    let mut parts = ooxml_opc::unzip_parts(DECK).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "ppt/slides/slide1.xml" {
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            let rtl = xml.replacen(
+                r#"<a:pPr lvl="0" /><a:r><a:rPr /><a:t>First level</a:t>"#,
+                "<a:pPr lvl=\"0\" rtl=\"1\" /><a:r><a:rPr /><a:t>\u{645}\u{631}\u{62d}\u{628}\u{627} \u{628}\u{643}\u{645}</a:t>",
+                1,
+            );
+            assert_ne!(rtl, xml, "the fixture paragraph is rewritten");
+            *bytes = rtl.into_bytes();
+        }
+    }
+    let session = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 2946).unwrap();
+    let ShapeNode::Shape(body) = &session.package().slides[0].shapes[1] else {
+        panic!("the bullet body");
+    };
+    assert_eq!(
+        body.text.as_ref().unwrap().paragraphs[0].properties.rtl,
+        Some(true)
+    );
+    let list = renderer()
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list;
+    let line = &lines(&list, 3)[0];
+    let run = line
+        .runs
+        .iter()
+        .find(|run| run.text.contains('\u{645}'))
+        .expect("the Arabic run");
+    assert!(run.glyphs.len() > 2);
+    assert!(
+        run.glyphs.windows(2).all(|pair| pair[1].x < pair[0].x),
+        "each glyph paints left of the one before it"
+    );
+    for glyph in &run.glyphs {
+        let stop = line
+            .caret_stops
+            .iter()
+            .find(|stop| stop.position == glyph.cluster)
+            .expect("a caret before every cluster");
+        assert!(
+            (stop.x - (glyph.x + glyph.advance)).abs() < 0.01,
+            "the caret before a character sits at its right edge"
+        );
+    }
+}
+
+#[test]
+fn a_right_to_left_paragraph_keeps_its_latin_words_in_their_own_order() {
+    let mut parts = ooxml_opc::unzip_parts(DECK).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "ppt/slides/slide1.xml" {
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            *bytes = xml
+                .replacen(
+                    r#"<a:pPr lvl="0" /><a:r><a:rPr /><a:t>First level</a:t>"#,
+                    "<a:pPr lvl=\"0\" rtl=\"1\" /><a:r><a:rPr /><a:t>\u{645}\u{631}\u{62d}\u{628}\u{627} Hello world \u{628}\u{643}\u{645}</a:t>",
+                    1,
+                )
+                .into_bytes();
+        }
+    }
+    let session = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 2947).unwrap();
+    let list = renderer()
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list;
+    let line = &lines(&list, 3)[0];
+    let find = |needle: char| {
+        line.runs
+            .iter()
+            .find(|run| run.text.contains(needle))
+            .expect("a run")
+    };
+    let (first, latin, last) = (find('\u{645}'), find('H'), find('\u{643}'));
+    assert!(latin.text.starts_with("Hello world"), "{:?}", latin.text);
+    assert!(
+        first.x > latin.x && latin.x > last.x,
+        "the first Arabic word reads rightmost, the last leftmost"
+    );
+    assert!(
+        latin.glyphs.windows(2).all(|pair| pair[1].x > pair[0].x),
+        "Latin letters keep left-to-right order"
+    );
+    assert!(first.glyphs.windows(2).all(|pair| pair[1].x < pair[0].x));
+    let caret = |position: u32| {
+        line.caret_stops
+            .iter()
+            .find(|stop| stop.position == position)
+            .expect("a caret stop")
+            .x
+    };
+    assert!(
+        (caret(latin.start) - latin.x).abs() < 0.01,
+        "the caret before a Latin span sits at its left edge"
+    );
+    assert!((caret(latin.start + 1) - latin.glyphs[1].x).abs() < 0.01);
+}
+
+#[test]
+fn a_punctuation_run_between_latin_words_reads_left_to_right() {
+    let mut parts = ooxml_opc::unzip_parts(DECK).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "ppt/slides/slide1.xml" {
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            *bytes = xml
+                .replacen(
+                    r#"<a:pPr lvl="0" /><a:r><a:rPr /><a:t>First level</a:t>"#,
+                    "<a:pPr lvl=\"0\" rtl=\"1\" /><a:r><a:rPr /><a:t>\u{645}\u{631}\u{62d}\u{628}\u{627} Hello</a:t></a:r><a:r><a:rPr b=\"1\" /><a:t>, </a:t></a:r><a:r><a:rPr /><a:t>world \u{628}\u{643}\u{645}</a:t>",
+                    1,
+                )
+                .into_bytes();
+        }
+    }
+    let session = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 2948).unwrap();
+    let list = renderer()
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list;
+    let line = &lines(&list, 3)[0];
+    let find = |needle: &str| {
+        line.runs
+            .iter()
+            .find(|run| run.text.starts_with(needle))
+            .expect("a run")
+    };
+    let (hello, comma, world) = (find("Hello"), find(","), find("world"));
+    assert!(hello.x < comma.x && comma.x < world.x);
+    assert!((hello.x + hello.width - comma.x).abs() < 0.01);
+}
+
 fn clear_bullets(body: &mut TextBody) {
     for properties in body
         .default_list_style
