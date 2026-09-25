@@ -12,9 +12,30 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
+import {
+  cellRect,
+  initWasm,
+  isPngExportAvailable,
+  openWorkbook,
+  selectionAt,
+} from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
-import { XlsxEditor, type XlsxEditorApi } from './XlsxEditor';
+import { isMacPlatform } from './commands/descriptors';
+import { useXlsxCommands } from './commands/hooks';
+import type {
+  XlsxCommandArgs,
+  XlsxCommandId,
+  XlsxCommandResult,
+  XlsxCommandStore,
+} from './commands/types';
+import { EditorToolbar } from './components/EditorToolbar';
+import { ToolbarCommandButton } from './components/toolbar/ToolbarCommand';
+import {
+  XlsxEditor,
+  XlsxSaveRefusedError,
+  type XlsxEditorApi,
+  type XlsxEditorProps,
+} from './XlsxEditor';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
@@ -204,7 +225,10 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
     },
     type: (value: string) => fireEvent.change(editor()!, { target: { value } }),
     formula: () => (view.getByTestId('xlsx-formula-input') as HTMLInputElement).value,
-    canUndo: () => !(view.getByTestId('xlsx-undo') as HTMLButtonElement).disabled,
+    canUndo: () => {
+      const undo = view.getByTestId('xlsx-undo') as HTMLButtonElement;
+      return !undo.disabled && undo.getAttribute('aria-disabled') !== 'true';
+    },
     outline: () => view.queryByTestId('xlsx-chart-selection'),
     selectionBox: () => view.queryByTestId('xlsx-selection'),
     error: () => view.queryByTestId('xlsx-error'),
@@ -1088,5 +1112,1168 @@ describe('XlsxEditor pending host edits', () => {
     fireEvent.change(editor, { target: { value: 'Second draft' } });
     fireEvent.blur(editor);
     expect(api!.handle.cell(0, target.row, target.col).input).toBe('Second draft');
+  });
+});
+
+describe('XlsxEditor commands', () => {
+  const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
+  const target = { row: 2, col: 0 };
+
+  async function mountCommands(props: Partial<XlsxEditorProps> = {}) {
+    let api: XlsxEditorApi | undefined;
+    let changes = 0;
+    const saves: Uint8Array[] = [];
+    const onReady = (ready: XlsxEditorApi) => {
+      api = ready;
+    };
+    const element = (next: Partial<XlsxEditorProps> = {}) => (
+      <XlsxEditor
+        file={plain.bytes}
+        onChange={() => {
+          changes += 1;
+        }}
+        onSave={(bytes) => {
+          saves.push(bytes);
+        }}
+        onReady={onReady}
+        {...props}
+        {...next}
+      />
+    );
+    const view = render(element());
+    await waitFor(() => expect(api).toBeDefined());
+    await act(async () => {
+      api!.selectCells(0, selectionAt(target));
+    });
+    const execute = async <K extends XlsxCommandId>(id: K, args: XlsxCommandArgs[K]) => {
+      let result!: XlsxCommandResult;
+      await act(async () => {
+        result = await api!.commands.execute(id, args);
+      });
+      return result;
+    };
+    const typeInCell = (value: string) => {
+      fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
+      const editor = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+      fireEvent.change(editor, { target: { value } });
+      return editor;
+    };
+    return {
+      view,
+      api: () => api!,
+      changes: () => changes,
+      saves,
+      execute,
+      typeInCell,
+      rerender: (next: Partial<XlsxEditorProps>) => view.rerender(element(next)),
+      input: () => api!.handle.cell(0, target.row, target.col).input,
+    };
+  }
+
+  const failure = (result: XlsxCommandResult) => (result.ok ? null : result.failure.code);
+
+  it('exposes one store for the default toolbar and host calls', async () => {
+    const editor = await mountCommands();
+    const commands = editor.api().commands;
+    expect(commands.getState('bold')).toEqual({ enabled: true, active: false });
+    expect(await editor.execute('bold', null)).toEqual({ ok: true, status: 'executed' });
+    await waitFor(() => expect(commands.getState('bold').active).toBe(true));
+    expect(editor.api().handle.selectionFormatting(0, 'A3:A3').bold).toBe(true);
+    expect(failure(await editor.execute('searchMenus', null))).toBe('unsupported-command');
+    expect(commands.getState('exportPng').enabled).toBe(isPngExportAvailable());
+  });
+
+  it('writes a cell draft once before a command, without a second commit on blur', async () => {
+    const editor = await mountCommands();
+    const input = editor.typeInCell('Bold draft');
+    expect(await editor.execute('bold', null)).toEqual({ ok: true, status: 'executed' });
+    expect(editor.input()).toBe('Bold draft');
+    expect(editor.view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    expect(editor.api().handle.selectionFormatting(0, 'A3:A3').bold).toBe(true);
+    fireEvent.blur(input);
+    expect(editor.changes()).toBe(2);
+    expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A3');
+  });
+
+  it('undoes a formula draft it committed, then refuses a second undo and redoes it', async () => {
+    const editor = await mountCommands();
+    const before = editor.input();
+    fireEvent.change(editor.view.getByTestId('xlsx-formula-input'), {
+      target: { value: 'Typed' },
+    });
+    expect(editor.api().commands.getState('undo').enabled).toBe(true);
+    expect(await editor.execute('undo', null)).toEqual({ ok: true, status: 'executed' });
+    expect(editor.input()).toBe(before);
+    expect(failure(await editor.execute('undo', null))).toBe('nothing-to-undo');
+    expect(await editor.execute('redo', null)).toEqual({ ok: true, status: 'executed' });
+    expect(editor.input()).toBe('Typed');
+    fireEvent.change(editor.view.getByTestId('xlsx-formula-input'), {
+      target: { value: 'Later' },
+    });
+    expect(editor.input()).toBe('Typed');
+  });
+
+  it('merges, saves and exports after a pending draft', async () => {
+    const editor = await mountCommands();
+    await act(async () => {
+      editor.api().selectCells(0, { anchor: { row: 2, col: 0 }, focus: { row: 2, col: 1 } });
+    });
+    fireEvent.change(editor.view.getByTestId('xlsx-formula-input'), {
+      target: { value: 'Merged draft' },
+    });
+    expect(await editor.execute('merge', { value: 'all' })).toEqual({ ok: true, status: 'executed' });
+    expect(editor.api().handle.cell(0, 2, 1).input).toBe('Merged draft');
+    expect(editor.api().handle.mergedRanges(0, 'A3:B3')).toHaveLength(1);
+    await waitFor(() =>
+      expect(editor.api().commands.getState('merge', { value: 'unmerge' }).enabled).toBe(true)
+    );
+    fireEvent.change(editor.view.getByTestId('xlsx-formula-input'), {
+      target: { value: 'Saved draft' },
+    });
+    expect(await editor.execute('save', null)).toEqual({ ok: true, status: 'executed' });
+    const reopened = openWorkbook(editor.saves[0]);
+    try {
+      expect(reopened.cell(0, 2, 1).input).toBe('Saved draft');
+      expect(reopened.mergedRanges(0, 'A3:B3')).toHaveLength(1);
+    } finally {
+      reopened.dispose();
+    }
+  });
+
+  it('keeps a draft that could not be written and does not run the command', async () => {
+    const editor = await mountCommands();
+    editor.typeInCell('Refused');
+    const handle = editor.api().handle;
+    const editCell = handle.editCell;
+    handle.editCell = () => {
+      throw new Error('cell is locked');
+    };
+    try {
+      expect(failure(await editor.execute('bold', null))).toBe('input-failed');
+    } finally {
+      handle.editCell = editCell;
+    }
+    const input = editor.view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+    expect(input.value).toBe('Refused');
+    expect(handle.selectionFormatting(0, 'A3:A3').bold).toBe(false);
+    expect(failure(await editor.execute('bold', null))).toBe('input-failed');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(editor.input()).toBe('Refused');
+    await act(async () => {
+      editor.api().selectCells(0, selectionAt(target));
+    });
+    expect(await editor.execute('bold', null)).toEqual({ ok: true, status: 'executed' });
+  });
+
+  it('ends a composition before the command and writes its final text', async () => {
+    const editor = await mountCommands();
+    const input = editor.typeInCell('日本');
+    act(() => input.focus());
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 });
+    expect(editor.view.getByTestId('xlsx-cell-editor')).toBe(input);
+    let result: Promise<XlsxCommandResult> | undefined;
+    let settled = false;
+    await act(async () => {
+      result = editor.api().commands.execute('italic', null);
+      void result.then(() => (settled = true));
+    });
+    expect(document.activeElement).not.toBe(input);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+    expect(settled).toBe(false);
+    expect(editor.input()).not.toBe('日本語');
+    fireEvent.change(input, { target: { value: '日本語' } });
+    await act(async () => {
+      fireEvent.compositionEnd(input);
+      expect(await result!).toEqual({ ok: true, status: 'executed' });
+    });
+    expect(editor.input()).toBe('日本語');
+    expect(editor.api().handle.selectionFormatting(0, 'A3:A3').italic).toBe(true);
+    expect(editor.view.queryByTestId('xlsx-cell-editor')).toBeNull();
+  });
+
+  it('saves a composed formula draft even when Enter commits it while Save waits', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    let resolveClipboard!: (text: string) => void;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: () => new Promise<string>((resolve) => (resolveClipboard = resolve)) },
+    });
+    try {
+      const editor = await mountCommands();
+      await act(async () => {
+        editor.api().selectCells(0, selectionAt({ row: 6, col: 4 }));
+      });
+      fireEvent.keyDown(editor.view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      await act(async () => {
+        editor.api().selectCells(0, selectionAt(target));
+      });
+      const formula = editor.view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+      act(() => formula.focus());
+      fireEvent.compositionStart(formula);
+      fireEvent.change(formula, { target: { value: '日本' } });
+      const save = editor.api().commands.execute('save', null);
+      fireEvent.change(formula, { target: { value: '日本語' } });
+      await act(async () => {
+        fireEvent.compositionEnd(formula);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      act(() => formula.focus());
+      fireEvent.keyDown(formula, { key: 'Enter' });
+      await act(async () => resolveClipboard('Pasted'));
+      expect(await save).toEqual({ ok: true, status: 'executed' });
+      const saved = openWorkbook(editor.saves[0]);
+      try {
+        expect(saved.cell(0, target.row, target.col).input).toBe('日本語');
+        expect(saved.cell(0, 6, 4).input).toBe('Pasted');
+      } finally {
+        saved.dispose();
+      }
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  function holdClipboard() {
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const reads: ((text: string) => void)[] = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: () => new Promise<string>((resolve) => reads.push(resolve)) },
+    });
+    return {
+      resolve: (text: string) => reads.shift()!(text),
+      restore: () => {
+        if (original) Object.defineProperty(navigator, 'clipboard', original);
+        else Reflect.deleteProperty(navigator, 'clipboard');
+      },
+    };
+  }
+
+  const oversized = 'x'.repeat(32_768);
+
+  it('blocks every command while a rejected entry waits for correction on its own cell', async () => {
+    const clipboard = holdClipboard();
+    try {
+      const editor = await mountCommands();
+      fireEvent.keyDown(editor.view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      const formula = editor.view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+      const typeAt = async (row: number, col: number, value: string) => {
+        await act(async () => {
+          editor.api().selectCells(0, selectionAt({ row, col }));
+        });
+        fireEvent.change(formula, { target: { value } });
+      };
+      await typeAt(3, 1, oversized);
+      fireEvent.keyDown(formula, { key: 'Enter' });
+      await typeAt(5, 2, 'Newer');
+      await act(async () => clipboard.resolve('Pasted'));
+      expect(editor.input()).toBe('Pasted');
+      expect(formula.value).toBe('Newer');
+
+      const blocked = await editor.execute('save', null);
+      expect(blocked.ok ? null : blocked.failure.code).toBe('input-failed');
+      const zoom = await editor.execute('zoom', { scale: 2 });
+      expect(zoom.ok ? null : zoom.failure.code).toBe('input-failed');
+      expect(editor.saves).toHaveLength(0);
+      expect(() => editor.api().save()).toThrow(XlsxSaveRefusedError);
+
+      fireEvent.keyDown(formula, { key: 'Enter' });
+      expect(editor.api().handle.cell(0, 5, 2).input).toBe('Newer');
+      await waitFor(() => expect(formula.value).toBe(oversized));
+      expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
+      const stillBlocked = await editor.execute('save', null);
+      expect(stillBlocked.ok ? null : stillBlocked.failure.code).toBe('input-failed');
+
+      fireEvent.change(formula, { target: { value: 'Corrected' } });
+      fireEvent.keyDown(formula, { key: 'Enter' });
+      expect(editor.api().handle.cell(0, 3, 1).input).toBe('Corrected');
+      expect(await editor.execute('save', null)).toEqual({ ok: true, status: 'executed' });
+      const saved = openWorkbook(editor.saves[0]);
+      try {
+        expect(saved.cell(0, 3, 1).input).toBe('Corrected');
+        expect(saved.cell(0, 5, 2).input).toBe('Newer');
+      } finally {
+        saved.dispose();
+      }
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('refuses a synchronous save while accepted input waits, and saves it through the command', async () => {
+    const clipboard = holdClipboard();
+    try {
+      const editor = await mountCommands();
+      await act(async () => {
+        editor.api().selectCells(0, selectionAt({ row: 0, col: 0 }));
+      });
+      const surface = editor.view.getByTestId('xlsx-scroll');
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await act(async () => {
+        editor.api().selectCells(0, selectionAt({ row: 3, col: 1 }));
+      });
+      fireEvent.keyDown(surface, { key: 'F2' });
+      const cell = editor.view.getByTestId('xlsx-cell-editor');
+      fireEvent.change(cell, { target: { value: 'Entered' } });
+      fireEvent.keyDown(cell, { key: 'Enter' });
+      expect(editor.view.queryByTestId('xlsx-cell-editor')).toBeNull();
+
+      let refusal: unknown;
+      try {
+        editor.api().save();
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal).toBeInstanceOf(XlsxSaveRefusedError);
+      expect((refusal as XlsxSaveRefusedError).code).toBe('input-pending');
+
+      const saving = editor.api().commands.execute('save', null);
+      await act(async () => clipboard.resolve('Pasted'));
+      expect(await saving).toEqual({ ok: true, status: 'executed' });
+      const saved = openWorkbook(editor.saves[0]);
+      try {
+        expect(saved.cell(0, 0, 0).input).toBe('Pasted');
+        expect(saved.cell(0, 3, 1).input).toBe('Entered');
+      } finally {
+        saved.dispose();
+      }
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      const bytes = editor.api().save();
+      const reopened = openWorkbook(bytes);
+      try {
+        expect(reopened.cell(0, 3, 1).input).toBe('Entered');
+      } finally {
+        reopened.dispose();
+      }
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  for (const caller of ['selectCells', 'clearSelection', 'sheet switch'] as const) {
+    it(`queues a correction closed by ${caller} behind the entry it corrects`, async () => {
+      const clipboard = holdClipboard();
+      try {
+        const editor = await mountCommands();
+        const surface = editor.view.getByTestId('xlsx-scroll');
+        await act(async () => {
+          editor.api().selectCells(0, selectionAt({ row: 0, col: 0 }));
+        });
+        fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+        const typeAt = async (value: string, commit: boolean) => {
+          await act(async () => {
+            editor.api().selectCells(0, selectionAt({ row: 3, col: 1 }));
+          });
+          fireEvent.keyDown(surface, { key: 'F2' });
+          const cell = editor.view.getByTestId('xlsx-cell-editor');
+          act(() => cell.focus());
+          fireEvent.change(cell, { target: { value } });
+          if (commit) fireEvent.keyDown(cell, { key: 'Enter' });
+        };
+        await typeAt('first', true);
+        await typeAt('corrected', false);
+        await act(async () => {
+          if (caller === 'selectCells') {
+            expect(editor.api().selectCells(0, selectionAt({ row: 5, col: 2 }))).toBe(true);
+          } else if (caller === 'clearSelection') {
+            editor.api().clearSelection();
+          } else {
+            fireEvent.click(editor.view.getAllByRole('tab')[1]);
+          }
+        });
+        expect(editor.view.queryByTestId('xlsx-cell-editor')).toBeNull();
+        expect(() => editor.api().save()).toThrow(XlsxSaveRefusedError);
+        await act(async () => clipboard.resolve('Pasted'));
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(editor.api().handle.cell(0, 0, 0).input).toBe('Pasted');
+        expect(editor.api().handle.cell(0, 3, 1).input).toBe('corrected');
+      } finally {
+        clipboard.restore();
+      }
+    });
+  }
+
+  it('runs a command on the selection a host set in the same handler', async () => {
+    const editor = await mountCommands();
+    const api = editor.api();
+    let result!: XlsxCommandResult;
+    await act(async () => {
+      expect(api.selectCells(0, selectionAt({ row: 3, col: 1 }))).toBe(true);
+      expect(api.commands.getState('merge')).toMatchObject({ value: { rows: 1, columns: 1 } });
+      result = await api.commands.execute('bold', null);
+    });
+    expect(result).toEqual({ ok: true, status: 'executed' });
+    expect(api.handle.selectionFormatting(0, 'B4:B4').bold).toBe(true);
+    expect(api.handle.selectionFormatting(0, 'A3:A3').bold).toBe(false);
+  });
+
+  it('runs a command on the sheet a host switched to in the same handler', async () => {
+    const editor = await mountCommands();
+    const api = editor.api();
+    let result!: XlsxCommandResult;
+    await act(async () => {
+      expect(api.selectCells(1, selectionAt({ row: 0, col: 0 }))).toBe(true);
+      result = await api.commands.execute('italic', null);
+    });
+    expect(result).toEqual({ ok: true, status: 'executed' });
+    expect(api.handle.selectionFormatting(1, 'A1:A1').italic).toBe(true);
+    expect(api.handle.selectionFormatting(0, 'A3:A3').italic).toBe(false);
+    expect(api.handle.selectionFormatting(0, 'A1:A1').italic).toBe(false);
+  });
+
+  it('keeps a queued entry on its cell and runs a command on the newly set selection', async () => {
+    const clipboard = holdClipboard();
+    try {
+      const editor = await mountCommands();
+      const api = editor.api();
+      const surface = editor.view.getByTestId('xlsx-scroll');
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 0, col: 0 }));
+      });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 3, col: 1 }));
+      });
+      fireEvent.keyDown(surface, { key: 'F2' });
+      const cell = editor.view.getByTestId('xlsx-cell-editor');
+      fireEvent.change(cell, { target: { value: 'Queued entry' } });
+      fireEvent.keyDown(cell, { key: 'Enter' });
+      let bold!: Promise<XlsxCommandResult>;
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 5, col: 2 }));
+        bold = api.commands.execute('bold', null);
+      });
+      await act(async () => clipboard.resolve('Pasted'));
+      expect(await bold).toEqual({ ok: true, status: 'executed' });
+      expect(api.handle.cell(0, 3, 1).input).toBe('Queued entry');
+      expect(api.handle.selectionFormatting(0, 'C6:C6').bold).toBe(true);
+      expect(api.handle.selectionFormatting(0, 'B4:B4').bold).toBe(false);
+      expect(api.handle.selectionFormatting(0, 'B5:B5').bold).toBe(false);
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  function holdClipboardWrite() {
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writes: { text: string; resolve: () => void }[] = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: (text: string) =>
+          new Promise<void>((resolve) => writes.push({ text, resolve })),
+      },
+    });
+    return {
+      writes,
+      restore: () => {
+        if (original) Object.defineProperty(navigator, 'clipboard', original);
+        else Reflect.deleteProperty(navigator, 'clipboard');
+      },
+    };
+  }
+
+  it('clears only the range and sheet a cut started on', async () => {
+    const clipboard = holdClipboardWrite();
+    try {
+      const editor = await mountCommands();
+      const api = editor.api();
+      const surface = editor.view.getByTestId('xlsx-scroll');
+      api.handle.editCells(0, [
+        { row: 0, col: 0, input: 'Cut me' },
+        { row: 3, col: 1, input: 'Keep me' },
+      ]);
+      api.handle.editCells(1, [{ row: 0, col: 0, input: 'Other sheet' }]);
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 0, col: 0 }));
+      });
+      fireEvent.keyDown(surface, { key: 'x', ctrlKey: true });
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 3, col: 1 }));
+      });
+      await act(async () => clipboard.writes[0].resolve());
+      expect(clipboard.writes[0].text).toBe('Cut me');
+      expect(api.handle.cell(0, 0, 0).input).toBe('');
+      expect(api.handle.cell(0, 3, 1).input).toBe('Keep me');
+
+      fireEvent.keyDown(surface, { key: 'x', ctrlKey: true });
+      await act(async () => {
+        api.selectCells(1, selectionAt({ row: 0, col: 0 }));
+      });
+      await act(async () => clipboard.writes[1].resolve());
+      expect(clipboard.writes[1].text).toBe('Keep me');
+      expect(api.handle.cell(0, 3, 1).input).toBe('');
+      expect(api.handle.cell(1, 0, 0).input).toBe('Other sheet');
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('copies the range a host selected in the same handler', async () => {
+    const clipboard = holdClipboardWrite();
+    try {
+      const editor = await mountCommands();
+      const api = editor.api();
+      const surface = editor.view.getByTestId('xlsx-scroll');
+      api.handle.editCells(0, [
+        { row: 0, col: 0, input: 'First' },
+        { row: 3, col: 1, input: 'Second' },
+      ]);
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 0, col: 0 }));
+      });
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 3, col: 1 }));
+        fireEvent.keyDown(surface, { key: 'c', ctrlKey: true });
+      });
+      expect(clipboard.writes.map((write) => write.text)).toEqual(['Second']);
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('keeps a rejected entry on its own sheet and lets Escape discard it', async () => {
+    const source = openWorkbook(plain.bytes.slice());
+    source.applyOps([{ type: 'addSheet', index: 1, name: 'Second' }]);
+    const file = source.save();
+    source.dispose();
+    const clipboard = holdClipboard();
+    try {
+      const editor = await mountCommands({ file });
+      fireEvent.keyDown(editor.view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      const formula = editor.view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+      await act(async () => {
+        editor.api().selectCells(0, selectionAt({ row: 3, col: 1 }));
+      });
+      fireEvent.change(formula, { target: { value: oversized } });
+      fireEvent.keyDown(formula, { key: 'Enter' });
+      const tabs = editor.view.getAllByRole('tab');
+      await act(async () => {
+        fireEvent.click(tabs[1]);
+      });
+      fireEvent.change(formula, { target: { value: 'On the second sheet' } });
+      await act(async () => clipboard.resolve('Pasted'));
+      expect(formula.value).toBe('On the second sheet');
+
+      fireEvent.keyDown(formula, { key: 'Enter' });
+      expect(editor.api().handle.cell(1, 0, 0).input).toBe('On the second sheet');
+      expect(formula.value).not.toBe(oversized);
+      expect(editor.view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      const blocked = await editor.execute('save', null);
+      expect(blocked.ok ? null : blocked.failure.code).toBe('input-failed');
+      expect(editor.api().handle.cell(0, 3, 1).input).not.toBe('On the second sheet');
+      expect(editor.api().handle.cell(0, 3, 1).input).not.toBe(oversized);
+
+      await act(async () => {
+        fireEvent.click(editor.view.getAllByRole('tab')[0]);
+      });
+      await waitFor(() => expect(formula.value).toBe(oversized));
+      expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
+      fireEvent.keyDown(formula, { key: 'Escape' });
+      expect(await editor.execute('save', null)).toEqual({ ok: true, status: 'executed' });
+      const saved = openWorkbook(editor.saves[0]);
+      try {
+        expect(saved.cell(0, 3, 1).input).not.toBe(oversized);
+        expect(saved.cell(1, 0, 0).input).toBe('On the second sheet');
+      } finally {
+        saved.dispose();
+      }
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('prints a replacement workbook only after it painted', async () => {
+    let paints = 0;
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = (() => {
+      paints += 1;
+      return stubContext();
+    }) as unknown as HTMLCanvasElement['getContext'];
+    const print = window.print;
+    let paintsAtPrint: number | null = null;
+    window.print = () => {
+      paintsAtPrint = paints;
+    };
+    try {
+      let api: XlsxEditorApi | undefined;
+      const view = render(
+        <XlsxEditor
+          file={plain.bytes.slice()}
+          onReady={(ready) => {
+            api = ready;
+          }}
+        />
+      );
+      await waitFor(() => expect(api).toBeDefined());
+      let printing: Promise<XlsxCommandResult> | undefined;
+      view.rerender(
+        <XlsxEditor
+          file={charted.bytes.slice()}
+          onReady={(ready) => {
+            paints = 0;
+            printing = ready.commands.execute('print', null);
+          }}
+        />
+      );
+      await waitFor(() => expect(printing).toBeDefined());
+      expect(await printing!).toEqual({ ok: true, status: 'executed' });
+      expect(paintsAtPrint ?? 0).toBeGreaterThan(0);
+    } finally {
+      HTMLCanvasElement.prototype.getContext = getContext;
+      window.print = print;
+    }
+  });
+
+  it('fails a command waiting on a composition whose input went away', async () => {
+    const editor = await mountCommands();
+    const input = editor.typeInCell('日本');
+    fireEvent.compositionStart(input);
+    let result: Promise<XlsxCommandResult> | undefined;
+    await act(async () => {
+      result = editor.api().commands.execute('italic', null);
+    });
+    await act(async () => editor.rerender({ readOnly: true }));
+    await act(async () => {
+      const outcome = await result!;
+      expect(outcome.ok ? null : outcome.failure.code).toBe('input-failed');
+    });
+    expect(editor.api().handle.selectionFormatting(0, 'A3:A3').italic).toBe(false);
+  });
+
+  it('fails a command whose preceding chart move could not land', async () => {
+    let api: XlsxEditorApi | undefined;
+    const saves: Uint8Array[] = [];
+    const view = render(
+      <XlsxEditor
+        file={charted.bytes.slice()}
+        onSave={(bytes) => {
+          saves.push(bytes);
+        }}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const surface = view.getByTestId('xlsx-scroll');
+    const [chart] = charted.charts;
+    fireEvent.mouseDown(surface, chartCenter(chart));
+    fireEvent.mouseUp(window, chartCenter(chart));
+    await act(async () => {
+      fireEvent.keyDown(surface, { key: 'ArrowRight' });
+    });
+    const moveChart = api!.handle.moveChart;
+    api!.handle.moveChart = () => {
+      throw new Error('anchor refused');
+    };
+    let result!: XlsxCommandResult;
+    try {
+      await act(async () => {
+        result = await api!.commands.execute('save', null);
+      });
+    } finally {
+      api!.handle.moveChart = moveChart;
+    }
+    expect(result.ok ? null : result.failure.code).toBe('input-failed');
+    expect(saves).toHaveLength(0);
+  });
+
+  for (const source of ['cell', 'formula'] as const) {
+    it(`writes a ${source} draft before formatting, borders and export`, async () => {
+      const clicks: string[] = [];
+      const click = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+        clicks.push(this.download);
+      };
+      try {
+        const editor = await mountCommands({ fileName: 'report.xlsx' });
+        const type = (value: string) =>
+          source === 'cell'
+            ? editor.typeInCell(value)
+            : fireEvent.change(editor.view.getByTestId('xlsx-formula-input'), {
+                target: { value },
+              });
+        type('Styled');
+        expect(await editor.execute('borderStyle', { value: 'dashed' })).toEqual({
+          ok: true,
+          status: 'noop',
+        });
+        expect(editor.input()).toBe('Styled');
+        type('Framed');
+        expect(await editor.execute('borderColor', { color: '#ff0000' })).toEqual({
+          ok: true,
+          status: 'noop',
+        });
+        expect(editor.input()).toBe('Framed');
+        expect(await editor.execute('borderPreset', { value: 'outer' })).toEqual({
+          ok: true,
+          status: 'executed',
+        });
+        const formatting = editor.api().handle.selectionFormatting(0, 'A3:A3');
+        expect([editor.input(), formatting.borderStyle, formatting.borderColor]).toEqual([
+          'Framed',
+          'dashed',
+          '#ff0000',
+        ]);
+        expect(editor.api().commands.getState('borderStyle').value).toBe('dashed');
+        type('Exported');
+        expect(await editor.execute('exportPng', null)).toEqual({ ok: true, status: 'executed' });
+        expect(editor.input()).toBe('Exported');
+        expect(clicks).toEqual(['report.png']);
+      } finally {
+        HTMLAnchorElement.prototype.click = click;
+      }
+    });
+  }
+
+  it('captures a paint format, applies it to the next selection and resets on read-only or reopen', async () => {
+    const editor = await mountCommands();
+    await editor.execute('bold', null);
+    expect(await editor.execute('paintFormat', null)).toEqual({ ok: true, status: 'executed' });
+    await waitFor(() => expect(editor.api().commands.getState('paintFormat').active).toBe(true));
+    const surface = editor.view.getByTestId('xlsx-scroll');
+    const next = pointAt(plain, { row: 3, col: 1 });
+    await act(async () => {
+      fireEvent.mouseDown(surface, next);
+      fireEvent.mouseUp(window, next);
+    });
+    const painted = (editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value;
+    expect(painted).not.toBe('A3');
+    await waitFor(() =>
+      expect(editor.api().handle.selectionFormatting(0, `${painted}:${painted}`).bold).toBe(true)
+    );
+    expect(editor.api().commands.getState('paintFormat').active).toBe(false);
+
+    await editor.execute('paintFormat', null);
+    await act(async () => editor.rerender({ readOnly: true }));
+    await act(async () => editor.rerender({ readOnly: false }));
+    expect(editor.api().commands.getState('paintFormat').active).toBe(false);
+
+    await editor.execute('paintFormat', null);
+    await act(async () => editor.rerender({ file: plain.bytes.slice() }));
+    await waitFor(() => expect(editor.api().commands.getState('bold').enabled).toBe(true));
+    expect(editor.api().commands.getState('paintFormat').active).toBe(false);
+  });
+
+  it('reports the workbook lifecycle and fails commands of a replaced workbook', async () => {
+    let api: XlsxEditorApi | undefined;
+    const view = render(<XlsxEditor onReady={(ready) => void (api = ready)} />);
+    const store = await new Promise<XlsxCommandStore>((resolve) => {
+      function Probe() {
+        resolve(useXlsxCommands());
+        return null;
+      }
+      view.rerender(<XlsxEditor toolbar={<Probe />} />);
+    });
+    const code = (state: { enabled: boolean; disabledReason?: { code: string } }) =>
+      state.enabled ? null : state.disabledReason!.code;
+    expect(code(store.getState('save'))).toBe('no-document');
+    view.rerender(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => void (api = ready)} />);
+    expect(code(store.getState('save'))).toBe('document-loading');
+    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(store.getState('save').enabled).toBe(true));
+    expect(api!.commands).toBe(store);
+  });
+
+  it('keeps a failed Enter commit open in the editor', async () => {
+    const editor = await mountCommands();
+    const input = editor.typeInCell('Locked');
+    const handle = editor.api().handle;
+    const editCell = handle.editCell;
+    handle.editCell = () => {
+      throw new Error('cell is locked');
+    };
+    try {
+      fireEvent.keyDown(input, { key: 'Enter' });
+    } finally {
+      handle.editCell = editCell;
+    }
+    expect((editor.view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('Locked');
+    expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A3');
+    fireEvent.keyDown(editor.view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    expect(editor.input()).toBe('Locked');
+  });
+
+  it('writes pastes, Enter commits and commands in the order they were accepted', async () => {
+    const reads: ((text: string) => void)[] = [];
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        readText: () => new Promise<string>((resolve) => reads.push(resolve)),
+      },
+    });
+    try {
+      const editor = await mountCommands();
+      const surface = editor.view.getByTestId('xlsx-scroll');
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      const save = editor.api().commands.execute('save', null);
+      await act(async () => {
+        editor.api().selectCells(0, selectionAt({ row: 3, col: 1 }));
+      });
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      await act(async () => reads[1]('Second'));
+      expect(editor.api().handle.cell(0, 3, 1).input).not.toBe('Second');
+      await act(async () => reads[0]('First'));
+      expect(await save).toEqual({ ok: true, status: 'executed' });
+      const saved = openWorkbook(editor.saves[0]);
+      try {
+        expect(saved.cell(0, 2, 0).input).toBe('First');
+        expect(saved.cell(0, 3, 1).input).not.toBe('Second');
+      } finally {
+        saved.dispose();
+      }
+      await waitFor(() => expect(editor.api().handle.cell(0, 3, 1).input).toBe('Second'));
+
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      const input = editor.typeInCell('Queued');
+      fireEvent.keyDown(input, { key: 'Enter' });
+      expect(editor.view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      const handle = editor.api().handle;
+      const editCell = handle.editCell;
+      handle.editCell = () => {
+        throw new Error('cell is locked');
+      };
+      const bold = editor.api().commands.execute('bold', null);
+      try {
+        await act(async () => reads[2]('Third'));
+        const result = await bold;
+        expect(result.ok ? null : result.failure.code).toBe('input-failed');
+      } finally {
+        handle.editCell = editCell;
+      }
+      await waitFor(() =>
+        expect((editor.view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('Queued')
+      );
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it('refuses a queued cell command whose selection moved, and a color picked for another selection', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    let resolveClipboard!: (text: string) => void;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: () => new Promise<string>((resolve) => (resolveClipboard = resolve)) },
+    });
+    try {
+      const editor = await mountCommands();
+      fireEvent.keyDown(editor.view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      const bold = editor.api().commands.execute('bold', null);
+      await act(async () => resolveClipboard('A\tB'));
+      const result = await bold;
+      expect(result.ok ? null : result.failure.code).toBe('target-changed');
+      expect(editor.api().handle.selectionFormatting(0, 'A3:B3').bold).toBe(false);
+
+      const picker = editor.view.getByLabelText('Text color', { selector: 'input' });
+      fireEvent.click(picker);
+      await act(async () => {
+        editor.api().selectCells(0, selectionAt({ row: 5, col: 2 }));
+      });
+      await act(async () => {
+        fireEvent.change(picker, { target: { value: '#ff0000' } });
+      });
+      expect(editor.api().handle.selectionFormatting(0, 'C6:C6').textColor).toBe('#000000');
+      fireEvent.click(picker);
+      await act(async () => {
+        fireEvent.change(picker, { target: { value: '#00ff00' } });
+      });
+      await waitFor(() =>
+        expect(editor.api().handle.selectionFormatting(0, 'C6:C6').textColor).toBe('#00ff00')
+      );
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it('prints only once the canvas shows the text written before it', async () => {
+    const painted: string[] = [];
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = (() => ({
+      ...stubContext(),
+      fillText: (text: string) => painted.push(text),
+    })) as unknown as HTMLCanvasElement['getContext'];
+    const print = window.print;
+    let printedWith: boolean | null = null;
+    window.print = () => {
+      printedWith = painted.includes('Printed draft');
+    };
+    try {
+      const editor = await mountCommands();
+      fireEvent.change(editor.view.getByTestId('xlsx-formula-input'), {
+        target: { value: 'Printed draft' },
+      });
+      painted.length = 0;
+      const printing = editor.api().commands.execute('print', null);
+      expect(printedWith).toBeNull();
+      await waitFor(() => expect(printedWith).not.toBeNull());
+      expect(printedWith === true).toBe(true);
+      expect(await printing).toEqual({ ok: true, status: 'executed' });
+
+      printedWith = null;
+      const handle = editor.api().handle;
+      const displayList = handle.displayList;
+      handle.displayList = () => {
+        throw new Error('render failed');
+      };
+      try {
+        fireEvent.change(editor.view.getByTestId('xlsx-formula-input'), {
+          target: { value: 'Unpainted' },
+        });
+        const failed = await editor.api().commands.execute('print', null);
+        expect(failed.ok ? null : failed.failure.code).toBe('render-failed');
+        expect(printedWith).toBeNull();
+      } finally {
+        handle.displayList = displayList;
+      }
+    } finally {
+      HTMLCanvasElement.prototype.getContext = getContext;
+      window.print = print;
+    }
+  });
+
+  it('keeps replacement formula bars read-only without a writable cell', async () => {
+    const host = (
+      <EditorToolbar mode="commands">
+        <EditorToolbar.FormulaBar />
+      </EditorToolbar>
+    );
+    const editor = await mountCommands({ toolbar: host, readOnly: true });
+    const formula = editor.view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+    expect(formula.readOnly).toBe(true);
+    const before = editor.input();
+    fireEvent.change(formula, { target: { value: 'Blocked' } });
+    await act(async () => editor.rerender({ toolbar: host, readOnly: false }));
+    expect(formula.readOnly).toBe(false);
+    expect(formula.value).toBe(before);
+    expect(await editor.execute('save', null)).toEqual({ ok: true, status: 'executed' });
+    expect(editor.input()).toBe(before);
+  });
+
+  it('dispatches shortcuts from the grid and keeps text undo in the cell editor', async () => {
+    const editor = await mountCommands();
+    const surface = editor.view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.keyDown(surface, { key: 'b', ...MOD });
+    });
+    await waitFor(() =>
+      expect(editor.api().handle.selectionFormatting(0, 'A3:A3').bold).toBe(true)
+    );
+    const input = editor.typeInCell('Shortcut draft');
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'z', ...MOD });
+    });
+    expect(editor.view.getByTestId('xlsx-cell-editor')).toBe(input);
+    expect(editor.input()).not.toBe('Shortcut draft');
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 's', ...MOD });
+    });
+    await waitFor(() => expect(editor.saves).toHaveLength(1));
+    expect(editor.input()).toBe('Shortcut draft');
+    const reopened = openWorkbook(editor.saves[0]);
+    try {
+      expect(reopened.cell(0, target.row, target.col).input).toBe('Shortcut draft');
+    } finally {
+      reopened.dispose();
+    }
+  });
+
+  it('waits for an accepted paste, and fails once the workbook is replaced', async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    let resolveClipboard!: (text: string) => void;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        readText: () =>
+          new Promise<string>((resolve) => {
+            resolveClipboard = resolve;
+          }),
+      },
+    });
+    try {
+      const editor = await mountCommands();
+      const before = editor.input();
+      const surface = editor.view.getByTestId('xlsx-scroll');
+      fireEvent.keyDown(surface, { key: 'v', ...{ ctrlKey: true } });
+      const undo = editor.api().commands.execute('undo', null);
+      await act(async () => resolveClipboard('Pasted'));
+      expect(await undo).toEqual({ ok: true, status: 'executed' });
+      expect(editor.input()).toBe(before);
+
+      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
+      const bold = editor.api().commands.execute('bold', null);
+      await act(async () => {
+        editor.rerender({ file: plain.bytes.slice() });
+      });
+      await act(async () => resolveClipboard('Late'));
+      expect(failure(await bold)).toBe('document-replaced');
+    } finally {
+      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it('refuses a command during an unfinished chart drag and lands a nudge before undo', async () => {
+    let api: XlsxEditorApi | undefined;
+    const view = render(
+      <XlsxEditor
+        file={charted.bytes.slice()}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const surface = view.getByTestId('xlsx-scroll');
+    const [chart] = charted.charts;
+    fireEvent.mouseDown(surface, chartCenter(chart));
+    let result!: XlsxCommandResult;
+    await act(async () => {
+      result = await api!.commands.execute('save', null);
+    });
+    expect(failure(result)).toBe('gesture-active');
+    expect(api!.commands.getState('bold').enabled).toBe(false);
+    fireEvent.mouseUp(window, chartCenter(chart));
+
+    await act(async () => {
+      fireEvent.keyDown(surface, { key: 'ArrowRight', shiftKey: true });
+    });
+    await act(async () => {
+      result = await api!.commands.execute('undo', null);
+    });
+    expect(result).toEqual({ ok: true, status: 'executed' });
+    const after = api!.handle
+      .displayList({ x: 0, y: 0, ...VIEWPORT })
+      .charts!.find((candidate) => candidate.id === chart.id)!;
+    expect(after.rect.x).toBe(chart.rect.x);
+    expect(api!.commands.getState('undo').enabled).toBe(false);
+  });
+
+  it('gates writes when read-only while saving stays available', async () => {
+    const editor = await mountCommands();
+    await act(async () => editor.rerender({ readOnly: true }));
+    const bold = editor.api().commands.getState('bold');
+    expect(bold.enabled ? null : bold.disabledReason.code).toBe('read-only');
+    expect(failure(await editor.execute('undo', null))).toBe('read-only');
+    expect(await editor.execute('save', null)).toEqual({ ok: true, status: 'executed' });
+  });
+
+  it('disables merging while collaborating', async () => {
+    let api: XlsxEditorApi | undefined;
+    render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        collaboration={{}}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    await act(async () => {
+      api!.selectCells(0, { anchor: { row: 0, col: 0 }, focus: { row: 1, col: 1 } });
+    });
+    const merge = api!.commands.getState('merge', { value: 'all' });
+    expect(merge.enabled ? null : merge.disabledReason.code).toBe('collaboration-unsupported');
+  });
+
+  it('accepts, refuses stale and force-applies proposals through commands', async () => {
+    const editor = await mountCommands();
+    const workbook = editor.api().handle;
+    const stage = async (input: string) => {
+      let id = '';
+      await act(async () => {
+        id = workbook.propose('Audit agent', null, [{ sheet: 0, row: 6, col: 4, input }]).id;
+        editor.api().refreshProposals();
+      });
+      return id;
+    };
+    const first = await stage('12');
+    expect(editor.api().commands.getState('proposalsPanel').value).toBe(1);
+    expect(await editor.execute('proposalAccept', { proposalId: first })).toEqual({
+      ok: true,
+      status: 'executed',
+    });
+    expect(workbook.cell(0, 6, 4).input).toBe('12');
+    expect(failure(await editor.execute('proposalReject', { proposalId: first }))).toBe(
+      'proposal-not-found'
+    );
+
+    const second = await stage('42');
+    await act(async () => {
+      workbook.editCell(0, 6, 4, '99');
+      editor.api().refreshProposals();
+    });
+    expect(failure(await editor.execute('proposalAccept', { proposalId: second }))).toBe(
+      'proposal-stale'
+    );
+    expect(await editor.execute('proposalsPanel', null)).toEqual({ ok: true, status: 'executed' });
+    await waitFor(() => editor.view.getByTestId('xlsx-proposal-stale'));
+    expect(
+      await editor.execute('proposalAccept', { proposalId: second, force: true })
+    ).toEqual({ ok: true, status: 'executed' });
+    expect(workbook.cell(0, 6, 4).input).toBe('42');
+  });
+
+  it('places host chrome by the toolbar and showToolbar props', async () => {
+    const originalHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.dataset.testid === 'xlsx-toolbar' ? (this.firstElementChild ? 60 : 0) : 0;
+      },
+    });
+    try {
+      const host = (
+        <EditorToolbar mode="commands">
+          <EditorToolbar.Toolbar>
+            <ToolbarCommandButton id="undo" />
+          </EditorToolbar.Toolbar>
+          <EditorToolbar.FormulaBar />
+        </EditorToolbar>
+      );
+      const editor = await mountCommands({ toolbar: host, readOnly: true });
+      expect(editor.view.getByTestId('xlsx-toolbar')).toBeDefined();
+      expect(editor.view.getByTestId('xlsx-formula-input')).toBeDefined();
+      expect(editor.view.queryByTestId('xlsx-save')).toBeNull();
+      await editor.execute('proposalsPanel', { open: true });
+      expect(editor.view.getByTestId('xlsx-proposals-panel').style.top).toBe('64px');
+
+      await act(async () => editor.rerender({ toolbar: null, readOnly: false }));
+      expect(editor.view.queryByTestId('xlsx-toolbar')).toBeNull();
+      await waitFor(() =>
+        expect(editor.view.getByTestId('xlsx-proposals-panel').style.top).toBe('4px')
+      );
+
+      const bar = (
+        <EditorToolbar mode="commands">
+          <EditorToolbar.Toolbar>
+            <ToolbarCommandButton id="bold" />
+          </EditorToolbar.Toolbar>
+        </EditorToolbar>
+      );
+      await act(async () => editor.rerender({ toolbar: bar, readOnly: false }));
+      expect(editor.view.queryByTestId('xlsx-formula-input')).toBeNull();
+      await act(async () => editor.rerender({ toolbar: bar, showToolbar: false, readOnly: false }));
+      expect(editor.view.queryByTestId('xlsx-toolbar')).toBeNull();
+      await act(async () => editor.rerender({ toolbar: undefined, readOnly: true }));
+      expect(editor.view.queryByTestId('xlsx-toolbar')).toBeNull();
+      await act(async () => editor.rerender({ toolbar: undefined, readOnly: false }));
+      expect(editor.view.getByTestId('xlsx-save')).toBeDefined();
+    } finally {
+      if (originalHeight) Object.defineProperty(HTMLElement.prototype, 'offsetHeight', originalHeight);
+    }
   });
 });

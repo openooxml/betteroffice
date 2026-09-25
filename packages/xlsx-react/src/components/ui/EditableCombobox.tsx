@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
 import { toolbarColors } from './ToolbarPrimitives';
@@ -12,8 +12,11 @@ export interface EditableComboboxProps {
   value: string;
   options: readonly ComboboxOption[];
   label: string;
-  onCommit?: (value: string) => void;
+  /** `pointer` is true when an option was clicked. */
+  onCommit?: (value: string, pointer: boolean) => void;
   disabled?: boolean;
+  /** Why the field is disabled; announced and shown on hover, and it stays focusable. */
+  description?: string;
   width?: number;
   inputStyle?: CSSProperties;
   testId?: string;
@@ -25,10 +28,13 @@ export function EditableCombobox({
   label,
   onCommit,
   disabled = false,
+  description,
   width = 72,
   inputStyle,
   testId,
 }: EditableComboboxProps) {
+  const descriptionId = useId();
+  const reason = disabled && description ? description : undefined;
   const [draft, setDraft] = useState(value);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ top: 0, left: 0, width });
@@ -71,7 +77,8 @@ export function EditableCombobox({
   }, [open, close, value]);
 
   const commit = useCallback(() => {
-    if (!disabled && onCommit && draft.trim()) onCommit(draft.trim());
+    const next = draft.trim();
+    if (!disabled && onCommit && next && next !== value) onCommit(next, false);
     setDraft(value);
   }, [disabled, onCommit, draft, value]);
 
@@ -98,7 +105,11 @@ export function EditableCombobox({
         aria-label={label}
         aria-autocomplete="list"
         aria-expanded={open}
-        disabled={disabled}
+        disabled={disabled && !reason}
+        readOnly={Boolean(reason)}
+        aria-disabled={reason ? true : undefined}
+        aria-describedby={reason ? descriptionId : undefined}
+        title={reason ? `${label}: ${reason}` : undefined}
         value={draft}
         onFocus={(event) => {
           if (disabled) return;
@@ -110,7 +121,6 @@ export function EditableCombobox({
           if (event.key === 'Enter') {
             commit();
             close();
-            event.currentTarget.blur();
           } else if (event.key === 'ArrowDown') {
             setOpen(true);
             event.preventDefault();
@@ -162,6 +172,11 @@ export function EditableCombobox({
       >
         <ToolbarIcon name="chevronDown" size={14} />
       </button>
+      {reason && (
+        <span id={descriptionId} hidden>
+          {reason}
+        </span>
+      )}
       {open && !disabled && (
         <div
           ref={menuRef}
@@ -192,7 +207,7 @@ export function EditableCombobox({
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setDraft(option.label);
-                onCommit?.(option.value);
+                onCommit?.(option.value, true);
                 close();
               }}
               style={{
