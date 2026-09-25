@@ -188,3 +188,17 @@ bookmarks crossing the span refuses, as does any step after which saving would
 move an opaque XML block, such as one that precedes a table. A batch holds at most 128 steps,
 1,048,576 inserted UTF-16 units and 1,024 new paragraphs. Paragraph ids are
 session anchors: they are not guaranteed to survive save and reopen.
+
+### Editor plugin contract (deprecated)
+
+`@betteroffice/docx/plugin-api` keeps its geometry and sidebar building blocks:
+`RenderedDomContext`, `PositionCoordinates`, `SidebarItem`,
+`createRenderedDomContext`, `createCanvasHostProjector` and
+`resolveItemPositions`. The snapshot-based `EditorPluginCore`,
+`PluginPanelProps`, `PanelConfig` and `SidebarItemContext` are deprecated: they
+pass serialized `Document` snapshots and have no host that manages their
+lifecycle. Host plugins for the React editor use `defineDocxPlugin` and the
+`plugins` prop of
+[`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react),
+which provide versioned reads, granted commands and edit batches, lifecycle
+events and cleanup.

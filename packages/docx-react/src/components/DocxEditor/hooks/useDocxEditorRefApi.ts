@@ -2,9 +2,6 @@ import { useImperativeHandle } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
 import type {
-  DocxEditFailure,
-  DocxEditRefusal,
-  DocxEditRequest,
   DocxEditStep,
   DocxTextTarget,
   YrsInlineFormatDelta,
@@ -20,6 +17,7 @@ import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { createComment } from '../commentFactories';
+import { applyEditBatch, flushedSession, modeRefusal } from '../editorBatches';
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 
@@ -49,50 +47,6 @@ function helperTarget(story: string, paraId: string, search?: string): DocxTextT
 
 function storyOffset(session: YrsSession, loc: YrsLoc): number {
   return session.locateParagraph(loc.story, loc.paraId).start + loc.offset;
-}
-
-function adapterRefusal(
-  session: YrsSession,
-  failure: Omit<DocxEditFailure, 'message'> & { message: string }
-): DocxEditRefusal {
-  return { ok: false, version: session.version(), failure };
-}
-
-/** Refuses writes the editor's mode does not allow; suggesting mode needs `suggest` on every step. */
-function modeRefusal(
-  session: YrsSession,
-  mode: EditorMode,
-  request: DocxEditRequest
-): DocxEditRefusal | null {
-  if (mode === 'viewing') {
-    return adapterRefusal(session, { code: 'read-only', message: 'The editor is read-only' });
-  }
-  const direct = request.steps.findIndex((step) => !step.suggest);
-  if (mode === 'suggesting' && direct >= 0) {
-    return adapterRefusal(session, {
-      code: 'invalid-step',
-      stepIndex: direct,
-      message: 'Suggesting mode records every step as a tracked change; supply suggest metadata',
-    });
-  }
-  return null;
-}
-
-/**
- * Flushes pending input and returns the current handle. Handles are rebuilt on layout changes,
- * so only the session identifies the document the flush started on.
- */
-async function flushedSession(
-  pagedEditorRef: React.RefObject<PagedEditorRef | null>
-): Promise<{ editor: PagedEditorRef; session: YrsSession }> {
-  const session = pagedEditorRef.current?.getYrsSession();
-  if (!pagedEditorRef.current || !session) throw new Error('The editor input is unavailable');
-  await pagedEditorRef.current.flushPendingInput();
-  const editor = pagedEditorRef.current;
-  if (!editor || editor.getYrsSession() !== session) {
-    throw new Error('The document changed while flushing input');
-  }
-  return { editor, session };
 }
 
 function normalizeSelection(session: YrsSession): YrsStoryRange | null {
@@ -216,25 +170,9 @@ export function useDocxEditorRefApi({
         return modeRefusal(session, modeRef.current, request) ?? session.validateEdits(request);
       },
       applyEdits: async (request) => {
-        const session = pagedEditorRef.current?.getYrsSession();
-        if (!session) throw new Error('The editor input is unavailable');
-        const early = modeRefusal(session, modeRef.current, request);
-        if (early) return early;
-        const flushed = await flushedSession(pagedEditorRef);
-        if (flushed.session !== session) {
-          throw new Error('The document changed while flushing input');
-        }
-        const refused = modeRefusal(session, modeRef.current, request);
-        if (refused) return refused;
-        const result = session.applyEdits(request);
-        if (result.ok && result.applied) {
-          try {
-            flushed.editor.syncYrsInputState(true, result.changedStories);
-          } catch (error) {
-            console.error('[DocxEditor] refreshing after an applied edit batch failed', error);
-          }
-        }
-        return result;
+        const outcome = await applyEditBatch(pagedEditorRef, () => modeRef.current, request);
+        if ('flush' in outcome) throw outcome.flush.error;
+        return outcome.result;
       },
 
       addComment: (options) => {

@@ -85,6 +85,15 @@ export function UnifiedSidebar({
     }
   }, [resolved]);
 
+  // Forget removed items, so a card that returns is placed afresh instead of at a stale Y.
+  useEffect(() => {
+    const live = new Set(items.map((item) => item.id));
+    for (const cache of [lastKnownRef.current, cardHeightsRef.current, measureRefsRef.current]) {
+      for (const id of cache.keys()) if (!live.has(id)) cache.delete(id);
+    }
+    for (const id of knownCardsRef.current) if (!live.has(id)) knownCardsRef.current.delete(id);
+  }, [items]);
+
   // Re-measure card heights and bump positionVersion only if anything
   // changed, so the collision-avoidance useMemo re-runs with real sizes.
   // Reads are batched in a single rAF to avoid forced sync layout.

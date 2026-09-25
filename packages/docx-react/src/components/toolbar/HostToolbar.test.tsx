@@ -270,6 +270,40 @@ describe('host-composed toolbar', () => {
     expect(second.harness.calls.map((call) => call.id)).toEqual(['save']);
   });
 
+  test('deleting a selected table ignores editing keys typed into a text field', () => {
+    const { controller } = editor();
+    const actions: string[] = [];
+    const containerRef = { current: null as HTMLDivElement | null };
+    function TableShortcuts() {
+      useKeyboardShortcuts({
+        commands: controller,
+        pagedEditorRef: { current: null },
+        containerRef,
+        disableFindReplaceShortcuts: false,
+        tableSelection: {
+          state: { tableIndex: 0 },
+          handleAction: (action: string) => actions.push(action),
+        } as never,
+      });
+      return null;
+    }
+    render(
+      <div ref={containerRef}>
+        <TableShortcuts />
+        <input aria-label="Plugin note" />
+        <button type="button">Plugin action</button>
+      </div>
+    );
+    const typed = fireEvent.keyDown(screen().getByLabelText('Plugin note'), { key: 'Backspace' });
+    expect(typed).toBe(true);
+    expect(actions).toEqual([]);
+    const pressed = fireEvent.keyDown(screen().getByRole('button', { name: 'Plugin action' }), {
+      key: 'Delete',
+    });
+    expect(pressed).toBe(false);
+    expect(actions).toEqual(['deleteTable']);
+  });
+
   test('offers stable unavailable state before an editor is attached', () => {
     function Probe() {
       const state = useDocxCommandState('bold');

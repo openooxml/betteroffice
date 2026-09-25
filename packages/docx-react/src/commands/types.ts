@@ -241,7 +241,10 @@ export type DocxCommandDisabledCode =
   | 'controlled-sidebar'
   | 'host-disabled'
   | 'unsupported-command'
-  | 'invalid-arguments';
+  | 'invalid-arguments'
+  | 'permission-denied'
+  | 'unsupported-policy'
+  | 'plugin-unavailable';
 
 /** Why an executed command did not complete. */
 export type DocxCommandFailureCode =
@@ -249,7 +252,8 @@ export type DocxCommandFailureCode =
   | 'input-failed'
   | 'document-replaced'
   | 'target-changed'
-  | 'command-failed';
+  | 'command-failed'
+  | 'aborted';
 
 /** Presentation hints for an option preview. */
 export type DocxCommandOptionPreview = {
@@ -306,12 +310,31 @@ export type DocxCommandResult =
   | { ok: true; status: DocxCommandStatus }
   | { ok: false; failure: CommandReason<DocxCommandFailureCode> };
 
+/** A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`. */
+export type DocxPluginCommandId = `plugin:${string}/${string}`;
+
+/** Static description of a contributed command. */
+export interface DocxPluginCommandDescriptor {
+  id: DocxPluginCommandId;
+  label: string;
+  mutatesDocument: boolean;
+  shortcuts: readonly { chord: string; args: null }[];
+}
+
+/** State of a contributed command; the plugin chooses its own disabled codes. */
+export type DocxPluginCommandState = CommandState;
+
 /** The command authority of one editor, shared by built-in and host chrome. */
 export interface DocxCommandStore {
   getDescriptor<K extends DocxCommandId>(id: K): DocxCommandDescriptor<K>;
+  /** Null while no active plugin contributes `id`. */
+  getDescriptor(id: DocxPluginCommandId): DocxPluginCommandDescriptor | null;
   /** Snapshots are stable until the state changes; pass `args` to evaluate one option. */
   getState<K extends DocxCommandId>(id: K, args?: DocxCommandArgs[K]): DocxCommandState<K>;
+  getState(id: DocxPluginCommandId, args?: null): DocxPluginCommandState;
   subscribe(listener: () => void): () => void;
   /** Runs after input accepted before the call; availability is checked again first. */
   execute<K extends DocxCommandId>(id: K, args: DocxCommandArgs[K]): Promise<DocxCommandResult>;
+  /** Runs a contributed command with its plugin's own clients, outside the input queue. */
+  execute(id: DocxPluginCommandId, args: null): Promise<DocxCommandResult>;
 }

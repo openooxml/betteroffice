@@ -101,6 +101,11 @@ import { RULER_WIDTH } from './ui/VerticalRuler';
 import { SIDEBAR_DOCUMENT_SHIFT } from './sidebar/constants';
 import { useCommentSidebarItems, type CommentCallbacks } from '../hooks/useCommentSidebarItems';
 import type { ReactSidebarItem } from '../plugin-api/types';
+import type { DocxEditorPluginProps } from '../plugins/types';
+import { useDocxPluginHost } from '../plugins/useDocxPluginHost';
+import { PluginOverlays } from '../plugins/PluginOverlays';
+import { PluginDock } from '../plugins/PluginPanels';
+import { mergeSidebarItems } from '../plugins/PluginSidebarItems';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Translations } from '@betteroffice/docx-i18n';
 import { type PrintOptions } from './ui/PrintPreview';
@@ -132,7 +137,7 @@ export type { DocxEditorCollaborationOptions } from './DocxEditor/types';
 /**
  * DocxEditor props
  */
-export interface DocxEditorProps {
+export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Document data — ArrayBuffer, Uint8Array, Blob, or File */
   documentBuffer?: DocxInput | null;
   /** Pre-parsed document (alternative to documentBuffer) */
@@ -301,19 +306,22 @@ export interface DocxEditorProps {
   commentsSidebarOpen?: boolean;
   /** Fires with the next open state whenever the editor wants to show or hide the comments sidebar. Fires in both controlled and uncontrolled modes. */
   onCommentsSidebarOpenChange?: (open: boolean) => void;
-  /**
-   * Callback when rendered DOM context is ready (for plugin overlays).
-   * Used by PluginHost to get access to the rendered page DOM for positioning.
-   */
+  /** Receives the editor's rendered-DOM context whenever a new frame or zoom rebuilds it. */
   onRenderedDomContextReady?: (context: RenderedDomContext) => void;
   /**
-   * Plugin overlays to render inside the editor viewport.
-   * Passed from PluginHost to render plugin-specific overlays.
+   * Unmanaged overlay content, drawn under managed plugin overlays.
+   * @deprecated Contribute an `overlay` through `plugins` instead.
    */
   pluginOverlays?: ReactNode;
-  /** Sidebar items from plugins (passed from PluginHost). */
+  /**
+   * Unmanaged sidebar items, merged with comments and managed plugin items.
+   * @deprecated Contribute sidebar items through `plugins` instead.
+   */
   pluginSidebarItems?: ReactSidebarItem[];
-  /** Rendered DOM context from PluginHost (for sidebar position resolution). */
+  /**
+   * Geometry for `pluginSidebarItems`; ignored while `plugins` are installed.
+   * @deprecated The editor supplies its own geometry.
+   */
   pluginRenderedDomContext?: RenderedDomContext | null;
   /** Custom logo/icon for the title bar */
   renderLogo?: () => ReactNode;
@@ -677,6 +685,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pluginOverlays,
     pluginSidebarItems,
     pluginRenderedDomContext,
+    plugins,
+    pluginGrants,
+    onPluginError,
     renderLogo,
     documentName,
     onDocumentNameChange,
@@ -770,7 +781,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // Canvas renderer plumbing. `resolvedIdsForRender` reaches the Rust
   // display-list build so the canvas drops the comment wash of resolved
   // threads (and re-tints the one whose sidebar card is expanded).
-  const canvasRenderer = useCanvasRenderer(rustFontChainsProviderRef, resolvedIdsForRender);
+  const canvasRenderer = useCanvasRenderer(rustFontChainsProviderRef, resolvedIdsForRender, () =>
+    pagedEditorRef.current?.relayout()
+  );
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
   }, [canvasRenderer.error, onError]);
@@ -825,8 +838,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     outlineHeadings,
     setHeadingInfos,
     refreshHeadings,
-    toolbarHeight,
-    toolbarRefCallback,
     editorScrollLeft,
   } = useOutlineSidebar({
     showOutlineProp,
@@ -877,7 +888,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // tracked-change allocation in this component and its hooks.
   const commentIdAllocatorRef = useRef(createCommentIdAllocator());
 
-  const { resetForNewDocument } = useResetEditorState({
+  const beginPluginLoadRef = useRef<() => void>(() => {});
+  const { resetForNewDocument: resetEditorState } = useResetEditorState({
     commentsLoadedRef,
     trackedChangesLoadedRef,
     setComments,
@@ -892,6 +904,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     clearFindReplaceMatches: useCallback(() => findReplace.setMatches([], 0), [findReplace]),
     cleanOrphanedCommentsTimerRef,
   });
+  const resetForNewDocument = useCallback(() => {
+    beginPluginLoadRef.current();
+    resetEditorState();
+  }, [resetEditorState]);
 
   const {
     loadParsedDocument,
@@ -1334,6 +1350,41 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pagedEditorRef,
   });
 
+  const pluginOverlayTarget = useCanvasOverlayTarget((plugins?.length ?? 0) > 0, editorContentRef);
+  const pluginHost = useDocxPluginHost({
+    plugins,
+    pluginGrants,
+    onPluginError,
+    pagedEditorRef,
+    writeModeRef,
+    mode: editingMode,
+    readOnly,
+    commands: commandController,
+    session:
+      yrsCore.session && history.state && !state.isLoading && !state.parseError
+        ? yrsCore.session
+        : null,
+    loadGeneration: yrsSeedGeneration,
+    queries: canvasRenderer.queries,
+    zoom: state.zoom,
+    canvasHostRef: canvasRenderer.canvasHostRef,
+    overlayTarget: pluginOverlayTarget,
+    selectionChangeSubscribersRef,
+    i18n,
+    onRenderedDomContextReady,
+  });
+  beginPluginLoadRef.current = pluginHost.beginLoad;
+  const sidebarDomContext = pluginHost.managed
+    ? pluginHost.renderedDomContext
+    : (pluginRenderedDomContext ?? null);
+  useEffect(() => {
+    if (pluginHost.managed && pluginRenderedDomContext) {
+      console.warn(
+        '[DocxEditor] pluginRenderedDomContext is ignored while plugins are installed; the editor supplies its own geometry.'
+      );
+    }
+  }, [pluginHost.managed, pluginRenderedDomContext]);
+
   // Handle save
   // Handle error from editor
   const handleEditorError = useCallback(
@@ -1621,12 +1672,24 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     addCommentYPosition,
   });
 
-  const allSidebarItems = useMemo(() => {
-    const items: ReactSidebarItem[] = [];
-    if (showCommentsSidebar) items.push(...commentSidebarItems);
-    if (pluginSidebarItems) items.push(...pluginSidebarItems);
-    return items;
-  }, [showCommentsSidebar, commentSidebarItems, pluginSidebarItems]);
+  const allSidebarItems = useMemo(
+    () =>
+      mergeSidebarItems(
+        showCommentsSidebar ? commentSidebarItems : [],
+        pluginSidebarItems ?? [],
+        pluginHost.sidebarItems
+      ),
+    [showCommentsSidebar, commentSidebarItems, pluginSidebarItems, pluginHost.sidebarItems]
+  );
+
+  useEffect(() => {
+    if (
+      expandedSidebarItem?.startsWith('plugin:') &&
+      !allSidebarItems.some((item) => item.id === expandedSidebarItem)
+    ) {
+      setExpandedSidebarItem(null);
+    }
+  }, [allSidebarItems, expandedSidebarItem]);
 
   // Build a map from insertion revisionIds to sidebar item IDs for replacement tracked changes.
   // This allows clicking the insertion part of a replacement to activate the same sidebar card.
@@ -1684,6 +1747,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     // selection event so range/caret announcements are never lost to toolbar
     // state deduplication.
     canvasA11yNotifyRef.current?.();
+    pluginHost.publishSelection();
     const session = pagedEditorRef.current?.getYrsSession();
     const head = session?.selection()?.head;
     if (!session || !head) return;
@@ -1726,7 +1790,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       setShowCommentsSidebar(true);
     }
     setExpandedSidebarItem(cursorSidebarItem);
-  }, [comments, resolvedCommentIds, commentSidebarItems, revisionIdAliases, setShowCommentsSidebar]);
+  }, [
+    comments,
+    resolvedCommentIds,
+    commentSidebarItems,
+    revisionIdAliases,
+    setShowCommentsSidebar,
+    pluginHost.publishSelection,
+  ]);
 
   const handleYrsToolbarSelectionChange = useCallback(
     (selection: YrsToolbarSelection) => {
@@ -1762,13 +1833,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   );
   const chrome = !showToolbar ? null : toolbar !== undefined ? (
     toolbar !== null && (
-      <div ref={toolbarRefCallback} className="z-50 flex flex-col gap-0 flex-shrink-0">
+      <div className="z-50 flex flex-col gap-0 flex-shrink-0">
         {toolbar}
       </div>
     )
   ) : readOnlyProp ? null : (
     <DocxEditorToolbar
-      toolbarRefCallback={toolbarRefCallback}
       renderLogo={renderLogo}
       documentName={documentName}
       onDocumentNameChange={onDocumentNameChange}
@@ -1861,7 +1931,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         showOutlineButton={showOutlineButton}
         sidebarOpen={sidebarOpen}
         minLayoutWidth={minLayoutWidth}
-        toolbarHeight={toolbarHeight}
         editorScrollLeft={editorScrollLeft}
         expandedSidebarItem={expandedSidebarItem}
         trackedChanges={trackedChanges}
@@ -1897,11 +1966,20 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           headings: outlineHeadings,
           onHeadingClick: handleHeadingInfoClick,
           onClose: () => setShowOutline(false),
-          topOffset: toolbarHeight,
           scrollLeft: editorScrollLeft,
         }}
         onToggleOutline={handleToggleOutline}
         scrollPageInfo={scrollPageInfo}
+        renderDock={(placement, available) => (
+          <PluginDock
+            host={pluginHost.host}
+            placement={placement}
+            activations={pluginHost.activations.filter(
+              (activation) => activation.plugin.panel?.placement === placement
+            )}
+            available={available}
+          />
+        )}
         toolbar={
           chrome && (
             <EditorChromeContext.Provider value={chromeContext}>{chrome}</EditorChromeContext.Provider>
@@ -1950,7 +2028,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onYrsContentChange={handleYrsContentChange}
               onPagedSelectionChange={handlePagedSelectionChange}
               onYrsSelectionChange={handleYrsToolbarSelectionChange}
-              onRenderedDomContextReady={onRenderedDomContextReady}
+              onRenderedDomContextReady={
+                pluginHost.managed || onRenderedDomContextReady
+                  ? pluginHost.onRenderedDomContext
+                  : undefined
+              }
               pluginOverlays={pluginOverlays}
               onHyperlinkClick={handleHyperlinkClick}
               hyperlinkPopupData={hyperlinkPopupData}
@@ -1965,7 +2047,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               anchorPositions={anchorPositions}
               onAnchorPositionsChange={setAnchorPositions}
               onYrsTrackedChangesChange={setYrsTrackedChangesResult}
-              pluginRenderedDomContext={pluginRenderedDomContext}
+              pluginRenderedDomContext={sidebarDomContext}
               pageWidthPx={pageWidthPx}
               expandedSidebarItem={expandedSidebarItem}
               setExpandedSidebarItem={setExpandedSidebarItem}
@@ -2012,6 +2094,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
                 }
               />
             )}
+            <PluginOverlays
+              host={pluginHost.host}
+              activations={pluginHost.activations}
+              target={pluginOverlayTarget}
+              layerRef={pluginHost.overlayLayerRef}
+            />
           </CanvasPagedArea>
         }
         overlays={

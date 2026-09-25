@@ -74,6 +74,8 @@ Vanished (hidden) text stays out of the layout by default; pass
 - Zoom control and ruler
 - Composable chrome: arrange built-in controls with their state, shortcuts and
   restrictions, add host actions, or drive a toolbar outside the editor
+- Host-owned plugins with panels, overlays, sidebar items, lifecycle events,
+  and explicitly granted commands and edit batches
 - Localized UI via the `i18n` prop
   ([`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n))
 - Real-time collaboration with people or agents; the document is a CRDT
@@ -267,6 +269,120 @@ Read-only editors refuse with `read-only` (`locked-target` stays for locked
 content); in suggesting mode every step must carry `suggest`. The promise rejects when the document is replaced while input
 flushes. `proposeChange`, `addComment` and `applyFormatting` resolve their
 `{ paraId, search }` targets through the same Rust resolver in the accepted view.
+
+## Host plugins
+
+Host-owned tools (review aids, templates, checks) install through the `plugins`
+prop. A plugin contributes a panel, an overlay, sidebar cards, and commands, and
+works through restricted clients rather than the editor or its session:
+
+```tsx
+import { DocxEditor, defineDocxPlugin } from '@betteroffice/docx-react';
+
+type State = { version: string | null; count: number };
+
+const review = defineDocxPlugin<State>({
+  id: 'acme.review',
+  createState: () => ({ version: null, count: 0 }),
+  async onEvent(context, event) {
+    if (event.type !== 'load' && event.type !== 'document-change') return;
+    const read = await context.read.readParagraphs({ view: 'accepted' });
+    if (read.ok) {
+      context.setState({ version: read.version, count: read.paragraphs.length }, read.version);
+    }
+  },
+  panel: {
+    title: 'Review',
+    placement: 'right',
+    render: ({ context }) => <p>{context.state.count} paragraphs</p>,
+  },
+});
+
+<DocxEditor
+  documentBuffer={file}
+  plugins={[review]}
+  pluginGrants={{ 'acme.review': { document: 'write', editBatches: true } }}
+  onPluginError={(error) => report(error)}
+/>;
+```
+
+- **Lifecycle.** Once a document is ready, each plugin gets fresh state,
+  `initialize`, then one `load` event (`loaded`, `replaced`, or `attached` for a
+  plugin added to an open document), and its contributions appear. It then
+  receives `document-change` (the committed version only, for typing, remote
+  edits, undo, commands and batches, never for refusals or no-ops),
+  `selection-change`, `mode-change` (with the effective `readOnly`),
+  `layout-change` and `grants-change`. Events describe current state: several
+  changes may arrive as one, and a newer one aborts the hook still handling the
+  previous (`context.signal`). Replacing the document, removing the plugin,
+  changing its `revision`, unmounting, or a failure ends the activation: its
+  signals abort, its clients refuse, and every `onCleanup` disposer runs once
+  with the reason. A disposer registered afterwards runs immediately. Plugins
+  are matched by `id` and `revision`, so new array or callback identities and
+  reordering keep their state. `context.run(action)` gives event handlers a
+  fresh context and isolates their failures.
+- **Stale results.** `setState` returns false once the context is superseded or
+  ended, or when the document is no longer at `atVersion` (by default the
+  version the context was created at). Pass the version a read returned so an
+  older read never overwrites newer state.
+- **Grants.** Without a grant a plugin reads, validates and navigates only, and
+  `context.edits` is null. Built-in commands need their id in `commands`, and
+  mutating ones also `document: 'write'`; edit batches need `document: 'write'`
+  and `editBatches`, and `history: 'none'` also `untrackedHistory`. Grants,
+  editor mode and document policy are checked again right before each change,
+  so a revoked grant, viewing mode, `readOnly` or a replaced document refuses
+  even through a client obtained earlier. Mutating built-in commands have no
+  authoritative lock policy yet and refuse plugins with `unsupported-policy`;
+  plugins change documents through edit batches, whose Rust policy refuses
+  locked content. Suggesting mode follows each operation's own rules; a batch
+  step needs `suggest` there.
+- **Contributed commands** register as `plugin:<pluginId>/<id>` on
+  `ref.commands`. They always run with their own plugin's clients, even when the
+  host's toolbar, shortcuts or `ref.commands` invoke them, and outside the input
+  queue, so a handler can await its own batches. `mutatesDocument` disables a
+  command in viewing and read-only modes but grants nothing. Plugin shortcuts
+  must use Mod or Alt, or a function key; built-in and clipboard shortcuts win,
+  and a clashing plugin shortcut is not bound and is reported. Keys pressed in
+  plugin chrome are the user's: built-in shortcuts act on the editor there, and
+  a plugin's text fields keep their own editing keys. `toolbar` lists
+  local ids in order: the default toolbar shows them, and replacement chrome
+  places `<DocxPluginToolbar />` where it wants them. `ToolbarCommandButton`,
+  `ToolbarCommand`, `useDocxCommand` and `useDocxCommandState` also take a
+  contributed id; a button renders nothing while no plugin contributes it.
+- **Panels** dock left, right or bottom of the document, beside the toolbar
+  rather than inside the scroll area, with tabs when several share a side.
+  `preferredSize` is clamped to 40% of the editor. In a narrow editor side docks
+  show their tabs, and a tab opens its panel as a drawer over the document that
+  Escape closes. Collapsing a panel keeps the plugin running.
+- **Geometry.** `context.geometry` is null until a rendered layout shows the
+  current version, and whenever it falls behind. `geometry.dom` answers in
+  pages-container units divided by zoom; `geometry.toOverlayRect(rect)` converts
+  one of those rectangles into pixels of the unscaled overlay layer, once. The
+  layer ignores the pointer; interactive overlay elements set
+  `pointer-events: auto`. `snapshot.selection.displayRange` belongs to one
+  layout and is never an edit target.
+- **Sidebar cards** anchor to `{ version, story, paraId }` and show only while
+  the document is at that version and the body paragraph resolves uniquely.
+  Their ids are namespaced, so they never collide with comments.
+- **Navigation.** `navigation.scrollToParagraph(target, { expectVersion })`
+  flushes input, waits briefly for a layout of that version, and keeps focus
+  and selection unless `focus: true`. It succeeds only when it scrolled, and
+  otherwise says why (`stale-version`, `missing-target`, `ambiguous-target`,
+  `layout-unavailable`, `unsupported`).
+- **Failures.** Every contribution renders behind its own error boundary with a
+  command context restricted to its plugin, so public command hooks inside it
+  act for the plugin. A throwing hook, renderer, sidebar or command-state
+  function, command, or `context.run` action stops only that plugin, runs its
+  cleanups and reports `{ pluginId, generation, phase, error }` to
+  `onPluginError`; it stays stopped until a new document, `revision` or
+  reinstallation. Plugins run in the page's realm: grants govern the supported
+  API, not a sandbox.
+- **Legacy props.** `pluginOverlays` and `pluginSidebarItems` still render as
+  unmanaged content, below managed overlays and merged with managed cards;
+  `pluginRenderedDomContext` is ignored while plugins are installed, and
+  `onRenderedDomContextReady` receives the editor's own context. The
+  snapshot-based `EditorPluginCore` types in `@betteroffice/docx/plugin-api`
+  are deprecated in favour of this API.
 
 ## Framework notes
 

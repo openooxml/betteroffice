@@ -90,6 +90,10 @@ const REASON_KEYS: Record<DocxCommandFailureCode, TranslationKey> = {
   'host-disabled': 'commands.reasons.hostDisabled',
   'unsupported-command': 'commands.reasons.unsupportedCommand',
   'invalid-arguments': 'commands.reasons.invalidArguments',
+  'permission-denied': 'commands.reasons.permissionDenied',
+  'unsupported-policy': 'commands.reasons.unsupportedPolicy',
+  'plugin-unavailable': 'commands.reasons.pluginUnavailable',
+  aborted: 'commands.reasons.aborted',
   'input-failed': 'commands.reasons.inputFailed',
   'document-replaced': 'commands.reasons.documentReplaced',
   'target-changed': 'commands.reasons.targetChanged',
@@ -652,6 +656,16 @@ function evaluate<K extends DocxCommandId>(
     default:
       return { gate: 'unsupported-command' };
   }
+}
+
+/** The editor's gate for a contributed command; null when it passes. */
+export function contributedCommandGate(
+  mutatesDocument: boolean,
+  env: DocxCommandEnvironment | null
+): CommandReason<DocxCommandDisabledCode> | null {
+  if (!env) return commandReason('editor-unavailable', null);
+  const gate = mutatesDocument ? writeGate(env) : documentGate(env);
+  return gate ? commandReason(gate, env) : null;
 }
 
 /** The single availability gate for snapshots and execution. */

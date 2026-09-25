@@ -59,6 +59,11 @@
   changed. Text steps stay within one paragraph and paragraph steps need a
   document opened from DOCX bytes.
 
+- **Host-owned DOCX plugins.** DOCX React supports host-owned plugins with
+  panels, overlays, sidebar items, lifecycle events, and explicitly granted
+  commands and edit batches. Plugins read and navigate by default; every write
+  is checked against its grant, the editor mode and document policy when it runs.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

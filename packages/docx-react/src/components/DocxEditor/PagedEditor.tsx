@@ -98,7 +98,7 @@ import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRust
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { useSelectionOverlay } from './hooks/useSelectionOverlay';
 import { useImageInteractions } from './hooks/useImageInteractions';
-import { usePagedScrollApi } from './hooks/usePagedScrollApi';
+import { usePagedScrollApi, type RevealPositionOutcome } from './hooks/usePagedScrollApi';
 import { usePagesPointer } from './hooks/usePagesPointer';
 import {
   usePagedEditorCommandBridge,
@@ -215,7 +215,8 @@ export interface PagedEditorProps {
   /** Callback when editor is ready. */
   onReady?: (ref: PagedEditorRef) => void;
   /** Callback when rendered DOM context is ready. */
-  onRenderedDomContextReady?: (context: RenderedDomContext) => void;
+  /** Receives each rendered-DOM context with the query facade it was built over. */
+  onRenderedDomContextReady?: (context: RenderedDomContext, queries: DisplayListQueries) => void;
   /** Plugin overlays to render inside the viewport. */
   pluginOverlays?: React.ReactNode;
   /** Callback when header or footer is double-clicked for editing. */
@@ -395,6 +396,8 @@ export interface PagedEditorRef {
   relayout(): void;
   /** Scroll the visible pages to bring a display position into view. */
   scrollToPosition(position: number): void;
+  /** Scrolls a display position into view without moving focus or selection, saying why not. */
+  revealDisplayPosition(position: number): RevealPositionOutcome;
   /**
    * Scroll to the paragraph identified by Word `w14:paraId`.
    * Pass `options.highlight` to briefly flash rendered paragraph fragments.
@@ -1301,17 +1304,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     // Scroll API exposed via the PagedEditorRef. Owns the AbortController
     // chain that lets a fresh scroll supersede an in-flight paint-settle.
-    const { scrollToPositionImpl, scrollToPageImpl, scrollToParaIdImpl } = usePagedScrollApi({
-      pagesContainerRef,
-      yrsInputRef,
-      yrsSession: yrsCore.session,
-      yrsLocToDisplayPosition,
-      getScrollContainer,
-      displayListQueries,
-      canvasHostRef,
-      onNavigationIntent: cancelPendingScrollRestore,
-      requestCanvasParagraphFlash,
-    });
+    const { scrollToPositionImpl, revealPositionImpl, scrollToPageImpl, scrollToParaIdImpl } =
+      usePagedScrollApi({
+        pagesContainerRef,
+        yrsInputRef,
+        yrsSession: yrsCore.session,
+        yrsLocToDisplayPosition,
+        getScrollContainer,
+        displayListQueries,
+        canvasHostRef,
+        onNavigationIntent: cancelPendingScrollRestore,
+        requestCanvasParagraphFlash,
+      });
 
     // Display-list positions retain the document tree's integer coordinate
     // space. Build a lightweight index directly from the authoritative yrs
@@ -1673,7 +1677,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           createRenderedDomContext(host, zoom, {
             displayListQueries,
             projector: createCanvasHostProjector(host, displayListQueries, zoom),
-          })
+          }),
+          displayListQueries
         );
       };
       emit();
@@ -1701,6 +1706,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       layout,
       runLayoutPipeline,
       scrollToPositionImpl,
+      revealPositionImpl,
       scrollToParaIdImpl,
       scrollToPageImpl,
       setIsFocused,

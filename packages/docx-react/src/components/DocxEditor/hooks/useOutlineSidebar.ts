@@ -60,37 +60,6 @@ export function useOutlineSidebar({
     if (showOutlineProp) refreshHeadings();
   }, [showOutlineProp, refreshHeadings]);
 
-  // Toolbar height — drives vertical positioning of the outline panel/button.
-  // ResizeObserver tracks the toolbar wrapper so panel placement keeps up with
-  // toolbar reflow (responsive breakpoints, font/icon-size changes).
-  const toolbarRoRef = useRef<ResizeObserver | null>(null);
-  const toolbarWrapperRef = useRef<HTMLDivElement | null>(null);
-  const [toolbarHeight, setToolbarHeight] = useState(0);
-
-  const toolbarRefCallback = useCallback((el: HTMLDivElement | null) => {
-    toolbarWrapperRef.current = el;
-    if (toolbarRoRef.current) {
-      toolbarRoRef.current.disconnect();
-      toolbarRoRef.current = null;
-    }
-    if (!el) {
-      setToolbarHeight(0);
-      return;
-    }
-    setToolbarHeight(el.offsetHeight);
-    const ro = new ResizeObserver(() => {
-      setToolbarHeight(el.offsetHeight);
-    });
-    ro.observe(el);
-    toolbarRoRef.current = ro;
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      toolbarRoRef.current?.disconnect();
-    };
-  }, []);
-
   // Horizontal scroll offset of the editor scroll container. Used to slide the
   // outline panel and toggle button with the doc instead of leaving them pinned
   // to the viewport. Scroll updates are coalesced to one per frame — scroll
@@ -124,8 +93,6 @@ export function useOutlineSidebar({
     outlineHeadings,
     setHeadingInfos,
     refreshHeadings,
-    toolbarHeight,
-    toolbarRefCallback,
     editorScrollLeft,
   };
 }

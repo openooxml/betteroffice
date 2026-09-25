@@ -85,6 +85,122 @@ document and selection they opened with. At narrow widths, groups move into an
 accessible More menu that keeps every built-in choice; wrap other host content
 in `ToolbarOverflow` to give it an entry there.
 
+## Host DOCX editor plugins
+
+Host-owned tools install through the `plugins` prop. A plugin created with
+`defineDocxPlugin` can contribute a docked panel, an overlay, sidebar cards and
+commands; it reads and edits through restricted clients, never the session:
+
+```tsx
+import { DocxEditor, defineDocxPlugin } from "@betteroffice/docx-react";
+
+const review = defineDocxPlugin<{ count: number }>({
+  id: "acme.review",
+  createState: () => ({ count: 0 }),
+  async onEvent(context, event) {
+    if (event.type !== "load" && event.type !== "document-change") return;
+    const read = await context.read.readParagraphs({ view: "accepted" });
+    if (read.ok) context.setState({ count: read.paragraphs.length }, read.version);
+  },
+  panel: {
+    title: "Review",
+    placement: "right",
+    render: ({ context }) => <p>{context.state.count} paragraphs</p>,
+  },
+  commands: [
+    {
+      id: "mark",
+      label: "Mark reviewed",
+      mutatesDocument: true,
+      async execute(context) {
+        const read = await context.read.readParagraphs({ view: "accepted" });
+        if (!read.ok || !context.edits) return { ok: true, status: "noop" };
+        const first = read.paragraphs[0];
+        const result = await context.edits.applyEdits({
+          expectVersion: read.version,
+          steps: [{ op: "insertText", target: { kind: "paragraph", story: "body", paraId: first.paraId }, at: "end", text: " ✓" }],
+        });
+        return result.ok ? { ok: true, status: "executed" } : { ok: true, status: "noop" };
+      },
+    },
+  ],
+  toolbar: ["mark"],
+});
+
+<DocxEditor
+  documentBuffer={bytes}
+  plugins={[review]}
+  pluginGrants={{ "acme.review": { document: "write", editBatches: true } }}
+  onPluginError={(error) => console.error(error.pluginId, error.phase, error.error)}
+/>;
+```
+
+**Lifecycle.** When a document is ready each plugin gets fresh state, runs
+`initialize`, receives one `load` event (`loaded`, `replaced` or `attached`), and
+then its contributions appear. `document-change` carries only the committed
+version, for typing, remote edits, undo, commands and batches, and never for a
+refusal or no-op; `selection-change`, `mode-change` (with the effective
+`readOnly`), `layout-change` and `grants-change` follow. Notifications describe
+current state, so several changes can arrive as one, and a newer one aborts the
+hook still handling the last (`context.signal`). Replacing the document,
+removing the plugin, changing its `revision`, unmounting or a failure ends the
+activation: signals abort, clients refuse, and each `onCleanup` disposer runs
+once with the reason. Plugins are matched by `id` and `revision`, so new array
+identities and reordering keep their state; React StrictMode's double setup
+creates two distinct activations.
+
+**Stale results.** `setState(next, atVersion)` returns `false` for a superseded
+or ended context or when the document is no longer at `atVersion`, which
+defaults to the version the context was created at. Use `context.run(action)` in
+event handlers: it supplies a fresh context and isolates failures.
+
+**Grants.** Without a grant a plugin can read, validate and navigate only.
+Built-in commands need their id in `commands`, and mutating ones also
+`document: "write"`; `applyEdits` needs `document: "write"` and `editBatches`,
+and `history: "none"` also needs `untrackedHistory`. Grants, the editor mode and
+document policy are checked again immediately before each change, so revoking a
+grant, switching to viewing mode, `readOnly`, or replacing the document refuses
+through clients obtained earlier too. Mutating built-in commands refuse plugins
+with `unsupported-policy` until they have an authoritative lock policy; edit
+batches refuse locked content in Rust. In suggesting mode each batch step needs
+`suggest`.
+
+**Commands and toolbar.** Contributed commands register as
+`plugin:<pluginId>/<id>` on `ref.commands` and always run with their own
+plugin's clients, whether the default toolbar, a shortcut or the host invokes
+them. Plugin shortcuts must use Mod or Alt, or a function key; built-in and
+clipboard shortcuts take precedence, and a clashing plugin shortcut is reported
+and not bound. Keys
+pressed in plugin chrome are the user's: built-in shortcuts act on the editor
+there, and a plugin's text fields keep their own editing keys. Replacement chrome
+shows toolbar contributions with
+`<DocxPluginToolbar />`, and `ToolbarCommandButton`, `ToolbarCommand`,
+`useDocxCommand` and `useDocxCommandState` accept contributed ids.
+
+**Coordinates.** `context.geometry` exists only while a rendered layout shows
+the current version. `geometry.dom` (a `RenderedDomContext`) answers in
+pages-container units divided by zoom, and `geometry.toOverlayRect(rect)`
+converts such a rectangle into pixels of the unscaled overlay layer. Overlays
+ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
+anchor to `{ version, story, paraId }` and appear only while that version is
+current and the body paragraph is unique. `navigation.scrollToParagraph`
+flushes input, waits briefly for a matching layout, keeps focus unless asked, and
+reports `layout-unavailable` or `unsupported` instead of success when it cannot
+scroll. In a narrow editor, side docks show tabs that open panels as drawers.
+
+**Failures.** Each contribution renders behind its own error boundary and with
+a command context restricted to its plugin. A throwing hook, renderer, sidebar
+or command-state function, command or action stops only that plugin, runs its
+cleanups and reaches `onPluginError`; other plugins and the editor continue.
+Plugins share the page's JavaScript realm, so grants govern the supported API
+rather than sandboxing code.
+
+**Migrating.** `pluginOverlays`, `pluginSidebarItems` and
+`pluginRenderedDomContext` remain as deprecated, unmanaged inputs;
+`onRenderedDomContextReady` receives the editor's own context. The
+snapshot-based `EditorPluginCore` contract in `@betteroffice/docx/plugin-api`
+is deprecated; its geometry types remain.
+
 ## Use the JavaScript core
 
 ```ts
@@ -160,7 +276,7 @@ interaction separately when investigating input-to-paint latency.
 | Package | What it is |
 | --- | --- |
 | `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text and paragraph batches, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
-| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, and flushed version-checked edit batches on its ref. |
+| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, flushed version-checked edit batches on its ref, and host-owned plugins with panels, overlays, sidebar items, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |
