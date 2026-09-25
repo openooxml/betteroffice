@@ -1375,6 +1375,11 @@ pub(crate) fn parse_paragraph_properties(element: Option<&XmlElement>) -> Paragr
         },
         default_tab_size: numeric_attribute(Some(element), "defTabSz").filter(|size| *size > 0),
         tab_stops: element.child("tabLst").map(parse_tab_stops),
+        rtl: match element.attribute("rtl") {
+            Some("1" | "true") => Some(true),
+            Some("0" | "false") => Some(false),
+            _ => None,
+        },
         default_run: element
             .child("defRPr")
             .map(|value| parse_run_properties(Some(value))),
