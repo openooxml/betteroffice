@@ -1,5 +1,7 @@
 use pptx_edit::DeckSession;
-use pptx_parse::{Bullet, BulletSize, PptxPackage, ShapeNode, TextBody};
+use pptx_parse::{
+    Bullet, BulletSize, ParagraphProperties, PptxPackage, RunProperties, ShapeNode, TextBody,
+};
 use pptx_render::{PositionedTextLine, Primitive, SlideRenderer, SurfaceDisplayList};
 
 const DECK: &[u8] = include_bytes!("fixtures/list-style-bullets.pptx");
@@ -57,6 +59,42 @@ fn list_styles_cascade_defaults_levels_and_direct_properties() {
     assert_eq!(direct[0].runs.len(), 1);
     assert_eq!(direct[0].runs[0].color, "#008080");
     assert!((direct[0].runs[0].font_size_px - 80.0 / 3.0).abs() < 0.001);
+}
+
+#[test]
+fn text_outside_placeholders_takes_the_presentation_default_style() {
+    let session = DeckSession::open(DECK, 2943).unwrap();
+    let mut package = session.package().clone();
+    let sized = |size| {
+        vec![
+            ParagraphProperties {
+                default_run: Some(RunProperties {
+                    font_size_pt: Some(size),
+                    ..RunProperties::default()
+                }),
+                ..ParagraphProperties::default()
+            };
+            3
+        ]
+    };
+    package.presentation.default_text_style = sized(27.0);
+    for master in &mut package.masters {
+        master.text_styles.other = sized(18.0);
+    }
+    for shape in &mut package.slides[0].shapes {
+        if let ShapeNode::Shape(shape) = shape
+            && let Some(body) = &mut shape.text
+        {
+            body.default_list_style = None;
+            body.list_style.clear();
+        }
+    }
+    let list = renderer()
+        .layout_slide(&package, &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list;
+    assert_eq!(lines(&list, 2)[0].runs[0].font_size_px, 88.0);
+    assert_eq!(lines(&list, 4)[0].runs.last().unwrap().font_size_px, 36.0);
 }
 
 fn clear_bullets(body: &mut TextBody) {

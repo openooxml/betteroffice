@@ -790,6 +790,7 @@ impl<'a> LayoutBuilder<'a> {
             layout: layout_node.and_then(node_text),
             master: master_node.and_then(node_text),
             master_slide: self.master,
+            default_style: &self.package.presentation.default_text_style,
             placeholder: shape.placeholder.as_ref(),
             style_color: shape_style_color(original),
         };
@@ -969,6 +970,7 @@ impl<'a> LayoutBuilder<'a> {
                     layout: None,
                     master: None,
                     master_slide: self.master,
+                    default_style: &self.package.presentation.default_text_style,
                     placeholder: base.placeholder.as_ref(),
                     style_color: shape_style_color(Some(shape)),
                 },
@@ -1830,6 +1832,7 @@ fn cell_cascade<'a>(text: &'a TextBody, inherited: &'a TextBody) -> BodyCascade<
         layout: None,
         master: Some(inherited),
         master_slide: None,
+        default_style: &[],
         placeholder: None,
         style_color: None,
     }
@@ -1973,6 +1976,9 @@ struct BodyCascade<'a> {
     layout: Option<&'a TextBody>,
     master: Option<&'a TextBody>,
     master_slide: Option<&'a SlideMaster>,
+    /// `p:defaultTextStyle`, which outranks the master's `otherStyle` for
+    /// text outside placeholders.
+    default_style: &'a [ParagraphProperties],
     placeholder: Option<&'a Placeholder>,
     style_color: Option<&'a ColorValue>,
 }
@@ -2078,6 +2084,14 @@ impl BodyCascade<'_> {
             .and_then(|master| master_style(master, self.placeholder, level))
             .cloned()
             .unwrap_or_default();
+        if self.placeholder.is_none()
+            && let Some(source) = self
+                .default_style
+                .get(level as usize)
+                .or_else(|| self.default_style.first())
+        {
+            merge_paragraph_properties(&mut properties, source);
+        }
         if let Some(color) = self.style_color {
             properties
                 .default_run
