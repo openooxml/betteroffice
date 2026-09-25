@@ -54,6 +54,7 @@ export interface YrsInputRef {
   focus(): void;
   blur(): void;
   isFocused(): boolean;
+  flushPendingInput(): Promise<void>;
   setSelectionFromDisplay(anchor: number, head?: number, story?: string): void;
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
@@ -225,9 +226,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const composingRef = useRef(false);
   const compositionPendingRef = useRef(false);
   const compositionCommitRef = useRef('');
+  const compositionWaitersRef = useRef(new Set<() => void>());
+  const inputLifetimeRef = useRef({ session, enabled, mounted: true });
+  inputLifetimeRef.current.session = session;
+  inputLifetimeRef.current.enabled = enabled;
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const inputOperationQueueRef = useRef<InputOperationQueue | null>(null);
-  if (!inputOperationQueueRef.current) {
+  const queuedSessionRef = useRef(session);
+  if (!inputOperationQueueRef.current || queuedSessionRef.current !== session) {
+    queuedSessionRef.current = session;
     inputOperationQueueRef.current = new InputOperationQueue((error) => {
       console.error('[YrsInput] queued input operation failed', error);
     });
@@ -1067,6 +1074,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionCommitRef.current =
         event.currentTarget.value || event.data || compositionCommitRef.current;
       queueMicrotask(() => {
+        if (!compositionPendingRef.current || inputLifetimeRef.current.session !== session) return;
         const text = textareaRef.current?.value || compositionCommitRef.current;
         // Reset the browser model before applying the document op. A trailing
         // post-composition beforeinput therefore observes an empty model and
@@ -1075,9 +1083,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         compositionPendingRef.current = false;
         compositionCommitRef.current = '';
         insertText(text);
+        for (const resolve of compositionWaitersRef.current) resolve();
+        compositionWaitersRef.current.clear();
       });
     },
-    [insertText]
+    [insertText, session]
   );
 
   const handleInput = useCallback(
@@ -1102,12 +1112,49 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
+  const flushPendingInput = useCallback(async (): Promise<void> => {
+    const queue = inputOperationQueueRef.current;
+    const assertCurrent = () => {
+      const current = inputLifetimeRef.current;
+      if (!session || !current.mounted || !current.enabled || current.session !== session) {
+        throw new Error('The editor input changed or is unavailable while flushing');
+      }
+    };
+    assertCurrent();
+    if (composingRef.current || compositionPendingRef.current) {
+      await new Promise<void>((resolve) => compositionWaitersRef.current.add(resolve));
+      assertCurrent();
+    }
+    pendingResidentTextRef.current = null;
+    await queue?.flush();
+    assertCurrent();
+  }, [session]);
+
+  useEffect(() => {
+    inputLifetimeRef.current.mounted = true;
+    return () => {
+      inputLifetimeRef.current.mounted = false;
+      for (const resolve of compositionWaitersRef.current) resolve();
+      compositionWaitersRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    composingRef.current = false;
+    compositionPendingRef.current = false;
+    compositionCommitRef.current = '';
+    pendingResidentTextRef.current = null;
+    for (const resolve of compositionWaitersRef.current) resolve();
+    compositionWaitersRef.current.clear();
+  }, [session, enabled]);
+
   useImperativeHandle(
     ref,
     () => ({
       focus: () => textareaRef.current?.focus({ preventScroll: true }),
       blur: () => textareaRef.current?.blur(),
       isFocused: () => document.activeElement === textareaRef.current,
+      flushPendingInput,
       setSelectionFromDisplay(anchor, head = anchor, targetStory = story) {
         const anchorLoc = displayPositionToLoc(anchor, targetStory);
         const headLoc = displayPositionToLoc(head, targetStory);
@@ -1174,6 +1221,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       displaySelection,
       ensureSelection,
       finishMutation,
+      flushPendingInput,
       insertText,
       deleteSelected,
       readOnly,

@@ -11,7 +11,6 @@ use crate::eval::{
 };
 use crate::parser::Expr;
 
-use xlsx_model::DateSystem;
 use xlsx_model::numfmt;
 
 use super::nth_int;
@@ -485,7 +484,7 @@ pub(crate) fn text_fn(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if format.is_empty() {
         return text("");
     }
-    let formatted = numfmt::format_value(&value, &format, DateSystem::V1900);
+    let formatted = numfmt::format_value(&value, &format, ctx.date_system);
     limited_text(formatted.text)
 }
 

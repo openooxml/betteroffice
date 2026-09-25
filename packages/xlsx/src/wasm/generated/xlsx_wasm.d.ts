@@ -18,6 +18,7 @@ export class XlsxDocument {
      * apply a raw op list as one user transaction; returns `SheetInfo` json.
      */
     applyOpsJson(transaction_json: string): string;
+    applyOpsProfiledJson(transaction_json: string): string;
     applyUpdateJson(update: Uint8Array): string;
     calculationStatusJson(): string;
     captureFormatJson(args: string): string;
@@ -38,6 +39,7 @@ export class XlsxDocument {
      * serialized `DisplayList` for a serialized `Viewport`.
      */
     displayListJson(viewport_json: string): string;
+    displayListProfiledJson(viewport_json: string): string;
     /**
      * Poll one event: origin byte (`0` local, `1` remote), then update; empty means none.
      */
@@ -46,6 +48,7 @@ export class XlsxDocument {
      * enter one cell edit; returns updated `SheetInfo` json.
      */
     editCellJson(args: string): string;
+    editCellProfiledJson(args: string): string;
     /**
      * enter a batch of cell edits as one undo step; returns `SheetInfo` json.
      */
@@ -135,6 +138,7 @@ export interface InitOutput {
     readonly xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_applyOpsProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_calculationStatusJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_captureFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -144,8 +148,10 @@ export interface InitOutput {
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_displayListProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_drainUpdateEvent: (a: number) => [number, number, number, number];
     readonly xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_editCellProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];

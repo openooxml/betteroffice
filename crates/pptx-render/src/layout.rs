@@ -2306,7 +2306,14 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering)
+        // A blank paragraph between list items is spacing, not an item:
+        // PowerPoint neither marks it nor counts it towards the next number.
+        let marker = paragraph
+            .runs
+            .iter()
+            .any(|run| !run.text.is_empty())
+            .then(|| resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering))
+            .flatten()
             .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
@@ -2936,7 +2943,9 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
                 .fold(0.0_f32, f32::max);
             value as f32 * SINGLE_LINE_PITCH_EM * points_to_px(size_pt * scale)
         }
-        Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
+        // An autofit font scale shrinks the text, never a spacing written in
+        // points: PowerPoint keeps `a:spcBef`/`a:spcAft` at their stated size.
+        Some(LineSpacing::Points { value }) => points_to_px(value as f32),
         None => 0.0,
     };
     if height.is_finite() {
@@ -3044,7 +3053,6 @@ fn layout_paragraph(
             style_line_box(fonts, style, scale)?,
             paragraph,
             points_to_px(style.font_size_pt * scale),
-            scale,
         );
         return Ok(vec![PositionedTextLine {
             x,
@@ -3128,7 +3136,7 @@ fn layout_paragraph(
         };
         let (natural, extents) = clusters_line_box(fonts, slice, scale)?;
         let line_box = shifted_line_box(
-            spaced_line_box(natural, paragraph, line_font_size_px(slice, scale), scale),
+            spaced_line_box(natural, paragraph, line_font_size_px(slice, scale)),
             extents,
         );
         let mut caret_stops = vec![CaretStop {
@@ -3763,7 +3771,6 @@ fn spaced_line_box(
     content: ooxml_text::LineBox,
     paragraph: &ResolvedParagraph,
     size_px: f32,
-    scale: f32,
 ) -> ooxml_text::LineBox {
     if content.height() <= 0.0 {
         return content;
@@ -3771,16 +3778,23 @@ fn spaced_line_box(
     let reduction = paragraph.line_space_reduction;
     let single = SINGLE_LINE_PITCH_EM * size_px;
     let target = match paragraph.line_spacing {
-        Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
+        // An exact line spacing is a measurement, not a font size, so the
+        // autofit scale leaves it alone.
+        Some(LineSpacing::Points { value }) => points_to_px(value as f32),
         Some(LineSpacing::Percent { value }) => (value as f32 - reduction).max(0.0) * single,
         None => (1.0 - reduction) * single,
     };
     if !target.is_finite() || target < 0.0 {
         return content;
     }
+    // PowerPoint splits the room a line box does not fill evenly above and
+    // below it, so a paragraph whose spacing asks for more than its face
+    // measures starts that much lower.
     if target >= content.height() {
+        let slack = (target - content.ascent - content.descent) / 2.0;
         return ooxml_text::LineBox {
-            leading: target - content.ascent - content.descent,
+            ascent: content.ascent + slack,
+            leading: slack,
             ..content
         };
     }
@@ -7960,8 +7974,11 @@ mod tests {
         let pitch = lines[1].y - lines[0].y;
         assert!((pitch - 1.5 * 1.2 * points_to_px(size_pt)).abs() < 0.05);
 
+        // The room the spacing adds is split above and below the line, so a
+        // looser paragraph starts lower by half of what it added.
         let (single, _) = wrapped_text_box(8_016, None, None, 1_524_000, true);
-        assert!((lines[0].baseline - single[0].baseline).abs() < 0.001);
+        let added = (lines[0].height - single[0].height) / 2.0;
+        assert!((lines[0].baseline - single[0].baseline - added).abs() < 0.001);
     }
 
     #[test]

@@ -119,6 +119,36 @@ import { CollaborationProvider } from '@betteroffice/docx/collaboration';
 />;
 ```
 
+## Host saves and pending input
+
+`onSaveRequest` owns File > Save and Cmd/Ctrl+S before serialization. Its awaited
+callback can perform locks, revision checks, and persistence. Returning `true`
+continues the built-in export/download; returning `false` or nothing suppresses it.
+Overlapping UI save requests share one workflow. Errors reach `onError`.
+
+`DocxEditorRef.flushPendingInput()` and `PagedEditorRef.flushPendingInput()` wait
+until input accepted before the call and its selection are authoritative in Yrs.
+They wait for active IME composition to end, and reject on input failure, unmount,
+or document replacement. A failed input queue remains failed until a new session
+is loaded. The promise does not wait for browser painting.
+
+```tsx
+<DocxEditor
+  ref={editorRef}
+  onSaveRequest={async () => {
+    await validateRevision();
+    await editorRef.current!.flushPendingInput();
+    const bytes = await editorRef.current!.save();
+    if (bytes) await persistDocument(bytes);
+  }}
+/>
+```
+
+`save()` flushes input and exports directly, so calling it inside `onSaveRequest`
+does not invoke that callback again. `onSave(buffer)` remains the notification
+after export. Before direct session reads or mutations, await `flushPendingInput()`;
+after a mutation, use `syncYrsInputState(true)` to refresh the editor.
+
 ## Framework notes
 
 Import `@betteroffice/docx-react/styles.css` once (in a bundler entry or, under

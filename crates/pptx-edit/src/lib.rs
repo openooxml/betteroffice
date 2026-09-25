@@ -31,7 +31,7 @@ pub use model::*;
 pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
-pub use undo::DeckUndoManager;
+pub use undo::{DeckUndoManager, UndoCaptureMode};
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -325,6 +325,20 @@ impl DeckSession {
 
     pub fn can_redo(&self) -> bool {
         self.undo.borrow().can_redo()
+    }
+
+    pub fn undo_capture_mode(&self) -> UndoCaptureMode {
+        self.undo.borrow().capture_mode()
+    }
+
+    pub fn set_undo_capture_mode(&self, mode: UndoCaptureMode) {
+        self.undo.borrow_mut().set_capture_mode(mode);
+    }
+
+    pub(crate) fn automatic_undo_barrier(&self) {
+        if self.undo_capture_mode() == UndoCaptureMode::Auto {
+            self.add_undo_barrier();
+        }
     }
 
     pub fn add_undo_barrier(&self) {

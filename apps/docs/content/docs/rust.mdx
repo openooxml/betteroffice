@@ -35,6 +35,11 @@ unmodified row, column, and cell markup. Worksheets with missing or out-of-order
 row or cell addresses, and worksheets reconstructed from collaboration updates,
 are serialized from the model instead.
 
+`Workbook::edit_cell_profiled` and `apply_ops_profiled` return the usual edit
+outcome with an `EditProfile`. Supply a monotonic clock reporting milliseconds
+to collect validate, apply, recalculation, and result-building durations. Normal
+edit methods do not read a profiling clock.
+
 Open and save DOCX and PPTX files through their format APIs:
 
 ```rust

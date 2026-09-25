@@ -36,9 +36,10 @@ use crate::sheet_json::{
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
 };
 use crate::{
-    CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, Error, HistoryState,
-    MutationResult, NumberFormatKind, ProposalAcceptance, ProposalRequest, Result,
-    SelectionFormatting, SheetInfo, TextSearchMatch, UpdateEvent, UpdateOrigin,
+    CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
+    EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
+    ProposalRequest, Result, SelectionFormatting, SheetInfo, TextSearchMatch, UpdateEvent,
+    UpdateOrigin,
 };
 #[cfg(feature = "raster")]
 use crate::{RenderOptions, RenderedPng};
@@ -1163,12 +1164,39 @@ impl Workbook {
         input: &str,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.edit_cell_marked(sheet, cell, input, options, &mut |_| {})
+    }
+
+    /// [`Workbook::edit_cell`] with its stages timed by `now`, a millisecond
+    /// clock the caller supplies so native builds keep no browser dependency.
+    pub fn edit_cell_profiled(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<(MutationResult, EditProfile)> {
+        profiled(now, |mark| {
+            self.edit_cell_marked(sheet, cell, input, options, mark)
+        })
+    }
+
+    fn edit_cell_marked(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+        mark: &mut dyn FnMut(EditStage),
+    ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
         let state = edit_cell_state(&self.model, sheet, cell, input);
         validate_cell_state(&state)?;
         if cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state) {
             return Ok(MutationResult::default());
         }
+        mark(EditStage::Validated);
         self.ensure_graph();
         let formula = state.formula.clone();
         let ops = vec![Op::SetCell {
@@ -1182,6 +1210,7 @@ impl Workbook {
             cell,
             formula.as_deref(),
         );
+        mark(EditStage::Applied);
         let seeds = [(sheet, cell)];
         let result = recalc_after(
             &mut self.model,
@@ -1189,6 +1218,7 @@ impl Workbook {
             &seeds,
             options.now_serial,
         );
+        mark(EditStage::Recalculated);
         Ok(self.mutation_result(true, result, &seeds))
     }
 
@@ -1264,6 +1294,25 @@ impl Workbook {
         ops: Vec<Op>,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.apply_ops_marked(ops, options, &mut |_| {})
+    }
+
+    /// [`Workbook::apply_ops`] with its stages timed by `now`.
+    pub fn apply_ops_profiled(
+        &mut self,
+        ops: Vec<Op>,
+        options: CalculationOptions,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<(MutationResult, EditProfile)> {
+        profiled(now, |mark| self.apply_ops_marked(ops, options, mark))
+    }
+
+    fn apply_ops_marked(
+        &mut self,
+        ops: Vec<Op>,
+        options: CalculationOptions,
+        mark: &mut dyn FnMut(EditStage),
+    ) -> Result<MutationResult> {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
@@ -1289,6 +1338,7 @@ impl Workbook {
         if preview == self.model {
             return Ok(MutationResult::default());
         }
+        mark(EditStage::Validated);
         let mut inverse = Vec::new();
         for chunk in per_op.into_iter().rev() {
             inverse.extend(chunk);
@@ -1299,7 +1349,9 @@ impl Workbook {
         if invalidates_proposals {
             self.proposals.clear();
         }
+        mark(EditStage::Applied);
         let result = self.rebuild_and_recalculate(options);
+        mark(EditStage::Recalculated);
         Ok(MutationResult {
             applied: true,
             changed: result.changed,
@@ -2606,6 +2658,31 @@ fn validate_collaboration_state_entries(entries: usize) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// runs one marked mutation against a caller-supplied clock and reads its
+/// stage durations off the marks; a stage the mutation skipped reads 0.
+fn profiled<T>(
+    now: &mut impl FnMut() -> f64,
+    run: impl FnOnce(&mut dyn FnMut(EditStage)) -> Result<T>,
+) -> Result<(T, EditProfile)> {
+    let started = now();
+    let mut stamps: Vec<(EditStage, f64)> = Vec::with_capacity(3);
+    let value = run(&mut |stage| stamps.push((stage, now())))?;
+    let finished = now();
+    let at = |stage: EditStage| stamps.iter().find(|(s, _)| *s == stage).map(|(_, t)| *t);
+    let validated = at(EditStage::Validated).unwrap_or(finished);
+    let applied = at(EditStage::Applied).unwrap_or(validated);
+    let recalculated = at(EditStage::Recalculated).unwrap_or(applied);
+    Ok((
+        value,
+        EditProfile {
+            validate_ms: validated - started,
+            apply_ms: applied - validated,
+            recalc_ms: recalculated - applied,
+            result_ms: finished - recalculated,
+        },
+    ))
 }
 
 fn calculation_result(result: &RecalcResult) -> CalculationResult {

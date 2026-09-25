@@ -55,7 +55,7 @@ use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
     Patch, Position, RawOp, SeedParagraph, SegmentContent, SimpleFormat, StoryRange, TabStop,
-    TableLocator, TableRange, TriState, UndoSession, story_ref,
+    TableLocator, TableRange, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -1855,8 +1855,34 @@ impl EditSession {
         self.undo.track(self.engine.doc());
     }
 
-    /// Notes the story a direct operation is about to edit; a different story
-    /// than the previous edit or caret closes the current undo step.
+    /// Closes the current undo capture without adding an empty step.
+    pub fn add_undo_boundary(&self) {
+        self.undo.add_undo_barrier();
+    }
+
+    /// Changes grouping policy while retaining undo and redo history.
+    pub fn set_undo_capture_mode(&self, mode: &str) -> Result<(), JsValue> {
+        let mode = match mode {
+            "auto" => UndoCaptureMode::Auto,
+            "manual" => UndoCaptureMode::Manual,
+            _ => {
+                return Err(js_err("undo capture mode must be auto or manual"));
+            }
+        };
+        self.undo.set_capture_mode(mode);
+        Ok(())
+    }
+
+    /// Current undo grouping policy.
+    pub fn undo_capture_mode(&self) -> String {
+        match self.undo.capture_mode() {
+            UndoCaptureMode::Auto => "auto",
+            UndoCaptureMode::Manual => "manual",
+        }
+        .to_owned()
+    }
+
+    /// Selects a story, closing capture unless manual grouping is selected.
     pub fn select_story(&self, story: &str) {
         self.undo.select_story(story);
     }

@@ -127,3 +127,12 @@ step automatically.
 
 [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
 [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/xlsx/CHANGELOG.md) · Apache-2.0.
+
+### Operation profiles
+
+`editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled` perform the same
+operations as their unprofiled counterparts and return engine stage durations
+in milliseconds. Edit results include `profile` (validate, apply, recalc, result);
+display results contain `{ displayList, profile }` (build, encode). The normal
+entry points do not read profiling clocks. See the
+[corpus and browser tests](../../e2e/README.md) for usage and timing limits.
