@@ -365,6 +365,7 @@ pub(crate) struct ReadSource {
     /// Each source comment's `w:comment` element.
     pub comment_anchors: HashMap<String, Anchor>,
     pub final_section: Option<Value>,
+    pub settings: Option<Value>,
     /// Each part's relationships, the main document part's included.
     pub relationships: HashMap<String, HashMap<String, RelationshipTarget>>,
     pub numbering: Arc<docx_parse::NumberingMap>,
@@ -522,6 +523,9 @@ impl ReadSource {
             raw_block_anchors: HashMap::new(),
             comment_anchors: HashMap::new(),
             final_section: field(field(package, "document"), "finalSectionProperties")
+                .filter(|value| !value.is_null())
+                .cloned(),
+            settings: field(package, "settings")
                 .filter(|value| !value.is_null())
                 .cloned(),
             relationships: HashMap::from([(document_part.to_owned(), main)]),

@@ -74,11 +74,13 @@ function Harness({
   editorRef,
   scrollRef,
   coreRef,
+  zoom = 1,
 }: {
   bytes: Uint8Array;
   editorRef: RefObject<PagedEditorRef | null>;
   scrollRef: RefObject<HTMLDivElement | null>;
   coreRef: { current: YrsCoreSession | null };
+  zoom?: number;
 }) {
   const [host, setHost] = useState<Document | null>(null);
   const core = useYrsCoreSession(true, host, null, bytes, 0, undefined, {
@@ -91,6 +93,7 @@ function Harness({
         ref={editorRef}
         document={host}
         yrsCore={core}
+        zoom={zoom}
         scrollContainerRef={scrollRef}
         measurementFontProvider={{ resolve: () => () => Promise.resolve(fontBytes) }}
       />
@@ -158,4 +161,64 @@ test('exports leave the mounted editor viewport, layout, DOM and selection untou
   expect(editor.getLayout()).toBe(layout);
   expect([scroller.scrollTop, scroller.scrollLeft]).toEqual(viewport);
   expect([session.selection(), editor.getSelectionRange()]).toEqual(selection);
+});
+
+test('page exports read the layout the editor laid out, whatever its zoom', async () => {
+  const editorRef = createRef<PagedEditorRef>();
+  const scrollRef = createRef<HTMLDivElement>();
+  const coreRef: { current: YrsCoreSession | null } = { current: null };
+  const bytes = fixture();
+  const { container, rerender } = render(
+    <Harness bytes={bytes} editorRef={editorRef} scrollRef={scrollRef} coreRef={coreRef} />
+  );
+  await until(() => !!coreRef.current?.session && !!editorRef.current?.getLayout());
+  await settled(container);
+  const editor = editorRef.current!;
+  const session = editor.getYrsSession()!;
+  const request = editor.getLayoutRequest();
+  if (request === null) throw new Error('the editor has no layout request');
+  const options = { revisionView: 'markup', includeGeometry: true } as const;
+  const first = session.exportStructuredWithPagesFor(options, request);
+  if (!first.ok) throw new Error(first.failure.message);
+  expect(first.content.layout.documentVersion).toBe(session.version());
+  expect(first.content.layout.pages).toHaveLength(editor.getLayout()!.pages.length);
+  expect(first.content.layout.fragments.length).toBeGreaterThan(40);
+  rerender(
+    <Harness bytes={bytes} editorRef={editorRef} scrollRef={scrollRef} coreRef={coreRef} zoom={2} />
+  );
+  await settled(container);
+  expect(editorRef.current!.getLayoutRequest()).toBe(request);
+  const zoomed = session.exportStructuredWithPagesFor(options, request);
+  if (!zoomed.ok) throw new Error(zoomed.failure.message);
+  expect(zoomed.content.layout.fragments).toEqual(first.content.layout.fragments);
+});
+
+test('an editor laying out sections, headers and notes exports their pages', async () => {
+  const editorRef = createRef<PagedEditorRef>();
+  const scrollRef = createRef<HTMLDivElement>();
+  const coreRef: { current: YrsCoreSession | null } = { current: null };
+  const bytes = new Uint8Array(
+    readFileSync(
+      resolve(import.meta.dir, '../../../../../crates/docx-edit/tests/fixtures/page-fragments/pages.docx')
+    )
+  );
+  const { container } = render(
+    <Harness bytes={bytes} editorRef={editorRef} scrollRef={scrollRef} coreRef={coreRef} />
+  );
+  await until(() => !!coreRef.current?.session && !!editorRef.current?.getLayout());
+  await settled(container);
+  const editor = editorRef.current!;
+  const session = editor.getYrsSession()!;
+  const request = editor.getLayoutRequest();
+  if (request === null) throw new Error('the editor has no layout request');
+  const paged = session.exportStructuredWithPagesFor(
+    { revisionView: 'markup', stories: ['body', 'headers', 'footers', 'footnotes', 'endnotes'] },
+    request
+  );
+  if (!paged.ok) throw new Error(paged.failure.message);
+  const { pages, occurrences } = paged.content.layout;
+  expect(pages).toHaveLength(editor.getLayout()!.pages.length);
+  expect(new Set(pages.map((page) => page.sectionIndex)).size).toBeGreaterThan(2);
+  expect(occurrences.some((occurrence) => occurrence.region.kind === 'header')).toBe(true);
+  expect(occurrences.some((occurrence) => occurrence.region.kind === 'footnote')).toBe(true);
 });

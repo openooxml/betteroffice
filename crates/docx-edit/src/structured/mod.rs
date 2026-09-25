@@ -8,6 +8,7 @@
 //! three read the same editing stream and retained package context.
 
 mod markdown;
+pub(crate) mod pages;
 pub(crate) mod source;
 mod walk;
 
@@ -20,7 +21,15 @@ use crate::EditingDoc;
 use crate::batch::DocumentVersion;
 
 pub use crate::read_types::{Anchor, ControlMetadata, HeadingInfo, OutlineSource, StorySelection};
-pub use markdown::render_docx_markdown;
+pub use markdown::{PageAnnotations, render_docx_markdown, render_docx_markdown_with_pages};
+pub use pages::{
+    AtomCoverage, DEFAULT_MAX_FRAGMENTS, DocxLayoutMap, DocxPagedStructuredContent,
+    DocxSnapshotLayoutMap, ExportPage, FragmentGeometry, FragmentRow, FragmentSlice,
+    GeometryOrigin, GeometryRect, GeometryUnit, LayoutProvenance, LayoutRevisionView,
+    MAX_FRAGMENTS_LIMIT, NotePlacement, NumberingStatus, OccurrenceRegion, PageDiagnostic,
+    PageDiagnosticCode, PageExportOptions, PageFragment, PageMarkdownOptions, PageSize,
+    SnapshotLayoutProvenance, StoryOccurrence, export_fingerprint,
+};
 
 /// The only structured-content schema version this crate reads and writes.
 pub const SCHEMA_VERSION: u8 = 1;
@@ -498,6 +507,16 @@ pub enum ExportFailureCode {
     InvalidOptions,
     LimitExceeded,
     Unsupported,
+    /// The document changed after the layout a paged export needs was computed.
+    StaleDocument,
+    /// The layout named or the fonts and options it was measured with changed.
+    StaleLayout,
+    /// No complete layout of the current document is retained.
+    LayoutUnavailable,
+    /// The revision view reflows differently from the markup the pages show.
+    UnsupportedRevisionLayout,
+    /// Note placement did not settle.
+    LayoutNotConverged,
 }
 
 /// Why an export was refused, as data. `target` is the anchor the refusal concerns, if any.
@@ -515,6 +534,11 @@ impl fmt::Display for ExportFailure {
             ExportFailureCode::InvalidOptions => "invalid-options",
             ExportFailureCode::LimitExceeded => "limit-exceeded",
             ExportFailureCode::Unsupported => "unsupported",
+            ExportFailureCode::StaleDocument => "stale-document",
+            ExportFailureCode::StaleLayout => "stale-layout",
+            ExportFailureCode::LayoutUnavailable => "layout-unavailable",
+            ExportFailureCode::UnsupportedRevisionLayout => "unsupported-revision-layout",
+            ExportFailureCode::LayoutNotConverged => "layout-not-converged",
         };
         write!(f, "{code}: {}", self.message)
     }
@@ -563,6 +587,26 @@ impl From<ExportFailure> for ExportError {
     }
 }
 
+/// Counts written bytes without keeping them.
+struct Counter(usize);
+
+impl std::io::Write for Counter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The compact JSON size of `value`, measured without building the JSON.
+pub(crate) fn json_len<T: Serialize + ?Sized>(value: &T) -> usize {
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_or(0, |_| counter.0)
+}
+
 pub(crate) fn invalid_options(message: impl Into<String>) -> ExportFailure {
     ExportFailure {
         code: ExportFailureCode::InvalidOptions,
@@ -593,6 +637,11 @@ pub(crate) fn byte_limit(requested: Option<u32>) -> Result<usize, ExportFailure>
         )));
     }
     Ok(limit as usize)
+}
+
+/// Validates export options without exporting.
+pub(crate) fn validate_options(options: &ExportOptions) -> Result<(), ExportFailure> {
+    Resolved::new(options).map(|_| ())
 }
 
 /// Export options with their defaults applied and validated.
@@ -641,6 +690,15 @@ impl EditingDoc {
         &self,
         options: &ExportOptions,
     ) -> Result<ExportRead<DocxStructuredContent>, ExportRefusal> {
+        self.export_structured_scoped(options, AnchorScope::Session)
+    }
+
+    /// [`EditingDoc::export_structured`] with anchors in `scope`.
+    pub(crate) fn export_structured_scoped(
+        &self,
+        options: &ExportOptions,
+        scope: AnchorScope,
+    ) -> Result<ExportRead<DocxStructuredContent>, ExportRefusal> {
         let version = self.version();
         let refuse = |failure| ExportRefusal {
             version: version.clone(),
@@ -654,7 +712,7 @@ impl EditingDoc {
                 message: "The session holds no document content to export.".to_owned(),
             }));
         }
-        let content = walk::export(self, &resolved, AnchorScope::Session);
+        let content = walk::export(self, &resolved, scope);
         Ok(ExportRead { version, content })
     }
 

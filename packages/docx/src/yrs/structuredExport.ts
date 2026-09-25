@@ -235,9 +235,21 @@ export interface DocxMarkdownContent extends ExportCompletion {
 
 /**
  * Options out of range or above a hard maximum, or a session holding no document content.
- * Unsupported document content is diagnosed, never refused.
+ * Unsupported document content is diagnosed, never refused. A paged export also refuses a
+ * layout older than the document (`stale-document`), one whose fonts, options or named version
+ * changed (`stale-layout`), no retained or measurable layout (`layout-unavailable`), a revision
+ * view the markup pages do not show (`unsupported-revision-layout`) and notes that did not
+ * settle (`layout-not-converged`).
  */
-export type DocxExportFailureCode = 'invalid-options' | 'limit-exceeded' | 'unsupported';
+export type DocxExportFailureCode =
+  | 'invalid-options'
+  | 'limit-exceeded'
+  | 'unsupported'
+  | 'stale-document'
+  | 'stale-layout'
+  | 'layout-unavailable'
+  | 'unsupported-revision-layout'
+  | 'layout-not-converged';
 
 /** Why an export was refused; `target` is the anchor the refusal concerns, if any. */
 export interface DocxExportFailure {

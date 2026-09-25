@@ -3195,6 +3195,62 @@ impl EditSession {
         outcome_json(&self.engine.doc().export_markdown(&options)).map_err(js_err)
     }
 
+    /// [`EditSession::export_structured_json`] with the page map of the retained region
+    /// layout. `options` adds `"includeGeometry"?`, `"expectLayoutVersion"?`,
+    /// `"maxFragments"?` and `"maxLayoutBytes"?`; the reply is
+    /// `{"ok":true,"version","content":{"structured","layout"}}` or a refusal. An editor passes
+    /// the region layout request it would lay the document out with now as `current_request`,
+    /// and the layout must have been computed from the same inputs. Lays nothing out and changes
+    /// nothing.
+    pub fn export_structured_with_pages_json(
+        &self,
+        options: &str,
+        current_request: Option<String>,
+    ) -> Result<String, JsValue> {
+        let options: crate::structured::PageExportOptions =
+            serde_json::from_str(options).map_err(js_err)?;
+        let read = match current_request {
+            Some(current) => self
+                .engine
+                .export_structured_with_pages_for(&options, &current),
+            None => self.engine.export_structured_with_pages(&options),
+        };
+        outcome_json(&read).map_err(js_err)
+    }
+
+    /// Lays this private session out with its own fonts and exports it with pages as a
+    /// snapshot. `fonts` holds the font files back to back, `font_lengths` their byte lengths;
+    /// `request` is a region layout request whose font chains name fonts by their index. The
+    /// reply is `{"ok":true,"content"}` or `{"ok":false,"failure"}`; a rejected font or an
+    /// unusable request throws. The module's shared measurement fonts are left untouched.
+    pub fn export_snapshot_with_private_fonts_json(
+        &self,
+        fonts: &[u8],
+        font_lengths: &[u32],
+        request: &str,
+        options: &str,
+    ) -> Result<String, JsValue> {
+        let options: crate::structured::PageExportOptions =
+            serde_json::from_str(options).map_err(js_err)?;
+        let mut files = Vec::with_capacity(font_lengths.len());
+        let mut rest = fonts;
+        for length in font_lengths {
+            if rest.len() < *length as usize {
+                return Err(js_err("font lengths exceed the font bytes"));
+            }
+            let (file, tail) = rest.split_at(*length as usize);
+            files.push(file);
+            rest = tail;
+        }
+        let outcome = self
+            .engine
+            .export_snapshot_with_private_fonts(&files, request, &options)
+            .map_err(js_err)?
+            .map(|content| json!({ "content": content }))
+            .map_err(|failure| json!({ "failure": failure }));
+        outcome_json(&outcome).map_err(js_err)
+    }
+
     /// The headings of `story` in document order, classified as the structured export
     /// classifies them: `[{"paraId","heading":{"outlineLevel","source"}}]`.
     pub fn headings_json(&self, story: &str) -> Result<String, JsValue> {
@@ -3620,6 +3676,42 @@ pub fn render_docx_markdown_json(content: &str, options: &str) -> Result<String,
     )
 }
 
+/// Renders a paged export as Markdown: `content` is `{"structured","layout"}` from a paged
+/// export and `options` is `{"maxBytes"?,"pageMarkers"?}`.
+#[wasm_bindgen]
+pub fn render_docx_markdown_with_pages_json(
+    content: &str,
+    options: &str,
+) -> Result<String, JsValue> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Layout {
+        export_fingerprint: String,
+        pages: Vec<crate::structured::ExportPage>,
+        fragments: Vec<crate::structured::PageFragment>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Paged {
+        structured: crate::structured::DocxStructuredContent,
+        layout: Layout,
+    }
+    let content: Paged = serde_json::from_str(content).map_err(js_err)?;
+    let options: crate::structured::PageMarkdownOptions =
+        serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(
+        crate::structured::render_docx_markdown_with_pages(
+            &content.structured,
+            crate::structured::PageAnnotations {
+                export_fingerprint: &content.layout.export_fingerprint,
+                pages: &content.layout.pages,
+                fragments: &content.layout.fragments,
+            },
+            &options,
+        )
+        .map_err(crate::structured::ExportError::Refused),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3825,6 +3917,128 @@ mod tests {
         );
         assert_eq!(unsupported["failure"]["code"], "unsupported");
         assert_eq!(unsupported["failure"]["target"], Value::Null);
+    }
+
+    #[test]
+    fn paged_export_envelopes_carry_versions_maps_and_refusals() {
+        let font: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let session = EditSession::new(75.0).unwrap();
+        session.open_docx(&batch_docx(), true).unwrap();
+        let options = r#"{"revisionView":"markup"}"#;
+        let unavailable = envelope(
+            &session
+                .export_structured_with_pages_json(options, None)
+                .unwrap(),
+        );
+        assert_eq!(unavailable["ok"], false);
+        assert_eq!(unavailable["version"], session.version().as_str());
+        assert_eq!(unavailable["failure"]["code"], "layout-unavailable");
+        assert_eq!(unavailable["failure"]["target"], Value::Null);
+        let mut request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"properties": {}}]},
+            "renderEnv": {},
+        });
+        let requirements: Vec<Value> = serde_json::from_str(
+            &session
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains = |id: u32| -> serde_json::Map<String, Value> {
+            requirements
+                .iter()
+                .map(|requirement| (requirement["key"].as_str().unwrap().to_owned(), json!([id])))
+                .collect()
+        };
+        let defaults = json!({"fontSize": 11, "fontFamily": "Calibri"});
+        let snapshot_request = {
+            let mut private = request.clone();
+            private["measurement"] = json!({"fontChains": chains(0), "defaults": defaults});
+            private.to_string()
+        };
+        docx_layout::clear_measure_fonts();
+        let id = session.register_measure_font(font).unwrap();
+        request["measurement"] = json!({"fontChains": chains(id), "defaults": defaults});
+        let request = request.to_string();
+        session
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        let version = session.version();
+        let read = envelope(
+            &session
+                .export_structured_with_pages_json(options, Some(request.clone()))
+                .unwrap(),
+        );
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["version"], version.as_str());
+        assert_eq!(
+            read["content"]["layout"]["documentVersion"],
+            version.as_str()
+        );
+        assert_eq!(read["content"]["layout"]["layoutRevisionView"], "markup");
+        assert_eq!(read["content"]["layout"]["pages"][0]["displayedLabel"], "1");
+        assert!(
+            read["content"]["layout"]["provenance"]
+                .get("frameEpoch")
+                .is_none()
+        );
+        assert_eq!(
+            read["content"]["layout"]["fragments"][0]["geometry"],
+            Value::Null
+        );
+        assert_eq!(read["content"]["structured"]["anchorScope"], "session");
+        let private = EditSession::new(76.0).unwrap();
+        private.open_docx(&batch_docx(), true).unwrap();
+        let snapshot = envelope(
+            &private
+                .export_snapshot_with_private_fonts_json(
+                    font,
+                    &[font.len() as u32],
+                    &snapshot_request,
+                    options,
+                )
+                .unwrap(),
+        );
+        assert_eq!(snapshot["ok"], true);
+        assert!(snapshot.get("version").is_none());
+        assert!(
+            snapshot["content"]["layout"]
+                .get("documentVersion")
+                .is_none()
+        );
+        assert_eq!(snapshot["content"]["structured"]["anchorScope"], "snapshot");
+        assert_eq!(
+            session
+                .export_structured_with_pages_json(options, Some(request.clone()))
+                .map(|reply| envelope(&reply)["ok"].clone())
+                .unwrap(),
+            true,
+            "the private fonts never replaced the session's"
+        );
+        let marked = envelope(
+            &render_docx_markdown_with_pages_json(
+                &snapshot["content"].to_string(),
+                r#"{"pageMarkers":true}"#,
+            )
+            .unwrap(),
+        );
+        assert!(
+            marked["content"]["markdown"]
+                .as_str()
+                .unwrap()
+                .contains("<!-- docx-export:0 --><!-- docx-pages: 0=1 -->")
+        );
+        let limited = envelope(
+            &session
+                .export_structured_with_pages_json(
+                    r#"{"revisionView":"markup","maxLayoutBytes":8}"#,
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(limited["failure"]["code"], "invalid-options");
+        assert_eq!(session.version(), version);
     }
 
     #[test]

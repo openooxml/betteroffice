@@ -65,7 +65,8 @@ use crate::display_list::{
     TableFragmentIn, WatermarkIn, capped_alt_text, emit_hf_shape, emit_paragraph_fragment,
     emit_table_fragment, px, rotation_degrees, sanitized_href, table_total_width,
 };
-use crate::display_list::{Crop, ImagePrimitive};
+use crate::display_list::{Crop, ImagePrimitive, PageHeaderFooterRefsIn};
+use crate::header_footer::{HeaderFooterKind, HeaderFooterType};
 
 /// Word's default header/footer distance: 0.5 inches at 96 DPI.
 const DEFAULT_HF_DISTANCE_PX: f64 = 48.0;
@@ -146,56 +147,72 @@ enum HfType {
     Even,
 }
 
-/// Selects the header or footer variant for a 1-based page number.
-fn resolve_variant<'a>(
-    hf: &'a HeadersFootersIn,
-    page: &PageIn,
-    kind: HfKind,
-    page_number: u64,
-) -> Option<&'a HfVariantIn> {
-    let section_index = page.section_index.map(|value| value as usize);
+/// The section flags that select a band variant.
+pub(crate) struct BandSettings<'a> {
+    pub title_pg: bool,
+    pub even_and_odd_headers: bool,
+    pub title_page_sections: &'a [usize],
+    pub even_and_odd_sections: &'a [usize],
+}
+
+/// The page facts that select a band variant.
+pub(crate) struct BandPage {
+    pub section_index: Option<usize>,
+    pub section_page_index: Option<u64>,
+    /// The layout's own 1-based page number.
+    pub page_number: u64,
+    /// Whether the page carries its section's header/footer relationships.
+    pub has_refs: bool,
+}
+
+/// Selects the header or footer variant a page shows, with the role it shows it in: a part one
+/// section references as both its default and first-page band is shown in whichever role the page
+/// selected. `describe` names a variant's kind, type, relationship id and section; `page_ref` is
+/// the page's relationship for a kind and type.
+pub(crate) fn select_band_variant<'a, V>(
+    variants: &'a [V],
+    describe: impl Fn(&V) -> (HeaderFooterKind, HeaderFooterType, &str, Option<usize>),
+    settings: &BandSettings<'_>,
+    page: &BandPage,
+    page_ref: impl Fn(HeaderFooterKind, HeaderFooterType) -> Option<&'a str>,
+    kind: HeaderFooterKind,
+) -> Option<(&'a V, HeaderFooterType)> {
+    let section_index = page.section_index;
+    let in_section = |section: Option<usize>| section.is_none() || section == section_index;
     // Later variants take precedence.
-    let get = |t: HfType| {
-        hf.variants.iter().rfind(|v| {
-            v.kind == kind
-                && v.hf_type == t
-                && (v.section_index.is_none() || v.section_index == section_index)
+    let get = |wanted: HeaderFooterType| {
+        variants.iter().rfind(|variant| {
+            let (variant_kind, variant_type, _, section) = describe(variant);
+            variant_kind == kind && variant_type == wanted && in_section(section)
         })
     };
-    let title_page = section_index.is_some_and(|index| hf.title_page_sections.contains(&index))
-        || hf.title_pg == Some(true);
-    let even_and_odd = section_index.is_some_and(|index| hf.even_and_odd_sections.contains(&index))
-        || hf.even_and_odd_headers == Some(true);
+    let title_page = section_index
+        .is_some_and(|index| settings.title_page_sections.contains(&index))
+        || settings.title_pg;
+    let even_and_odd = section_index
+        .is_some_and(|index| settings.even_and_odd_sections.contains(&index))
+        || settings.even_and_odd_headers;
     let first_page = page
         .section_page_index
-        .unwrap_or(page_number.saturating_sub(1))
+        .unwrap_or(page.page_number.saturating_sub(1))
         == 0;
     let selected_type = if first_page && title_page {
-        HfType::First
-    } else if even_and_odd && page_number.is_multiple_of(2) {
-        HfType::Even
+        HeaderFooterType::First
+    } else if even_and_odd && page.page_number.is_multiple_of(2) {
+        HeaderFooterType::Even
     } else {
-        HfType::Default
+        HeaderFooterType::Default
     };
-    if let Some(refs) = &page.header_footer_refs {
-        let r_id = match (kind, selected_type) {
-            (HfKind::Header, HfType::Default) => refs.header_default.as_deref(),
-            (HfKind::Header, HfType::First) => refs.header_first.as_deref(),
-            (HfKind::Header, HfType::Even) => refs.header_even.as_deref(),
-            (HfKind::Footer, HfType::Default) => refs.footer_default.as_deref(),
-            (HfKind::Footer, HfType::First) => refs.footer_first.as_deref(),
-            (HfKind::Footer, HfType::Even) => refs.footer_even.as_deref(),
-        };
-        if let Some(r_id) = r_id
-            && let Some(variant) = hf.variants.iter().rfind(|variant| {
-                variant.kind == kind
-                    && variant.r_id == r_id
-                    && (variant.section_index.is_none() || variant.section_index == section_index)
+    if page.has_refs {
+        if let Some(r_id) = page_ref(kind, selected_type)
+            && let Some(variant) = variants.iter().rfind(|variant| {
+                let (variant_kind, _, variant_r_id, section) = describe(variant);
+                variant_kind == kind && variant_r_id == r_id && in_section(section)
             })
         {
-            return Some(variant);
+            return Some((variant, selected_type));
         }
-        if selected_type == HfType::First {
+        if selected_type == HeaderFooterType::First {
             return None;
         }
     }
@@ -203,15 +220,85 @@ fn resolve_variant<'a>(
         // `titlePg` selects a distinct story. Word treats an absent first-page
         // relationship as an intentionally blank band; falling through here
         // would incorrectly repeat the default header/footer on page one.
-        return get(HfType::First);
+        return get(HeaderFooterType::First).map(|variant| (variant, HeaderFooterType::First));
     }
     if even_and_odd
-        && page_number.is_multiple_of(2)
-        && let Some(v) = get(HfType::Even)
+        && page.page_number.is_multiple_of(2)
+        && let Some(variant) = get(HeaderFooterType::Even)
     {
-        return Some(v);
+        return Some((variant, HeaderFooterType::Even));
     }
-    get(HfType::Default)
+    get(HeaderFooterType::Default).map(|variant| (variant, HeaderFooterType::Default))
+}
+
+/// The relationship id `refs` names for one band kind and type.
+pub(crate) fn band_ref(
+    refs: &PageHeaderFooterRefsIn,
+    kind: HeaderFooterKind,
+    hf_type: HeaderFooterType,
+) -> Option<&str> {
+    match (kind, hf_type) {
+        (HeaderFooterKind::Header, HeaderFooterType::Default) => refs.header_default.as_deref(),
+        (HeaderFooterKind::Header, HeaderFooterType::First) => refs.header_first.as_deref(),
+        (HeaderFooterKind::Header, HeaderFooterType::Even) => refs.header_even.as_deref(),
+        (HeaderFooterKind::Footer, HeaderFooterType::Default) => refs.footer_default.as_deref(),
+        (HeaderFooterKind::Footer, HeaderFooterType::First) => refs.footer_first.as_deref(),
+        (HeaderFooterKind::Footer, HeaderFooterType::Even) => refs.footer_even.as_deref(),
+    }
+}
+
+fn typed_kind(kind: HfKind) -> HeaderFooterKind {
+    match kind {
+        HfKind::Header => HeaderFooterKind::Header,
+        HfKind::Footer => HeaderFooterKind::Footer,
+    }
+}
+
+fn typed_type(hf_type: HfType) -> HeaderFooterType {
+    match hf_type {
+        HfType::Default => HeaderFooterType::Default,
+        HfType::First => HeaderFooterType::First,
+        HfType::Even => HeaderFooterType::Even,
+    }
+}
+
+/// Selects the header or footer variant for a 1-based page number.
+fn resolve_variant<'a>(
+    hf: &'a HeadersFootersIn,
+    page: &'a PageIn,
+    kind: HfKind,
+    page_number: u64,
+) -> Option<&'a HfVariantIn> {
+    select_band_variant(
+        &hf.variants,
+        |variant| {
+            (
+                typed_kind(variant.kind),
+                typed_type(variant.hf_type),
+                variant.r_id.as_str(),
+                variant.section_index,
+            )
+        },
+        &BandSettings {
+            title_pg: hf.title_pg == Some(true),
+            even_and_odd_headers: hf.even_and_odd_headers == Some(true),
+            title_page_sections: &hf.title_page_sections,
+            even_and_odd_sections: &hf.even_and_odd_sections,
+        },
+        &BandPage {
+            section_index: page.section_index.map(|value| value as usize),
+            section_page_index: page.section_page_index,
+            page_number,
+            has_refs: page.header_footer_refs.is_some(),
+        },
+        |kind, hf_type| {
+            page.header_footer_refs
+                .as_ref()
+                .and_then(|refs| band_ref(refs, kind, hf_type))
+        },
+        typed_kind(kind),
+    )
+    .map(|(variant, _)| variant)
 }
 
 #[cfg(test)]
@@ -294,6 +381,39 @@ mod tests {
             resolve_variant(&hf, &page, HfKind::Header, 2).map(|value| value.r_id.as_str()),
             Some("section-one")
         );
+    }
+
+    #[test]
+    fn a_shared_relationship_is_shown_in_the_role_the_page_selects() {
+        let variants = [
+            (HeaderFooterType::Default, "shared"),
+            (HeaderFooterType::First, "shared"),
+        ];
+        let settings = BandSettings {
+            title_pg: true,
+            even_and_odd_headers: false,
+            title_page_sections: &[],
+            even_and_odd_sections: &[],
+        };
+        let role = |page_number: u64| {
+            select_band_variant(
+                &variants,
+                |(hf_type, r_id)| (HeaderFooterKind::Header, *hf_type, *r_id, None),
+                &settings,
+                &BandPage {
+                    section_index: Some(0),
+                    section_page_index: Some(page_number - 1),
+                    page_number,
+                    has_refs: true,
+                },
+                |_, _| Some("shared"),
+                HeaderFooterKind::Header,
+            )
+            .map(|(_, role)| role)
+        };
+
+        assert_eq!(role(1), Some(HeaderFooterType::First));
+        assert_eq!(role(2), Some(HeaderFooterType::Default));
     }
 }
 

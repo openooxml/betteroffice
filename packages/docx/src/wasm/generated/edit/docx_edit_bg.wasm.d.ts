@@ -46,7 +46,9 @@ export const editsession_encode_state_vector: (a: number) => [number, number];
 export const editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_encoded_selection: (a: number) => [number, number, number, number];
 export const editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_export_structured_with_pages_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_find_text_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -126,6 +128,7 @@ export const editsession_yrs_blocks_for_story: (a: number, b: number, c: number,
 export const export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

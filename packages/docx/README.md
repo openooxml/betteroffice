@@ -261,4 +261,72 @@ blocks per cell), attributed insertions and deletions, and a
 anchor in `anchors`. Only http, https, mailto and internal-anchor targets are linked,
 judged after entity and percent decoding, and `&` in a target is written `&amp;`; document text, titles and alt text never keep a
 line break or unescaped HTML. It does not
-preserve Word pagination or layout. Page fragments are not included yet.
+preserve Word pagination or layout.
+
+### Page fragments
+
+A paged export attaches a page map to the structured content: the physical page,
+section and displayed page label showing each block and inline, and the body,
+header, footer or note occurrence it sits in. Ordinary exports never lay anything
+out.
+
+```ts
+import { exportDocxStructuredWithPages, renderDocxMarkdownWithPages } from '@betteroffice/docx';
+
+const paged = await exportDocxStructuredWithPages(
+  bytes,
+  { revisionView: 'markup', stories: ['body', 'headers', 'footnotes'], includeGeometry: true },
+  { fonts: [{ key: 'sans', data: fontBase64 }], defaultChain: ['sans'] }
+);
+paged.layout.pages; // pageIndex, displayedLabel, sectionIndex, parityFiller, size
+paged.layout.fragments; // pageIndex, occurrenceId, nodeId, slice, continuation flags, geometry
+const { markdown } = await renderDocxMarkdownWithPages(paged, { pageMarkers: true });
+```
+
+`exportDocxStructuredWithPages` opens the bytes in a private session, registers
+exactly the fonts it is given, as base64 data, in a measurement font store of its
+own (a requirement `family|bold|italic` takes the chain named by its key, else by
+its lowercase family, else `defaultChain`; nothing is looked up on the system and
+no editor's fonts change), lays out every section, header, footer and note, and
+exports from that one state. Its options are plain JSON: `measurementDefaults`
+(`fontFamily`, `fontSize`), `renderEnvironment` (`showHiddenText`,
+`defaultTabStopTwips`) and `compatibility`, all fingerprinted in the map's
+provenance. A requirement left with no font, including the `measurementDefaults`
+family text naming none falls back to, or any text measured with stand-in metrics
+is refused as `layout-unavailable`, as is a live layout whose font store was
+cleared or added to since.
+The snapshot map is deterministic for the same bytes, fonts and options and
+carries no session token. `session.exportStructuredWithPages(options)` reads the
+region layout a session retains and lays nothing out, flushes nothing and loads no
+font; the layout must have lowered the current version from the session's own
+stories, with section, settings and note metadata that describe it and a
+registered font for every requirement. Its map carries `documentVersion` and a
+`layoutVersion` to pass back as `expectLayoutVersion`; its references describe the
+authoritative layout of that version, which a later edit may supersede before it is
+painted.
+
+`pageIndex` counts physical pages from zero, blank parity pages included, while
+`displayedNumber`/`displayedLabel` follow the section's PAGE numbering (restarts,
+continuation and Roman or letter formats; an unwritable format falls back to
+decimal with `numberingStatus: 'fallback'` and an `unsupported-numbering`
+diagnostic). A header or footer part stays one exported story with an occurrence
+on every page showing it; a note has an occurrence where its note area is, which
+may differ from its reference's page. Text slices are ranges in the export's own
+offsets, split where the node, paragraph, view or page changes; atoms (fields,
+controls, images, note marks, breaks) are sliced whole and marked `partial` with
+an `anchor-only` diagnostic when only part of their content is on the page. Table
+fragments list their row window with `continuedFromPrevious`, `continuedOnNext`
+and `repeatedHeader`, and each cell paragraph has fragments of its own. Pages are
+laid out with revision markup, so `accepted` and `original` are refused with
+`unsupported-revision-layout` while any laid-out story holds pending revisions.
+Refusals also cover `stale-document`, `stale-layout` (stale section, settings or
+note metadata, fonts, options or `expectLayoutVersion`), `layout-unavailable`,
+`layout-not-converged` and `unsupported` for a footnote the layout places away from
+its reference in a split table row; a note too tall for its page's note area is
+diagnosed `unsupported-note-layout` rather than placed.
+Geometry is off by default; rectangles are unzoomed CSS pixels (96 per inch) from
+the physical page's top-left corner. `maxFragments` (100,000 by default) and
+`maxLayoutBytes` bound the map separately and mark it `truncated`. With
+`pageMarkers`, Markdown follows each block marker with
+`<!-- docx-pages: 0=i 1=ii -->` (labels percent-encoded) and writes no page break
+into the text; a map from other content is refused.

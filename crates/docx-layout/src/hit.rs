@@ -1235,83 +1235,162 @@ fn collect_range_rects(
     to: i64,
     out: &mut Vec<RangeRect>,
 ) {
-    let mut pending: Vec<(RectOwner<'_>, RangeRect)> = Vec::new();
-    for h in text_hits(prims) {
-        // blank-line marker: zero-length span selects as a thin sliver
-        if h.doc_start == h.doc_end {
-            if h.doc_start >= from && h.doc_start < to {
-                pending.push((
-                    rect_owner(&h),
-                    RangeRect {
-                        page_index,
-                        x: h.x,
-                        y: h.top,
-                        width: BLANK_LINE_SELECTION_WIDTH,
-                        height: h.bottom - h.top,
-                    },
-                ));
-            }
-            continue;
-        }
-        if h.doc_end <= from || h.doc_start >= to {
-            continue;
-        }
-        let start = from.max(h.doc_start).min(h.doc_end);
-        let end = to.max(h.doc_start).min(h.doc_end);
-        let x0 = x_at_position(&h, start);
-        let x1 = x_at_position(&h, end);
-        pending.push((
-            rect_owner(&h),
-            RangeRect {
-                page_index,
-                x: x0.min(x1),
-                y: h.top,
-                // degenerate overlaps keep a 1px floor like lineSpanRect
-                width: (x1 - x0).abs().max(1.0),
-                height: h.bottom - h.top,
-            },
-        ));
-    }
+    let pending: Vec<(RectOwner<'_>, RangeRect)> = text_hits(prims)
+        .iter()
+        .filter_map(|hit| hit_rect(hit, page_index, from, to))
+        .collect();
     merge_line_rects(pending, out);
+    out.extend(
+        prims
+            .iter()
+            .filter_map(atom_rect)
+            .filter(|(start, end, _)| *end > from && *start < to)
+            .map(|(_, _, rect)| RangeRect { page_index, ..rect }),
+    );
+}
 
-    for p in prims {
-        match p {
-            Primitive::Image(img) => {
-                let (Some(ds), Some(de)) = (img.attrs.doc_start, img.attrs.doc_end) else {
-                    continue;
-                };
-                if de <= from || ds >= to {
-                    continue;
-                }
-                out.push(RangeRect {
+/// The rect one text hit contributes to the range `[from, to)`: a proportional sub-span over
+/// the line band, or a thin sliver for a blank-line marker inside it.
+fn hit_rect<'a>(
+    h: &TextHit<'a>,
+    page_index: usize,
+    from: i64,
+    to: i64,
+) -> Option<(RectOwner<'a>, RangeRect)> {
+    // blank-line marker: zero-length span selects as a thin sliver
+    if h.doc_start == h.doc_end {
+        return (h.doc_start >= from && h.doc_start < to).then(|| {
+            (
+                rect_owner(h),
+                RangeRect {
                     page_index,
-                    x: img.x.as_f64().unwrap_or(0.0),
-                    y: img.y.as_f64().unwrap_or(0.0),
-                    width: img.w.as_f64().unwrap_or(0.0),
-                    height: img.h.as_f64().unwrap_or(0.0),
-                });
-            }
-            Primitive::Shape(shape) => {
-                if shape.attrs.inline_shape_atom != Some(true) {
-                    continue;
-                }
-                let (Some(ds), Some(de)) = (shape.attrs.doc_start, shape.attrs.doc_end) else {
-                    continue;
-                };
-                if de <= from || ds >= to {
-                    continue;
-                }
-                out.push(RangeRect {
-                    page_index,
-                    x: shape.x.as_f64().unwrap_or(0.0),
-                    y: shape.y.as_f64().unwrap_or(0.0),
-                    width: shape.w.as_f64().unwrap_or(0.0),
-                    height: shape.h.as_f64().unwrap_or(0.0),
-                });
-            }
-            _ => {}
+                    x: h.x,
+                    y: h.top,
+                    width: BLANK_LINE_SELECTION_WIDTH,
+                    height: h.bottom - h.top,
+                },
+            )
+        });
+    }
+    if h.doc_end <= from || h.doc_start >= to {
+        return None;
+    }
+    let start = from.max(h.doc_start).min(h.doc_end);
+    let end = to.max(h.doc_start).min(h.doc_end);
+    let x0 = x_at_position(h, start);
+    let x1 = x_at_position(h, end);
+    Some((
+        rect_owner(h),
+        RangeRect {
+            page_index,
+            x: x0.min(x1),
+            y: h.top,
+            // degenerate overlaps keep a 1px floor like lineSpanRect
+            width: (x1 - x0).abs().max(1.0),
+            height: h.bottom - h.top,
+        },
+    ))
+}
+
+/// The document range and box of an image or inline-shape atom primitive.
+fn atom_rect(primitive: &Primitive) -> Option<(i64, i64, RangeRect)> {
+    let (attrs, x, y, w, h) = match primitive {
+        Primitive::Image(img) => (&img.attrs, &img.x, &img.y, &img.w, &img.h),
+        Primitive::Shape(shape) if shape.attrs.inline_shape_atom == Some(true) => {
+            (&shape.attrs, &shape.x, &shape.y, &shape.w, &shape.h)
+        }
+        _ => return None,
+    };
+    Some((
+        attrs.doc_start?,
+        attrs.doc_end?,
+        RangeRect {
+            page_index: 0,
+            x: x.as_f64().unwrap_or(0.0),
+            y: y.as_f64().unwrap_or(0.0),
+            width: w.as_f64().unwrap_or(0.0),
+            height: h.as_f64().unwrap_or(0.0),
+        },
+    ))
+}
+
+/// Highlight rects for many ranges of one page-local primitive list (a page body, one band or
+/// one note), each answered as [`range_rects_in_region`] answers a single range but without
+/// rescanning the list per range.
+pub struct RangeRectIndex<'a> {
+    page_index: usize,
+    /// Text hits by start position, with the widest hit span.
+    hits: Vec<TextHit<'a>>,
+    widest: i64,
+    atoms: Vec<(i64, i64, RangeRect)>,
+    widest_atom: i64,
+}
+
+impl<'a> RangeRectIndex<'a> {
+    pub fn new(prims: &'a [Primitive], page_index: usize) -> Self {
+        let mut hits = text_hits(prims);
+        hits.sort_by_key(|hit| hit.doc_start);
+        let widest = hits
+            .iter()
+            .map(|hit| hit.doc_end - hit.doc_start)
+            .max()
+            .unwrap_or(0)
+            .max(0);
+        let mut atoms: Vec<_> = prims.iter().filter_map(atom_rect).collect();
+        atoms.sort_by_key(|(start, ..)| *start);
+        let widest_atom = atoms
+            .iter()
+            .map(|(start, end, _)| end - start)
+            .max()
+            .unwrap_or(0)
+            .max(0);
+        Self {
+            page_index,
+            hits,
+            widest,
+            atoms,
+            widest_atom,
         }
     }
+
+    /// The merged per-line rects covering `[from, to)`.
+    pub fn rects(&self, from: i64, to: i64) -> Vec<RangeRect> {
+        let mut out = Vec::new();
+        if from >= to {
+            return out;
+        }
+        let first = self
+            .hits
+            .partition_point(|hit| hit.doc_start < from.saturating_sub(self.widest));
+        let pending: Vec<_> = self.hits[first..]
+            .iter()
+            .take_while(|hit| hit.doc_start < to)
+            .filter_map(|hit| hit_rect(hit, self.page_index, from, to))
+            .collect();
+        merge_line_rects(pending, &mut out);
+        let first = self
+            .atoms
+            .partition_point(|(start, ..)| *start < from.saturating_sub(self.widest_atom));
+        out.extend(
+            self.atoms[first..]
+                .iter()
+                .take_while(|(start, ..)| *start < to)
+                .filter(|(_, end, _)| *end > from)
+                .map(|(_, _, rect)| RangeRect {
+                    page_index: self.page_index,
+                    ..rect.clone()
+                }),
+        );
+        out
+    }
+}
+
+/// Each note of a page's note area with the primitives it paints.
+pub fn note_primitives(area: &NoteRegion) -> Vec<(i64, &[Primitive])> {
+    note_stories(area)
+        .into_iter()
+        .map(|story| (story.id, story.primitives))
+        .collect()
 }
 
 const LINE_MERGE_BAND_EPSILON: f64 = 1.0;
@@ -2004,6 +2083,40 @@ mod tests {
         assert_eq!(rects.len(), 2, "one band per cell: {rects:?}");
         assert!((rects[0].width - 40.0).abs() < 0.01);
         assert!((rects[1].width - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn indexed_range_rects_answer_every_range_like_a_single_query() {
+        let owned = |x: f64, baseline: f64, doc_start: i64, line_index: u64| {
+            let mut prim = run(x, baseline, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["lineIndex"] = line_index.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                owned(180.0, 200.0, 11, 0),
+                owned(100.0, 200.0, 1, 0),
+                owned(140.0, 200.0, 6, 0),
+                owned(100.0, 230.0, 16, 1),
+                image(100.0, 260.0, Some(21)),
+                image(200.0, 260.0, None),
+            ],
+        );
+        let index = RangeRectIndex::new(&dl.pages[0].primitives, 3);
+        for from in 0..24 {
+            for to in from..24 {
+                let expected: Vec<_> = range_rects(&dl, from, to)
+                    .into_iter()
+                    .map(|rect| RangeRect {
+                        page_index: 3,
+                        ..rect
+                    })
+                    .collect();
+                assert_eq!(index.rects(from, to), expected, "[{from}, {to})");
+            }
+        }
     }
 
     /// Selection geometry follows the same scoping: a range in a note's story

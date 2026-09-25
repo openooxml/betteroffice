@@ -84,7 +84,11 @@ let markdown = document.export_markdown(&ExportOptions::new(RevisionView::Markup
 The export reads edits made through the model, lists omitted and unsupported
 content in `diagnostics`, and returns `Error::Export` for unusable limits. The
 same content comes from `docx_edit::structured` for a live `EditingDoc` or raw
-bytes. Page fragments are not included yet.
+bytes. `Document` exports do not yet generate page maps: `Document::layout`
+paginates measurements you supply, which prove nothing about the current model.
+An `EngineSession` in `betteroffice-docx-edit` that lays a document out itself
+attaches one with `export_structured_with_pages`, refusing a stale or incomplete
+layout as the JavaScript API does.
 
 ## PowerPoint comments
 

@@ -279,8 +279,10 @@ impl ParagraphView {
     /// Raw index of the visible unit at `offset`, or the paragraph mark at the end.
     pub fn raw_at(&self, offset: u32) -> u32 {
         self.spans
-            .iter()
-            .find(|span| offset < span.view + span.len)
+            .get(
+                self.spans
+                    .partition_point(|span| span.view + span.len <= offset),
+            )
             .map_or(self.pilcrow, |span| span.raw + (offset - span.view))
     }
 
@@ -290,8 +292,10 @@ impl ParagraphView {
             return self.node_start;
         }
         self.spans
-            .iter()
-            .find(|span| offset - 1 < span.view + span.len)
+            .get(
+                self.spans
+                    .partition_point(|span| span.view + span.len < offset),
+            )
             .map_or(self.pilcrow, |span| span.raw + (offset - span.view))
     }
 

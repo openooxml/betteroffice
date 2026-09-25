@@ -15,6 +15,7 @@ interface RefApiInputs {
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
   runLayoutPipeline: () => void;
+  getLayoutRequest: () => string | null;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
@@ -54,6 +55,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     yrsInputRef,
     layout,
     runLayoutPipeline,
+    getLayoutRequest,
     scrollToPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
@@ -154,6 +156,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     applyYrsFormatting: (action) => applyYrsFormattingRef.current(action),
     applyYrsCommand: (command) => applyYrsCommandRef.current(command),
     getLayout: () => layout,
+    getLayoutRequest,
     relayout: runLayoutPipeline,
     scrollToPosition: scrollToPositionImpl,
     scrollToParaId: scrollToParaIdImpl,
@@ -199,6 +202,7 @@ export interface UsePagedEditorRefApiOptions {
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
   runLayoutPipeline: () => void;
+  getLayoutRequest: () => string | null;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
@@ -220,6 +224,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     yrsInputRef,
     layout,
     runLayoutPipeline,
+    getLayoutRequest,
     scrollToPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
@@ -255,6 +260,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     yrsInputRef,
     layout,
     runLayoutPipeline,
+    getLayoutRequest,
     scrollToPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
@@ -272,6 +278,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   useImperativeHandle(ref, () => buildRefApi(inputs), [
     layout,
     runLayoutPipeline,
+    getLayoutRequest,
     scrollToPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,

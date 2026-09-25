@@ -102,7 +102,8 @@ Fields keep their cached result and are never evaluated, and images export alt
 text and relationship metadata, not image data. `max_blocks` and `max_bytes`
 stop the export at a whole block and set `truncated`. `export_markdown` and
 `render_docx_markdown(content)` add a `<!-- docx-export:N -->` marker per block,
-mapped to its anchor in `anchors`. Page fragments are not included yet.
+mapped to its anchor in `anchors`. Python exports do not yet generate page maps;
+the JavaScript packages attach them from a layout of the current document.
 
 ## Lay a document out
 
