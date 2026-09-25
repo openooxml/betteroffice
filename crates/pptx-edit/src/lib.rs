@@ -18,6 +18,7 @@ mod batch;
 mod comments;
 mod deck;
 mod effects;
+mod inherit;
 mod model;
 mod outline_gradients;
 mod proposal_diff;

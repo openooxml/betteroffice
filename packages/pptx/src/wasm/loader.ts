@@ -59,6 +59,8 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenPresentationOptions {
   clientId?: number;
   fonts?: ReadonlyArray<PptxFontFace>;
+  /** Faces drawn only for characters the run's own face has no glyph for, e.g. a script's Noto face. */
+  fallbackFonts?: ReadonlyArray<PptxFontFace>;
   /**
    * Opens from a collaboration update instead of parsing the file bytes.
    * When the bytes are the file the update was seeded from, the session
@@ -101,6 +103,8 @@ export interface PresentationHandle extends CollaborationReplica {
   /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
+  /** Registers a face drawn only where a run's own face has no glyph. */
+  registerFallbackFont(face: PptxFontFace): number;
   layoutSlide(slideIndex: number): SlideDisplayList;
   /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
@@ -272,6 +276,7 @@ export function openPresentation(
   );
   const renderer = construct(() => new PptxRenderer());
   for (const face of options.fonts ?? []) registerFont(renderer, face);
+  for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -441,6 +446,9 @@ export function openPresentation(
     },
     registerFont(face: PptxFontFace): number {
       return wasmCall(() => registerFont(renderer, face));
+    },
+    registerFallbackFont(face: PptxFontFace): number {
+      return wasmCall(() => registerFont(renderer, face, true));
     },
     layoutSlide(slideIndex: number): SlideDisplayList {
       return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
@@ -769,9 +777,10 @@ function requestJson(request: unknown): string {
   });
 }
 
-function registerFont(renderer: PptxRenderer, face: PptxFontFace): number {
+function registerFont(renderer: PptxRenderer, face: PptxFontFace, fallback = false): number {
   try {
-    return renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes);
+    const register = fallback ? renderer.registerFallbackFont : renderer.registerFont;
+    return register.call(renderer, face.family, face.bold ?? false, face.italic ?? false, face.bytes);
   } catch (error) {
     throw toError(error);
   }
