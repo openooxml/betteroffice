@@ -2882,7 +2882,7 @@ fn chart_text_primitive(
             piece_face.id,
             &text.text[*start..end],
             size_px,
-            ligature_features(tracking != 0.0 || piece_face.widths.is_some()),
+            ligature_features(tracking != 0.0),
         )
         .map_err(|error| RenderError::Font(error.to_string()))?;
         let piece_x = cursor;
@@ -10046,21 +10046,42 @@ mod tests {
         const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
         let mut renderer = SlideRenderer::new();
         renderer
+            .register_font("Arial", false, false, CARLITO)
+            .unwrap();
+        renderer
             .register_font("Trebuchet MS", false, false, CARLITO)
             .unwrap();
-        let face = renderer.resolve_face("Trebuchet MS", false, false).unwrap();
         let text = "Transmigration";
-        let ligated = shape(&renderer.fonts, face.id, text, 20.0, &[]).unwrap();
-        assert!(ligated.len() < text.len(), "Carlito ligates ti");
-        let shaped = shape(
-            &renderer.fonts,
-            face.id,
-            text,
-            20.0,
-            ligature_features(face.widths.is_some()),
-        )
-        .unwrap();
-        assert_eq!(shaped.len(), text.len());
+        let lay = |family: &str| {
+            let mut paragraph = paragraph(&renderer, "l", text);
+            paragraph.runs[0].style.face = renderer.resolve_face(family, false, false).unwrap();
+            paragraph.runs[0].style.family = family.to_owned();
+            layout_paragraph(
+                &renderer.fonts,
+                &paragraph,
+                0.0,
+                0.0,
+                1_000.0,
+                1.0,
+                false,
+                true,
+            )
+            .unwrap()
+        };
+        assert!(
+            glyph_positions(&lay("Arial")).len() < text.len(),
+            "Carlito ligates ti on its own widths"
+        );
+        let named = lay("Trebuchet MS");
+        let positions = glyph_positions(&named);
+        assert_eq!(positions.len(), text.len());
+        let metrics = family_metrics("trebuchet ms", false, false).unwrap();
+        let size = points_to_px(18.0);
+        let mut pen = positions[0];
+        for (character, x) in text.chars().zip(&positions) {
+            assert!((x - pen).abs() < 0.01, "{character} at {x}, expected {pen}");
+            pen += family_advance(metrics, character).unwrap() * size;
+        }
     }
 
     #[test]
