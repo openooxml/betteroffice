@@ -8467,34 +8467,39 @@ impl PlotSink for PrimitiveSink<'_> {
                 color,
                 align,
                 rotation_deg: _,
-            } => prims.push(Primitive::Text(TextRunPrimitive {
-                x: px(match align {
-                    PlotTextAlign::Start => x,
+            } => {
+                let (x, width) = match align {
+                    PlotTextAlign::Start => (x, width),
                     PlotTextAlign::Center => {
-                        x + (width - fallback_label_width(&text, &font)).max(0.0) / 2.0
+                        let run = fallback_label_width(&text, &font);
+                        (x + (width - run) / 2.0, run)
                     }
-                }),
-                text,
-                baseline_y: px(baseline_y),
-                width: px(width),
-                paint_clip: None,
-                letter_spacing: (font.letter_spacing_px != 0.0).then(|| px(font.letter_spacing_px)),
-                font: font.css(),
-                color,
-                word_spacing: None,
-                rtl: None,
-                opacity: None,
-                rotation_deg: None,
-                horizontal_scale: None,
-                all_caps: false,
-                small_caps: false,
-                hidden: false,
-                text_shadow: None,
-                text_outline: false,
-                emphasis_mark: None,
-                text_effect: None,
-                attrs: attrs.clone(),
-            })),
+                };
+                prims.push(Primitive::Text(TextRunPrimitive {
+                    x: px(x),
+                    text,
+                    baseline_y: px(baseline_y),
+                    width: px(width),
+                    paint_clip: None,
+                    letter_spacing: (font.letter_spacing_px != 0.0)
+                        .then(|| px(font.letter_spacing_px)),
+                    font: font.css(),
+                    color,
+                    word_spacing: None,
+                    rtl: None,
+                    opacity: None,
+                    rotation_deg: None,
+                    horizontal_scale: None,
+                    all_caps: false,
+                    small_caps: false,
+                    hidden: false,
+                    text_shadow: None,
+                    text_outline: false,
+                    emphasis_mark: None,
+                    text_effect: None,
+                    attrs: attrs.clone(),
+                }))
+            }
             PlotOp::Line {
                 x1,
                 y1,
@@ -10541,6 +10546,48 @@ mod tests {
         assert!(
             (starts[1] - (10.0 + (200.0 - estimate) / 2.0)).abs() < 0.01,
             "{starts:?}"
+        );
+        let widths: Vec<f64> = prims
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Text(text) => text.width.as_f64(),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            (widths[1] - estimate).abs() < 0.01,
+            "a centred run reports its own width"
+        );
+    }
+
+    #[test]
+    fn a_label_wider_than_its_box_spills_evenly_both_ways() {
+        let attrs = DocAttrs::default();
+        let mut prims = Vec::new();
+        let mut sink = PrimitiveSink {
+            prims: &mut prims,
+            attrs: &attrs,
+        };
+        let font = ooxml_drawingml::chart::chart_label_font();
+        let text = "North / Q1 / 10.0";
+        sink.push_op(PlotOp::Text {
+            text: text.to_owned(),
+            x: 100.0,
+            baseline_y: 20.0,
+            width: 40.0,
+            font: font.clone(),
+            color: "#000000".to_owned(),
+            align: PlotTextAlign::Center,
+            rotation_deg: 0.0,
+        });
+        let Some(Primitive::Text(run)) = prims.first() else {
+            panic!("a text run");
+        };
+        let (left, width) = (run.x.as_f64().unwrap(), run.width.as_f64().unwrap());
+        assert!(width > 40.0 && left < 100.0);
+        assert!(
+            (left + width / 2.0 - 120.0).abs() < 0.01,
+            "centred on the box"
         );
     }
 
