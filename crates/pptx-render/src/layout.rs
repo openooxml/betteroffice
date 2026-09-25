@@ -2878,8 +2878,11 @@ fn text_layout_key(
     stacked: bool,
     wraps: bool,
 ) -> Vec<u8> {
-    let text_len: usize = content
-        .paragraphs
+    let ResolvedContent {
+        paragraphs,
+        space_first_last_para,
+    } = content;
+    let text_len: usize = paragraphs
         .iter()
         .flat_map(|paragraph| &paragraph.runs)
         .map(|run| run.text.len())
@@ -2891,36 +2894,59 @@ fn text_layout_key(
     key_f32(&mut key, scale);
     key.push(u8::from(stacked));
     key.push(u8::from(wraps));
-    key_u32(&mut key, content.paragraphs.len() as u32);
-    for paragraph in &content.paragraphs {
-        key.push(match paragraph.align {
+    key.push(u8::from(*space_first_last_para));
+    key_u32(&mut key, paragraphs.len() as u32);
+    for paragraph in paragraphs {
+        let ResolvedParagraph {
+            align,
+            justify,
+            level,
+            margin_left_px,
+            margin_right_px,
+            line_spacing,
+            space_before,
+            space_after,
+            line_space_reduction,
+            indent_px,
+            tab_stops,
+            default_tab_px,
+            marker,
+            bullet_style,
+            runs,
+        } = paragraph;
+        key.push(match align {
             TextAlign::Left => 0,
             TextAlign::Center => 1,
             TextAlign::Right => 2,
             TextAlign::Justify => 3,
         });
-        key.push(u8::from(paragraph.justify));
-        key_u32(&mut key, paragraph.level);
-        key_f32(&mut key, paragraph.margin_left_px);
-        key_f32(&mut key, paragraph.margin_right_px);
-        key_f32(&mut key, paragraph.indent_px);
-        key_f32(&mut key, paragraph.line_space_reduction);
-        key_spacing(&mut key, &paragraph.line_spacing);
-        key_spacing(&mut key, &paragraph.space_before);
-        key_spacing(&mut key, &paragraph.space_after);
-        key_opt_str(&mut key, &paragraph.marker);
-        match &paragraph.bullet_style {
+        key.push(u8::from(*justify));
+        key_u32(&mut key, *level);
+        key_f32(&mut key, *margin_left_px);
+        key_f32(&mut key, *margin_right_px);
+        key_f32(&mut key, *indent_px);
+        key_f32(&mut key, *line_space_reduction);
+        key_spacing(&mut key, line_spacing);
+        key_spacing(&mut key, space_before);
+        key_spacing(&mut key, space_after);
+        key_u32(&mut key, tab_stops.len() as u32);
+        for stop in tab_stops {
+            key_f32(&mut key, *stop);
+        }
+        key_f32(&mut key, *default_tab_px);
+        key_opt_str(&mut key, marker);
+        match bullet_style {
             Some(style) => {
                 key.push(1);
                 key_style(&mut key, style);
             }
             None => key.push(0),
         }
-        key_u32(&mut key, paragraph.runs.len() as u32);
-        for run in &paragraph.runs {
-            key_u32(&mut key, run.start);
-            key_str(&mut key, &run.text);
-            key_style(&mut key, &run.style);
+        key_u32(&mut key, runs.len() as u32);
+        for ResolvedRun { text, start, style } in runs {
+            key_u32(&mut key, *start);
+            key_str(&mut key, text);
+            key_style(&mut key, style);
         }
     }
     key
@@ -2968,16 +2994,45 @@ fn key_spacing(key: &mut Vec<u8>, spacing: &Option<LineSpacing>) {
 }
 
 fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
-    key_u32(key, style.face.id.to_u32());
-    key_str(key, &style.face.requested_family);
-    key_str(key, &style.family);
-    key_f32(key, style.font_size_pt);
-    key_f32(key, style.spacing_pt);
-    key_f32(key, style.baseline_shift_px);
-    key.push(u8::from(style.bold));
-    key.push(u8::from(style.italic));
-    key.push(u8::from(style.underline));
-    key_str(key, &style.color);
+    let ResolvedStyle {
+        face:
+            FontFace {
+                id,
+                family: face_family,
+                requested_family,
+                widths,
+                line,
+            },
+        family,
+        font_size_pt,
+        line_font_size_pt,
+        spacing_pt,
+        baseline_shift_px,
+        bold,
+        italic,
+        underline,
+        color,
+        caps,
+    } = style;
+    key_u32(key, id.to_u32());
+    key_str(key, face_family);
+    key_str(key, requested_family);
+    key.push(u8::from(widths.is_some()));
+    key.push(u8::from(line.is_some()));
+    key_str(key, family);
+    key_f32(key, *font_size_pt);
+    key_f32(key, *line_font_size_pt);
+    key_f32(key, *spacing_pt);
+    key_f32(key, *baseline_shift_px);
+    key.push(u8::from(*bold));
+    key.push(u8::from(*italic));
+    key.push(u8::from(*underline));
+    key_str(key, color);
+    key.push(match caps {
+        TextCaps::None => 0,
+        TextCaps::Small => 1,
+        TextCaps::All => 2,
+    });
 }
 
 fn layout_content(
@@ -5918,6 +5973,33 @@ mod tests {
                 blank: *blank,
             })
             .collect()
+    }
+
+    #[test]
+    fn the_layout_cache_key_changes_with_every_input_layout_reads() {
+        let renderer = renderer();
+        let rect = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let content = |space_first_last_para| ResolvedContent {
+            paragraphs: vec![paragraph(&renderer, "l", "Text")],
+            space_first_last_para,
+        };
+        let key = |content: &ResolvedContent| text_layout_key(content, rect, 1.0, false, true);
+        let base = key(&content(false));
+        assert_ne!(base, key(&content(true)));
+        let mut changed = content(false);
+        changed.paragraphs[0].tab_stops = vec![40.0];
+        assert_ne!(base, key(&changed));
+        let mut changed = content(false);
+        changed.paragraphs[0].default_tab_px = 48.0;
+        assert_ne!(base, key(&changed));
+        let mut changed = content(false);
+        changed.paragraphs[0].runs[0].style.line_font_size_pt = 24.0;
+        assert_ne!(base, key(&changed));
     }
 
     fn paragraph(renderer: &SlideRenderer, alignment: &str, text: &str) -> ResolvedParagraph {
