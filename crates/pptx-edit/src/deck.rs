@@ -624,38 +624,14 @@ impl DeckSession {
         shape_id: &str,
         stroke: &ShapeStroke,
     ) -> EditResult<ShapeStrokeReceipt> {
-        let color = stroke.color.as_deref().map(color_value).transpose()?;
-        if let Some(width) = stroke.width_pt
-            && (!width.is_finite() || !(0.0..=1_000.0).contains(&width))
-        {
-            return Err(EditError::InvalidGeometry(format!(
-                "stroke width {width}pt is outside the safe range"
-            )));
-        }
+        stroked_outline(None, stroke)?;
         let mut txn = self.transact_for(context);
         require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
         require_shape_kind(&shape, &txn)?;
         let existing = optional_json::<ShapeOutline, _>(&shape, &txn, "outlineJson")?;
         let before = existing.as_ref().and_then(outline_stroke);
-        let outline = if stroke.color.is_none() && stroke.width_pt.is_none() {
-            ShapeOutline::default()
-        } else {
-            let mut outline = existing.unwrap_or_default();
-            if let Some(color) = color {
-                if outline.width.is_none() {
-                    outline.width = Some(EMU_PER_POINT);
-                }
-                outline.color = Some(color);
-                outline.gradient = None;
-            } else if outline.color.is_none() && outline.gradient.is_none() {
-                outline.color = Some(color_value("#000000")?);
-            }
-            if let Some(width) = stroke.width_pt {
-                outline.width = Some(width * EMU_PER_POINT);
-            }
-            outline
-        };
+        let outline = stroked_outline(existing, stroke)?;
         insert_json(&shape, &mut txn, "outlineJson", Some(&outline))?;
         Ok(ShapeStrokeReceipt {
             slide_id: slide_id.to_owned(),
@@ -2203,7 +2179,7 @@ fn required_u32<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> EditResult<u32>
     })
 }
 
-fn validate_rect(rect: ShapeRect) -> EditResult<()> {
+pub(crate) fn validate_rect(rect: ShapeRect) -> EditResult<()> {
     validate_coordinate(rect.x)?;
     validate_coordinate(rect.y)?;
     if rect.width <= 0 || rect.height <= 0 {
@@ -2259,7 +2235,7 @@ fn valid_adjustment_name(name: &str) -> bool {
         .is_some_and(|value| (1..=MAX_ADJUSTMENT_INDEX).contains(&value))
 }
 
-fn shape_fill(color: Option<&str>) -> EditResult<ShapeFill> {
+pub(crate) fn shape_fill(color: Option<&str>) -> EditResult<ShapeFill> {
     Ok(match color {
         Some(color) => ShapeFill {
             fill_type: "solid".to_owned(),
@@ -2268,6 +2244,38 @@ fn shape_fill(color: Option<&str>) -> EditResult<ShapeFill> {
         },
         None => ShapeFill::named("none"),
     })
+}
+
+/// The outline a stroke leaves on a shape outlined by `existing`, after checking the stroke.
+pub(crate) fn stroked_outline(
+    existing: Option<ShapeOutline>,
+    stroke: &ShapeStroke,
+) -> EditResult<ShapeOutline> {
+    let color = stroke.color.as_deref().map(color_value).transpose()?;
+    if let Some(width) = stroke.width_pt
+        && (!width.is_finite() || !(0.0..=1_000.0).contains(&width))
+    {
+        return Err(EditError::InvalidGeometry(format!(
+            "stroke width {width}pt is outside the safe range"
+        )));
+    }
+    if stroke.color.is_none() && stroke.width_pt.is_none() {
+        return Ok(ShapeOutline::default());
+    }
+    let mut outline = existing.unwrap_or_default();
+    if let Some(color) = color {
+        if outline.width.is_none() {
+            outline.width = Some(EMU_PER_POINT);
+        }
+        outline.color = Some(color);
+        outline.gradient = None;
+    } else if outline.color.is_none() && outline.gradient.is_none() {
+        outline.color = Some(color_value("#000000")?);
+    }
+    if let Some(width) = stroke.width_pt {
+        outline.width = Some(width * EMU_PER_POINT);
+    }
+    Ok(outline)
 }
 
 fn fill_color(fill: &ShapeFill) -> Option<String> {

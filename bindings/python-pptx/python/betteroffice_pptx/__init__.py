@@ -5,6 +5,31 @@ from __future__ import annotations
 import os
 import json
 from typing import Iterator, Mapping, Sequence, Union
+from .edits import (
+    PptxEditFailure,
+    PptxEditFailureCode,
+    PptxEditHistory,
+    PptxEditReceipt,
+    PptxEditRefusal,
+    PptxEditRequest,
+    PptxEditResult,
+    PptxEditSource,
+    PptxEditStep,
+    PptxFindMatch,
+    PptxFindRequest,
+    PptxFindResult,
+    PptxFindScope,
+    PptxParagraphText,
+    PptxReadRequest,
+    PptxReadResult,
+    PptxShapeTarget,
+    PptxSlideTarget,
+    PptxStoryTarget,
+    PptxStoryText,
+    PptxTextRange,
+    PptxTextTarget,
+    PptxValidationResult,
+)
 from .proposals import Proposal, ProposalChange, ProposalPreview
 
 from ._betteroffice_pptx import (
@@ -60,6 +85,29 @@ __all__ = [
     "Png",
     "PptxError",
     "Presentation",
+    "PptxEditFailure",
+    "PptxEditFailureCode",
+    "PptxEditHistory",
+    "PptxEditReceipt",
+    "PptxEditRefusal",
+    "PptxEditRequest",
+    "PptxEditResult",
+    "PptxEditSource",
+    "PptxEditStep",
+    "PptxFindMatch",
+    "PptxFindRequest",
+    "PptxFindResult",
+    "PptxFindScope",
+    "PptxParagraphText",
+    "PptxReadRequest",
+    "PptxReadResult",
+    "PptxShapeTarget",
+    "PptxSlideTarget",
+    "PptxStoryTarget",
+    "PptxStoryText",
+    "PptxTextRange",
+    "PptxTextTarget",
+    "PptxValidationResult",
     "Proposal",
     "ProposalChange",
     "ProposalPreview",
@@ -484,6 +532,30 @@ class Presentation:
         """Remove a proposal without changing the presentation."""
         return self._inner.reject_proposal(proposal_id)
 
+    def version(self) -> str:
+        """This session's version token; every committed change, undo and redo included, moves it."""
+        return self._inner.version()
+
+    def read_content(self, request: "PptxReadRequest | None" = None) -> PptxReadResult:
+        """Slides and their stories' text, with the version they were read at."""
+        return json.loads(self._inner.read_content_json(_request_json(request or {})))
+
+    def find_text(self, request: PptxFindRequest) -> PptxFindResult:
+        """Exact, case-sensitive, paragraph-local search; overlapping matches all count."""
+        return json.loads(self._inner.find_text_json(_request_json(request)))
+
+    def validate_edits(self, request: PptxEditRequest) -> PptxValidationResult:
+        """Run every check of ``apply_edits`` without changing anything."""
+        return json.loads(self._inner.validate_edits_json(_request_json(request)))
+
+    def apply_edits(self, request: PptxEditRequest) -> PptxEditResult:
+        """Apply every step or none against ``expectVersion``, as one transaction.
+
+        Policy failures come back as ``{"ok": False, ...}``; a malformed request raises
+        ``ValueError``.
+        """
+        return json.loads(self._inner.apply_edits_json(_request_json(request)))
+
     def render_png(
         self,
         slide: SlideKey,
@@ -554,6 +626,10 @@ class Presentation:
 
     def __repr__(self) -> str:
         return f"Presentation(slides={self.slide_count})"
+
+
+def _request_json(request: "Mapping[str, object]") -> str:
+    return json.dumps(dict(request), allow_nan=False)
 
 
 def _as_limits(limits: "Mapping[str, int] | None") -> "dict[str, int] | None":

@@ -12,6 +12,11 @@ export class PptxDocument {
     addTextBoxJson(args: string): string;
     addTextBoxProfiledJson(args: string): string;
     addUndoBoundary(): void;
+    /**
+     * Applies a batch all-or-nothing: `{"ok":true,"baseVersion","version","applied","source",
+     * "changedSlides","changedStories","receipts"}`.
+     */
+    applyEditsJson(request: string): string;
     applyUpdateJson(update: Uint8Array): string;
     bringShapeForwardJson(args: string): string;
     bringShapeToFrontJson(args: string): string;
@@ -22,10 +27,18 @@ export class PptxDocument {
     deleteSlideJson(args: string): string;
     deleteTextJson(args: string): string;
     deleteTextProfiledJson(args: string): string;
+    /**
+     * The session-scoped version token of the committed deck state.
+     */
+    documentVersion(): string;
     drainUpdateEvent(): Uint8Array;
     encodeDiff(remote_state_vector: Uint8Array): Uint8Array;
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
+    /**
+     * `{"text","within"?,"limit"?}` -> `{"ok":true,"version","matches","truncated"}`.
+     */
+    findTextJson(request: string): string;
     formatTextJson(args: string): string;
     insertParagraphBreakJson(args: string): string;
     insertSlideJson(args: string): string;
@@ -47,6 +60,10 @@ export class PptxDocument {
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
     previewProposalJson(args: string): string;
     proposeJson(args: string): string;
+    /**
+     * `{"slideIds"?}` -> `{"ok":true,"version","slides","stories"}`.
+     */
+    readContentJson(request: string): string;
     redoJson(): string;
     rejectProposalJson(args: string): string;
     removeCommentJson(args: string): string;
@@ -80,6 +97,11 @@ export class PptxDocument {
      * `{"receipt": ..., "profile": {"undoMs", "snapshotMs", "serializeMs"}}`.
      */
     undoProfiledJson(): string;
+    /**
+     * Runs every check of `applyEditsJson`, staging included, without changing anything:
+     * `{"ok":true,"baseVersion","wouldApply","previews"}`.
+     */
+    validateEditsJson(request: string): string;
     static version(): string;
     readonly clientId: number;
 }
@@ -132,6 +154,7 @@ export interface InitOutput {
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addUndoBoundary: (a: number) => void;
+    readonly pptxdocument_applyEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_bringShapeForwardJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -143,10 +166,12 @@ export interface InitOutput {
     readonly pptxdocument_deleteSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_documentVersion: (a: number) => [number, number];
     readonly pptxdocument_drainUpdateEvent: (a: number) => [number, number];
     readonly pptxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly pptxdocument_encodeStateVector: (a: number) => [number, number];
+    readonly pptxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_formatTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertParagraphBreakJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -162,6 +187,7 @@ export interface InitOutput {
     readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly pptxdocument_previewProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_readContentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -188,6 +214,7 @@ export interface InitOutput {
     readonly pptxdocument_undoCaptureMode: (a: number) => [number, number];
     readonly pptxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_undoProfiledJson: (a: number) => [number, number, number, number];
+    readonly pptxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
