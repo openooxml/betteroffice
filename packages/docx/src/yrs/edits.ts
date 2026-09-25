@@ -22,6 +22,9 @@ export type {
   ValidationSuccess,
 } from '../../../../shared/host-contracts/edits';
 
+import type { DocxContentControlSelector } from './contentControls';
+import type { DocxAnchor } from './readTypes';
+
 export type DocxTextView = 'accepted' | 'original';
 
 /** Provenance only: history and revision authorship are chosen separately. */
@@ -62,7 +65,8 @@ export type DocxTextTarget =
 
 export type DocxEditTarget =
   | DocxTextTarget
-  | { kind: 'paragraphs'; story: string; firstParaId: string; lastParaId: string };
+  | { kind: 'paragraphs'; story: string; firstParaId: string; lastParaId: string }
+  | { kind: 'contentControl'; selector: DocxContentControlSelector };
 
 /** Refuses the step unless its target currently reads exactly `text`. */
 export interface DocxEditGuard {
@@ -92,12 +96,29 @@ export type DocxEditOperation =
       paragraphs: readonly DocxParagraphInput[];
     }
   | { op: 'deleteParagraphs'; story: string; firstParaId: string; lastParaId: string }
-  | { op: 'setParagraphStyle'; target: DocxParagraphTarget; styleId: string };
+  | { op: 'setParagraphStyle'; target: DocxParagraphTarget; styleId: string }
+  | Omit<DocxSetContentControlTextStep, 'expect'>;
 
-export type DocxEditStep = DocxEditOperation & {
+/**
+ * Replaces a plain- or rich-text content control's content with plain text and clears its
+ * placeholder state. CRLF becomes LF; LF breaks lines in an inline control and paragraphs in a
+ * block control, and a plain-text control accepts it only with `w:multiLine`. The text takes the
+ * formatting of the control's first text run (a control showing its placeholder takes its own run
+ * properties). `expect` compares against the control's `value`; `suggest` is refused.
+ */
+export interface DocxSetContentControlTextStep {
+  op: 'setContentControlText';
+  target: DocxContentControlSelector;
+  text: string;
   expect?: DocxEditGuard;
-  suggest?: DocxEditSuggestion;
-};
+}
+
+export type DocxEditStep =
+  | (Exclude<DocxEditOperation, { op: 'setContentControlText' }> & {
+      expect?: DocxEditGuard;
+      suggest?: DocxEditSuggestion;
+    })
+  | DocxSetContentControlTextStep;
 
 export interface DocxEditRequest {
   /** The version the targets were read at; a changed document refuses with `stale-version`. */
@@ -126,7 +147,33 @@ export type DocxEditFailureCode =
   | 'invalid-step'
   | 'limit-exceeded';
 
-export type DocxEditFailure = OperationFailure<DocxEditFailureCode, DocxEditTarget>;
+/** Why a `setContentControlText` step was refused, beside its failure code. */
+export type DocxEditFailureReason =
+  | 'missing-control'
+  | 'missing-tag'
+  | 'ambiguous-tag'
+  | 'ambiguous-control-id'
+  | 'content-locked'
+  | 'bound-control'
+  | 'unsupported-control-type'
+  | 'unsupported-children'
+  | 'nested-controls'
+  | 'unknown-lock'
+  | 'unsupported-suggestion'
+  | 'provenance-unavailable'
+  | 'unsupported-story'
+  | 'multiline-not-allowed'
+  | 'invalid-text';
+
+export type DocxEditFailure = OperationFailure<DocxEditFailureCode, DocxEditTarget> & {
+  reason?: DocxEditFailureReason;
+};
+
+/** The content control a step resolved to, and where it is. */
+export interface DocxResolvedControl {
+  controlId: string;
+  anchor: DocxAnchor;
+}
 
 export type DocxEditRefusal = OperationRefusal<DocxEditFailure>;
 
@@ -141,6 +188,7 @@ export interface DocxEditReceipt {
   newParagraphs: DocxParagraphTarget[];
   removedParagraphs: DocxParagraphTarget[];
   revisionIds: string[];
+  control?: DocxResolvedControl;
 }
 
 /** What one step would do; it cannot be committed later. */
@@ -150,6 +198,7 @@ export interface DocxEditPreview {
   wouldChange: boolean;
   newParagraphCount: number;
   wouldCreateRevisions: boolean;
+  control?: DocxResolvedControl;
 }
 
 export type DocxEditResult =

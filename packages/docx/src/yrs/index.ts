@@ -37,6 +37,11 @@ import type {
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
 import type {
+  DocxContentControlQuery,
+  DocxContentControlsOptions,
+  DocxContentControlsResult,
+} from './contentControls';
+import type {
   DocxExportOptions,
   DocxExportResult,
   DocxMarkdownContent,
@@ -44,6 +49,7 @@ import type {
 } from './structuredExport';
 
 export * from './edits';
+export * from './contentControls';
 export * from './readTypes';
 export * from './structuredExport';
 export * from './inputPositionMap';
@@ -247,7 +253,11 @@ export interface YrsParagraphAttrs {
   other?: Readonly<Record<string, unknown | null>>;
 }
 
-/** Typed value stored on a structured document tag (content control). */
+/**
+ * Typed value for a content control. A string fills a plain- or rich-text control's content
+ * (as a `setContentControlText` edit step would); the objects set checkbox, dropdown and date
+ * controls.
+ */
 export type YrsContentControlValue =
   | { kind: 'dropdown'; value: string }
   | { kind: 'checkbox'; checked: boolean }
@@ -913,11 +923,17 @@ export interface YrsSession extends CollaborationReplica {
     image: Readonly<Record<string, unknown>>,
     suggesting?: YrsAuthor
   ): YrsRevisionReceipt;
-  /** Sets the authored value on a content-control embed addressed by stable payload id. */
+  /**
+   * Sets the value of a content-control embed addressed by stable payload id. A string fills a
+   * text control's content as one version-checked step and throws when the fill is refused.
+   */
   setContentControlValue(embedId: string, value: YrsContentControlValue): void;
-  /** Sets a content-control value at a paragraph-keyed embed position. */
+  /** {@link setContentControlValue} for the embed at a paragraph-keyed position. */
   setContentControlValueAt(at: YrsLoc, value: YrsContentControlValue): void;
-  /** Removes the authored value from a content-control embed. */
+  /**
+   * Removes an authored value from a content-control embed. It never erases a text control's
+   * text: fill it with `''` for that.
+   */
   clearContentControlValue(embedId: string): void;
   /** Commits image size/wrapping/position fields in one transaction. */
   setImageGeometry(embedId: string, geometry: YrsImageGeometry): void;
@@ -1025,6 +1041,20 @@ export interface YrsSession extends CollaborationReplica {
    * classifies them. Throws for an unknown story.
    */
   headings(story: string): DocxParagraphHeading[];
+
+  // -- content controls --
+
+  /**
+   * The content controls of the committed document with the version they were read at; control
+   * ids and anchors resolve against that version. Nothing is committed, flushed or published.
+   * Unusable options are refused; malformed ones throw.
+   */
+  listContentControls(options?: DocxContentControlsOptions): DocxContentControlsResult;
+  /** The controls {@link listContentControls} lists that match `query` exactly; none or several. */
+  findContentControls(
+    query: DocxContentControlQuery,
+    options?: DocxContentControlsOptions
+  ): DocxContentControlsResult;
 
   /** Drops the observer and frees the wasm-side replica. Idempotent. */
   destroy(): void;
@@ -1829,6 +1859,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     setContentControlValueAt: (at, value) => {
       ensureUndo(at.story);
+      if (typeof value === 'string') markDirty('all');
       mutate(() =>
         session.set_content_control_value_at(at.story, at.paraId, at.offset, JSON.stringify(value))
       );
@@ -1953,6 +1984,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         session.export_markdown_json(JSON.stringify(options))
       ) as DocxExportResult<DocxMarkdownContent>,
     headings: (story) => JSON.parse(session.headings_json(story)) as DocxParagraphHeading[],
+    listContentControls: (options = {}) =>
+      JSON.parse(
+        session.list_content_controls_json(JSON.stringify(options))
+      ) as DocxContentControlsResult,
+    findContentControls: (query, options = {}) =>
+      JSON.parse(
+        session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
+      ) as DocxContentControlsResult,
 
     version: () => session.version(),
     readParagraphs: (request) =>

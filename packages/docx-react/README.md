@@ -180,6 +180,11 @@ content); in suggesting mode every step must carry `suggest`. The promise reject
 flushes. `proposeChange`, `addComment` and `applyFormatting` resolve their
 `{ paraId, search }` targets through the same Rust resolver in the accepted view.
 
+`listContentControls()` and `findContentControls(query)` flush the same way and
+list the document's content controls with the version they were read at; fill
+plain- and rich-text controls with `setContentControlText` steps through
+`applyEdits`, which refreshes the control's story and the story holding it.
+
 ## Framework notes
 
 Import `@betteroffice/docx-react/styles.css` once (in a bundler entry or, under

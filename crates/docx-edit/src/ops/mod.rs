@@ -1,5 +1,6 @@
 //! Mutating editing operations.
 
+pub(crate) mod content_control;
 pub mod embed;
 pub mod paragraph;
 pub mod resolve;

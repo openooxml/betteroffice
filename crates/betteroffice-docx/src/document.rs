@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+use docx_edit::content_controls::{
+    ContentControlQuery, ContentControlsOptions, ContentControlsSnapshot,
+    find_package_content_controls, list_package_content_controls,
+};
 use docx_edit::structured::{
     DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions,
     export_package_structured,
@@ -194,6 +198,34 @@ impl Document {
                 max_bytes: options.max_bytes,
             },
         )
+    }
+
+    /// Lists the content controls of the current model in document order. Control ids and
+    /// anchors address the returned snapshot; controls whose source content no longer matches
+    /// the opened package cannot be shown fillable. Filling needs an editing session.
+    pub fn list_content_controls(
+        &self,
+        options: &ContentControlsOptions,
+    ) -> Result<ContentControlsSnapshot> {
+        Ok(list_package_content_controls(
+            self.envelope(),
+            &self.original_parts,
+            options,
+        )?)
+    }
+
+    /// The content controls of the current model that match `query` exactly.
+    pub fn find_content_controls(
+        &self,
+        query: &ContentControlQuery,
+        options: &ContentControlsOptions,
+    ) -> Result<ContentControlsSnapshot> {
+        Ok(find_package_content_controls(
+            self.envelope(),
+            &self.original_parts,
+            query,
+            options,
+        )?)
     }
 
     /// The current model as the parsed package seeding reads.

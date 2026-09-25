@@ -14,6 +14,7 @@ export function sdtPropsToAttrs(props: SdtProperties): Record<string, unknown> {
     listItems: props.listItems ? JSON.stringify(props.listItems) : null,
     checked: props.checked ?? null,
     dataBinding: props.dataBinding ? JSON.stringify(props.dataBinding) : null,
+    multiLine: props.multiLine ?? null,
     rawPropertiesXml: props.rawPropertiesXml ?? null,
     rawEndPropertiesXml: props.rawEndPropertiesXml ?? null,
   };
@@ -46,6 +47,7 @@ export function sdtAttrsToProps(attrs: Record<string, unknown>): SdtProperties {
       // The raw property XML remains available for lossless serialization.
     }
   }
+  if (typeof attrs.multiLine === 'boolean') props.multiLine = attrs.multiLine;
   if (attrs.rawPropertiesXml != null) props.rawPropertiesXml = String(attrs.rawPropertiesXml);
   if (attrs.rawEndPropertiesXml != null) {
     props.rawEndPropertiesXml = String(attrs.rawEndPropertiesXml);

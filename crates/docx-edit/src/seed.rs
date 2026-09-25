@@ -8,11 +8,13 @@ use serde_json::{Map, Value, json};
 use yrs::Any;
 use yrs::types::Attrs;
 
+use crate::control_source::safety_key;
 use crate::structured::source::{
     CellLayout, CommentWrites, InlineRecord, InlineSource, Pin, Provenance, RawSource, ReadSource,
-    Relocated, RowLayout, SourceMerge, SourceParts, Step, TableLayout, Witness,
+    Relocated, Represented, RowLayout, SourceMerge, SourceParts, Step, TableLayout, Witness,
+    story_root,
 };
-use crate::structured::{BreakType, Revision, RevisionKind};
+use crate::structured::{BreakType, Revision, RevisionKind, StoryKind};
 use crate::{EditCtx, EditingDoc, RawOp};
 
 type JsonObject = BTreeMap<String, Value>;
@@ -193,6 +195,22 @@ impl SourceMetadata {
             properties: payload(para_attrs_to_ppr(attrs))?,
             run: payload(run)?,
         })
+    }
+
+    /// The run formatting typed text takes in a paragraph of `style_id` inside a content control
+    /// whose own run properties are `control` (a parsed `w:rPr`).
+    pub(crate) fn control_run(
+        &self,
+        style_id: Option<&str>,
+        control: Option<&Value>,
+    ) -> Result<Vec<(String, Any)>, String> {
+        let formatting = style_id.map_or_else(|| json!({}), |id| json!({ "styleId": id }));
+        let paragraph = json!({ "type": "paragraph", "formatting": formatting, "content": [] });
+        let style = paragraph_style_formatting(&paragraph, &self.styles, None);
+        let run_style = self.styles.run_style_own(string(field(control, "styleId")));
+        let inherited = merge_text_formatting(style.as_ref(), run_style.as_ref());
+        let merged = merge_text_formatting(inherited.as_ref(), control);
+        payload(marks_to_attrs(&formatting_to_marks(merged.as_ref())))
     }
 
     /// How the save projection restores each raw XML block of `story` when only the paragraphs
@@ -1864,6 +1882,7 @@ fn sdt_properties_attrs(properties: &Value, source: &BTreeMap<String, String>) -
         "listItems": field(Some(properties), "listItems").map(|value| source_json(value, source)),
         "checked": nullish(field(Some(properties), "checked")),
         "dataBinding": field(Some(properties), "dataBinding").map(|value| source_json(value, source)),
+        "multiLine": nullish(field(Some(properties), "multiLine")),
         "rawPropertiesXml": nullish(field(Some(properties), "rawPropertiesXml")),
         "rawEndPropertiesXml": nullish(field(Some(properties), "rawEndPropertiesXml"))
     }))
@@ -4457,7 +4476,8 @@ pub(crate) fn seed_parsed_docx_with(
     read.seeded_comments = seeded_comments(&context.plans);
     if let Some(parts) = parts {
         let comment_raw = comment_raw_sources(&context.styles, &read);
-        read.resolve_sources(parts, comment_raw);
+        let represented = represented_controls(&context.plans, &read);
+        read.resolve_sources(parts, comment_raw, &represented);
     }
     document
         .create_empty_stories(
@@ -4523,6 +4543,49 @@ fn scratch_options() -> StoryOptions {
         append_body_tail: false,
         seed_comments: false,
     }
+}
+
+/// How many controls with each captured `w:sdtPr` seeding represents in each source part:
+/// control embeds, the controls nested in them and block controls. A header or footer part that
+/// several relationships reference counts once; every other story, each note included, counts.
+fn represented_controls(plans: &[StoryPlan], read: &ReadSource) -> Represented {
+    fn count(raw: Option<&Value>, part: &str, represented: &mut Represented) {
+        let key = safety_key(string(raw));
+        *represented.entry((part.to_owned(), key)).or_default() += 1;
+    }
+    fn nested(content: Option<&Value>, part: &str, represented: &mut Represented) {
+        for item in array(content) {
+            if string(field(Some(item), "kind")) == Some("sdt") {
+                let payload = field(Some(item), "payload");
+                count(field(payload, "rawPropertiesXml"), part, represented);
+                nested(field(payload, "content"), part, represented);
+            }
+        }
+    }
+    let mut readers: HashMap<String, &str> = HashMap::new();
+    let mut represented = Represented::new();
+    for plan in plans {
+        let root = story_root(&plan.story_id);
+        let Some(part) = read.story_part(root) else {
+            continue;
+        };
+        let alias = read
+            .story(root)
+            .is_some_and(|story| matches!(story.kind, StoryKind::Header | StoryKind::Footer));
+        if alias && *readers.entry(part.clone()).or_insert(root) != root {
+            continue;
+        }
+        for unit in &plan.units {
+            let UnitContent::Embed { kind, payload } = &unit.content else {
+                continue;
+            };
+            if matches!(kind.as_str(), "sdt" | "blockSdt") {
+                count(payload.get("rawPropertiesXml"), &part, &mut represented);
+                nested(payload.get("content"), &part, &mut represented);
+            }
+        }
+    }
+    represented
 }
 
 fn read_source(package: &Value, parsed: &Value, parts: Option<&SourceParts>) -> ReadSource {
@@ -4597,7 +4660,8 @@ pub(crate) fn source_metadata(
     read.seeded_comments = seeded_comments(&context.plans);
     if let Some(parts) = parts {
         let comment_raw = comment_raw_sources(&context.styles, &read);
-        read.resolve_sources(parts, comment_raw);
+        let represented = represented_controls(&context.plans, &read);
+        read.resolve_sources(parts, comment_raw, &represented);
     }
     Ok(SourceMetadata {
         styles: context.styles,

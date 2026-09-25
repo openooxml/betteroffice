@@ -131,6 +131,44 @@ classified the same way. Exports stop at whole blocks when they reach `maxBlocks
 `maxBytes` and report `truncated`. Markdown does not preserve Word pagination or
 layout, and page fragments are not included yet.
 
+## Fill DOCX content controls
+
+`listContentControls` lists a session's content controls in document order with
+their tag, alias, type, lock, placement, anchor and current text, and the version
+they were read at. A `setContentControlText` step in an edit batch fills a plain-
+or rich-text control by its `controlId`, or by a tag only one control carries.
+
+```ts
+const read = session.listContentControls();
+if (!read.ok) throw new Error(read.failure.message);
+const byTag = (tag: string) => read.content.controls.find((control) => control.tag === tag)!;
+
+const result = session.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: "setContentControlText", target: { kind: "id", controlId: byTag("customer.name").controlId }, text: "Ada Lovelace" },
+    { op: "setContentControlText", target: { kind: "tag", tag: "customer.address" }, text: "12 Example Street\nLondon" },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code, result.failure.reason);
+```
+
+The text replaces the control's content and clears its placeholder: CRLF becomes
+LF, LF is a line break in an inline control and a new paragraph in a block
+control, and a plain-text control accepts it only with `w:multiLine`. The new
+text takes the formatting of the control's first text run, or the control's own
+run properties while it shows its placeholder. Every step commits or none does;
+missing or duplicate tags, locked, data-bound and nested controls, and content
+other than text, tabs and line breaks are refused as data with a `reason`.
+`findContentControls(query)` returns every exact match of an id, tag or alias,
+and `listDocxContentControls(bytes)` and `findDocxContentControls` read bytes
+without a session. Control ids belong to the version they were read at and do not
+survive save and reopen. Checkbox, dropdown and date controls keep
+`setContentControlValue`; passing a string to it fills a text control the same
+way. The React editor exposes `listContentControls` and `findContentControls` on
+its ref. Filling needs a session opened from DOCX bytes; rich-text run input is
+not supported yet.
+
 ## Operation profiles
 
 XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
@@ -145,8 +183,8 @@ interaction separately when investigating input-to-paint latency.
 
 | Package | What it is |
 | --- | --- |
-| `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text and paragraph batches, structured JSON and Markdown export with source anchors, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
-| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, and flushed version-checked edit batches on its ref. |
+| `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with source anchors, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
+| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, and flushed version-checked edit batches and content-control discovery on its ref. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |

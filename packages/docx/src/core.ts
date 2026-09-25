@@ -48,6 +48,17 @@ export type * from './yrs/structuredExport';
 export type * from './yrs/readTypes';
 
 // ============================================================================
+// CONTENT CONTROLS
+// ============================================================================
+
+export {
+  DocxContentControlsError,
+  findDocxContentControls,
+  listDocxContentControls,
+} from './docx/contentControls';
+export type * from './yrs/contentControls';
+
+// ============================================================================
 // UTILITIES
 // ============================================================================
 

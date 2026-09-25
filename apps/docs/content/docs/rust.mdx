@@ -86,6 +86,25 @@ content in `diagnostics`, and returns `Error::Export` for unusable limits. The
 same content comes from `docx_edit::structured` for a live `EditingDoc` or raw
 bytes. Page fragments are not included yet.
 
+`Document::list_content_controls` lists the content controls of the current model
+in document order, with the structured export's control metadata plus placement,
+anchor, parent control, current text and effective lock; `find_content_controls`
+keeps the exact matches of an id, tag or alias:
+
+```rust
+use betteroffice_docx::{ContentControlQuery, ContentControlsOptions, Document};
+
+let document = Document::open(&docx_bytes)?;
+let controls = document.list_content_controls(&ContentControlsOptions::default())?;
+let query = ContentControlQuery::Tag { tag: "customer.name".to_owned() };
+let named = document.find_content_controls(&query, &ContentControlsOptions::default())?;
+```
+
+Ids and anchors address the returned snapshot. A live `EditingDoc` lists the same
+controls with its version and fills plain- and rich-text ones through
+`setContentControlText` steps of `apply_edits`; the `Document` facade has no
+fill yet.
+
 ## PowerPoint comments
 
 `comment_flavor` reports whether a deck uses legacy or modern comments. Modern

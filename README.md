@@ -59,6 +59,11 @@
   Markdown with source anchors, explicit story and revision options, and
   omission diagnostics. Page fragments are not yet included.
 
+- **DOCX content controls.** List DOCX content controls in JavaScript, Rust, and
+  Python. JavaScript and React hosts fill plain- and rich-text controls
+  atomically through version-checked edit batches. Native and Python filling and
+  explicit rich-text run input are not yet supported.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

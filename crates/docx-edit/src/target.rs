@@ -16,6 +16,7 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
 use crate::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditRefusal, EditTarget, failure, refusal,
 };
+use crate::content_controls::Inventory;
 use crate::format::InlineFormatDelta;
 use crate::ops::{ChunkKind, capture_pilcrow, utf16_len};
 use crate::policy::Ownership;
@@ -656,6 +657,7 @@ pub(crate) struct Views<'a, T: ReadTxn> {
     txn: &'a T,
     cache: HashMap<(String, EditTextView), Option<Rc<StoryView>>>,
     ownership: Option<Rc<Ownership>>,
+    controls: Option<Rc<Inventory>>,
 }
 
 /// A resolved text selection in one paragraph of one view.
@@ -704,6 +706,7 @@ impl<'a, T: ReadTxn> Views<'a, T> {
             txn,
             cache: HashMap::new(),
             ownership: None,
+            controls: None,
         }
     }
 
@@ -751,6 +754,19 @@ impl<'a, T: ReadTxn> Views<'a, T> {
             self.ownership
                 .get_or_insert_with(|| Rc::new(Ownership::build(doc, txn))),
         )
+    }
+
+    /// Every content control of this state, read once.
+    pub fn controls(&mut self) -> Result<Rc<Inventory>, EditFailure> {
+        if let Some(controls) = &self.controls {
+            return Ok(Rc::clone(controls));
+        }
+        let inventory = Rc::new(
+            Inventory::build(self.doc, self.txn)
+                .map_err(|export| failure(EditFailureCode::LimitExceeded, export.message, None))?,
+        );
+        self.controls = Some(Rc::clone(&inventory));
+        Ok(inventory)
     }
 
     pub fn paragraph(

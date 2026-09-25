@@ -103,6 +103,11 @@ impl Ownership {
         Self { owners }
     }
 
+    /// Whether an embed of another story owns `story`.
+    pub fn owns(&self, story: &str) -> bool {
+        self.owners.contains_key(story)
+    }
+
     /// The owners of `story`, nearest first; errors on a cycle or excessive nesting.
     pub fn chain(&self, story: &str) -> Result<Vec<&Owner>, String> {
         let mut chain = Vec::new();

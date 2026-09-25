@@ -64,6 +64,9 @@ use yrs::{
 };
 
 mod batch;
+pub mod content_controls;
+mod control_source;
+mod control_values;
 mod ctx;
 mod deterministic;
 mod format;
@@ -89,9 +92,10 @@ pub mod engine;
 pub mod frame_delta;
 
 pub use batch::{
-    DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditGuard, EditHistory,
-    EditOperation, EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource, EditStep,
-    EditSuggestion, EditTarget, EditValidation, ParagraphInput, TargetEdge,
+    DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditFailureReason, EditGuard,
+    EditHistory, EditOperation, EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource,
+    EditStep, EditSuggestion, EditTarget, EditValidation, ParagraphInput, ResolvedControl,
+    TargetEdge,
 };
 pub use canonical::{CanonicalItem, checksum, project_story, story_checksum, to_canonical_bytes};
 pub use ctx::{EditCtx, EditOrigin, SuggestCtx};
