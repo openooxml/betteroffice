@@ -792,9 +792,9 @@ attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, line chart,
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":196,"y1":186,"y2":186}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":52,"x":66}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":52,"x":170}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":134.133}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":134.133} .. {\"type\":\"close\"} #9377fed6d40e628c","h":9.333,"kind":"shape","w":9.333,"x":87.333,"y":134.133}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":196,"y1":138.8,"y2":91.6}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":191.333,"y":86.933}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":196,\"y\":86.933} .. {\"type\":\"close\"} #3ebe14b54df47668","h":9.333,"kind":"shape","w":9.333,"x":191.333,"y":86.933}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":162.453}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":196,"y1":167.12,"y2":68}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":191.333,"y":63.333}
@@ -886,8 +886,8 @@ attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, radar chart
 {"color":"#666666","kind":"line","strokeWidth":0.5,"x1":148.8,"x2":148.8,"y1":144,"y2":195.68}
 {"baselineY":200.848,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":32,"x":132.8}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":148.8,"x2":148.8,"y1":123.328,"y2":185.344}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":144.133,"y":118.661}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":144.133,"y":180.677}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":148.8,\"y\":118.661} .. {\"type\":\"close\"} #c1be5a1bc1e8b3fe","h":9.333,"kind":"shape","w":9.333,"x":144.133,"y":118.661}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":148.8,\"y\":180.677} .. {\"type\":\"close\"} #33243b3c2e4e7bb3","h":9.333,"kind":"shape","w":9.333,"x":144.133,"y":180.677}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":148.8,"x2":148.8,"y1":135.731,"y2":195.68}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":144.133,"y":131.065}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":144.133,"y":191.013}
@@ -915,9 +915,9 @@ attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, stock chart
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":196,"y1":186,"y2":186}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":52,"x":66}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":52,"x":170}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":134.133}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":134.133} .. {\"type\":\"close\"} #9377fed6d40e628c","h":9.333,"kind":"shape","w":9.333,"x":87.333,"y":134.133}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":196,"y1":138.8,"y2":91.6}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":191.333,"y":86.933}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":196,\"y\":86.933} .. {\"type\":\"close\"} #3ebe14b54df47668","h":9.333,"kind":"shape","w":9.333,"x":191.333,"y":86.933}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":162.453}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":196,"y1":167.12,"y2":68}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":191.333,"y":63.333}
@@ -1329,9 +1329,9 @@ attrs {"ariaLabel":"Combo","blockId":42,"chart":{"label":"Combo, combo chart, 2 
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":196,"y1":186,"y2":186}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":52,"x":66}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":52,"x":170}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":128.889}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":128.889} .. {\"type\":\"close\"} #be8ca2ab3a2ff63c","h":9.333,"kind":"shape","w":9.333,"x":87.333,"y":128.889}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":196,"y1":133.556,"y2":81.111}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":191.333,"y":76.444}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":196,\"y\":76.444} .. {\"type\":\"close\"} #98fe746c449a0259","h":9.333,"kind":"shape","w":9.333,"x":191.333,"y":76.444}
 {"fill":"#4472C4","h":8,"kind":"rect","w":8,"x":212,"y":76}
 {"baselineY":84,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Revenue","width":80,"x":224}
 {"fill":"#4472C4","h":8,"kind":"rect","w":8,"x":212,"y":91}
@@ -1394,12 +1394,12 @@ attrs {"ariaLabel":"Points","blockId":42,"chart":{"label":"Points, line chart, 1
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":34.667,"x":74.667}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":34.667,"x":126.667}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q3","width":34.667,"x":178.667}
-{"fill":"#FF0000","h":18.667,"kind":"rect","w":18.667,"x":82.667,"y":73.417}
+{"fill":"#FF0000","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":73.417} .. {\"type\":\"close\"} #e19c9adccee51c5c","h":18.667,"kind":"shape","w":18.667,"x":82.667,"y":73.417}
 {"baselineY":64.083,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"peak","width":48,"x":110.667}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":144,"y1":82.75,"y2":156.5}
-{"fill":"#4472C4","h":12,"kind":"rect","w":12,"x":138,"y":150.5}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":144,\"y\":150.5} .. {\"type\":\"close\"} #41c947062a4bb889","h":12,"kind":"shape","w":12,"x":138,"y":150.5}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":144,"x2":196,"y1":156.5,"y2":141.75}
-{"fill":"#00FF00","h":12,"kind":"rect","w":12,"x":190,"y":135.75}
+{"fill":"#00FF00","geometryPath":"5 commands {\"type\":\"move\",\"x\":196,\"y\":135.75} .. {\"type\":\"close\"} #aeed7af698df426d","h":12,"kind":"shape","w":12,"x":190,"y":135.75}
 {"baselineY":129.75,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"end","width":48,"x":208}
 {"fill":"#4472C4","h":8,"kind":"rect","w":8,"x":212,"y":76}
 {"baselineY":84,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North","width":80,"x":224}
@@ -1532,9 +1532,9 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, line chart, 1 series, 2 ca
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":292,"y1":186,"y2":186}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":100,"x":42}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":100,"x":242}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":126.933}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":126.933} .. {\"type\":\"close\"} #c70a1b7bb97d2205","h":9.333,"kind":"shape","w":9.333,"x":87.333,"y":126.933}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":292,"y1":131.6,"y2":77.2}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":287.333,"y":72.533}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":292,\"y\":72.533} .. {\"type\":\"close\"} #88c2a060b8da14e0","h":9.333,"kind":"shape","w":9.333,"x":287.333,"y":72.533}
 # empty-series
 attrs {"blockId":42,"chart":{"label":"Untitled chart, column chart, 0 series, 0 categories"},"docEnd":5,"docStart":4}
 {"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
@@ -1650,9 +1650,9 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, line chart, 2 series, 2 ca
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":196,"y1":186,"y2":186}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":52,"x":66}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":52,"x":170}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":103.619}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":103.619} .. {\"type\":\"close\"} #22ded3733320f0a2","h":9.333,"kind":"shape","w":9.333,"x":87.333,"y":103.619}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":196,"y1":108.286,"y2":69.429}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":191.333,"y":64.762}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":196,\"y\":64.762} .. {\"type\":\"close\"} #ef49fdcf0bce3e17","h":9.333,"kind":"shape","w":9.333,"x":191.333,"y":64.762}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":84.19}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":196,"y1":88.857,"y2":178.229}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":191.333,"y":173.562}
@@ -1782,9 +1782,9 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, line chart, 2 series, 2 ca
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":196,"y1":186,"y2":186}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":52,"x":66}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":52,"x":170}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":90.667}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":90.667} .. {\"type\":\"close\"} #6e2f8b1ca225dee3","h":9.333,"kind":"shape","w":9.333,"x":87.333,"y":90.667}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":196,"y1":95.333,"y2":91.286}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":191.333,"y":86.619}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":196,\"y\":86.619} .. {\"type\":\"close\"} #a0f46288d19ba8f5","h":9.333,"kind":"shape","w":9.333,"x":191.333,"y":86.619}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":62.333}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":196,"y1":67,"y2":176.286}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":191.333,"y":171.619}
@@ -2044,10 +2044,10 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, radar chart, 1 series, 4 c
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":200.82,"x2":148.8,"y1":135,"y2":158.12}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":148.8,"x2":114.12,"y1":158.12,"y2":135}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":114.12,"x2":148.8,"y1":135,"y2":117.66}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":144.133,"y":112.993}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":196.153,"y":130.333}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":144.133,"y":153.453}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":109.453,"y":130.333}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":148.8,\"y\":112.993} .. {\"type\":\"close\"} #70287aa99c141d46","h":9.333,"kind":"shape","w":9.333,"x":144.133,"y":112.993}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":200.82,\"y\":130.333} .. {\"type\":\"close\"} #d268d6af12a48602","h":9.333,"kind":"shape","w":9.333,"x":196.153,"y":130.333}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":148.8,\"y\":153.453} .. {\"type\":\"close\"} #a52f02232143e5ec","h":9.333,"kind":"shape","w":9.333,"x":144.133,"y":153.453}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":114.12,\"y\":130.333} .. {\"type\":\"close\"} #ff450308a7413a3b","h":9.333,"kind":"shape","w":9.333,"x":109.453,"y":130.333}
 {"fill":"#4472C4","h":8,"kind":"rect","w":8,"x":212,"y":58}
 {"baselineY":66,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Skills","width":80,"x":224}
 # radar-filled
@@ -2196,9 +2196,9 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, combo chart, 2 series, 2 c
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":254,"x2":254,"y1":50,"y2":186}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":81,"x":51.5}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":81,"x":213.5}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":126.933}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":126.933} .. {\"type\":\"close\"} #c70a1b7bb97d2205","h":9.333,"kind":"shape","w":9.333,"x":87.333,"y":126.933}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":254,"y1":131.6,"y2":77.2}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":249.333,"y":72.533}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":254,\"y\":72.533} .. {\"type\":\"close\"} #1a61a6a87a9891a0","h":9.333,"kind":"shape","w":9.333,"x":249.333,"y":72.533}
 # log-scale-and-ticks
 attrs {"blockId":42,"chart":{"label":"Untitled chart, line chart, 1 series, 2 categories"},"docEnd":5,"docStart":4}
 {"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
@@ -2215,9 +2215,9 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, line chart, 1 series, 2 ca
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":292,"y1":186,"y2":186}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":100,"x":42}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":100,"x":242}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":181.333}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":181.333} .. {\"type\":\"close\"} #2bf03205a4b51d5c","h":9.333,"kind":"shape","w":9.333,"x":87.333,"y":181.333}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":292,"y1":186,"y2":63.647}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":287.333,"y":58.98}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":292,\"y\":58.98} .. {\"type\":\"close\"} #026677867f15e1d1","h":9.333,"kind":"shape","w":9.333,"x":287.333,"y":58.98}
 # reversed-axes
 attrs {"blockId":42,"chart":{"label":"Untitled chart, column chart, 1 series, 2 categories"},"docEnd":5,"docStart":4}
 {"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
@@ -2610,9 +2610,9 @@ attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, line chart,
 {"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":836,"y1":92,"y2":92}
 {"baselineY":106,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":372,"x":-94}
 {"baselineY":106,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":372,"x":650}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":77.733}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":92,\"y\":77.733} .. {\"type\":\"close\"} #bc87556b377e50e5","h":9.333,"kind":"shape","w":9.333,"x":87.333,"y":77.733}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":836,"y1":82.4,"y2":72.8}
-{"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":831.333,"y":68.133}
+{"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":836,\"y\":68.133} .. {\"type\":\"close\"} #fce9a3b173d71190","h":9.333,"kind":"shape","w":9.333,"x":831.333,"y":68.133}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":87.333,"y":83.493}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":836,"y1":88.16,"y2":68}
 {"fill":"#4472C4","h":9.333,"kind":"rect","w":9.333,"x":831.333,"y":63.333}

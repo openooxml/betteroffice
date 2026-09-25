@@ -1492,7 +1492,7 @@ impl<'a> SeriesView<'a> {
             .and_then(|point| point.marker.as_ref())
             .or(self.series.marker.as_ref())
             .and_then(|marker| marker.symbol)
-            .unwrap_or(PlotMarkerSymbol::Square)
+            .unwrap_or(PlotMarkerSymbol::Auto)
             .resolved(series_index);
         (symbol != PlotMarkerSymbol::None).then_some(symbol)
     }
@@ -4932,7 +4932,7 @@ mod tests {
         assert!(ops.len() <= MAX_PLOT_OPS);
         assert!(
             ops.iter()
-                .any(|op| matches!(op, PlotOp::Rect { fill, .. } if fill == "#010203"))
+                .any(|op| matches!(op, PlotOp::Rect { fill, .. } | PlotOp::Path { fill, .. } if fill == "#010203"))
         );
     }
 
@@ -5061,6 +5061,18 @@ mod tests {
             .collect()
     }
 
+    /// Every rectangle and outlined path, as `(x, y, w, h)`: a marker is one or the other.
+    fn marks(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { x, y, w, h, .. } | PlotOp::Path { x, y, w, h, .. } => {
+                    Some((*x, *y, *w, *h))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every rectangle but the chart background and the legend swatches.
     fn bars(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
         rects(ops)
@@ -5175,7 +5187,7 @@ mod tests {
         xy.x_values = &x;
         let chart = grouped("scatter", group("scatter", vec![xy]));
         let ops = plot_chart(&chart, rect());
-        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+        let markers: Vec<(f64, f64, f64, f64)> = marks(&ops)
             .into_iter()
             .filter(|(_, _, w, h)| {
                 (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
@@ -5201,7 +5213,7 @@ mod tests {
             rect(),
         );
         assert_eq!(
-            rects(&scatter)
+            marks(&scatter)
                 .iter()
                 .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
                     && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
@@ -5240,7 +5252,7 @@ mod tests {
             rect(),
         );
         assert_eq!(
-            rects(&scatter)
+            marks(&scatter)
                 .iter()
                 .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
                     && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
@@ -5651,7 +5663,7 @@ mod tests {
         off.markers = Some(false);
         let ops = plot_chart(&grouped("line", off), rect());
         assert!(
-            !rects(&ops)
+            !marks(&ops)
                 .iter()
                 .any(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
                     && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
@@ -5798,7 +5810,7 @@ mod tests {
             .into_iter()
             .find(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
             .expect("a column");
-        let marker = bars(&ops)
+        let marker = marks(&ops)
             .into_iter()
             .find(|(_, _, w, h)| {
                 (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
@@ -5865,7 +5877,7 @@ mod tests {
             ..PlotChart::default()
         };
         let ops = plot_chart(&chart, rect());
-        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+        let markers: Vec<(f64, f64, f64, f64)> = marks(&ops)
             .into_iter()
             .filter(|(_, _, w, h)| {
                 (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
