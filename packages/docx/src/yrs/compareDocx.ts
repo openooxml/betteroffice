@@ -7,7 +7,6 @@ import type {
   DocxCompareResult,
 } from '../docx/compare';
 import { writeDocumentWithRust } from '../docx/rustSaveFacade';
-import { createYrsSession } from './index';
 import { sessionInternals } from './sessionInternals';
 import { type RevisionNumbers, yrsBodyToDocumentWithRevisionIds } from './yrsToDocument';
 
@@ -38,6 +37,8 @@ export async function compareDocxInSession(
   revised: Uint8Array,
   options: DocxCompareOptions
 ): Promise<DocxCompareResult> {
+  // A static import would move the facade, and its relative worker URL, out of the yrs entry.
+  const { createYrsSession } = await import('./index');
   const session = await createYrsSession({ clientId: COMPARE_CLIENT_ID });
   try {
     const internals = sessionInternals(session);
