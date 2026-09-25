@@ -961,6 +961,32 @@ function paintTextRun(
 
 function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: number }> {
   if (run.glyphs.length < 2) return [{ text: run.text, x: run.x }];
+  // A right-to-left run's glyphs step leftward: the canvas orders each tab-free
+  // piece itself, drawn from that piece's leftmost glyph.
+  if (run.glyphs[1].x < run.glyphs[0].x) {
+    const texts = run.text.split('\t');
+    const ends: number[] = [];
+    let end = -1;
+    for (const text of texts) {
+      end += text.length + 1;
+      ends.push(end);
+    }
+    const lefts = texts.map(() => Infinity);
+    for (const glyph of run.glyphs) {
+      const offset = glyph.cluster - run.start;
+      let low = 0;
+      let high = ends.length - 1;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (ends[middle] < offset) low = middle + 1;
+        else high = middle;
+      }
+      if (offset >= 0 && offset < ends[low]) lefts[low] = Math.min(lefts[low], glyph.x);
+    }
+    return texts.flatMap((text, index) =>
+      text.length > 0 && lefts[index] < Infinity ? [{ text, x: lefts[index] }] : [],
+    );
+  }
   const chunks: Array<{ text: string; x: number }> = [];
   let textStart = 0;
   let x = run.x;

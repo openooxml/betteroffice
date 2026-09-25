@@ -4232,7 +4232,6 @@ fn emit_pie<S: PlotSink + ?Sized>(
             .unwrap_or(0.0)
             .rem_euclid(360.0)
             .to_radians();
-    let vary = group.is_some_and(|group| group.vary_colors);
     let mut angle = start;
     for (index, value) in (0..scanned)
         .map(|index| (index, series.value(index)))
@@ -4243,17 +4242,9 @@ fn emit_pie<S: PlotSink + ?Sized>(
         let middle = angle + sweep / 2.0;
         let offset = r * series.explosion(index) / 100.0;
         let (ox, oy) = (cx + offset * middle.cos(), cy + offset * middle.sin());
-        let color = if vary {
-            series
-                .point(index)
-                .and_then(|point| point.color)
-                .map(hex)
-                .unwrap_or_else(|| {
-                    CHART_SERIES_COLORS[index % CHART_SERIES_COLORS.len()].to_owned()
-                })
-        } else {
-            series.point_color(index, index)
-        };
+        // Varied slices arrive as points; a slice without one keeps the
+        // series' own fill.
+        let color = series.point_color(index, index);
         ops.push(PlotOp::Path {
             x: ox - r,
             y: oy - r,
@@ -4371,17 +4362,26 @@ fn emit_legend<S: PlotSink + ?Sized>(
 }
 
 fn legend_entries(chart: &PlotChart<'_>, budget: &mut ScanBudget) -> Vec<(String, String)> {
-    let series: Vec<&PlotSeries<'_>> = if chart.series.is_empty() {
+    let series: Vec<&PlotSeries<'_>> = if chart.plot_groups.is_empty() {
+        chart.series.iter().take(MAX_LEGEND_ENTRIES).collect()
+    } else {
         chart
             .plot_groups
             .iter()
             .flat_map(|group| group.series.iter())
             .take(MAX_LEGEND_ENTRIES)
             .collect()
-    } else {
-        chart.series.iter().take(MAX_LEGEND_ENTRIES).collect()
     };
-    let pie_legend = matches!(chart.chart_type, "pie" | "doughnut" | "ofPie")
+    let varied_bar = series.len() == 1
+        && chart.plot_groups.iter().any(|group| {
+            group.vary_colors
+                && matches!(
+                    group.chart_type.unwrap_or(chart.chart_type),
+                    "bar" | "column"
+                )
+        });
+    let pie_legend = varied_bar
+        || matches!(chart.chart_type, "pie" | "doughnut" | "ofPie")
         || chart.plot_groups.iter().any(|group| {
             matches!(
                 group.chart_type,
