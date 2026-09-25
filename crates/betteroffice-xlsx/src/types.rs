@@ -1,5 +1,6 @@
 use serde::Serialize;
 use xlsx_model::{CellRange, CellRef, SheetId};
+use xlsx_ops::CapturedFormat;
 
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, HorizontalAlignment, NumberFormatMutation, TextWrapping,
@@ -33,6 +34,20 @@ pub struct CellAddress {
 pub struct CellInput {
     pub cell: CellRef,
     pub input: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkbookCellInput {
+    pub sheet: SheetId,
+    pub cell: CellRef,
+    pub input: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkbookFormatInput {
+    pub sheet: SheetId,
+    pub range: CellRange,
+    pub format: CapturedFormat,
 }
 
 #[derive(Debug, Clone, PartialEq)]

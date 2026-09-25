@@ -7,7 +7,7 @@ use betteroffice_xlsx::{
     Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
     ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, Stylesheet,
-    UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    UpdateOrigin, Viewport, Workbook, WorkbookCellInput, WorkbookFormatInput, WorkbookModel,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2095,6 +2095,145 @@ fn semantic_noop_preserves_redo_history() {
         .unwrap();
     assert!(!result.applied);
     assert!(workbook.can_redo());
+}
+
+#[test]
+fn workbook_inputs_and_formats_share_one_collaborative_undo_step() {
+    let mut styled = Workbook::open(&sample_xlsx()).unwrap();
+    styled
+        .patch_range_style(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            StylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let bytes = styled.save().unwrap();
+    let mut left = Workbook::open_collaborative(&bytes, 711).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 712).unwrap();
+    let source_format = left
+        .capture_format(SheetId(0), CellRange::new(cell("A1"), cell("A1")))
+        .unwrap();
+    let original_format = left
+        .capture_format(SheetId(1), CellRange::new(cell("A1"), cell("A1")))
+        .unwrap();
+    let edits = [
+        WorkbookCellInput {
+            sheet: SheetId(0),
+            cell: cell("B2"),
+            input: "=A1*2".into(),
+        },
+        WorkbookCellInput {
+            sheet: SheetId(1),
+            cell: cell("A1"),
+            input: "7".into(),
+        },
+    ];
+    let formats = [WorkbookFormatInput {
+        sheet: SheetId(1),
+        range: CellRange::new(cell("A1"), cell("A1")),
+        format: source_format.clone(),
+    }];
+    assert!(
+        left.edit_workbook_cells(&edits, &formats, CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(left.history_state().undo_depth, 1);
+    assert_eq!(left.cell(SheetId(0), cell("B2")).unwrap().input, "=A1*2");
+    assert_eq!(left.cell(SheetId(1), cell("A1")).unwrap().input, "7");
+    assert_eq!(
+        left.capture_format(SheetId(1), CellRange::new(cell("A1"), cell("A1")))
+            .unwrap(),
+        source_format
+    );
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(right.model(), left.model());
+    let reopened = Workbook::open(&right.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.cell(SheetId(0), cell("B2")).unwrap().input,
+        "=A1*2"
+    );
+    assert_eq!(
+        reopened
+            .capture_format(SheetId(1), CellRange::new(cell("A1"), cell("A1")))
+            .unwrap(),
+        source_format
+    );
+    assert!(left.undo(CalculationOptions::default()).unwrap().applied);
+    assert_eq!(left.cell(SheetId(0), cell("B2")).unwrap().input, "");
+    assert_eq!(left.cell(SheetId(1), cell("A1")).unwrap().input, "");
+    assert_eq!(
+        left.capture_format(SheetId(1), CellRange::new(cell("A1"), cell("A1")))
+            .unwrap(),
+        original_format
+    );
+    let undo = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&undo, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(right.model(), left.model());
+}
+
+#[test]
+fn workbook_input_batch_rejects_bad_targets_before_mutation() {
+    let mut workbook = Workbook::open_collaborative(&sample_xlsx(), 713).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let edits = [
+        WorkbookCellInput {
+            sheet: SheetId(0),
+            cell: cell("A1"),
+            input: "30".into(),
+        },
+        WorkbookCellInput {
+            sheet: SheetId(1),
+            cell: CellRef::new(MAX_ROWS, 0),
+            input: "invalid".into(),
+        },
+    ];
+    assert!(
+        workbook
+            .edit_workbook_cells(&edits, &[], CalculationOptions::default())
+            .is_err()
+    );
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+    assert!(!workbook.can_undo());
+}
+
+#[test]
+fn workbook_input_batch_rejects_bad_format_after_valid_input() {
+    let mut workbook = Workbook::open_collaborative(&sample_xlsx(), 714).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let format = workbook
+        .capture_format(SheetId(0), CellRange::new(cell("A1"), cell("A1")))
+        .unwrap();
+    let edits = [WorkbookCellInput {
+        sheet: SheetId(0),
+        cell: cell("A1"),
+        input: "30".into(),
+    }];
+    let formats = [WorkbookFormatInput {
+        sheet: SheetId(1),
+        range: CellRange::new(cell("A1"), CellRef::new(MAX_ROWS - 1, 0)),
+        format,
+    }];
+    assert!(
+        workbook
+            .edit_workbook_cells(&edits, &formats, CalculationOptions::default())
+            .is_err()
+    );
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+    assert!(!workbook.can_undo());
 }
 
 #[test]
