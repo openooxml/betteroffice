@@ -7,7 +7,7 @@ import {
   pptxCommandController,
   type PptxPendingCommand,
 } from '../../commands/createPptxCommandStore';
-import { commandShortcut, defaultArgs } from '../../commands/descriptors';
+import { commandShortcut, defaultArgs, isPluginCommandId } from '../../commands/descriptors';
 import { MAX_FONT_POINTS, MIN_FONT_POINTS, MAX_ZOOM, MIN_ZOOM } from '../../commands/evaluate';
 import { usePptxCommand, usePptxCommands, usePptxCommandState } from '../../commands/hooks';
 import type {
@@ -15,6 +15,7 @@ import type {
   PptxCommandId,
   PptxCommandState,
   PptxCommandStore,
+  PptxPluginCommandId,
   PptxSelectCommandId,
   PptxZOrderMove,
 } from '../../commands/types';
@@ -150,17 +151,21 @@ function hintFor(id: PptxCommandId, args: unknown): string | null {
 }
 
 /** Arguments a control binds; required when the command cannot run without them. */
-export type ToolbarCommandArgs<K extends PptxCommandId> = null extends PptxCommandArgs[K]
-  ? { args?: PptxCommandArgs[K] }
-  : {} extends PptxCommandArgs[K]
-  ? { args?: PptxCommandArgs[K] }
-  : { args: PptxCommandArgs[K] };
+export type ToolbarCommandArgs<K extends PptxCommandId | PptxPluginCommandId> =
+  K extends PptxCommandId
+    ? null extends PptxCommandArgs[K]
+      ? { args?: PptxCommandArgs[K] }
+      : {} extends PptxCommandArgs[K]
+      ? { args?: PptxCommandArgs[K] }
+      : { args: PptxCommandArgs[K] }
+    : { args?: null };
 
-export type ToolbarCommandButtonProps<K extends PptxCommandId> = {
+/** A built-in or contributed command; a contributed one renders nothing while inactive. */
+export type ToolbarCommandButtonProps<K extends PptxCommandId | PptxPluginCommandId> = {
   id: K;
   /** Button content; defaults to the command's icon, or its label when it has none. */
   children?: ReactNode;
-  /** Accessible name; defaults to the localized command label. */
+  /** Accessible name; defaults to the localized or contributed command label. */
   label?: string;
   className?: string;
   style?: CSSProperties;
@@ -180,7 +185,7 @@ export type PptxControlCommandId =
   | 'zOrder'
   | 'fontSizeStep';
 
-export type ToolbarCommandProps<K extends PptxCommandId> = {
+export type ToolbarCommandProps<K extends PptxCommandId | PptxPluginCommandId> = {
   id: K;
   className?: string;
 } & (K extends PptxControlCommandId
@@ -406,23 +411,30 @@ function useCommandOverflow<K extends PptxCommandId>(
 }
 
 /** A button bound to one command, showing its pressed and disabled state. */
-export function ToolbarCommandButton<K extends PptxCommandId>(props: ToolbarCommandButtonProps<K>) {
+export function ToolbarCommandButton<K extends PptxCommandId | PptxPluginCommandId>(
+  props: ToolbarCommandButtonProps<K>
+) {
   const { id, children, label, className, style } = props;
-  const args = (props as { args?: PptxCommandArgs[K] }).args;
-  const command = usePptxCommand(id, args ?? defaultArgs(id));
+  const args = (props as { args?: unknown }).args;
+  const builtIn = isPluginCommandId(id) ? null : (id as PptxCommandId);
+  const command = usePptxCommand(
+    id as PptxCommandId,
+    (args ?? (builtIn ? defaultArgs(builtIn) : null)) as never
+  );
   const { t } = useTranslation();
-  const icon = iconFor(id, args);
-  const name = label ?? labelFor(id, args, t, command.label);
+  if (!builtIn && command.descriptor === null) return null;
+  const icon = builtIn ? iconFor(builtIn, args) : undefined;
+  const name = label ?? (builtIn ? labelFor(builtIn, args, t, command.label) : command.label);
   return (
     <ToolbarButton
       active={command.state.active}
       disabled={!command.state.enabled}
       description={reasonOf(command.state as PptxCommandState)}
       title={name}
-      shortcut={hintFor(id, args) ?? undefined}
+      shortcut={(builtIn ? hintFor(builtIn, args) : command.shortcut) ?? undefined}
       className={className}
       style={!icon && !children ? { padding: '0 8px', ...style } : style}
-      testId={testIdFor(id, args)}
+      testId={builtIn ? testIdFor(builtIn, args) : undefined}
       onClick={() => void command.execute()}
     >
       {children ?? (icon ? <ToolbarIcon name={icon} /> : name)}
@@ -989,9 +1001,15 @@ function FontSizeSteps() {
 }
 
 /** The built-in control of any command, as the default toolbar presents it. */
-export function ToolbarCommand<K extends PptxCommandId>(props: ToolbarCommandProps<K>) {
+export function ToolbarCommand<K extends PptxCommandId | PptxPluginCommandId>(
+  props: ToolbarCommandProps<K>
+) {
   const { id, className } = props;
-  const args = (props as { args?: PptxCommandArgs[K] }).args;
+  if (isPluginCommandId(id)) {
+    const pluginId: PptxPluginCommandId = id;
+    return <ToolbarCommandButton id={pluginId} className={className} />;
+  }
+  const args = (props as { args?: unknown }).args;
   if (args === undefined) {
     if (SELECT_IDS.has(id)) {
       return <ToolbarCommandSelect id={id as PptxSelectCommandId} className={className} />;
@@ -1010,8 +1028,8 @@ export function ToolbarCommand<K extends PptxCommandId>(props: ToolbarCommandPro
     }
   }
   const Button = ToolbarCommandButton as ComponentType<{
-    id: K;
-    args?: PptxCommandArgs[K];
+    id: PptxCommandId;
+    args?: unknown;
     className?: string;
   }>;
   return <Button id={id} args={args} className={className} />;

@@ -50,6 +50,7 @@ export {
   usePptxCommandState,
   usePptxCommand,
   type PptxBoundCommand,
+  type PptxBoundPluginCommand,
 } from './commands/hooks';
 export type {
   CommandReason,
@@ -67,6 +68,9 @@ export type {
   PptxCommandStatus,
   PptxCommandStore,
   PptxCommandValues,
+  PptxPluginCommandDescriptor,
+  PptxPluginCommandId,
+  PptxPluginCommandState,
   PptxSelectCommandId,
   PptxZOrderMove,
 } from './commands/types';
@@ -81,3 +85,37 @@ export {
   type PptxControlCommandId,
 } from './components/toolbar/ToolbarCommand';
 export { ToolbarOverflow, type ToolbarOverflowProps } from './components/toolbar/ToolbarOverflow';
+
+export { definePptxPlugin } from './plugins/definePptxPlugin';
+export { PptxPluginToolbar } from './plugins/PptxPluginToolbar';
+export type {
+  MaybePromise,
+  PluginCleanupReason,
+  PluginGrant,
+  PluginLoadReason,
+  PptxEditorPluginProps,
+  PptxPlugin,
+  PptxPluginCommand,
+  PptxPluginCommandClient,
+  PptxPluginContext,
+  PptxPluginDefinition,
+  PptxPluginEditClient,
+  PptxPluginError,
+  PptxPluginErrorPhase,
+  PptxPluginEvent,
+  PptxPluginFailureCode,
+  PptxPluginGeometry,
+  PptxPluginGrant,
+  PptxPluginLayout,
+  PptxPluginNavigation,
+  PptxPluginNavigationFailureCode,
+  PptxPluginNavigationOptions,
+  PptxPluginNavigationResult,
+  PptxPluginPanel,
+  PptxPluginPointPosition,
+  PptxPluginReadClient,
+  PptxPluginRect,
+  PptxPluginRefusal,
+  PptxPluginSelection,
+  PptxPluginSnapshot,
+} from './plugins/types';

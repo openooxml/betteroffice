@@ -1,14 +1,22 @@
 import type { Translations } from '@betteroffice/pptx-i18n';
-import { isPptxCommandId, PPTX_COMMAND_DESCRIPTORS } from './descriptors';
-import { commandReason, evaluatePptxCommand, type PptxCommandEnvironment } from './evaluate';
+import { isPluginCommandId, isPptxCommandId, PPTX_COMMAND_DESCRIPTORS } from './descriptors';
+import {
+  commandReason,
+  contributedCommandGate,
+  evaluatePptxCommand,
+  type PptxCommandEnvironment,
+} from './evaluate';
 import type {
   PptxCommandArgs,
-  PptxCommandDescriptor,
+  PptxCommandDisabledCode,
   PptxCommandFailureCode,
   PptxCommandId,
   PptxCommandResult,
   PptxCommandState,
   PptxCommandStore,
+  PptxPluginCommandDescriptor,
+  PptxPluginCommandId,
+  PptxPluginCommandState,
 } from './types';
 
 /** Raised when an admitted command cannot run against its originating input or target. */
@@ -75,6 +83,23 @@ export interface PptxPendingCommand<K extends PptxCommandId> {
   execute(args: PptxCommandArgs[K]): Promise<PptxCommandResult>;
 }
 
+/** A contributed command as the store runs it. */
+export interface PptxPluginCommandBinding {
+  readonly descriptor: PptxPluginCommandDescriptor;
+  /** The plugin's own state; the editor's gate applies on top. */
+  state(): PptxPluginCommandState;
+  /** Runs the plugin's handler with that plugin's clients. */
+  execute(): Promise<PptxCommandResult>;
+}
+
+/** Who a scoped store acts for; asked again inside every operation boundary. */
+export interface PptxCommandScope {
+  /** Why the caller may not run `id` now, or null. */
+  deny(id: PptxCommandId | PptxPluginCommandId): PptxCommandFailureCode | null;
+  /** Notified whenever `deny` may answer differently. */
+  subscribe(listener: () => void): () => void;
+}
+
 /** Private controls of a store: binding, refresh, deferred actions, chrome. */
 export interface PptxCommandController {
   readonly store: PptxCommandStore;
@@ -84,6 +109,7 @@ export interface PptxCommandController {
   refresh(): void;
   /** Keeps one snapshot cached, and its identity stable, while a subscriber shows it. */
   hold<K extends PptxCommandId>(id: K, args?: PptxCommandArgs[K]): () => void;
+  hold(id: PptxPluginCommandId): () => void;
   /** Captures the document and target of an action `id` opens now and completes later. */
   defer<K extends PptxCommandId>(id: K, args: PptxCommandArgs[K]): PptxDeferredCommand;
   /** Captures the document and target now for `id`, run later with arguments chosen then. */
@@ -95,15 +121,34 @@ export interface PptxCommandController {
   chrome(): PptxChromeContext | null;
   subscribeChrome(listener: () => void): () => void;
   focusEditor(): void;
+  /** Replaces the contributed commands and the toolbar order of their ids. */
+  setPluginCommands(
+    commands: readonly PptxPluginCommandBinding[],
+    toolbar: readonly PptxPluginCommandId[]
+  ): void;
+  /** Contributed toolbar commands, in display order. */
+  pluginToolbar(): readonly PptxPluginCommandId[];
+  /** Keyboard bindings of the contributed commands. */
+  pluginShortcuts(): readonly { id: PptxPluginCommandId; chord: string }[];
+  /**
+   * A store acting for `scope`: its answer is checked inside each operation, and mutating
+   * built-in commands, which have no authoritative policy path yet, refuse with
+   * `unsupported-policy`.
+   */
+  scoped(scope: PptxCommandScope): PptxCommandStore;
+  /** Whether `store` is this editor's store or one scoped from it. */
+  ownsStore(store: PptxCommandStore): boolean;
 }
 
 const MAX_CACHED_SNAPSHOTS = 512;
 
+type AnyCommandId = PptxCommandId | PptxPluginCommandId;
+
 interface CachedSnapshot {
-  id: PptxCommandId;
+  id: AnyCommandId;
   args: unknown;
   json: string;
-  state: PptxCommandState;
+  state: PptxCommandState | PptxPluginCommandState;
   holds: number;
   read: number;
 }
@@ -117,13 +162,42 @@ function failure(
   return { ok: false, failure: commandReason(code, env) };
 }
 
-function snapshotKey(id: PptxCommandId, args: unknown): string {
+function snapshotKey(id: AnyCommandId, args: unknown): string {
   return args === undefined ? id : `${id}\u0000${JSON.stringify(args)}`;
+}
+
+/** The disabled code a refusal shows as while the command cannot run at all. */
+function disabledCode(code: PptxCommandFailureCode): PptxCommandDisabledCode {
+  switch (code) {
+    case 'input-failed':
+    case 'target-changed':
+    case 'gesture-active':
+    case 'command-failed':
+      return 'editor-unavailable';
+    case 'document-replaced':
+    case 'aborted':
+      return 'plugin-unavailable';
+    default:
+      return code;
+  }
+}
+
+function mutatingBuiltIn(id: AnyCommandId): boolean {
+  return !isPluginCommandId(id) && PPTX_COMMAND_DESCRIPTORS[id].mutatesDocument;
+}
+
+function knownCommand(id: unknown): id is AnyCommandId {
+  return isPptxCommandId(id) || isPluginCommandId(id);
 }
 
 /** Creates the command store of one editor mount. */
 export function createPptxCommandController(): PptxCommandController {
   let binding: PptxCommandBinding | null = null;
+  let pluginCommands = new Map<PptxPluginCommandId, PptxPluginCommandBinding>();
+  let pluginToolbarIds: readonly PptxPluginCommandId[] = Object.freeze([]);
+  let pluginShortcutList: readonly { id: PptxPluginCommandId; chord: string }[] = Object.freeze([]);
+  const scopedStores = new WeakMap<PptxCommandScope, PptxCommandStore>();
+  const ownStores = new WeakSet<PptxCommandStore>();
   const listeners = new Set<() => void>();
   const snapshots = new Map<string, CachedSnapshot>();
   const chromeRoots = new Set<HTMLElement>();
@@ -141,8 +215,22 @@ export function createPptxCommandController(): PptxCommandController {
     }
   };
 
-  const compute = (id: PptxCommandId, args: unknown, env: PptxCommandEnvironment | null) =>
-    evaluatePptxCommand(id, args as never, env) as PptxCommandState;
+  const pluginState = (
+    id: PptxPluginCommandId,
+    env: PptxCommandEnvironment | null
+  ): PptxPluginCommandState => {
+    const command = pluginCommands.get(id);
+    if (!command) {
+      return { enabled: false, disabledReason: commandReason('unsupported-command', env) };
+    }
+    const gate = contributedCommandGate(command.descriptor.mutatesDocument, env);
+    return gate ? { enabled: false, disabledReason: gate } : command.state();
+  };
+
+  const compute = (id: AnyCommandId, args: unknown, env: PptxCommandEnvironment | null) =>
+    isPluginCommandId(id)
+      ? pluginState(id, env)
+      : (evaluatePptxCommand(id, args as never, env) as PptxCommandState);
 
   const notify = () => {
     round += 1;
@@ -157,11 +245,11 @@ export function createPptxCommandController(): PptxCommandController {
     }
   };
 
-  const snapshot = (id: PptxCommandId, args: unknown): CachedSnapshot => {
+  const snapshot = (id: AnyCommandId, args: unknown): CachedSnapshot => {
     const key = snapshotKey(id, args);
     let entry = snapshots.get(key);
     if (!entry) {
-      const state = isPptxCommandId(id)
+      const state = knownCommand(id)
         ? compute(id, args, environment(false))
         : ({
             enabled: false,
@@ -197,7 +285,7 @@ export function createPptxCommandController(): PptxCommandController {
     const env = environment(false);
     let changed = false;
     for (const entry of snapshots.values()) {
-      if (!isPptxCommandId(entry.id)) continue;
+      if (!knownCommand(entry.id)) continue;
       const next = compute(entry.id, entry.args, env);
       const json = JSON.stringify(next);
       if (json === entry.json) continue;
@@ -217,24 +305,30 @@ export function createPptxCommandController(): PptxCommandController {
     }
   };
 
-  const run = async <K extends PptxCommandId>(
-    id: K,
-    args: PptxCommandArgs[K],
+  const run = async (
+    id: AnyCommandId,
+    args: unknown,
     perform: (env: PptxCommandEnvironment) => PptxCommandResult | Promise<PptxCommandResult>,
-    deferred?: { origin: PptxCommandOrigin | null }
+    deferred?: { origin: PptxCommandOrigin | null },
+    scope?: PptxCommandScope
   ): Promise<PptxCommandResult> => {
     const current = binding;
     if (!current) return failure('editor-unavailable', null);
-    const ordered = deferred !== undefined || current.ordered(id, args);
-    const origin = deferred ? deferred.origin : ordered ? capture(id) : undefined;
+    const builtIn = isPluginCommandId(id) ? null : id;
+    const ordered =
+      deferred !== undefined || (builtIn !== null && current.ordered(builtIn, args as never));
+    const origin = deferred ? deferred.origin : ordered && builtIn ? capture(builtIn) : undefined;
     const attempt = () => {
       if (origin !== undefined) {
         const stale = origin ? current.resume(origin) : 'editor-unavailable';
         if (stale) return failure(stale, environment(true));
       }
+      const denied = scope?.deny(id) ?? null;
+      if (denied) return failure(denied, environment(true));
       const env = environment(true);
-      const state = evaluatePptxCommand(id, args, env);
+      const state = compute(id, args, env);
       if (!state.enabled) return { ok: false, failure: state.disabledReason } as PptxCommandResult;
+      if (scope && mutatingBuiltIn(id)) return failure('unsupported-policy', env);
       return perform(env!);
     };
     try {
@@ -249,27 +343,93 @@ export function createPptxCommandController(): PptxCommandController {
     }
   };
 
-  const store: PptxCommandStore = Object.freeze({
-    getDescriptor<K extends PptxCommandId>(id: K): PptxCommandDescriptor<K> {
-      return PPTX_COMMAND_DESCRIPTORS[id] as PptxCommandDescriptor<K>;
-    },
-    getState<K extends PptxCommandId>(id: K, args?: PptxCommandArgs[K]): PptxCommandState<K> {
-      return snapshot(id, args).state as PptxCommandState<K>;
-    },
+  const perform = (id: AnyCommandId, args: unknown, env: PptxCommandEnvironment) =>
+    isPluginCommandId(id)
+      ? pluginCommands.get(id)!.execute()
+      : binding!.perform(id, args as never, env);
+
+  const dispatch = (
+    id: unknown,
+    args: unknown,
+    scope?: PptxCommandScope
+  ): Promise<PptxCommandResult> => {
+    if (!knownCommand(id)) {
+      return Promise.resolve(failure('unsupported-command', environment(false)));
+    }
+    return run(id, args, (env) => perform(id, args, env), undefined, scope);
+  };
+
+  const getDescriptor = (id: AnyCommandId) =>
+    isPluginCommandId(id)
+      ? pluginCommands.get(id)?.descriptor ?? null
+      : PPTX_COMMAND_DESCRIPTORS[id];
+
+  const store = Object.freeze({
+    getDescriptor,
+    getState: (id: AnyCommandId, args?: unknown) => snapshot(id, args).state,
     subscribe(listener: () => void): () => void {
       listeners.add(listener);
       return () => {
         listeners.delete(listener);
       };
     },
-    execute<K extends PptxCommandId>(id: K, args: PptxCommandArgs[K]): Promise<PptxCommandResult> {
-      if (!isPptxCommandId(id)) {
-        return Promise.resolve(failure('unsupported-command', environment(false)));
+    execute: (id: AnyCommandId, args: unknown) => dispatch(id, args),
+  }) as PptxCommandStore;
+
+  const createScoped = (scope: PptxCommandScope): PptxCommandStore => {
+    const cache = new Map<
+      string,
+      { base: unknown; denial: PptxCommandFailureCode | null; policy: boolean; state: unknown }
+    >();
+    const getState = (id: AnyCommandId, args?: unknown) => {
+      const base = snapshot(id, args).state;
+      const denial = scope.deny(id);
+      const policy = !denial && base.enabled && mutatingBuiltIn(id);
+      const key = snapshotKey(id, args);
+      const cached = cache.get(key);
+      if (cached && cached.base === base && cached.denial === denial && cached.policy === policy) {
+        return cached.state;
       }
-      const current = binding;
-      return run(id, args, (env) => current!.perform(id, args, env));
-    },
-  });
+      const code = denial ? disabledCode(denial) : policy ? 'unsupported-policy' : null;
+      const { enabled: _enabled, disabledReason: _reason, ...presentation } = base;
+      const state = code
+        ? {
+            ...presentation,
+            enabled: false,
+            disabledReason: commandReason(code, environment(false)),
+          }
+        : base;
+      if (cache.size >= MAX_CACHED_SNAPSHOTS) cache.delete(cache.keys().next().value!);
+      cache.set(key, { base, denial, policy, state });
+      return state;
+    };
+    const scopedStore = Object.freeze({
+      getDescriptor,
+      getState,
+      subscribe(listener: () => void): () => void {
+        const release = [store.subscribe(listener), scope.subscribe(listener)];
+        return () => {
+          for (const unsubscribe of release) unsubscribe();
+        };
+      },
+      execute: (id: AnyCommandId, args: unknown) => dispatch(id, args, scope),
+    }) as PptxCommandStore;
+    controllers.set(scopedStore, {
+      ...controller,
+      store: scopedStore,
+      defer(id, args) {
+        const origin = capture(id);
+        return { complete: (write) => run(id, args, () => write(), { origin }, scope) };
+      },
+      prepare(id) {
+        const origin = capture(id);
+        return {
+          execute: (args) => run(id, args, (env) => perform(id, args, env), { origin }, scope),
+        };
+      },
+    });
+    return scopedStore;
+  };
 
   const controller: PptxCommandController = {
     store,
@@ -283,7 +443,7 @@ export function createPptxCommandController(): PptxCommandController {
       refresh();
     },
     refresh,
-    hold(id, args) {
+    hold(id: AnyCommandId, args?: unknown) {
       const entry = snapshot(id, args);
       entry.holds += 1;
       let held = true;
@@ -300,10 +460,7 @@ export function createPptxCommandController(): PptxCommandController {
     prepare(id) {
       const origin = capture(id);
       return {
-        execute: (args) => {
-          const current = binding;
-          return run(id, args, (env) => current!.perform(id, args, env), { origin });
-        },
+        execute: (args) => run(id, args, (env) => perform(id, args, env), { origin }),
       };
     },
     registerChrome(element) {
@@ -327,7 +484,31 @@ export function createPptxCommandController(): PptxCommandController {
     focusEditor() {
       binding?.focusEditor();
     },
+    setPluginCommands(commands, toolbar) {
+      pluginCommands = new Map(commands.map((command) => [command.descriptor.id, command]));
+      pluginToolbarIds = Object.freeze(toolbar.filter((id) => pluginCommands.has(id)));
+      pluginShortcutList = Object.freeze(
+        commands.flatMap((command) =>
+          command.descriptor.shortcuts.map(({ chord }) => ({ id: command.descriptor.id, chord }))
+        )
+      );
+      refresh();
+      notify();
+    },
+    pluginToolbar: () => pluginToolbarIds,
+    pluginShortcuts: () => pluginShortcutList,
+    scoped(scope) {
+      let scoped = scopedStores.get(scope);
+      if (!scoped) {
+        scoped = createScoped(scope);
+        scopedStores.set(scope, scoped);
+        ownStores.add(scoped);
+      }
+      return scoped;
+    },
+    ownsStore: (candidate) => ownStores.has(candidate),
   };
+  ownStores.add(store);
   controllers.set(store, controller);
   return controller;
 }

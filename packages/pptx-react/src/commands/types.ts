@@ -137,7 +137,10 @@ export type PptxCommandDisabledCode =
   | 'proposals-unavailable'
   | 'host-disabled'
   | 'unsupported-command'
-  | 'invalid-arguments';
+  | 'invalid-arguments'
+  | 'permission-denied'
+  | 'unsupported-policy'
+  | 'plugin-unavailable';
 
 /** Why an executed command did not complete. */
 export type PptxCommandFailureCode =
@@ -146,7 +149,8 @@ export type PptxCommandFailureCode =
   | 'document-replaced'
   | 'target-changed'
   | 'gesture-active'
-  | 'command-failed';
+  | 'command-failed'
+  | 'aborted';
 
 /** One choice of a selector command. */
 export interface PptxCommandOption<K extends PptxCommandId = PptxCommandId> {
@@ -193,12 +197,31 @@ export type PptxCommandResult =
   | { ok: true; status: PptxCommandStatus }
   | { ok: false; failure: CommandReason<PptxCommandFailureCode> };
 
+/** A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`. */
+export type PptxPluginCommandId = `plugin:${string}/${string}`;
+
+/** Static description of a contributed command. */
+export interface PptxPluginCommandDescriptor {
+  id: PptxPluginCommandId;
+  label: string;
+  mutatesDocument: boolean;
+  shortcuts: readonly { chord: string; args: null }[];
+}
+
+/** State of a contributed command; the plugin chooses its own disabled codes. */
+export type PptxPluginCommandState = CommandState;
+
 /** The command authority of one editor, shared by built-in and host chrome. */
 export interface PptxCommandStore {
   getDescriptor<K extends PptxCommandId>(id: K): PptxCommandDescriptor<K>;
+  /** Null while no active plugin contributes `id`. */
+  getDescriptor(id: PptxPluginCommandId): PptxPluginCommandDescriptor | null;
   /** Snapshots are stable until the state changes; pass `args` to evaluate one option. */
   getState<K extends PptxCommandId>(id: K, args?: PptxCommandArgs[K]): PptxCommandState<K>;
+  getState(id: PptxPluginCommandId, args?: null): PptxPluginCommandState;
   subscribe(listener: () => void): () => void;
   /** Runs after input accepted before the call; availability is checked again first. */
   execute<K extends PptxCommandId>(id: K, args: PptxCommandArgs[K]): Promise<PptxCommandResult>;
+  /** Runs a contributed command with its plugin's own clients, outside the input queue. */
+  execute(id: PptxPluginCommandId, args: null): Promise<PptxCommandResult>;
 }

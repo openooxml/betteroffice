@@ -13,6 +13,7 @@ import {
   resolveLastResortFace,
   resolveMetricCompatFace,
 } from "@betteroffice/fonts";
+import type { PptxPlugin, PptxPluginGrant } from "@betteroffice/pptx-react";
 import { Logo } from "../components/Logo";
 import {
   CollaborationControls,
@@ -70,6 +71,21 @@ export function PptxDemoClient() {
   const [user, setUser] = useState<CollaborationUser | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [compact, setCompact] = useState(false);
+  const [reviewPlugin, setReviewPlugin] = useState<PptxPlugin | null>(null);
+  const [reviewEnabled, setReviewEnabled] = useState(false);
+  const [reviewWrites, setReviewWrites] = useState(false);
+  const [readOnly, setReadOnly] = useState(false);
+  const plugins = useMemo(
+    () => (reviewEnabled && reviewPlugin ? [reviewPlugin] : []),
+    [reviewEnabled, reviewPlugin],
+  );
+  const pluginGrants = useMemo<Record<string, PptxPluginGrant> | undefined>(
+    () =>
+      reviewWrites && reviewPlugin
+        ? { [reviewPlugin.id]: { document: "write", editBatches: true } }
+        : undefined,
+    [reviewPlugin, reviewWrites],
+  );
   const room = useDemoRoom();
   const createProvider = useCallback(
     (replica: CollaborationReplica, transport: CollaborationTransport) =>
@@ -81,6 +97,16 @@ export function PptxDemoClient() {
   const collab = useCollabRoom(COLLAB_RELAY_ORIGIN, room, createProvider);
 
   useEffect(() => setUser(loadPresenceUser()), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void import("./ReviewPlugin").then((module) => {
+      if (!cancelled) setReviewPlugin(module.reviewPlugin);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,6 +175,32 @@ export function PptxDemoClient() {
           >
             Compact toolbar
           </button>
+          <button
+            type="button"
+            className="rounded-[5px] px-2 py-1 text-[12.5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg aria-pressed:bg-surface aria-pressed:text-fg"
+            aria-pressed={reviewEnabled}
+            disabled={!reviewPlugin}
+            onClick={() => setReviewEnabled((value) => !value)}
+          >
+            Review plugin
+          </button>
+          <button
+            type="button"
+            className="rounded-[5px] px-2 py-1 text-[12.5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg aria-pressed:bg-surface aria-pressed:text-fg"
+            aria-pressed={reviewWrites}
+            disabled={!reviewEnabled}
+            onClick={() => setReviewWrites((value) => !value)}
+          >
+            Plugin write access
+          </button>
+          <button
+            type="button"
+            className="rounded-[5px] px-2 py-1 text-[12.5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg aria-pressed:bg-surface aria-pressed:text-fg"
+            aria-pressed={readOnly}
+            onClick={() => setReadOnly((value) => !value)}
+          >
+            Read-only
+          </button>
           <CollaborationControls
             status={collab.status}
             synced={collab.synced}
@@ -188,6 +240,15 @@ export function PptxDemoClient() {
             file={assets.file}
             fonts={assets.fonts}
             collaboration={collaboration}
+            readOnly={readOnly}
+            plugins={plugins}
+            pluginGrants={pluginGrants}
+            onPluginError={(failure) =>
+              console.error(
+                `Plugin ${failure.pluginId} failed (${failure.phase})`,
+                failure.error,
+              )
+            }
             toolbar={
               compact ? (
                 <CompactToolbar

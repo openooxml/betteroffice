@@ -3,6 +3,7 @@ import type {
   PptxCommandDescriptor,
   PptxCommandId,
   PptxCommandShortcut,
+  PptxPluginCommandId,
 } from './types';
 
 type DescriptorTable = { readonly [K in PptxCommandId]: PptxCommandDescriptor<K> };
@@ -61,6 +62,13 @@ export function isPptxCommandId(value: unknown): value is PptxCommandId {
   );
 }
 
+const PLUGIN_COMMAND_ID =
+  /^plugin:[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+export function isPluginCommandId(value: unknown): value is PptxPluginCommandId {
+  return typeof value === 'string' && PLUGIN_COMMAND_ID.test(value);
+}
+
 /** Arguments a control uses when none are bound. */
 export function defaultArgs<K extends PptxCommandId>(id: K): PptxCommandArgs[K] {
   return (id === 'insertSlide' ? {} : null) as PptxCommandArgs[K];
@@ -84,6 +92,36 @@ function parseChord(chord: string): ParsedChord {
     key: key.toLowerCase(),
   };
 }
+
+const MODIFIERS: ReadonlySet<string> = new Set(['Mod', 'Shift', 'Alt']);
+
+/** `chord` in canonical form (`Mod+Alt+Shift+key`), or null when it is not a chord. */
+export function normalizeChord(chord: string): string | null {
+  if (typeof chord !== 'string' || chord.length === 0) return null;
+  const parts = chord.split('+');
+  const modifiers =
+    parts.length > 1 && parts[parts.length - 1] === '' ? parts.slice(0, -2) : parts.slice(0, -1);
+  if (!modifiers.every((modifier) => MODIFIERS.has(modifier))) return null;
+  const parsed = parseChord(chord);
+  if (parsed.key.length === 0) return null;
+  return [parsed.mod && 'Mod', parsed.alt && 'Alt', parsed.shift && 'Shift', parsed.key]
+    .filter(Boolean)
+    .join('+');
+}
+
+/** Canonical chords the text input handles itself (clipboard and select all). */
+export const EDITING_CHORDS: ReadonlySet<string> = new Set(
+  ['Mod+A', 'Mod+C', 'Mod+V', 'Mod+X', 'Mod+Shift+V'].map((chord) => normalizeChord(chord)!)
+);
+
+/** Canonical chords of the built-in commands, which always win over contributed ones. */
+export const BUILT_IN_CHORDS: ReadonlySet<string> = new Set(
+  Object.values(PPTX_COMMAND_DESCRIPTORS).flatMap((descriptor) =>
+    (descriptor.shortcuts as readonly PptxCommandShortcut[]).map(
+      (shortcut) => normalizeChord(shortcut.chord)!
+    )
+  )
+);
 
 export function isMacPlatform(): boolean {
   return typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);

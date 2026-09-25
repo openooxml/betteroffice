@@ -75,6 +75,11 @@
   return a typed refusal with nothing changed. Text steps stay within one
   paragraph and leave fields and line breaks whole.
 
+- **Host-owned PPTX plugins.** PPTX React supports host-owned plugins with
+  panels, overlays, lifecycle events, and explicitly granted commands and edit
+  batches. Plugins read and navigate by default; every write is checked against
+  its grant and `readOnly` when it runs.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

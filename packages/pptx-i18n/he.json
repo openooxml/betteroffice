@@ -188,7 +188,17 @@
       "documentReplaced": "המצגת הוחלפה.",
       "targetChanged": "הבחירה השתנתה לפני שהפקודה הופעלה.",
       "gestureActive": "סיים תחילה את תנועת המצביע.",
-      "commandFailed": "הפקודה נכשלה."
+      "commandFailed": "הפקודה נכשלה.",
+      "permissionDenied": "היישום המארח לא התיר לתוסף זה להשתמש בפקודה זו.",
+      "unsupportedPolicy": "תוספים עדיין לא יכולים להריץ פקודה זו. השתמש במקום זאת באצוות עריכה.",
+      "pluginUnavailable": "התוסף אינו פעיל עוד.",
+      "aborted": "פעולת התוסף בוטלה לפני שהפקודה רצה."
     }
+  },
+  "plugins": {
+    "toolbarGroup": "תוספים",
+    "panelTabs": "חלוניות תוספים",
+    "collapsePanel": "כווץ את {title}",
+    "expandPanel": "הרחב את {title}"
   }
 }

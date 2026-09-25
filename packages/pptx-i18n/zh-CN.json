@@ -188,7 +188,17 @@
       "documentReplaced": "演示文稿已被替换。",
       "targetChanged": "命令运行前选择已更改。",
       "gestureActive": "请先完成指针手势。",
-      "commandFailed": "命令执行失败。"
+      "commandFailed": "命令执行失败。",
+      "permissionDenied": "宿主应用未允许此插件使用此命令。",
+      "unsupportedPolicy": "插件尚不能运行此命令，请改用编辑批处理。",
+      "pluginUnavailable": "插件已不再处于活动状态。",
+      "aborted": "插件操作在命令运行前已取消。"
     }
+  },
+  "plugins": {
+    "toolbarGroup": "插件",
+    "panelTabs": "插件面板",
+    "collapsePanel": "折叠{title}",
+    "expandPanel": "展开{title}"
   }
 }

@@ -188,7 +188,17 @@
       "documentReplaced": "Sunu değiştirildi.",
       "targetChanged": "Komut çalışmadan önce seçim değişti.",
       "gestureActive": "Önce işaretçi hareketini tamamlayın.",
-      "commandFailed": "Komut başarısız oldu."
+      "commandFailed": "Komut başarısız oldu.",
+      "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
+      "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
+      "pluginUnavailable": "Eklenti artık etkin değil.",
+      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi."
     }
+  },
+  "plugins": {
+    "toolbarGroup": "Eklentiler",
+    "panelTabs": "Eklenti panelleri",
+    "collapsePanel": "{title} daralt",
+    "expandPanel": "{title} genişlet"
   }
 }

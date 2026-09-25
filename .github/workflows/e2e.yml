@@ -108,7 +108,7 @@ jobs:
         if: matrix.suite == 'browser'
         run: bun run test:e2e:browser
 
-      - name: Run the DOCX plugin host in Chromium
+      - name: Run the editor plugin hosts in Chromium
         if: matrix.suite == 'browser'
         run: bun run test:e2e:browser:plugins
 

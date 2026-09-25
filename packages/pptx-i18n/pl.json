@@ -188,7 +188,17 @@
       "documentReplaced": "Prezentacja została zastąpiona.",
       "targetChanged": "Zaznaczenie zmieniło się przed wykonaniem polecenia.",
       "gestureActive": "Najpierw dokończ gest wskaźnika.",
-      "commandFailed": "Polecenie nie powiodło się."
+      "commandFailed": "Polecenie nie powiodło się.",
+      "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
+      "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
+      "pluginUnavailable": "Wtyczka nie jest już aktywna.",
+      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia."
     }
+  },
+  "plugins": {
+    "toolbarGroup": "Wtyczki",
+    "panelTabs": "Panele wtyczek",
+    "collapsePanel": "Zwiń {title}",
+    "expandPanel": "Rozwiń {title}"
   }
 }

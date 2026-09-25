@@ -2,6 +2,7 @@ import { useContext } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { PptxCommandContext } from '../commands/PptxCommandProvider';
 import { useTranslation } from '../i18n';
+import { PptxPluginToolbar } from '../plugins/PptxPluginToolbar';
 import { EditorToolbarContext, ToolbarModeContext } from './EditorToolbarContext';
 import { useLegacyToolbarStore } from './toolbar/legacyCommands';
 import { ShapeToolMenu, ToolbarCommand, ToolbarCommandButton } from './toolbar/ToolbarCommand';
@@ -175,6 +176,7 @@ function DefaultToolbarItems() {
         <ToolbarCommand id="shapeAdjustment" />
         <ToolbarCommand id="zOrder" />
       </ToolbarGroup>
+      <PptxPluginToolbar />
     </>
   );
 }

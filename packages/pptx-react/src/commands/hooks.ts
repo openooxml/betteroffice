@@ -2,7 +2,7 @@ import { useCallback, useContext, useMemo, useRef, useSyncExternalStore } from '
 import { useTranslation } from '../i18n';
 import { pptxCommandController, type PptxChromeContext } from './createPptxCommandStore';
 import { PptxCommandContext } from './PptxCommandProvider';
-import { commandShortcut, defaultArgs } from './descriptors';
+import { commandShortcut, defaultArgs, formatChord, isPluginCommandId } from './descriptors';
 import type {
   PptxCommandArgs,
   PptxCommandDescriptor,
@@ -10,6 +10,9 @@ import type {
   PptxCommandResult,
   PptxCommandState,
   PptxCommandStore,
+  PptxPluginCommandDescriptor,
+  PptxPluginCommandId,
+  PptxPluginCommandState,
 } from './types';
 
 /** The nearest editor's command store. */
@@ -31,12 +34,18 @@ function parse(argsKey: string | undefined) {
 export function usePptxCommandState<K extends PptxCommandId>(
   id: K,
   args?: PptxCommandArgs[K]
-): PptxCommandState<K> {
+): PptxCommandState<K>;
+/** Subscribes to a contributed command's state. */
+export function usePptxCommandState(id: PptxPluginCommandId, args?: null): PptxPluginCommandState;
+export function usePptxCommandState(
+  id: PptxCommandId | PptxPluginCommandId,
+  args?: unknown
+): PptxCommandState | PptxPluginCommandState {
   const store = usePptxCommands();
   const argsKey = args === undefined ? undefined : JSON.stringify(args);
   const subscribe = useCallback(
     (listener: () => void) => {
-      const release = pptxCommandController(store)?.hold(id, parse(argsKey));
+      const release = pptxCommandController(store)?.hold(id as PptxCommandId, parse(argsKey));
       const unsubscribe = store.subscribe(listener);
       return () => {
         unsubscribe();
@@ -45,7 +54,10 @@ export function usePptxCommandState<K extends PptxCommandId>(
     },
     [store, id, argsKey]
   );
-  const getSnapshot = useCallback(() => store.getState(id, parse(argsKey)), [store, id, argsKey]);
+  const getSnapshot = useCallback(
+    () => store.getState(id as PptxCommandId, parse(argsKey)),
+    [store, id, argsKey]
+  );
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
@@ -61,39 +73,72 @@ export interface PptxBoundCommand<K extends PptxCommandId> {
   execute(args?: PptxCommandArgs[K]): Promise<PptxCommandResult>;
 }
 
+/** A contributed command bound to this component. */
+export interface PptxBoundPluginCommand {
+  id: PptxPluginCommandId;
+  /** Null while no active plugin contributes the command. */
+  descriptor: PptxPluginCommandDescriptor | null;
+  state: PptxPluginCommandState;
+  /** The contributed label, or the id while no plugin contributes it. */
+  label: string;
+  shortcut: string | null;
+  execute(): Promise<PptxCommandResult>;
+}
+
 /** Binds one command for a custom control. */
 export function usePptxCommand<K extends PptxCommandId>(
   id: K,
   args?: PptxCommandArgs[K]
-): PptxBoundCommand<K> {
+): PptxBoundCommand<K>;
+/** Binds a contributed command for a custom control. */
+export function usePptxCommand(id: PptxPluginCommandId, args?: null): PptxBoundPluginCommand;
+export function usePptxCommand(
+  id: PptxCommandId | PptxPluginCommandId,
+  args?: unknown
+): PptxBoundCommand<PptxCommandId> | PptxBoundPluginCommand {
   const store = usePptxCommands();
-  const state = usePptxCommandState(id, args);
+  const state = usePptxCommandState(id as PptxCommandId, args as never);
   const { t } = useTranslation();
-  const descriptor = store.getDescriptor(id);
+  const descriptor = store.getDescriptor(id as PptxCommandId) as
+    | PptxCommandDescriptor
+    | PptxPluginCommandDescriptor
+    | null;
   const argsKey = args === undefined ? undefined : JSON.stringify(args);
   const execute = useCallback(
-    (callArgs?: PptxCommandArgs[K]) =>
+    (callArgs?: unknown) =>
       store.execute(
-        id,
-        callArgs !== undefined
+        id as PptxCommandId,
+        (callArgs !== undefined
           ? callArgs
           : argsKey !== undefined
           ? JSON.parse(argsKey)
-          : defaultArgs(id)
+          : defaultArgs(id as PptxCommandId)) as never
       ),
     [store, id, argsKey]
   );
-  return useMemo(
-    () => ({
+  return useMemo(() => {
+    if (isPluginCommandId(id)) {
+      const contributed = descriptor as PptxPluginCommandDescriptor | null;
+      const chord = contributed?.shortcuts[0]?.chord;
+      return {
+        id,
+        descriptor: contributed,
+        state,
+        label: contributed?.label ?? id,
+        shortcut: chord ? formatChord(chord) : null,
+        execute: () => execute(),
+      };
+    }
+    const builtIn = descriptor as PptxCommandDescriptor;
+    return {
       id,
-      descriptor,
-      state,
-      label: t(descriptor.labelKey),
+      descriptor: builtIn,
+      state: state as PptxCommandState,
+      label: t(builtIn.labelKey),
       shortcut: commandShortcut(id, parse(argsKey)),
       execute,
-    }),
-    [id, descriptor, state, t, argsKey, execute]
-  );
+    };
+  }, [id, descriptor, state, t, argsKey, execute]);
 }
 
 /** The editor's locale, following its changes; `null` outside an editor. */

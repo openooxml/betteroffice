@@ -255,6 +255,100 @@ their place through `handle.anchorCaret()` and `handle.resolveCaretAnchor()`,
 caret anchors that later edits, undo and remote updates move along; hosts can
 use them too.
 
+## Host PPTX editor plugins
+
+`PptxEditor` installs host-owned tools through the same `plugins`,
+`pluginGrants` and `onPluginError` props as the DOCX editor. A plugin created
+with `definePptxPlugin` contributes a docked panel, an overlay on the slide and
+commands, and works through restricted clients:
+
+```tsx
+import { PptxEditor, definePptxPlugin } from "@betteroffice/pptx-react";
+
+const review = definePptxPlugin<{ slides: number }>({
+  id: "acme.review",
+  createState: () => ({ slides: 0 }),
+  async onEvent(context, event) {
+    if (event.type !== "load" && event.type !== "document-change") return;
+    const read = await context.read.readContent();
+    if (read.ok) context.setState({ slides: read.slides.length }, read.version);
+  },
+  panel: {
+    title: "Review",
+    placement: "right",
+    render: ({ context }) => <p>{context.state.slides} slides</p>,
+  },
+  commands: [
+    {
+      id: "mark",
+      label: "Mark reviewed",
+      mutatesDocument: true,
+      async execute(context) {
+        const read = await context.read.readContent();
+        const slideId = context.snapshot.selection?.slideId;
+        if (!read.ok || !slideId || !context.edits) return { ok: true, status: "noop" };
+        const result = await context.edits.applyEdits({
+          expectVersion: read.version,
+          steps: [{ op: "setSlideNotes", target: { slideId }, text: "Reviewed" }],
+        });
+        return result.ok ? { ok: true, status: "executed" } : { ok: true, status: "noop" };
+      },
+    },
+  ],
+  toolbar: ["mark"],
+});
+
+<PptxEditor
+  file={bytes}
+  fonts={fonts}
+  plugins={[review]}
+  pluginGrants={{ "acme.review": { document: "write", editBatches: true } }}
+  onPluginError={(error) => console.error(error.pluginId, error.phase, error.error)}
+/>;
+```
+
+**Lifecycle and grants** follow the DOCX editor: fresh state, `initialize` and
+one `load` event per presentation, then coalesced `document-change`,
+`selection-change`, `mode-change` (with `readOnly`), `layout-change` and
+`grants-change` events. `document-change` comes from the presentation's
+committed versions, so typing, commands, batches, undo, redo and remote updates
+each produce one, and refusals or no-ops none. Replacing the presentation,
+removing the plugin, changing its `revision`, unmounting or a failure ends the
+activation and runs its cleanups once. Without a grant a plugin reads
+(`read.version`, `readContent`, `findText`, `validateEdits`) and navigates;
+built-in commands need an allowlisted id, mutating ones refuse with
+`unsupported-policy`, and `applyEdits` needs `document: "write"` and
+`editBatches`. Grants and `readOnly` are checked again right before each change.
+Each client call waits for pending input in order with it; plugin handlers run
+outside that queue.
+
+**Selection and navigation.** `snapshot.selection` names the current slide
+(session `slideId` and one-based `slide`) and a slide, shape or text target;
+text keeps its `anchor`/`focus` direction. `navigation.goToSlide`,
+`selectShape` and `selectText` take the version the target was read at, keep
+keyboard focus unless `focus: true`, and refuse with `stale-version`,
+`missing-target`, `layout-unavailable` or `unsupported` rather than retarget a
+changed deck. Slide, shape and story ids are session-scoped.
+
+**Coordinates.** `context.geometry` exists only while the canvas shows a
+painted frame of the current version, and not during proposal review.
+`layout.width`/`height` are the unzoomed slide in display-list pixels and
+`layout.zoom` the resolved scale. `geometry.toOverlayRect({ space, rect })`
+converts `slide-emu` (9,525 EMU per pixel) or `slide-px` rectangles into pixels
+of the unscaled overlay layer on the slide, `getShapeRect(shapeId)` returns a
+shape's rendered bounds including group descendants, and `getPositionAtPoint`
+hit-tests client coordinates with the layout's `version` and `id`. The layer
+sits below selection handles and proposal controls and ignores the pointer
+unless an element sets `pointer-events: auto`. Panels dock left, right or bottom
+of the slide beside the thumbnail rail, and become drawers in a narrow editor.
+Place `<PptxPluginToolbar />` in replacement chrome to keep contributed toolbar
+commands. Plugin shortcuts must use Mod or Alt, or a function key; built-in and
+clipboard shortcuts take precedence, and a clashing plugin shortcut is reported
+and not bound. Keys pressed in plugin chrome are the user's: built-in shortcuts act
+on the editor there, and a plugin's text fields keep their own editing keys.
+Plugins share the page's JavaScript realm, so grants govern the
+supported API rather than sandboxing code.
+
 ## Use the JavaScript core
 
 ```ts
@@ -375,7 +469,7 @@ interaction separately when investigating input-to-paint latency.
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
 | `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, version-checked atomic edit batches, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
-| `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with a command store, composable toolbar parts, and flushed version-checked edit batches on its editor API. |
+| `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with a command store, composable toolbar parts, flushed version-checked edit batches on its editor API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/pptx-i18n` | UI locale strings and types for the PPTX React editor. |
 
 See [Collaboration](./collaboration) to connect editors through a shared relay.

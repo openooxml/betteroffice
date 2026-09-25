@@ -188,7 +188,17 @@
       "documentReplaced": "Die Präsentation wurde ersetzt.",
       "targetChanged": "Die Auswahl hat sich geändert, bevor der Befehl ausgeführt wurde.",
       "gestureActive": "Beenden Sie zuerst die Zeigergeste.",
-      "commandFailed": "Der Befehl ist fehlgeschlagen."
+      "commandFailed": "Der Befehl ist fehlgeschlagen.",
+      "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
+      "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
+      "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
+      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
     }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Plugin-Bereiche",
+    "collapsePanel": "{title} einklappen",
+    "expandPanel": "{title} ausklappen"
   }
 }
