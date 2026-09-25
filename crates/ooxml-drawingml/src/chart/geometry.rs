@@ -248,11 +248,21 @@ pub trait PlotSink {
     }
 
     fn push_op(&mut self, op: PlotOp) -> bool;
+
+    /// Whether the host draws a text op at its `rotation_deg`. One that keeps
+    /// every label flat gets a turned title laid out flat instead.
+    fn turns_text(&self) -> bool {
+        false
+    }
 }
 
 impl PlotSink for Vec<PlotOp> {
     fn push_op(&mut self, op: PlotOp) -> bool {
         self.push(op);
+        true
+    }
+
+    fn turns_text(&self) -> bool {
         true
     }
 }
@@ -2389,7 +2399,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
         (left_of_plot(plot), below_plot(plot))
     };
     if let Some(title) = family.axis_titles.value.filter(|title| !title.is_empty()) {
-        if transposed {
+        if transposed || !ops.sink.turns_text() {
             push_text(
                 ops,
                 title,
@@ -2400,9 +2410,8 @@ fn emit_axes<S: PlotSink + ?Sized>(
             );
         } else {
             // PowerPoint stands a value-axis title on its side, centred on the
-            // axis it names, outside the tick labels.
-            // The sink hangs the box from the baseline, so the baseline sits
-            // half an ascent below the centre the title turns about.
+            // axis it names; the baseline sits half an ascent below the centre
+            // the box turns about.
             push_text_turned(
                 ops,
                 title,
@@ -4487,6 +4496,47 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, PlotOp::Text { text, .. } if text == "Millions"))
         );
+    }
+
+    #[test]
+    fn a_value_axis_title_turns_only_for_a_host_that_can_draw_it_turned() {
+        struct Flat(Vec<PlotOp>);
+        impl PlotSink for Flat {
+            fn push_op(&mut self, op: PlotOp) -> bool {
+                self.0.push(op);
+                true
+            }
+        }
+        let north = source(&[10.0, 20.0]);
+        let chart = PlotChart {
+            chart_type: "column",
+            axis_titles: PlotAxisTitles {
+                category: None,
+                value: Some("Millions"),
+            },
+            series: vec![series("North", &north)],
+            ..PlotChart::default()
+        };
+        let title = |ops: &[PlotOp]| {
+            ops.iter()
+                .find_map(|op| match op {
+                    PlotOp::Text {
+                        text,
+                        rotation_deg,
+                        width,
+                        ..
+                    } if text == "Millions" => Some((*rotation_deg, *width)),
+                    _ => None,
+                })
+                .expect("the value-axis title is drawn")
+        };
+        let turned = title(&plot_chart(&chart, rect()));
+        assert_eq!(turned.0, -90.0);
+        let mut flat = Flat(Vec::new());
+        plot_chart_into(&chart, rect(), &mut flat);
+        let (rotation, width) = title(&flat.0);
+        assert_eq!(rotation, 0.0);
+        assert_ne!(width, turned.1, "a flat title keeps its own box");
     }
 
     #[test]

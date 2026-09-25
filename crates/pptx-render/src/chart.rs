@@ -100,6 +100,10 @@ struct ChartSink<'a> {
 }
 
 impl PlotSink for ChartSink<'_> {
+    fn turns_text(&self) -> bool {
+        true
+    }
+
     fn accepts_more(&mut self) -> bool {
         self.remaining > 0 && self.error.is_none()
     }
