@@ -1019,7 +1019,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             x: plot_x,
             y: region_y + axis_header,
             w: (width - gutter - legend_w - 10.0 - secondary_w).max(24.0),
-            h: (height - title_h - 34.0 - legend_h - axis_header).max(24.0),
+            h: (height - title_h - category_band(chart, chart_text) - legend_h - axis_header)
+                .max(24.0),
             gutter,
         },
     };
@@ -2741,13 +2742,14 @@ fn emit_bar<S: PlotSink + ?Sized>(
         // A category name carries its own line breaks, and PowerPoint stacks
         // the lines under the band rather than running them together.
         let step = category_style.font.size_px * 1.2;
+        let lift = step * (label.split('\n').count() - 1) as f64 / 2.0;
         for (line, text) in label.split('\n').enumerate() {
             if horizontal {
                 push_text(
                     ops,
                     text.trim(),
                     plot.x - plot.gutter + 4.0,
-                    plot.y + slot + bands.slot * 0.55 + step * line as f64,
+                    plot.y + slot + bands.slot * 0.55 - lift + step * line as f64,
                     plot.gutter - 8.0,
                     category_style,
                 );
@@ -3994,7 +3996,7 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
     if !value.is_finite() || code.is_empty() {
         return None;
     }
-    let sections = code.split(';').collect::<Vec<_>>();
+    let sections = format_sections(code);
     // Excel reads the sections as positive, negative and zero. A negative with
     // a section of its own writes itself, parentheses and all; without one it
     // takes a minus sign.
@@ -4007,11 +4009,14 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
         return Some(format_number(value));
     }
     let section = &strip_modifiers(section)?;
-    if section.contains(['y', 'd', 'h', 's', 'E', 'e', '?'])
-        || section.contains("m/")
-        || !section.contains(['0', '#'])
-    {
+    if section.contains(['y', 'd', 'h', 's', 'E', 'e', '?']) || section.contains("m/") {
         return None;
+    }
+    // A section with no digit placeholder writes only its literal text, which
+    // is how `0;-0;"-"` draws a zero as a dash and `0;-0;` as nothing.
+    if !section.contains(['0', '#']) {
+        let (leading, trailing) = literals(section);
+        return Some(leading + &trailing);
     }
     let digits = section
         .split('.')
@@ -4045,6 +4050,66 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
     Some(out)
 }
 
+/// The room under the plot for its category names: the one line every chart
+/// keeps, grown by a line for each break the longest name carries.
+fn category_band(chart: &PlotChart<'_>, chart_text: PlotTextStyle<'_>) -> f64 {
+    const ONE_LINE: f64 = 34.0;
+    let lines = chart
+        .series
+        .iter()
+        .chain(
+            chart
+                .plot_groups
+                .iter()
+                .flat_map(|group| group.series.iter()),
+        )
+        .find(|series| !series.categories.is_empty())
+        .into_iter()
+        .flat_map(|series| series.categories.iter())
+        .take(MAX_PLOT_DATA_SCAN)
+        .map(|name| name.split('\n').count())
+        .max()
+        .unwrap_or(1);
+    if lines <= 1 || has_transposed_family(chart) {
+        return ONE_LINE;
+    }
+    let style = chart
+        .axes
+        .iter()
+        .find(|axis| axis.kind != PlotAxisKind::Value)
+        .map(|axis| axis.text)
+        .unwrap_or_default()
+        .over(chart_text)
+        .resolve(CHART_LABEL_SIZE_PX, 400);
+    ONE_LINE + style.font.size_px * 1.2 * (lines - 1) as f64
+}
+
+/// A format code's `;`-separated sections. A semicolon inside quotes, or one
+/// escaped, spaced or repeated as a literal, belongs to the section it is in.
+fn format_sections(code: &str) -> Vec<&str> {
+    let mut sections = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut literal = false;
+    for (index, character) in code.char_indices() {
+        if literal {
+            literal = false;
+            continue;
+        }
+        match character {
+            '"' => quoted = !quoted,
+            '\\' | '_' | '*' if !quoted => literal = true,
+            ';' if !quoted => {
+                sections.push(&code[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    sections.push(&code[start..]);
+    sections
+}
+
 /// A section without the `[…]` groups that only colour it or name its locale.
 /// A condition such as `[>100]` picks the section by value, which this does not
 /// model, so it gives up instead.
@@ -4057,14 +4122,25 @@ fn strip_modifiers(section: &str) -> Option<String> {
     while let Some(open) = rest.find('[') {
         let close = rest[open..].find(']')? + open;
         let inside = &rest[open + 1..close];
-        let known = inside.starts_with('$')
-            || COLORS.iter().any(|name| inside.eq_ignore_ascii_case(name))
+        out.push_str(&rest[..open]);
+        rest = &rest[close + 1..];
+        // `[$€-407]` is a currency symbol and the locale it belongs to: the
+        // symbol is drawn, the locale is not.
+        if let Some(currency) = inside.strip_prefix('$') {
+            let symbol = currency
+                .split_once('-')
+                .map_or(currency, |(symbol, _)| symbol);
+            for character in symbol.chars() {
+                out.push('\\');
+                out.push(character);
+            }
+            continue;
+        }
+        let known = COLORS.iter().any(|name| inside.eq_ignore_ascii_case(name))
             || inside.to_ascii_lowercase().starts_with("color");
         if !known {
             return None;
         }
-        out.push_str(&rest[..open]);
-        rest = &rest[close + 1..];
     }
     out.push_str(rest);
     Some(out)
@@ -6305,6 +6381,23 @@ mod tests {
             Some("($18,766)")
         );
         assert_eq!(format_with_code(7.0, "General").as_deref(), Some("7"));
+        assert_eq!(format_with_code(0.0, "0;-0;\"-\"").as_deref(), Some("-"));
+        assert_eq!(format_with_code(0.0, "0;-0;").as_deref(), Some(""));
+        assert_eq!(format_with_code(4.0, "0;-0;").as_deref(), Some("4"));
+        assert_eq!(
+            format_with_code(1234.5, "[$$-409]#,##0.00").as_deref(),
+            Some("$1,234.50")
+        );
+        assert_eq!(
+            format_with_code(1234.5, "[$\u{20ac}-407]#,##0.00").as_deref(),
+            Some("\u{20ac}1,234.50")
+        );
+        assert_eq!(format_with_code(3.0, "[$-409]0").as_deref(), Some("3"));
+        assert_eq!(format_with_code(2.5, "0.0\";\"").as_deref(), Some("2.5;"));
+        assert_eq!(
+            format_with_code(-2.5, "0.0\\;;(0.0)").as_deref(),
+            Some("(2.5)")
+        );
         assert_eq!(format_with_code(7.0, "0 \"kg\"").as_deref(), Some("7 kg"));
         assert_eq!(format_with_code(7.0, "yyyy-mm-dd"), None);
         assert_eq!(format_with_code(f64::NAN, "0.0"), None);
@@ -6529,6 +6622,30 @@ mod tests {
             "an overlaid legend must leave the plot its width: {} vs {}",
             widest(true),
             widest(false)
+        );
+    }
+
+    #[test]
+    fn a_category_name_with_breaks_keeps_every_line_inside_the_frame() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North"];
+        let categories = ["One\nTwo\nThree".to_owned(), "Four".to_owned()];
+        let mut chart = legend_chart(Some("bottom"), &names, &data);
+        chart.series[0].categories = &categories;
+        let ops = plot_chart(&chart, rect());
+        let bottom = rect().y + rect().h;
+        let three = ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Text {
+                    text, baseline_y, ..
+                } if text == "Three" => Some(*baseline_y),
+                _ => None,
+            })
+            .expect("the third line is drawn");
+        assert!(
+            three < bottom,
+            "the third line sits below the frame: {three} vs {bottom}"
         );
     }
 
