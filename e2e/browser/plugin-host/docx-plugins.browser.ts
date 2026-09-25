@@ -172,8 +172,9 @@ test('sidebar cards make room for comments and start collapsed after replacement
   await expect(comment).toBeVisible();
   await expect
     .poll(async () => {
-      const a = (await card.boundingBox())!;
-      const b = (await comment.boundingBox())!;
+      const a = await card.boundingBox();
+      const b = await comment.boundingBox();
+      if (!a || !b) return false;
       return a.y + a.height <= b.y || b.y + b.height <= a.y;
     })
     .toBe(true);
