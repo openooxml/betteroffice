@@ -233,6 +233,46 @@ fn a_right_to_left_paragraph_read_from_xml_paints_and_carets_in_reading_order() 
     }
 }
 
+#[test]
+fn a_right_to_left_paragraph_keeps_its_latin_words_in_their_own_order() {
+    let mut parts = ooxml_opc::unzip_parts(DECK).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "ppt/slides/slide1.xml" {
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            *bytes = xml
+                .replacen(
+                    r#"<a:pPr lvl="0" /><a:r><a:rPr /><a:t>First level</a:t>"#,
+                    "<a:pPr lvl=\"0\" rtl=\"1\" /><a:r><a:rPr /><a:t>\u{645}\u{631}\u{62d}\u{628}\u{627} Hello world \u{628}\u{643}\u{645}</a:t>",
+                    1,
+                )
+                .into_bytes();
+        }
+    }
+    let session = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 2947).unwrap();
+    let list = renderer()
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list;
+    let line = &lines(&list, 3)[0];
+    let find = |needle: char| {
+        line.runs
+            .iter()
+            .find(|run| run.text.contains(needle))
+            .expect("a run")
+    };
+    let (first, latin, last) = (find('\u{645}'), find('H'), find('\u{643}'));
+    assert!(latin.text.starts_with("Hello world"), "{:?}", latin.text);
+    assert!(
+        first.x > latin.x && latin.x > last.x,
+        "the first Arabic word reads rightmost, the last leftmost"
+    );
+    assert!(
+        latin.glyphs.windows(2).all(|pair| pair[1].x > pair[0].x),
+        "Latin letters keep left-to-right order"
+    );
+    assert!(first.glyphs.windows(2).all(|pair| pair[1].x < pair[0].x));
+}
+
 fn clear_bullets(body: &mut TextBody) {
     for properties in body
         .default_list_style

@@ -2342,7 +2342,15 @@ fn resolve_content(
                 resolve_style(renderer, theme, &run.style, properties.default_run.as_ref())?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
-            push_cased_runs(&mut runs, &run.text, start, language, style);
+            if properties.rtl == Some(true) {
+                let mut cased = Vec::new();
+                push_cased_runs(&mut cased, &run.text, start, language, style);
+                for run in cased {
+                    split_by_direction(run, &mut runs);
+                }
+            } else {
+                push_cased_runs(&mut runs, &run.text, start, language, style);
+            }
         }
         if runs.is_empty() {
             let end_style = cascade
@@ -3363,10 +3371,11 @@ fn layout_paragraph(
     Ok(output)
 }
 
-/// Lays a right-to-left line out from its right edge. A run of right-to-left
-/// script mirrors glyph by glyph, so it paints in reading order; any other run
-/// keeps its own order and moves as a block. The caret stops follow the glyphs
-/// they sit between.
+/// Lays a right-to-left line out from its right edge, in bidi visual order:
+/// the runs reverse, except that a stretch of consecutive left-to-right runs
+/// keeps its own order. A right-to-left run mirrors glyph by glyph so it paints
+/// in reading order; a left-to-right run keeps its glyphs and moves as a block.
+/// Caret stops follow the glyphs they sit between.
 fn mirror_line(
     runs: &mut [PositionedTextRun],
     caret_stops: &mut [CaretStop],
@@ -3374,38 +3383,98 @@ fn mirror_line(
     line_width: f32,
 ) {
     let mirror = 2.0 * line_x + line_width;
-    for stop in caret_stops.iter_mut() {
-        stop.x = mirror - stop.x;
+    let ltr: Vec<bool> = runs
+        .iter()
+        .map(|run| direction(&run.text) == Some(false))
+        .collect();
+    let old: Vec<f32> = runs.iter().map(|run| run.x).collect();
+    let mut placed: Vec<f32> = runs.iter().map(|run| mirror - run.width - run.x).collect();
+    let mut index = 0;
+    while index < runs.len() {
+        if !ltr[index] {
+            index += 1;
+            continue;
+        }
+        let end = (index..runs.len())
+            .find(|position| !ltr[*position])
+            .unwrap_or(runs.len());
+        let mut x = placed[index..end].iter().copied().fold(f32::MAX, f32::min);
+        for position in index..end {
+            placed[position] = x;
+            x += runs[position].width;
+        }
+        index = end;
     }
-    for run in runs {
-        let (old_x, new_x) = (run.x, mirror - run.width - run.x);
-        if reads_right_to_left(&run.text) {
+    for stop in caret_stops.iter_mut() {
+        let home = (0..runs.len()).find(|&position| {
+            let run = &runs[position];
+            ltr[position]
+                && (stop.position > run.start && stop.position < run.end
+                    || stop.position == run.start && position > 0 && ltr[position - 1])
+        });
+        stop.x = match home {
+            Some(position) => placed[position] + (stop.x - old[position]),
+            None => mirror - stop.x,
+        };
+    }
+    for (position, run) in runs.iter_mut().enumerate() {
+        if ltr[position] {
             for glyph in &mut run.glyphs {
-                glyph.x = mirror - glyph.x - glyph.advance;
+                glyph.x += placed[position] - old[position];
             }
         } else {
             for glyph in &mut run.glyphs {
-                glyph.x += new_x - old_x;
-            }
-            for stop in caret_stops
-                .iter_mut()
-                .filter(|stop| stop.position > run.start && stop.position < run.end)
-            {
-                stop.x = 2.0 * new_x + run.width - stop.x;
+                glyph.x = mirror - glyph.x - glyph.advance;
             }
         }
-        run.x = new_x;
+        run.x = placed[position];
     }
 }
 
-/// Whether `text` holds a character of a right-to-left script.
-fn reads_right_to_left(text: &str) -> bool {
-    text.chars().any(|character| {
-        matches!(
-            character as u32,
-            0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
-        )
-    })
+/// The strong direction of `text`: `Some(true)` for right-to-left script,
+/// `Some(false)` for letters and digits of any other, `None` for neither.
+fn direction(text: &str) -> Option<bool> {
+    text.chars().find_map(char_direction)
+}
+
+fn char_direction(character: char) -> Option<bool> {
+    if matches!(
+        character as u32,
+        0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
+    ) {
+        Some(true)
+    } else if character.is_alphanumeric() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Splits a right-to-left paragraph's run where its strong direction turns, so
+/// each part reads one way. Spaces and punctuation stay with the text before.
+fn split_by_direction(run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
+    let mut cuts = vec![0];
+    let mut current = None;
+    for (index, character) in run.text.char_indices() {
+        if let Some(next) = char_direction(character) {
+            if current.is_some_and(|current| current != next) {
+                cuts.push(index);
+            }
+            current = Some(next);
+        }
+    }
+    if cuts.len() == 1 {
+        out.push(run);
+        return;
+    }
+    for (position, start) in cuts.iter().enumerate() {
+        let end = cuts.get(position + 1).copied().unwrap_or(run.text.len());
+        out.push(ResolvedRun {
+            text: run.text[*start..end].to_owned(),
+            start: run.start + utf16_len(&run.text[..*start]),
+            style: run.style.clone(),
+        });
+    }
 }
 
 /// Prepends a marker outside the story's character space.
@@ -3783,25 +3852,32 @@ fn positioned_runs(
     let mut output: Vec<PositionedTextRun> = Vec::new();
     let mut cursor_x = line_x;
     let mut trailing_tracking = 0.0_f32;
+    let mut run_direction = None;
     for (index, cluster) in clusters.iter().enumerate() {
         if cluster.text == "\n" {
             continue;
         }
         let baseline_offset_px = cluster.style.baseline_shift_px * scale;
-        let append = output.last().is_some_and(|run| {
-            run.end == cluster.start
-                && run.font_id == cluster.style.face.id.to_u32()
-                && run.letter_spacing_px == cluster.tracking
-                && run.baseline_offset_px == baseline_offset_px
-                && run.font_family == cluster.style.family
-                && run.font_size_px
-                    == points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale))
-                && run.bold == cluster.style.bold
-                && run.italic == cluster.style.italic
-                && run.underline == cluster.style.underline
-                && run.color == cluster.style.color
-        });
+        let turns = matches!(
+            (run_direction, direction(&cluster.text)),
+            (Some(current), Some(next)) if current != next
+        );
+        let append = !turns
+            && output.last().is_some_and(|run| {
+                run.end == cluster.start
+                    && run.font_id == cluster.style.face.id.to_u32()
+                    && run.letter_spacing_px == cluster.tracking
+                    && run.baseline_offset_px == baseline_offset_px
+                    && run.font_family == cluster.style.family
+                    && run.font_size_px
+                        == points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale))
+                    && run.bold == cluster.style.bold
+                    && run.italic == cluster.style.italic
+                    && run.underline == cluster.style.underline
+                    && run.color == cluster.style.color
+            });
         if !append {
+            run_direction = None;
             if let Some(previous) = output.last_mut() {
                 previous.width -= trailing_tracking;
             }
@@ -3823,6 +3899,7 @@ fn positioned_runs(
                 glyphs: Vec::new(),
             });
         }
+        run_direction = run_direction.or_else(|| direction(&cluster.text));
         let Some(run) = output.last_mut() else {
             continue;
         };

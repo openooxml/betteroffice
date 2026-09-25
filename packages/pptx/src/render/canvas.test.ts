@@ -456,6 +456,56 @@ describe('PPTX canvas replay', () => {
     );
     expect(calls).toEqual([{ text: '\u05d0\u05d1\u05d2', x: 40 }]);
   });
+
+  test('paints each tab-separated piece of a right-to-left run at its own glyphs', async () => {
+    const calls: Array<{ text: string; x: number }> = [];
+    const ctx = new Proxy(
+      { fillText: (text: string, x: number) => calls.push({ text, x }) } as Record<string, unknown>,
+      {
+        get: (target, property) => (property in target ? target[property as string] : () => undefined),
+        set: (target, property, value) => {
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    const glyph = (cluster: number, x: number) => ({
+      glyphId: cluster + 1, cluster, x, advance: 10, xOffset: 0, yOffset: 68,
+    });
+    await paintSlide(
+      ctx,
+      {
+        contractVersion: 1,
+        width: 320,
+        height: 180,
+        primitives: [
+          {
+            kind: 'textBox', objectId: 1, shapeId: 'shape:1', storyId: 'story:1',
+            x: 40, y: 50, w: 240, h: 80, anchor: 'top', paragraphs: [],
+            lines: [
+              {
+                x: 40, y: 50, width: 120, height: 24, baseline: 68, start: 0, end: 5,
+                caretStops: [],
+                runs: [
+                  {
+                    text: '\u05d0\u05d1\t\u05d2\u05d3', start: 0, end: 5, x: 40, width: 120, fontId: 1,
+                    fontFamily: 'Liberation Sans', fontSizePx: 20, bold: false, italic: false,
+                    underline: false, color: '#000000',
+                    glyphs: [glyph(0, 150), glyph(1, 140), glyph(3, 50), glyph(4, 40)],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      1
+    );
+    expect(calls).toEqual([
+      { text: '\u05d0\u05d1', x: 140 },
+      { text: '\u05d2\u05d3', x: 40 },
+    ]);
+  });
 });
 
 type Call = [string, ...number[]];
