@@ -1012,7 +1012,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     // A side legend keeps an em of its text between itself and the plot.
     let legend_gap = legend_style.font.size_px * LEGEND_PLOT_GAP_EM;
     let (reserve_left, reserve_right) = match &legend {
-        Some(band) if !band.horizontal && legend_reserves => {
+        Some(band) if !band.horizontal && legend_reserves && !band.rows.is_empty() => {
             if legend_position == "left" {
                 (band.x + band.w + legend_gap - x, 0.0)
             } else {
@@ -1036,13 +1036,21 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             .collect()
     };
     let families = plot_families(chart, &views, label_style);
-    let bands = axis_bands(
-        ops,
-        families
-            .iter()
-            .copied()
-            .find(|family| has_axes(family.chart_type) && !family.secondary),
-    );
+    // Every family on the primary axes hangs its labels off the one plot, so
+    // each side takes the widest band any of them needs.
+    let bands = families
+        .iter()
+        .copied()
+        .filter(|family| has_axes(family.chart_type) && !family.secondary)
+        .map(|family| axis_bands(ops, Some(family), width))
+        .reduce(|a, b| AxisBands {
+            left: a.left.max(b.left),
+            top: a.top.max(b.top),
+            right: a.right.max(b.right),
+            bottom: a.bottom.max(b.bottom),
+            overhang: a.overhang.max(b.overhang),
+        })
+        .unwrap_or_else(|| axis_bands(ops, None, width));
     let gutter = bands.left;
     let plot_x = x + reserve_left + gutter;
     let secondary_w = if secondary_value_axis(chart, false).is_some() {
@@ -1222,6 +1230,7 @@ struct AxisBands {
 fn axis_bands<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     family: Option<PlotFamily<'_>>,
+    width: f64,
 ) -> AxisBands {
     let empty = AxisBands {
         left: CHART_PAD + PLOT_INSET,
@@ -1302,6 +1311,30 @@ fn axis_bands<S: PlotSink + ?Sized>(
             overhang,
         }
     } else {
+        // A scatter's x labels sit centred on their ticks, so the last one
+        // hangs half its width past the plot.
+        let x_overhang = if matches!(family.chart_type, "scatter" | "bubble")
+            && !family.x_axis.is_some_and(|axis| axis.hidden)
+        {
+            let scale = scatter_x_scale(
+                family,
+                PlotArea {
+                    x: 0.0,
+                    y: 0.0,
+                    w: width,
+                    h: 0.0,
+                    gutter: 0.0,
+                },
+            );
+            let format = family.x_axis.and_then(|axis| axis.number_format);
+            axis_ticks(scale, family.x_axis.and_then(|axis| axis.major_unit))
+                .last()
+                .map_or(0.0, |value| {
+                    text_width(&scale.format(*value, format), family.label(), ops) / 2.0
+                })
+        } else {
+            0.0
+        };
         AxisBands {
             left: value_title
                 + if values.is_empty() {
@@ -1314,14 +1347,14 @@ fn axis_bands<S: PlotSink + ?Sized>(
             } else {
                 PLOT_INSET.max(0.5 * value_style.font.size_px - 0.7)
             },
-            right: PLOT_INSET,
+            right: PLOT_INSET + x_overhang,
             bottom: category_title
                 + if categories.is_empty() {
                     empty.bottom
                 } else {
                     hung(&category_style, lines)
                 },
-            overhang: 0.0,
+            overhang: x_overhang,
         }
     }
 }
@@ -2013,9 +2046,14 @@ fn side_legend_band<S: PlotSink + ?Sized>(
     } else {
         rect.y
     };
+    let first = if position == "topRight" {
+        top + LEGEND_EDGE
+    } else {
+        top
+    };
     // Entries that would run past the chart's foot are left out, as PowerPoint
     // leaves them.
-    let room = (rect.y + rect.h - top).max(0.0);
+    let room = (rect.y + rect.h - first).max(0.0);
     let mut used = 0.0;
     rows.retain(|row| {
         used += row.height;
@@ -2034,7 +2072,7 @@ fn side_legend_band<S: PlotSink + ?Sized>(
             rect.x + rect.w - LEGEND_EDGE - w
         },
         y: if position == "topRight" {
-            top + LEGEND_EDGE
+            first
         } else {
             ((top + rect.y + rect.h) / 2.0 - h / 2.0).max(top)
         },
@@ -6897,6 +6935,70 @@ mod tests {
     }
 
     #[test]
+    fn a_combo_chart_makes_room_for_its_widest_labels() {
+        let data = Source {
+            categories: vec![
+                "A rather long category name".to_owned(),
+                "Another long one".to_owned(),
+            ],
+            values: vec![10.0, 20.0],
+        };
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![
+                group("column", vec![series("North", &data)]),
+                group("bar", vec![series("South", &data)]),
+            ],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: None,
+                visible: Some(false),
+            }),
+            ..PlotChart::default()
+        };
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 300.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        for name in ["A rather long category name", "Another long one"] {
+            assert!(
+                texts_at(&ops)
+                    .iter()
+                    .filter(|(text, ..)| text == name)
+                    .all(|(_, x, ..)| *x >= frame.x),
+                "{name} starts outside the frame"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scatter_keeps_its_last_x_label_inside_the_frame() {
+        let data = source(&[1.0, 2.0]);
+        let xs = [0.0, 123_456.0];
+        let mut points = series("North", &data);
+        points.x_values = &xs;
+        let chart = PlotChart {
+            chart_type: "scatter",
+            plot_groups: vec![group("scatter", vec![points])],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: None,
+                visible: Some(false),
+            }),
+            ..PlotChart::default()
+        };
+        let frame = rect();
+        // Each x label's box is twice its text, centred on the tick.
+        for (text, x, _, width) in tick_labels(&plot_chart(&chart, frame)) {
+            let ink_right = x + width * 0.75;
+            assert!(ink_right <= frame.x + frame.w, "{text} ends at {ink_right}");
+        }
+    }
+
+    #[test]
     fn axis_labels_keep_a_font_sized_gap_from_their_axis() {
         let data = source(&[10.0, 20.0]);
         let mut chart = grouped("column", group("column", vec![series("North", &data)]));
@@ -7538,6 +7640,78 @@ mod tests {
         names.sort_by(|a, b| a.0.total_cmp(&b.0));
         let order: Vec<String> = names.into_iter().map(|(_, name)| name).collect();
         assert_eq!(order, ["South", "North", "East", "West"]);
+    }
+
+    #[test]
+    fn a_capped_combo_legend_reverses_its_stacked_group_safely() {
+        let data = source(&[10.0, 20.0]);
+        let names: Vec<String> = (0..9).map(|index| format!("S{index}")).collect();
+        let lines = group(
+            "line",
+            names.iter().map(|name| series(name, &data)).collect(),
+        );
+        let mut columns = group(
+            "column",
+            vec![series("North", &data), series("South", &data)],
+        );
+        columns.grouping = Some("stacked");
+        let chart = PlotChart {
+            chart_type: "line",
+            plot_groups: vec![lines, columns],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: Some("right"),
+                visible: Some(true),
+            }),
+            ..PlotChart::default()
+        };
+        assert_eq!(
+            swatches(&plot_chart(&chart, rect())).len(),
+            MAX_LEGEND_ENTRIES
+        );
+    }
+
+    #[test]
+    fn a_top_right_legend_keeps_its_rows_inside_a_short_chart() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["A", "B", "C", "D", "E", "F"];
+        let mut chart = legend_chart(Some("topRight"), &names, &data);
+        chart.title = None;
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 80.0,
+        };
+        let keys = swatches(&plot_chart(&chart, frame));
+        assert!(!keys.is_empty() && keys.len() < names.len(), "{keys:?}");
+        for (_, y) in keys {
+            assert!(y + CHART_LABEL_SIZE_PX * LEGEND_KEY_EM <= frame.y + frame.h);
+        }
+    }
+
+    #[test]
+    fn a_side_legend_with_no_room_leaves_the_plot_its_width() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South"];
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 12.0,
+        };
+        let widest = |position| {
+            let mut chart = legend_chart(position, &names, &data);
+            chart.title = None;
+            plot_chart(&chart, frame)
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { x1, x2, width, .. } if *width >= 1.0 => Some(x2 - x1),
+                    _ => None,
+                })
+                .fold(f64::MIN, f64::max)
+        };
+        assert_eq!(widest(Some("right")), widest(Some("bottom")));
     }
 
     #[test]
