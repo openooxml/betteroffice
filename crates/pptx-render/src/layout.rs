@@ -7918,8 +7918,6 @@ mod tests {
             font_scale: Some(0.5),
             line_space_reduction: None,
         });
-        // The scale lands the type on a whole point, as PowerPoint's own
-        // shrink-to-fit does.
         assert!((font_size(&package) - (natural * 0.5).round()).abs() < 0.001);
     }
 

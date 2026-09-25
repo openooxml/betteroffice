@@ -5,7 +5,7 @@ use pptx_render::{PositionedTextLine, Primitive, SlideRenderer};
 const DECK: &[u8] = include_bytes!("fixtures/line-spacing.pptx");
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
-fn render(size_pt: f64, scale: f64) -> (f32, Vec<PositionedTextLine>) {
+fn render(family: &str, size_pt: f64, scale: f64) -> (f32, Vec<PositionedTextLine>) {
     let session = DeckSession::open(DECK, 8_021).unwrap();
     let mut snapshot = session.snapshot().unwrap();
     let shape = snapshot.slides[0]
@@ -15,6 +15,7 @@ fn render(size_pt: f64, scale: f64) -> (f32, Vec<PositionedTextLine>) {
         .unwrap();
     for paragraph in &mut shape.text_stories[0].paragraphs {
         for run in &mut paragraph.runs {
+            run.style.font_family = Some(family.to_owned());
             run.style.font_size_pt = Some(size_pt);
         }
     }
@@ -48,16 +49,18 @@ fn render(size_pt: f64, scale: f64) -> (f32, Vec<PositionedTextLine>) {
 
 #[test]
 fn fractional_autofit_matches_an_authored_whole_point_size() {
-    let (size, lines) = render(32.0, 0.85);
-    let (_, authored) = render(27.0, 1.0);
-    assert_eq!(size, 27.0);
-    assert_eq!(lines, authored);
-    assert_eq!(lines[0].runs[0].font_size_px, 36.0);
+    for family in ["Arial", "Trebuchet MS"] {
+        let (size, lines) = render(family, 32.0, 0.85);
+        let (_, authored) = render(family, 27.0, 1.0);
+        assert_eq!(size, 27.0);
+        assert_eq!(lines, authored);
+        assert_eq!(lines[0].runs[0].font_size_px, 36.0);
+    }
 }
 
 #[test]
 fn unscaled_text_keeps_its_authored_fractional_size() {
-    let (size, lines) = render(27.5, 1.0);
+    let (size, lines) = render("Arial", 27.5, 1.0);
     assert_eq!(size, 27.5);
     assert!((lines[0].runs[0].font_size_px - 27.5 * 4.0 / 3.0).abs() < 0.001);
 }
