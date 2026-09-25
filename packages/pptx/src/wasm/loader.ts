@@ -17,11 +17,14 @@ import type {
   CommentReceipt,
   CommentSnapshot,
   DeckSnapshot,
+  HistoryProfile,
   HistoryResult,
   HitTestResult,
   ParagraphAlignment,
   PictureDraft,
   PresetShapeDraft,
+  Profiled,
+  ProfiledLayout,
   PptxFontFace,
   PptxTextMatch,
   PptxTextSearchOptions,
@@ -56,6 +59,8 @@ export interface OpenPresentationOptions {
   initialUpdate?: Uint8Array;
 }
 
+export type UndoCaptureMode = 'auto' | 'manual';
+
 export interface PresentationHandle extends CollaborationReplica {
   isProposalsAvailable(): boolean;
   propose(agentId: string, note: string | null, edits: readonly ProposalEdit[]): Proposal;
@@ -72,12 +77,22 @@ export interface PresentationHandle extends CollaborationReplica {
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
   layoutSlide(slideIndex: number): SlideDisplayList;
+  /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
+  layoutSlideProfiled(slideIndex: number): ProfiledLayout;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
   /** serialize the presentation back to .pptx bytes, edits included. */
   save(): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
+  /** `insertText` with the boundary's stage timings attached. */
+  insertTextProfiled(
+    storyId: string,
+    index: number,
+    text: string,
+    style?: TextStyle
+  ): Profiled<TextReceipt>;
   deleteText(storyId: string, start: number, end: number): TextReceipt;
+  deleteTextProfiled(storyId: string, start: number, end: number): Profiled<TextReceipt>;
   formatText(storyId: string, start: number, end: number, patch: TextStylePatch): TextReceipt;
   insertParagraphBreak(storyId: string, index: number): TextReceipt;
   /** Sets the alignment of every paragraph the range touches; `null` restores
@@ -89,11 +104,13 @@ export interface PresentationHandle extends CollaborationReplica {
     alignment: ParagraphAlignment | null
   ): TextReceipt;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
+  insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
   deleteSlide(slideId: string): SlideReceipt;
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
   /** Sets a slide's speaker notes; empty text clears them. */
   setSlideNotes(slideId: string, text: string): void;
   addTextBox(slideId: string, draft: ShapeDraft): ShapeReceipt;
+  addTextBoxProfiled(slideId: string, draft: ShapeDraft): Profiled<ShapeReceipt>;
   addShape(slideId: string, draft: PresetShapeDraft): ShapeReceipt;
   addPicture(slideId: string, draft: PictureDraft): ShapeReceipt;
   setShapeFill(slideId: string, shapeId: string, color: string | null): ShapeFillReceipt;
@@ -135,16 +152,29 @@ export interface PresentationHandle extends CollaborationReplica {
   ): CommentReceipt;
   /** Resolves or reopens a modern comment. */
   setCommentStatus(commentId: string, resolved: boolean): CommentReceipt;
+  /** Moves a root comment on its slide; coordinates are safe integer EMU. */
+  setCommentPosition(commentId: string, position: { xEmu: number; yEmu: number }): CommentReceipt;
   removeComment(commentId: string): CommentReceipt;
   /** Only legal while the deck has no comments. */
   setCommentFlavor(flavor: CommentFlavor): CommentFlavor;
   comments(): CommentSnapshot[];
   moveShape(slideId: string, shapeId: string, x: number, y: number): TransformReceipt;
+  moveShapeProfiled(
+    slideId: string,
+    shapeId: string,
+    x: number,
+    y: number
+  ): Profiled<TransformReceipt>;
   resizeShape(slideId: string, shapeId: string, width: number, height: number): TransformReceipt;
   setShapeRect(slideId: string, shapeId: string, rect: ShapeRect): TransformReceipt;
   canUndo(): boolean;
   canRedo(): boolean;
+  undoCaptureMode(): UndoCaptureMode;
+  setUndoCaptureMode(mode: UndoCaptureMode): void;
+  addUndoBoundary(): void;
   undo(): HistoryResult;
+  /** `undo` with undo, snapshot and serialize time measured at the boundary. */
+  undoProfiled(): Profiled<HistoryResult, HistoryProfile>;
   redo(): HistoryResult;
   encodeStateVector(): Uint8Array;
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
@@ -371,6 +401,9 @@ export function openPresentation(
     layoutSlide(slideIndex: number): SlideDisplayList {
       return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
     },
+    layoutSlideProfiled(slideIndex: number): ProfiledLayout {
+      return jsonWasmCall(() => renderer.layoutSlideProfiledJson(doc, slideIndex));
+    },
     hitTest(x: number, y: number): HitTestResult | null {
       return jsonWasmCall(() => renderer.hitTestJson(x, y));
     },
@@ -386,9 +419,21 @@ export function openPresentation(
         true
       );
     },
+    insertTextProfiled(storyId, index, text, style = {}): Profiled<TextReceipt> {
+      return jsonWasmCall(
+        () => doc.insertTextProfiledJson(JSON.stringify({ storyId, index, text, style })),
+        true
+      );
+    },
     deleteText(storyId, start, end): TextReceipt {
       return jsonWasmCall(
         () => doc.deleteTextJson(JSON.stringify({ storyId, start, end })),
+        true
+      );
+    },
+    deleteTextProfiled(storyId, start, end): Profiled<TextReceipt> {
+      return jsonWasmCall(
+        () => doc.deleteTextProfiledJson(JSON.stringify({ storyId, start, end })),
         true
       );
     },
@@ -415,6 +460,15 @@ export function openPresentation(
       return jsonWasmCall(
         () =>
           doc.insertSlideJson(JSON.stringify({ index, layoutPartPath: layoutPartPath ?? null })),
+        true
+      );
+    },
+    insertSlideProfiled(index, layoutPartPath): Profiled<SlideReceipt> {
+      return jsonWasmCall(
+        () =>
+          doc.insertSlideProfiledJson(
+            JSON.stringify({ index, layoutPartPath: layoutPartPath ?? null })
+          ),
         true
       );
     },
@@ -462,6 +516,14 @@ export function openPresentation(
         true
       );
     },
+    setCommentPosition(commentId, position): CommentReceipt {
+      if (!Number.isSafeInteger(position.xEmu) || !Number.isSafeInteger(position.yEmu)) {
+        throw new Error('Comment coordinates must be safe integer EMU');
+      }
+      return jsonWasmCall(
+        () => doc.setCommentPositionJson(JSON.stringify({ commentId, ...position })), true
+      );
+    },
     setCommentStatus(commentId, resolved): CommentReceipt {
       return jsonWasmCall(
         () => doc.setCommentStatusJson(JSON.stringify({ commentId, resolved })),
@@ -479,6 +541,12 @@ export function openPresentation(
     },
     addTextBox(slideId, draft): ShapeReceipt {
       return jsonWasmCall(() => doc.addTextBoxJson(JSON.stringify({ slideId, draft })), true);
+    },
+    addTextBoxProfiled(slideId, draft): Profiled<ShapeReceipt> {
+      return jsonWasmCall(
+        () => doc.addTextBoxProfiledJson(JSON.stringify({ slideId, draft })),
+        true
+      );
     },
     addShape(slideId, draft): ShapeReceipt {
       return jsonWasmCall(() => doc.addShapeJson(JSON.stringify({ slideId, draft })), true);
@@ -540,6 +608,12 @@ export function openPresentation(
         true
       );
     },
+    moveShapeProfiled(slideId, shapeId, x, y): Profiled<TransformReceipt> {
+      return jsonWasmCall(
+        () => doc.moveShapeProfiledJson(JSON.stringify({ slideId, shapeId, x, y })),
+        true
+      );
+    },
     resizeShape(slideId, shapeId, width, height): TransformReceipt {
       return jsonWasmCall(
         () => doc.resizeShapeJson(JSON.stringify({ slideId, shapeId, width, height })),
@@ -558,8 +632,20 @@ export function openPresentation(
     canRedo(): boolean {
       return wasmCall(() => doc.canRedo());
     },
+    undoCaptureMode(): UndoCaptureMode {
+      return wasmCall(() => doc.undoCaptureMode()) as UndoCaptureMode;
+    },
+    setUndoCaptureMode(mode): void {
+      wasmCall(() => doc.setUndoCaptureMode(mode));
+    },
+    addUndoBoundary(): void {
+      wasmCall(() => doc.addUndoBoundary());
+    },
     undo(): HistoryResult {
       return jsonWasmCall(() => doc.undoJson(), true);
+    },
+    undoProfiled(): Profiled<HistoryResult, HistoryProfile> {
+      return jsonWasmCall(() => doc.undoProfiledJson(), true);
     },
     redo(): HistoryResult {
       return jsonWasmCall(() => doc.redoJson(), true);

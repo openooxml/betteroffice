@@ -38,6 +38,10 @@ export class EditSession {
      */
     add_comment(ranges_json: string, author: string, date: string, body_json: string): string;
     /**
+     * Closes the current undo capture without adding an empty step.
+     */
+    add_undo_boundary(): void;
+    /**
      * Deletes one character at this session's collapsed selection and returns
      * the resulting binary `FrameDelta`. `direction` is `"backward"` or
      * `"forward"`; a surrogate pair is removed whole. At a paragraph boundary
@@ -586,8 +590,7 @@ export class EditSession {
      */
     seed_from_docx(bytes: Uint8Array): string;
     /**
-     * Notes the story a direct operation is about to edit; a different story
-     * than the previous edit or caret closes the current undo step.
+     * Selects a story, closing capture unless manual grouping is selected.
      */
     select_story(story: string): void;
     /**
@@ -725,6 +728,10 @@ export class EditSession {
      */
     set_table_width(table_json: string, width_twips: number): string;
     /**
+     * Changes grouping policy while retaining undo and redo history.
+     */
+    set_undo_capture_mode(mode: string): void;
+    /**
      * Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
      * committed transaction. `update` is v1-encoded — feed it straight to
      * [`EditSession::apply_update`] on a peer — and is copied out of wasm
@@ -813,6 +820,10 @@ export class EditSession {
      * tracked-origin policy; `false` before tracking starts.
      */
     undo(): boolean;
+    /**
+     * Current undo grouping policy.
+     */
+    undo_capture_mode(): string;
     /**
      * Lowers one story to a `LayoutBlock[]` JSON array — the block, run and
      * table vocabulary the layout engine consumes. `env_json` supplies the
@@ -1049,6 +1060,7 @@ export interface InitOutput {
     readonly __wbg_editsession_free: (a: number, b: number) => void;
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_add_undo_boundary: (a: number) => void;
     readonly editsession_apply_delete: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_delete_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_input: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1141,6 +1153,7 @@ export interface InitOutput {
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];
     readonly editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
@@ -1152,6 +1165,7 @@ export interface InitOutput {
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;
+    readonly editsession_undo_capture_mode: (a: number) => [number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];

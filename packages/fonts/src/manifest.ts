@@ -496,10 +496,8 @@ const WIDTH_MATCHED_SUBSTITUTES: Record<string, string> = {
 /**
  * `Calibri Light` and `Inter Light` are families of their own on the machine
  * that drew the reference: a Regular and an Italic, no bold member, so a run
- * marked bold is still drawn at the family's own weight. Only a face lighter
- * than the family's Regular is worth reading — a heavier one measured worse
- * than leaving the run alone, and a name we cannot place at all is Calibri,
- * whatever weight it claims (#797).
+ * marked bold is still drawn at the family's own weight, and a name we cannot
+ * place at all is Calibri, whatever weight it claims (#797).
  */
 const LIGHTER_THAN_REGULAR = new Set([
   'thin',
@@ -543,15 +541,32 @@ function looksMono(family: string): boolean {
   );
 }
 
+const HEAVIER_THAN_REGULAR = new Set([
+  'black',
+  'heavy',
+  'extrabold',
+  'ultrabold',
+  'extrablack',
+  'ultra',
+]);
+
+function heavyVariantOf(family: string, italic: boolean): BundledFontFace | undefined {
+  const words = family.trim().split(/[\s-]+/);
+  if (words.length < 2 || !HEAVIER_THAN_REGULAR.has(words[words.length - 1].toLowerCase())) {
+    return undefined;
+  }
+  return resolveMetricCompatFace(words.slice(0, -1).join(' '), true, italic);
+}
+
 /**
  * Choose a related family, then a serif or sans fallback.
  *
  * The sans fallback is Calibri because that is what Office substitutes for a
  * family it cannot find: a deck asking for Google Sans, Inter or Questrial is
  * drawn in Calibri, which is ~7% narrower than Arial, so falling back to Arial
- * rewraps every line the document wrote against those metrics. A weight in the
- * name is deliberately not read — Office substitutes `Archivo Black` with a
- * regular face too, and matching that is what keeps the line breaks (#797).
+ * rewraps every line the document wrote against those metrics. A heavy weight
+ * in the name is read only for a family we bundle: Office substitutes
+ * `Archivo Black` with a regular face, and matching that keeps the line breaks.
  */
 export function resolveLastResortFace(
   family: string,
@@ -560,6 +575,8 @@ export function resolveLastResortFace(
 ): BundledFontFace {
   const light = lightVariantOf(family, italic);
   if (light) return light;
+  const heavy = heavyVariantOf(family, italic);
+  if (heavy) return heavy;
   if (looksMono(family)) {
     return resolveMetricCompatFace('Courier New', bold, italic)!;
   }

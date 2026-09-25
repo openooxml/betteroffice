@@ -368,6 +368,8 @@ export interface PagedEditorRef {
   displayPositionToYrsLoc(position: number): YrsLoc | null;
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
+  /** Commits accepted input and selection; waits for active IME composition. */
+  flushPendingInput(): Promise<void>;
   /** Paragraph-local stored inline formatting for the current yrs caret. */
   getYrsStoredFormatting(): YrsStoredFormatting | null;
   /** Resolve a live yrs Loc to the display position used by overlays. */

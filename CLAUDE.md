@@ -15,16 +15,18 @@ bun run dev              # apps/web
 bun run dev:demo         # apps/demo
 bun run dev:docs         # apps/docs
 
-bun run test             # builds xlsx+docx wasm, then runs packages, apps/web/app, apps/demo/lib, scripts
+bun run test             # builds wasm, then runs package, app, script, and E2E harness tests
 bun run typecheck        # every workspace
 bun run rust:check       # cargo fmt --check && clippy -D warnings && cargo test
 ```
 
 ### wasm must be built before tests
 
-The generated wasm bindings under `packages/*/src/wasm/generated/` are **gitignored build
-artifacts**. `bun run test` builds xlsx and docx first via `pretest`; running `bun test <path>`
-directly does not. A failure like `Cannot find module './generated/xlsx_wasm.js'` means the
+The generated `.wasm` binaries and `.js` glue under `packages/*/src/wasm/generated/`
+are **gitignored build artifacts**. The `.d.ts` declarations are tracked; regenerate
+and commit them when changing the WASM API. CI checks that they match the build.
+`bun run test` builds the WASM bundles first; running `bun test <path>` directly does not.
+A failure like `Cannot find module './generated/xlsx_wasm.js'` means the
 bundle is missing, not that the code is broken:
 
 ```bash

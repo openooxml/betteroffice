@@ -59,6 +59,16 @@ a precompiled `WebAssembly.Module` in runtimes that cannot fetch that URL. The
 core also provides hit-testing, viewport calculations, accessibility data, and
 TSV clipboard helpers.
 
+## Operation profiles
+
+XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
+The edit results include stage timings in `profile`; display profiling returns
+`{ displayList, profile }`. PPTX provides `layoutSlideProfiled` and profiled
+mutation/history methods such as `insertTextProfiled` and `undoProfiled`, returning
+`{ layout, profile }` or `{ receipt, profile }` respectively. Durations are in
+milliseconds and describe engine stages; measure the surrounding browser
+interaction separately when investigating input-to-paint latency.
+
 ## Package reference
 
 | Package | What it is |

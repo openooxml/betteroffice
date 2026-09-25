@@ -235,7 +235,7 @@ impl DeckSession {
         if applied {
             let update = preview.encode_diff_v1(&self.encode_state_vector_v1())?;
             let update = decode_update_v1(&update).map_err(EditError::InvalidUpdate)?;
-            self.add_undo_barrier();
+            self.automatic_undo_barrier();
             self.doc
                 .transact_mut_with(self.client_id)
                 .apply_update(update)
@@ -244,7 +244,7 @@ impl DeckSession {
                 preview.id_counter.load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
-            self.add_undo_barrier();
+            self.automatic_undo_barrier();
         }
         self.reject_proposal(id);
         Ok(ProposalAcceptance {

@@ -86,11 +86,11 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The DOCX editor as a drop-in React component.",
+    desc: "The DOCX editor as a drop-in React component, with host-controlled saving and awaited input flushing.",
   },
   {
     name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine.",
+    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with opt-in operation timings.",
   },
   {
     name: "@betteroffice/xlsx-react",
@@ -98,11 +98,11 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with opt-in operation timings, manual undo boundaries, and comment repositioning.",
   },
   {
     name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component.",
+    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, and pointer position queries.",
   },
 ];
 
@@ -128,7 +128,7 @@ export const CAPABILITIES = [
   },
   {
     name: "Undo and redo",
-    desc: "Navigate editing history and undo accepted agent proposals as a single step.",
+    desc: "Navigate editing history and undo accepted agent proposals as a single step. DOCX hosts can set explicit boundaries and choose automatic or manual grouping.",
   },
   {
     name: "Embed or automate",
