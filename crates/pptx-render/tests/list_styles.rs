@@ -182,6 +182,57 @@ fn a_right_to_left_paragraph_hangs_its_marker_off_the_right_edge() {
     );
 }
 
+#[test]
+fn a_right_to_left_paragraph_read_from_xml_paints_and_carets_in_reading_order() {
+    let mut parts = ooxml_opc::unzip_parts(DECK).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "ppt/slides/slide1.xml" {
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            let rtl = xml.replacen(
+                r#"<a:pPr lvl="0" /><a:r><a:rPr /><a:t>First level</a:t>"#,
+                "<a:pPr lvl=\"0\" rtl=\"1\" /><a:r><a:rPr /><a:t>\u{645}\u{631}\u{62d}\u{628}\u{627} \u{628}\u{643}\u{645}</a:t>",
+                1,
+            );
+            assert_ne!(rtl, xml, "the fixture paragraph is rewritten");
+            *bytes = rtl.into_bytes();
+        }
+    }
+    let session = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 2946).unwrap();
+    let ShapeNode::Shape(body) = &session.package().slides[0].shapes[1] else {
+        panic!("the bullet body");
+    };
+    assert_eq!(
+        body.text.as_ref().unwrap().paragraphs[0].properties.rtl,
+        Some(true)
+    );
+    let list = renderer()
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list;
+    let line = &lines(&list, 3)[0];
+    let run = line
+        .runs
+        .iter()
+        .find(|run| run.text.contains('\u{645}'))
+        .expect("the Arabic run");
+    assert!(run.glyphs.len() > 2);
+    assert!(
+        run.glyphs.windows(2).all(|pair| pair[1].x < pair[0].x),
+        "each glyph paints left of the one before it"
+    );
+    for glyph in &run.glyphs {
+        let stop = line
+            .caret_stops
+            .iter()
+            .find(|stop| stop.position == glyph.cluster)
+            .expect("a caret before every cluster");
+        assert!(
+            (stop.x - (glyph.x + glyph.advance)).abs() < 0.01,
+            "the caret before a character sits at its right edge"
+        );
+    }
+}
+
 fn clear_bullets(body: &mut TextBody) {
     for properties in body
         .default_list_style

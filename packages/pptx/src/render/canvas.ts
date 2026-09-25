@@ -961,6 +961,8 @@ function paintTextRun(
 
 function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: number }> {
   if (run.glyphs.length < 2) return [{ text: run.text, x: run.x }];
+  // A right-to-left run's glyphs step leftward; the canvas orders its string itself.
+  if (run.glyphs[1].x < run.glyphs[0].x) return [{ text: run.text, x: run.x }];
   const chunks: Array<{ text: string; x: number }> = [];
   let textStart = 0;
   let x = run.x;

@@ -3363,9 +3363,10 @@ fn layout_paragraph(
     Ok(output)
 }
 
-/// Lays a right-to-left line's runs out from its right edge: each run keeps
-/// its own glyph order, which the backends draw as one string, and moves to
-/// the mirrored place in the line, as do the caret stops.
+/// Lays a right-to-left line out from its right edge. A run of right-to-left
+/// script mirrors glyph by glyph, so it paints in reading order; any other run
+/// keeps its own order and moves as a block. The caret stops follow the glyphs
+/// they sit between.
 fn mirror_line(
     runs: &mut [PositionedTextRun],
     caret_stops: &mut [CaretStop],
@@ -3373,16 +3374,38 @@ fn mirror_line(
     line_width: f32,
 ) {
     let mirror = 2.0 * line_x + line_width;
-    for run in runs {
-        let shift = mirror - run.width - 2.0 * run.x;
-        run.x += shift;
-        for glyph in &mut run.glyphs {
-            glyph.x += shift;
-        }
-    }
-    for stop in caret_stops {
+    for stop in caret_stops.iter_mut() {
         stop.x = mirror - stop.x;
     }
+    for run in runs {
+        let (old_x, new_x) = (run.x, mirror - run.width - run.x);
+        if reads_right_to_left(&run.text) {
+            for glyph in &mut run.glyphs {
+                glyph.x = mirror - glyph.x - glyph.advance;
+            }
+        } else {
+            for glyph in &mut run.glyphs {
+                glyph.x += new_x - old_x;
+            }
+            for stop in caret_stops
+                .iter_mut()
+                .filter(|stop| stop.position > run.start && stop.position < run.end)
+            {
+                stop.x = 2.0 * new_x + run.width - stop.x;
+            }
+        }
+        run.x = new_x;
+    }
+}
+
+/// Whether `text` holds a character of a right-to-left script.
+fn reads_right_to_left(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
+        )
+    })
 }
 
 /// Prepends a marker outside the story's character space.
