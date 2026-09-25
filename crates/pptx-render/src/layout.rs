@@ -86,11 +86,17 @@ struct FontFace {
     widths: Option<&'static FamilyMetrics>,
     /// The same family's `hhea` metrics, which decide where the line box sits.
     line: Option<&'static FamilyMetrics>,
+    /// The face whose own metrics size the line when `line` names none: the
+    /// face itself, or for a coverage fallback the face of the run it stands in.
+    line_id: FontId,
 }
 
 pub struct SlideRenderer {
     fonts: FontStore,
     faces: HashMap<(String, bool, bool), FontFace>,
+    /// Faces drawn only for characters a run's own face has no glyph for,
+    /// with the weight and slant each was registered for.
+    coverage_faces: Vec<(bool, bool, FontFace)>,
     fallback: Option<FontFace>,
     /// Normalized fallback family.
     fallback_family: Option<String>,
@@ -110,6 +116,7 @@ impl SlideRenderer {
         Self {
             fonts: FontStore::new(),
             faces: HashMap::new(),
+            coverage_faces: Vec::new(),
             fallback: None,
             fallback_family: None,
             font_count: 0,
@@ -150,6 +157,7 @@ impl SlideRenderer {
             requested_family: requested.clone(),
             widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
             line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
+            line_id: id,
         };
         self.faces.insert((requested, bold, italic), face.clone());
         self.fallback.get_or_insert(face);
@@ -160,6 +168,145 @@ impl SlideRenderer {
             cache.clear();
         }
         Ok(id.to_u32())
+    }
+
+    /// Registers a face drawn only where a run's own face has no glyph, the way
+    /// PowerPoint reaches for a script's font when the named one cannot draw a
+    /// character. The first registered face that covers a character draws it.
+    pub fn register_fallback_font(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        bytes: &[u8],
+    ) -> Result<u32, RenderError> {
+        if bytes.len() > MAX_FONT_BYTES {
+            return Err(RenderError::ResourceLimit(format!(
+                "font exceeds {MAX_FONT_BYTES} bytes"
+            )));
+        }
+        if self.font_count >= MAX_FONTS {
+            return Err(RenderError::ResourceLimit(format!(
+                "more than {MAX_FONTS} font faces"
+            )));
+        }
+        let family = family.trim();
+        if family.is_empty() {
+            return Err(RenderError::Font("font family is empty".to_owned()));
+        }
+        let id = self
+            .fonts
+            .register(bytes.to_vec())
+            .map_err(|error| RenderError::Font(error.to_string()))?;
+        self.coverage_faces.push((
+            bold,
+            italic,
+            FontFace {
+                id,
+                family: family.to_owned(),
+                requested_family: normalize_family(family),
+                widths: None,
+                line: None,
+                line_id: id,
+            },
+        ));
+        self.font_count += 1;
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
+        Ok(id.to_u32())
+    }
+
+    /// The fallback face that draws `character` for a run in `face`: one of the
+    /// same weight and slant where there is one, sized on the run's own line.
+    fn coverage_face(
+        &self,
+        face: &FontFace,
+        character: char,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFace> {
+        let covering = || {
+            self.coverage_faces.iter().filter(|(_, _, candidate)| {
+                self.fonts.covers(candidate.id, character).unwrap_or(false)
+            })
+        };
+        covering()
+            .find(|(face_bold, face_italic, _)| (*face_bold, *face_italic) == (bold, italic))
+            .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
+            .or_else(|| covering().next())
+            .map(|(_, _, candidate)| FontFace {
+                line: face.line,
+                line_id: face.line_id,
+                ..candidate.clone()
+            })
+    }
+
+    /// Where `text` in `face` needs a fallback: each piece's byte start and the
+    /// face that draws it, `None` for `face` itself. Spaces and punctuation
+    /// stay with the fallback text around them.
+    fn coverage_pieces(
+        &self,
+        face: &FontFace,
+        text: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Vec<(usize, Option<FontFace>)> {
+        let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
+        if self.coverage_faces.is_empty()
+            || text
+                .chars()
+                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+        {
+            return vec![(0, None)];
+        }
+        for (index, character) in text.char_indices() {
+            let current = pieces.last().and_then(|(_, face)| face.as_ref());
+            let own = self.fonts.covers(face.id, character).unwrap_or(true);
+            let neutral = character.is_whitespace() || character.is_ascii_punctuation();
+            let chosen = match current {
+                Some(current)
+                    if neutral && self.fonts.covers(current.id, character).unwrap_or(false) =>
+                {
+                    Some(current.clone())
+                }
+                _ if own => None,
+                _ => self.coverage_face(face, character, bold, italic),
+            };
+            let same = pieces.last().is_some_and(|(_, last)| {
+                last.as_ref().map(|face| face.id) == chosen.as_ref().map(|face| face.id)
+            });
+            if !same {
+                pieces.push((index, chosen));
+            }
+        }
+        pieces
+    }
+
+    /// Splits `run` where its face has no glyph and a fallback does, so each
+    /// part is shaped, measured and drawn in a face that can draw it.
+    fn split_by_coverage(&self, run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
+        let pieces =
+            self.coverage_pieces(&run.style.face, &run.text, run.style.bold, run.style.italic);
+        if let [(0, None)] = pieces.as_slice() {
+            out.push(run);
+            return;
+        }
+        for (position, (start, face)) in pieces.iter().enumerate() {
+            let end = pieces
+                .get(position + 1)
+                .map_or(run.text.len(), |(next, _)| *next);
+            let mut style = run.style.clone();
+            if let Some(face) = face {
+                style.family = face.family.clone();
+                style.face = face.clone();
+            }
+            out.push(ResolvedRun {
+                text: run.text[*start..end].to_owned(),
+                start: run.start + utf16_len(&run.text[..*start]),
+                style,
+            });
+        }
     }
 
     /// The store holding every registered face, so a raster backend can resolve
@@ -2340,7 +2487,11 @@ fn resolve_content(
                 resolve_style(renderer, theme, &run.style, properties.default_run.as_ref())?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
-            push_cased_runs(&mut runs, &run.text, start, language, style);
+            let mut cased = Vec::new();
+            push_cased_runs(&mut cased, &run.text, start, language, style);
+            for run in cased {
+                renderer.split_by_coverage(run, &mut runs);
+            }
         }
         if runs.is_empty() {
             let end_style = cascade
@@ -2699,32 +2850,45 @@ fn chart_text_primitive(
     let face = renderer.resolve_face(&family, bold, italic)?;
     let size_px = safe_geometry(text.font.size_px as f32).clamp(1.0, 4_096.0);
     let tracking = safe_geometry(text.font.letter_spacing_px as f32);
-    let shaped = shape(
-        &renderer.fonts,
-        face.id,
-        text.text,
-        size_px,
-        tracking_features(tracking),
-    )
-    .map_err(|error| RenderError::Font(error.to_string()))?;
     let metrics = renderer
         .fonts
         .metrics(face.id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
     let line_box = single_line_box(metrics, size_px, &CompatFlags::default());
-    let mut offsets = Vec::with_capacity(shaped.len());
+    let pieces = renderer.coverage_pieces(&face, text.text, bold, italic);
+    let mut shaped_pieces = Vec::with_capacity(pieces.len());
     let mut cursor = 0.0_f32;
     let mut cluster_advance = 0.0_f32;
-    let mut cluster = None;
-    for glyph in &shaped {
-        if cluster.is_some_and(|previous| previous != glyph.cluster) {
-            cursor += tracking.max(-cluster_advance);
-            cluster_advance = 0.0;
+    let mut started = false;
+    for (index, (start, piece_face)) in pieces.iter().enumerate() {
+        let end = pieces
+            .get(index + 1)
+            .map_or(text.text.len(), |(next, _)| *next);
+        let piece_face = piece_face.clone().unwrap_or_else(|| face.clone());
+        let shaped = shape(
+            &renderer.fonts,
+            piece_face.id,
+            &text.text[*start..end],
+            size_px,
+            tracking_features(tracking),
+        )
+        .map_err(|error| RenderError::Font(error.to_string()))?;
+        let piece_x = cursor;
+        let mut offsets = Vec::with_capacity(shaped.len());
+        let mut cluster = None;
+        for glyph in &shaped {
+            if started && cluster != Some(glyph.cluster) {
+                cursor += tracking.max(-cluster_advance);
+                cluster_advance = 0.0;
+            }
+            offsets.push(cursor);
+            cursor += glyph.x_advance;
+            cluster_advance += glyph.x_advance;
+            cluster = Some(glyph.cluster);
+            started = true;
         }
-        offsets.push(cursor);
-        cursor += glyph.x_advance;
-        cluster_advance += glyph.x_advance;
-        cluster = Some(glyph.cluster);
+        let piece_x = offsets.first().copied().unwrap_or(piece_x);
+        shaped_pieces.push((*start, end, piece_face, shaped, offsets, piece_x, cursor));
     }
     let advance = cursor;
     let box_x = safe_geometry(text.x as f32);
@@ -2738,36 +2902,44 @@ fn chart_text_primitive(
         _ => box_x,
     };
     let baseline = safe_geometry(text.baseline_y as f32);
-    let glyphs = shaped
-        .iter()
-        .zip(&offsets)
-        .map(|(glyph, offset)| PositionedGlyph {
-            glyph_id: glyph.glyph_id,
-            cluster: glyph.cluster,
-            x: x + offset,
-            advance: glyph.x_advance,
-            x_offset: glyph.x_offset,
-            y_offset: baseline + glyph.y_offset,
-        })
+    let runs: Vec<PositionedTextRun> = shaped_pieces
+        .into_iter()
+        .map(
+            |(start, end, piece_face, shaped, offsets, piece_x, piece_end)| {
+                let glyphs = shaped
+                    .iter()
+                    .zip(&offsets)
+                    .map(|(glyph, offset)| PositionedGlyph {
+                        glyph_id: glyph.glyph_id,
+                        cluster: utf16_len(&text.text[..start + glyph.cluster as usize]),
+                        x: x + offset,
+                        advance: glyph.x_advance,
+                        x_offset: glyph.x_offset,
+                        y_offset: baseline + glyph.y_offset,
+                    })
+                    .collect();
+                PositionedTextRun {
+                    text: text.text[start..end].to_owned(),
+                    start: utf16_len(&text.text[..start]),
+                    end: utf16_len(&text.text[..end]),
+                    x: x + piece_x,
+                    width: (piece_end - piece_x).max(0.0),
+                    font_id: piece_face.id.to_u32(),
+                    font_family: piece_face.family.clone(),
+                    font_size_px: size_px,
+                    bold,
+                    italic,
+                    underline: false,
+                    color: text.color.to_owned(),
+                    letter_spacing_px: tracking,
+                    baseline_offset_px: 0.0,
+                    glyphs,
+                }
+            },
+        )
         .collect();
-    let run = PositionedTextRun {
-        text: text.text.to_owned(),
-        start: 0,
-        end: utf16_len(text.text),
-        x,
-        width: advance.max(0.0),
-        font_id: face.id.to_u32(),
-        font_family: face.family.clone(),
-        font_size_px: size_px,
-        bold,
-        italic,
-        underline: false,
-        color: text.color.to_owned(),
-        letter_spacing_px: tracking,
-        baseline_offset_px: 0.0,
-        glyphs,
-    };
-    let width = run.width;
+    let width = advance.max(0.0);
+    let end = utf16_len(text.text);
     Ok(Primitive::TextBox {
         text_shadow: None,
         object_id: text.object_id,
@@ -2798,8 +2970,8 @@ fn chart_text_primitive(
             height: line_box.height(),
             baseline,
             start: 0,
-            end: run.end,
-            runs: vec![run],
+            end,
+            runs,
             caret_stops: Vec::new(),
         }],
         overflow: false,
@@ -3025,6 +3197,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
                 requested_family,
                 widths,
                 line,
+                line_id,
             },
         family,
         font_size_pt,
@@ -3038,6 +3211,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
         caps,
     } = style;
     key_u32(key, id.to_u32());
+    key_u32(key, line_id.to_u32());
     key_str(key, face_family);
     key_str(key, requested_family);
     key.push(u8::from(widths.is_some()));
@@ -3912,7 +4086,7 @@ fn style_line_box(
         return Ok(family_line_box(named, size_px));
     }
     let metrics = fonts
-        .metrics(style.face.id)
+        .metrics(style.face.line_id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
     Ok(single_line_box(metrics, size_px, &CompatFlags::default()))
 }
@@ -5698,6 +5872,126 @@ mod tests {
         assert_eq!(
             format_autonum(u32::MAX, "romanUcPeriod"),
             format!("{}DCCLXVII.", "M".repeat(52))
+        );
+    }
+
+    #[test]
+    fn a_character_its_face_cannot_draw_moves_to_a_fallback_that_can() {
+        let arabic: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
+        let mut renderer = renderer();
+        let run = paragraph(
+            &renderer,
+            "l",
+            "Hello \u{645}\u{631}\u{62d}\u{628}\u{627} world",
+        )
+        .runs
+        .remove(0);
+        let mut unchanged = Vec::new();
+        renderer.split_by_coverage(
+            ResolvedRun {
+                text: run.text.clone(),
+                start: 3,
+                style: run.style.clone(),
+            },
+            &mut unchanged,
+        );
+        assert_eq!(unchanged.len(), 1, "no fallback registered, nothing moves");
+
+        renderer
+            .register_fallback_font("Noto Sans Arabic", false, false, arabic)
+            .unwrap();
+        let mut pieces = Vec::new();
+        renderer.split_by_coverage(
+            ResolvedRun {
+                text: run.text.clone(),
+                start: 3,
+                style: run.style.clone(),
+            },
+            &mut pieces,
+        );
+        let parts: Vec<(&str, u32, &str)> = pieces
+            .iter()
+            .map(|piece| {
+                (
+                    piece.text.as_str(),
+                    piece.start,
+                    piece.style.family.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("Hello ", 3, "Arial"),
+                (
+                    "\u{645}\u{631}\u{62d}\u{628}\u{627} ",
+                    9,
+                    "Noto Sans Arabic"
+                ),
+                ("world", 15, "Arial"),
+            ]
+        );
+        assert_eq!(pieces[1].style.face.line_id, run.style.face.id);
+        assert_ne!(pieces[1].style.face.id, run.style.face.id);
+    }
+
+    #[test]
+    fn a_chart_label_draws_what_its_face_lacks_in_a_fallback() {
+        let arabic: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
+        let mut renderer = renderer();
+        renderer
+            .register_fallback_font("Noto Sans Arabic", false, false, arabic)
+            .unwrap();
+        let label = "Sales \u{645}\u{628}\u{64a}\u{639}\u{627}\u{62a}";
+        let primitive = chart_text_primitive(
+            &renderer,
+            &Theme::default(),
+            "chart:1",
+            ChartText {
+                object_id: 1,
+                text: label,
+                x: 10.0,
+                baseline_y: 40.0,
+                width: 200.0,
+                font: ooxml_drawingml::chart::PlotFont {
+                    weight: 400,
+                    size_px: 14.0,
+                    family: "Arial".to_owned(),
+                    italic: false,
+                    letter_spacing_px: 2.0,
+                },
+                color: "#000000",
+                align: PlotTextAlign::Start,
+                rotation_deg: 0.0,
+            },
+        )
+        .unwrap();
+        let Primitive::TextBox { lines, .. } = primitive else {
+            panic!("a text box");
+        };
+        for run in &lines[0].runs {
+            assert_eq!(run.x, run.glyphs[0].x, "a run starts at its first glyph");
+        }
+        let runs: Vec<(&str, &str)> = lines[0]
+            .runs
+            .iter()
+            .map(|run| (run.text.as_str(), run.font_family.as_str()))
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                ("Sales ", "Arial"),
+                (
+                    "\u{645}\u{628}\u{64a}\u{639}\u{627}\u{62a}",
+                    "Noto Sans Arabic"
+                ),
+            ]
+        );
+        assert!(
+            (lines[0].runs[1].x - (lines[0].runs[0].x + lines[0].runs[0].width + 2.0)).abs() < 0.01,
+            "the tracked gap sits between the pieces"
         );
     }
 
