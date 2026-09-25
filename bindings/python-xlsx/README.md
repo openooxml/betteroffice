@@ -132,6 +132,37 @@ preserve them and acceptance still checks their targets.
 An unknown proposal ID raises `KeyError`; `reject_proposal` returns `False`
 instead when there is nothing left to reject.
 
+## Version-checked edit batches
+
+`read_cells` returns values, formulas and display text with the workbook
+version they were read at. `apply_edits` applies a batch against that version as
+one recalculated undo step, or returns a refusal with nothing changed. Requests
+and results are the camelCase dictionaries every binding shares, typed in
+`betteroffice_xlsx.edits`:
+
+```python
+b3 = {"sheetId": "sheet:0", "range": {"kind": "a1", "a1": "B3"}}
+read = wb.read_cells({"ranges": [b3]})
+result = wb.apply_edits({
+    "expectVersion": read["version"],
+    "calculation": {"nowSerial": 45658.5},
+    "steps": [
+        {"op": "setCellInputs", "target": b3, "inputs": [["120"]],
+         "expect": {"cells": [[{"displayText": read["ranges"][0]["cells"][0][0]["displayText"]}]]}},
+        {"op": "patchStyle", "target": b3, "patch": {"bold": True}},
+    ],
+})
+if not result["ok"]:
+    print(result["failure"]["code"])   # "stale-version", "content-mismatch", ...
+```
+
+Steps set inputs (parsed like `set`), formulas (source without `=`), number
+formats and styles. `validate_edits` stages a batch without changing anything,
+`find_text` searches display text exactly, and `history: "none"` keeps a batch
+out of undo. A malformed request raises `ValueError`. Batches do not insert or
+delete rows, columns or sheets, and refuse writes to merged-cell followers,
+array-formula cells and protected sheets.
+
 ## Formatting
 
 ```python
@@ -190,6 +221,8 @@ formulas evaluated or a sheet rasterized, that is the gap this fills.
 | `wb.undo()` / `wb.redo()` | walk local history |
 | `wb.can_undo` / `wb.can_redo` / `wb.history()` | what history is available |
 | `wb.propose(...)` / `proposals()` / `accept_proposal` / `reject_proposal` | staged agent edits |
+| `wb.version()` / `read_cells(...)` / `find_text(...)` | versioned reads |
+| `wb.validate_edits(...)` / `apply_edits(...)` | version-checked edit batches |
 | `wb.set_style(...)` / `set_number_format(...)` | formatting over a range |
 | `wb.diff(sv)` / `apply_update(u)` / `state_vector()` / `state_as_update()` | exchange Yrs updates |
 | `wb.client_id` / `wb.is_collaborative` | which kind of workbook you are holding |
@@ -246,7 +279,8 @@ Errors raise `XlsxError` or a more specific subclass: `ParseError`,
 `StaleProposalError`, `NotCollaborativeError`. Invalid peer updates, broken
 local collaboration state, stale proposals, and collaboration-only operations
 are the last four in that order. `StaleProposalError.cells` lists the changed A1
-addresses, and an unknown proposal ID raises `KeyError`.
+addresses and `targets` their sheets and coordinates, and an unknown proposal ID
+raises `KeyError`.
 
 ## Status
 

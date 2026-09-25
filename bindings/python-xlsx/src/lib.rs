@@ -15,6 +15,7 @@ use betteroffice_xlsx::{
     NumberFormatMutation, Proposal, ProposalEditInput, ProposalRequest, RenderOptions, SheetId,
     StylePatch, TextWrapping, VerticalAlignment, Workbook as CoreWorkbook,
 };
+use pyo3::types::PyDict;
 
 create_exception!(
     _betteroffice_xlsx,
@@ -65,14 +66,34 @@ create_exception!(
     "The operation requires a collaborative workbook."
 );
 
-fn stale_proposal_error(message: String, cells: Vec<CellAddress>) -> PyErr {
-    let cells = cells
-        .into_iter()
-        .map(|address| address.cell.to_a1())
-        .collect::<Vec<_>>();
+/// `sheet_ids` names each drifted cell's sheet in `targets`; without them only `cells` is set.
+fn stale_proposal_error(message: String, cells: Vec<CellAddress>, sheet_ids: &[String]) -> PyErr {
     Python::attach(|py| {
         let error = StaleProposalError::new_err(message);
-        match error.value(py).setattr("cells", cells) {
+        let attach = || -> PyResult<()> {
+            let value = error.value(py);
+            value.setattr(
+                "cells",
+                cells
+                    .iter()
+                    .map(|address| address.cell.to_a1())
+                    .collect::<Vec<_>>(),
+            )?;
+            let targets = cells
+                .iter()
+                .map(|address| {
+                    let target = PyDict::new(py);
+                    target.set_item("sheet", address.sheet.0)?;
+                    target.set_item("sheetId", sheet_ids.get(address.sheet.0 as usize).cloned())?;
+                    target.set_item("row", address.cell.row)?;
+                    target.set_item("col", address.cell.col)?;
+                    target.set_item("a1", address.cell.to_a1())?;
+                    Ok(target)
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            value.setattr("targets", targets)
+        };
+        match attach() {
             Ok(()) => error,
             Err(attribute_error) => attribute_error,
         }
@@ -84,9 +105,10 @@ fn map_error(error: CoreError) -> PyErr {
     match error {
         CoreError::InvalidUpdate(_) => InvalidUpdateError::new_err(message),
         CoreError::CollaborativeState(_) => CollaborativeStateError::new_err(message),
-        CoreError::StaleProposal(cells) => stale_proposal_error(message, cells),
+        CoreError::StaleProposal(cells) => stale_proposal_error(message, cells, &[]),
         CoreError::ProposalNotFound(_) => PyKeyError::new_err(message),
         CoreError::NotCollaborative => NotCollaborativeError::new_err(message),
+        CoreError::InvalidRequest(_) => PyValueError::new_err(message),
         CoreError::Package(_)
         | CoreError::Spreadsheet(_)
         | CoreError::DuplicatePart(_)
@@ -757,10 +779,45 @@ impl PyWorkbook {
         let acceptance = self
             .inner
             .accept_proposal(proposal_id, force, CalculationOptions { now_serial })
-            .map_err(map_error)?;
+            .map_err(|error| match error {
+                CoreError::StaleProposal(cells) => {
+                    let sheet_ids = self
+                        .inner
+                        .sheet_info()
+                        .map(|info| info.sheet_ids)
+                        .unwrap_or_default();
+                    stale_proposal_error(
+                        CoreError::StaleProposal(cells.clone()).to_string(),
+                        cells,
+                        &sheet_ids,
+                    )
+                }
+                other => map_error(other),
+            })?;
         Ok(PyMutation::from_core(&self.inner, &acceptance.mutation))
     }
 
+    fn version(&self) -> String {
+        self.inner.version().to_string()
+    }
+
+    fn read_cells_json(&self, request: &str) -> PyResult<String> {
+        self.inner.read_cells_json(request).map_err(map_error)
+    }
+
+    fn find_text_json(&self, request: &str) -> PyResult<String> {
+        self.inner.find_text_json(request).map_err(map_error)
+    }
+
+    fn validate_edits_json(&self, py: Python<'_>, request: &str) -> PyResult<String> {
+        py.detach(|| self.inner.validate_edits_json(request))
+            .map_err(map_error)
+    }
+
+    fn apply_edits_json(&mut self, py: Python<'_>, request: &str) -> PyResult<String> {
+        py.detach(|| self.inner.apply_edits_json(request))
+            .map_err(map_error)
+    }
     fn reject_proposal(&mut self, proposal_id: &str) -> bool {
         self.inner.reject_proposal(proposal_id)
     }

@@ -47,6 +47,14 @@ import type {
   SelectionLimits,
   SheetInfo,
   WorkbookHandle,
+  XlsxEditRefusal,
+  XlsxEditRequest,
+  XlsxEditResult,
+  XlsxFindRequest,
+  XlsxFindResult,
+  XlsxReadRequest,
+  XlsxReadResult,
+  XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import type {
   AwarenessPeer,
@@ -74,6 +82,11 @@ import { ProposalsPanel } from './proposals/ProposalsPanel';
  * The imperative surface handed to {@link XlsxEditorProps.onReady}: the open
  * workbook handle plus a `refreshProposals` to re-read the pending list after an
  * external caller (e.g. a demo agent) stages proposals on the same handle.
+ *
+ * The version, read and edit-batch methods first commit pending input: cell and
+ * formula drafts, chart nudges and clipboard pastes in flight. They reject while
+ * text composition or a chart drag is unfinished, or when the workbook is
+ * replaced meanwhile.
  */
 export interface XlsxEditorApi {
   clearSelection: () => void;
@@ -83,6 +96,25 @@ export interface XlsxEditorApi {
   save: () => Uint8Array;
   /** Scrolls the focus cell into view. */
   selectCells: (sheet: number, selection: Selection) => boolean;
+  version: () => Promise<string>;
+  readCells: (request: XlsxReadRequest) => Promise<XlsxReadResult>;
+  findText: (request: XlsxFindRequest) => Promise<XlsxFindResult>;
+  /** Refuses with `read-only` while the editor is read-only. */
+  validateEdits: (request: XlsxEditRequest) => Promise<XlsxValidationResult>;
+  /**
+   * Applies the batch against the caller's `expectVersion` after committing pending input,
+   * so input that lands first refuses it with `stale-version`. Refuses with `read-only`
+   * while the editor is read-only; an applied batch calls `onChange` once.
+   */
+  applyEdits: (request: XlsxEditRequest) => Promise<XlsxEditResult>;
+}
+
+function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
+  return {
+    ok: false,
+    version: handle.version(),
+    failure: { code: 'read-only', message: 'The editor is read-only' },
+  };
 }
 
 export interface XlsxEditorCollaborationOptions {
@@ -415,6 +447,9 @@ function XlsxEditorContent({
   const flushNudgeRef = useRef<() => void>(() => {});
   const settlePendingEditsRef = useRef<() => boolean>(() => true);
   const pendingDraftRef = useRef<(EditState & { sheet: number }) | null>(null);
+  // accepted input that lands after an await: clipboard pastes and cuts.
+  const pendingInputRef = useRef(new Set<Promise<void>>());
+  const composingRef = useRef(false);
   // latest onReady, read (not depended on) by the open effect so a changing
   // callback identity never reopens the workbook.
   const onReadyRef = useRef(onReady);
@@ -554,6 +589,34 @@ function XlsxEditorContent({
     return () => observer.disconnect();
   }, [readOnly]);
 
+  const trackInput = useCallback((task: Promise<void>) => {
+    const pending = pendingInputRef.current;
+    pending.add(task);
+    const done = () => {
+      pending.delete(task);
+    };
+    task.then(done, done);
+  }, []);
+
+  const flushPendingInput = useCallback(async (opened: WorkbookHandle) => {
+    if (handleRef.current !== opened) throw new Error('The workbook is no longer open');
+    while (pendingInputRef.current.size > 0) {
+      await Promise.allSettled([...pendingInputRef.current]);
+      if (handleRef.current !== opened) {
+        throw new Error('The workbook changed while flushing input');
+      }
+    }
+    if (composingRef.current) {
+      throw new Error('Finish text composition before reading or editing the workbook');
+    }
+    if (chartDragRef.current) {
+      throw new Error('Finish the chart drag before reading or editing the workbook');
+    }
+    if (!settlePendingEditsRef.current()) {
+      throw new Error('Could not commit pending workbook edits');
+    }
+  }, []);
+
   // re-read the pending proposal list and queue a repaint — ghosts paint into
   // the engine frame, so every lifecycle change (propose/accept/reject) must
   // republish it. safe to call against an old core (the loader returns an
@@ -600,6 +663,7 @@ function XlsxEditorContent({
     setRenderError(null);
     paintSourceRef.current = null;
     pendingSheetViewRef.current = false;
+    composingRef.current = false;
     if (!file) {
       handleRef.current = null;
       setSheetInfo(null);
@@ -651,6 +715,7 @@ function XlsxEditorContent({
           setCollaborationReplica(handle);
           setError(null);
           refreshProposals();
+          const opened = handle;
           const cleanup = onReadyRef.current?.({
             clearSelection,
             handle,
@@ -660,9 +725,35 @@ function XlsxEditorContent({
               if (!settlePendingEditsRef.current()) {
                 throw new Error('Could not commit pending workbook edits');
               }
-              return handle!.save();
+              return opened.save();
             },
             selectCells,
+            version: async () => {
+              await flushPendingInput(opened);
+              return opened.version();
+            },
+            readCells: async (request) => {
+              await flushPendingInput(opened);
+              return opened.readCells(request);
+            },
+            findText: async (request) => {
+              await flushPendingInput(opened);
+              return opened.findText(request);
+            },
+            validateEdits: async (request) => {
+              if (readOnlyRef.current) return readOnlyRefusal(opened);
+              await flushPendingInput(opened);
+              if (readOnlyRef.current) return readOnlyRefusal(opened);
+              return opened.validateEdits(request);
+            },
+            applyEdits: async (request) => {
+              if (readOnlyRef.current) return readOnlyRefusal(opened);
+              await flushPendingInput(opened);
+              if (readOnlyRef.current) return readOnlyRefusal(opened);
+              const result = opened.applyEdits(request);
+              if (result.ok && result.applied) onChangeRef.current?.();
+              return result;
+            },
           });
           if (typeof cleanup === 'function') cleanupReady = cleanup;
         } catch (e) {
@@ -698,6 +789,7 @@ function XlsxEditorContent({
     collaborationClientId,
     collaborationInitialUpdate,
     clearSelection,
+    flushPendingInput,
     refreshProposals,
     selectCells,
   ]);
@@ -1152,20 +1244,26 @@ function XlsxEditorContent({
     focusContainer();
   }, [focusContainer]);
 
+  const clearRange = useCallback(
+    (handle: WorkbookHandle, sheet: number, r: ReturnType<typeof normalizeRange>) => {
+      const edits: CellInputEdit[] = [];
+      for (let row = r.top; row <= r.bottom; row++) {
+        for (let col = r.left; col <= r.right; col++) edits.push({ row, col, input: '' });
+      }
+      try {
+        applyResult(handle.editCells(sheet, edits));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [applyResult]
+  );
+
   const clearCells = useCallback(() => {
     const handle = handleRef.current;
     if (!handle || !selection || readOnly) return;
-    const r = normalizeRange(selection);
-    const edits: CellInputEdit[] = [];
-    for (let row = r.top; row <= r.bottom; row++) {
-      for (let col = r.left; col <= r.right; col++) edits.push({ row, col, input: '' });
-    }
-    try {
-      applyResult(handle.editCells(activeSheet, edits));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [selection, activeSheet, applyResult, readOnly]);
+    clearRange(handle, activeSheet, normalizeRange(selection));
+  }, [selection, activeSheet, clearRange, readOnly]);
 
   const copySelection = useCallback(async () => {
     const handle = handleRef.current;
@@ -1184,10 +1282,17 @@ function XlsxEditorContent({
     }
   }, [selection, activeSheet]);
 
+  // the cut clears what was selected when it was accepted, and only while that workbook is
+  // still open and writable once the clipboard write settles.
   const cutSelection = useCallback(async () => {
+    const handle = handleRef.current;
+    if (!handle || !selection) return;
+    const range = normalizeRange(selection);
+    const sheet = activeSheet;
     await copySelection();
-    clearCells();
-  }, [copySelection, clearCells]);
+    if (readOnly || readOnlyRef.current || handleRef.current !== handle) return;
+    clearRange(handle, sheet, range);
+  }, [selection, activeSheet, copySelection, clearRange, readOnly]);
 
   const pasteSelection = useCallback(async () => {
     const handle = handleRef.current;
@@ -1574,12 +1679,12 @@ function XlsxEditorContent({
           return;
         }
         if (lower === 'v') {
-          void pasteSelection();
+          trackInput(pasteSelection());
           e.preventDefault();
           return;
         }
         if (lower === 'x') {
-          void cutSelection();
+          trackInput(cutSelection());
           e.preventDefault();
           return;
         }
@@ -1636,6 +1741,7 @@ function XlsxEditorContent({
       copySelection,
       pasteSelection,
       cutSelection,
+      trackInput,
       undo,
       redo,
       save,
@@ -1986,6 +2092,12 @@ function XlsxEditorContent({
                 aria-label={t('toolbar.formulaPlaceholder')}
                 disabled={!sheetInfo}
                 onChange={(e) => setFormulaDraft(e.target.value)}
+                onCompositionStart={() => {
+                  composingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  composingRef.current = false;
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     commitFormula(e.shiftKey ? 'up' : 'down');
@@ -2152,6 +2264,12 @@ function XlsxEditorContent({
                 onChange={(e) =>
                   setEditing((prev) => (prev ? { ...prev, value: e.target.value } : prev))
                 }
+                onCompositionStart={() => {
+                  composingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  composingRef.current = false;
+                }}
                 onKeyDown={(e) => {
                   e.stopPropagation();
                   if (e.key === 'Enter') {

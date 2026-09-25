@@ -55,6 +55,13 @@
   changed. Text steps stay within one paragraph and paragraph steps need a
   document opened from DOCX bytes.
 
+- **Version-checked XLSX edit batches.** XLSX hosts in JavaScript, React, Rust
+  and Python read cells with a session version, then apply atomic cell input,
+  formula, number-format and style batches that commit as one recalculated undo
+  step or return a typed refusal with nothing changed. Batches do not insert or
+  delete rows, columns or sheets, and refuse writes to merged-cell followers,
+  array-formula cells and protected sheets.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

@@ -246,6 +246,23 @@ impl PreservedPackage {
             .get(index)
             .is_none_or(PreservedSheet::is_worksheet)
     }
+
+    /// Whether a source sheet enables `sheetProtection`. A declaration that cannot be read
+    /// counts as enabled.
+    #[doc(hidden)]
+    pub fn source_sheet_is_protected(&self, index: usize) -> bool {
+        self.sheets
+            .get(index)
+            .and_then(|sheet| sheet.template.child("sheetProtection"))
+            .is_some_and(|protection| {
+                attributes_from_fragment(&protection.bytes).map_or(true, |attributes| {
+                    attributes.iter().any(|attribute| {
+                        attribute.local_name() == "sheet"
+                            && matches!(attribute.value.as_str(), "1" | "true")
+                    })
+                })
+            })
+    }
 }
 
 #[derive(Clone, Debug)]
