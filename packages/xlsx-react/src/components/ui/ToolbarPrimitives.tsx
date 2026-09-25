@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
+import type { OverflowMenuEntry } from '../../../../../shared/react-toolbar/OverflowMenu';
+import { useRovingFocus } from '../../../../../shared/react-toolbar/useRovingFocus';
+import { useOverflowSource } from '../toolbar/overflowRegistry';
 
 export const toolbarColors = {
   text: '#3c4043',
@@ -50,9 +53,16 @@ function interactiveButtonStyle(
   };
 }
 
+function hint(title: string, shortcut: string | null | undefined, reason: string | undefined) {
+  const named = shortcut ? `${title} (${shortcut})` : title;
+  return reason ? `${named}: ${reason}` : named;
+}
+
 export interface ToolbarButtonProps {
   active?: boolean;
   disabled?: boolean;
+  /** Why the button is disabled; announced and shown on hover, and it stays focusable. */
+  description?: string;
   title: string;
   onClick?: () => void;
   children: ReactNode;
@@ -61,35 +71,87 @@ export interface ToolbarButtonProps {
   ariaExpanded?: boolean;
 }
 
-export function ToolbarButton({
-  active = false,
+export interface ToolbarButtonBaseProps extends Omit<ToolbarButtonProps, 'active'> {
+  active?: boolean | 'mixed';
+  /** Always exposes the pressed state, also when not pressed. */
+  toggle?: boolean;
+  shortcut?: string | null;
+  className?: string;
+  /** Overflow-menu entries; defaults to one item running `onClick`, `null` for none. */
+  overflow?: (() => readonly OverflowMenuEntry[]) | null;
+}
+
+/** The button behind `ToolbarButton` and command buttons. */
+export function ToolbarButtonBase({
+  active,
+  toggle = false,
   disabled = false,
+  description,
   title,
+  shortcut,
   onClick,
   children,
   style,
   testId,
   ariaExpanded,
-}: ToolbarButtonProps) {
+  className,
+  overflow,
+}: ToolbarButtonBaseProps) {
   const [hovered, setHovered] = useState(false);
-  return (
-    <button
-      type="button"
-      data-testid={testId}
-      disabled={disabled}
-      aria-label={title}
-      aria-pressed={active || undefined}
-      aria-expanded={ariaExpanded}
-      title={title}
-      onMouseDown={(event) => event.preventDefault()}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onClick={disabled ? undefined : onClick}
-      style={interactiveButtonStyle(disabled, active, hovered, style)}
-    >
-      {children}
-    </button>
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const id = useId();
+  const reason = disabled && description ? description : undefined;
+  const pressed = toggle ? (active ?? false) : active || undefined;
+  useOverflowSource(
+    buttonRef,
+    overflow !== undefined
+      ? overflow
+      : () => [
+          {
+            kind: 'item',
+            id,
+            label: title,
+            shortcut: shortcut ?? undefined,
+            checked: toggle ? (active ?? false) : active,
+            disabled,
+            description: reason,
+            onSelect: () => onClick?.(),
+          },
+        ]
   );
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        className={className}
+        data-testid={testId}
+        disabled={disabled && !reason}
+        aria-disabled={reason ? true : undefined}
+        aria-describedby={reason ? id : undefined}
+        aria-label={title}
+        aria-pressed={pressed}
+        aria-expanded={ariaExpanded}
+        title={hint(title, shortcut, reason)}
+        onMouseDown={(event) => event.preventDefault()}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onClick={disabled ? undefined : onClick}
+        style={interactiveButtonStyle(disabled, active === true, hovered, style)}
+      >
+        {children}
+      </button>
+      {reason && (
+        <span id={id} hidden>
+          {reason}
+        </span>
+      )}
+    </>
+  );
+}
+
+export function ToolbarButton(props: ToolbarButtonProps) {
+  return <ToolbarButtonBase {...props} />;
 }
 
 export function ToolbarGroup({
@@ -122,6 +184,7 @@ export function ToolbarSeparator() {
   return (
     <div
       role="separator"
+      aria-orientation="vertical"
       style={{
         width: 1,
         height: 24,
@@ -138,35 +201,110 @@ export interface ToolbarDropdownProps {
   trigger: ReactNode;
   children: (close: () => void) => ReactNode;
   disabled?: boolean;
+  /** Why the dropdown is disabled; announced and shown on hover, and it stays focusable. */
+  description?: string;
   active?: boolean;
   menuWidth?: number;
   style?: CSSProperties;
   testId?: string;
 }
 
+const MENU_ITEMS = '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]';
+const MENU_ROLES: ReadonlySet<string> = new Set([
+  'menuitem',
+  'menuitemradio',
+  'menuitemcheckbox',
+  'separator',
+]);
+const FOCUSABLE =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+const VIEWPORT_MARGIN = 8;
+const MAX_POPUP_HEIGHT = 440;
+
+type OpenMode = 'pointer' | 'first' | 'last';
+
+/** Below the trigger when the popup fits or has more room there, else above; always on screen. */
+function placeBelowOrAbove(
+  trigger: DOMRect,
+  height: number,
+  width: number
+): { top: number; left: number; maxHeight: number } {
+  const viewportHeight = window.innerHeight;
+  const below = Math.max(0, viewportHeight - VIEWPORT_MARGIN - (trigger.bottom + 4));
+  const above = Math.max(0, trigger.top - 4 - VIEWPORT_MARGIN);
+  const left = Math.max(
+    VIEWPORT_MARGIN,
+    Math.min(trigger.left, window.innerWidth - width - VIEWPORT_MARGIN)
+  );
+  if (Math.min(height, MAX_POPUP_HEIGHT) <= below || below >= above) {
+    const maxHeight = Math.min(MAX_POPUP_HEIGHT, below);
+    const top = Math.min(trigger.bottom + 4, viewportHeight - VIEWPORT_MARGIN - maxHeight);
+    return { top: Math.max(VIEWPORT_MARGIN, top), left, maxHeight };
+  }
+  const maxHeight = Math.min(MAX_POPUP_HEIGHT, above);
+  const top = trigger.top - 4 - Math.min(height, maxHeight);
+  return { top: Math.max(VIEWPORT_MARGIN, top), left, maxHeight };
+}
+
+/**
+ * A button with a popup. Content made only of menu items is a menu with arrow
+ * keys, Home/End and typeahead; other content is a non-modal dialog. Escape
+ * returns focus to the button.
+ */
 export function ToolbarDropdown({
   title,
   trigger,
   children,
   disabled = false,
+  description,
   active = false,
   menuWidth = 220,
   style,
   testId,
 }: ToolbarDropdownProps) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState<OpenMode | null>(null);
+  const [kind, setKind] = useState<'menu' | 'dialog'>('menu');
   const [hovered, setHovered] = useState(false);
-  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const [position, setPosition] = useState({ top: 0, left: 0, maxHeight: 440 });
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const popupId = useId();
+  const descriptionId = useId();
+  const reason = disabled && description ? description : undefined;
+  const roving = useRovingFocus({
+    container: menuRef,
+    itemSelector: MENU_ITEMS,
+    labelOf: (item) => item.getAttribute('aria-label') ?? item.textContent ?? '',
+  });
+  const rovingRef = useRef(roving);
+  rovingRef.current = roving;
 
-  const close = useCallback(() => setOpen(false), []);
+  const close = useCallback((restoreFocus = false) => {
+    setOpen(null);
+    if (restoreFocus) triggerRef.current?.focus({ preventScroll: true });
+  }, []);
 
-  useEffect(() => {
-    if (!open || !triggerRef.current) return;
-    const rect = triggerRef.current.getBoundingClientRect();
-    const left = Math.min(rect.left, Math.max(8, window.innerWidth - menuWidth - 8));
-    setPosition({ top: rect.bottom + 4, left });
+  const closeFromContent = useCallback(
+    () => close(menuRef.current?.contains(document.activeElement) ?? false),
+    [close]
+  );
+
+  useLayoutEffect(() => {
+    const trigger = triggerRef.current;
+    const menu = menuRef.current;
+    if (!open || !trigger || !menu) return;
+    setPosition(placeBelowOrAbove(trigger.getBoundingClientRect(), menu.scrollHeight, menuWidth));
+    const isMenu = Array.from(menu.children).every(
+      (child) => child.hasAttribute('hidden') || MENU_ROLES.has(child.getAttribute('role') ?? '')
+    );
+    setKind(isMenu ? 'menu' : 'dialog');
+    if (open === 'pointer') return;
+    if (isMenu) {
+      if (open === 'first') rovingRef.current.focusFirst();
+      else rovingRef.current.focusLast();
+    } else {
+      menu.querySelector<HTMLElement>(FOCUSABLE)?.focus({ preventScroll: true });
+    }
   }, [open, menuWidth]);
 
   useEffect(() => {
@@ -178,7 +316,9 @@ export function ToolbarDropdown({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') close();
     };
-    const onScroll = () => close();
+    const onScroll = (event: Event) => {
+      if (!(event.target instanceof Node && menuRef.current?.contains(event.target))) close();
+    };
     document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
     window.addEventListener('scroll', onScroll, true);
@@ -189,30 +329,77 @@ export function ToolbarDropdown({
     };
   }, [open, close]);
 
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
+      return;
+    }
+    if (kind !== 'menu') return;
+    if (event.key === 'Tab') {
+      close();
+      return;
+    }
+    if (roving.onKeyDown(event)) event.stopPropagation();
+  };
+
   return (
     <div style={{ position: 'relative', display: 'inline-flex', flex: '0 0 auto' }}>
       <button
         ref={triggerRef}
         type="button"
         data-testid={testId}
-        disabled={disabled}
+        disabled={disabled && !reason}
+        aria-disabled={reason ? true : undefined}
+        aria-describedby={reason ? descriptionId : undefined}
         aria-label={title}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title={title}
+        aria-haspopup={kind}
+        aria-expanded={open !== null}
+        aria-controls={open ? popupId : undefined}
+        title={hint(title, null, reason)}
         onMouseDown={(event) => event.preventDefault()}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        onClick={() => !disabled && setOpen((value) => !value)}
-        style={interactiveButtonStyle(disabled, active || open, hovered, style)}
+        onClick={() => !disabled && setOpen((value) => (value ? null : 'pointer'))}
+        onKeyDown={(event) => {
+          if (disabled) return;
+          if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') {
+            event.preventDefault();
+            setOpen('first');
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            setOpen('last');
+          } else if (event.key === 'Escape' && open) {
+            event.preventDefault();
+            close();
+          }
+        }}
+        style={interactiveButtonStyle(disabled, active || open !== null, hovered, style)}
       >
         {trigger}
       </button>
+      {reason && (
+        <span id={descriptionId} hidden>
+          {reason}
+        </span>
+      )}
       {open && (
         <div
           ref={menuRef}
-          role="menu"
+          id={popupId}
+          role={kind}
           aria-label={title}
+          aria-orientation={kind === 'menu' ? 'vertical' : undefined}
+          tabIndex={-1}
+          onKeyDown={onMenuKeyDown}
+          onBlur={(event) => {
+            if (kind !== 'dialog') return;
+            const next = event.relatedTarget as Node | null;
+            if (next && !menuRef.current?.contains(next) && !triggerRef.current?.contains(next)) {
+              close();
+            }
+          }}
           onMouseDown={(event) => event.preventDefault()}
           style={{
             position: 'fixed',
@@ -220,7 +407,8 @@ export function ToolbarDropdown({
             left: position.left,
             zIndex: 10000,
             width: menuWidth,
-            maxHeight: 'min(440px, calc(100vh - 16px))',
+            maxWidth: `calc(100vw - ${2 * VIEWPORT_MARGIN}px)`,
+            maxHeight: position.maxHeight,
             overflowY: 'auto',
             padding: 6,
             border: `1px solid ${toolbarColors.border}`,
@@ -228,9 +416,10 @@ export function ToolbarDropdown({
             background: toolbarColors.surface,
             boxShadow: '0 4px 16px rgba(60, 64, 67, 0.24)',
             boxSizing: 'border-box',
+            outline: 'none',
           }}
         >
-          {children(close)}
+          {children(closeFromContent)}
         </div>
       )}
     </div>
@@ -240,8 +429,11 @@ export function ToolbarDropdown({
 export interface ToolbarMenuItemProps {
   label: string;
   icon?: ReactNode;
+  /** Makes the item a radio choice, checked when true. */
   selected?: boolean;
   disabled?: boolean;
+  /** Why the item is disabled; announced and shown on hover. */
+  description?: string;
   onClick?: () => void;
   close?: () => void;
 }
@@ -249,57 +441,71 @@ export interface ToolbarMenuItemProps {
 export function ToolbarMenuItem({
   label,
   icon,
-  selected = false,
+  selected,
   disabled = false,
+  description,
   onClick,
   close,
 }: ToolbarMenuItemProps) {
   const [hovered, setHovered] = useState(false);
+  const id = useId();
+  const reason = disabled && description ? description : undefined;
   return (
-    <button
-      type="button"
-      role="menuitem"
-      disabled={disabled}
-      aria-label={label}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      onClick={() => {
-        if (disabled) return;
-        onClick?.();
-        close?.();
-      }}
-      style={{
-        appearance: 'none',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        width: '100%',
-        minHeight: 32,
-        padding: '5px 9px',
-        border: 0,
-        borderRadius: 4,
-        background: hovered && !disabled ? toolbarColors.hover : 'transparent',
-        color: disabled ? toolbarColors.disabled : toolbarColors.text,
-        cursor: disabled ? 'default' : 'pointer',
-        opacity: disabled ? 0.48 : 1,
-        font: '400 13px ui-sans-serif, system-ui, sans-serif',
-        textAlign: 'left',
-        boxSizing: 'border-box',
-      }}
-    >
-      <span
+    <>
+      <button
+        type="button"
+        role={selected === undefined ? 'menuitem' : 'menuitemradio'}
+        tabIndex={-1}
+        aria-checked={selected}
+        aria-disabled={disabled || undefined}
+        aria-describedby={reason ? id : undefined}
+        aria-label={label}
+        title={reason}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onClick={() => {
+          if (disabled) return;
+          onClick?.();
+          close?.();
+        }}
         style={{
-          display: 'inline-grid',
-          placeItems: 'center',
-          width: 20,
-          flex: '0 0 auto',
+          appearance: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          width: '100%',
+          minHeight: 32,
+          padding: '5px 9px',
+          border: 0,
+          borderRadius: 4,
+          background: hovered && !disabled ? toolbarColors.hover : 'transparent',
+          color: disabled ? toolbarColors.disabled : toolbarColors.text,
+          cursor: disabled ? 'default' : 'pointer',
+          opacity: disabled ? 0.48 : 1,
+          font: '400 13px ui-sans-serif, system-ui, sans-serif',
+          textAlign: 'left',
+          boxSizing: 'border-box',
         }}
       >
-        {icon}
-      </span>
-      <span style={{ flex: 1 }}>{label}</span>
-      {selected && <span aria-hidden="true">✓</span>}
-    </button>
+        <span
+          style={{
+            display: 'inline-grid',
+            placeItems: 'center',
+            width: 20,
+            flex: '0 0 auto',
+          }}
+        >
+          {icon}
+        </span>
+        <span style={{ flex: 1 }}>{label}</span>
+        {selected && <span aria-hidden="true">✓</span>}
+      </button>
+      {reason && (
+        <span id={id} hidden>
+          {reason}
+        </span>
+      )}
+    </>
   );
 }
 

@@ -201,6 +201,59 @@ rather than sandboxing code.
 snapshot-based `EditorPluginCore` contract in `@betteroffice/docx/plugin-api`
 is deprecated; its geometry types remain.
 
+## Compose the XLSX toolbar
+
+The spreadsheet editor's built-in controls share one command store,
+`api.commands`, handed to `onReady`. Pass `toolbar` to replace the default
+chrome with parts bound to it; `EditorToolbar.FormulaBar` keeps the name box and
+formula input:
+
+```tsx
+import {
+  EditorToolbar,
+  ToolbarButton,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  ToolbarGroup,
+  XlsxEditor,
+} from "@betteroffice/xlsx-react";
+
+<XlsxEditor
+  file={bytes}
+  toolbar={
+    <EditorToolbar mode="commands">
+      <EditorToolbar.Toolbar>
+        <ToolbarGroup label="Formatting">
+          <ToolbarCommandSelect id="numberFormat" />
+          <ToolbarCommandButton id="bold" />
+        </ToolbarGroup>
+        <ToolbarCommandButton id="undo" />
+        <ToolbarButton title="Share" onClick={share}>Share</ToolbarButton>
+      </EditorToolbar.Toolbar>
+      <EditorToolbar.FormulaBar />
+    </EditorToolbar>
+  }
+/>;
+```
+
+Omit `toolbar` for the default chrome (hidden when `readOnly`), pass `null` for
+none, or set `showToolbar={false}`. Outside the editor, render the same parts
+inside `<XlsxCommandProvider commands={commands}>`, with `commands` captured from
+`onReady` (`null` until then). `execute(id, args)` runs in order with pastes
+and cell entries accepted before it, writes the cell or formula text typed so
+far, checks availability again, and resolves to `executed`, `noop`, `opened`,
+`requested` or a typed failure such as `target-changed`; a disabled command
+states why in `disabledReason`. The synchronous `api.save()` throws
+`XlsxSaveRefusedError` (`input-pending` or `input-failed`) instead of returning
+bytes without accepted input; `execute("save", null)` waits for it and saves.
+`selectCells` and `clearSelection` queue an open entry behind input that is
+still waiting, so it may not have landed when they return.
+The store gates the editor's own UI, not direct
+`api.handle` calls. Existing prop-based `EditorToolbar` and `Toolbar` usage keeps
+working in the default legacy mode; `mode="commands"` rejects those props. Narrow
+rails move groups into an accessible More menu; wrap other host content in
+`ToolbarOverflow` to give it an entry there.
+
 ## Use the JavaScript core
 
 ```ts
@@ -279,7 +332,7 @@ interaction separately when investigating input-to-paint latency.
 | `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, flushed version-checked edit batches on its ref, and host-owned plugins with panels, overlays, sidebar items, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
-| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |
+| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
 | `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
 | `@betteroffice/pptx-react` | The slides editor and viewer as a React component. |

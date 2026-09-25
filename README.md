@@ -64,6 +64,10 @@
   commands and edit batches. Plugins read and navigate by default; every write
   is checked against its grant, the editor mode and document policy when it runs.
 
+- **Composable XLSX toolbars.** Replace the spreadsheet toolbar with built-in
+  controls and the formula bar in your own order. Commands run after pending
+  cell input and state why they are unavailable.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 
