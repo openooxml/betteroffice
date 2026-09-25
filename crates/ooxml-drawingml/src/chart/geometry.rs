@@ -301,6 +301,9 @@ pub enum PlotFill<'a> {
         foreground: Option<&'a str>,
         background: Option<&'a str>,
     },
+    Gradient(&'a [String]),
+    /// A fill the geometry cannot paint: the chart's default ground stands in.
+    Unsupported,
 }
 
 /// The `a:ln` of a `c:spPr`.
@@ -640,6 +643,8 @@ fn plot_fill_from_model(fill: &super::model::ChartFill) -> PlotFill<'_> {
             foreground: foreground.as_deref(),
             background: background.as_deref(),
         },
+        super::model::ChartFill::Gradient { colors } => PlotFill::Gradient(colors),
+        super::model::ChartFill::Unsupported => PlotFill::Unsupported,
     }
 }
 
@@ -1576,9 +1581,9 @@ fn emit_family<S: PlotSink + ?Sized>(
 }
 
 /// The one colour a fill paints as, or `None` for `a:noFill` and for a fill
-/// whose colours did not resolve. A pattern averages its two: no host carries a
-/// hatch paint, and over a whole chart space the mean reads far closer than
-/// either colour on its own.
+/// whose colours did not resolve. A pattern averages its two and a gradient its
+/// stops: no host carries either paint, and over a whole chart space the mean
+/// reads far closer than any one colour on its own.
 fn plot_fill_color(fill: PlotFill<'_>) -> Option<String> {
     match fill {
         PlotFill::None => None,
@@ -1592,7 +1597,21 @@ fn plot_fill_color(fill: PlotFill<'_>) -> Option<String> {
             }
             (foreground, background) => foreground.or(background).map(str::to_owned),
         },
+        PlotFill::Gradient(colors) => mean_hex(colors),
+        PlotFill::Unsupported => None,
     }
+}
+
+/// The mean of the `#RRGGBB` colours that parse, or `None` when none does.
+fn mean_hex(colors: &[String]) -> Option<String> {
+    let parsed: Vec<[u8; 3]> = colors.iter().filter_map(|color| parse_hex(color)).collect();
+    if parsed.is_empty() {
+        return None;
+    }
+    let mean = |index: usize| {
+        parsed.iter().map(|rgb| u32::from(rgb[index])).sum::<u32>() / parsed.len() as u32
+    };
+    Some(format!("#{:02X}{:02X}{:02X}", mean(0), mean(1), mean(2)))
 }
 
 /// The midpoint of two `#RRGGBB` colours.

@@ -807,12 +807,29 @@ fn parse_fill<E: ChartXml>(properties: Option<&E>) -> Option<ChartFill> {
             .solid_fill_hex()
             .map(|color| ChartFill::Solid { color });
     }
-    let pattern = child(properties, "pattFill")?;
-    Some(ChartFill::Pattern {
-        foreground: child(pattern, "fgClr").and_then(E::solid_fill_hex),
-        background: child(pattern, "bgClr").and_then(E::solid_fill_hex),
-    })
+    if let Some(gradient) = child(properties, "gradFill") {
+        let colors = child(gradient, "gsLst")
+            .into_iter()
+            .flat_map(|stops| children(stops, "gs"))
+            .take(MAX_GRADIENT_STOPS)
+            .filter_map(E::solid_fill_hex)
+            .collect();
+        return Some(ChartFill::Gradient { colors });
+    }
+    if let Some(pattern) = child(properties, "pattFill") {
+        return Some(ChartFill::Pattern {
+            foreground: child(pattern, "fgClr").and_then(E::solid_fill_hex),
+            background: child(pattern, "bgClr").and_then(E::solid_fill_hex),
+        });
+    }
+    ["blipFill", "grpFill"]
+        .iter()
+        .any(|fill| child(properties, fill).is_some())
+        .then_some(ChartFill::Unsupported)
 }
+
+/// Stops read from one `a:gsLst`; the schema allows at most ten.
+const MAX_GRADIENT_STOPS: usize = 10;
 
 fn parse_line<E: ChartXml>(properties: Option<&E>) -> Option<ChartLine> {
     let line = child(properties?, "ln")?;
@@ -1331,6 +1348,41 @@ mod tests {
             .flatten()
             .map(|point| point.color.clone())
             .collect()
+    }
+
+    #[test]
+    fn a_gradient_or_picture_chart_area_is_still_a_fill() {
+        let space = |fill: Node| {
+            parse_chart_space(&Node::el(
+                "c:chartSpace",
+                vec![
+                    Node::el(
+                        "c:chart",
+                        vec![Node::el(
+                            "c:plotArea",
+                            vec![Node::el("c:barChart", Vec::new())],
+                        )],
+                    ),
+                    Node::el("c:spPr", vec![fill]),
+                ],
+            ))
+            .expect("chart space parses")
+            .fill
+        };
+        let stop = |rgb: &str| Node::el("a:gs", vec![Node::val("a:srgbClr", rgb)]);
+        assert_eq!(
+            space(Node::el(
+                "a:gradFill",
+                vec![Node::el("a:gsLst", vec![stop("FF0000"), stop("0000FF")])],
+            )),
+            Some(ChartFill::Gradient {
+                colors: vec!["#FF0000".to_owned(), "#0000FF".to_owned()],
+            })
+        );
+        assert_eq!(
+            space(Node::el("a:blipFill", Vec::new())),
+            Some(ChartFill::Unsupported)
+        );
     }
 
     #[test]
