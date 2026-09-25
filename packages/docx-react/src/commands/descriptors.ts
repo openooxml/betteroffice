@@ -127,7 +127,10 @@ export function isMacPlatform(): boolean {
 
 const MODIFIERS: ReadonlySet<string> = new Set(['Mod', 'Shift', 'Alt']);
 
-/** `chord` in canonical form (`Mod+Alt+Shift+key`), or null when it is not a chord. */
+/**
+ * `chord` in canonical form (`Mod+Alt+Shift+key`), or null when it is not a chord. `+` counts as
+ * `=`, whose matcher also accepts the `+` key.
+ */
 export function normalizeChord(chord: string): string | null {
   if (typeof chord !== 'string' || chord.length === 0) return null;
   const parts = chord.split('+');
@@ -136,7 +139,8 @@ export function normalizeChord(chord: string): string | null {
   if (!modifiers.every((modifier) => MODIFIERS.has(modifier))) return null;
   const parsed = parseChord(chord);
   if (parsed.key.length === 0) return null;
-  return [parsed.mod && 'Mod', parsed.alt && 'Alt', parsed.shift && 'Shift', parsed.key]
+  const key = parsed.key === '+' ? '=' : parsed.key;
+  return [parsed.mod && 'Mod', parsed.alt && 'Alt', parsed.shift && 'Shift', key]
     .filter(Boolean)
     .join('+');
 }

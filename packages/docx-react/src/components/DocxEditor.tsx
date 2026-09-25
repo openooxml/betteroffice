@@ -1361,7 +1361,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     readOnly,
     commands: commandController,
     session:
-      yrsCore.session && history.state && !state.isLoading && !state.parseError
+      yrsCore.session &&
+      yrsCore.sessionGeneration === yrsSeedGeneration &&
+      history.state &&
+      !state.isLoading &&
+      !state.parseError
         ? yrsCore.session
         : null,
     loadGeneration: yrsSeedGeneration,

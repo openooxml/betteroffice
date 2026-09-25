@@ -308,7 +308,8 @@ const review = defineDocxPlugin<State>({
 
 - **Lifecycle.** Once a document is ready, each plugin gets fresh state,
   `initialize`, then one `load` event (`loaded`, `replaced`, or `attached` for a
-  plugin added to an open document), and its contributions appear. It then
+  plugin added to an open document), and its contributions appear. A document
+  change before that hook finishes aborts it and delivers `load` again. It then
   receives `document-change` (the committed version only, for typing, remote
   edits, undo, commands and batches, never for refusals or no-ops),
   `selection-change`, `mode-change` (with the effective `readOnly`),

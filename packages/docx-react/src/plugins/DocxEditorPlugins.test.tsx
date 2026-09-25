@@ -415,6 +415,22 @@ describe('DocxEditor plugins', () => {
       failure: { code: 'permission-denied' },
     });
     expect((await firstParagraph(ref)).version).toBe(version);
+
+    const grant: { document: 'write'; editBatches?: true } = {
+      document: 'write',
+      editBatches: true,
+    };
+    const grants = { 'acme.review': grant };
+    const changes = () => log.filter((entry) => entry === 'grants-change').length;
+    rerender({ plugins: [plugin], pluginGrants: grants });
+    await until(() => changes() === 2);
+    delete grant.editBatches;
+    rerender({ plugins: [plugin], pluginGrants: grants });
+    await until(() => changes() === 3);
+    expect(await edits.applyEdits(appendRequest(version, paragraph.paraId))).toMatchObject({
+      ok: false,
+      failure: { code: 'permission-denied' },
+    });
   });
 
   test('contributed commands run with their plugin, from the toolbar, ref and shortcuts', async () => {
@@ -599,6 +615,22 @@ describe('DocxEditor plugins', () => {
     });
     const fresh = contexts.at(-1)!;
     expect(fresh.snapshot.generation).not.toBe(first.snapshot.generation);
+  });
+
+  test('loading a parsed document activates plugins once, over the new session', async () => {
+    const { plugin, log } = recorder();
+    const { ref } = await mount({ plugins: [plugin] });
+    await until(() => log.includes('load:loaded'));
+    await act(async () => {
+      ref.current!.loadDocument(ref.current!.getDocument()!);
+    });
+    await until(() => log.includes('load:replaced'));
+    await settle(150);
+    expect(log.slice(log.indexOf('load:loaded') + 1)).toEqual([
+      'cleanup:document-replaced',
+      'initialize',
+      'load:replaced',
+    ]);
   });
 
   test('StrictMode setup, cleanup and setup leaves one live activation', async () => {

@@ -156,7 +156,9 @@ describe('contributed commands', () => {
   test('chords normalize, and built-in chords are reserved', () => {
     expect(normalizeChord('Shift+Mod+b')).toBe('Mod+Shift+b');
     expect(normalizeChord('Ctrl+B')).toBeNull();
-    expect(normalizeChord('Mod++')).toBe('Mod++');
+    expect(normalizeChord('Mod++')).toBe('Mod+=');
+    expect(BUILT_IN_CHORDS.has(normalizeChord('Mod++')!)).toBe(true);
+    expect(BUILT_IN_CHORDS.has(normalizeChord('Mod+Shift++')!)).toBe(true);
     expect(BUILT_IN_CHORDS.has('Mod+b')).toBe(true);
     expect(BUILT_IN_CHORDS.has(normalizeChord('Mod+Shift+M')!)).toBe(false);
     const ids: unknown[] = ['plugin:acme/mark', 'plugin:acme/', 'plugin:/x', 'bold'];
