@@ -70,6 +70,28 @@ export interface EditResult {
   limitedCells?: string[];
 }
 
+/** Facade stage latencies of one profiled mutation, in ms. */
+export interface EditProfile {
+  validateMs: number;
+  applyMs: number;
+  recalcMs: number;
+  resultMs: number;
+}
+
+export interface ProfiledEditResult extends EditResult {
+  profile: EditProfile;
+}
+
+export interface DisplayListProfile {
+  buildMs: number;
+  encodeMs: number;
+}
+
+export interface ProfiledDisplayList {
+  displayList: DisplayList;
+  profile: DisplayListProfile;
+}
+
 export interface CalculationStatus {
   limitedCells: string[];
 }
@@ -311,6 +333,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   sheetInfo(): SheetInfo;
   calculationStatus(): CalculationStatus;
   displayList(viewport: Viewport): DisplayList;
+  /** `displayList` with build and encode time measured inside the core. */
+  displayListProfiled(viewport: Viewport): ProfiledDisplayList;
   printDisplayList(
     sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean
   ): DisplayList;
@@ -339,10 +363,14 @@ export interface WorkbookHandle extends CollaborationReplica {
    * in `EditResult.changed`.
    */
   editCell(sheet: number, row: number, col: number, input: string): EditResult;
+  /** `editCell` with the facade's stage timings attached. */
+  editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
+  /** `applyOps` with the facade's stage timings attached. */
+  applyOpsProfiled(ops: unknown[]): ProfiledEditResult;
   undo(): EditResult;
   redo(): EditResult;
   /** the editable view of one cell (formula bar / in-cell editor prefill). */
@@ -623,6 +651,9 @@ export function openWorkbook(
     displayList(viewport: Viewport): DisplayList {
       return parseJson(() => doc.displayListJson(JSON.stringify(viewport)));
     },
+    displayListProfiled(viewport: Viewport): ProfiledDisplayList {
+      return parseJson(() => doc.displayListProfiledJson(JSON.stringify(viewport)));
+    },
     printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): DisplayList {
       return parseJson(() =>
         doc.printDisplayListJson(JSON.stringify({ sheet, range, metrics, gridlines }))
@@ -640,11 +671,20 @@ export function openWorkbook(
     editCell(sheet: number, row: number, col: number, input: string): EditResult {
       return parseJson(() => doc.editCellJson(JSON.stringify({ sheet, row, col, input })), true);
     },
+    editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult {
+      return parseJson(
+        () => doc.editCellProfiledJson(JSON.stringify({ sheet, row, col, input })),
+        true
+      );
+    },
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);
+    },
+    applyOpsProfiled(ops: unknown[]): ProfiledEditResult {
+      return parseJson(() => doc.applyOpsProfiledJson(JSON.stringify({ ops })), true);
     },
     undo(): EditResult {
       return parseJson(() => doc.undoJson(), true);

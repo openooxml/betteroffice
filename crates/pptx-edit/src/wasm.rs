@@ -8,8 +8,15 @@ use yrs::Subscription;
 
 use crate::{
     CommentFlavor, DeckSession, DeckSnapshot, EditCtx, PictureDraft, PresetShapeDraft, ShapeDraft,
-    ShapeRect, ShapeStroke, TextStyle, TextStylePatch, UpdateEvent, UpdateOrigin,
+    ShapeReceipt, ShapeRect, ShapeStroke, SlideReceipt, TextReceipt, TextStyle, TextStylePatch,
+    TransformReceipt, UpdateEvent, UpdateOrigin,
 };
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn performance_now() -> f64;
+}
 
 #[wasm_bindgen]
 pub struct PptxDocument {
@@ -99,6 +106,14 @@ struct ReplyCommentArgs {
     initials: String,
     text: String,
     created: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentPositionArgs {
+    comment_id: String,
+    x_emu: i64,
+    y_emu: i64,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +257,23 @@ struct SetShapeAdjustArgs {
 struct HistoryResult {
     applied: bool,
     snapshot: DeckSnapshot,
+}
+
+/// boundary stage latencies of one profiled edit, in milliseconds.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditProfile {
+    parse_ms: f64,
+    apply_ms: f64,
+    serialize_ms: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryProfile {
+    undo_ms: f64,
+    snapshot_ms: f64,
+    serialize_ms: f64,
 }
 
 #[derive(Deserialize)]
@@ -442,28 +474,22 @@ impl PptxDocument {
 
     #[wasm_bindgen(js_name = insertTextJson)]
     pub fn insert_text_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: InsertTextArgs = parse_args(args)?;
-        json(
-            self.session
-                .insert_text(
-                    &local_context(),
-                    &args.story_id,
-                    args.index,
-                    &args.text,
-                    &args.style,
-                )
-                .map_err(js_error)?,
-        )
+        json(self.insert_text(parse_args(args)?)?)
+    }
+
+    #[wasm_bindgen(js_name = insertTextProfiledJson)]
+    pub fn insert_text_profiled_json(&self, args: &str) -> Result<String, JsValue> {
+        profiled(args, &mut performance_now, |args| self.insert_text(args))
     }
 
     #[wasm_bindgen(js_name = deleteTextJson)]
     pub fn delete_text_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: DeleteTextArgs = parse_args(args)?;
-        json(
-            self.session
-                .delete_text(&local_context(), &args.story_id, args.start, args.end)
-                .map_err(js_error)?,
-        )
+        json(self.delete_text(parse_args(args)?)?)
+    }
+
+    #[wasm_bindgen(js_name = deleteTextProfiledJson)]
+    pub fn delete_text_profiled_json(&self, args: &str) -> Result<String, JsValue> {
+        profiled(args, &mut performance_now, |args| self.delete_text(args))
     }
 
     #[wasm_bindgen(js_name = formatTextJson)]
@@ -534,6 +560,16 @@ impl PptxDocument {
         )
     }
 
+    #[wasm_bindgen(js_name = setCommentPositionJson)]
+    pub fn set_comment_position_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: CommentPositionArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_comment_position(&local_context(), &args.comment_id, args.x_emu, args.y_emu)
+                .map_err(js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = setCommentStatusJson)]
     pub fn set_comment_status_json(&self, args: &str) -> Result<String, JsValue> {
         let args: CommentStatusArgs = parse_args(args)?;
@@ -581,16 +617,12 @@ impl PptxDocument {
 
     #[wasm_bindgen(js_name = insertSlideJson)]
     pub fn insert_slide_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: InsertSlideArgs = parse_args(args)?;
-        json(
-            self.session
-                .insert_slide(
-                    &local_context(),
-                    args.index,
-                    args.layout_part_path.as_deref(),
-                )
-                .map_err(js_error)?,
-        )
+        json(self.insert_slide(parse_args(args)?)?)
+    }
+
+    #[wasm_bindgen(js_name = insertSlideProfiledJson)]
+    pub fn insert_slide_profiled_json(&self, args: &str) -> Result<String, JsValue> {
+        profiled(args, &mut performance_now, |args| self.insert_slide(args))
     }
 
     #[wasm_bindgen(js_name = deleteSlideJson)]
@@ -624,12 +656,12 @@ impl PptxDocument {
 
     #[wasm_bindgen(js_name = addTextBoxJson)]
     pub fn add_text_box_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: AddTextBoxArgs = parse_args(args)?;
-        json(
-            self.session
-                .add_text_box(&local_context(), &args.slide_id, &args.draft)
-                .map_err(js_error)?,
-        )
+        json(self.add_text_box(parse_args(args)?)?)
+    }
+
+    #[wasm_bindgen(js_name = addTextBoxProfiledJson)]
+    pub fn add_text_box_profiled_json(&self, args: &str) -> Result<String, JsValue> {
+        profiled(args, &mut performance_now, |args| self.add_text_box(args))
     }
 
     #[wasm_bindgen(js_name = addShapeJson)]
@@ -713,18 +745,12 @@ impl PptxDocument {
 
     #[wasm_bindgen(js_name = moveShapeJson)]
     pub fn move_shape_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: MoveShapeArgs = parse_args(args)?;
-        json(
-            self.session
-                .move_shape(
-                    &local_context(),
-                    &args.slide_id,
-                    &args.shape_id,
-                    args.x,
-                    args.y,
-                )
-                .map_err(js_error)?,
-        )
+        json(self.move_shape(parse_args(args)?)?)
+    }
+
+    #[wasm_bindgen(js_name = moveShapeProfiledJson)]
+    pub fn move_shape_profiled_json(&self, args: &str) -> Result<String, JsValue> {
+        profiled(args, &mut performance_now, |args| self.move_shape(args))
     }
 
     #[wasm_bindgen(js_name = resizeShapeJson)]
@@ -798,12 +824,56 @@ impl PptxDocument {
         )
     }
 
+    #[wasm_bindgen(js_name = undoCaptureMode)]
+    pub fn undo_capture_mode(&self) -> String {
+        match self.session.undo_capture_mode() {
+            crate::UndoCaptureMode::Auto => "auto",
+            crate::UndoCaptureMode::Manual => "manual",
+        }
+        .to_owned()
+    }
+
+    #[wasm_bindgen(js_name = setUndoCaptureMode)]
+    pub fn set_undo_capture_mode(&self, mode: &str) -> Result<(), JsValue> {
+        let mode = match mode {
+            "auto" => crate::UndoCaptureMode::Auto,
+            "manual" => crate::UndoCaptureMode::Manual,
+            _ => return Err(js_error("undo capture mode must be auto or manual")),
+        };
+        self.session.set_undo_capture_mode(mode);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = addUndoBoundary)]
+    pub fn add_undo_boundary(&self) {
+        self.session.add_undo_barrier();
+    }
+
     #[wasm_bindgen(js_name = undoJson)]
     pub fn undo_json(&self) -> Result<String, JsValue> {
         json(HistoryResult {
             applied: self.session.undo(),
             snapshot: self.session.snapshot().map_err(js_error)?,
         })
+    }
+
+    /// `undoJson` timed at its undo, snapshot and serialize boundaries, as
+    /// `{"receipt": ..., "profile": {"undoMs", "snapshotMs", "serializeMs"}}`.
+    #[wasm_bindgen(js_name = undoProfiledJson)]
+    pub fn undo_profiled_json(&self) -> Result<String, JsValue> {
+        let started = performance_now();
+        let applied = self.session.undo();
+        let undone = performance_now();
+        let snapshot = self.session.snapshot().map_err(js_error)?;
+        let snapshotted = performance_now();
+        let receipt = json(HistoryResult { applied, snapshot })?;
+        let serialized = performance_now();
+        let profile = json(HistoryProfile {
+            undo_ms: undone - started,
+            snapshot_ms: snapshotted - undone,
+            serialize_ms: serialized - snapshotted,
+        })?;
+        Ok(format!("{{\"receipt\":{receipt},\"profile\":{profile}}}"))
     }
 
     #[wasm_bindgen(js_name = redoJson)]
@@ -833,6 +903,74 @@ impl PptxDocument {
     pub fn session(&self) -> &DeckSession {
         &self.session
     }
+
+    fn insert_text(&self, args: InsertTextArgs) -> Result<TextReceipt, JsValue> {
+        self.session
+            .insert_text(
+                &local_context(),
+                &args.story_id,
+                args.index,
+                &args.text,
+                &args.style,
+            )
+            .map_err(js_error)
+    }
+
+    fn delete_text(&self, args: DeleteTextArgs) -> Result<TextReceipt, JsValue> {
+        self.session
+            .delete_text(&local_context(), &args.story_id, args.start, args.end)
+            .map_err(js_error)
+    }
+
+    fn insert_slide(&self, args: InsertSlideArgs) -> Result<SlideReceipt, JsValue> {
+        self.session
+            .insert_slide(
+                &local_context(),
+                args.index,
+                args.layout_part_path.as_deref(),
+            )
+            .map_err(js_error)
+    }
+
+    fn add_text_box(&self, args: AddTextBoxArgs) -> Result<ShapeReceipt, JsValue> {
+        self.session
+            .add_text_box(&local_context(), &args.slide_id, &args.draft)
+            .map_err(js_error)
+    }
+
+    fn move_shape(&self, args: MoveShapeArgs) -> Result<TransformReceipt, JsValue> {
+        self.session
+            .move_shape(
+                &local_context(),
+                &args.slide_id,
+                &args.shape_id,
+                args.x,
+                args.y,
+            )
+            .map_err(js_error)
+    }
+}
+
+/// one edit timed by `now` at its parse, apply and serialize boundaries, as
+/// `{"receipt": <the usual json>, "profile": {"parseMs", "applyMs", "serializeMs"}}`.
+fn profiled<A: serde::de::DeserializeOwned, R: Serialize>(
+    args: &str,
+    now: &mut impl FnMut() -> f64,
+    apply: impl FnOnce(A) -> Result<R, JsValue>,
+) -> Result<String, JsValue> {
+    let started = now();
+    let args = parse_args(args)?;
+    let parsed = now();
+    let receipt = apply(args)?;
+    let applied = now();
+    let receipt = json(receipt)?;
+    let serialized = now();
+    let profile = json(EditProfile {
+        parse_ms: parsed - started,
+        apply_ms: applied - parsed,
+        serialize_ms: serialized - applied,
+    })?;
+    Ok(format!("{{\"receipt\":{receipt},\"profile\":{profile}}}"))
 }
 
 fn local_context() -> EditCtx {

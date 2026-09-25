@@ -4,6 +4,7 @@ export const memory: WebAssembly.Memory;
 export const __wbg_editsession_free: (a: number, b: number) => void;
 export const editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+export const editsession_add_undo_boundary: (a: number) => void;
 export const editsession_apply_delete: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_apply_delete_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_apply_input: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -96,6 +97,7 @@ export const editsession_set_paragraph_attr: (a: number, b: number, c: number, d
 export const editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
 export const editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
 export const editsession_set_update_observer: (a: number, b: any) => [number, number];
 export const editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
@@ -107,6 +109,7 @@ export const editsession_story_segments: (a: number, b: number, c: number) => [n
 export const editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_track_undo: (a: number) => void;
 export const editsession_undo: (a: number) => number;
+export const editsession_undo_capture_mode: (a: number) => [number, number];
 export const editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_load: (a: number, b: number, c: number) => [number, number];
 export const decodeTiffPng: (a: number, b: number) => [number, number, number, number];

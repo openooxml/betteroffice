@@ -222,9 +222,6 @@ fn parse_package(
         limits,
     );
 
-    let diagram_drawings =
-        parse_diagram_drawings(&parts, &slides, &relationships, limits, shape_elements);
-
     let deck_comments = parse_package_comments(
         &parts,
         &presentation,
@@ -234,6 +231,8 @@ fn parse_package(
     )?;
 
     let content_types = parse_content_types(&parts, &mut budget)?;
+    let diagram_drawings =
+        parse_diagram_drawings(&parts, &slides, &relationships, &mut budget, shape_elements);
     let media = source_parts
         .iter()
         .filter(|(path, _)| path.starts_with("ppt/media/"))
@@ -629,12 +628,14 @@ fn read_chart_root(
     root
 }
 
-/// Parses every `ppt/diagrams/drawing#.xml` a slide points at, once each.
+/// Parses every `ppt/diagrams/drawing#.xml` a slide points at, once each,
+/// against what the package budget has left: a drawing that would overrun it is
+/// declined, since every part it could fail has already been read.
 fn parse_diagram_drawings(
     parts: &HashMap<&str, &[u8]>,
     slides: &[Slide],
     relationships: &BTreeMap<String, Vec<Relationship>>,
-    limits: &ParseLimits,
+    budget: &mut ParseBudget<'_>,
     elements: ShapeElements,
 ) -> Vec<DiagramDrawing> {
     let mut wanted: Vec<String> = Vec::new();
@@ -648,8 +649,7 @@ fn parse_diagram_drawings(
         let Some(bytes) = parts.get(part_path.as_str()) else {
             continue;
         };
-        let mut budget = ParseBudget::new(limits);
-        let Ok(root) = parse_xml(bytes, &part_path, &mut budget) else {
+        let Ok(root) = parse_xml(bytes, &part_path, budget) else {
             continue;
         };
         let part_relationships = relationships
@@ -657,7 +657,7 @@ fn parse_diagram_drawings(
             .map(Vec::as_slice)
             .unwrap_or_default();
         if let Ok(shapes) =
-            parse_diagram_drawing(&root, part_relationships, &part_path, &mut budget, elements)
+            parse_diagram_drawing(&root, part_relationships, &part_path, budget, elements)
             && !shapes.is_empty()
         {
             drawings.push(DiagramDrawing { part_path, shapes });
@@ -1455,6 +1455,101 @@ mod tests {
             ["ppt/charts/chart1.xml"]
         );
         assert_eq!(package.charts[0].chart.series[0].values.len(), 4_000);
+    }
+
+    /// A deck of SmartArt whose drawings each hold `shapes` shapes, `drawings` of them.
+    fn smartart_deck(drawings: usize, shapes: usize) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        let frames = (0..drawings)
+            .map(|index| {
+                format!(
+                    r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{}" name="SmartArt {index}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rIdData{index}" r:lo="" r:qs="" r:cs=""/></a:graphicData></a:graphic></p:graphicFrame>"#,
+                    index + 900
+                )
+            })
+            .collect::<String>();
+        let links = (0..drawings)
+            .map(|index| {
+                format!(
+                    r#"<Relationship Id="rIdData{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data{index}.xml"/><Relationship Id="rIdDrawing{index}" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="../diagrams/drawing{index}.xml"/>"#
+                )
+            })
+            .collect::<String>();
+        let crowd = (0..shapes)
+            .map(|_| r#"<dsp:sp modelId="{0}"><dsp:nvSpPr><dsp:cNvPr id="0" name=""/><dsp:cNvSpPr/></dsp:nvSpPr><dsp:spPr/></dsp:sp>"#)
+            .collect::<String>();
+        let drawing = format!(
+            r#"<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:spTree><dsp:nvGrpSpPr><dsp:cNvPr id="0" name=""/><dsp:cNvGrpSpPr/></dsp:nvGrpSpPr><dsp:grpSpPr/>{crowd}</dsp:spTree></dsp:drawing>"#
+        );
+        for (path, bytes) in &mut parts {
+            let edited = match path.as_str() {
+                "ppt/slides/slide1.xml" => String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("</p:spTree>", &format!("{frames}</p:spTree>")),
+                "ppt/slides/_rels/slide1.xml.rels" => String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("</Relationships>", &format!("{links}</Relationships>")),
+                _ => continue,
+            };
+            *bytes = edited.into_bytes();
+        }
+        for index in 0..drawings {
+            parts.push((
+                format!("ppt/diagrams/drawing{index}.xml"),
+                drawing.clone().into_bytes(),
+            ));
+        }
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    /// Every SmartArt drawing draws from the one package budget, so a deck of
+    /// many cannot parse past it; the drawings that would are declined and the
+    /// deck still opens.
+    #[test]
+    fn smartart_drawings_share_the_package_budget() {
+        let whole = parse_pptx(&smartart_deck(3, 40)).unwrap();
+        assert_eq!(whole.diagram_drawings.len(), 3);
+        let spent = whole
+            .slides
+            .iter()
+            .map(|slide| count_shapes(&slide.shapes))
+            .sum::<usize>()
+            + whole
+                .layouts
+                .iter()
+                .map(|layout| count_shapes(&layout.shapes))
+                .sum::<usize>()
+            + whole
+                .masters
+                .iter()
+                .map(|master| count_shapes(&master.shapes))
+                .sum::<usize>();
+        let limits = ParseLimits {
+            max_shapes: spent + 100,
+            ..ParseLimits::default()
+        };
+
+        let package = parse_pptx_with_limits(&smartart_deck(3, 40), &limits).unwrap();
+
+        assert_eq!(package.slides.len(), whole.slides.len());
+        assert_eq!(
+            package
+                .diagram_drawings
+                .iter()
+                .map(|drawing| drawing.shapes.len())
+                .collect::<Vec<_>>(),
+            [40, 40]
+        );
+    }
+
+    fn count_shapes(shapes: &[ShapeNode]) -> usize {
+        shapes
+            .iter()
+            .map(|shape| match shape {
+                ShapeNode::Group(group) => 1 + count_shapes(&group.children),
+                _ => 1,
+            })
+            .sum()
     }
 
     #[test]

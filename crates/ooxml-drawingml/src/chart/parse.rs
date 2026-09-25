@@ -311,7 +311,7 @@ fn place_points<T: Clone>(entries: Vec<(usize, T)>, blank: &T) -> Vec<T> {
     let Some(last) = entries.iter().map(|(index, _)| *index).max() else {
         return Vec::new();
     };
-    let mut placed = vec![blank.clone(); (last + 1).min(MAX_POINTS)];
+    let mut placed = vec![blank.clone(); last.saturating_add(1).min(MAX_POINTS)];
     for (index, value) in entries {
         if let Some(slot) = placed.get_mut(index) {
             *slot = value;
@@ -365,7 +365,7 @@ fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> V
             .trim()
             .to_owned();
         let index = point_index_attr(point, next);
-        next = index + 1;
+        next = index.saturating_add(1);
         Some((index, text))
     });
     place_points(entries, &String::new())
@@ -384,7 +384,7 @@ fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<
         let text = child(point, "v")?.descendant_text();
         let value = parse_number(Some(text.trim()))?;
         let index = point_index_attr(point, next);
-        next = index + 1;
+        next = index.saturating_add(1);
         Some((index, value))
     });
     place_points(entries, &f64::NAN)
@@ -410,7 +410,7 @@ fn parse_num_cache_with_strings<E: ChartXml>(
             .to_owned();
         let number = parse_number(Some(&text)).unwrap_or(f64::NAN);
         let index = point_index_attr(point, next);
-        next = index + 1;
+        next = index.saturating_add(1);
         Some((index, (text, number)))
     });
     let placed = place_points(entries, &(String::new(), f64::NAN));
@@ -1194,6 +1194,27 @@ mod tests {
         assert_eq!(values.len(), 4);
         assert!(values[0].is_nan() && values[2].is_nan());
         assert_eq!([values[1], values[3]], [7.0, 9.0]);
+    }
+
+    #[test]
+    fn a_point_index_at_the_top_of_its_range_does_not_overflow() {
+        let top = usize::MAX.to_string();
+        let cache = Node::el(
+            "c:numCache",
+            vec![
+                Node::el("c:pt", vec![Node::text("c:v", "7")]).attr("idx", "1"),
+                Node::el("c:pt", vec![Node::text("c:v", "8")]).attr("idx", &top),
+                Node::el("c:pt", vec![Node::text("c:v", "9")]),
+            ],
+        );
+        let numbers = parse_num_cache(Some(&cache), &mut Budget::new());
+        let strings = parse_string_cache(Some(&cache), &mut Budget::new());
+        let (_, paired) = parse_num_cache_with_strings(Some(&cache), &mut Budget::new());
+        assert_eq!(
+            [numbers.len(), strings.len(), paired.len()],
+            [MAX_POINTS; 3]
+        );
+        assert_eq!((numbers[1], strings[1].as_str()), (7.0, "7"));
     }
 
     #[test]

@@ -3,6 +3,7 @@ export type {
   PptxEditorApi,
   PptxEditorCollaborationOptions,
   PptxEditorProps,
+  PptxPointPosition,
   PptxTextSelection,
   PptxTextSelectionTarget,
 } from './PptxEditor';

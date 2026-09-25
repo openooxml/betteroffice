@@ -136,6 +136,15 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     displayPositionToYrsLoc: (position) => displayPositionToYrsLocRef.current(position),
     getYrsSession: () => yrsSessionRef.current,
+    flushPendingInput: async () => {
+      const input = yrsInputRef.current;
+      const session = yrsSessionRef.current;
+      if (!input || !session) throw new Error('The editor input is unavailable');
+      await input.flushPendingInput();
+      if (input !== yrsInputRef.current || session !== yrsSessionRef.current) {
+        throw new Error('The document changed while flushing input');
+      }
+    },
     getYrsStoredFormatting: () => yrsInputRef.current?.storedFormatting() ?? null,
     yrsLocToDisplayPosition: (loc) => yrsLocToDisplayPositionRef.current(loc),
     syncYrsInputState: (docChanged) => syncYrsInputStateRef.current(docChanged),

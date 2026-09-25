@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
+use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
 use crate::metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
@@ -79,6 +80,12 @@ pub enum RenderError {
 struct FontFace {
     id: FontId,
     family: String,
+    requested_family: String,
+    /// The named family's own advance widths, where this face stands in for a
+    /// family that does not already run at them.
+    widths: Option<&'static FamilyMetrics>,
+    /// The same family's `hhea` metrics, which decide where the line box sits.
+    line: Option<&'static FamilyMetrics>,
 }
 
 pub struct SlideRenderer {
@@ -135,12 +142,16 @@ impl SlideRenderer {
             .fonts
             .register(bytes.to_vec())
             .map_err(|error| RenderError::Font(error.to_string()))?;
+        let requested = normalize_family(family);
+        let metrics = family_metrics(&requested, bold, italic);
         let face = FontFace {
             id,
             family: family.to_owned(),
+            requested_family: requested.clone(),
+            widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
+            line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
         };
-        self.faces
-            .insert((normalize_family(family), bold, italic), face.clone());
+        self.faces.insert((requested, bold, italic), face.clone());
         self.fallback.get_or_insert(face);
         self.fallback_family
             .get_or_insert_with(|| normalize_family(family));
@@ -406,9 +417,13 @@ impl SlideRenderer {
             (false, italic),
             (false, false),
         ];
-        for (bold, italic) in styles {
-            if let Some(face) = self.faces.get(&(requested.clone(), bold, italic)) {
-                return Ok(face.clone());
+        for (face_bold, face_italic) in styles {
+            if let Some(face) = self.faces.get(&(requested.clone(), face_bold, face_italic)) {
+                return Ok(if (face_bold, face_italic) == (bold, italic) {
+                    face.clone()
+                } else {
+                    self.with_requested_metrics(face, &requested, bold, italic)
+                });
             }
         }
         self.faces
@@ -421,8 +436,24 @@ impl SlideRenderer {
                     *face_italic,
                 )
             })
-            .map(|(_, face)| face.clone())
+            .map(|(_, face)| self.with_requested_metrics(face, &requested, bold, italic))
             .ok_or(RenderError::NoFont)
+    }
+
+    fn with_requested_metrics(
+        &self,
+        face: &FontFace,
+        requested: &str,
+        bold: bool,
+        italic: bool,
+    ) -> FontFace {
+        let metrics = family_metrics(requested, bold, italic);
+        FontFace {
+            requested_family: requested.to_owned(),
+            widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, face.id, metrics)),
+            line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, face.id, metrics)),
+            ..face.clone()
+        }
     }
 }
 
@@ -1634,7 +1665,7 @@ impl<'a> LayoutBuilder<'a> {
                     .map(|run| TextRun {
                         text: run.text.clone(),
                         font_family: run.style.family.clone(),
-                        font_size_pt: run.style.font_size_pt * scale,
+                        font_size_pt: autofit_size_pt(run.style.font_size_pt, scale),
                         bold: run.style.bold,
                         italic: run.style.italic,
                         underline: run.style.underline,
@@ -2306,7 +2337,14 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering)
+        // A blank paragraph between list items is spacing, not an item:
+        // PowerPoint neither marks it nor counts it towards the next number.
+        let marker = paragraph
+            .runs
+            .iter()
+            .any(|run| !run.text.is_empty())
+            .then(|| resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering))
+            .flatten()
             .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
@@ -2541,6 +2579,71 @@ fn resolve_style(
             .or_else(|| fallback.and_then(|value| value.caps))
             .unwrap_or(TextCaps::None),
     })
+}
+
+/// Characters used to check whether a registered face matches a metric table.
+const ADVANCE_SAMPLE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,";
+
+/// Preserve the face's kerning when its individual advances already match.
+fn runs_at_own_widths(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
+    let Ok(own) = fonts.metrics(id) else {
+        return true;
+    };
+    let units = f32::from(own.units_per_em);
+    if units <= 0.0 {
+        return true;
+    }
+    for character in ADVANCE_SAMPLE.chars() {
+        let Some(wanted) = family_advance(metrics, character) else {
+            continue;
+        };
+        let Ok(Some(advance)) = fonts.advance_width(id, character) else {
+            return false;
+        };
+        if (wanted - advance / units).abs() > 0.002 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether `id` already stacks its lines the way `metrics` does.
+fn sits_on_own_baseline(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
+    let Ok(own) = fonts.metrics(id) else {
+        return true;
+    };
+    let units = f32::from(own.units_per_em);
+    if units <= 0.0 {
+        return true;
+    }
+    let same =
+        |theirs: i32, ours: i16| (theirs as f32 / 1000.0 - f32::from(ours) / units).abs() <= 0.002;
+    same(metrics.ascent, own.hhea_ascender)
+        && same(metrics.descent, own.hhea_descender)
+        && same(metrics.line_gap, own.hhea_line_gap)
+}
+
+/// The line box the named family measures at `size_px`, in the shape
+/// [`single_line_box`] gives a registered face.
+fn family_line_box(metrics: &FamilyMetrics, size_px: f32) -> ooxml_text::LineBox {
+    let em = size_px / 1000.0;
+    ooxml_text::LineBox {
+        ascent: (metrics.ascent + metrics.line_gap).max(0) as f32 * em,
+        descent: (-metrics.descent).max(0) as f32 * em,
+        leading: 0.0,
+    }
+}
+
+/// How wide the family a run names draws `text`, when that family is one we
+/// have widths but no face for. `None` for anything the table cannot measure,
+/// which keeps the substitute's own advance.
+fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Option<f32> {
+    let metrics = style.face.widths?;
+    let mut total = 0.0;
+    for character in text.chars() {
+        total += family_advance(metrics, character)?;
+    }
+    Some(total * size_px)
 }
 
 /// Optional ligatures are off once glyphs are tracked apart.
@@ -2778,8 +2881,11 @@ fn text_layout_key(
     stacked: bool,
     wraps: bool,
 ) -> Vec<u8> {
-    let text_len: usize = content
-        .paragraphs
+    let ResolvedContent {
+        paragraphs,
+        space_first_last_para,
+    } = content;
+    let text_len: usize = paragraphs
         .iter()
         .flat_map(|paragraph| &paragraph.runs)
         .map(|run| run.text.len())
@@ -2791,36 +2897,59 @@ fn text_layout_key(
     key_f32(&mut key, scale);
     key.push(u8::from(stacked));
     key.push(u8::from(wraps));
-    key_u32(&mut key, content.paragraphs.len() as u32);
-    for paragraph in &content.paragraphs {
-        key.push(match paragraph.align {
+    key.push(u8::from(*space_first_last_para));
+    key_u32(&mut key, paragraphs.len() as u32);
+    for paragraph in paragraphs {
+        let ResolvedParagraph {
+            align,
+            justify,
+            level,
+            margin_left_px,
+            margin_right_px,
+            line_spacing,
+            space_before,
+            space_after,
+            line_space_reduction,
+            indent_px,
+            tab_stops,
+            default_tab_px,
+            marker,
+            bullet_style,
+            runs,
+        } = paragraph;
+        key.push(match align {
             TextAlign::Left => 0,
             TextAlign::Center => 1,
             TextAlign::Right => 2,
             TextAlign::Justify => 3,
         });
-        key.push(u8::from(paragraph.justify));
-        key_u32(&mut key, paragraph.level);
-        key_f32(&mut key, paragraph.margin_left_px);
-        key_f32(&mut key, paragraph.margin_right_px);
-        key_f32(&mut key, paragraph.indent_px);
-        key_f32(&mut key, paragraph.line_space_reduction);
-        key_spacing(&mut key, &paragraph.line_spacing);
-        key_spacing(&mut key, &paragraph.space_before);
-        key_spacing(&mut key, &paragraph.space_after);
-        key_opt_str(&mut key, &paragraph.marker);
-        match &paragraph.bullet_style {
+        key.push(u8::from(*justify));
+        key_u32(&mut key, *level);
+        key_f32(&mut key, *margin_left_px);
+        key_f32(&mut key, *margin_right_px);
+        key_f32(&mut key, *indent_px);
+        key_f32(&mut key, *line_space_reduction);
+        key_spacing(&mut key, line_spacing);
+        key_spacing(&mut key, space_before);
+        key_spacing(&mut key, space_after);
+        key_u32(&mut key, tab_stops.len() as u32);
+        for stop in tab_stops {
+            key_f32(&mut key, *stop);
+        }
+        key_f32(&mut key, *default_tab_px);
+        key_opt_str(&mut key, marker);
+        match bullet_style {
             Some(style) => {
                 key.push(1);
                 key_style(&mut key, style);
             }
             None => key.push(0),
         }
-        key_u32(&mut key, paragraph.runs.len() as u32);
-        for run in &paragraph.runs {
-            key_u32(&mut key, run.start);
-            key_str(&mut key, &run.text);
-            key_style(&mut key, &run.style);
+        key_u32(&mut key, runs.len() as u32);
+        for ResolvedRun { text, start, style } in runs {
+            key_u32(&mut key, *start);
+            key_str(&mut key, text);
+            key_style(&mut key, style);
         }
     }
     key
@@ -2868,15 +2997,45 @@ fn key_spacing(key: &mut Vec<u8>, spacing: &Option<LineSpacing>) {
 }
 
 fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
-    key_u32(key, style.face.id.to_u32());
-    key_str(key, &style.family);
-    key_f32(key, style.font_size_pt);
-    key_f32(key, style.spacing_pt);
-    key_f32(key, style.baseline_shift_px);
-    key.push(u8::from(style.bold));
-    key.push(u8::from(style.italic));
-    key.push(u8::from(style.underline));
-    key_str(key, &style.color);
+    let ResolvedStyle {
+        face:
+            FontFace {
+                id,
+                family: face_family,
+                requested_family,
+                widths,
+                line,
+            },
+        family,
+        font_size_pt,
+        line_font_size_pt,
+        spacing_pt,
+        baseline_shift_px,
+        bold,
+        italic,
+        underline,
+        color,
+        caps,
+    } = style;
+    key_u32(key, id.to_u32());
+    key_str(key, face_family);
+    key_str(key, requested_family);
+    key.push(u8::from(widths.is_some()));
+    key.push(u8::from(line.is_some()));
+    key_str(key, family);
+    key_f32(key, *font_size_pt);
+    key_f32(key, *line_font_size_pt);
+    key_f32(key, *spacing_pt);
+    key_f32(key, *baseline_shift_px);
+    key.push(u8::from(*bold));
+    key.push(u8::from(*italic));
+    key.push(u8::from(*underline));
+    key_str(key, color);
+    key.push(match caps {
+        TextCaps::None => 0,
+        TextCaps::Small => 1,
+        TextCaps::All => 2,
+    });
 }
 
 fn layout_content(
@@ -2937,9 +3096,11 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
                 .iter()
                 .map(|run| run.style.font_size_pt)
                 .fold(0.0_f32, f32::max);
-            value as f32 * SINGLE_LINE_PITCH_EM * points_to_px(size_pt * scale)
+            value as f32 * SINGLE_LINE_PITCH_EM * points_to_px(autofit_size_pt(size_pt, scale))
         }
-        Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
+        // An autofit font scale shrinks the text, never a spacing written in
+        // points: PowerPoint keeps `a:spcBef`/`a:spcAft` at their stated size.
+        Some(LineSpacing::Points { value }) => points_to_px(value as f32),
         None => 0.0,
     };
     if height.is_finite() {
@@ -3046,8 +3207,7 @@ fn layout_paragraph(
         let line_box = spaced_line_box(
             style_line_box(fonts, style, scale)?,
             paragraph,
-            points_to_px(style.font_size_pt * scale),
-            scale,
+            points_to_px(autofit_size_pt(style.font_size_pt, scale)),
         );
         return Ok(vec![PositionedTextLine {
             x,
@@ -3131,7 +3291,7 @@ fn layout_paragraph(
         };
         let (natural, extents) = clusters_line_box(fonts, slice, scale)?;
         let line_box = shifted_line_box(
-            spaced_line_box(natural, paragraph, line_font_size_px(slice, scale), scale),
+            spaced_line_box(natural, paragraph, line_font_size_px(slice, scale)),
             extents,
         );
         let mut caret_stops = vec![CaretStop {
@@ -3354,7 +3514,7 @@ fn add_shaped_segment(
     if text.is_empty() {
         return Ok(());
     }
-    let size_px = points_to_px(run.style.font_size_pt * scale);
+    let size_px = points_to_px(autofit_size_pt(run.style.font_size_pt, scale));
     let tracking = points_to_px(run.style.spacing_pt * scale);
     let shaped = shape(
         fonts,
@@ -3397,13 +3557,18 @@ fn add_shaped_segment(
             });
             glyph_x += glyph.x_advance;
         }
+        let text_slice = &text[start_byte..end_byte];
+        // The glyphs keep the advances of the face that draws them, so a
+        // backend laying the run out itself still sees where each one ends and
+        // places the next cluster at the x this width put it.
+        let cluster_width = named_cluster_width(&run.style, text_slice, size_px).unwrap_or(glyph_x);
         let global_end = global_run_byte + run_byte_start + end_byte;
-        let tracking = tracking.max(-glyph_x);
+        let tracking = tracking.max(-cluster_width);
         output.push(ShapedCluster {
-            text: text[start_byte..end_byte].to_owned(),
+            text: text_slice.to_owned(),
             start: source_start,
             end: source_end,
-            width: glyph_x + tracking,
+            width: cluster_width + tracking,
             tracking,
             run_index,
             style: run.style.clone(),
@@ -3541,7 +3706,8 @@ fn positioned_runs(
                 && run.letter_spacing_px == cluster.tracking
                 && run.baseline_offset_px == baseline_offset_px
                 && run.font_family == cluster.style.family
-                && run.font_size_px == points_to_px(cluster.style.font_size_pt * scale)
+                && run.font_size_px
+                    == points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale))
                 && run.bold == cluster.style.bold
                 && run.italic == cluster.style.italic
                 && run.underline == cluster.style.underline
@@ -3559,7 +3725,7 @@ fn positioned_runs(
                 width: 0.0,
                 font_id: cluster.style.face.id.to_u32(),
                 font_family: cluster.style.family.clone(),
-                font_size_px: points_to_px(cluster.style.font_size_pt * scale),
+                font_size_px: points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale)),
                 bold: cluster.style.bold,
                 italic: cluster.style.italic,
                 underline: cluster.style.underline,
@@ -3721,22 +3887,30 @@ fn style_line_box(
     style: &ResolvedStyle,
     scale: f32,
 ) -> Result<ooxml_text::LineBox, RenderError> {
+    let size_px = points_to_px(autofit_size_pt(style.line_font_size_pt, scale));
+    if let Some(named) = style.face.line {
+        return Ok(family_line_box(named, size_px));
+    }
     let metrics = fonts
         .metrics(style.face.id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
-    Ok(single_line_box(
-        metrics,
-        points_to_px(style.line_font_size_pt * scale),
-        &CompatFlags::default(),
-    ))
+    Ok(single_line_box(metrics, size_px, &CompatFlags::default()))
 }
 
 /// Largest font size on this line.
 fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
     clusters
         .iter()
-        .map(|cluster| points_to_px(cluster.style.line_font_size_pt * scale))
+        .map(|cluster| points_to_px(autofit_size_pt(cluster.style.line_font_size_pt, scale)))
         .fold(0.0_f32, f32::max)
+}
+
+/// Round normal-autofit sizes to whole points, preserving authored sizes otherwise.
+fn autofit_size_pt(size_pt: f32, scale: f32) -> f32 {
+    if scale >= 1.0 {
+        return size_pt;
+    }
+    (size_pt * scale).round().max(1.0)
 }
 
 /// `a:normAutofit/@fontScale`, applied verbatim: PowerPoint stores the scale it
@@ -3766,7 +3940,6 @@ fn spaced_line_box(
     content: ooxml_text::LineBox,
     paragraph: &ResolvedParagraph,
     size_px: f32,
-    scale: f32,
 ) -> ooxml_text::LineBox {
     if content.height() <= 0.0 {
         return content;
@@ -3774,16 +3947,23 @@ fn spaced_line_box(
     let reduction = paragraph.line_space_reduction;
     let single = SINGLE_LINE_PITCH_EM * size_px;
     let target = match paragraph.line_spacing {
-        Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
+        // An exact line spacing is a measurement, not a font size, so the
+        // autofit scale leaves it alone.
+        Some(LineSpacing::Points { value }) => points_to_px(value as f32),
         Some(LineSpacing::Percent { value }) => (value as f32 - reduction).max(0.0) * single,
         None => (1.0 - reduction) * single,
     };
     if !target.is_finite() || target < 0.0 {
         return content;
     }
+    // PowerPoint splits the room a line box does not fill evenly above and
+    // below it, so a paragraph whose spacing asks for more than its face
+    // measures starts that much lower.
     if target >= content.height() {
+        let slack = (target - content.ascent - content.descent) / 2.0;
         return ooxml_text::LineBox {
-            leading: target - content.ascent - content.descent,
+            ascent: content.ascent + slack,
+            leading: slack,
             ..content
         };
     }
@@ -5798,6 +5978,33 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn the_layout_cache_key_changes_with_every_input_layout_reads() {
+        let renderer = renderer();
+        let rect = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let content = |space_first_last_para| ResolvedContent {
+            paragraphs: vec![paragraph(&renderer, "l", "Text")],
+            space_first_last_para,
+        };
+        let key = |content: &ResolvedContent| text_layout_key(content, rect, 1.0, false, true);
+        let base = key(&content(false));
+        assert_ne!(base, key(&content(true)));
+        let mut changed = content(false);
+        changed.paragraphs[0].tab_stops = vec![40.0];
+        assert_ne!(base, key(&changed));
+        let mut changed = content(false);
+        changed.paragraphs[0].default_tab_px = 48.0;
+        assert_ne!(base, key(&changed));
+        let mut changed = content(false);
+        changed.paragraphs[0].runs[0].style.line_font_size_pt = 24.0;
+        assert_ne!(base, key(&changed));
+    }
+
     fn paragraph(renderer: &SlideRenderer, alignment: &str, text: &str) -> ResolvedParagraph {
         let face = renderer.resolve_face("Arial", false, false).unwrap();
         ResolvedParagraph {
@@ -6130,7 +6337,7 @@ mod tests {
                     assert_eq!(actual.font_family, expected.style.family);
                     assert_eq!(
                         actual.font_size_px,
-                        points_to_px(expected.style.font_size_pt * scale)
+                        points_to_px(autofit_size_pt(expected.style.font_size_pt, scale))
                     );
                 }
             }
@@ -7963,8 +8170,11 @@ mod tests {
         let pitch = lines[1].y - lines[0].y;
         assert!((pitch - 1.5 * 1.2 * points_to_px(size_pt)).abs() < 0.05);
 
+        // The room the spacing adds is split above and below the line, so a
+        // looser paragraph starts lower by half of what it added.
         let (single, _) = wrapped_text_box(8_016, None, None, 1_524_000, true);
-        assert!((lines[0].baseline - single[0].baseline).abs() < 0.001);
+        let added = (lines[0].height - single[0].height) / 2.0;
+        assert!((lines[0].baseline - single[0].baseline - added).abs() < 0.001);
     }
 
     #[test]
@@ -8212,7 +8422,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_autofit_applies_the_stored_font_scale_without_refitting() {
+    fn normal_autofit_steps_the_type_down_by_its_stored_scale() {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_003).unwrap();
         let initial = session.snapshot().unwrap();
@@ -8298,7 +8508,7 @@ mod tests {
             font_scale: Some(0.5),
             line_space_reduction: None,
         });
-        assert!((font_size(&package) - natural * 0.5).abs() < 0.001);
+        assert!((font_size(&package) - (natural * 0.5).round()).abs() < 0.001);
     }
 
     #[test]
@@ -9328,5 +9538,102 @@ mod tests {
         let end = line_end(Some(&end("oval", Some("sm"), Some("lg"))), 1.0).unwrap();
         assert!((end.width - 5.291_339).abs() < 1e-6);
         assert!((end.length - 13.228_347).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_family_we_cannot_ship_lends_its_own_metrics_to_the_substitute() {
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Trebuchet MS", false, false, FONT)
+            .unwrap();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let substituted = renderer.resolve_face("Trebuchet MS", false, false).unwrap();
+        let plain = renderer.resolve_face("Arial", false, false).unwrap();
+        assert!(plain.widths.is_none() && plain.line.is_none());
+
+        let metrics = substituted.widths.expect("trebuchet ms widths");
+        assert!((family_advance(metrics, 'M').unwrap() - 0.709).abs() < 1e-6);
+        assert!((family_advance(metrics, ' ').unwrap() - 0.301).abs() < 1e-6);
+        assert!((family_advance(metrics, '\u{2019}').unwrap() - 0.367).abs() < 1e-6);
+        assert_eq!(family_advance(metrics, '\u{4e00}'), None);
+        assert!(family_metrics("trebuchet ms", true, false).is_some());
+        assert!(family_metrics("Trebuchet MS", false, false).is_none());
+        assert!(family_metrics("calibri", false, false).is_none());
+
+        let line = family_line_box(substituted.line.expect("trebuchet ms lines"), 1000.0);
+        assert!((line.ascent - 939.0).abs() < 1e-3);
+        assert!((line.descent - 222.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn missing_faces_keep_the_requested_family_and_style_metrics() {
+        for registered in ["Arial", "Trebuchet MS"] {
+            let mut renderer = SlideRenderer::new();
+            renderer
+                .register_font(registered, false, false, FONT)
+                .unwrap();
+            for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                let face = renderer.resolve_face("Trebuchet MS", bold, italic).unwrap();
+                let expected = family_metrics("trebuchet ms", bold, italic).unwrap();
+                assert_eq!(renderer.fonts.font_bytes(face.id).unwrap(), FONT);
+                assert!(std::ptr::eq(face.widths.unwrap(), expected));
+                assert!(std::ptr::eq(face.line.unwrap(), expected));
+            }
+            let unknown = renderer
+                .resolve_face("Unknown family", false, false)
+                .unwrap();
+            assert!(unknown.widths.is_none() && unknown.line.is_none());
+        }
+    }
+
+    #[test]
+    fn different_requested_metrics_do_not_share_cached_fallback_layouts() {
+        let session = DeckSession::open(
+            include_bytes!("../tests/fixtures/paragraph-spacing.pptx"),
+            8_020,
+        )
+        .unwrap();
+        let new_renderer = || {
+            let mut renderer = SlideRenderer::new();
+            renderer.register_font("Arial", false, false, FONT).unwrap();
+            renderer
+        };
+        let render = |renderer: &SlideRenderer, family: &str| {
+            let mut snapshot = session.snapshot().unwrap();
+            let story = &mut snapshot.slides[0]
+                .shapes
+                .iter_mut()
+                .find(|shape| shape.source_id == 2)
+                .unwrap()
+                .text_stories[0];
+            for paragraph in &mut story.paragraphs {
+                for run in &mut paragraph.runs {
+                    run.style.font_family = Some(family.to_owned());
+                    run.style.font_size_pt = Some(24.0);
+                    run.text = "MMMMMMMM".to_owned();
+                }
+            }
+            renderer
+                .layout_slide(session.package(), &snapshot, 0)
+                .unwrap()
+                .display_list
+                .primitives
+                .into_iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::TextBox {
+                        object_id: 2,
+                        lines,
+                        ..
+                    } => Some(lines),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let renderer = new_renderer();
+        let trebuchet = render(&renderer, "Trebuchet MS");
+        let consolas = render(&renderer, "Consolas");
+        assert!((trebuchet[0].width - consolas[0].width).abs() > 1.0);
+        assert_eq!(consolas, render(&new_renderer(), "Consolas"));
+        assert_eq!(trebuchet, render(&renderer, "Trebuchet MS"));
     }
 }
