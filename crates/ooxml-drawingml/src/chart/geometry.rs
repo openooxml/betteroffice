@@ -1603,7 +1603,8 @@ fn plot_fill_color(fill: PlotFill<'_>) -> Option<String> {
 }
 
 /// The mean of the `#RRGGBB` or `#RRGGBBAA` colours that parse, or `None`
-/// when none does. The alpha stays in the result while it is below opaque.
+/// when none does. Each colour weighs by its opacity, so a clear stop lends no
+/// hue, and the mean alpha stays in the result while it is below opaque.
 fn mean_hex(colors: &[String]) -> Option<String> {
     let parsed: Vec<[u8; 4]> = colors
         .iter()
@@ -1612,15 +1613,23 @@ fn mean_hex(colors: &[String]) -> Option<String> {
     if parsed.is_empty() {
         return None;
     }
-    let mean = |index: usize| {
+    let weight: u32 = parsed.iter().map(|rgba| u32::from(rgba[3])).sum();
+    let channel = |index: usize| {
         parsed
             .iter()
-            .map(|rgba| u32::from(rgba[index]))
+            .map(|rgba| u32::from(rgba[index]) * u32::from(rgba[3]))
             .sum::<u32>()
-            / parsed.len() as u32
+            .checked_div(weight)
+            .unwrap_or_else(|| {
+                parsed
+                    .iter()
+                    .map(|rgba| u32::from(rgba[index]))
+                    .sum::<u32>()
+                    / parsed.len() as u32
+            })
     };
-    let rgb = format!("#{:02X}{:02X}{:02X}", mean(0), mean(1), mean(2));
-    Some(match mean(3) {
+    let rgb = format!("#{:02X}{:02X}{:02X}", channel(0), channel(1), channel(2));
+    Some(match weight / parsed.len() as u32 {
         255 => rgb,
         alpha => format!("{rgb}{alpha:02X}"),
     })
