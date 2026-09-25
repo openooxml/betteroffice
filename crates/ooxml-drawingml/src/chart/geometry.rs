@@ -1827,7 +1827,7 @@ fn legend_text_width<S: PlotSink + ?Sized>(
 
 /// A label's width when the sink cannot measure text: n - 1 tracked gaps, as a
 /// measured line has, and never below zero.
-fn fallback_label_width(label: &str, font: &PlotFont) -> f64 {
+pub fn fallback_label_width(label: &str, font: &PlotFont) -> f64 {
     let count = label.chars().count() as f64;
     (count * font.size_px * 0.5 + (count - 1.0).max(0.0) * font.letter_spacing_px).max(0.0)
 }

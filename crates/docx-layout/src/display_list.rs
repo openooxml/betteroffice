@@ -81,7 +81,8 @@ use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
     PlotDataLabels, PlotGroup, PlotLegend, PlotMarker, PlotMarkerSymbol, PlotOp, PlotPoint,
-    PlotRect, PlotSeries, PlotSink, PlotTextStyle, chart_aria_label, plot_chart_into,
+    PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label,
+    fallback_label_width, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -8459,11 +8460,16 @@ impl PlotSink for PrimitiveSink<'_> {
                 width,
                 font,
                 color,
-                align: _,
+                align,
                 rotation_deg: _,
             } => prims.push(Primitive::Text(TextRunPrimitive {
+                x: px(match align {
+                    PlotTextAlign::Start => x,
+                    PlotTextAlign::Center => {
+                        x + (width - fallback_label_width(&text, &font)).max(0.0) / 2.0
+                    }
+                }),
                 text,
-                x: px(x),
                 baseline_y: px(baseline_y),
                 width: px(width),
                 paint_clip: None,
@@ -10496,6 +10502,42 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_centred_chart_label_is_centred_in_its_box() {
+        let attrs = DocAttrs::default();
+        let mut prims = Vec::new();
+        let mut sink = PrimitiveSink {
+            prims: &mut prims,
+            attrs: &attrs,
+        };
+        let font = ooxml_drawingml::chart::chart_label_font();
+        for align in [PlotTextAlign::Start, PlotTextAlign::Center] {
+            sink.push_op(PlotOp::Text {
+                text: "Revenue".to_owned(),
+                x: 10.0,
+                baseline_y: 20.0,
+                width: 200.0,
+                font: font.clone(),
+                color: "#000000".to_owned(),
+                align,
+                rotation_deg: 0.0,
+            });
+        }
+        let starts: Vec<f64> = prims
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Text(text) => text.x.as_f64(),
+                _ => None,
+            })
+            .collect();
+        let estimate = fallback_label_width("Revenue", &font);
+        assert_eq!(starts[0], 10.0);
+        assert!(
+            (starts[1] - (10.0 + (200.0 - estimate) / 2.0)).abs() < 0.01,
+            "{starts:?}"
+        );
+    }
 
     #[test]
     fn a_wrapping_float_is_clamped_to_the_page_and_wrap_none_is_not() {
