@@ -1007,7 +1007,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     // A side legend keeps an em of its text between itself and the plot.
     let legend_gap = legend_style.font.size_px * LEGEND_PLOT_GAP_EM;
     let (reserve_left, reserve_right) = match &legend {
-        Some(band) if !band.horizontal && legend_reserves => {
+        Some(band) if !band.horizontal && legend_reserves && !band.rows.is_empty() => {
             if legend_position == "left" {
                 (band.x + band.w + legend_gap - x, 0.0)
             } else {
@@ -2016,9 +2016,14 @@ fn side_legend_band<S: PlotSink + ?Sized>(
     } else {
         rect.y
     };
+    let first = if position == "topRight" {
+        top + LEGEND_EDGE
+    } else {
+        top
+    };
     // Entries that would run past the chart's foot are left out, as PowerPoint
     // leaves them.
-    let room = (rect.y + rect.h - top).max(0.0);
+    let room = (rect.y + rect.h - first).max(0.0);
     let mut used = 0.0;
     rows.retain(|row| {
         used += row.height;
@@ -2037,7 +2042,7 @@ fn side_legend_band<S: PlotSink + ?Sized>(
             rect.x + rect.w - LEGEND_EDGE - w
         },
         y: if position == "topRight" {
-            top + LEGEND_EDGE
+            first
         } else {
             ((top + rect.y + rect.h) / 2.0 - h / 2.0).max(top)
         },
@@ -7517,6 +7522,78 @@ mod tests {
         names.sort_by(|a, b| a.0.total_cmp(&b.0));
         let order: Vec<String> = names.into_iter().map(|(_, name)| name).collect();
         assert_eq!(order, ["South", "North", "East", "West"]);
+    }
+
+    #[test]
+    fn a_capped_combo_legend_reverses_its_stacked_group_safely() {
+        let data = source(&[10.0, 20.0]);
+        let names: Vec<String> = (0..9).map(|index| format!("S{index}")).collect();
+        let lines = group(
+            "line",
+            names.iter().map(|name| series(name, &data)).collect(),
+        );
+        let mut columns = group(
+            "column",
+            vec![series("North", &data), series("South", &data)],
+        );
+        columns.grouping = Some("stacked");
+        let chart = PlotChart {
+            chart_type: "line",
+            plot_groups: vec![lines, columns],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: Some("right"),
+                visible: Some(true),
+            }),
+            ..PlotChart::default()
+        };
+        assert_eq!(
+            swatches(&plot_chart(&chart, rect())).len(),
+            MAX_LEGEND_ENTRIES
+        );
+    }
+
+    #[test]
+    fn a_top_right_legend_keeps_its_rows_inside_a_short_chart() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["A", "B", "C", "D", "E", "F"];
+        let mut chart = legend_chart(Some("topRight"), &names, &data);
+        chart.title = None;
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 80.0,
+        };
+        let keys = swatches(&plot_chart(&chart, frame));
+        assert!(!keys.is_empty() && keys.len() < names.len(), "{keys:?}");
+        for (_, y) in keys {
+            assert!(y + CHART_LABEL_SIZE_PX * LEGEND_KEY_EM <= frame.y + frame.h);
+        }
+    }
+
+    #[test]
+    fn a_side_legend_with_no_room_leaves_the_plot_its_width() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South"];
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 12.0,
+        };
+        let widest = |position| {
+            let mut chart = legend_chart(position, &names, &data);
+            chart.title = None;
+            plot_chart(&chart, frame)
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { x1, x2, width, .. } if *width >= 1.0 => Some(x2 - x1),
+                    _ => None,
+                })
+                .fold(f64::MIN, f64::max)
+        };
+        assert_eq!(widest(Some("right")), widest(Some("bottom")));
     }
 
     #[test]
