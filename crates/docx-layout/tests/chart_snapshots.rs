@@ -2621,3 +2621,39 @@ attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, line chart,
 {"fill":"#4472C4","h":8,"kind":"rect","w":8,"x":852,"y":91}
 {"baselineY":99,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"South","width":80,"x":864}
 "##;
+
+#[test]
+fn a_gridline_whose_sp_pr_draws_no_line_is_hidden() {
+    let gridlines = |line: Option<Value>| {
+        let mut axis = json!({
+            "id": "2",
+            "axisType": "value",
+            "min": 0.0,
+            "max": 20.0,
+            "majorGridlines": true
+        });
+        if let Some(line) = line {
+            axis["majorGridlineLine"] = line;
+        }
+        let chart = json!({
+            "type": "chart",
+            "chartType": "column",
+            "legend": { "visible": false },
+            "axisList": [{ "id": "1", "axisType": "category" }, axis],
+            "plotGroups": [{
+                "chartType": "column",
+                "axisIds": ["1", "2"],
+                "series": [series("Units", json!([10.0, 15.0]))]
+            }]
+        });
+        display_list(chart, 260.0, 180.0)["pages"][0]["primitives"]
+            .as_array()
+            .expect("primitives")
+            .iter()
+            .filter(|primitive| primitive["kind"] == "line" && primitive["color"] == "#D9D9D9")
+            .count()
+    };
+    assert!(gridlines(None) > 0);
+    assert_eq!(gridlines(Some(json!({ "none": false }))), gridlines(None));
+    assert_eq!(gridlines(Some(json!({ "none": true }))), 0);
+}

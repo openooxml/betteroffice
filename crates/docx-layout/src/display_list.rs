@@ -80,8 +80,8 @@
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
-    PlotDataLabels, PlotGroup, PlotLegend, PlotMarker, PlotMarkerSymbol, PlotOp, PlotPoint,
-    PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label,
+    PlotDataLabels, PlotGroup, PlotLegend, PlotLine, PlotMarker, PlotMarkerSymbol, PlotOp,
+    PlotPoint, PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label,
     fallback_label_width, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
@@ -2385,6 +2385,22 @@ struct ChartAxisIn {
     hidden: bool,
     #[serde(default)]
     text: Option<ChartTextIn>,
+    #[serde(default)]
+    major_gridline_line: Option<ChartLineIn>,
+    #[serde(default)]
+    minor_gridline_line: Option<ChartLineIn>,
+}
+
+/// `c:spPr/a:ln` of a chart part.
+#[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChartLineIn {
+    #[serde(default)]
+    none: bool,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    width_emu: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -8344,8 +8360,16 @@ fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
         hidden: axis.hidden,
         text: plot_text_from(axis.text.as_ref()),
         line: None,
-        major_gridline: None,
-        minor_gridline: None,
+        major_gridline: axis.major_gridline_line.as_ref().map(plot_line_from),
+        minor_gridline: axis.minor_gridline_line.as_ref().map(plot_line_from),
+    }
+}
+
+fn plot_line_from(line: &ChartLineIn) -> PlotLine<'_> {
+    PlotLine {
+        none: line.none,
+        color: line.color.as_deref(),
+        width_emu: line.width_emu,
     }
 }
 
