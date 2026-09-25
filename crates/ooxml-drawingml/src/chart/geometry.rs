@@ -1602,16 +1602,39 @@ fn plot_fill_color(fill: PlotFill<'_>) -> Option<String> {
     }
 }
 
-/// The mean of the `#RRGGBB` colours that parse, or `None` when none does.
+/// The mean of the `#RRGGBB` or `#RRGGBBAA` colours that parse, or `None`
+/// when none does. The alpha stays in the result while it is below opaque.
 fn mean_hex(colors: &[String]) -> Option<String> {
-    let parsed: Vec<[u8; 3]> = colors.iter().filter_map(|color| parse_hex(color)).collect();
+    let parsed: Vec<[u8; 4]> = colors
+        .iter()
+        .filter_map(|color| parse_rgba(color))
+        .collect();
     if parsed.is_empty() {
         return None;
     }
     let mean = |index: usize| {
-        parsed.iter().map(|rgb| u32::from(rgb[index])).sum::<u32>() / parsed.len() as u32
+        parsed
+            .iter()
+            .map(|rgba| u32::from(rgba[index]))
+            .sum::<u32>()
+            / parsed.len() as u32
     };
-    Some(format!("#{:02X}{:02X}{:02X}", mean(0), mean(1), mean(2)))
+    let rgb = format!("#{:02X}{:02X}{:02X}", mean(0), mean(1), mean(2));
+    Some(match mean(3) {
+        255 => rgb,
+        alpha => format!("{rgb}{alpha:02X}"),
+    })
+}
+
+fn parse_rgba(color: &str) -> Option<[u8; 4]> {
+    let hex = color.strip_prefix('#').unwrap_or(color);
+    let alpha = match hex.len() {
+        6 => 255,
+        8 => u8::from_str_radix(hex.get(6..8)?, 16).ok()?,
+        _ => return None,
+    };
+    let [red, green, blue] = parse_hex(hex.get(..6)?)?;
+    Some([red, green, blue, alpha])
 }
 
 /// The midpoint of two `#RRGGBB` colours.

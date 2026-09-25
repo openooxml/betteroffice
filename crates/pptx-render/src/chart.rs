@@ -546,6 +546,10 @@ mod tests {
             colors: vec!["#000000".to_owned(), "#FEFEFE".to_owned()],
         });
         assert!(fills(&plot(&filled)).contains(&"#7F7F7F"));
+        filled.fill = Some(ChartFill::Gradient {
+            colors: vec!["#00000000".to_owned(), "#FEFEFE00".to_owned()],
+        });
+        assert!(fills(&plot(&filled)).contains(&"#7F7F7F00"));
         filled.fill = Some(ChartFill::Unsupported);
         assert!(fills(&plot(&filled)).contains(&"#FFFFFF"));
     }
