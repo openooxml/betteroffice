@@ -813,6 +813,9 @@ pub struct ParagraphProperties {
     /// stops the list style would otherwise contribute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_stops: Option<Vec<i64>>,
+    /// `a:pPr/@rtl`: the paragraph reads right to left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtl: Option<bool>,
     pub default_run: Option<RunProperties>,
 }
 

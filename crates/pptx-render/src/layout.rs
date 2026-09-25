@@ -2403,6 +2403,8 @@ struct ResolvedParagraph {
     default_tab_px: f32,
     marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
+    /// `a:pPr/@rtl`: margins, indent, bullet and run order mirror.
+    rtl: bool,
     runs: Vec<ResolvedRun>,
 }
 
@@ -2489,6 +2491,13 @@ fn resolve_content(
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
             let mut cased = Vec::new();
             push_cased_runs(&mut cased, &run.text, start, language, style);
+            if properties.rtl == Some(true) {
+                let mut directed = Vec::new();
+                for run in cased {
+                    split_by_direction(run, &mut directed);
+                }
+                cased = directed;
+            }
             for run in cased {
                 renderer.split_by_coverage(run, &mut runs);
             }
@@ -2539,6 +2548,7 @@ fn resolve_content(
                 .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
                 .transpose()?,
             marker,
+            rtl: properties.rtl.unwrap_or(false),
             runs,
         });
         story_offset = story_offset.saturating_add(1);
@@ -3107,6 +3117,7 @@ fn text_layout_key(
             default_tab_px,
             marker,
             bullet_style,
+            rtl,
             runs,
         } = paragraph;
         key.push(match align {
@@ -3129,6 +3140,7 @@ fn text_layout_key(
             key_f32(&mut key, *stop);
         }
         key_f32(&mut key, *default_tab_px);
+        key.push(u8::from(*rtl));
         key_opt_str(&mut key, marker);
         match bullet_style {
             Some(style) => {
@@ -3251,7 +3263,12 @@ fn layout_content(
             y += spacing_px(paragraph.space_before, paragraph, scale);
         }
         previous = Some(paragraph);
-        let paragraph_x = rect.x + paragraph.margin_left_px.max(0.0);
+        let start_margin = if paragraph.rtl {
+            paragraph.margin_right_px
+        } else {
+            paragraph.margin_left_px
+        };
+        let paragraph_x = rect.x + start_margin.max(0.0);
         let paragraph_width =
             (rect.w - paragraph.margin_left_px.max(0.0) - paragraph.margin_right_px.max(0.0))
                 .max(1.0);
@@ -3476,7 +3493,7 @@ fn layout_paragraph(
         } else {
             0.0
         };
-        let line_start = x + indent;
+        let line_start = if paragraph.rtl { x } else { x + indent };
         let line_room = width - indent;
         let line_x = match paragraph.align {
             TextAlign::Center => line_start + ((line_room - natural_width) / 2.0).max(0.0),
@@ -3503,7 +3520,10 @@ fn layout_paragraph(
         caret_stops.dedup_by(|left, right| {
             left.position == right.position && left.x.to_bits() == right.x.to_bits()
         });
-        let runs = positioned_runs(slice, &advances, line_x, line_y + line_box.ascent, scale);
+        let mut runs = positioned_runs(slice, &advances, line_x, line_y + line_box.ascent, scale);
+        if paragraph.rtl {
+            mirror_line(&mut runs, &mut caret_stops, line_x, line_width);
+        }
         output.push(PositionedTextLine {
             x: line_x,
             y: line_y,
@@ -3520,15 +3540,130 @@ fn layout_paragraph(
         });
         line_y += line_box.height();
     }
-    prepend_bullet(fonts, paragraph, x, &mut output, scale)?;
+    prepend_bullet(fonts, paragraph, (x, width), &mut output, scale)?;
     Ok(output)
+}
+
+/// Lays a right-to-left line out from its right edge, in bidi visual order:
+/// the runs reverse, except that a stretch of consecutive left-to-right runs
+/// keeps its own order. A run of spaces or punctuation reads the way its
+/// strong neighbours agree on, else right to left. A right-to-left run mirrors
+/// glyph by glyph so it paints in reading order; a left-to-right run keeps its
+/// glyphs and moves as a block. Each caret stop sits at the leading edge of
+/// the character after it, or at the trailing edge of the line's last run.
+fn mirror_line(
+    runs: &mut [PositionedTextRun],
+    caret_stops: &mut [CaretStop],
+    line_x: f32,
+    line_width: f32,
+) {
+    let mirror = 2.0 * line_x + line_width;
+    let strong: Vec<Option<bool>> = runs.iter().map(|run| direction(&run.text)).collect();
+    let ltr: Vec<bool> = (0..runs.len())
+        .map(|position| match strong[position] {
+            Some(rtl) => !rtl,
+            None => {
+                let before = strong[..position].iter().rev().find_map(|value| *value);
+                let after = strong[position + 1..].iter().find_map(|value| *value);
+                before == Some(false) && after == Some(false)
+            }
+        })
+        .collect();
+    let old: Vec<f32> = runs.iter().map(|run| run.x).collect();
+    let mut placed: Vec<f32> = runs.iter().map(|run| mirror - run.width - run.x).collect();
+    let mut index = 0;
+    while index < runs.len() {
+        if !ltr[index] {
+            index += 1;
+            continue;
+        }
+        let end = (index..runs.len())
+            .find(|position| !ltr[*position])
+            .unwrap_or(runs.len());
+        let mut x = placed[index..end].iter().copied().fold(f32::MAX, f32::min);
+        for position in index..end {
+            placed[position] = x;
+            x += runs[position].width;
+        }
+        index = end;
+    }
+    let last = runs.len().checked_sub(1);
+    for stop in caret_stops.iter_mut() {
+        let home = (0..runs.len()).find(|&position| {
+            let run = &runs[position];
+            (run.start..run.end).contains(&stop.position)
+                || Some(position) == last && stop.position == run.end
+        });
+        stop.x = match home {
+            Some(position) if ltr[position] => placed[position] + (stop.x - old[position]),
+            _ => mirror - stop.x,
+        };
+    }
+    for (position, run) in runs.iter_mut().enumerate() {
+        if ltr[position] {
+            for glyph in &mut run.glyphs {
+                glyph.x += placed[position] - old[position];
+            }
+        } else {
+            for glyph in &mut run.glyphs {
+                glyph.x = mirror - glyph.x - glyph.advance;
+            }
+        }
+        run.x = placed[position];
+    }
+}
+
+/// The strong direction of `text`: `Some(true)` for right-to-left script,
+/// `Some(false)` for letters and digits of any other, `None` for neither.
+fn direction(text: &str) -> Option<bool> {
+    text.chars().find_map(char_direction)
+}
+
+fn char_direction(character: char) -> Option<bool> {
+    if matches!(
+        character as u32,
+        0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
+    ) {
+        Some(true)
+    } else if character.is_alphanumeric() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Splits a right-to-left paragraph's run where its strong direction turns, so
+/// each part reads one way. Spaces and punctuation stay with the text before.
+fn split_by_direction(run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
+    let mut cuts = vec![0];
+    let mut current = None;
+    for (index, character) in run.text.char_indices() {
+        if let Some(next) = char_direction(character) {
+            if current.is_some_and(|current| current != next) {
+                cuts.push(index);
+            }
+            current = Some(next);
+        }
+    }
+    if cuts.len() == 1 {
+        out.push(run);
+        return;
+    }
+    for (position, start) in cuts.iter().enumerate() {
+        let end = cuts.get(position + 1).copied().unwrap_or(run.text.len());
+        out.push(ResolvedRun {
+            text: run.text[*start..end].to_owned(),
+            start: run.start + utf16_len(&run.text[..*start]),
+            style: run.style.clone(),
+        });
+    }
 }
 
 /// Prepends a marker outside the story's character space.
 fn prepend_bullet(
     fonts: &FontStore,
     paragraph: &ResolvedParagraph,
-    x: f32,
+    (x, width): (f32, f32),
     lines: &mut [PositionedTextLine],
     scale: f32,
 ) -> Result<(), RenderError> {
@@ -3557,6 +3692,7 @@ fn prepend_bullet(
         default_tab_px: resolve_default_tab(None),
         marker: None,
         bullet_style: None,
+        rtl: false,
         runs: vec![ResolvedRun {
             text: value.clone(),
             start: paragraph.runs[0].start,
@@ -3571,6 +3707,15 @@ fn prepend_bullet(
         .iter()
         .map(|cluster| cluster.width)
         .collect::<Vec<_>>();
+    // A right-to-left marker hangs off the right edge the way a left-to-right
+    // one hangs off the left.
+    let bullet_x = if paragraph.rtl {
+        let right =
+            (x + width - paragraph.indent_px).min(x + width + paragraph.margin_left_px.max(0.0));
+        right - advances.iter().sum::<f32>()
+    } else {
+        bullet_x
+    };
     let mut runs = positioned_runs(&clusters, &advances, bullet_x, first.baseline, scale);
     for run in &mut runs {
         run.start = paragraph.runs[0].start;
@@ -3889,25 +4034,32 @@ fn positioned_runs(
     let mut output: Vec<PositionedTextRun> = Vec::new();
     let mut cursor_x = line_x;
     let mut trailing_tracking = 0.0_f32;
+    let mut run_direction = None;
     for (index, cluster) in clusters.iter().enumerate() {
         if cluster.text == "\n" {
             continue;
         }
         let baseline_offset_px = cluster.style.baseline_shift_px * scale;
-        let append = output.last().is_some_and(|run| {
-            run.end == cluster.start
-                && run.font_id == cluster.style.face.id.to_u32()
-                && run.letter_spacing_px == cluster.tracking
-                && run.baseline_offset_px == baseline_offset_px
-                && run.font_family == cluster.style.family
-                && run.font_size_px
-                    == points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale))
-                && run.bold == cluster.style.bold
-                && run.italic == cluster.style.italic
-                && run.underline == cluster.style.underline
-                && run.color == cluster.style.color
-        });
+        let turns = matches!(
+            (run_direction, direction(&cluster.text)),
+            (Some(current), Some(next)) if current != next
+        );
+        let append = !turns
+            && output.last().is_some_and(|run| {
+                run.end == cluster.start
+                    && run.font_id == cluster.style.face.id.to_u32()
+                    && run.letter_spacing_px == cluster.tracking
+                    && run.baseline_offset_px == baseline_offset_px
+                    && run.font_family == cluster.style.family
+                    && run.font_size_px
+                        == points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale))
+                    && run.bold == cluster.style.bold
+                    && run.italic == cluster.style.italic
+                    && run.underline == cluster.style.underline
+                    && run.color == cluster.style.color
+            });
         if !append {
+            run_direction = None;
             if let Some(previous) = output.last_mut() {
                 previous.width -= trailing_tracking;
             }
@@ -3929,6 +4081,7 @@ fn positioned_runs(
                 glyphs: Vec::new(),
             });
         }
+        run_direction = run_direction.or_else(|| direction(&cluster.text));
         let Some(run) = output.last_mut() else {
             continue;
         };
@@ -4649,6 +4802,9 @@ fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Paragra
     }
     if source.tab_stops.is_some() {
         target.tab_stops.clone_from(&source.tab_stops);
+    }
+    if source.rtl.is_some() {
+        target.rtl = source.rtl;
     }
     if let Some(source) = &source.default_run {
         let target = target
@@ -6336,6 +6492,7 @@ mod tests {
             default_tab_px: resolve_default_tab(None),
             marker: None,
             bullet_style: None,
+            rtl: false,
             runs: vec![ResolvedRun {
                 text: text.to_owned(),
                 start: 0,
@@ -6612,6 +6769,7 @@ mod tests {
                 default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: [style.clone(), changed.clone(), style.clone()]
                     .into_iter()
                     .enumerate()
@@ -6691,6 +6849,7 @@ mod tests {
                 default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: parts
                     .iter()
                     .map(|text| {
@@ -6765,6 +6924,7 @@ mod tests {
                 default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: vec![ResolvedRun {
                     text: text.to_owned(),
                     start: 0,
