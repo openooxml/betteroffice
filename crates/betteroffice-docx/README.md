@@ -28,6 +28,13 @@ survive the round trip.
 caller-supplied `ParseLimits`, which is what a host ingesting untrusted uploads
 wants. A document past any cap is refused, never truncated.
 
+`export_structured` and `export_markdown` export the document, edits included,
+as read-only structured content or Markdown with source anchors, and
+`render_docx_markdown` renders exported content. `ExportOptions` requires a
+`RevisionView` and selects stories (the body by default); omitted and
+unsupported content is listed in the content's diagnostics, and options out of
+range return `Error::Export`. Page fragments are not included yet.
+
 ## Rendering
 
 The `raster` feature is opt-in; the raster backend is server-side only and the

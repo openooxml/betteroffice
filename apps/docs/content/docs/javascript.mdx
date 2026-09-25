@@ -99,6 +99,38 @@ list numbering is a v1 limitation: numbered paragraphs and styles that define
 numbering refuse with `unsupported` until a follow-up retains numbering
 definitions.
 
+## Export DOCX as structured content
+
+`exportDocxStructured` reads a DOCX into read-only JSON: ordered stories of
+headings, paragraphs, list items, tables and content controls, with the location
+of every block and inline and a diagnostic for everything omitted or not
+represented. `exportDocxMarkdown` renders the same content as Markdown with a
+marker per block.
+
+```ts
+import { exportDocxMarkdown, exportDocxStructured } from "@betteroffice/docx";
+
+const content = await exportDocxStructured(bytes, { revisionView: "accepted" });
+const { markdown, anchors } = await exportDocxMarkdown(bytes, {
+  revisionView: "markup",
+  stories: ["body", "footnotes", "comments"],
+});
+```
+
+`revisionView` is required: `accepted` and `original` project pending revisions,
+`markup` keeps both with attribution. Only the body is exported unless `stories`
+selects headers, footers, footnotes, endnotes or comments; omitted stories,
+formatting and revision content are listed in `diagnostics`. Ranges use the edit
+batch offsets (UTF-16, one U+FFFC per inline atom) in the view they name.
+Fields export their cached result and are never evaluated; images export alt
+text and relationship metadata, not image data. On a live session,
+`session.exportStructured(options)` and `session.exportMarkdown(options)` return
+the content with the version its anchors belong to, without committing or
+publishing anything, and `session.headings(story)` lists a story's headings
+classified the same way. Exports stop at whole blocks when they reach `maxBlocks` or
+`maxBytes` and report `truncated`. Markdown does not preserve Word pagination or
+layout, and page fragments are not included yet.
+
 ## Operation profiles
 
 XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
@@ -113,7 +145,7 @@ interaction separately when investigating input-to-paint latency.
 
 | Package | What it is |
 | --- | --- |
-| `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text and paragraph batches, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
+| `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text and paragraph batches, structured JSON and Markdown export with source anchors, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
 | `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, and flushed version-checked edit batches on its ref. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |

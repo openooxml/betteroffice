@@ -10,9 +10,10 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyInt};
 use python_common::map_io_error;
 
 use betteroffice_docx::{
-    BlockContent, DisplayList, Document as CoreDocument, EditCtx, EditOrigin, Error as CoreError,
-    HeaderFooter, ImageScope, InlineNode, LayoutInput, NoteKind, Paragraph, ParagraphContent,
-    ParseLimits, Receipt, Run, RunContent, SaveOptions, Section, Table, get_paragraph_text,
+    BlockContent, DisplayList, Document as CoreDocument, DocxStructuredContent, EditCtx,
+    EditOrigin, Error as CoreError, ExportOptions, HeaderFooter, ImageScope, InlineNode,
+    LayoutInput, MarkdownOptions, NoteKind, Paragraph, ParagraphContent, ParseLimits, Receipt,
+    RevisionView, Run, RunContent, SaveOptions, Section, StorySelection, Table, get_paragraph_text,
 };
 
 /// The engine builds and discards an editing document per call, so one client
@@ -55,6 +56,12 @@ create_exception!(
     DocxError,
     "Rasterization failed or exceeded a resource limit."
 );
+create_exception!(
+    _betteroffice_docx,
+    ExportError,
+    DocxError,
+    "The engine refused a structured export's options."
+);
 
 fn map_error(error: CoreError) -> PyErr {
     let message = error.to_string();
@@ -69,8 +76,21 @@ fn map_error(error: CoreError) -> PyErr {
         | CoreError::Render(_)
         | CoreError::RenderTooLarge { .. }
         | CoreError::RenderAreaTooLarge { .. } => RenderError::new_err(message),
+        CoreError::Export(_) => ExportError::new_err(message),
         _ => DocxError::new_err(message),
     }
+}
+
+/// [`map_error`], with an export refusal attached to its `ExportError` as the `failure` dict.
+fn map_export_error(py: Python<'_>, error: CoreError) -> PyErr {
+    let CoreError::Export(failure) = &error else {
+        return map_error(error);
+    };
+    let exception = ExportError::new_err(error.to_string());
+    if let Ok(failure) = to_dict(py, serde_json::to_string(failure)) {
+        let _ = exception.value(py).setattr("failure", failure);
+    }
+    exception
 }
 
 fn parse_limits(limits: Option<&Bound<'_, PyDict>>) -> PyResult<ParseLimits> {
@@ -120,6 +140,78 @@ fn parse_origin(origin: &str) -> PyResult<EditOrigin> {
             "origin must be local, agent, remote, or system, not {other:?}"
         ))),
     }
+}
+
+fn parse_revision_view(view: &str) -> PyResult<RevisionView> {
+    match view {
+        "accepted" => Ok(RevisionView::Accepted),
+        "original" => Ok(RevisionView::Original),
+        "markup" => Ok(RevisionView::Markup),
+        other => Err(PyValueError::new_err(format!(
+            "revision_view must be accepted, original, or markup, not {other:?}"
+        ))),
+    }
+}
+
+fn parse_story(story: &str) -> PyResult<StorySelection> {
+    match story {
+        "body" => Ok(StorySelection::Body),
+        "headers" => Ok(StorySelection::Headers),
+        "footers" => Ok(StorySelection::Footers),
+        "footnotes" => Ok(StorySelection::Footnotes),
+        "endnotes" => Ok(StorySelection::Endnotes),
+        "comments" => Ok(StorySelection::Comments),
+        other => Err(PyValueError::new_err(format!(
+            "stories may name body, headers, footers, footnotes, endnotes, or comments, not {other:?}"
+        ))),
+    }
+}
+
+fn export_options(
+    revision_view: &str,
+    stories: Option<Vec<String>>,
+    include_formatting: bool,
+    max_blocks: u32,
+    max_bytes: u32,
+) -> PyResult<ExportOptions> {
+    Ok(ExportOptions {
+        revision_view: parse_revision_view(revision_view)?,
+        stories: stories
+            .map(|stories| stories.iter().map(|story| parse_story(story)).collect())
+            .transpose()?,
+        include_formatting: Some(include_formatting),
+        max_blocks: Some(max_blocks),
+        max_bytes: Some(max_bytes),
+    })
+}
+
+/// An engine value's JSON as the equivalent Python dict.
+fn to_dict<'py>(py: Python<'py>, json: serde_json::Result<String>) -> PyResult<Bound<'py, PyAny>> {
+    let text = json.map_err(|error| DocxError::new_err(error.to_string()))?;
+    py.import("json")?.call_method1("loads", (text,))
+}
+
+/// Render structured content (an `export_structured` dict) as Markdown.
+#[pyfunction]
+#[pyo3(signature = (content, *, max_bytes = 8_388_608))]
+fn render_docx_markdown<'py>(
+    py: Python<'py>,
+    content: &Bound<'py, PyAny>,
+    max_bytes: u32,
+) -> PyResult<Bound<'py, PyAny>> {
+    let text = py
+        .import("json")?
+        .call_method1("dumps", (content,))?
+        .extract::<String>()?;
+    let content: DocxStructuredContent = serde_json::from_str(&text)
+        .map_err(|error| PyValueError::new_err(format!("invalid structured content: {error}")))?;
+    let options = MarkdownOptions {
+        max_bytes: Some(max_bytes),
+    };
+    let rendered = py
+        .detach(|| betteroffice_docx::render_docx_markdown(&content, &options))
+        .map_err(|error| map_export_error(py, error))?;
+    to_dict(py, serde_json::to_string(&rendered))
 }
 
 fn origin_name(origin: EditOrigin) -> &'static str {
@@ -1063,6 +1155,73 @@ impl PyDocument {
         Ok(PyEdit::from_core(receipt))
     }
 
+    /// Export the document as read-only structured content: a dict with the
+    /// camelCase `schemaVersion: 1` schema, anchors scoped to this snapshot.
+    ///
+    /// Raises `ExportError` when the options are unusable (a limit out of range
+    /// or no stories selected); its `failure` is the refusal as a dict.
+    #[pyo3(signature = (
+        *,
+        revision_view,
+        stories = None,
+        include_formatting = true,
+        max_blocks = 10_000,
+        max_bytes = 8_388_608
+    ))]
+    fn export_structured<'py>(
+        &self,
+        py: Python<'py>,
+        revision_view: &str,
+        stories: Option<Vec<String>>,
+        include_formatting: bool,
+        max_blocks: u32,
+        max_bytes: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = export_options(
+            revision_view,
+            stories,
+            include_formatting,
+            max_blocks,
+            max_bytes,
+        )?;
+        let content = py
+            .detach(|| self.inner.export_structured(&options))
+            .map_err(|error| map_export_error(py, error))?;
+        to_dict(py, serde_json::to_string(&content))
+    }
+
+    /// `export_structured` rendered as Markdown: `{"markdown", "anchors",
+    /// "diagnostics", "truncated"}`. Markdown keeps no Word layout.
+    #[pyo3(signature = (
+        *,
+        revision_view,
+        stories = None,
+        include_formatting = true,
+        max_blocks = 10_000,
+        max_bytes = 8_388_608
+    ))]
+    fn export_markdown<'py>(
+        &self,
+        py: Python<'py>,
+        revision_view: &str,
+        stories: Option<Vec<String>>,
+        include_formatting: bool,
+        max_blocks: u32,
+        max_bytes: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = export_options(
+            revision_view,
+            stories,
+            include_formatting,
+            max_blocks,
+            max_bytes,
+        )?;
+        let content = py
+            .detach(|| self.inner.export_markdown(&options))
+            .map_err(|error| map_export_error(py, error))?;
+        to_dict(py, serde_json::to_string(&content))
+    }
+
     /// Paginate a `{"measured": [...], "options": {...}}` envelope.
     ///
     /// The engine paginates blocks that were already measured; it does not
@@ -1222,6 +1381,8 @@ fn _betteroffice_docx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add("LayoutError", py.get_type::<LayoutError>())?;
     module.add("RenderError", py.get_type::<RenderError>())?;
+    module.add("ExportError", py.get_type::<ExportError>())?;
+    module.add_function(wrap_pyfunction!(render_docx_markdown, module)?)?;
     module.add("MAX_PIXMAP_DIM", betteroffice_docx::MAX_PIXMAP_DIM)?;
     module.add("MAX_PIXMAP_PIXELS", betteroffice_docx::MAX_PIXMAP_PIXELS)?;
     Ok(())

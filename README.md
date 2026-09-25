@@ -55,6 +55,10 @@
   changed. Text steps stay within one paragraph and paragraph steps need a
   document opened from DOCX bytes.
 
+- **Structured DOCX export.** DOCX exports read-only structured JSON and
+  Markdown with source anchors, explicit story and revision options, and
+  omission diagnostics. Page fragments are not yet included.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

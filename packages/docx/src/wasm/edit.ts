@@ -10,7 +10,13 @@
  * through the same facade inside the worker context).
  */
 
-import wasmInit, { initSync, EditSession } from './generated/edit/docx_edit.js';
+import wasmInit, {
+  initSync,
+  EditSession,
+  export_docx_markdown_json,
+  export_docx_structured_json,
+  render_docx_markdown_json,
+} from './generated/edit/docx_edit.js';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 
 const state = createWasmModuleState({
@@ -34,6 +40,24 @@ export function preloadEditWasm(input?: WasmAsyncInput): Promise<void> {
 export function createEditSession(clientId: number): EditSession {
   state.ensure();
   return new EditSession(clientId);
+}
+
+/** Structured export of DOCX bytes: `{ok: true, content}` or `{ok: false, failure}` JSON. */
+export function exportDocxStructuredJson(bytes: Uint8Array, options: string): string {
+  state.ensure();
+  return export_docx_structured_json(bytes, options);
+}
+
+/** {@link exportDocxStructuredJson} rendered as Markdown. */
+export function exportDocxMarkdownJson(bytes: Uint8Array, options: string): string {
+  state.ensure();
+  return export_docx_markdown_json(bytes, options);
+}
+
+/** Markdown rendering of structured content JSON. */
+export function renderDocxMarkdownJson(content: string, options: string): string {
+  state.ensure();
+  return render_docx_markdown_json(content, options);
 }
 
 export type { EditSession };

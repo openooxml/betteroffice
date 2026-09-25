@@ -31,16 +31,14 @@ tiff = ["docx-parse/tiff"]
 # policy; there is no Cargo deny/release-age policy, and the existing lockfile already pins it.
 docx-layout.workspace = true
 docx-parse.workspace = true
+ooxml-opc.workspace = true
 ryu-js = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 yrs = "0.27.3"
 unicode-segmentation = "1.12"
 # serde_json is a non-optional dep above (the render bridge needs it in native
 # builds too), so the `wasm` feature does not re-declare it as `dep:serde_json`.
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
-
-[dev-dependencies]
-ooxml-opc.workspace = true
-sha2 = "0.10"

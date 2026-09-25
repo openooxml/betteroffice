@@ -83,6 +83,18 @@ DOCX files while preserving unsupported package content.
 `render_png` renders a page from that layout. Register the required fonts before
 rendering; a missing font produces an error.
 
+`export_structured` returns the document as read-only structured content, a dict
+in the same camelCase schema the JavaScript and Rust APIs produce, and
+`export_markdown` renders it as Markdown with source anchors:
+
+```python
+content = document.export_structured(revision_view="accepted", stories=["body", "footnotes"])
+markdown = document.export_markdown(revision_view="markup")["markdown"]
+```
+
+Omitted and unsupported content is listed in `diagnostics`; unusable limits raise
+`ExportError`. Page fragments are not included yet.
+
 ## PPTX
 
 [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) reads decks,

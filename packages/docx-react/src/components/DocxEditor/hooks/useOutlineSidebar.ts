@@ -2,23 +2,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HeadingInfo } from '@betteroffice/docx/utils';
 import type { PagedEditorRef } from '../PagedEditor';
 
-function collectYrsHeadings(editor: PagedEditorRef | null): HeadingInfo[] {
+/** The body's headings as the engine classifies them, with their display positions. */
+export function collectYrsHeadings(editor: PagedEditorRef | null): HeadingInfo[] {
   if (!editor) return [];
   const session = editor.getYrsSession();
   if (!session) return [];
   const headings: HeadingInfo[] = [];
+  const levels = new Map(
+    session.headings('body').map((entry) => [entry.paraId, entry.heading.outlineLevel])
+  );
   for (const paragraph of session.paragraphs('body')) {
-    const properties = paragraph.properties;
-    const authoredLevel = properties.outlineLevel;
-    const styleId = typeof properties.styleId === 'string' ? properties.styleId : null;
-    const styleMatch = styleId?.match(/^[Hh]eading(\d)$/);
-    const level =
-      typeof authoredLevel === 'number'
-        ? authoredLevel
-        : styleMatch
-          ? Number(styleMatch[1]) - 1
-          : null;
-    if (level == null || level < 0 || level > 8 || !paragraph.text.trim()) continue;
+    const level = levels.get(paragraph.paraId);
+    if (level == null || !paragraph.text.trim()) continue;
     const contentPosition = editor.yrsLocToDisplayPosition({
       story: 'body',
       paraId: paragraph.paraId,
