@@ -64,6 +64,22 @@
   commands and edit batches. Plugins read and navigate by default; every write
   is checked against its grant, the editor mode and document policy when it runs.
 
+- **Composable XLSX toolbars.** Replace the spreadsheet toolbar with built-in
+  controls and the formula bar in your own order. Commands run after pending
+  cell input and state why they are unavailable.
+
+- **Version-checked XLSX edit batches.** XLSX hosts in JavaScript, React, Rust
+  and Python read cells with a session version, then apply atomic cell input,
+  formula, number-format and style batches that commit as one recalculated undo
+  step or return a typed refusal with nothing changed. Batches do not insert or
+  delete rows, columns or sheets, and refuse writes to merged-cell followers,
+  array-formula cells and protected sheets.
+
+- **Host-owned XLSX plugins.** XLSX React supports host-owned plugins with
+  panels, overlays, lifecycle events, and explicitly granted commands and edit
+  batches. Plugins read and navigate by default; every write is checked against
+  its grant and `readOnly` when it runs.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

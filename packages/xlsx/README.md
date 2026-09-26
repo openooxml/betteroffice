@@ -79,7 +79,60 @@ if (isProposalsAvailable()) {
 
 The React editor paints pending proposals as in-cell tracked-change ghosts with
 an accept/reject panel. Guard with `isProposalsAvailable()` against cores built
-without the feature.
+without the feature. `StaleProposalError.targets` names each drifted cell's sheet
+beside `cells`.
+
+## Version-checked edit batches
+
+Read cells with the version they were read at, then apply a batch against it.
+Every step commits as one recalculated change and one undo step, or the batch
+returns a typed refusal and nothing changes:
+
+```ts
+const read = workbook.readCells({
+  ranges: [{ sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } }],
+});
+if (!read.ok) throw new Error(read.failure.message);
+
+const result = workbook.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    {
+      op: "setCellInputs",
+      target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } },
+      inputs: [["120"]],
+      expect: { cells: [[{ value: read.ranges[0].cells[0][0].value }]] },
+    },
+    { op: "setNumberFormat", target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } }, format: "currency" },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
+```
+
+- Steps: `setCellInputs` (parsed like typing, against each cell's current
+  number format), `setFormulas` (source without `=`, stored as formulas whatever
+  the format), `setNumberFormat` and `patchStyle`. Content and formatting may
+  combine on the same cells; writing one property twice refuses with
+  `overlapping-steps`.
+- Targets name a sheet id from the current catalog (`sheet:{index}` standalone,
+  the replica's sheet keys in collaboration) and an A1 range or zero-based
+  corners. Matrices and guards match the target's shape exactly. Guards compare
+  a cell's value, formula (`null` for none) or display text before the batch.
+- `validateEdits` stages a batch without changing anything; `findText` searches
+  display text exactly and case-sensitively. Update listeners run once, after
+  `applyEdits` returns, and see the recalculated state and its new version.
+  `changedSheets` names every sheet the batch or its recalculation changed.
+- Requests over 16 MiB and results over 64 MiB refuse with `limit-exceeded`;
+  calculation diagnostics stop at 10,000 cells per list and set `truncated`.
+- `history: "none"` keeps a batch out of undo; standalone undo still replays
+  older steps over its cells. It is experimental: that interaction may change
+  in a minor release. `source` records provenance only. Volatile functions see
+  only `calculation.nowSerial`.
+- Versions and sheet ids are session-scoped; standalone sheet ids are
+  positional, so each is valid only for the version it was read at. Batches do
+  not insert or delete rows, columns or sheets, merge cells or move charts, and
+  refuse writes to merged-cell followers, array-formula cells and protected
+  sheets.
 
 ## Collaboration
 

@@ -544,6 +544,10 @@ describe('wasm loader — proposals', () => {
       }
       expect(stale).toBeInstanceOf(StaleProposalError);
       expect(stale?.cells).toContain('E7');
+      expect(stale?.message).toBe('stale: E7');
+      expect(stale?.targets).toEqual([
+        { sheet: 0, sheetId: 'sheet:0', row: 6, col: 4, a1: 'E7' },
+      ]);
 
       // force applies despite the drift.
       const forced = handle.acceptProposal(proposal.id, { force: true });
