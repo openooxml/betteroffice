@@ -38,17 +38,20 @@ const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
 const CHARTS_SCHEMA_VERSION: i64 = 6;
-const SCHEMA_VERSION: i64 = 6;
+const HIDDEN_SIZE_SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 7;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
 const CONTENTS: &str = "contents";
 const COL_WIDTHS: &str = "colWidths";
+const HIDDEN_COL_WIDTHS: &str = "hiddenColWidths";
 const FREEZE_PANE: &str = "freezePane";
 const HYPERLINKS: &str = "hyperlinks";
 const MERGES: &str = "merges";
 const NAME: &str = "name";
 const ROW_HEIGHTS: &str = "rowHeights";
+const HIDDEN_ROW_HEIGHTS: &str = "hiddenRowHeights";
 const STYLES: &str = "styles";
 const BOOTSTRAP_ORIGIN: &str = "xlsx:bootstrap";
 const HYDRATE_ORIGIN: &str = "xlsx:hydrate";
@@ -104,6 +107,7 @@ struct WorkbookBase {
     hyperlinks: Vec<Vec<Hyperlink>>,
     charts: Vec<Vec<SheetChart>>,
     hidden_dimensions: Vec<HiddenDimensions>,
+    hidden_sizes: Vec<HiddenDimensions>,
     shared_strings: Vec<String>,
     styles: Stylesheet,
     /// table parts; read-only reference data, not shared state.
@@ -223,6 +227,14 @@ impl WorkbookBase {
                 .map(|sheet| sheet.charts.clone())
                 .collect(),
             hidden_dimensions: hidden_dimensions(model, legacy_dimensions),
+            hidden_sizes: model
+                .sheets
+                .iter()
+                .map(|sheet| HiddenDimensions {
+                    col_widths: sheet.hidden_col_widths.clone(),
+                    row_heights: sheet.hidden_row_heights.clone(),
+                })
+                .collect(),
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
             tables: model.tables.clone(),
@@ -333,6 +345,8 @@ struct SheetSharedTypes {
     sheet: BranchID,
     col_widths: BranchID,
     contents: BranchID,
+    hidden_col_widths: Option<BranchID>,
+    hidden_row_heights: Option<BranchID>,
     row_heights: BranchID,
     styles: BranchID,
 }
@@ -576,7 +590,15 @@ impl WorkbookAuthority {
     /// written at, and where the bootstraps do agree the two are the same
     /// document, so adopting is never worse than merging.
     pub(crate) fn snapshot_replacement(&self, update: &[u8]) -> SnapshotAdoption {
-        if !self.is_pristine() {
+        let pristine = self.is_pristine();
+        if !pristine
+            && (!update
+                .windows(BASE_FINGERPRINT.len())
+                .any(|part| part == BASE_FINGERPRINT.as_bytes())
+                || !update
+                    .windows(b"schemaVersion".len())
+                    .any(|part| part == b"schemaVersion"))
+        {
             return SnapshotAdoption::NotApplicable;
         }
         let doc = Doc::with_client_id(self.client_id());
@@ -592,6 +614,27 @@ impl WorkbookAuthority {
             redo_stack: Vec::new(),
         };
         if !candidate.is_whole_document() {
+            return SnapshotAdoption::NotApplicable;
+        }
+        if !pristine {
+            let version = candidate.schema_version().unwrap_or_default();
+            let txn = candidate.doc.transact();
+            let fingerprint = txn
+                .get_map(META)
+                .and_then(|meta| meta.get(&txn, BASE_FINGERPRINT))
+                .and_then(|value| value.cast::<String>().ok());
+            let same_bootstrap = txn
+                .state_vector()
+                .iter()
+                .any(|(client, _)| client.get() == self.base.bootstrap_client_id);
+            if version != SCHEMA_VERSION
+                || fingerprint.as_deref() != Some(self.base.fingerprint.as_str())
+                || !same_bootstrap
+            {
+                return SnapshotAdoption::Incompatible(
+                    "cannot merge a foreign workbook snapshot after local edits".to_string(),
+                );
+            }
             return SnapshotAdoption::NotApplicable;
         }
         if let Err(error) = candidate.upgrade_schema() {
@@ -961,6 +1004,8 @@ impl WorkbookAuthority {
                         charts,
                         sheet.col_widths.clone(),
                         sheet.row_heights.clone(),
+                        sheet.hidden_col_widths.clone(),
+                        sheet.hidden_row_heights.clone(),
                     ),
                 ))
             })
@@ -975,11 +1020,17 @@ impl WorkbookAuthority {
                 .get(&txn, &key)
                 .and_then(|value| value.cast::<MapRef>().ok())
                 .ok_or_else(|| format!("sheet {key} is not a map"))?;
-            if let Some((.., col_widths, row_heights)) = features.get(&key) {
+            if let Some((_, _, _, col_widths, row_heights, hidden_col_widths, hidden_row_heights)) =
+                features.get(&key)
+            {
                 let widths: MapRef = sheet.get_or_init(&mut txn, COL_WIDTHS);
                 sync_numbers(&widths, &mut txn, col_widths);
                 let heights: MapRef = sheet.get_or_init(&mut txn, ROW_HEIGHTS);
                 sync_numbers(&heights, &mut txn, row_heights);
+                let hidden_widths: MapRef = sheet.get_or_init(&mut txn, HIDDEN_COL_WIDTHS);
+                sync_numbers(&hidden_widths, &mut txn, hidden_col_widths);
+                let hidden_heights: MapRef = sheet.get_or_init(&mut txn, HIDDEN_ROW_HEIGHTS);
+                sync_numbers(&hidden_heights, &mut txn, hidden_row_heights);
             }
             let (freeze_pane, hyperlinks, charts) = features
                 .get(&key)
@@ -1130,6 +1181,9 @@ impl WorkbookAuthority {
             let hidden_dimensions = base_sheet
                 .and_then(|base| self.base.hidden_dimensions.get(base))
                 .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
+            let hidden_sizes = base_sheet
+                .and_then(|base| self.base.hidden_sizes.get(base))
+                .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
             model.sheets.push(materialize_sheet(
                 &sheet_map,
                 &txn,
@@ -1142,6 +1196,7 @@ impl WorkbookAuthority {
                     hyperlinks,
                     charts,
                     hidden_dimensions,
+                    hidden_sizes,
                 },
             )?);
         }
@@ -1241,10 +1296,20 @@ impl WorkbookAuthority {
                         }
                         authored_cells.insert((key, *at));
                     }
-                    (Op::SetColWidth { col, .. }, Some(key)) => {
+                    (
+                        Op::SetColWidth { col, .. }
+                        | Op::SetColVisibility { col, .. }
+                        | Op::RestoreColDimension { col, .. },
+                        Some(key),
+                    ) => {
                         col_widths.insert((key, *col));
                     }
-                    (Op::SetRowHeight { row, .. }, Some(key)) => {
+                    (
+                        Op::SetRowHeight { row, .. }
+                        | Op::SetRowVisibility { row, .. }
+                        | Op::RestoreRowDimension { row, .. },
+                        Some(key),
+                    ) => {
                         row_heights.insert((key, *row));
                     }
                     (Op::MergeCells { .. } | Op::UnmergeCells { .. }, Some(key)) => {
@@ -1345,6 +1410,13 @@ impl WorkbookAuthority {
                     col,
                     sheet_model.col_widths.get(&col).copied(),
                 );
+                let hidden_map: MapRef = sheet_map.get_or_init(&mut txn, HIDDEN_COL_WIDTHS);
+                sync_number(
+                    &hidden_map,
+                    &mut txn,
+                    col,
+                    sheet_model.hidden_col_widths.get(&col).copied(),
+                );
             }
             for (key, row) in row_heights {
                 let (sheet_map, sheet_model) =
@@ -1355,6 +1427,13 @@ impl WorkbookAuthority {
                     &mut txn,
                     row,
                     sheet_model.row_heights.get(&row).copied(),
+                );
+                let hidden_map: MapRef = sheet_map.get_or_init(&mut txn, HIDDEN_ROW_HEIGHTS);
+                sync_number(
+                    &hidden_map,
+                    &mut txn,
+                    row,
+                    sheet_model.hidden_row_heights.get(&row).copied(),
                 );
             }
             for key in merges {
@@ -2402,7 +2481,11 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::InsertCols { sheet, .. }
         | Op::DeleteCols { sheet, .. }
         | Op::SetColWidth { sheet, .. }
+        | Op::SetColVisibility { sheet, .. }
+        | Op::RestoreColDimension { sheet, .. }
         | Op::SetRowHeight { sheet, .. }
+        | Op::SetRowVisibility { sheet, .. }
+        | Op::RestoreRowDimension { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
@@ -2499,6 +2582,7 @@ fn sync_sheet(
     stylesheet: &Stylesheet,
 ) -> Result<(), String> {
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
+    let hidden_col_widths: MapRef = sheet_map.get_or_init(txn, HIDDEN_COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
     sheet_map.try_update(txn, FREEZE_PANE, freeze_pane_to_any(sheet.freeze_pane));
     let hyperlinks = serde_json::to_string(&sheet.hyperlinks)
@@ -2510,10 +2594,13 @@ fn sync_sheet(
     sheet_map.try_update(txn, MERGES, merges_to_any(&sheet.merges));
     sheet_map.try_update(txn, NAME, sheet.name.as_str());
     let row_heights: MapRef = sheet_map.get_or_init(txn, ROW_HEIGHTS);
+    let hidden_row_heights: MapRef = sheet_map.get_or_init(txn, HIDDEN_ROW_HEIGHTS);
     let styles: MapRef = sheet_map.get_or_init(txn, STYLES);
     sync_numbers(&col_widths, txn, &sheet.col_widths);
+    sync_numbers(&hidden_col_widths, txn, &sheet.hidden_col_widths);
     sync_contents(&contents, txn, sheet);
     sync_numbers(&row_heights, txn, &sheet.row_heights);
+    sync_numbers(&hidden_row_heights, txn, &sheet.hidden_row_heights);
     sync_styles(&styles, txn, sheet, stylesheet)?;
     Ok(())
 }
@@ -2735,6 +2822,7 @@ struct SheetFallbacks<'a> {
     hyperlinks: &'a [Hyperlink],
     charts: &'a [SheetChart],
     hidden_dimensions: &'a HiddenDimensions,
+    hidden_sizes: &'a HiddenDimensions,
 }
 
 impl Default for SheetFallbacks<'_> {
@@ -2746,6 +2834,7 @@ impl Default for SheetFallbacks<'_> {
             hyperlinks: &[],
             charts: &[],
             hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
+            hidden_sizes: &EMPTY_HIDDEN_DIMENSIONS,
         }
     }
 }
@@ -2797,6 +2886,41 @@ fn materialize_sheet<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
+    if version >= HIDDEN_SIZE_SCHEMA_VERSION {
+        sheet.hidden_col_widths = materialize_numbers(
+            &nested_map(sheet_map, txn, HIDDEN_COL_WIDTHS)?,
+            txn,
+            MAX_COLS,
+            "hidden column width",
+        )?;
+        sheet.hidden_row_heights = materialize_numbers(
+            &nested_map(sheet_map, txn, HIDDEN_ROW_HEIGHTS)?,
+            txn,
+            MAX_ROWS,
+            "hidden row height",
+        )?;
+        sheet
+            .hidden_col_widths
+            .retain(|index, _| sheet.col_widths.get(index) == Some(&0.0));
+        sheet
+            .hidden_row_heights
+            .retain(|index, _| sheet.row_heights.get(index) == Some(&0.0));
+    } else {
+        sheet.hidden_col_widths = fallbacks
+            .hidden_sizes
+            .col_widths
+            .iter()
+            .filter(|(index, _)| sheet.col_widths.get(index) == Some(&0.0))
+            .map(|(index, size)| (*index, *size))
+            .collect();
+        sheet.hidden_row_heights = fallbacks
+            .hidden_sizes
+            .row_heights
+            .iter()
+            .filter(|(index, _)| sheet.row_heights.get(index) == Some(&0.0))
+            .map(|(index, size)| (*index, *size))
+            .collect();
+    }
     if version < SCHEMA_VERSION {
         for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
             sheet.col_widths.entry(at).or_insert(size);
@@ -2880,6 +3004,14 @@ fn sheet_shared_types<T: ReadTxn>(sheet_map: &MapRef, txn: &T) -> Result<SheetSh
         sheet: sheet_map.as_ref().id(),
         col_widths: nested_map(sheet_map, txn, COL_WIDTHS)?.as_ref().id(),
         contents: nested_map(sheet_map, txn, CONTENTS)?.as_ref().id(),
+        hidden_col_widths: sheet_map
+            .get(txn, HIDDEN_COL_WIDTHS)
+            .and_then(|value| value.cast::<MapRef>().ok())
+            .map(|map| map.as_ref().id()),
+        hidden_row_heights: sheet_map
+            .get(txn, HIDDEN_ROW_HEIGHTS)
+            .and_then(|value| value.cast::<MapRef>().ok())
+            .map(|map| map.as_ref().id()),
         row_heights: nested_map(sheet_map, txn, ROW_HEIGHTS)?.as_ref().id(),
         styles: nested_map(sheet_map, txn, STYLES)?.as_ref().id(),
     })
@@ -2976,11 +3108,24 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
         ROW_HEIGHTS,
         STYLES,
     ];
+    const V7: &[&str] = &[
+        COL_WIDTHS,
+        CONTENTS,
+        FREEZE_PANE,
+        HIDDEN_COL_WIDTHS,
+        HIDDEN_ROW_HEIGHTS,
+        HYPERLINKS,
+        MERGES,
+        NAME,
+        ROW_HEIGHTS,
+        STYLES,
+    ];
     match version {
         MIN_SUPPORTED_SCHEMA_VERSION => V3,
         FREEZE_PANE_SCHEMA_VERSION => V4,
         HYPERLINK_SCHEMA_VERSION => V5,
-        _ => V6,
+        CHARTS_SCHEMA_VERSION => V6,
+        _ => V7,
     }
 }
 
@@ -3403,7 +3548,8 @@ fn fingerprint_model_with_schema(
         3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
         4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
         5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
-        _ => b"betteroffice-xlsx-yrs-v6".as_slice(),
+        6 => b"betteroffice-xlsx-yrs-v6".as_slice(),
+        _ => b"betteroffice-xlsx-yrs-v7".as_slice(),
     };
     hasher.update(domain);
     let base = if include_defined_names {
@@ -3464,6 +3610,18 @@ fn fingerprint_model_with_schema(
         for (&row, &height) in &sheet.row_heights {
             hash_u32(&mut hasher, row);
             hash_u64(&mut hasher, height.to_bits());
+        }
+        if schema_version >= HIDDEN_SIZE_SCHEMA_VERSION {
+            hash_u64(&mut hasher, sheet.hidden_col_widths.len() as u64);
+            for (&column, &width) in &sheet.hidden_col_widths {
+                hash_u32(&mut hasher, column);
+                hash_u64(&mut hasher, width.to_bits());
+            }
+            hash_u64(&mut hasher, sheet.hidden_row_heights.len() as u64);
+            for (&row, &height) in &sheet.hidden_row_heights {
+                hash_u32(&mut hasher, row);
+                hash_u64(&mut hasher, height.to_bits());
+            }
         }
         if schema_version >= FREEZE_PANE_SCHEMA_VERSION {
             match sheet.freeze_pane {
@@ -3625,6 +3783,10 @@ mod tests {
                 }
                 if version < FREEZE_PANE_SCHEMA_VERSION {
                     sheet.remove(&mut txn, FREEZE_PANE);
+                }
+                if version < HIDDEN_SIZE_SCHEMA_VERSION {
+                    sheet.remove(&mut txn, HIDDEN_COL_WIDTHS);
+                    sheet.remove(&mut txn, HIDDEN_ROW_HEIGHTS);
                 }
             }
         }
@@ -3853,7 +4015,7 @@ mod tests {
     fn known_schema_versions_materialize_and_upgrade_to_current() {
         let model = rich_model();
         for (index, (version, include_defined_names)) in
-            [(3, false), (3, true), (4, true), (5, true)]
+            [(3, false), (3, true), (4, true), (5, true), (6, true)]
                 .into_iter()
                 .enumerate()
         {
@@ -3876,7 +4038,9 @@ mod tests {
     #[test]
     fn legacy_snapshot_merges_into_current_bootstrap() {
         let model = rich_model();
-        for (version, include_defined_names) in [(3, false), (3, true), (4, true), (5, true)] {
+        for (version, include_defined_names) in
+            [(3, false), (3, true), (4, true), (5, true), (6, true)]
+        {
             let update = legacy_update(&model, version, include_defined_names);
             let authority = WorkbookAuthority::from_model_with_client_id(&model, 108).unwrap();
             let staged = authority.stage_updates_v1(&[&update], None).unwrap();
@@ -4043,7 +4207,7 @@ mod tests {
         };
         assert_eq!(
             error,
-            "unsupported schema version 7; supported versions are 3 through 6"
+            "unsupported schema version 8; supported versions are 3 through 7"
         );
     }
 

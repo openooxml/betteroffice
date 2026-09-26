@@ -141,6 +141,8 @@ pub struct Sheet {
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,
+    pub hidden_col_widths: BTreeMap<ColId, f64>,
+    pub hidden_row_heights: BTreeMap<RowId, f64>,
     /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
     pub format: SheetFormat,
     /// `<col>` style runs in source order; read by the renderer, never the writer.

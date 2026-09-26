@@ -202,6 +202,85 @@ fn an_edited_replica_does_not_adopt_a_legacy_snapshot() {
 }
 
 #[test]
+fn an_edited_replica_refuses_the_published_v6_snapshot() {
+    let source = include_bytes!("../../../packages/xlsx/test-fixtures/sample.xlsx");
+    let snapshot = include_bytes!("fixtures/workbook-npm-0.2.1.update.bin");
+    let mut workbook =
+        Workbook::open_collaborative_recalculated(source, 5_024, CalculationOptions::default())
+            .unwrap();
+    let local = CellRef::parse_a1("B43").unwrap();
+    workbook
+        .edit_cell(SheetId(0), local, "local", CalculationOptions::default())
+        .unwrap();
+    assert!(
+        workbook
+            .apply_update_v1(snapshot, CalculationOptions::default())
+            .is_err()
+    );
+    assert_eq!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(local)
+            .unwrap()
+            .value,
+        CellValue::Text {
+            value: "local".into()
+        }
+    );
+}
+
+#[test]
+fn an_edited_replica_accepts_a_current_peer_full_state() {
+    let mut left =
+        Workbook::open_collaborative_recalculated(SAMPLE, 5_025, CalculationOptions::default())
+            .unwrap();
+    let mut right =
+        Workbook::open_collaborative_recalculated(SAMPLE, 5_026, CalculationOptions::default())
+            .unwrap();
+    left.edit_cell(
+        SheetId(0),
+        CellRef::parse_a1("A2").unwrap(),
+        "left",
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .edit_cell(
+            SheetId(0),
+            CellRef::parse_a1("B2").unwrap(),
+            "right",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    left.apply_update_v1(
+        &right.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        left.sheet(SheetId(0))
+            .unwrap()
+            .cell(CellRef::parse_a1("A2").unwrap())
+            .unwrap()
+            .value,
+        CellValue::Text {
+            value: "left".into()
+        }
+    );
+    assert_eq!(
+        left.sheet(SheetId(0))
+            .unwrap()
+            .cell(CellRef::parse_a1("B2").unwrap())
+            .unwrap()
+            .value,
+        CellValue::Text {
+            value: "right".into()
+        }
+    );
+}
+
+#[test]
 fn a_cleared_cell_prevents_snapshot_replacement() {
     for legacy in [false, true] {
         let mut workbook =
