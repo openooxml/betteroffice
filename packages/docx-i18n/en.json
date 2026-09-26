@@ -932,7 +932,17 @@
       "inputFailed": "Earlier input could not be applied, so the command did not run.",
       "documentReplaced": "The document changed before the command could run.",
       "targetChanged": "The content this action was opened for changed before it could be applied.",
-      "commandFailed": "The command could not be completed."
+      "commandFailed": "The command could not be completed.",
+      "permissionDenied": "The host application has not allowed this plugin to use this command.",
+      "unsupportedPolicy": "Plugins can't run this command yet. Use an edit batch instead.",
+      "pluginUnavailable": "The plugin is no longer active.",
+      "aborted": "The plugin action was cancelled before the command ran."
     }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Plugin panels",
+    "collapsePanel": "Collapse {title}",
+    "expandPanel": "Expand {title}"
   }
 }

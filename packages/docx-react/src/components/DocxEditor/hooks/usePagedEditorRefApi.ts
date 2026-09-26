@@ -21,6 +21,7 @@ import {
   type YrsToolbarSelection,
 } from '../yrsToolbar';
 import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
+import type { RevealPositionOutcome } from './usePagedScrollApi';
 
 /** The image under a one-unit selection. */
 export interface PagedEditorSelectedImage {
@@ -65,6 +66,7 @@ interface RefApiInputs {
   layout: Layout | null;
   runLayoutPipeline: () => void;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
+  revealPositionImpl: (position: number) => RevealPositionOutcome;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
   setIsFocused: React.Dispatch<React.SetStateAction<boolean>>;
@@ -72,7 +74,7 @@ interface RefApiInputs {
   yrsSessionRef: React.MutableRefObject<YrsSession | null>;
   yrsLocToDisplayPositionRef: React.MutableRefObject<(loc: YrsLoc) => number | null>;
   syncYrsInputStateRef: React.MutableRefObject<
-    (docChanged: boolean, dirtyStory?: string) => boolean
+    (docChanged: boolean, dirtyStory?: string | readonly string[]) => boolean
   >;
   applyYrsFormattingRef: React.MutableRefObject<(action: FormattingAction) => boolean>;
   applyYrsCommandRef: React.MutableRefObject<(command: YrsEditorCommand) => boolean>;
@@ -104,6 +106,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     layout,
     runLayoutPipeline,
     scrollToPositionImpl,
+    revealPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
     setIsFocused,
@@ -156,16 +159,16 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       const session = yrsSessionRef.current;
       const result = session
         ? performYrsHistoryAction(session, false)
-        : { changed: false, story: null };
-      if (result.changed) syncYrsInputStateRef.current(true, result.story ?? undefined);
+        : { changed: false, stories: [] };
+      if (result.changed) syncYrsInputStateRef.current(true, result.stories);
       return result.changed;
     },
     redo: () => {
       const session = yrsSessionRef.current;
       const result = session
         ? performYrsHistoryAction(session, true)
-        : { changed: false, story: null };
-      if (result.changed) syncYrsInputStateRef.current(true, result.story ?? undefined);
+        : { changed: false, stories: [] };
+      if (result.changed) syncYrsInputStateRef.current(true, result.stories);
       return result.changed;
     },
     canUndo: () => yrsSessionRef.current?.canUndo() ?? false,
@@ -189,19 +192,23 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       const input = yrsInputRef.current;
       const session = yrsSessionRef.current;
       if (!input || !session) throw new Error('The editor input is unavailable');
+      // The input rejects its own flush when it unmounts or changes session; its handle object
+      // is rebuilt whenever a new frame changes its callbacks, so only the session is compared.
       await input.flushPendingInput();
-      if (input !== yrsInputRef.current || session !== yrsSessionRef.current) {
+      if (session !== yrsSessionRef.current) {
         throw new Error('The document changed while flushing input');
       }
     },
     getYrsStoredFormatting: () => yrsInputRef.current?.storedFormatting() ?? null,
     yrsLocToDisplayPosition: (loc) => yrsLocToDisplayPositionRef.current(loc),
-    syncYrsInputState: (docChanged) => syncYrsInputStateRef.current(docChanged),
+    syncYrsInputState: (docChanged, dirtyStories) =>
+      syncYrsInputStateRef.current(docChanged, dirtyStories),
     applyYrsFormatting: (action) => applyYrsFormattingRef.current(action),
     applyYrsCommand: (command) => applyYrsCommandRef.current(command),
     getLayout: () => layout,
     relayout: runLayoutPipeline,
     scrollToPosition: scrollToPositionImpl,
+    revealDisplayPosition: revealPositionImpl,
     scrollToParaId: scrollToParaIdImpl,
     scrollToPage: scrollToPageImpl,
     highlightRange: (from, to) => {
@@ -246,6 +253,7 @@ export interface UsePagedEditorRefApiOptions {
   layout: Layout | null;
   runLayoutPipeline: () => void;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
+  revealPositionImpl: (position: number) => RevealPositionOutcome;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
   setIsFocused: React.Dispatch<React.SetStateAction<boolean>>;
@@ -253,7 +261,7 @@ export interface UsePagedEditorRefApiOptions {
   documentFromYrs: () => Document | null;
   yrsSession: YrsSession | null;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
-  syncYrsInputState: (docChanged: boolean, dirtyStory?: string) => boolean;
+  syncYrsInputState: (docChanged: boolean, dirtyStory?: string | readonly string[]) => boolean;
   applyYrsFormatting: (action: FormattingAction) => boolean;
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   getYrsPositionProjection: () => YrsPositionProjection | null;
@@ -267,6 +275,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     layout,
     runLayoutPipeline,
     scrollToPositionImpl,
+    revealPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
     setIsFocused,
@@ -302,6 +311,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     layout,
     runLayoutPipeline,
     scrollToPositionImpl,
+    revealPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
     setIsFocused,
@@ -319,6 +329,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     layout,
     runLayoutPipeline,
     scrollToPositionImpl,
+    revealPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
   ]);
@@ -340,7 +351,7 @@ export interface UsePagedEditorCommandBridgeOptions {
   displayPositionToLoc: (position: number) => YrsLoc | null;
   format: (action: FormattingAction) => boolean;
   command: (command: YrsEditorCommand) => boolean;
-  syncYrsInputState: (docChanged: boolean, dirtyStory?: string) => boolean;
+  syncYrsInputState: (docChanged: boolean, dirtyStory?: string | readonly string[]) => boolean;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
 }
@@ -421,7 +432,7 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
         const session = current.session;
         if (!session) return false;
         const result = performYrsHistoryAction(session, redo);
-        if (result.changed) current.syncYrsInputState(true, result.story ?? undefined);
+        if (result.changed) current.syncYrsInputState(true, result.stories);
         return result.changed;
       },
       select(start, end) {

@@ -85,6 +85,7 @@ export interface RenderedDomContext {
 
 /**
  * Props passed to plugin panel components (framework-agnostic base).
+ * @deprecated Use `DocxPluginPanel` from `@betteroffice/docx-react`.
  */
 export interface PluginPanelProps<TState = unknown> {
   /** Current serializer-facing document snapshot. */
@@ -111,6 +112,7 @@ export interface PluginPanelProps<TState = unknown> {
 
 /**
  * Configuration for plugin panel rendering.
+ * @deprecated Use `DocxPluginPanel` from `@betteroffice/docx-react`.
  */
 export interface PanelConfig {
   /** Where to render the panel */
@@ -145,6 +147,7 @@ export interface PanelConfig {
  *
  * Framework adapters (ReactEditorPlugin, VueEditorPlugin) extend this
  * with their own Panel component type and renderOverlay function.
+ * @deprecated Use `defineDocxPlugin` and the `plugins` prop of `@betteroffice/docx-react`.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface EditorPluginCore<TState = any> {
@@ -209,6 +212,7 @@ export interface SidebarItem {
 
 /**
  * Context provided to plugins when computing sidebar items.
+ * @deprecated Use `DocxPluginSidebarItem` from `@betteroffice/docx-react`.
  */
 export interface SidebarItemContext {
   document: Document | null;

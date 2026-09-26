@@ -3,6 +3,7 @@ import type {
   DocxCommandDescriptor,
   DocxCommandId,
   DocxCommandShortcut,
+  DocxPluginCommandId,
 } from './types';
 
 type DescriptorTable = { readonly [K in DocxCommandId]: DocxCommandDescriptor<K> };
@@ -94,6 +95,13 @@ export function isDocxCommandId(value: unknown): value is DocxCommandId {
   return typeof value === 'string' && Object.hasOwn(DOCX_COMMAND_DESCRIPTORS, value);
 }
 
+const PLUGIN_COMMAND_ID =
+  /^plugin:[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+export function isPluginCommandId(value: unknown): value is DocxPluginCommandId {
+  return typeof value === 'string' && PLUGIN_COMMAND_ID.test(value);
+}
+
 interface ParsedChord {
   mod: boolean;
   shift: boolean;
@@ -116,6 +124,40 @@ function parseChord(chord: string): ParsedChord {
 export function isMacPlatform(): boolean {
   return typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
 }
+
+const MODIFIERS: ReadonlySet<string> = new Set(['Mod', 'Shift', 'Alt']);
+
+/**
+ * `chord` in canonical form (`Mod+Alt+Shift+key`), or null when it is not a chord. `+` counts as
+ * `=`, whose matcher also accepts the `+` key.
+ */
+export function normalizeChord(chord: string): string | null {
+  if (typeof chord !== 'string' || chord.length === 0) return null;
+  const parts = chord.split('+');
+  const modifiers =
+    parts.length > 1 && parts[parts.length - 1] === '' ? parts.slice(0, -2) : parts.slice(0, -1);
+  if (!modifiers.every((modifier) => MODIFIERS.has(modifier))) return null;
+  const parsed = parseChord(chord);
+  if (parsed.key.length === 0) return null;
+  const key = parsed.key === '+' ? '=' : parsed.key;
+  return [parsed.mod && 'Mod', parsed.alt && 'Alt', parsed.shift && 'Shift', key]
+    .filter(Boolean)
+    .join('+');
+}
+
+/** Canonical chords the text input handles itself (clipboard and select all). */
+export const EDITING_CHORDS: ReadonlySet<string> = new Set(
+  ['Mod+A', 'Mod+C', 'Mod+V', 'Mod+X', 'Mod+Shift+V'].map((chord) => normalizeChord(chord)!)
+);
+
+/** Canonical chords of the built-in commands, which always win over contributed ones. */
+export const BUILT_IN_CHORDS: ReadonlySet<string> = new Set(
+  Object.values(DOCX_COMMAND_DESCRIPTORS).flatMap((descriptor) =>
+    (descriptor.shortcuts as readonly DocxCommandShortcut[]).map(
+      (shortcut) => normalizeChord(shortcut.chord)!
+    )
+  )
+);
 
 function keyMatches(key: string, event: KeyboardEvent): boolean {
   if (key === '=') return event.code === 'Equal' || event.key === '=' || event.key === '+';

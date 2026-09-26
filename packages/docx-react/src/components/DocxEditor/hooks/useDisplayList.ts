@@ -36,6 +36,11 @@ import type { RustFontChainsProvider } from './useRustMeasurement';
 import { displayListNeedsHostImages } from '../canvasPresentation';
 import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
+  readSessionVersion,
+  sourceVersionOf,
+  stampSourceVersion,
+} from '../internals/layoutProvenance';
+import {
   DisplayListQueryEpochGate,
   type ResolveDisplayListQueries,
 } from './displayListQueryEpochGate';
@@ -145,8 +150,12 @@ export function useRustDisplayList(
   // Changing the set rebuilds the display list so resolve/reopen — and the
   // "expanded resolved card re-tints its range" flow — repaint immediately.
   resolvedCommentIds?: ReadonlySet<number>,
-  engine?: RustDisplayListEngine | null
+  engine?: RustDisplayListEngine | null,
+  /** Asks the host for a layout of the document as it is now. */
+  requestLayout?: () => void
 ): UseRustDisplayListResult {
+  const requestLayoutRef = useRef(requestLayout);
+  requestLayoutRef.current = requestLayout;
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const queryEpochGateRef = useRef<DisplayListQueryEpochGate | null>(null);
@@ -438,7 +447,8 @@ export function useRustDisplayList(
           nextFrame,
           caret,
           null,
-          { ...previous, queries: null }
+          { ...previous, queries: null },
+          readSessionVersion(hostEngine)
         );
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
@@ -456,6 +466,7 @@ export function useRustDisplayList(
         if (!worker || !worker.client.isReady() || !currentFrame) return null;
         const selection = worker.engine.selection();
         if (!selection) return null;
+        const dispatchedEpoch = contentEpochRef.current;
         paintedCaretMachine.noteInput(performance.now());
         const paintCaret = workerPresentationActiveRef.current;
         const paintToken = paintedCaretMachine.token();
@@ -523,12 +534,31 @@ export function useRustDisplayList(
           worker.engine.selection(),
           nextFrame
         );
+        if (contentEpochRef.current !== dispatchedEpoch) {
+          // Another change reached the session while the worker computed this frame: show its
+          // pixels, but publish no queries and leave rendering unsettled until a fresh layout.
+          const overtaken: RustDisplayListSnapshot = {
+            displayList: nextFrame.displayList,
+            frame: nextFrame,
+            queries: null,
+            caret,
+          };
+          snapshotRef.current = overtaken;
+          setSnapshot(overtaken);
+          setError(null);
+          setLoading(false);
+          requestSettleRelayout();
+          setTimeout(() => requestLayoutRef.current?.(), 0);
+          applyPaintedCaretReply(false, paintToken);
+          return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false };
+        }
         const nextSnapshot = createRustDisplayListSnapshot(
           nextFrame.displayList,
           nextFrame,
           caret,
           null,
-          previous
+          previous,
+          readSessionVersion(worker.engine)
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -577,6 +607,7 @@ export function useRustDisplayList(
       paintedCaretMachine,
       publishQuerySnapshot,
       queryEpochGate,
+      requestSettleRelayout,
     ]
   );
 
@@ -630,6 +661,7 @@ export function useRustDisplayList(
     }
     queryEpochGate.invalidate();
     const contentEpoch = contentEpochRef.current;
+    const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
     if (!inputs) {
@@ -797,7 +829,8 @@ export function useRustDisplayList(
           result.frame,
           result.caret,
           result.queryEngine,
-          snapshotRef.current
+          snapshotRef.current,
+          sourceVersion
         );
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
@@ -899,20 +932,19 @@ export function useRustDisplayList(
   };
 }
 
+/** `sourceVersion`: the document version the frame's pixels and queries show. */
 function createRustDisplayListSnapshot(
   displayList: DisplayList,
   frame: RetainedFrame | null,
   caret: YrsResidentCaretSnapshot | null,
   engine: RustDisplayListEngine | null | undefined,
-  previous: RustDisplayListSnapshot
+  previous: RustDisplayListSnapshot,
+  sourceVersion: string | null
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
-  return {
-    displayList,
-    frame,
-    queries: createDisplayListQueries(displayList, residentQueries, previous.queries),
-    caret,
-  };
+  const queries = createDisplayListQueries(displayList, residentQueries, previous.queries);
+  stampSourceVersion(queries, sourceVersion);
+  return { displayList, frame, queries, caret };
 }
 
 function residentCaretForSelection(
@@ -1044,7 +1076,9 @@ export function useCanvasRenderer(
   fontChainsProviderRef?: React.RefObject<RustFontChainsProvider | null>,
   // Resolved comment ids whose range wash the canvas hides; identity changes
   // rebuild the display list (resolve / reopen / expand-a-resolved-card).
-  resolvedCommentIds?: ReadonlySet<number>
+  resolvedCommentIds?: ReadonlySet<number>,
+  /** Asks the host for a layout of the document as it is now. */
+  requestLayout?: () => void
 ): UseCanvasRendererResult {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [engine, setEngine] = useState<
@@ -1079,7 +1113,14 @@ export function useCanvasRenderer(
     notifyCaretInput,
     notifyCaretInputDispatched,
     notifyCaretInterrupt,
-  } = useRustDisplayList(layout, undefined, fontChainsProviderRef, resolvedCommentIds, engine);
+  } = useRustDisplayList(
+    layout,
+    undefined,
+    fontChainsProviderRef,
+    resolvedCommentIds,
+    engine,
+    requestLayout
+  );
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'

@@ -21,13 +21,16 @@ type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 /** The React editor's sole mutable document session. */
 export interface YrsCoreSession {
   session: YrsSession | null;
+  /** The seed generation `session` was created for. */
+  sessionGeneration: number | null;
   storyBlocks(storyId: string, env: YrsRenderEnv): LayoutBlock[] | null;
   bodyBlocks(env: YrsRenderEnv): LayoutBlock[] | null;
   inputPositionMap(storyId?: string): YrsInputPositionMap | null;
   displayPositionToLoc(position: number, storyId?: string): YrsLoc | null;
   locToDisplayPosition(loc: YrsLoc): number | null;
   documentFromYrs(baseDocument?: Document | null): Document | null;
-  publishDirectInput(storyId?: string): void;
+  /** Marks stories changed outside the save projection; the live selection's story by default. */
+  publishDirectInput(stories?: string | readonly string[]): void;
 }
 
 interface YrsCoreSessionCallbacks {
@@ -179,6 +182,7 @@ export function useYrsCoreSession(
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
+  const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
 
   useEffect(() => {
     setSession(null);
@@ -206,6 +210,7 @@ export function useYrsCoreSession(
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
+        setSessionGeneration(seedGeneration);
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration);
       })
       .catch((error) => {
@@ -332,16 +337,22 @@ export function useYrsCoreSession(
     }
   }, []);
 
-  const publishDirectInput = useCallback((storyId?: string): void => {
+  const publishDirectInput = useCallback((stories?: string | readonly string[]): void => {
     const live = sessionRef.current;
     if (!live || !live.storyIds().includes('body')) return;
     inputPositionMapsRef.current.clear();
-    const activeStory = storyId ?? live.selection()?.head.story ?? 'body';
-    projectionStoriesRef.current.add(dirtyProjectionStory(activeStory));
+    const dirty =
+      stories === undefined
+        ? [live.selection()?.head.story ?? 'body']
+        : typeof stories === 'string'
+          ? [stories]
+          : stories;
+    for (const story of dirty) projectionStoriesRef.current.add(dirtyProjectionStory(story));
   }, []);
 
   return {
     session,
+    sessionGeneration,
     storyBlocks,
     bodyBlocks,
     inputPositionMap,

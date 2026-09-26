@@ -6,6 +6,7 @@ import Link from "next/link";
 import { CollaborationProvider } from "@betteroffice/docx/collaboration";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
+import type { DocxPlugin, DocxPluginGrant } from "@betteroffice/docx-react";
 import { Logo } from "../components/Logo";
 import {
   CollaborationControls,
@@ -62,6 +63,30 @@ export function DocxDemoClient() {
   );
   const [error, setError] = useState<string | null>(null);
   const [compact, setCompact] = useState(false);
+  const [reviewPlugin, setReviewPlugin] = useState<DocxPlugin | null>(null);
+  const [reviewEnabled, setReviewEnabled] = useState(false);
+  const [reviewWrites, setReviewWrites] = useState(false);
+  const plugins = useMemo(
+    () => (reviewEnabled && reviewPlugin ? [reviewPlugin] : []),
+    [reviewEnabled, reviewPlugin],
+  );
+  const pluginGrants = useMemo<Record<string, DocxPluginGrant> | undefined>(
+    () =>
+      reviewWrites && reviewPlugin
+        ? { [reviewPlugin.id]: { document: "write", editBatches: true } }
+        : undefined,
+    [reviewPlugin, reviewWrites],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void import("./ReviewPlugin").then((module) => {
+      if (!cancelled) setReviewPlugin(module.reviewPlugin);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -174,6 +199,24 @@ export function DocxDemoClient() {
           >
             Compact toolbar
           </button>
+          <button
+            type="button"
+            className="rounded-[5px] px-2 py-1 text-[12.5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg aria-pressed:bg-surface aria-pressed:text-fg"
+            aria-pressed={reviewEnabled}
+            disabled={!reviewPlugin}
+            onClick={() => setReviewEnabled((value) => !value)}
+          >
+            Review plugin
+          </button>
+          <button
+            type="button"
+            className="rounded-[5px] px-2 py-1 text-[12.5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg aria-pressed:bg-surface aria-pressed:text-fg"
+            aria-pressed={reviewWrites}
+            disabled={!reviewEnabled}
+            onClick={() => setReviewWrites((value) => !value)}
+          >
+            Plugin write access
+          </button>
           <CollaborationControls
             status={collab.status}
             synced={collab.synced}
@@ -217,6 +260,14 @@ export function DocxDemoClient() {
             documentName={source.name}
             onOpen={handleOpen}
             onError={(cause) => setError(cause.message)}
+            plugins={plugins}
+            pluginGrants={pluginGrants}
+            onPluginError={(failure) =>
+              console.error(
+                `Plugin ${failure.pluginId} failed (${failure.phase})`,
+                failure.error,
+              )
+            }
             toolbar={
               compact ? (
                 <CompactToolbar

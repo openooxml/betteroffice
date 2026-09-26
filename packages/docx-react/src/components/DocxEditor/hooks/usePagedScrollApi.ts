@@ -29,8 +29,13 @@ export interface UsePagedScrollApiOptions {
   }) => void;
 }
 
+/** How revealing a display position went. */
+export type RevealPositionOutcome = 'scrolled' | 'layout-unavailable' | 'unsupported';
+
 export interface UsePagedScrollApiReturn {
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
+  /** Scrolls a position into view without touching focus or selection. */
+  revealPositionImpl: (position: number) => RevealPositionOutcome;
   scrollToPageImpl: (pageNumber: number) => void;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
 }
@@ -90,6 +95,20 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     [displayListQueries, onNavigationIntent, scrollRectIntoView]
   );
 
+  const revealPositionImpl = useCallback(
+    (position: number): RevealPositionOutcome => {
+      if (!Number.isInteger(position) || position < 0) return 'unsupported';
+      if (!displayListQueries) return 'layout-unavailable';
+      const rect = displayListQueries.anchorRect(position);
+      if (!rect) return 'unsupported';
+      onNavigationIntent?.();
+      scrollAbortRef.current?.abort();
+      scrollAbortRef.current = new AbortController();
+      return scrollRectIntoView(rect, true) ? 'scrolled' : 'layout-unavailable';
+    },
+    [displayListQueries, onNavigationIntent, scrollRectIntoView]
+  );
+
   const scrollToPageImpl = useCallback(
     (pageNumber: number): void => {
       if (
@@ -141,5 +160,5 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     [requestCanvasParagraphFlash, scrollToPositionImpl, yrsInputRef, yrsLocToDisplayPosition, yrsSession]
   );
 
-  return { scrollToPositionImpl, scrollToPageImpl, scrollToParaIdImpl };
+  return { scrollToPositionImpl, revealPositionImpl, scrollToPageImpl, scrollToParaIdImpl };
 }
