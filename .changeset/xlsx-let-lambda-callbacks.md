@@ -1,6 +1,0 @@
----
-'@betteroffice/xlsx': minor
-'@betteroffice/rust-crates': minor
----
-
-Evaluate `LET`, `LAMBDA` and the callback builtins. `LET` binds each name for the values that follow it and for the calculation, a name bound to a plain reference still reaches a callee that wants an area, and `LAMBDA` values are invoked by `BYROW`, `BYCOL`, `MAP`, `REDUCE`, `SCAN` and `MAKEARRAY`, with `BYROW`/`BYCOL` handing over each row or column as a reference. `TEXTSPLIT` splits a string into a grid, `TEXTJOIN` and `CONCAT` read every cell of a computed block, `COUNTIF`/`SUMIF`/`AVERAGEIF`/the `-IFS` family answer once per criterion given as a block while their ranges stay references, `VLOOKUP`/`HLOOKUP`/`XLOOKUP` answer once per key, and `INDEX` with a zero or omitted index returns a whole row or column. An array builtin called from a cell the file did not mark as an array formula now evaluates instead of reporting `#NAME?`, and a rectangle an engine gap reshaped reports the gap rather than retiring cells the real result still covers. Over 165 recalculated corpus workbooks scored against Excel's own results, cell accuracy rises from 86.4906% to 87.6274%, and the workbooks scoring nothing at all fall from 20 to 15.

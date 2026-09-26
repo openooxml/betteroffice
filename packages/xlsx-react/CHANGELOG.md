@@ -1,5 +1,47 @@
 # @betteroffice/xlsx-react
 
+## 0.3.0
+
+### Minor Changes
+
+- 5206ccf: Add host-controlled viewing mode, change notifications, imperative save, and cell selection APIs.
+
+### Patch Changes
+
+- Updated dependencies [80341ac]
+- Updated dependencies [e7f4868]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [3153c95]
+- Updated dependencies [ae8c931]
+- Updated dependencies [6bd3783]
+- Updated dependencies [0f23444]
+- Updated dependencies [21d83b3]
+- Updated dependencies [21d83b3]
+- Updated dependencies [91554bf]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [ddbfd29]
+- Updated dependencies [b56efb3]
+- Updated dependencies [b4db492]
+- Updated dependencies [65f0ce9]
+- Updated dependencies [6d28c9d]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [dfb5c82]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [9a6cdd5]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [6d28c9d]
+- Updated dependencies [bcc90ba]
+- Updated dependencies [35f9cec]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [d1c6a55]
+- Updated dependencies [b56efb3]
+- Updated dependencies [b56efb3]
+  - @betteroffice/xlsx@0.3.0
+  - @betteroffice/xlsx-i18n@0.3.0
+
 ## 0.2.1
 
 ### Patch Changes
