@@ -1128,6 +1128,41 @@ mod tests {
     }
 
     #[test]
+    fn stored_cell_addresses_follow_peer_edits() {
+        let bytes = sample_xlsx();
+        let mut left = Session::open_collaborative(&bytes, 101, None).unwrap();
+        let mut right = Session::open_collaborative(&bytes, 202, None).unwrap();
+        let baseline = left.encode_state_vector();
+        left.edit_cell_json(r#"{"sheet":0,"row":3,"col":1,"input":"left"}"#, None)
+            .unwrap();
+        right
+            .edit_cell_json(r#"{"sheet":0,"row":2,"col":2,"input":"right"}"#, None)
+            .unwrap();
+        let left_update = left.encode_diff(&baseline).unwrap();
+        let right_update = right.encode_diff(&baseline).unwrap();
+        left.apply_update_json(&right_update, None).unwrap();
+        right.apply_update_json(&left_update, None).unwrap();
+
+        let left_page = left
+            .stored_cell_addresses_json(r#"{"sheet":0,"limit":10}"#)
+            .unwrap();
+        assert_eq!(
+            left_page,
+            right
+                .stored_cell_addresses_json(r#"{"sheet":0,"limit":10}"#)
+                .unwrap()
+        );
+        let page: serde_json::Value = serde_json::from_str(&left_page).unwrap();
+        let addresses = page["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cell| cell["a1"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(addresses, ["A1", "B2", "C3", "B4"]);
+    }
+
+    #[test]
     fn formatting_queries_round_trip_and_undo() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let initial = session
