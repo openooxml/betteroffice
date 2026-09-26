@@ -8,11 +8,16 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { useState } from 'react';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
 import type { PptxFontFace, PptxPresenceCursor, SlideDisplayList } from '@betteroffice/pptx';
 import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
+import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
+import { isMacPlatform, matchesChord } from './commands/descriptors';
+
+const mod = () => (isMacPlatform() ? { metaKey: true } : { ctrlKey: true });
 
 const root = resolve(import.meta.dir, '../../..');
 
@@ -20,7 +25,9 @@ const root = resolve(import.meta.dir, '../../..');
 // installed it may tear it down.
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor, within } = await import(
+  '@testing-library/react'
+);
 
 let fixture: Uint8Array;
 let fontBytes: Uint8Array;
@@ -39,6 +46,21 @@ beforeAll(async () => {
 afterEach(cleanup);
 afterAll(async () => {
   if (ownsDom && GlobalRegistrator.isRegistered) await GlobalRegistrator.unregister();
+});
+
+/** Disabled controls with a stated reason stay focusable and are marked `aria-disabled`. */
+function isDisabled(element: HTMLElement): boolean {
+  return element.getAttribute('aria-disabled') === 'true' || (element as HTMLButtonElement).disabled;
+}
+
+describe('shortcut matching', () => {
+  it('needs exactly the chord\'s modifiers', () => {
+    const press = (init: KeyboardEventInit) => new KeyboardEvent('keydown', { key: 'b', ...init });
+    expect(matchesChord('Mod+B', press({ ctrlKey: true }), false)).toBe(true);
+    expect(matchesChord('Mod+B', press({ ctrlKey: true, metaKey: true }), false)).toBe(false);
+    expect(matchesChord('Mod+B', press({ metaKey: true, ctrlKey: true }), true)).toBe(false);
+    expect(matchesChord('Mod+B', press({ ctrlKey: true, altKey: true }), false)).toBe(false);
+  });
 });
 
 describe('PptxEditor PNG export', () => {
@@ -104,10 +126,7 @@ describe('PptxEditor PNG export', () => {
             />
           );
           await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
-          if (!view.queryByTestId('pptx-export-png')) {
-            fireEvent.click(view.getByTestId('pptx-toolbar-more'));
-          }
-          fireEvent.click(view.getByTestId('pptx-export-png'));
+          const exported = opened[0].commands.execute('exportPng', null);
           await waitFor(() => expect(encoding).toBe(true));
           if (scenario === 'unmount') view.unmount();
           if (scenario === 'replace' || scenario === 'stale-error') {
@@ -134,6 +153,11 @@ describe('PptxEditor PNG export', () => {
           });
           expect(downloads).toEqual(scenario === 'download' ? ['report-slide-1.png'] : []);
           expect(errors).toEqual(scenario === 'error' ? [encodingError] : []);
+          expect(await exported).toMatchObject(
+            scenario === 'download'
+              ? { ok: true, status: 'executed' }
+              : { ok: false, failure: { code: scenario === 'error' ? 'command-failed' : 'document-replaced' } }
+          );
         } finally {
           cleanup();
           clicked.mockRestore();
@@ -205,7 +229,7 @@ describe('PptxEditor insert image', () => {
   );
 
   it(
-    'lands on the slide showing when the read finishes, not the one showing when it started',
+    'lands on the slide it was chosen for, not the one showing when decoding finishes',
     async () => {
       const originalImage = globalThis.Image;
       let finishDecoding: (() => void) | undefined;
@@ -252,8 +276,9 @@ describe('PptxEditor insert image', () => {
           opened[0].handle
             .snapshot()
             .slides[slideIndex].shapes.some((shape) => shape.name === 'logo.png');
-        await waitFor(() => expect(hasLogo(1)).toBe(true));
-        expect(hasLogo(0)).toBe(false);
+        await waitFor(() => expect(hasLogo(0)).toBe(true));
+        expect(hasLogo(1)).toBe(false);
+        expect(view.container.querySelector('button[aria-current="page"]')?.textContent).toContain('2');
       } finally {
         cleanup();
         globalThis.Image = originalImage;
@@ -646,13 +671,14 @@ describe('PptxEditor proposal review', () => {
       });
       await waitFor(() => expect(complete.length).toBe(1));
       const accept = view.getByTestId('pptx-canvas-proposal-accept') as HTMLButtonElement;
-      expect(accept.disabled).toBe(true);
+      expect(isDisabled(accept)).toBe(true);
+      expect(accept.title).toBe('The change preview is still loading.');
       await act(async () => { api!.refresh(); });
       await waitFor(() => expect(complete.length).toBe(2));
       await act(async () => { complete[0](); });
-      expect(accept.disabled).toBe(true);
+      expect(isDisabled(accept)).toBe(true);
       await act(async () => { complete[1](); });
-      await waitFor(() => expect(accept.disabled).toBe(false));
+      await waitFor(() => expect(isDisabled(accept)).toBe(false));
       fireEvent.click(accept);
       expect(handle.snapshot().slides[0].notes).toBe('Pending notes');
     } finally {
@@ -697,7 +723,7 @@ describe('PptxEditor proposal review', () => {
     fireEvent.click(view.getByTestId('pptx-proposal-accept'));
     await waitFor(() => expect(handle.listProposals()).toHaveLength(0));
     expect(JSON.stringify(handle.snapshot())).toContain('A reviewed title');
-    fireEvent.keyDown(view.getByRole('application'), { key: 'z', ctrlKey: true, metaKey: true });
+    fireEvent.keyDown(view.getByRole('application'), { key: 'z', ...mod() });
     await waitFor(() => expect(handle.snapshot()).toEqual(original));
     await act(async () => {
       handle.propose('Review agent', null, [{ type: 'setSlideNotes', slideId: slide.id, text: 'Reject this' }]);
@@ -711,7 +737,11 @@ describe('PptxEditor proposal review', () => {
       api!.refresh();
     });
     expect(view.getByTestId('pptx-proposal-stale')).toBeDefined();
-    expect((view.getByTestId('pptx-canvas-proposal-accept') as HTMLButtonElement).disabled).toBe(true);
+    expect(isDisabled(view.getByTestId('pptx-canvas-proposal-accept'))).toBe(true);
+    expect(isDisabled(view.getByTestId('pptx-proposal-accept'))).toBe(true);
+    expect(view.getByTestId('pptx-proposal-accept').title).toBe(
+      "The proposal's targets changed. Review the updated preview before applying."
+    );
     expect(view.getByTestId('pptx-proposal-notes-diff').textContent).toContain('Human notes');
     fireEvent.click(view.getByTestId('pptx-proposal-accept'));
     expect(handle.snapshot().slides[0].notes).toBe('Human notes');
@@ -772,7 +802,7 @@ describe('PptxEditor proposal review', () => {
     fireEvent.click(link);
     await act(async () => {});
     expect(cursors.slice(cursorCount).some((cursor) => cursor?.shapeId === shape.id)).toBe(false);
-    expect((view.getByTestId('pptx-canvas-proposal-accept') as HTMLButtonElement).disabled).toBe(true);
+    expect(isDisabled(view.getByTestId('pptx-canvas-proposal-accept'))).toBe(true);
     fireEvent.click(view.getByTestId('pptx-canvas-proposal-reject'));
     expect(view.queryByTestId('pptx-canvas-review-toolbar')).toBeNull();
   }, 30000);
@@ -936,4 +966,638 @@ describe('PptxEditor host controls', () => {
       expect(api!.save().byteLength).toBeGreaterThan(0);
     } finally { read.mockRestore(); }
   });
+});
+
+describe('PptxEditor commands', () => {
+  const faces = () => [{ family: 'Liberation Sans', bytes: fontBytes }];
+
+  async function open(props: Partial<Parameters<typeof PptxEditor>[0]> = {}) {
+    const opened: PptxEditorApi[] = [];
+    const view = render(
+      <PptxEditor file={fixture} fonts={faces()} onReady={(api) => opened.push(api)} {...props} />
+    );
+    await act(async () => {
+      await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
+    });
+    const api = opened[0];
+    const slide = api.handle.snapshot().slides[0];
+    const shape = slide.shapes.find((candidate) => candidate.textStories.length > 0)!;
+    const story = shape.textStories[0];
+    return { view, api, opened, shape, story };
+  }
+
+  function pauseImages() {
+    const originalImage = globalThis.Image;
+    const pending: Array<{ load(): void; fail(): void }> = [];
+    class PausedImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 400;
+      naturalHeight = 200;
+      set src(value: string) {
+        if (value.startsWith('data:')) {
+          pending.push({ load: () => this.onload?.(), fail: () => this.onerror?.() });
+        } else queueMicrotask(() => this.onload?.());
+      }
+    }
+    globalThis.Image = PausedImage as unknown as typeof Image;
+    return { pending, restore: () => (globalThis.Image = originalImage) };
+  }
+
+  function chooseImage(view: ReturnType<typeof render>) {
+    const file = new File([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], 'queued.png', { type: 'image/png' });
+    fireEvent.change(view.getByTestId('pptx-insert-image-input'), { target: { files: [file] } });
+  }
+
+  it('follows a presentation the host replaces from onReady', async () => {
+    const opened: PptxEditorApi[] = [];
+    const errors: Error[] = [];
+    const fonts = faces();
+    function Host() {
+      const [file, setFile] = useState(fixture);
+      return (
+        <PptxEditor
+          file={file}
+          fonts={fonts}
+          onError={(error) => errors.push(error)}
+          onReady={(api) => {
+            if (opened.push(api) === 1) setFile(new Uint8Array(fixture));
+          }}
+        />
+      );
+    }
+    render(<Host />);
+    await waitFor(() => expect(opened).toHaveLength(2), { timeout: 15_000 });
+    const api = opened[1];
+    expect(api.commands.getState('undo').enabled).toBe(false);
+    const slideId = api.handle.snapshot().slides[0].id;
+    await act(async () => {
+      api.handle.setSlideNotes(slideId, 'After replacement');
+    });
+    await waitFor(() => expect(api.commands.getState('undo').enabled).toBe(true));
+    expect(errors).toEqual([]);
+  }, 30_000);
+
+  it('forced acceptance checks the reviewed preview again once pending input has run', async () => {
+    const images = pauseImages();
+    try {
+      const { view, api } = await open();
+      const handle = api.handle;
+      const slideId = handle.snapshot().slides[0].id;
+      await act(async () => {
+        handle.propose('Review agent', null, [{ type: 'setSlideNotes', slideId, text: 'Proposed notes' }]);
+        handle.setSlideNotes(slideId, 'Human notes');
+        api.refresh();
+      });
+      fireEvent.click(view.getByTestId('pptx-proposals-button'));
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(1));
+      fireEvent.click(view.getByTestId('pptx-proposal-preview'));
+      await waitFor(() => expect(view.getByTestId('pptx-proposal-force')).toBeDefined());
+      fireEvent.click(view.getByTestId('pptx-proposal-force'));
+      handle.setSlideNotes(slideId, 'Newer human notes');
+      await act(async () => images.pending[0].load());
+      await waitFor(() =>
+        expect(view.getByTestId('pptx-proposal-preview-dialog').textContent).toContain('Newer human notes')
+      );
+      expect(handle.snapshot().slides[0].notes).toBe('Newer human notes');
+      expect(handle.listProposals()).toHaveLength(1);
+      fireEvent.click(view.getByTestId('pptx-proposal-force'));
+      await waitFor(() => expect(handle.snapshot().slides[0].notes).toBe('Proposed notes'));
+    } finally {
+      images.restore();
+    }
+  }, 30_000);
+
+  it('a deferred forced acceptance leaves a change selected meanwhile on screen', async () => {
+    const images = pauseImages();
+    try {
+      const { view, api } = await open();
+      const handle = api.handle;
+      const [first, second] = handle.snapshot().slides;
+      await act(async () => {
+        handle.propose('Review agent', null, [
+          { type: 'setSlideNotes', slideId: first.id, text: 'First proposed' },
+          { type: 'setSlideNotes', slideId: second.id, text: 'Second proposed' },
+        ]);
+        handle.setSlideNotes(first.id, 'Human notes');
+        api.refresh();
+      });
+      fireEvent.click(view.getByTestId('pptx-proposals-button'));
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(1));
+      fireEvent.click(view.getAllByTestId('pptx-proposal-preview')[0]);
+      await waitFor(() => expect(view.getByTestId('pptx-proposal-force')).toBeDefined());
+      fireEvent.click(view.getByTestId('pptx-proposal-force'));
+      handle.setSlideNotes(first.id, 'Newer human notes');
+      const dialog = view.getByTestId('pptx-proposal-preview-dialog');
+      const picker = within(dialog).getByRole('combobox', { name: 'Change' }) as HTMLSelectElement;
+      fireEvent.change(picker, { target: { value: '1' } });
+      await waitFor(() => expect(dialog.textContent).toContain('Second proposed'));
+      const layouts = spyOn(handle, 'layoutSlide');
+      await act(async () => images.pending[0].load());
+      await act(async () => {
+        await new Promise((done) => setTimeout(done, 50));
+      });
+      expect(layouts.mock.calls.map(([index]) => index)).not.toContain(0);
+      expect(dialog.textContent).not.toContain('The target changed again');
+      expect(picker.value).toBe('1');
+      expect(handle.snapshot().slides[0].notes).toBe('Newer human notes');
+      expect(handle.listProposals()).toHaveLength(1);
+      layouts.mockRestore();
+    } finally {
+      images.restore();
+    }
+  }, 30_000);
+
+  it('formats through api.commands and the platform-aware shortcuts', async () => {
+    const { view, api, shape, story } = await open();
+    const end = api.handle.story(story.id).length - 1;
+    await act(async () => {
+      api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end });
+    });
+    expect(api.commands.getState('bold')).toMatchObject({ enabled: true, active: true });
+    expect(view.getByTestId('pptx-bold').title).toBe('Bold (Ctrl+B)');
+    const before = api.handle.snapshot();
+    let result: unknown;
+    await act(async () => {
+      result = await api.commands.execute('bold', null);
+    });
+    expect(result).toEqual({ ok: true, status: 'executed' });
+    expect(api.handle.story(story.id).paragraphs[0].runs[0].style.bold).toBe(false);
+    expect(api.commands.getState('bold').active).toBe(false);
+    fireEvent.keyDown(view.getByRole('application'), { key: 'z', ctrlKey: true });
+    await waitFor(() => expect(api.handle.snapshot()).toEqual(before));
+    fireEvent.keyDown(document.body, { key: 'z', ctrlKey: true, shiftKey: true });
+    expect(api.handle.snapshot()).toEqual(before);
+  }, 60_000);
+
+  it('runs a command and later typing after pending image input, in order', async () => {
+    const images = pauseImages();
+    try {
+      const { view, api, shape, story } = await open();
+      await act(async () => {
+        api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 });
+      });
+      const before = api.handle.snapshot();
+      const text = () =>
+        api.handle
+          .story(story.id)
+          .paragraphs.map((paragraph) => paragraph.runs.map((run) => run.text).join(''))
+          .join('\n');
+      const original = text();
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(1));
+      const stage = view.getByRole('application');
+      let undone: unknown;
+      const undo = api.commands.execute('undo', null).then((value) => (undone = value));
+      expect(fireEvent.keyDown(stage, { key: 'x' })).toBe(false);
+      expect(fireEvent.keyDown(stage, { key: 'y' })).toBe(false);
+      expect(api.handle.snapshot()).toEqual(before);
+      await act(async () => {
+        images.pending[0].load();
+        await undo;
+      });
+      await api.flushPendingInput();
+      expect(undone).toEqual({ ok: true, status: 'executed' });
+      expect(text()).toBe(`xy${original}`);
+      const shapes = api.handle.snapshot().slides[0].shapes;
+      expect(shapes.some((candidate) => candidate.name === 'queued.png')).toBe(false);
+      expect(shapes).toHaveLength(before.slides[0].shapes.length);
+    } finally {
+      images.restore();
+    }
+  }, 60_000);
+
+  for (const typed of ['x', 'first character'] as const) {
+    it(`carries queued typing across an undo issued between keystrokes (${typed})`, async () => {
+      const images = pauseImages();
+      try {
+        const { view, api, shape, story } = await open();
+        await act(async () => {
+          api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 });
+        });
+        const text = () =>
+          api.handle
+            .story(story.id)
+            .paragraphs.map((paragraph) => paragraph.runs.map((run) => run.text).join(''))
+            .join('\n');
+        const original = text();
+        const key = typed === 'x' ? 'x' : original[0];
+        chooseImage(view);
+        await waitFor(() => expect(images.pending).toHaveLength(1));
+        const stage = view.getByRole('application');
+        expect(fireEvent.keyDown(stage, { key })).toBe(false);
+        const undo = api.commands.execute('undo', null);
+        expect(fireEvent.keyDown(stage, { key: 'y' })).toBe(false);
+        await act(async () => {
+          images.pending[0].load();
+          await undo;
+        });
+        await api.flushPendingInput();
+        expect(await undo).toEqual({ ok: true, status: 'executed' });
+        expect(text()).toBe(`y${original}`);
+      } finally {
+        images.restore();
+      }
+    }, 60_000);
+  }
+
+  it('fails commands behind refused typing and drops input queued for a replaced deck', async () => {
+    const images = pauseImages();
+    const errors: Error[] = [];
+    try {
+      const { view, api, shape, story } = await open({ onError: (error) => errors.push(error) });
+      await act(async () => {
+        api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 });
+      });
+      const refusal = new Error('typing refused');
+      const insert = spyOn(api.handle, 'insertText').mockImplementation(() => {
+        throw refusal;
+      });
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(1));
+      const stage = view.getByRole('application');
+      fireEvent.keyDown(stage, { key: 'q' });
+      const blocked = api.commands.execute('redo', null);
+      await act(async () => {
+        images.pending[0].load();
+      });
+      expect(await blocked).toMatchObject({ ok: false, failure: { code: 'input-failed' } });
+      expect(errors).toEqual([refusal]);
+      insert.mockRestore();
+
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(2));
+      fireEvent.keyDown(stage, { key: 'z' });
+      const replaced: PptxEditorApi[] = [];
+      await act(async () => {
+        view.rerender(
+          <PptxEditor
+            file={fixture.slice()}
+            fonts={faces()}
+            onReady={(ready) => replaced.push(ready)}
+            onError={(error) => errors.push(error)}
+          />
+        );
+      });
+      await waitFor(() => expect(replaced).toHaveLength(1), { timeout: 15_000 });
+      const fresh = replaced[0].handle.snapshot();
+      await act(async () => {
+        images.pending[1].load();
+      });
+      await replaced[0].flushPendingInput();
+      expect(replaced[0].handle.snapshot()).toEqual(fresh);
+      expect(errors).toHaveLength(1);
+    } finally {
+      images.restore();
+    }
+  }, 60_000);
+
+  it('keeps a picker opened for one deck from inserting into its replacement', async () => {
+    const originalImage = globalThis.Image;
+    class FakeImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 400;
+      naturalHeight = 200;
+      set src(_value: string) {
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+    globalThis.Image = FakeImage as unknown as typeof Image;
+    try {
+      const { view, api } = await open();
+      await act(async () => {
+        expect(await api.commands.execute('insertImage', null)).toEqual({
+          ok: true,
+          status: 'opened',
+        });
+      });
+      const replaced: PptxEditorApi[] = [];
+      await act(async () => {
+        view.rerender(
+          <PptxEditor file={fixture.slice()} fonts={faces()} onReady={(ready) => replaced.push(ready)} />
+        );
+      });
+      await waitFor(() => expect(replaced).toHaveLength(1), { timeout: 15_000 });
+      const fresh = replaced[0].handle.snapshot();
+      await act(async () => {
+        chooseImage(view);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await replaced[0].flushPendingInput();
+      expect(replaced[0].handle.snapshot()).toEqual(fresh);
+      await act(async () => {
+        chooseImage(view);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() =>
+        expect(replaced[0].handle.snapshot().slides[0].shapes.length).toBe(
+          fresh.slides[0].shapes.length + 1
+        )
+      );
+    } finally {
+      globalThis.Image = originalImage;
+    }
+  }, 60_000);
+
+  it('evaluates consecutive commands against the state the previous one left', async () => {
+    const { api, story } = await open();
+    const slideId = api.handle.snapshot().slides[0].id;
+    await act(async () => {
+      api.handle.propose('Review agent', null, [
+        { type: 'replaceText', storyId: story.id, start: 0, end: 0, text: 'Proposed ' },
+      ]);
+      api.refreshProposals();
+    });
+    expect(slideId).toBeDefined();
+    const results: unknown[] = [];
+    await act(async () => {
+      const opening = api.commands.execute('proposalsPanel', null);
+      const closing = api.commands.execute('proposalsPanel', null);
+      const hiding = api.commands.execute('proposalDiff', { enabled: false });
+      const showing = api.commands.execute('proposalDiff', { enabled: true });
+      const zoomed = api.commands.execute('zoom', { scale: 2 });
+      const again = api.commands.execute('zoom', { scale: 2 });
+      results.push(...(await Promise.all([opening, closing, hiding, showing, zoomed, again])));
+    });
+    expect(results).toEqual([
+      { ok: true, status: 'opened' },
+      { ok: true, status: 'executed' },
+      { ok: true, status: 'executed' },
+      { ok: true, status: 'executed' },
+      { ok: true, status: 'executed' },
+      { ok: true, status: 'noop' },
+    ]);
+    expect(api.commands.getState('proposalsPanel').value).toBe(false);
+    expect(api.commands.getState('proposalDiff').value).toBe(true);
+    expect(api.commands.getState('zoom').value).toBe(2);
+  }, 60_000);
+
+  it('fails commands behind failed image input and read-only transitions', async () => {
+    const images = pauseImages();
+    const errors: Error[] = [];
+    try {
+      const { view, api, shape, story } = await open({ onError: (error) => errors.push(error) });
+      await act(async () => {
+        api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 3 });
+      });
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(1));
+      const failed = api.commands.execute('italic', null);
+      await act(async () => {
+        images.pending[0].fail();
+      });
+      expect(await failed).toMatchObject({ ok: false, failure: { code: 'input-failed' } });
+      expect(errors).toHaveLength(1);
+
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(2));
+      const blocked = api.commands.execute('underline', null);
+      await act(async () => {
+        view.rerender(
+          <PptxEditor file={fixture} fonts={faces()} onReady={() => {}} readOnly />
+        );
+      });
+      await act(async () => {
+        images.pending[1].load();
+      });
+      expect(await blocked).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+      expect(errors).toHaveLength(1);
+    } finally {
+      images.restore();
+    }
+  }, 60_000);
+
+  it('stores caret formatting for the next typed text', async () => {
+    const { view, api, shape, story } = await open();
+    await act(async () => {
+      api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 });
+    });
+    expect(api.commands.getState('italic').active).toBe(false);
+    const before = api.handle.snapshot();
+    await act(async () => {
+      expect(await api.commands.execute('italic', null)).toEqual({ ok: true, status: 'executed' });
+    });
+    expect(api.handle.snapshot()).toEqual(before);
+    expect(api.commands.getState('italic').active).toBe(true);
+    fireEvent.keyDown(view.getByRole('application'), { key: 'Q' });
+    const first = api.handle.story(story.id).paragraphs[0].runs[0];
+    expect(first.text.startsWith('Q')).toBe(true);
+    expect(first.style.italic).toBe(true);
+  }, 60_000);
+
+  it('refuses document commands during a pointer gesture and after replacement', async () => {
+    const images = pauseImages();
+    try {
+      const { view, api, shape, story } = await open();
+      const canvas = view.getByTestId('pptx-slide-canvas');
+      const frame = api.handle.layoutSlide(0);
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, frame.width, frame.height);
+      let point: { x: number; y: number } | undefined;
+      for (let y = 0; y < frame.height && !point; y += 8) {
+        for (let x = 0; x < frame.width; x += 8) {
+          if (api.handle.hitTest(x, y)?.kind === 'shape') {
+            point = { x, y };
+            break;
+          }
+        }
+      }
+      expect(point).toBeDefined();
+      canvas.setPointerCapture = () => {};
+      fireEvent.pointerDown(canvas, {
+        isPrimary: true,
+        button: 0,
+        pointerId: 7,
+        clientX: point!.x,
+        clientY: point!.y,
+      });
+      expect(await api.commands.execute('zOrder', { value: 'back' })).toMatchObject({
+        ok: false,
+        failure: { code: 'gesture-active' },
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 7, clientX: point!.x, clientY: point!.y });
+
+      await act(async () => {
+        api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 3 });
+      });
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(1));
+      const stale = api.commands.execute('underline', null);
+      await act(async () => {
+        view.rerender(
+          <PptxEditor file={fixture.slice()} fonts={faces()} onReady={() => {}} />
+        );
+      });
+      await act(async () => {
+        images.pending[0].load();
+      });
+      expect(await stale).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+    } finally {
+      images.restore();
+    }
+  }, 60_000);
+
+  it('answers shortcuts only in the owning editor, past composition, prevented keys and fields', async () => {
+    const saved: Uint8Array[] = [];
+    const first = await open({ onSave: (bytes) => saved.push(bytes) });
+    const other: PptxEditorApi[] = [];
+    const second = render(
+      <PptxEditor file={fixture.slice()} fonts={faces()} onReady={(api) => other.push(api)} />
+    );
+    await act(async () => {
+      await waitFor(() => expect(other).toHaveLength(1), { timeout: 15_000 });
+    });
+    await act(async () => {
+      first.api.selectText({
+        slide: 1,
+        shapeId: first.shape.id,
+        storyId: first.story.id,
+        start: 0,
+        end: 3,
+      });
+    });
+    const italic = () => first.api.handle.story(first.story.id).paragraphs[0].runs[0].style.italic;
+    const initial = italic();
+    const untouched = other[0].handle.snapshot();
+    const stage = within(first.view.container).getByRole('application');
+    const press = (target: Element, init: KeyboardEventInit & { keyCode?: number } = {}) =>
+      fireEvent.keyDown(target, { key: 'i', ctrlKey: true, ...init });
+
+    press(within(second.container).getByRole('application'));
+    press(document.body);
+    press(stage, { isComposing: true });
+    press(stage, { keyCode: 229 });
+    const prevent = (event: Event) => event.preventDefault();
+    stage.addEventListener('keydown', prevent, { once: true });
+    press(stage);
+    const notes = within(first.view.container).getByTestId('pptx-notes-textarea');
+    press(notes);
+    expect(italic()).toBe(initial);
+    expect(other[0].handle.snapshot()).toEqual(untouched);
+
+    expect(press(notes, { key: 's' })).toBe(false);
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(press(stage)).toBe(false);
+    await waitFor(() => expect(italic()).toBe(true));
+  }, 60_000);
+
+  it('owns shortcuts inside its portalled popups and keeps keyboard focus on the toolbar', async () => {
+    const originalRect = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      const rect = originalRect.call(this);
+      return this.getAttribute('role') === 'toolbar' ? { ...rect.toJSON(), width: 4000 } : rect;
+    };
+    try {
+      const { view, api, shape, story } = await open();
+      await act(async () => {
+        api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 3 });
+      });
+      const run = () => api.handle.story(story.id).paragraphs[0].runs[0].style;
+      const initialUnderline = run().underline;
+      const family = view.getByTestId('pptx-font-family');
+      act(() => family.focus());
+      fireEvent.keyDown(family, { key: 'ArrowDown' });
+      const menu = within(document.body).getByRole('menu', { name: 'Font family' });
+      expect(view.container.contains(menu)).toBe(false);
+      const item = document.activeElement as HTMLElement;
+      expect(menu.contains(item)).toBe(true);
+      fireEvent.keyDown(item, { key: 'u', ctrlKey: true });
+      await waitFor(() => expect(run().underline).not.toBe(initialUnderline));
+      fireEvent.keyDown(item, { key: 'Escape' });
+      expect(document.activeElement).toBe(family);
+
+      const italic = view.getByTestId('pptx-italic');
+      act(() => italic.focus());
+      fireEvent.keyDown(italic, { key: 'Enter' });
+      fireEvent.click(italic);
+      await waitFor(() => expect(run().italic).toBe(true));
+      fireEvent.keyDown(italic, { key: 'b', ctrlKey: true });
+      await waitFor(() => expect(run().bold).toBe(false));
+      expect(document.activeElement).toBe(italic);
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = originalRect;
+    }
+  }, 60_000);
+
+  it('lets a save request flush input and reports its outcome', async () => {
+    const saved: Uint8Array[] = [];
+    let decision = true;
+    let api: PptxEditorApi | undefined;
+    const context = await open({
+      onSave: (bytes) => saved.push(bytes),
+      onSaveRequest: async () => {
+        await api!.flushPendingInput();
+        return decision;
+      },
+    });
+    api = context.api;
+    expect(await api.commands.execute('save', null)).toEqual({ ok: true, status: 'executed' });
+    decision = false;
+    expect(await api.commands.execute('save', null)).toEqual({ ok: true, status: 'requested' });
+    expect(saved).toHaveLength(1);
+  }, 60_000);
+
+  it('replaces, hides and keeps the toolbar region by precedence', async () => {
+    const { view } = await open({ toolbar: null });
+    expect(view.queryByTestId('pptx-editor-toolbar')).toBeNull();
+    expect(view.queryByTestId('pptx-present')).toBeNull();
+    const custom = (
+      <EditorToolbar mode="commands">
+        <EditorToolbar.Toolbar>
+          <ToolbarCommandButton id="bold" />
+          <ToolbarCommandButton id="slideshow" />
+        </EditorToolbar.Toolbar>
+      </EditorToolbar>
+    );
+    await act(async () => {
+      view.rerender(
+        <PptxEditor file={fixture} fonts={faces()} toolbar={custom} readOnly />
+      );
+    });
+    expect(view.getByTestId('pptx-bold').title).toContain('The presentation is read-only.');
+    expect(view.queryByTestId('pptx-save')).toBeNull();
+    await act(async () => {
+      view.rerender(
+        <PptxEditor file={fixture} fonts={faces()} toolbar={custom} showToolbar={false} />
+      );
+    });
+    expect(view.queryByTestId('pptx-bold')).toBeNull();
+    expect(view.getByTestId('pptx-insert-image-input')).toBeDefined();
+    await act(async () => {
+      view.rerender(<PptxEditor file={fixture} fonts={faces()} readOnly />);
+    });
+    expect(view.queryByTestId('pptx-editor-toolbar')).toBeNull();
+    expect(view.getByTestId('pptx-present')).toBeDefined();
+  }, 60_000);
+
+  it('drives an external toolbar and owns shortcuts pressed inside it', async () => {
+    const { view, api, shape, story } = await open({ toolbar: null });
+    await act(async () => {
+      api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 3 });
+    });
+    const outside = render(
+      <PptxCommandProvider commands={api.commands}>
+        <EditorToolbar mode="commands">
+          <EditorToolbar.Toolbar>
+            <ToolbarCommandButton id="italic" />
+            <ToolbarCommandButton id="undo" />
+          </EditorToolbar.Toolbar>
+        </EditorToolbar>
+      </PptxCommandProvider>,
+      { container: document.body.appendChild(document.createElement('div')) }
+    );
+    const italic = outside.getAllByTestId('pptx-italic').find((button) => !view.container.contains(button))!;
+    const before = api.handle.snapshot();
+    await act(async () => {
+      fireEvent.click(italic);
+    });
+    await waitFor(() =>
+      expect(api.handle.story(story.id).paragraphs[0].runs[0].style.italic).toBe(true)
+    );
+    fireEvent.keyDown(italic, { key: 'z', ctrlKey: true });
+    await waitFor(() => expect(api.handle.snapshot()).toEqual(before));
+    outside.unmount();
+  }, 60_000);
 });
