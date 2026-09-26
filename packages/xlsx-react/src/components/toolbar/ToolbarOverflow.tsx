@@ -16,7 +16,10 @@ import {
   type OverflowMenuEntry,
   type OverflowMenuHandle,
 } from '../../../../../shared/react-toolbar/OverflowMenu';
-import { useToolbarOverflow } from '../../../../../shared/react-toolbar/useToolbarOverflow';
+import {
+  representsUnit,
+  useToolbarOverflow,
+} from '../../../../../shared/react-toolbar/useToolbarOverflow';
 import { xlsxCommandController } from '../../commands/createXlsxCommandStore';
 import { useXlsxCommands } from '../../commands/hooks';
 import { useTranslation } from '../../i18n';
@@ -136,7 +139,9 @@ export function ToolbarRail({ children, className, style }: ToolbarRailProps) {
   const { hidden, remeasure } = useToolbarOverflow({
     items: itemsRef,
     more: moreRef,
-    canHide: (unit) => unit.getAttribute('role') === 'separator' || sourcesIn(unit).length > 0,
+    canHide: (unit) =>
+      unit.getAttribute('role') === 'separator' ||
+      representsUnit(unit, sourcesIn(unit).map(({ element }) => element)),
     onFocusHidden: () => setFocusMore(true),
   });
 

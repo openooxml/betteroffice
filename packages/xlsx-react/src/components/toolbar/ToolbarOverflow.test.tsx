@@ -176,6 +176,41 @@ describe('xlsx toolbar overflow', () => {
     ]);
   });
 
+  test('keeps a group with a control that has no menu entry in the row', () => {
+    const shared: string[] = [];
+    railWidth = 4000;
+    const controller = createXlsxCommandController();
+    controller.attach(testBinding({ translate: createT(en) }).binding);
+    render(
+      <XlsxCommandProvider commands={controller.store}>
+        <EditorToolbar mode="commands">
+          <EditorToolbar.Toolbar>
+            <ToolbarGroup label="Sharing">
+              <ToolbarCommandButton id="bold" />
+              <button type="button" onClick={() => shared.push('share')}>
+                Share
+              </button>
+            </ToolbarGroup>
+            <ToolbarGroup label="History">
+              <ToolbarCommandButton id="undo" />
+              <ToolbarCommandButton id="redo" />
+            </ToolbarGroup>
+          </EditorToolbar.Toolbar>
+        </EditorToolbar>
+      </XlsxCommandProvider>
+    );
+    resize(10);
+    const toolbar = screen().getByRole('toolbar');
+    const group = (label: string) =>
+      toolbar.querySelector<HTMLElement>(`[role="group"][aria-label="${label}"]`)!;
+    expect(group('Sharing').getAttribute('aria-hidden')).toBeNull();
+    expect((group('Sharing') as HTMLElement & { inert?: boolean }).inert).toBeFalsy();
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Share' }));
+    expect(shared).toEqual(['share']);
+    expect(group('History').getAttribute('aria-hidden')).toBe('true');
+    expect(labels(openWithKeyboard())).toEqual(['Undo', 'Redo']);
+  });
+
   test('supports menu keyboard navigation, typeahead and Escape', () => {
     mount();
     resize(10);

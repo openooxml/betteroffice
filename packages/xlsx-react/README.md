@@ -151,6 +151,7 @@ import {
   authority, and the store is not workbook protection.
 - Narrow toolbars move trailing groups into a keyboard-accessible More menu. Host
   `ToolbarButton`s get an entry there; wrap other content in `ToolbarOverflow`.
+  A group holding content without an entry stays in the row.
 
 The prop-based `EditorToolbar`, `Toolbar` and `useEditorToolbar` API keeps
 working unchanged in the default legacy mode and is deprecated for new
