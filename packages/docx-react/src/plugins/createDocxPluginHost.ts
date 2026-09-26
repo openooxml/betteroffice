@@ -68,6 +68,11 @@ export interface DocxPluginHost {
   selectionChanged(selection: DocxPluginSelection): void;
   modeChanged(mode: EditorMode, readOnly: boolean): void;
   layoutChanged(layout: DocxPluginLayout | null): void;
+  /**
+   * The id of the layout plugins may use now. It clears in the same step as a committed change or
+   * a replaced document, before React renders.
+   */
+  layoutId(): string | null;
   /** Geometry moved without a new layout, as on resize or scroll-container changes. */
   geometryChanged(): void;
   activations(): readonly DocxPluginActivation[];
@@ -376,6 +381,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       const generation = runtime.generation();
       if (generation) notify({ type: 'layout-change', generation, layout });
     },
+
+    layoutId: () => (runtime.generation() === null ? null : state.layout?.id ?? null),
 
     geometryChanged: () => runtime.touch(),
 

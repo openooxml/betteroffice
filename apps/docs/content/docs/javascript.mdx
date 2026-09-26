@@ -185,7 +185,9 @@ shows toolbar contributions with
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
 the current version. `geometry.dom` (a `RenderedDomContext`) answers in
 pages-container units divided by zoom, and `geometry.toOverlayRect(rect)`
-converts such a rectangle into pixels of the unscaled overlay layer. Overlays
+converts such a rectangle into pixels of the unscaled overlay layer, or returns
+`null` once that layout is no longer rendered. `geometry.dom` is experimental
+and may be replaced by a data-only facade. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
 anchor to `{ version, story, paraId }` and appear only while that version is
 current and the body paragraph is unique; a card's `render` receives its `item`,

@@ -130,12 +130,14 @@ export interface DocxPluginSnapshot {
 
 /**
  * Local geometry of the rendered layout. `dom` answers in pages-container units divided by zoom;
- * `toOverlayRect` converts one of those rectangles into overlay-layer pixels.
+ * `toOverlayRect` converts one of those rectangles into overlay-layer pixels, and returns null
+ * once its layout is no longer rendered.
  */
 export interface DocxPluginGeometry {
   layout: DocxPluginLayout;
+  /** @experimental DOM access that a data-only geometry facade may replace in a minor release. */
   dom: RenderedDomContext;
-  toOverlayRect(rect: DocxPluginRect): DocxPluginRect;
+  toOverlayRect(rect: DocxPluginRect): DocxPluginRect | null;
 }
 
 export type DocxPluginNavigationFailureCode =

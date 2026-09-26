@@ -27,6 +27,7 @@ import {
   type DocxPluginDefinition,
   type DocxPluginError,
   type DocxPluginEvent,
+  type DocxPluginGeometry,
 } from '../index';
 import { isMacPlatform } from '../commands/descriptors';
 
@@ -739,6 +740,7 @@ describe('DocxEditor plugins', () => {
   test('overlays follow the rendered layout version; navigation reports missing geometry', async () => {
     const layouts: (string | null)[] = [];
     const contexts: DocxPluginContext<null>[] = [];
+    const geometries: DocxPluginGeometry[] = [];
     const plugin = defineDocxPlugin<null>({
       id: 'acme.review',
       createState: () => null,
@@ -746,19 +748,25 @@ describe('DocxEditor plugins', () => {
         contexts.push(context);
         if (event.type === 'layout-change') layouts.push(event.layout?.version ?? null);
       },
-      overlay: ({ context, geometry }) => (
-        <div
-          data-testid="layout-marker"
-          data-version={geometry.layout.version}
-          data-snapshot={context.snapshot.version}
-        />
-      ),
+      overlay: ({ context, geometry }) => {
+        geometries.push(geometry);
+        return (
+          <div
+            data-testid="layout-marker"
+            data-version={geometry.layout.version}
+            data-snapshot={context.snapshot.version}
+          />
+        );
+      },
     });
     const { ref, view } = await mount({ plugins: [plugin] });
     const marker = () => view.container.querySelector<HTMLElement>('[data-testid="layout-marker"]');
     await until(() => marker() !== null);
     const { version, paragraph } = await firstParagraph(ref);
     expect(marker()!.dataset).toMatchObject({ version, snapshot: version });
+    const unit = { x: 0, y: 0, width: 1, height: 1 };
+    const retained = geometries.at(-1)!;
+    expect(retained.toOverlayRect(unit)).not.toBeNull();
 
     let next = '';
     await act(async () => {
@@ -769,6 +777,8 @@ describe('DocxEditor plugins', () => {
     const afterEdit = layouts.slice(layouts.lastIndexOf(version) + 1);
     expect(afterEdit[0]).toBeNull();
     expect(afterEdit.at(-1)).toBe(next);
+    expect(retained.toOverlayRect(unit)).toBeNull();
+    expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
 
     // happy-dom lays out no pixels, so the pages have no client geometry to scroll to.
     expect(

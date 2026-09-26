@@ -362,10 +362,12 @@ const review = defineDocxPlugin<State>({
 - **Geometry.** `context.geometry` is null until a rendered layout shows the
   current version, and whenever it falls behind. `geometry.dom` answers in
   pages-container units divided by zoom; `geometry.toOverlayRect(rect)` converts
-  one of those rectangles into pixels of the unscaled overlay layer, once. The
-  layer ignores the pointer; interactive overlay elements set
-  `pointer-events: auto`. `snapshot.selection.displayRange` belongs to one
-  layout and is never an edit target.
+  one of those rectangles into pixels of the unscaled overlay layer, once, or
+  returns null after that layout stops being rendered. `geometry.dom` is
+  experimental and may be replaced by a data-only facade. The layer ignores the
+  pointer; interactive overlay elements set `pointer-events: auto`.
+  `snapshot.selection.displayRange` belongs to one layout and is never an edit
+  target.
 - **Sidebar cards** anchor to `{ version, story, paraId }` and show only while
   the document is at that version and the body paragraph resolves uniquely.
   `render` receives the `item` it draws, so one component can draw every card;

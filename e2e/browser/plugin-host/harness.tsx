@@ -135,8 +135,8 @@ const alignment = defineDocxPlugin<ProbeState>({
     <>
       {Array.from({ length: Math.min(geometry.layout.pageCount, 2) }, (_, index) => {
         const bounds = geometry.dom.getPageBounds(index);
-        if (!bounds) return null;
-        const box = geometry.toOverlayRect(bounds);
+        const box = bounds && geometry.toOverlayRect(bounds);
+        if (!box) return null;
         return (
           <div
             key={index}

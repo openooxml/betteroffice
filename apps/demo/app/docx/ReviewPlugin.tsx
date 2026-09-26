@@ -181,17 +181,19 @@ function SelectionOverlay({
         .map((rect, index) => {
           const box = geometry.toOverlayRect(rect);
           return (
-            <div
-              key={index}
-              style={{
-                position: "absolute",
-                left: box.x,
-                top: box.y,
-                width: box.width,
-                height: box.height,
-                outline: "2px dashed rgba(37, 99, 235, 0.7)",
-              }}
-            />
+            box && (
+              <div
+                key={index}
+                style={{
+                  position: "absolute",
+                  left: box.x,
+                  top: box.y,
+                  width: box.width,
+                  height: box.height,
+                  outline: "2px dashed rgba(37, 99, 235, 0.7)",
+                }}
+              />
+            )
           );
         })}
     </>
