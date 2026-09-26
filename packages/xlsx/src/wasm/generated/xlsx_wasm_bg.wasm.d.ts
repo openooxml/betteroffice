@@ -20,6 +20,7 @@ export const xlsxdocument_drainUpdateEvent: (a: number) => [number, number, numb
 export const xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_editCellProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_editWorkbookCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
 export const xlsxdocument_encodeStateVector: (a: number) => [number, number];

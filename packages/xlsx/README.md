@@ -43,6 +43,19 @@ handle itself covers styling (`patchRangeStyle`, `setNumberFormat`), undo/redo,
 and PNG export (`renderPng` / `renderRangePng`; guard with
 `isPngExportAvailable`).
 
+`editWorkbookCells` applies raw cell inputs and captured range formats on
+multiple worksheets in one transaction. This includes one native undo step in
+collaborative sessions. Capture the format first, then submit the inputs and
+format targets together:
+
+```ts
+const format = workbook.captureFormat(0, "A1");
+workbook.editWorkbookCells(
+  [{ sheet: 0, row: 2, col: 0, input: "=A1*2" }],
+  [{ sheet: 1, range: "A1", format }],
+);
+```
+
 ## Print a range
 
 `workbook.printDisplayList(sheet, range, metrics, gridlines)` renders a range

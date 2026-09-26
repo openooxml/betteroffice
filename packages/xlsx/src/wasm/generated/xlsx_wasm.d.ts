@@ -53,6 +53,7 @@ export class XlsxDocument {
      * enter a batch of cell edits as one undo step; returns `SheetInfo` json.
      */
     editCellsJson(args: string): string;
+    editWorkbookCellsJson(args: string): string;
     encodeDiff(remote_state_vector: Uint8Array): Uint8Array;
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
@@ -153,6 +154,7 @@ export interface InitOutput {
     readonly xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_editWorkbookCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly xlsxdocument_encodeStateVector: (a: number) => [number, number];

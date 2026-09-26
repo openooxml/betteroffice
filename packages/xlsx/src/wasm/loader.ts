@@ -251,6 +251,16 @@ export interface CellInputEdit {
   input: string;
 }
 
+export interface WorkbookCellInputEdit extends CellInputEdit {
+  sheet: number;
+}
+
+export interface WorkbookFormatEdit {
+  sheet: number;
+  range: string;
+  format: CapturedFormat;
+}
+
 /**
  * One edit inside a proposal. Same shape as {@link CellInputEdit} plus the
  * sheet index — a proposal's cells carry their own sheet on the wire, so it
@@ -367,6 +377,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+  /** Apply raw inputs and captured formats across sheets as one native undo step. */
+  editWorkbookCells(edits: WorkbookCellInputEdit[], formats: WorkbookFormatEdit[]): EditResult;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -679,6 +691,9 @@ export function openWorkbook(
     },
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
+    },
+    editWorkbookCells(edits: WorkbookCellInputEdit[], formats: WorkbookFormatEdit[]): EditResult {
+      return parseJson(() => doc.editWorkbookCellsJson(JSON.stringify({ edits, formats })), true);
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);

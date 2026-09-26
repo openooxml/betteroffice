@@ -281,6 +281,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = editWorkbookCellsJson)]
+    pub fn edit_workbook_cells_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .edit_workbook_cells_json(args, now_serial())
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// apply a raw op list as one user transaction; returns `SheetInfo` json.
     #[wasm_bindgen(js_name = applyOpsJson)]
     pub fn apply_ops_json(&mut self, transaction_json: &str) -> Result<String, JsValue> {

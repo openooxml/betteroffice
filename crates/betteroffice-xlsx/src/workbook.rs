@@ -39,7 +39,7 @@ use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
     ProposalRequest, Result, SelectionFormatting, SheetInfo, TextSearchMatch, UpdateEvent,
-    UpdateOrigin,
+    UpdateOrigin, WorkbookCellInput, WorkbookFormatInput,
 };
 #[cfg(feature = "raster")]
 use crate::{RenderOptions, RenderedPng};
@@ -1287,6 +1287,49 @@ impl Workbook {
             options.now_serial,
         );
         Ok(self.mutation_result(true, result, &seeds))
+    }
+
+    /// Applies raw cell inputs and captured formats across worksheets in one transaction.
+    pub fn edit_workbook_cells(
+        &mut self,
+        edits: &[WorkbookCellInput],
+        formats: &[WorkbookFormatInput],
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        if edits.is_empty() && formats.is_empty() {
+            return Ok(MutationResult::default());
+        }
+        let mut preview = self.model.clone();
+        let mut ops = Vec::with_capacity(edits.len() + formats.len());
+        for edit in edits {
+            self.validate_target(edit.sheet, edit.cell)?;
+            let state = edit_cell_state(&preview, edit.sheet, edit.cell, &edit.input);
+            validate_cell_state(&state)?;
+            if cell_states_semantically_equal(
+                &current_cell_state(&preview, edit.sheet, edit.cell),
+                &state,
+            ) {
+                continue;
+            }
+            preview
+                .sheet_mut(edit.sheet)
+                .expect("sheet validated")
+                .set_cell(edit.cell, state.clone().into());
+            ops.push(Op::SetCell {
+                sheet: edit.sheet,
+                at: edit.cell,
+                cell: state,
+            });
+        }
+        for item in formats {
+            self.validate_bounded_range(item.sheet, item.range)?;
+            ops.push(Op::ApplyRangeFormat {
+                sheet: item.sheet,
+                range: item.range,
+                format: item.format.clone(),
+            });
+        }
+        self.apply_ops(ops, options)
     }
 
     pub fn apply_ops(
