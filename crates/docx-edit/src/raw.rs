@@ -89,7 +89,8 @@ impl EditingDoc {
     /// in the same transaction it takes a fresh key for a key any paragraph,
     /// present or deleted, held before, and a fresh Word paragraph ID for an
     /// ID another paragraph owns or a deleted one reserves. Ops that author
-    /// into an editor-only paragraph promote it, as typed edits do.
+    /// into an editor-only paragraph promote it, as typed edits do; content
+    /// they insert into it and delete again does not.
     pub fn apply_raw_ops(&self, story_id: &str, ops: Vec<RawOp>, ctx: &EditCtx) -> OpResult<()> {
         let rekeys = ops.iter().any(|op| match op {
             RawOp::InsertEmbed { kind, .. } => kind == PILCROW_KIND,
@@ -340,18 +341,33 @@ impl InsertRun {
     }
 }
 
-/// Whether an op inserts content before, or sets a property of, the mark
-/// that ends a story `len` units long as the preceding ops leave it.
+/// Whether the ops set a property of the mark that ends a story `len` units
+/// long, or leave content they insert directly before it. Content they
+/// insert there and delete again does not author into the paragraph.
 fn authors_last_paragraph(ops: &[RawOp], mut len: u32) -> bool {
+    let mut kept = 0u32;
     for op in ops {
         let (index, grows) = match op {
-            RawOp::Insert { index, text, .. } => (
-                (!text.is_empty()).then_some(*index),
-                text.encode_utf16().count() as u32,
-            ),
-            RawOp::InsertEmbed { index, .. } => (Some(*index), 1),
-            RawOp::SetEmbedAttr { index, key, .. } => ((key != PARA_ID).then_some(*index), 0),
-            RawOp::Delete { len: removed, .. } => {
+            RawOp::Insert { index, text, .. } => (*index, text.encode_utf16().count() as u32),
+            RawOp::InsertEmbed { index, .. } => (*index, 1),
+            RawOp::SetEmbedAttr { index, key, .. } => {
+                if key != PARA_ID && index + 1 == len {
+                    return true;
+                }
+                continue;
+            }
+            RawOp::Delete {
+                index,
+                len: removed,
+            } => {
+                let mark = len.saturating_sub(1);
+                let start = (*index).max(mark.saturating_sub(kept));
+                kept = kept.saturating_sub(
+                    index
+                        .saturating_add(*removed)
+                        .min(mark)
+                        .saturating_sub(start),
+                );
                 len = len.saturating_sub(*removed);
                 continue;
             }
@@ -359,12 +375,12 @@ fn authors_last_paragraph(ops: &[RawOp], mut len: u32) -> bool {
                 continue;
             }
         };
-        if index.is_some_and(|index| index + 1 == len) {
-            return true;
+        if (len.saturating_sub(kept + 1)..len).contains(&index) {
+            kept += grows;
         }
         len += grows;
     }
-    false
+    kept > 0
 }
 
 /// Applies `ops` to one story, collecting into `rekeyed` the pilcrows whose

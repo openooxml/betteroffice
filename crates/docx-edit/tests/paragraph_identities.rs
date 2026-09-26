@@ -1064,6 +1064,46 @@ fn raw_ops_authoring_into_an_editor_only_paragraph_promote_it() {
         assert_eq!(promoted.id_origin, Some(ParagraphIdOrigin::Authored));
         assert!(promoted.ooxml_para_id.is_some());
     }
+
+    let doc = seeded(&bytes);
+    let tail = doc
+        .paragraphs("body")
+        .unwrap()
+        .last()
+        .unwrap()
+        .para_id
+        .clone();
+    let at = doc.paragraph_mark_position(&tail).unwrap().index;
+    let typed = |text: &str| RawOp::Insert {
+        index: at,
+        text: text.into(),
+        attrs: Default::default(),
+    };
+    doc.apply_raw_ops(
+        "body",
+        vec![
+            typed("typed"),
+            RawOp::Delete {
+                index: at + 1,
+                len: 4,
+            },
+            RawOp::Delete { index: at, len: 1 },
+        ],
+        &ctx(),
+    )
+    .unwrap();
+    let transient = identity(&doc, &tail);
+    assert_eq!(
+        (transient.origin, transient.ooxml_para_id),
+        (ParagraphOrigin::Synthetic, None)
+    );
+    doc.apply_raw_ops(
+        "body",
+        vec![typed("typed"), RawOp::Delete { index: at, len: 4 }],
+        &ctx(),
+    )
+    .unwrap();
+    assert_eq!(identity(&doc, &tail).origin, ParagraphOrigin::Authored);
 }
 
 /// Writes the session's save plan over a model parsed from the source, as a
