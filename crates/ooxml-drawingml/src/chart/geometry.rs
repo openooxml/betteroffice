@@ -308,6 +308,9 @@ pub enum PlotFill<'a> {
         foreground: Option<&'a str>,
         background: Option<&'a str>,
     },
+    Gradient(&'a [String]),
+    /// A fill the geometry cannot paint: the chart's default ground stands in.
+    Unsupported,
 }
 
 /// The `a:ln` of a `c:spPr`.
@@ -647,6 +650,8 @@ fn plot_fill_from_model(fill: &super::model::ChartFill) -> PlotFill<'_> {
             foreground: foreground.as_deref(),
             background: background.as_deref(),
         },
+        super::model::ChartFill::Gradient { colors } => PlotFill::Gradient(colors),
+        super::model::ChartFill::Unsupported => PlotFill::Unsupported,
     }
 }
 
@@ -1794,9 +1799,9 @@ fn emit_family<S: PlotSink + ?Sized>(
 }
 
 /// The one colour a fill paints as, or `None` for `a:noFill` and for a fill
-/// whose colours did not resolve. A pattern averages its two: no host carries a
-/// hatch paint, and over a whole chart space the mean reads far closer than
-/// either colour on its own.
+/// whose colours did not resolve. A pattern averages its two and a gradient its
+/// stops: no host carries either paint, and over a whole chart space the mean
+/// reads far closer than any one colour on its own.
 fn plot_fill_color(fill: PlotFill<'_>) -> Option<String> {
     match fill {
         PlotFill::None => None,
@@ -1810,7 +1815,54 @@ fn plot_fill_color(fill: PlotFill<'_>) -> Option<String> {
             }
             (foreground, background) => foreground.or(background).map(str::to_owned),
         },
+        PlotFill::Gradient(colors) => mean_hex(colors),
+        PlotFill::Unsupported => None,
     }
+}
+
+/// The mean of the `#RRGGBB` or `#RRGGBBAA` colours that parse, or `None`
+/// when none does. Each colour weighs by its opacity, so a clear stop lends no
+/// hue, and the mean alpha stays in the result while it is below opaque.
+fn mean_hex(colors: &[String]) -> Option<String> {
+    let parsed: Vec<[u8; 4]> = colors
+        .iter()
+        .filter_map(|color| parse_rgba(color))
+        .collect();
+    if parsed.is_empty() {
+        return None;
+    }
+    let count = parsed.len() as u64;
+    let weight: u64 = parsed.iter().map(|rgba| u64::from(rgba[3])).sum();
+    let channel = |index: usize| {
+        parsed
+            .iter()
+            .map(|rgba| u64::from(rgba[index]) * u64::from(rgba[3]))
+            .sum::<u64>()
+            .checked_div(weight)
+            .unwrap_or_else(|| {
+                parsed
+                    .iter()
+                    .map(|rgba| u64::from(rgba[index]))
+                    .sum::<u64>()
+                    / count
+            })
+    };
+    let rgb = format!("#{:02X}{:02X}{:02X}", channel(0), channel(1), channel(2));
+    Some(match weight / count {
+        255 => rgb,
+        alpha => format!("{rgb}{alpha:02X}"),
+    })
+}
+
+fn parse_rgba(color: &str) -> Option<[u8; 4]> {
+    let hex = color.strip_prefix('#').unwrap_or(color);
+    let alpha = match hex.len() {
+        6 => 255,
+        8 => u8::from_str_radix(hex.get(6..8)?, 16).ok()?,
+        _ => return None,
+    };
+    let [red, green, blue] = parse_hex(hex.get(..6)?)?;
+    Some([red, green, blue, alpha])
 }
 
 /// The midpoint of two `#RRGGBB` colours.
@@ -4710,6 +4762,12 @@ mod tests {
     };
 
     const DEFAULT_MARKER_PX: f64 = DEFAULT_MARKER_PT * 4.0 / 3.0;
+
+    #[test]
+    fn a_gradient_with_many_opaque_stops_keeps_its_colour() {
+        let stops = vec!["#FFFFFF".to_owned(); 70_000];
+        assert_eq!(mean_hex(&stops).as_deref(), Some("#FFFFFF"));
+    }
 
     #[test]
     fn an_unmeasured_legend_label_is_never_negative_and_counts_gaps_between() {
