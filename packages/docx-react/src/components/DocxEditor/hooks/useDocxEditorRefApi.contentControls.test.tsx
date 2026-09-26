@@ -11,6 +11,7 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type DocxEditStep, type YrsSession } from '@betteroffice/docx/yrs';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
+import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxEditorRef } from '../../DocxEditor';
 import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
@@ -75,7 +76,6 @@ async function setup(options: { flush?: () => void; mode?: EditorMode } = {}) {
       historyStateRef: { current: null },
       pagedEditorRef: { current: editor },
       handleSave: async () => null,
-      handleDirectPrint: () => {},
       zoom: 1,
       setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
@@ -90,6 +90,7 @@ async function setup(options: { flush?: () => void; mode?: EditorMode } = {}) {
         throw new Error('unused');
       }) as never,
       commentIdAllocator: createCommentIdAllocator(),
+      commands: UNAVAILABLE_DOCX_COMMANDS,
       modeRef,
     });
     return ref;
@@ -241,7 +242,6 @@ function Mounted({
     historyStateRef: { current: null },
     pagedEditorRef: editorRef,
     handleSave: async () => null,
-    handleDirectPrint: () => {},
     zoom: 1,
     setZoom: () => {},
     scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
@@ -256,6 +256,7 @@ function Mounted({
       throw new Error('unused');
     }) as never,
     commentIdAllocator: createCommentIdAllocator(),
+    commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef,
   });
   return (

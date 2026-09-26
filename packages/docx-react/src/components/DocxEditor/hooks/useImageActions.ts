@@ -4,15 +4,9 @@ import type {
   FootnoteProperties,
   EndnoteProperties,
 } from '@betteroffice/docx/types/document';
-import { toolbarValueToLayoutTarget } from '@betteroffice/docx/docx';
 import { updateFinalSectionProperties } from '@betteroffice/docx/editor';
-import {
-  captureInlinePositionEmuFromDisplayList,
-  type DisplayListQueries,
-} from '@betteroffice/docx/layout/render';
 import type { ImagePositionData } from '../../dialogs/ImagePositionDialog';
 import type { ImagePropertiesData } from '../../dialogs/ImagePropertiesDialog';
-import type { PagedEditorRef } from '../PagedEditor';
 
 /** Minimal shape the hook needs from the parent's selection-tracker state. */
 interface ImageContext {
@@ -21,89 +15,33 @@ interface ImageContext {
 }
 
 /**
- * Image-related dialogs and toolbar actions:
- *  - wrap type (inline ↔ float-wrap variants) via setImageWrapType
- *  - 90° rotate + horizontal/vertical flip via transform attr
+ * Image and note dialogs:
  *  - position dialog (horizontal/vertical anchor + distFrom* offsets)
  *  - properties dialog (alt text, border, width/height)
  *  - footnote/endnote properties dialog (footnote numbering/format)
  *
  * Owns the open/closed state for each dialog; the JSX consumer reads the
- * `*Open` flags + the apply/cancel callbacks. `pmImageContext` comes
- * from the parent's selection-tracker state because it's set by the
- * image right-click flow.
+ * `*Open` flags + the apply/cancel callbacks. `applyGeometry` writes to the
+ * image the dialog opened for, wherever later edits moved it.
  */
 export function useImageActions({
   document,
   pmImageContext,
-  displayListQueries,
-  pagedEditorRef,
-  focusActiveEditor,
+  applyGeometry,
   pushDocument,
 }: {
   document: Document | null;
   pmImageContext: ImageContext | null | undefined;
-  displayListQueries: DisplayListQueries | null;
-  pagedEditorRef: React.RefObject<PagedEditorRef | null>;
-  focusActiveEditor: () => void;
+  applyGeometry: (patch: Readonly<Record<string, unknown>>) => void;
   pushDocument: (doc: Document) => void;
 }) {
   const [imagePositionOpen, setImagePositionOpen] = useState(false);
   const [imagePropsOpen, setImagePropsOpen] = useState(false);
   const [footnotePropsOpen, setFootnotePropsOpen] = useState(false);
 
-  const handleImageWrapType = useCallback(
-    (toolbarValue: string) => {
-      if (!pmImageContext) return;
-      const pos = pmImageContext.pos;
-
-      // The toolbar and the right-click menu share `setImageWrapType` and its
-      // `resolveAnchorAttrs` taxonomy. `toolbarValueToLayoutTarget` lives in
-      // core so the Vue adapter doesn't have to duplicate it.
-      const target = toolbarValueToLayoutTarget(toolbarValue);
-      if (!target) return;
-
-      // For inline → anchor, capture the inline glyph's rendered offset so the
-      // new float lands at the same X/Y (Word's behavior). The core helper
-      // handles the zoom + EMU conversion uniformly.
-      let opts: { initialPositionEmu?: { horizontalEmu: number; verticalEmu: number } } | undefined;
-      if (pmImageContext.wrapType === 'inline' && target !== 'inline') {
-        const captured = displayListQueries
-          ? captureInlinePositionEmuFromDisplayList(displayListQueries, pos)
-          : undefined;
-        if (captured) opts = { initialPositionEmu: captured };
-      }
-
-      if (pagedEditorRef.current?.applyYrsCommand({
-        type: 'imageWrap',
-        pmPos: pos,
-        target,
-        options: opts,
-      })) {
-        focusActiveEditor();
-      }
-    },
-    [displayListQueries, focusActiveEditor, pagedEditorRef, pmImageContext]
-  );
-
-  const handleImageTransform = useCallback(
-    (action: 'rotateCW' | 'rotateCCW' | 'flipH' | 'flipV') => {
-      if (!pmImageContext) return;
-      if (pagedEditorRef.current?.applyYrsCommand({
-        type: 'imageTransform',
-        pmPos: pmImageContext.pos,
-        action,
-      })) {
-        focusActiveEditor();
-      }
-    },
-    [focusActiveEditor, pagedEditorRef, pmImageContext]
-  );
-
   const handleApplyImagePosition = useCallback(
     (data: ImagePositionData) => {
       if (!pmImageContext) return;
-      const pos = pmImageContext.pos;
       const patch = {
         position: {
           horizontal: data.horizontal,
@@ -114,11 +52,9 @@ export function useImageActions({
         ...(data.distLeft != null ? { distLeft: data.distLeft } : {}),
         ...(data.distRight != null ? { distRight: data.distRight } : {}),
       };
-      if (pagedEditorRef.current?.applyYrsCommand({ type: 'imageGeometry', pmPos: pos, patch })) {
-        focusActiveEditor();
-      }
+      applyGeometry(patch);
     },
-    [focusActiveEditor, pagedEditorRef, pmImageContext]
+    [applyGeometry, pmImageContext]
   );
 
   const handleOpenImageProperties = useCallback(() => {
@@ -128,7 +64,6 @@ export function useImageActions({
   const handleApplyImageProperties = useCallback(
     (data: ImagePropertiesData) => {
       if (!pmImageContext) return;
-      const pos = pmImageContext.pos;
       const patch = {
         alt: data.alt ?? null,
         borderWidth: data.borderWidth ?? null,
@@ -137,11 +72,9 @@ export function useImageActions({
         width: data.width ?? null,
         height: data.height ?? null,
       };
-      if (pagedEditorRef.current?.applyYrsCommand({ type: 'imageGeometry', pmPos: pos, patch })) {
-        focusActiveEditor();
-      }
+      applyGeometry(patch);
     },
-    [focusActiveEditor, pagedEditorRef, pmImageContext]
+    [applyGeometry, pmImageContext]
   );
 
   const handleApplyFootnoteProperties = useCallback(
@@ -169,8 +102,6 @@ export function useImageActions({
     setImagePropsOpen,
     footnotePropsOpen,
     setFootnotePropsOpen,
-    handleImageWrapType,
-    handleImageTransform,
     handleApplyImagePosition,
     handleOpenImageProperties,
     handleApplyImageProperties,

@@ -15,6 +15,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { DocxEditorProps } from '../../DocxEditor';
+import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
 
@@ -33,64 +34,49 @@ const PRINT_CANVAS_CSS =
   'img.print-page:last-child { break-after: auto; }\n' +
   '@page { margin: 0; size: auto; }';
 
-// Print once fonts + images have settled, then close. Prints as soon as
-// everything is ready (usually well under the cap) with a hard timeout so a
-// browser that never resolves `fonts.ready`/`decode()` still prints.
-function finishPrint(w: Window, images: HTMLImageElement[] = []): void {
-  let done = false;
-  const runPrint = () => {
-    if (done || w.closed) return;
-    done = true;
-    w.focus();
-    w.print();
-    w.close();
-  };
-  Promise.all([
+// Resolves once fonts + images have settled (usually well under the cap), with
+// a hard timeout so a browser that never resolves `fonts.ready`/`decode()`
+// still prints.
+function settled(w: Window, images: HTMLImageElement[]): Promise<void> {
+  const loaded = Promise.all([
     w.document.fonts?.ready ?? Promise.resolve(),
     ...images.map((img) => img.decode().catch(() => undefined)),
-  ]).then(runPrint, runPrint);
-  setTimeout(runPrint, 2000);
+  ]).then(() => undefined, () => undefined);
+  return Promise.race([loaded, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
 }
 
-/** Prints display-list pages as PNG images without interpolating data into markup. */
-function printDisplayListPages(
+/** Fills `w` with display-list pages as PNG images without interpolating data into markup. */
+async function renderDisplayListPages(
+  w: Window,
   displayList: DisplayList,
-  resolveImage: ImageResolver,
-  onPrint?: () => void
-): void {
-  const w = openPrintWindow('Print', '');
-  if (!w) {
-    window.print();
-    onPrint?.();
-    return;
-  }
+  resolveImage: ImageResolver
+): Promise<void> {
   const style = w.document.createElement('style');
   style.textContent = PRINT_CANVAS_CSS;
   w.document.head.appendChild(style);
-
-  void rasterizeDisplayListPages(displayList, { resolveImage }).then(
-    (canvases) => {
-      const images: HTMLImageElement[] = [];
-      for (const canvas of canvases) {
-        try {
-          const img = w.document.createElement('img');
-          img.className = 'print-page';
-          img.src = canvas.toDataURL('image/png');
-          w.document.body.appendChild(img);
-          images.push(img);
-        } catch {
-          // Skip an unexpectedly tainted page without exposing markup.
-        }
-      }
-      finishPrint(w, images);
-      onPrint?.();
-    },
-    () => {
-      w.close();
-      window.print();
-      onPrint?.();
+  const canvases = await rasterizeDisplayListPages(displayList, { resolveImage });
+  const images: HTMLImageElement[] = [];
+  for (const canvas of canvases) {
+    try {
+      const img = w.document.createElement('img');
+      img.className = 'print-page';
+      img.src = canvas.toDataURL('image/png');
+      w.document.body.appendChild(img);
+      images.push(img);
+    } catch {
+      // Skip an unexpectedly tainted page without exposing markup.
     }
-  );
+  }
+  await settled(w, images);
+}
+
+/** A print window opened during a user gesture, filled once the document has settled. */
+export interface DocxPrintJob {
+  /** Renders `displayList` into the reserved window and waits for its pages to load. */
+  prepare(displayList: DisplayList): Promise<void>;
+  /** Prints the prepared pages; false when the reserved window was closed first. */
+  print(): boolean;
+  cancel(): void;
 }
 
 /**
@@ -103,7 +89,6 @@ function printDisplayListPages(
  */
 export function useFileIO({
   pagedEditorRef,
-  displayList,
   resolveImage,
   comments,
   documentName,
@@ -118,7 +103,6 @@ export function useFileIO({
   focusActiveEditor,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
-  displayList: DisplayList | null;
   resolveImage: ImageResolver;
   comments: Comment[];
   documentName: string | undefined;
@@ -133,8 +117,9 @@ export function useFileIO({
   focusActiveEditor: () => void;
 }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const imageInsertRef = useRef<DocxImageInsert | null>(null);
   const docxInputRef = useRef<HTMLInputElement>(null);
-  const saveRequestRef = useRef<Promise<void> | null>(null);
+  const saveRequestRef = useRef<Promise<DocxSaveOutcome> | null>(null);
 
   const handleSave = useCallback(
     async (): Promise<ArrayBuffer | null> => {
@@ -177,26 +162,42 @@ export function useFileIO({
     [pagedEditorRef, comments, onSave, onError]
   );
 
-  const handleDirectPrint = useCallback(() => {
-    if (!displayList) {
-      window.print();
-      onPrint?.();
-      return;
-    }
-    printDisplayListPages(displayList, resolveImage, onPrint);
-  }, [displayList, resolveImage, onPrint]);
+  const reservePrint = useCallback((): DocxPrintJob => {
+    const w = openPrintWindow('Print', '');
+    return {
+      async prepare(displayList) {
+        if (w && !w.closed) await renderDisplayListPages(w, displayList, resolveImage);
+      },
+      print() {
+        if (!w) {
+          window.print();
+        } else {
+          if (w.closed) return false;
+          w.focus();
+          w.print();
+          w.close();
+        }
+        onPrint?.();
+        return true;
+      },
+      cancel() {
+        if (w && !w.closed) w.close();
+      },
+    };
+  }, [resolveImage, onPrint]);
 
-  const handleDownloadDocument = useCallback((): Promise<void> => {
+  const handleDownloadDocument = useCallback((): Promise<DocxSaveOutcome> => {
     if (saveRequestRef.current) return saveRequestRef.current;
-    const pending = Promise.resolve().then(async () => {
+    const pending = Promise.resolve().then(async (): Promise<DocxSaveOutcome> => {
       const editor = pagedEditorRef.current;
       const session = editor?.getYrsSession();
-      if (onSaveRequest && (await onSaveRequest()) !== true) return;
+      if (onSaveRequest && (await onSaveRequest()) !== true) return 'requested';
       if (editor !== pagedEditorRef.current || session !== editor?.getYrsSession()) {
         throw new Error('The document changed during the save request');
       }
       const buffer = await handleSave();
-      if (!buffer || !downloadOnSave) return;
+      if (!buffer) return 'failed';
+      if (!downloadOnSave) return 'saved';
       const blob = new Blob([buffer], {
         type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       });
@@ -206,8 +207,10 @@ export function useFileIO({
       a.download = `${(documentName?.trim() || 'document').replace(/\.docx$/i, '')}.docx`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 0);
-    }).catch((error) => {
+      return 'saved';
+    }).catch((error): DocxSaveOutcome => {
       onError?.(toFileIOError(error, 'Failed to save document'));
+      return 'failed';
     }).finally(() => {
       if (saveRequestRef.current === pending) saveRequestRef.current = null;
     });
@@ -247,13 +250,17 @@ export function useFileIO({
     [loadBuffer, onDocumentNameChange, onError, onOpen]
   );
 
-  const handleInsertImageClick = useCallback(() => {
+  /** Opens the picker; `insert` stays with the file chosen in it through decoding. */
+  const handleInsertImageClick = useCallback((insert?: DocxImageInsert) => {
+    imageInsertRef.current = insert ?? null;
     imageInputRef.current?.click();
   }, []);
 
   const handleImageFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
+      const insert = imageInsertRef.current;
+      imageInsertRef.current = null;
       // Reset the input so the same file can be selected again
       e.target.value = '';
       if (!file) return;
@@ -271,17 +278,24 @@ export function useFileIO({
             width = INSERT_IMAGE_MAX_WIDTH_PX;
           }
           const rId = `rId_img_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
+          const picture = {
+            src: dataUrl,
+            alt: file.name,
+            width,
+            height,
+            rId,
+            wrapType: 'inline',
+            displayMode: 'inline',
+          };
+          if (insert) {
+            void insert(picture).then((result) => {
+              if (result.ok && result.status === 'executed') focusActiveEditor();
+            });
+            return;
+          }
           const inserted = pagedEditorRef.current?.applyYrsCommand({
             type: 'insertImage',
-            image: {
-              src: dataUrl,
-              alt: file.name,
-              width,
-              height,
-              rId,
-              wrapType: 'inline',
-              displayMode: 'inline',
-            },
+            image: picture,
           });
           if (inserted) focusActiveEditor();
         };
@@ -298,7 +312,7 @@ export function useFileIO({
     imageInputRef,
     docxInputRef,
     handleSave,
-    handleDirectPrint,
+    reservePrint,
     handleDownloadDocument,
     handleOpenDocument,
     handleDocxFileChange,

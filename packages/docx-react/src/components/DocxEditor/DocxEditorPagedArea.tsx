@@ -10,6 +10,7 @@ import type {
 import type { Comment } from '@betteroffice/docx/types/content';
 import { type BundledFontProvider } from '@betteroffice/docx/layout';
 import { PagedEditor, type PagedEditorRef } from './PagedEditor';
+import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
@@ -51,6 +52,7 @@ import { useEscapeKey } from '../../hooks/useEscapeKey';
 export function DocxEditorPagedArea({
   // PagedEditor refs + state
   pagedEditorRef,
+  commandBridgeRef,
   scrollContainerRef,
   editorContentRef,
   // Document + section
@@ -133,6 +135,7 @@ export function DocxEditorPagedArea({
   rustFontChainsProviderRef,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
+  commandBridgeRef: React.MutableRefObject<PagedEditorCommandBridge | null>;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   editorContentRef: React.RefObject<HTMLDivElement | null>;
   document: Document | null;
@@ -155,7 +158,7 @@ export function DocxEditorPagedArea({
   readOnly: boolean;
   showHiddenText?: boolean;
   onYrsContentChange: () => void;
-  onYrsHistoryChange: (canUndo: boolean, canRedo: boolean) => void;
+  onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: () => void;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
   onRenderedDomContextReady: ((ctx: RenderedDomContext) => void) | undefined;
@@ -413,6 +416,7 @@ export function DocxEditorPagedArea({
     <>
       <PagedEditor
         ref={pagedEditorRef}
+        commandBridgeRef={commandBridgeRef}
         document={document}
         yrsCore={yrsCore}
         collaboration={collaboration}
