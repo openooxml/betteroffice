@@ -19,7 +19,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::EditingDoc;
 use crate::batch::DocumentVersion;
 
-pub use crate::read_types::{Anchor, ControlMetadata, HeadingInfo, OutlineSource, StorySelection};
+pub use crate::read_types::{
+    Anchor, ControlMetadata, HeadingInfo, OutlineSource, StorySelection, UnlocatedReason,
+};
 pub use markdown::render_docx_markdown;
 
 /// The only structured-content schema version this crate reads and writes.

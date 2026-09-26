@@ -8,8 +8,8 @@ use std::rc::Rc;
 use docx_edit::structured::{
     Anchor, AnchorScope, Block, BlockKind, CachedResult, DiagnosticCode, DocxStructuredContent,
     ExportFailureCode, ExportOptions, FormattingMark, Inline, InlineKind, MarkdownOptions,
-    OutlineSource, RevisionKind, RevisionView, StoryKind, StorySelection, VerticalMerge,
-    export_docx_markdown, export_docx_structured, render_docx_markdown,
+    OutlineSource, RevisionKind, RevisionView, StoryKind, StorySelection, UnlocatedReason,
+    VerticalMerge, export_docx_markdown, export_docx_structured, render_docx_markdown,
 };
 use docx_edit::{
     EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditTextView, EditingDoc,
@@ -1105,7 +1105,13 @@ fn duplicate_paragraph_ids_are_reported_as_ambiguous() {
         .count();
     assert_eq!(ambiguous, 2);
     for block in body(&content) {
-        assert!(matches!(&block.anchor, Anchor::Paragraph { para_id, .. } if para_id.is_empty()));
+        assert!(matches!(
+            &block.anchor,
+            Anchor::Unlocated {
+                reason: UnlocatedReason::DuplicateParagraphId,
+                ..
+            }
+        ));
         assert!(
             inlines(block)
                 .iter()
