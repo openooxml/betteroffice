@@ -86,7 +86,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, and version-checked edit batches.",
+    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, composable toolbar controls, and version-checked edit batches.",
   },
   {
     name: "@betteroffice/xlsx",
@@ -98,11 +98,11 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with version-checked atomic edit batches, opt-in operation timings, manual undo boundaries, and comment repositioning.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with version-checked atomic edit batches, opt-in operation timings, manual undo boundaries, comment repositioning, and caret anchors.",
   },
   {
     name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, and version-checked edit batches.",
+    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, composable toolbar controls, and version-checked edit batches.",
   },
 ];
 
