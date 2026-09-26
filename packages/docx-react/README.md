@@ -238,7 +238,8 @@ editor's locale, and its keyboard shortcuts reach that editor only.
   and submenu navigation, keeping every choice of the built-in controls; custom
   colors and sizes are asked for in a dialog. Wrap host content in
   `ToolbarOverflow` to give it a menu entry; content without one, and any group
-  holding it, stays in the row.
+  holding it, stays in the row, which scrolls horizontally when that content
+  does not fit.
 
 ## Host edit batches
 
