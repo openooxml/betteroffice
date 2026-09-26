@@ -159,9 +159,11 @@ if not result["ok"]:
 Steps set inputs (parsed like `set`), formulas (source without `=`), number
 formats and styles. `validate_edits` stages a batch without changing anything,
 `find_text` searches display text exactly, and `history: "none"` keeps a batch
-out of undo. A malformed request raises `ValueError`. Batches do not insert or
-delete rows, columns or sheets, and refuse writes to merged-cell followers,
-array-formula cells and protected sheets.
+out of undo. `"none"` is experimental: standalone undo still replays older
+steps over its cells, and that interaction may change in a minor release. A
+malformed request raises `ValueError`. Batches do not insert or delete rows,
+columns or sheets, and refuse writes to merged-cell followers, array-formula
+cells and protected sheets.
 
 ## Structured export
 

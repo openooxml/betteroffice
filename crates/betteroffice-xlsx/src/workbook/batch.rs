@@ -96,6 +96,7 @@ pub enum EditHistory {
     Separate,
     /// No undo step; existing undo and redo entries stay. Standalone history replays inverse
     /// operations, so undoing an older step that wrote the same cell still overwrites it.
+    /// Experimental: its interaction with standalone undo may change in a minor release.
     None,
 }
 
@@ -138,6 +139,7 @@ pub struct StepGuard {
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
+#[non_exhaustive]
 pub enum EditOperation {
     /// What a user would type into each cell, parsed against the cell's current number format.
     SetCellInputs {
@@ -249,6 +251,7 @@ pub struct EditRequest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum EditFailureCode {
     StaleVersion,
     MissingTarget,

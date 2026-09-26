@@ -125,11 +125,14 @@ if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
 - Requests over 16 MiB and results over 64 MiB refuse with `limit-exceeded`;
   calculation diagnostics stop at 10,000 cells per list and set `truncated`.
 - `history: "none"` keeps a batch out of undo; standalone undo still replays
-  older steps over its cells. `source` records provenance only. Volatile
-  functions see only `calculation.nowSerial`.
-- Versions and sheet ids are session-scoped. Batches do not insert or delete
-  rows, columns or sheets, merge cells or move charts, and refuse writes to
-  merged-cell followers, array-formula cells and protected sheets.
+  older steps over its cells. It is experimental: that interaction may change
+  in a minor release. `source` records provenance only. Volatile functions see
+  only `calculation.nowSerial`.
+- Versions and sheet ids are session-scoped; standalone sheet ids are
+  positional, so each is valid only for the version it was read at. Batches do
+  not insert or delete rows, columns or sheets, merge cells or move charts, and
+  refuse writes to merged-cell followers, array-formula cells and protected
+  sheets.
 
 ## Structured export
 

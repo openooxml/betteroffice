@@ -3,7 +3,8 @@
 Fields keep the camelCase wire names every binding shares, so one request serializes the same
 from Python, JavaScript and Rust. Rows and columns are zero-based and ranges inclusive. Sheet ids
 come from the current catalog (``sheet:{index}`` standalone, the replica's sheet keys in
-collaboration); versions and sheet ids are session-scoped.
+collaboration); versions and sheet ids are session-scoped. Standalone ids are positional, so each
+is valid only for the version it was read at.
 """
 
 from __future__ import annotations

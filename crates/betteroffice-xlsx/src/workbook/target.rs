@@ -46,8 +46,8 @@ pub enum RangeAddress {
 }
 
 /// A range on the sheet the current catalog names `sheet_id`. Standalone ids are positional
-/// (`sheet:{index}`); collaborative ids are the replica's sheet keys. Neither survives
-/// save/reopen as an identity.
+/// (`sheet:{index}`), so each is valid only for the version it was read at; collaborative ids
+/// are the replica's sheet keys. Neither survives save/reopen as an identity.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RangeTarget {

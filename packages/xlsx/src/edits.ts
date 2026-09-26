@@ -4,7 +4,8 @@
  *
  * Rows and columns are zero-based and ranges inclusive. Sheet ids come from the current catalog:
  * `sheet:{index}` standalone, the replica's sheet keys in collaboration. Versions and sheet ids
- * are session-scoped; neither survives save and reopen.
+ * are session-scoped; neither survives save and reopen. Standalone ids are positional, so each is
+ * valid only for the version it was read at.
  */
 
 import type {
@@ -29,6 +30,8 @@ export type XlsxEditSource = 'host' | 'agent';
  * `separate`: exactly one undo step. `none`: no undo step, existing entries kept; standalone
  * undo replays inverse operations, so undoing an older step that wrote the same cell still
  * overwrites it.
+ *
+ * @experimental `none` only: its interaction with standalone undo may change in a minor release.
  */
 export type XlsxEditHistory = 'separate' | 'none';
 
