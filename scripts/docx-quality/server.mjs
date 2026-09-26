@@ -23,8 +23,21 @@ for (const [name, override] of [
     });
   }
 }
+// Fonts this checkout has not published yet cannot come from the pinned CDN,
+// so an explicit assets directory is served from the viewer's own origin.
+const fontAssets = process.env.QUALITY_FONT_ASSETS?.trim();
 const server = await createServer({
   configFile: false,
+  define: {
+    __QUALITY_FONT_BASE__: JSON.stringify(
+      fontAssets ? `/@fs${resolve(fontAssets)}/` : null
+    ),
+    __QUALITY_FONT_BASE_CJK__: JSON.stringify(
+      fontAssets
+        ? `/@fs${resolve(process.env.QUALITY_FONT_ASSETS_CJK ?? 'packages/fonts-cjk/assets')}/`
+        : null
+    ),
+  },
   plugins: format === 'docx' ? [] : [qualityRendererPlugin(format)],
   cacheDir: resolve(
     `.source/docx-quality/vite-cache-${process.env.QUALITY_PORT ?? 4178}`

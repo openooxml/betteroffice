@@ -49,39 +49,42 @@ fn horizontal_bar_fixture_transposes_axes_without_losing_series_or_labels() {
             })
             .unwrap();
         for (tick, x) in [
-            ("0", 156.0),
-            ("10", 252.5),
-            ("20", 349.0),
-            ("30", 445.5),
-            ("40", 542.0),
+            ("0", 181.41602),
+            ("10", 288.26343),
+            ("20", 395.11084),
+            ("30", 501.95825),
+            ("40", 608.80566),
         ] {
             let line = label(primitives, tick);
-            close(line.x, if index == 4 { 698.0 - x } else { x });
-            close(line.baseline, 412.0);
+            close(
+                line.x + line.width / 2.0,
+                if index == 4 { 790.2217 - x } else { x },
+            );
+            close(line.baseline, 406.0);
             assert!(line.runs.iter().all(|run| run.color == "#222222"));
         }
-        close(label(primitives, "Quarter").baseline, 137.0);
-        close(label(primitives, "Millions").baseline, 424.0);
+        close(label(primitives, "Quarter").baseline, 141.6);
+        close(label(primitives, "Millions").baseline, 418.5);
         for (category, baseline) in [
-            ("Category 1", 359.6),
-            ("Category 2", 274.26666),
-            ("Category 3", 188.93333),
+            ("Category 1", 348.18332),
+            ("Category 2", 268.55),
+            ("Category 3", 188.91667),
         ] {
             let line = label(primitives, category);
-            close(line.x, 100.0);
+            close(line.x + line.width, 168.41602);
             close(
                 line.baseline,
                 if index == 1 {
-                    548.5333 - baseline
+                    537.1 - baseline
                 } else {
                     baseline
                 },
             );
-            assert!(line.x + line.width < 172.0);
+            assert!(line.x >= 96.0);
         }
         for (color, widths) in [
-            ("#6254E7", [115.8, 183.35, 67.55]),
-            ("#1FA97A", [77.2, 135.1, 202.65]),
+            ("#6254E7", [128.21689, 203.01009, 74.79319]),
+            ("#1FA97A", [85.47793, 149.58638, 224.37956]),
         ] {
             let bars: Vec<_> = primitives
                 .iter()
@@ -100,17 +103,19 @@ fn horizontal_bar_fixture_transposes_axes_without_losing_series_or_labels() {
             assert_eq!(bars.len(), 3);
             for (bar, width) in bars.iter().zip(widths) {
                 close(bar.2, width);
-                close(bar.3, 34.133335);
+                close(bar.3, 31.853333);
             }
             assert_eq!(bars[0].1 > bars[2].1, index != 1);
         }
         if index == 3 {
-            close(label(primitives, "80").x, 542.0);
-            close(label(primitives, "80").baseline, 136.0);
+            let top = label(primitives, "80");
+            close(top.x + top.width / 2.0, 608.80566);
+            close(top.baseline, 131.1);
             assert!(primitives.iter().any(|primitive| matches!(primitive,
                 Primitive::Shape { x, y, w, h, stroke: Some(stroke), .. }
                     if stroke.color == "#D9D9D9" && stroke.width == 0.25
-                        && *x > 172.0 && *y == 142.0 && *w == 0.0 && *h == 256.0
+                        && *x > 182.0 && (*y - 146.6).abs() < 0.001 && *w == 0.0
+                        && (*h - 238.9).abs() < 0.001
             )));
         }
     }

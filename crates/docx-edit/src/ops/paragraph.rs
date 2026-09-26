@@ -816,6 +816,233 @@ impl EditingDoc {
     }
 }
 
+/// One complete paragraph for [`EditingDoc::insert_paragraph_records`].
+pub(crate) struct ParagraphRecord {
+    pub text: String,
+    /// Pilcrow properties other than the schema identity keys.
+    pub properties: Vec<(String, Any)>,
+    /// Formatting attributes for the paragraph's text.
+    pub run: Vec<(String, Any)>,
+}
+
+/// The pilcrow and run changes that apply one resolved paragraph style.
+pub(crate) struct StylePlan {
+    pub para_id: String,
+    pub pilcrow: u32,
+    /// `None` removes the key.
+    pub properties: Vec<(String, Option<Any>)>,
+    /// `(start, len, attrs)` run reformats; a null value clears the attribute.
+    pub formats: Vec<(u32, u32, Vec<(String, Any)>)>,
+}
+
+impl StylePlan {
+    pub fn is_empty(&self) -> bool {
+        self.properties.is_empty() && self.formats.is_empty()
+    }
+}
+
+/// The `_originalFormatting` key of a style-resolved pilcrow key.
+fn formatting_key(key: &str) -> &str {
+    match key {
+        DEFAULT_TEXT_FORMATTING => "runProperties",
+        key => key,
+    }
+}
+
+fn present(value: Option<&Any>) -> Option<&Any> {
+    value.filter(|value| !matches!(value, Any::Null | Any::Undefined))
+}
+
+/// Plans applying `style` to one paragraph: every style-resolved pilcrow key takes the style's
+/// value or clears, the source direct formatting drops those keys, the controlled run marks take
+/// the style's values, and other run marks that matched the previous style follow the new one.
+pub(crate) fn plan_paragraph_style(
+    chunks: &[crate::ops::Chunk],
+    para_id: &str,
+    pilcrow: u32,
+    node_start: u32,
+    properties: &BTreeMap<String, Any>,
+    previous: &crate::seed::StyledParagraph,
+    next: &crate::seed::StyledParagraph,
+    style_id: &str,
+) -> StylePlan {
+    let target: HashMap<&str, &Any> = next
+        .properties
+        .iter()
+        .map(|(key, value)| (key.as_str(), value))
+        .collect();
+    let mut changes = Vec::new();
+    for key in crate::seed::style_resolved_keys() {
+        let wanted = present(target.get(key).copied());
+        if wanted != present(properties.get(key)) {
+            changes.push((key.to_owned(), wanted.cloned()));
+        }
+    }
+    if present(properties.get("pStyle")) != Some(&Any::from(style_id)) {
+        changes.push(("pStyle".to_owned(), Some(Any::from(style_id))));
+    }
+    if let Some(Any::Map(original)) = properties.get("_originalFormatting") {
+        let mut direct = (**original).clone();
+        for key in crate::seed::style_resolved_keys() {
+            direct.remove(formatting_key(key));
+        }
+        direct.insert("styleId".to_owned(), Any::from(style_id));
+        if direct != **original {
+            changes.push((
+                "_originalFormatting".to_owned(),
+                Some(Any::Map(Arc::new(direct))),
+            ));
+        }
+    }
+    let old_run: HashMap<&str, &Any> = previous
+        .run
+        .iter()
+        .map(|(key, value)| (key.as_str(), value))
+        .collect();
+    let new_run: HashMap<&str, &Any> = next
+        .run
+        .iter()
+        .map(|(key, value)| (key.as_str(), value))
+        .collect();
+    let mut keys: Vec<&str> = STYLE_CONTROLLED_MARKS
+        .iter()
+        .copied()
+        .chain(old_run.keys().copied())
+        .chain(new_run.keys().copied())
+        .filter(|key| !PROTECTED_ATTRS.contains(key))
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut formats = Vec::new();
+    for chunk in chunks {
+        if !matches!(chunk.kind, crate::ops::ChunkKind::Text(_))
+            || chunk.start < node_start
+            || chunk.end() > pilcrow
+        {
+            continue;
+        }
+        let linked = chunk.attr_active(crate::format::HYPERLINK);
+        let mut attrs = Vec::new();
+        for key in &keys {
+            if linked && matches!(*key, "textColor" | "underline") {
+                continue;
+            }
+            let current = present(chunk.attrs.get(*key));
+            let follows_style = STYLE_CONTROLLED_MARKS.contains(key)
+                || current == present(old_run.get(key).copied());
+            let wanted = if follows_style {
+                present(new_run.get(key).copied())
+            } else {
+                current
+            };
+            if wanted != current {
+                attrs.push(((*key).to_owned(), wanted.cloned().unwrap_or(Any::Null)));
+            }
+        }
+        if !attrs.is_empty() {
+            formats.push((chunk.start, chunk.len, attrs));
+        }
+    }
+    StylePlan {
+        para_id: para_id.to_owned(),
+        pilcrow,
+        properties: changes,
+        formats,
+    }
+}
+
+impl EditingDoc {
+    /// Inserts complete paragraph records at story index `at` in one transaction and returns
+    /// their fresh ids. Existing paragraphs keep their identity and properties.
+    pub(crate) fn insert_paragraph_records(
+        &self,
+        story_id: &str,
+        at: u32,
+        records: &[ParagraphRecord],
+    ) -> OpResult<Vec<ParagraphId>> {
+        let mut txn = self.transact_for(&EditCtx::local(String::new(), String::new()));
+        let story = story_ref(&txn, story_id)?;
+        check_position(&story, &txn, at)?;
+        let mut index = at;
+        let mut ids = Vec::with_capacity(records.len());
+        for record in records {
+            if !record.text.is_empty() {
+                let mut attrs: Attrs = record
+                    .run
+                    .iter()
+                    .filter(|(key, _)| !PROTECTED_ATTRS.contains(&key.as_str()))
+                    .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
+                    .collect();
+                attrs.extend(insertion_attrs(None, None));
+                story.insert_with_attributes(&mut txn, index, &record.text, attrs);
+                index += crate::ops::utf16_len(&record.text);
+            }
+            let para_id = self.next_id();
+            let pilcrow = story.insert_embed_with_attributes(
+                &mut txn,
+                index,
+                MapPrelim::default(),
+                insertion_attrs(None, None),
+            );
+            pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
+            pilcrow.insert(&mut txn, PARA_ID, para_id.as_str());
+            for (key, value) in &record.properties {
+                if !matches!(key.as_str(), KIND_KEY | PARA_ID) {
+                    pilcrow.insert(&mut txn, key.clone(), value.clone());
+                }
+            }
+            index += 1;
+            ids.push(para_id);
+        }
+        Ok(ids)
+    }
+
+    /// Removes the complete paragraph records in `[start, end)` without transferring any
+    /// property or identity to a neighbour.
+    pub(crate) fn remove_paragraph_records(
+        &self,
+        story_id: &str,
+        start: u32,
+        end: u32,
+    ) -> OpResult<()> {
+        let mut txn = self.transact_for(&EditCtx::local(String::new(), String::new()));
+        let story = story_ref(&txn, story_id)?;
+        check_position(&story, &txn, end)?;
+        let len = end
+            .checked_sub(start)
+            .ok_or(OpError::InvalidRange { start, end })?;
+        story.remove_range(&mut txn, start, len);
+        Ok(())
+    }
+
+    /// Applies a [`StylePlan`] computed against this state in one transaction.
+    pub(crate) fn apply_style_plan(&self, story_id: &str, plan: &StylePlan) -> OpResult<()> {
+        let mut txn = self.transact_for(&EditCtx::local(String::new(), String::new()));
+        let story = story_ref(&txn, story_id)?;
+        let map = crate::pilcrows(&story, &txn)
+            .into_iter()
+            .find_map(|(index, map)| (index == plan.pilcrow).then_some(map))
+            .ok_or(OpError::ExpectedPilcrow {
+                story: story_id.to_owned(),
+                index: plan.pilcrow,
+            })?;
+        if crate::map_string(&map, &txn, PARA_ID).as_deref() != Some(plan.para_id.as_str()) {
+            return Err(OpError::UnknownPara(plan.para_id.clone()));
+        }
+        for (key, value) in &plan.properties {
+            set_or_remove(&mut txn, &map, key, value.clone());
+        }
+        for (start, len, attrs) in &plan.formats {
+            let attrs: Attrs = attrs
+                .iter()
+                .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
+                .collect();
+            story.format(&mut txn, *start, *len, attrs);
+        }
+        Ok(())
+    }
+}
+
 fn paragraph_revision_id<T: ReadTxn>(
     map: &MapRef,
     txn: &T,

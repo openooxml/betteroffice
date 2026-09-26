@@ -64,12 +64,14 @@ use yrs::{
     Update,
 };
 
+mod batch;
 mod ctx;
 mod deterministic;
 mod format;
 mod identity;
 mod op;
 mod ops;
+mod policy;
 mod presence;
 mod queries;
 mod raw;
@@ -77,12 +79,18 @@ mod read_state;
 mod search;
 mod seed;
 mod segments;
+mod target;
 mod undo;
 
 pub mod canonical;
 pub mod engine;
 pub mod frame_delta;
 
+pub use batch::{
+    DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditGuard, EditHistory,
+    EditOperation, EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource, EditStep,
+    EditSuggestion, EditTarget, EditValidation, ParagraphInput, TargetEdge,
+};
 pub use canonical::{CanonicalItem, checksum, project_story, story_checksum, to_canonical_bytes};
 pub use ctx::{EditCtx, EditOrigin, SuggestCtx};
 pub use engine::{EngineSession, EngineStats};
@@ -113,6 +121,11 @@ pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
 pub use seed::{seed_from_docx, seed_from_docx_with_generation};
 use segments::SegmentIndex;
+pub use target::{
+    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
+    ReadParagraphsRequest, ReadParagraphsResponse, SearchScope, TextAtom, TextMatch, TextPosition,
+    TextRange, TextTarget,
+};
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 
 #[cfg(feature = "wasm")]
@@ -299,6 +312,8 @@ impl fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
+static DOC_INSTANCES: AtomicU64 = AtomicU64::new(1);
+
 /// A single yrs replica of the DOCX editing model.
 pub struct EditingDoc {
     doc: Doc,
@@ -307,6 +322,11 @@ pub struct EditingDoc {
     /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
     /// indexes and chunk snapshots older than the current value are rebuilt on next lookup.
     epoch: Arc<AtomicU64>,
+    /// Process-unique identity of this replica object.
+    instance: u64,
+    /// Rotated whenever the replica's content or retained source is replaced.
+    version_nonce: AtomicU64,
+    metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
     chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
     source: Mutex<Option<identity::SourcePackage>>,
@@ -345,6 +365,9 @@ impl EditingDoc {
             client_id,
             id_counter: AtomicU64::new(0),
             epoch,
+            instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
+            version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
+            metadata: Mutex::new(None),
             segment_indexes: Mutex::new(HashMap::new()),
             chunk_snapshots: Mutex::new(HashMap::new()),
             source: Mutex::new(None),
@@ -352,6 +375,36 @@ impl EditingDoc {
             _update_sub: update_sub,
             _seen_subs: seen_subs,
         }
+    }
+
+    /// The optimistic-concurrency token of this replica's committed state.
+    ///
+    /// It changes with every committed change (local, remote, undo and redo) and whenever the
+    /// document or its retained source is replaced. It is scoped to this replica: equal tokens
+    /// from different replicas mean nothing.
+    pub fn version(&self) -> DocumentVersion {
+        batch::version_token(
+            self.version_nonce.load(Ordering::Relaxed),
+            self.epoch.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Invalidates every version handed out so far. `entropy` is mixed into the new nonce.
+    pub(crate) fn rotate_version(&self, entropy: u64) {
+        self.version_nonce.store(
+            batch::mint_nonce(self.client_id, entropy),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Retains the opened package's style and structure context and rotates the version.
+    pub(crate) fn install_source(&self, source: seed::SourceMetadata, entropy: u64) {
+        *self.metadata.lock().unwrap() = Some(Arc::new(source));
+        self.rotate_version(entropy);
+    }
+
+    pub(crate) fn source_metadata(&self) -> Option<Arc<seed::SourceMetadata>> {
+        self.metadata.lock().unwrap().clone()
     }
 
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.

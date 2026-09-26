@@ -92,13 +92,29 @@ fn automatic_numbers_keep_styles_and_story_geometry() {
     for node in &mut plain_package.slides[0].shapes {
         if let ShapeNode::Shape(shape) = node {
             let body = shape.text.as_mut().unwrap();
-            for properties in body
+            let levels: Vec<bool> = body
                 .list_style
-                .iter_mut()
-                .chain(body.paragraphs.iter_mut().map(|p| &mut p.properties))
-            {
+                .iter()
+                .map(|properties| matches!(properties.bullet, Some(Bullet::AutoNumber { .. })))
+                .collect();
+            for properties in body.list_style.iter_mut() {
                 if matches!(properties.bullet, Some(Bullet::AutoNumber { .. })) {
                     properties.bullet = Some(Bullet::None);
+                    // The marker stands in the hanging indent, so a paragraph
+                    // that loses it would start its first line there instead.
+                    properties.indent = Some(0);
+                }
+            }
+            for paragraph in body.paragraphs.iter_mut() {
+                let level = paragraph.properties.level as usize;
+                let numbered = match paragraph.properties.bullet {
+                    Some(Bullet::AutoNumber { .. }) => true,
+                    Some(_) => false,
+                    None => levels.get(level).copied().unwrap_or(false),
+                };
+                if numbered {
+                    paragraph.properties.bullet = Some(Bullet::None);
+                    paragraph.properties.indent = Some(0);
                 }
             }
         }

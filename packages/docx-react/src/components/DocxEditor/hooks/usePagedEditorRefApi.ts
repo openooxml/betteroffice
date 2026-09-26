@@ -23,7 +23,7 @@ interface RefApiInputs {
   yrsSessionRef: React.MutableRefObject<YrsSession | null>;
   yrsLocToDisplayPositionRef: React.MutableRefObject<(loc: YrsLoc) => number | null>;
   syncYrsInputStateRef: React.MutableRefObject<
-    (docChanged: boolean, dirtyStory?: string) => boolean
+    (docChanged: boolean, dirtyStory?: string | readonly string[]) => boolean
   >;
   applyYrsFormattingRef: React.MutableRefObject<(action: FormattingAction) => boolean>;
   applyYrsCommandRef: React.MutableRefObject<(command: YrsEditorCommand) => boolean>;
@@ -107,16 +107,16 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       const session = yrsSessionRef.current;
       const result = session
         ? performYrsHistoryAction(session, false)
-        : { changed: false, story: null };
-      if (result.changed) syncYrsInputStateRef.current(true, result.story ?? undefined);
+        : { changed: false, stories: [] };
+      if (result.changed) syncYrsInputStateRef.current(true, result.stories);
       return result.changed;
     },
     redo: () => {
       const session = yrsSessionRef.current;
       const result = session
         ? performYrsHistoryAction(session, true)
-        : { changed: false, story: null };
-      if (result.changed) syncYrsInputStateRef.current(true, result.story ?? undefined);
+        : { changed: false, stories: [] };
+      if (result.changed) syncYrsInputStateRef.current(true, result.stories);
       return result.changed;
     },
     canUndo: () => yrsSessionRef.current?.canUndo() ?? false,
@@ -140,14 +140,17 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       const input = yrsInputRef.current;
       const session = yrsSessionRef.current;
       if (!input || !session) throw new Error('The editor input is unavailable');
+      // The input rejects its own flush when it unmounts or changes session; its handle object
+      // is rebuilt whenever a new frame changes its callbacks, so only the session is compared.
       await input.flushPendingInput();
-      if (input !== yrsInputRef.current || session !== yrsSessionRef.current) {
+      if (session !== yrsSessionRef.current) {
         throw new Error('The document changed while flushing input');
       }
     },
     getYrsStoredFormatting: () => yrsInputRef.current?.storedFormatting() ?? null,
     yrsLocToDisplayPosition: (loc) => yrsLocToDisplayPositionRef.current(loc),
-    syncYrsInputState: (docChanged) => syncYrsInputStateRef.current(docChanged),
+    syncYrsInputState: (docChanged, dirtyStories) =>
+      syncYrsInputStateRef.current(docChanged, dirtyStories),
     applyYrsFormatting: (action) => applyYrsFormattingRef.current(action),
     applyYrsCommand: (command) => applyYrsCommandRef.current(command),
     getLayout: () => layout,
@@ -204,7 +207,7 @@ export interface UsePagedEditorRefApiOptions {
   documentFromYrs: () => Document | null;
   yrsSession: YrsSession | null;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
-  syncYrsInputState: (docChanged: boolean, dirtyStory?: string) => boolean;
+  syncYrsInputState: (docChanged: boolean, dirtyStory?: string | readonly string[]) => boolean;
   applyYrsFormatting: (action: FormattingAction) => boolean;
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   getYrsPositionProjection: () => YrsPositionProjection | null;

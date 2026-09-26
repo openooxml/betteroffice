@@ -54,6 +54,12 @@
   its package part, resolves again after reopening. Source paragraphs without an ID
   gain one only when the host opts in.
 
+- **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
+  paragraphs with a session version, then apply atomic text and paragraph
+  batches that commit as one undo step or return a typed refusal with nothing
+  changed. Text steps stay within one paragraph and paragraph steps need a
+  document opened from DOCX bytes.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 
