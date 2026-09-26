@@ -54,17 +54,6 @@
   to host actions, inside or outside the editor. Controls keep their state,
   shortcuts, disabled reasons, and read-only rules through one command store.
 
-- **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
-  paragraphs with a session version, then apply atomic text and paragraph
-  batches that commit as one undo step or return a typed refusal with nothing
-  changed. Text steps stay within one paragraph and paragraph steps need a
-  document opened from DOCX bytes.
-
-- **Host-owned DOCX plugins.** DOCX React supports host-owned plugins with
-  panels, overlays, sidebar items, lifecycle events, and explicitly granted
-  commands and edit batches. Plugins read and navigate by default; every write
-  is checked against its grant, the editor mode and document policy when it runs.
-
 - **Composable PPTX toolbars.** Arrange built-in slide controls in your own order
   next to host actions, inside or outside the editor, through one command store
   with disabled reasons, platform-aware shortcuts, and ordered execution.
@@ -73,12 +62,23 @@
   controls and the formula bar in your own order. Commands run after pending
   cell input and state why they are unavailable.
 
+- **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
+  paragraphs with a session version, then apply atomic text and paragraph
+  batches that commit as one undo step or return a typed refusal with nothing
+  changed. Text steps stay within one paragraph and paragraph steps need a
+  document opened from DOCX bytes.
+
 - **Version-checked XLSX edit batches.** XLSX hosts in JavaScript, React, Rust
   and Python read cells with a session version, then apply atomic cell input,
   formula, number-format and style batches that commit as one recalculated undo
   step or return a typed refusal with nothing changed. Batches do not insert or
   delete rows, columns or sheets, and refuse writes to merged-cell followers,
   array-formula cells and protected sheets.
+
+- **Host-owned DOCX plugins.** DOCX React supports host-owned plugins with
+  panels, overlays, sidebar items, lifecycle events, and explicitly granted
+  commands and edit batches. Plugins read and navigate by default; every write
+  is checked against its grant, the editor mode and document policy when it runs.
 
 - **Host-owned XLSX plugins.** XLSX React supports host-owned plugins with
   panels, overlays, lifecycle events, and explicitly granted commands and edit
