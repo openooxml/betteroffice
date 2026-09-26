@@ -94,7 +94,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/xlsx-react",
-    desc: "The spreadsheet editor as a drop-in React component.",
+    desc: "The spreadsheet editor as a drop-in React component, with composable toolbar controls.",
   },
   {
     name: "@betteroffice/pptx",

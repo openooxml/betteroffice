@@ -53,6 +53,10 @@
   to host actions, inside or outside the editor. Controls keep their state,
   shortcuts, disabled reasons, and read-only rules through one command store.
 
+- **Composable XLSX toolbars.** Replace the spreadsheet toolbar with built-in
+  controls and the formula bar in your own order. Commands run after pending
+  cell input and state why they are unavailable.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 
