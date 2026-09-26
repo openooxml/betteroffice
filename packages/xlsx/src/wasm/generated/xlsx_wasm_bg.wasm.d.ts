@@ -44,6 +44,7 @@ export const xlsxdocument_setActiveSheet: (a: number, b: number) => [number, num
 export const xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_sheetInfoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_startUpdateObservation: (a: number) => [number, number];
+export const xlsxdocument_storedCellAddressesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_undoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_version: () => [number, number];
 export const __wbindgen_exn_store: (a: number) => void;

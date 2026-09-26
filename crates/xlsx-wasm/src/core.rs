@@ -60,6 +60,26 @@ struct CellArgs {
 }
 
 #[derive(Deserialize)]
+struct StoredCellsArgs {
+    sheet: u32,
+    after: Option<CellRef>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct StoredCellAddress {
+    row: u32,
+    col: u32,
+    a1: String,
+}
+
+#[derive(Serialize)]
+struct StoredCellPage {
+    cells: Vec<StoredCellAddress>,
+    next: Option<CellRef>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchTextArgs {
     query: String,
@@ -543,6 +563,25 @@ impl Session {
             is_formula: cell.is_formula,
         })
         .map_err(|error| error.to_string())
+    }
+
+    pub fn stored_cell_addresses_json(&self, args: &str) -> Result<String, String> {
+        let args: StoredCellsArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad stored cell args: {error}"))?;
+        let (addresses, has_more) = self
+            .workbook
+            .stored_cell_addresses(SheetId(args.sheet), args.after, args.limit.unwrap_or(1000))
+            .map_err(|error| error.to_string())?;
+        let next = has_more.then(|| *addresses.last().expect("nonempty stored cell page"));
+        let cells = addresses
+            .into_iter()
+            .map(|cell| StoredCellAddress {
+                row: cell.row,
+                col: cell.col,
+                a1: cell.to_a1(),
+            })
+            .collect();
+        serde_json::to_string(&StoredCellPage { cells, next }).map_err(|error| error.to_string())
     }
 
     pub fn search_text_json(&self, args: &str) -> Result<String, String> {
@@ -1055,6 +1094,72 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&range).unwrap();
         assert_eq!(value["cells"].as_array().unwrap().len(), 2);
         assert_eq!(value["cells"][0].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn stored_cell_addresses_json_pages_and_validates() {
+        let session = Session::open(&sample_xlsx(), None).unwrap();
+        let first: serde_json::Value = serde_json::from_str(
+            &session
+                .stored_cell_addresses_json(r#"{"sheet":0,"limit":1}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first["cells"][0]["a1"], "A1");
+        assert_eq!(first["next"], serde_json::json!({ "row": 0, "col": 0 }));
+        let second: serde_json::Value = serde_json::from_str(
+            &session
+                .stored_cell_addresses_json(r#"{"sheet":0,"after":{"row":0,"col":0},"limit":1}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(second["cells"][0]["a1"], "B2");
+        assert!(second["next"].is_null());
+        assert!(
+            session
+                .stored_cell_addresses_json(r#"{"sheet":0,"limit":0}"#)
+                .is_err()
+        );
+        assert!(
+            session
+                .stored_cell_addresses_json(r#"{"sheet":0,"after":{"row":1048576,"col":0}}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn stored_cell_addresses_follow_peer_edits() {
+        let bytes = sample_xlsx();
+        let mut left = Session::open_collaborative(&bytes, 101, None).unwrap();
+        let mut right = Session::open_collaborative(&bytes, 202, None).unwrap();
+        let baseline = left.encode_state_vector();
+        left.edit_cell_json(r#"{"sheet":0,"row":3,"col":1,"input":"left"}"#, None)
+            .unwrap();
+        right
+            .edit_cell_json(r#"{"sheet":0,"row":2,"col":2,"input":"right"}"#, None)
+            .unwrap();
+        let left_update = left.encode_diff(&baseline).unwrap();
+        let right_update = right.encode_diff(&baseline).unwrap();
+        left.apply_update_json(&right_update, None).unwrap();
+        right.apply_update_json(&left_update, None).unwrap();
+
+        let left_page = left
+            .stored_cell_addresses_json(r#"{"sheet":0,"limit":10}"#)
+            .unwrap();
+        assert_eq!(
+            left_page,
+            right
+                .stored_cell_addresses_json(r#"{"sheet":0,"limit":10}"#)
+                .unwrap()
+        );
+        let page: serde_json::Value = serde_json::from_str(&left_page).unwrap();
+        let addresses = page["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cell| cell["a1"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(addresses, ["A1", "B2", "C3", "B4"]);
     }
 
     #[test]

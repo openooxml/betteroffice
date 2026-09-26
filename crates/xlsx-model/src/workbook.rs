@@ -293,6 +293,19 @@ impl Sheet {
             .map(|(&(row, col), cell)| (CellRef::new(row, col), cell))
     }
 
+    /// Stored cells after an address, in row-major order.
+    pub fn iter_cells_after(
+        &self,
+        after: Option<CellRef>,
+    ) -> impl Iterator<Item = (CellRef, &Cell)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        let start = after.map_or(Unbounded, |cell| Excluded((cell.row, cell.col)));
+        self.cells
+            .range((start, Unbounded))
+            .map(|(&(row, col), cell)| (CellRef::new(row, col), cell))
+    }
+
     pub fn iter_cells_in_rect(
         &self,
         rows: Range<RowId>,

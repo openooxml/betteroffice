@@ -54,6 +54,17 @@ export interface CellPosition {
   y: number;
 }
 
+export interface StoredCellAddress {
+  row: number;
+  col: number;
+  a1: string;
+}
+
+export interface StoredCellPage {
+  cells: StoredCellAddress[];
+  next: { row: number; col: number } | null;
+}
+
 /**
  * Result of any mutating call: whether it changed the workbook and the
  * (possibly grown) sheet metadata. Mirrors the Rust `EditResult`.
@@ -380,6 +391,11 @@ export interface WorkbookHandle extends CollaborationReplica {
   cellPosition(sheet: number, row: number, col: number): CellPosition;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
+  /** Page through cells physically stored on a sheet, including styled blanks. */
+  storedCellAddresses(
+    sheet: number,
+    options?: { after?: { row: number; col: number }; limit?: number }
+  ): StoredCellPage;
   patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
   setNumberFormat(sheet: number, range: string, format: NumberFormatMutation): EditResult;
   selectionFormatting(sheet: number, range: string): SelectionFormatting;
@@ -722,6 +738,17 @@ export function openWorkbook(
         doc.rangeCellsJson(JSON.stringify({ sheet, range }))
       );
       return parsed.cells;
+    },
+    storedCellAddresses(sheet, options): StoredCellPage {
+      const limit = options?.limit ?? 1000;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+        throw new RangeError('stored cell page limit must be between 1 and 10000');
+      }
+      return parseJson(() =>
+        doc.storedCellAddressesJson(
+          JSON.stringify({ sheet, after: options?.after ?? null, limit })
+        )
+      );
     },
     patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult {
       return parseJson(

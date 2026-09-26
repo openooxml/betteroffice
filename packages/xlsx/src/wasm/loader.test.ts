@@ -133,6 +133,45 @@ describe('wasm loader', () => {
     }
   });
 
+  it('pages stored addresses through the public handle after peer edits and save', () => {
+    const left = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5030 });
+    const right = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5031 });
+    try {
+      left.editCell(0, 40, 10, 'sparse');
+      left.patchRangeStyle(0, 'L42', { bold: true });
+      right.applyUpdate(left.encodeStateAsUpdate());
+      const stateBeforeRead = right.encodeStateVector();
+      const addresses: string[] = [];
+      let after: { row: number; col: number } | undefined;
+      do {
+        const page = right.storedCellAddresses(0, { after, limit: 3 });
+        expect(page.cells.length).toBeGreaterThan(0);
+        expect(page.cells.length).toBeLessThanOrEqual(3);
+        addresses.push(...page.cells.map((cell) => cell.a1));
+        after = page.next ?? undefined;
+      } while (after);
+      expect(addresses).toContain('K41');
+      expect(addresses).toContain('L42');
+      expect(new Set(addresses).size).toBe(addresses.length);
+      expect(right.encodeStateVector()).toEqual(stateBeforeRead);
+      expect(() => right.storedCellAddresses(0, { limit: 0 })).toThrow(RangeError);
+      expect(() => right.storedCellAddresses(0, { limit: 10_001 })).toThrow(RangeError);
+      expect(() => right.storedCellAddresses(0, { after: { row: 1_048_576, col: 0 } })).toThrow();
+
+      const reopened = openWorkbook(right.save());
+      try {
+        const saved = reopened.storedCellAddresses(0, { after: { row: 40, col: 9 }, limit: 100 });
+        expect(saved.cells[0]?.a1).toBe('K41');
+        expect(saved.cells.map((cell) => cell.a1)).toContain('L42');
+      } finally {
+        reopened.dispose();
+      }
+    } finally {
+      left.dispose();
+      right.dispose();
+    }
+  });
+
   it('restores inherited column formatting when undoing a deletion', () => {
     const bytes = new Uint8Array(readFileSync(resolve(
       import.meta.dir,

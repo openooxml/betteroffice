@@ -29,6 +29,11 @@ Saving preserves the source package: parts and sheets an edit did not touch are
 copied through byte for byte, and only what changed is reserialized.
 `0.2.x`: the API may change before `1.0`.
 
+`stored_cell_addresses(sheet, after, limit)` pages through stored cells in
+row-major order, including formatted blanks. `after` is the last address from
+the previous page; limits from 1 to 10,000 are accepted. This avoids scanning
+a large empty rectangle when auditing a sparse sheet.
+
 ## Collaboration
 
 Every replica needs an explicit client ID, assigned by the host. Yrs cannot

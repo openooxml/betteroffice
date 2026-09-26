@@ -991,6 +991,34 @@ impl Workbook {
         Ok(cells)
     }
 
+    /// Page through stored cells, including formatted blanks, in address order.
+    pub fn stored_cell_addresses(
+        &self,
+        sheet: SheetId,
+        after: Option<CellRef>,
+        limit: usize,
+    ) -> Result<(Vec<CellRef>, bool)> {
+        if !(1..=10_000).contains(&limit) {
+            return Err(Error::InvalidOperation(
+                "stored cell page limit must be between 1 and 10000".to_string(),
+            ));
+        }
+        if let Some(cursor) = after {
+            validate_cell_ref(cursor)?;
+        }
+        let sheet = self.sheet(sheet)?;
+        let mut addresses = sheet
+            .iter_cells_after(after)
+            .take(limit + 1)
+            .map(|(address, _)| address)
+            .collect::<Vec<_>>();
+        let has_more = addresses.len() > limit;
+        if has_more {
+            addresses.pop();
+        }
+        Ok((addresses, has_more))
+    }
+
     pub fn patch_range_style(
         &mut self,
         sheet: SheetId,
