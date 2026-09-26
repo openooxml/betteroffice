@@ -16,6 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(import.meta.dir, '..');
 const PACKAGES = ['docx-i18n', 'docx', 'docx-react'];
 const LINKED = ['react', 'react-dom', '@types/react', '@types/react-dom', 'csstype'];
+const DEMOS = ['ReviewPlugin.tsx', 'CompactToolbar.tsx'];
 
 const CONSUMER = `import {
   DocxEditor,
@@ -86,7 +87,7 @@ function run(command: string[], cwd: string) {
   if (result.status !== 0) throw new Error(result.stdout + result.stderr);
 }
 
-test('the DOCX plugin API and the demo plugin typecheck against built declarations', () => {
+test('the DOCX plugin API and the demo consumers typecheck against built declarations', () => {
   const directory = mkdtempSync(join(tmpdir(), 'betteroffice-docx-plugins-'));
   try {
     for (const name of PACKAGES) {
@@ -104,10 +105,9 @@ test('the DOCX plugin API and the demo plugin typecheck against built declaratio
     }
     writeFileSync(join(directory, 'package.json'), JSON.stringify({ type: 'module' }));
     writeFileSync(join(directory, 'consumer.tsx'), CONSUMER);
-    copyFileSync(
-      join(root, 'apps/demo/app/docx/ReviewPlugin.tsx'),
-      join(directory, 'ReviewPlugin.tsx')
-    );
+    for (const demo of DEMOS) {
+      copyFileSync(join(root, 'apps/demo/app/docx', demo), join(directory, demo));
+    }
     writeFileSync(
       join(directory, 'tsconfig.json'),
       JSON.stringify({
@@ -122,7 +122,7 @@ test('the DOCX plugin API and the demo plugin typecheck against built declaratio
           noEmit: true,
           types: [],
         },
-        files: ['consumer.tsx', 'ReviewPlugin.tsx'],
+        files: ['consumer.tsx', ...DEMOS],
       })
     );
     const tsc = createRequire(join(root, 'packages/docx-react/package.json')).resolve(
