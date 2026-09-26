@@ -1,11 +1,16 @@
 import { useCallback, useState } from 'react';
 import type { YrsCellBorders } from '@betteroffice/docx/yrs';
 
-import type { TableAction } from '../../ui/TableToolbar';
+import type { DocxTableAction } from '../../../commands/types';
 import { getBuiltinTableStyle } from '../../ui/TableStyleGallery';
 import type { PagedEditorRef } from '../PagedEditor';
-import { currentYrsSplitCellConfig, currentYrsTableProperties } from '../yrsCommands';
+import {
+  currentYrsSplitCellConfig,
+  currentYrsTableProperties,
+  type YrsEditorCommand,
+} from '../yrsCommands';
 import type { TableProperties } from '../../dialogs/TablePropertiesDialog';
+import type { DocxTableActionOutcome } from './useDocxCommands';
 
 interface SplitCellDialogState {
   isOpen: boolean;
@@ -21,13 +26,21 @@ interface BorderSpec {
   color: { rgb: string };
 }
 
-/** Table toolbar/dialog routing for the authoritative yrs session. */
+/**
+ * Table toolbar/dialog routing for the authoritative yrs session. `apply`
+ * runs a command immediately; `complete` finishes a dialog against the table
+ * selection it opened for.
+ */
 export function useTableDialogs({
   pagedEditorRef,
   borderSpecRef,
+  apply,
+  complete,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   borderSpecRef: React.RefObject<BorderSpec>;
+  apply: (command: YrsEditorCommand) => boolean;
+  complete: (dialog: 'splitCell' | 'tableProperties', command: YrsEditorCommand) => void;
 }) {
   const [tablePropsOpen, setTablePropsOpen] = useState(false);
   const [splitCellDialogState, setSplitCellDialogState] = useState<SplitCellDialogState>({
@@ -38,11 +51,12 @@ export function useTableDialogs({
     minCols: 1,
   });
 
-  const openSplitCellDialog = useCallback((_legacyView?: unknown) => {
+  const openSplitCellDialog = useCallback((): boolean => {
     const session = pagedEditorRef.current?.getYrsSession();
     const config = session ? currentYrsSplitCellConfig(session) : null;
-    if (!config) return;
+    if (!config) return false;
     setSplitCellDialogState({ ...config, isOpen: true });
+    return true;
   }, [pagedEditorRef]);
 
   const currentTableProperties = (() => {
@@ -56,16 +70,14 @@ export function useTableDialogs({
 
   const handleTablePropertiesApply = useCallback(
     (properties: TableProperties) => {
-      pagedEditorRef.current?.applyYrsCommand({ type: 'tableProperties', properties });
+      complete('tableProperties', { type: 'tableProperties', properties });
     },
-    [pagedEditorRef]
+    [complete]
   );
 
   const applyBorders = useCallback(
-    (borders: YrsCellBorders) => {
-      pagedEditorRef.current?.applyYrsCommand({ type: 'tableSetBorders', borders });
-    },
-    [pagedEditorRef]
+    (borders: YrsCellBorders) => apply({ type: 'tableSetBorders', borders }),
+    [apply]
   );
 
   const allBorders = useCallback(
@@ -81,103 +93,92 @@ export function useTableDialogs({
   );
 
   const handleTableAction = useCallback(
-    (action: TableAction) => {
-      const editor = pagedEditorRef.current;
-      if (!editor) return;
-      const apply = editor.applyYrsCommand;
+    (action: DocxTableAction): DocxTableActionOutcome => {
       if (typeof action === 'object') {
-        if (action.type === 'cellFillColor') {
-          apply({ type: 'tableCellShading', color: action.color });
-        } else if (action.type === 'borderColor') {
-          borderSpecRef.current = {
-            ...borderSpecRef.current,
-            color: { rgb: action.color.replace(/^#/, '') },
-          };
-          applyBorders(allBorders(borderSpecRef.current));
-        } else if (action.type === 'borderWidth') {
-          borderSpecRef.current = { ...borderSpecRef.current, size: action.size };
-          applyBorders(allBorders(borderSpecRef.current));
-        } else if (action.type === 'cellBorder') {
-          const border = {
-            style: action.style,
-            size: action.size,
-            color: { rgb: action.color.replace(/^#/, '') },
-          };
-          applyBorders(action.side === 'all' ? allBorders(border) : { [action.side]: border });
-        } else if (action.type === 'openTableProperties') {
-          setTablePropsOpen(true);
-        } else if (action.type === 'applyTableStyle') {
-          const preset = getBuiltinTableStyle(action.styleId);
-          if (preset?.tableBorders) applyBorders(preset.tableBorders);
+        switch (action.type) {
+          case 'cellFillColor':
+            return apply({ type: 'tableCellShading', color: action.color });
+          case 'borderColor':
+            borderSpecRef.current = {
+              ...borderSpecRef.current,
+              color: { rgb: action.color.replace(/^#/, '') },
+            };
+            return applyBorders(allBorders(borderSpecRef.current));
+          case 'borderWidth':
+            borderSpecRef.current = { ...borderSpecRef.current, size: action.size };
+            return applyBorders(allBorders(borderSpecRef.current));
+          case 'cellBorder': {
+            const border = {
+              style: action.style,
+              size: action.size,
+              color: { rgb: action.color.replace(/^#/, '') },
+            };
+            return applyBorders(
+              action.side === 'all' ? allBorders(border) : { [action.side]: border }
+            );
+          }
+          case 'tableProperties':
+            return apply({ type: 'tableProperties', properties: action.props });
+          case 'openTableProperties':
+            setTablePropsOpen(true);
+            return 'opened';
+          case 'applyTableStyle': {
+            const preset = getBuiltinTableStyle(action.styleId);
+            return preset?.tableBorders ? applyBorders(preset.tableBorders) : false;
+          }
+          default:
+            return false;
         }
-        return;
       }
 
       switch (action) {
         case 'addRowAbove':
-          apply({ type: 'tableInsertRow', side: 'above' });
-          break;
+          return apply({ type: 'tableInsertRow', side: 'above' });
         case 'addRowBelow':
-          apply({ type: 'tableInsertRow', side: 'below' });
-          break;
+          return apply({ type: 'tableInsertRow', side: 'below' });
         case 'addColumnLeft':
-          apply({ type: 'tableInsertColumn', side: 'left' });
-          break;
+          return apply({ type: 'tableInsertColumn', side: 'left' });
         case 'addColumnRight':
-          apply({ type: 'tableInsertColumn', side: 'right' });
-          break;
+          return apply({ type: 'tableInsertColumn', side: 'right' });
         case 'deleteRow':
-          apply({ type: 'tableDeleteRow' });
-          break;
+          return apply({ type: 'tableDeleteRow' });
         case 'deleteColumn':
-          apply({ type: 'tableDeleteColumn' });
-          break;
+          return apply({ type: 'tableDeleteColumn' });
         case 'deleteTable':
-          apply({ type: 'tableDelete' });
-          break;
+          return apply({ type: 'tableDelete' });
         case 'mergeCells':
-          apply({ type: 'tableMergeCells' });
-          break;
+          return apply({ type: 'tableMergeCells' });
         case 'splitCell':
-          openSplitCellDialog();
-          break;
+          return openSplitCellDialog() ? 'opened' : false;
         case 'selectTable':
-          apply({ type: 'tableSelect', target: 'table' });
-          break;
+          return apply({ type: 'tableSelect', target: 'table' });
         case 'selectRow':
-          apply({ type: 'tableSelect', target: 'row' });
-          break;
+          return apply({ type: 'tableSelect', target: 'row' });
         case 'selectColumn':
-          apply({ type: 'tableSelect', target: 'column' });
-          break;
+          return apply({ type: 'tableSelect', target: 'column' });
         case 'borderAll':
-          applyBorders(allBorders(borderSpecRef.current));
-          break;
+          return applyBorders(allBorders(borderSpecRef.current));
         case 'borderOutside':
-          applyBorders({
+          return applyBorders({
             top: borderSpecRef.current,
             bottom: borderSpecRef.current,
             left: borderSpecRef.current,
             right: borderSpecRef.current,
           });
-          break;
         case 'borderInside':
-          applyBorders({ insideH: borderSpecRef.current, insideV: borderSpecRef.current });
-          break;
+          return applyBorders({ insideH: borderSpecRef.current, insideV: borderSpecRef.current });
         case 'borderNone':
-          applyBorders(allBorders({ style: 'none', size: 0, color: { rgb: '000000' } }));
-          break;
+          return applyBorders(allBorders({ style: 'none', size: 0, color: { rgb: '000000' } }));
         case 'borderTop':
         case 'borderBottom':
         case 'borderLeft':
         case 'borderRight':
-          applyBorders({
+          return applyBorders({
             [action.slice('border'.length).toLowerCase()]: borderSpecRef.current,
           });
-          break;
       }
     },
-    [allBorders, applyBorders, borderSpecRef, openSplitCellDialog, pagedEditorRef]
+    [allBorders, apply, applyBorders, borderSpecRef, openSplitCellDialog]
   );
 
   const handleSplitCellDialogClose = useCallback(() => {
@@ -186,11 +187,11 @@ export function useTableDialogs({
 
   const handleSplitCellDialogApply = useCallback(
     (rows: number, columns: number) => {
-      pagedEditorRef.current?.applyYrsCommand({ type: 'tableSplitCell', rows, columns });
+      complete('splitCell', { type: 'tableSplitCell', rows, columns });
       setSplitCellDialogState((previous) => ({ ...previous, isOpen: false }));
       pagedEditorRef.current?.focus();
     },
-    [pagedEditorRef]
+    [complete, pagedEditorRef]
   );
 
   return {

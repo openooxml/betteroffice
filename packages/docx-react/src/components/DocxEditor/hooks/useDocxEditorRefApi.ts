@@ -20,6 +20,7 @@ import type {
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import type { DocxEditorRef } from '../../DocxEditor';
+import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { createComment } from '../commentFactories';
@@ -208,7 +209,6 @@ export function useDocxEditorRefApi({
   historyStateRef,
   pagedEditorRef,
   handleSave,
-  handleDirectPrint,
   zoom,
   setZoom,
   scrollPageInfo,
@@ -221,6 +221,7 @@ export function useDocxEditorRefApi({
   selectionChangeSubscribersRef,
   getCachedStyleResolver,
   commentIdAllocator,
+  commands,
   modeRef,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
@@ -229,7 +230,6 @@ export function useDocxEditorRefApi({
   historyStateRef: React.RefObject<Document | null>;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   handleSave: () => Promise<ArrayBuffer | null>;
-  handleDirectPrint: () => void;
   zoom: number;
   setZoom: (zoom: number) => void;
   scrollPageInfo: { currentPage: number; totalPages: number; visible: boolean };
@@ -244,12 +244,14 @@ export function useDocxEditorRefApi({
     styles: Parameters<typeof createStyleResolver>[0]
   ) => ReturnType<typeof createStyleResolver>;
   commentIdAllocator: CommentIdAllocator;
+  commands: DocxCommandStore;
   /** The editor's current write mode; `viewing` also stands for a read-only editor. */
   modeRef: React.RefObject<EditorMode>;
 }) {
   useImperativeHandle(
     ref,
     () => ({
+      commands,
       getDocument: () => pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document,
       getEditorRef: () => pagedEditorRef.current,
       flushPendingInput: async () => {
@@ -264,8 +266,8 @@ export function useDocxEditorRefApi({
       scrollToPage: (pageNumber) => pagedEditorRef.current?.scrollToPage(pageNumber),
       scrollToPosition: (displayPosition) =>
         pagedEditorRef.current?.scrollToPosition(displayPosition),
-      openPrintPreview: handleDirectPrint,
-      print: handleDirectPrint,
+      openPrintPreview: () => void commands.execute('print', null),
+      print: () => void commands.execute('print', null),
       loadDocument: loadParsedDocument,
       loadDocumentBuffer: loadBuffer,
 
@@ -515,10 +517,10 @@ export function useDocxEditorRefApi({
       scrollPageInfo,
       scrollPageInfo,
       handleSave,
-      handleDirectPrint,
       loadParsedDocument,
       loadBuffer,
       comments,
+      commands,
     ]
   );
 }

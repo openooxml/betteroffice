@@ -24,11 +24,14 @@ const TRANSFORM_OPTIONS: (Omit<IconGridOption<TransformAction>, 'label'> & {
 export interface ImageTransformDropdownProps {
   onTransform: (action: TransformAction) => void;
   disabled?: boolean;
+  /** Why the dropdown is disabled. */
+  description?: string;
 }
 
 export function ImageTransformDropdown({
   onTransform,
   disabled = false,
+  description,
 }: ImageTransformDropdownProps) {
   const { t } = useTranslation();
   const translatedOptions: IconGridOption<TransformAction>[] = TRANSFORM_OPTIONS.map((opt) => ({
@@ -43,6 +46,7 @@ export function ImageTransformDropdown({
       tooltipContent={t('imageTransform.tooltip')}
       onSelect={onTransform}
       disabled={disabled}
+      description={description}
       testId="toolbar-image-transform"
     />
   );

@@ -8,24 +8,8 @@ import type {
   TabStop,
 } from '@betteroffice/docx/types/document';
 import type { SelectionState, TableContextInfo } from '../types';
-import { createStyleResolver } from '@betteroffice/docx/styles';
 import { resolveColorToHex } from '@betteroffice/docx/utils';
-import type { SelectionFormatting } from '../../Toolbar';
 import type { YrsToolbarSelection } from '../yrsToolbar';
-
-interface PmImageContext {
-  pos: number;
-  wrapType: string;
-  displayMode: string;
-  cssFloat: string | null;
-  transform: string | null;
-  alt: string | null;
-  borderWidth: number | null;
-  borderColor: string | null;
-  borderStyle: string | null;
-  width: number | null;
-  height: number | null;
-}
 
 interface BorderSpec {
   style: string;
@@ -115,33 +99,25 @@ function yrsSelectionState(selection: YrsToolbarSelection): SelectionState {
 
 /** Slice of EditorState that handleSelectionChange writes on every fire. */
 export interface SelectionStateDelta {
-  selectionFormatting: SelectionFormatting;
   paragraphIndentLeft?: number;
   paragraphIndentRight?: number;
   paragraphFirstLineIndent?: number;
   paragraphHangingIndent?: boolean;
   paragraphTabs?: TabStop[] | null;
   pmTableContext: TableContextInfo | null;
-  pmImageContext: PmImageContext | null;
 }
 
 /**
- * Selection-change handler: extracts the formatting state the editor
- * sees at the cursor, derives table + image context from the
- * selection, syncs the border-spec ref to the cell's actual color,
- * pushes the result into EditorState, refreshes the floating
- * add-comment button, and fans the SelectionState out to consumer-side
- * `onSelectionChange` + the bridge subscribers.
- *
- * Font/size fall back to the paragraph style's resolved values when no
- * explicit run-level mark is present — keeps the toolbar picker showing
- * the right value for unstyled cursor positions.
+ * Selection-change handler: derives the ruler's paragraph state and the
+ * table context from the selection, syncs the border-spec ref to the cell's
+ * actual color, refreshes the floating add-comment button, and fans the
+ * SelectionState out to consumer-side `onSelectionChange` + the bridge
+ * subscribers. Toolbar state reads the authoritative selection through the
+ * command store instead.
  */
 export function useSelectionTracker({
   borderSpecRef,
   theme,
-  historyStateRef,
-  getCachedStyleResolver,
   setFloatingCommentBtn,
   applySelectionDelta,
   recomputeFloatingCommentBtn,
@@ -151,10 +127,6 @@ export function useSelectionTracker({
 }: {
   borderSpecRef: React.RefObject<BorderSpec>;
   theme: Theme | null | undefined;
-  historyStateRef: React.RefObject<{ package: { styles?: unknown } } | null>;
-  getCachedStyleResolver: (
-    styles: Parameters<typeof createStyleResolver>[0]
-  ) => ReturnType<typeof createStyleResolver>;
   setFloatingCommentBtn: React.Dispatch<React.SetStateAction<{ top: number; left: number } | null>>;
   applySelectionDelta: (delta: SelectionStateDelta) => void;
   recomputeFloatingCommentBtn: () => void;
@@ -184,80 +156,19 @@ export function useSelectionTracker({
 
       if (!selectionState) {
         setFloatingCommentBtn(null);
-        applySelectionDelta({
-          selectionFormatting: {},
-          pmTableContext: pmTableCtx,
-          pmImageContext: null,
-        });
+        applySelectionDelta({ pmTableContext: pmTableCtx });
         return;
       }
 
-      const { textFormatting, paragraphFormatting } = selectionState;
-
-      // Font/size fall back to the paragraph style's resolved values when no
-      // explicit run-level mark is present.
-      let fontFamily = textFormatting.fontFamily?.ascii || textFormatting.fontFamily?.hAnsi;
-      let fontSize = textFormatting.fontSize;
-      if (!fontFamily || !fontSize) {
-        const currentDoc = historyStateRef.current;
-        const paraStyleId = selectionState.styleId;
-        if (currentDoc?.package.styles && paraStyleId) {
-          const resolver = getCachedStyleResolver(
-            currentDoc.package.styles as Parameters<typeof createStyleResolver>[0]
-          );
-          const resolved = resolver.resolveParagraphStyle(paraStyleId);
-          if (!fontFamily && resolved.runFormatting?.fontFamily) {
-            fontFamily =
-              resolved.runFormatting.fontFamily.ascii || resolved.runFormatting.fontFamily.hAnsi;
-          }
-          if (!fontSize && resolved.runFormatting?.fontSize) {
-            fontSize = resolved.runFormatting.fontSize;
-          }
-        }
-      }
-
-      const textColorHex = resolveColorToHex(textFormatting.color, theme ?? undefined);
-      const textColor = textColorHex ? `#${textColorHex}` : undefined;
-
-      // Build list state from numPr.
-      const numPr = paragraphFormatting.numPr;
-      const listState = numPr
-        ? {
-            type: (numPr.numId === 1 ? 'bullet' : 'numbered') as 'bullet' | 'numbered',
-            level: numPr.ilvl ?? 0,
-            isInList: true,
-            numId: numPr.numId,
-          }
-        : undefined;
-
-      const formatting: SelectionFormatting = {
-        bold: textFormatting.bold,
-        italic: textFormatting.italic,
-        underline: !!textFormatting.underline,
-        strike: textFormatting.strike,
-        superscript: textFormatting.vertAlign === 'superscript',
-        subscript: textFormatting.vertAlign === 'subscript',
-        fontFamily,
-        fontSize,
-        color: textColor,
-        highlight: textFormatting.highlight,
-        alignment: paragraphFormatting.alignment,
-        lineSpacing: paragraphFormatting.lineSpacing,
-        listState,
-        styleId: selectionState.styleId ?? undefined,
-        indentLeft: paragraphFormatting.indentLeft,
-        bidi: !!paragraphFormatting.bidi,
-      };
+      const { paragraphFormatting } = selectionState;
 
       applySelectionDelta({
-        selectionFormatting: formatting,
         paragraphIndentLeft: paragraphFormatting.indentLeft ?? 0,
         paragraphIndentRight: paragraphFormatting.indentRight ?? 0,
         paragraphFirstLineIndent: paragraphFormatting.indentFirstLine ?? 0,
         paragraphHangingIndent: paragraphFormatting.hangingIndent ?? false,
         paragraphTabs: paragraphFormatting.tabs ?? null,
         pmTableContext: pmTableCtx,
-        pmImageContext: null,
       });
 
       recomputeFloatingCommentBtn();
@@ -275,8 +186,6 @@ export function useSelectionTracker({
     [
       borderSpecRef,
       theme,
-      historyStateRef,
-      getCachedStyleResolver,
       setFloatingCommentBtn,
       applySelectionDelta,
       recomputeFloatingCommentBtn,

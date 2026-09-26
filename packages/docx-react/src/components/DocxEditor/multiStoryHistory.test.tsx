@@ -13,9 +13,10 @@ import { unzipContainer } from '@betteroffice/docx/docx/wasm';
 import type { Document } from '@betteroffice/docx/types/document';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { PagedEditor, type PagedEditorRef } from './PagedEditor';
+import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import { useYrsCoreSession, type YrsCoreSession } from './hooks/useYrsCoreSession';
 
-const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
+const { act, cleanup, render } = await import('@testing-library/react');
 
 const WASM = resolve(import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm');
 const FONT = resolve(
@@ -81,10 +82,12 @@ function fixture(): Uint8Array {
 function Harness({
   bytes,
   editorRef,
+  bridgeRef,
   coreRef,
 }: {
   bytes: Uint8Array;
   editorRef: RefObject<PagedEditorRef | null>;
+  bridgeRef: { current: PagedEditorCommandBridge | null };
   coreRef: { current: YrsCoreSession | null };
 }) {
   const [host, setHost] = useState<Document | null>(null);
@@ -97,6 +100,7 @@ function Harness({
       ref={editorRef}
       document={host}
       yrsCore={core}
+      commandBridgeRef={bridgeRef}
       measurementFontProvider={{ resolve: () => () => Promise.resolve(fontBytes) }}
     />
   );
@@ -126,9 +130,12 @@ async function saved(editorRef: RefObject<PagedEditorRef | null>): Promise<strin
 
 test('undo and redo refresh every story a multi-story batch changed before the next save', async () => {
   const editorRef = createRef<PagedEditorRef>();
+  const bridgeRef: { current: PagedEditorCommandBridge | null } = { current: null };
   const coreRef: { current: YrsCoreSession | null } = { current: null };
-  render(<Harness bytes={fixture()} editorRef={editorRef} coreRef={coreRef} />);
-  await until(() => !!coreRef.current?.session && !!editorRef.current?.getYrsSession());
+  render(<Harness bytes={fixture()} editorRef={editorRef} bridgeRef={bridgeRef} coreRef={coreRef} />);
+  await until(
+    () => !!coreRef.current?.session && !!editorRef.current?.getYrsSession() && !!bridgeRef.current
+  );
   const session = coreRef.current!.session!;
   const result = session.applyEdits({
     expectVersion: session.version(),
@@ -152,9 +159,7 @@ test('undo and redo refresh every story a multi-story batch changed before the n
   });
   expect(await saved(editorRef)).toEqual(['Body text', 'Header text']);
 
-  act(() => {
-    fireEvent.keyDown(window.document.querySelector('textarea')!, { key: 'y', ctrlKey: true });
-  });
-  await act(() => editorRef.current!.flushPendingInput());
+  const bridge = bridgeRef.current!;
+  expect(await act(() => bridge.runAfterPendingInput(() => bridge.history(true)))).toBe(true);
   expect(await saved(editorRef)).toEqual(['Body edited', 'Header edited']);
 });

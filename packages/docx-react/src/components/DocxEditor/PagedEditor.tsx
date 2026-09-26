@@ -100,16 +100,20 @@ import { useSelectionOverlay } from './hooks/useSelectionOverlay';
 import { useImageInteractions } from './hooks/useImageInteractions';
 import { usePagedScrollApi } from './hooks/usePagedScrollApi';
 import { usePagesPointer } from './hooks/usePagesPointer';
-import { usePagedEditorRefApi } from './hooks/usePagedEditorRefApi';
+import {
+  usePagedEditorCommandBridge,
+  usePagedEditorRefApi,
+  type PagedEditorCommandBridge,
+} from './hooks/usePagedEditorRefApi';
 import { useLayoutTriggers } from './hooks/useLayoutTriggers';
 import { TableInsertButton } from './overlays/TableInsertButton';
 import { HyperlinkPopup, type HyperlinkPopupData } from '../ui/HyperlinkPopup';
-import type { FormattingAction } from '../Toolbar';
 import {
   applyYrsToolbarFormatting,
   currentYrsToolbarSelection,
   storedYrsToolbarFormatting,
   withStoredYrsFormatting,
+  type FormattingAction,
   type YrsToolbarSelection,
 } from './yrsToolbar';
 import {
@@ -335,6 +339,8 @@ export interface PagedEditorProps {
    * shares the visible canvas pages' coordinate space.
    */
   canvasOverlayTarget?: HTMLElement | null;
+  /** Receives the ordered command entry points used by editor chrome. */
+  commandBridgeRef?: React.MutableRefObject<PagedEditorCommandBridge | null>;
 }
 
 export interface PagedEditorRef {
@@ -508,6 +514,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onCaretInterrupt,
       canvasHostRef,
       canvasOverlayTarget = null,
+      commandBridgeRef,
     } = props;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
 
@@ -730,6 +737,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, []);
 
     const yrsProjectionVersionRef = useRef(0);
+    const latestYrsToolbarSelectionRef = useRef<YrsToolbarSelection | null>(null);
+    const stateListenersRef = useRef(new Set<() => void>());
+    const notifyStateListeners = useCallback(() => {
+      for (const listener of [...stateListenersRef.current]) listener();
+    }, []);
     const lastYrsToolbarSelectionKeyRef = useRef<string | null>(null);
     const lastPublishedBodySelectionKeyRef = useRef<string | null>(null);
     const lastPublishedPresenceSelectionKeyRef = useRef<string | null>(null);
@@ -793,6 +805,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         }
         const liveStory = session?.selection()?.head.story ?? activeYrsRootStory;
         const inputMap = yrsCore.inputPositionMap(liveStory);
+        latestYrsToolbarSelectionRef.current = null;
         if (session && inputMap) {
           const toolbarSelection = currentYrsToolbarSelection(session, inputMap);
           if (toolbarSelection) {
@@ -800,6 +813,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               toolbarSelection,
               yrsInputRef.current?.storedFormatting() ?? null
             );
+            latestYrsToolbarSelectionRef.current = nextToolbarSelection;
             const key = JSON.stringify([
               nextToolbarSelection.context,
               nextToolbarSelection.tableContext,
@@ -850,10 +864,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             onYrsContentChangeRef.current?.();
           }, 100);
         }
+        notifyStateListeners();
       },
       [
         activeYrsRootStory,
         collaboration?.presence,
+        notifyStateListeners,
         partEdit,
         refreshYrsLayout,
         updateSelectionOverlay,
@@ -903,7 +919,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       });
     }, [syncYrsInputState, yrsCore.session]);
 
-    const applyYrsFormatting = useCallback(
+    const executeYrsFormatting = useCallback(
       (action: FormattingAction): boolean => {
         if (!yrsCore.session) return false;
         const liveStory = yrsCore.session.selection()?.head.story ?? activeYrsRootStory;
@@ -931,27 +947,22 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             } else if (Object.keys(delta).length > 0) {
               yrsInputRef.current?.applyStoredFormatting({ type: 'set', delta });
             }
-            if (!syncYrsInputState(true)) return false;
-            yrsInputRef.current?.focus();
-            return true;
+            return syncYrsInputState(true);
           }
           if (selection && !selection.context.hasSelection) {
             const storedAction = storedYrsToolbarFormatting(selection.context, action);
             if (storedAction) {
               yrsInputRef.current?.applyStoredFormatting(storedAction);
-              yrsInputRef.current?.focus();
               return true;
             }
           }
           const changed = applyYrsToolbarFormatting(yrsCore.session, map, action, structuralAuthor);
           if (!changed) return false;
           yrsInputRef.current?.clearStoredFormatting();
-          if (!syncYrsInputState(true)) return false;
-          yrsInputRef.current?.focus();
-          return true;
+          return syncYrsInputState(true);
         } catch (error) {
-          console.error('[yrs] toolbar formatting failed', error);
-          return false;
+          syncYrsInputState(true);
+          throw error;
         }
       },
       [
@@ -965,7 +976,22 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       ]
     );
 
-    const applyYrsCommand = useCallback(
+    const applyYrsFormatting = useCallback(
+      (action: FormattingAction): boolean => {
+        let changed: boolean;
+        try {
+          changed = executeYrsFormatting(action);
+        } catch (error) {
+          console.error('[yrs] toolbar formatting failed', error);
+          return false;
+        }
+        if (changed) yrsInputRef.current?.focus();
+        return changed;
+      },
+      [executeYrsFormatting]
+    );
+
+    const executeYrsCommand = useCallback(
       (command: YrsEditorCommand): boolean => {
         const session = yrsCore.session;
         if (!session || activeYrsRootStory !== 'body') return false;
@@ -977,29 +1003,33 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             ? { name: author, date: new Date().toISOString() }
             : undefined;
           let docChanged = true;
+          const imageAt = (start: number) => {
+            const target = positionProjection.targetAt(start);
+            return yrsCore.displayPositionToLoc(target.displayPosition, target.story);
+          };
           if (command.type === 'imageGeometry') {
             const node = positionProjection.nodeAt(command.pmPos);
             if (!node || node.kind !== 'image') return false;
-            const embedId = yrsEmbedIdForProjectedNode(node);
+            const at = imageAt(node.start);
             const geometry = yrsImageGeometryForProjectedNode(node, command.patch);
-            if (!embedId || !geometry) return false;
-            session.setImageGeometry(embedId, geometry);
+            if (!at || !geometry) return false;
+            session.setImageGeometryAt(at, geometry);
           } else if (command.type === 'imageWrap') {
             const node = positionProjection.nodeAt(command.pmPos);
             if (!node || node.kind !== 'image') return false;
-            const embedId = yrsEmbedIdForProjectedNode(node);
+            const at = imageAt(node.start);
             const patch = resolveImageLayoutAttrs(command.target, node.attrs, command.options);
             const geometry = yrsImageGeometryForProjectedNode(node, patch);
-            if (!embedId || !geometry) return false;
-            session.setImageGeometry(embedId, geometry);
+            if (!at || !geometry) return false;
+            session.setImageGeometryAt(at, geometry);
           } else if (command.type === 'imageTransform') {
             const node = positionProjection.nodeAt(command.pmPos);
             if (!node || node.kind !== 'image') return false;
-            const embedId = yrsEmbedIdForProjectedNode(node);
+            const at = imageAt(node.start);
             const transform = yrsImageTransformForProjectedNode(node, command.action);
             const geometry = yrsImageGeometryForProjectedNode(node, { transform });
-            if (!embedId || !geometry) return false;
-            session.setImageGeometry(embedId, geometry);
+            if (!at || !geometry) return false;
+            session.setImageGeometryAt(at, geometry);
           } else if (command.type === 'insertImage') {
             const at = session.selection()?.head;
             if (!at) return false;
@@ -1228,11 +1258,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             yrsInputRef.current?.displaySelection() ?? displaySelection,
             docChanged
           );
-          yrsInputRef.current?.focus();
           return true;
         } catch (error) {
-          console.error('[yrs] non-toolbar command failed', error);
-          return false;
+          yrsCore.publishDirectInput();
+          handleYrsStateChange(yrsInputRef.current?.displaySelection() ?? displaySelection, true);
+          throw error;
         }
       },
       [
@@ -1244,6 +1274,21 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsCore.publishDirectInput,
         yrsCore.session,
       ]
+    );
+
+    const applyYrsCommand = useCallback(
+      (command: YrsEditorCommand): boolean => {
+        let applied: boolean;
+        try {
+          applied = executeYrsCommand(command);
+        } catch (error) {
+          console.error('[yrs] non-toolbar command failed', error);
+          return false;
+        }
+        if (applied) yrsInputRef.current?.focus();
+        return applied;
+      },
+      [executeYrsCommand]
     );
 
     const [canvasFlashRequest, setCanvasFlashRequest] =
@@ -1685,6 +1730,24 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       },
     });
 
+    usePagedEditorCommandBridge({
+      bridgeRef: commandBridgeRef,
+      yrsInputRef,
+      session: yrsCore.session,
+      rootStory: activeYrsRootStory,
+      inputPositionMap: yrsCore.inputPositionMap,
+      latestSelectionRef: latestYrsToolbarSelectionRef,
+      listenersRef: stateListenersRef,
+      getPositionProjection: () => getYrsPositionProjection('body'),
+      displayPositionToLoc: displayPositionToViewportLoc,
+      format: executeYrsFormatting,
+      command: executeYrsCommand,
+      syncYrsInputState: (docChanged, dirtyStory) =>
+        syncYrsInputState(docChanged, 'local', dirtyStory),
+      yrsLocToDisplayPosition,
+      scrollToPositionImpl,
+    });
+
     // =========================================================================
     // Render
     // =========================================================================
@@ -1754,6 +1817,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           applyResidentInput={applyResidentInput}
           applyResidentDelete={applyResidentDelete}
           onFocusChange={setIsFocused}
+          onPendingInputChange={notifyStateListeners}
           onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
           onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
           onCaretInterrupt={handleLocalCaretInterrupt}
