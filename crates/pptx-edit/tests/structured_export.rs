@@ -12,7 +12,7 @@ use pptx_edit::structured::{
     PptxMarkdownOptions, PptxStructuredContent, export_pptx_markdown, export_pptx_structured,
     render_pptx_markdown,
 };
-use pptx_edit::{DeckSession, EditCtx, ReadRequest, ShapeDraft, ShapeRect, TextStyle};
+use pptx_edit::{DeckSession, EditCtx, EditRequest, ReadRequest, ShapeDraft, ShapeRect, TextStyle};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -719,7 +719,7 @@ fn runs_carry_links_fields_breaks_and_unsupported_inlines() {
         .runs
         .iter()
         .map(|run| {
-            let PptxAnchor::Text { range, .. } = &run.anchor else {
+            let PptxAnchor::Range(range) = &run.anchor else {
                 panic!("run anchors are text ranges")
             };
             (
@@ -765,6 +765,33 @@ fn runs_carry_links_fields_breaks_and_unsupported_inlines() {
 }
 
 #[test]
+fn text_anchors_are_batch_targets() {
+    let session = DeckSession::open(&fixture(), 89).unwrap();
+    let exported = session
+        .export_structured(&options(json!({})))
+        .unwrap()
+        .unwrap();
+    let runs = &shape(&exported.content, "Linked").stories[0].paragraphs[0].runs;
+    let request: EditRequest = serde_json::from_value(json!({
+        "expectVersion": exported.version,
+        "steps": [{"op": "replaceText", "target": runs[1].anchor, "text": " site "}],
+    }))
+    .unwrap();
+    assert!(session.apply_edits(&request).unwrap().unwrap().applied);
+    let edited = session_export(&session, json!({}));
+    let texts: Vec<_> = shape(&edited, "Linked").stories[0].paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| &run.content)
+        .take(2)
+        .collect();
+    let text = |text: &str| ExportRunKind::Text {
+        text: text.to_owned(),
+    };
+    assert_eq!(texts, [&text("Docs"), &text(" site ")]);
+}
+
+#[test]
 fn text_anchors_agree_with_batch_reads() {
     let session = DeckSession::open(&fixture(), 81).unwrap();
     let content = session_export(&session, json!({}));
@@ -779,20 +806,20 @@ fn text_anchors_agree_with_batch_reads() {
             .iter()
             .flat_map(|slide| stories_of(&slide.shapes))
             .find(|(_, anchor)| {
-                matches!(anchor, PptxAnchor::Text { story_id, .. } if story_id == &story.story_id)
+                matches!(anchor, PptxAnchor::Range(range) if range.story_id == story.story_id)
             });
         let Some((paragraphs, _)) = exported else {
             continue;
         };
         let units: Vec<u16> = story.text.encode_utf16().collect();
         for (paragraph, expected) in paragraphs.iter().zip(&story.paragraphs) {
-            let PptxAnchor::Text { range, .. } = &paragraph.anchor else {
+            let PptxAnchor::Range(range) = &paragraph.anchor else {
                 panic!("paragraph anchors are text ranges")
             };
             assert_eq!((range.start, range.end), (expected.start, expected.end));
             assert_eq!(paragraph.paragraph_id, expected.paragraph_id);
             for run in &paragraph.runs {
-                let PptxAnchor::Text { range, .. } = &run.anchor else {
+                let PptxAnchor::Range(range) = &run.anchor else {
                     panic!("run anchors are text ranges")
                 };
                 let slice =
@@ -1298,7 +1325,7 @@ fn the_renderer_validates_what_it_is_given() {
     assert!(serde_json::from_value::<PptxStructuredContent>(value).is_err());
     let mut broken = content.clone();
     let paragraph = &mut broken.slides[0].shapes[0].stories[0].paragraphs[0];
-    if let PptxAnchor::Text { range, .. } = &mut paragraph.anchor {
+    if let PptxAnchor::Range(range) = &mut paragraph.anchor {
         range.start = range.end + 1;
     }
     let failure = render_pptx_markdown(&broken, &PptxMarkdownOptions::default()).unwrap_err();
@@ -1430,7 +1457,7 @@ fn edited_paragraphs_keep_what_can_still_be_located() {
         .unwrap();
     assert!(matches!(
         &unsupported.anchor,
-        PptxAnchor::Text { range, .. } if (range.start, range.end) == (10, 10)
+        PptxAnchor::Range(range) if (range.start, range.end) == (10, 10)
     ));
     assert!(content.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == ExportDiagnosticCode::ProvenanceUnavailable
@@ -1552,8 +1579,8 @@ fn the_renderer_refuses_content_that_breaks_its_contract() {
             }
         }),
         Box::new(|content| {
-            if let PptxAnchor::Text { shape_id, .. } = &mut title(content).runs[0].anchor {
-                *shape_id = "elsewhere".to_owned();
+            if let PptxAnchor::Range(range) = &mut title(content).runs[0].anchor {
+                range.shape_id = "elsewhere".to_owned();
             }
         }),
         Box::new(|content| {

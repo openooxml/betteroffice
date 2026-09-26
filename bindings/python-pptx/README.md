@@ -193,9 +193,10 @@ slides in deck order, shapes in shape-tree order, paragraphs with levels,
 resolved list markers, runs, fields and links, tables with merges, and
 placeholders with alternative text for pictures, media, charts, SmartArt and
 embedded objects. Every record carries an anchor and, when it was read from the
-file, its source part, SHA-256 and element path. Hidden slides and shapes,
-notes and comments are keyword options, and every omission is listed in
-`diagnostics`; a slide whose visibility an older collaboration update does not
+file, its source part, SHA-256 and element path. A `range` anchor is a batch
+text target: pass it as a step's `"target"` at the version it was read at.
+Hidden slides and shapes, notes and comments are keyword options, and every
+omission is listed in `diagnostics`; a slide whose visibility an older collaboration update does not
 record is exported with `hidden: None` and a `visibility-unknown` diagnostic. Unusable limits come back with `"ok": False`.
 `export_pptx_structured(data, options=...)` and `export_pptx_markdown` read
 bytes with the camelCase wire options and return the content alone,

@@ -161,11 +161,12 @@ is the authored order, not one inferred from geometry. Paragraphs carry levels,
 resolved list markers, runs with marks, links, line breaks and cached field
 results; tables keep spans and merges; pictures, media, charts, SmartArt and
 embedded objects become placeholders with their alternative text. Every record
-carries an anchor (`text` ranges use `readContent()` offsets) and, when read
-from the file, its source part, SHA-256 and element path. Hidden slides and
-shapes, notes and comments are explicit options, layout and master content is
-not exported, and every omission is a diagnostic. `maxBlocks` and `maxBytes`
-stop the export at a whole record and set `truncated`. Markdown marks each
+carries an anchor (`range` anchors are batch text targets in `readContent()`
+offsets) and, when read from the file, its source part, SHA-256 and element
+path. Hidden slides and shapes, notes and comments are explicit options, layout
+and master content is not exported, and every omission is a diagnostic.
+`maxBlocks` and `maxBytes` stop the export at a whole record and set
+`truncated`. Markdown marks each
 block with `<!-- pptx-export:N -->`, mapped back to its source in `anchors`.
 
 ## Operation profiles

@@ -41,6 +41,7 @@ structured content or Markdown with the version it was read at;
 the same for bytes and for content read earlier. Slides, shapes, stories,
 paragraphs, tables and placeholders for unrepresented objects carry session or
 snapshot anchors and source provenance, and every omission is a diagnostic.
+Text anchors are `PptxAnchor::Range` batch targets.
 
 `pptx-edit` keeps the wasm surface for JavaScript clients. This facade exposes
 the same engine operations without its JSON argument and result wrappers.

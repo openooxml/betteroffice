@@ -58,27 +58,23 @@
             {
               "id": "s0.h0.t0",
               "anchor": {
-                "kind": "text",
+                "kind": "range",
                 "slideId": "slide:0:256",
                 "shapeId": "slide:0:256:shape:0",
                 "storyId": "story:slide:0:256:shape:0:0",
-                "range": {
-                  "start": 0,
-                  "end": 16
-                }
+                "start": 0,
+                "end": 16
               },
               "paragraphs": [
                 {
                   "id": "s0.h0.t0.p0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:0",
                     "storyId": "story:slide:0:256:shape:0:0",
-                    "range": {
-                      "start": 0,
-                      "end": 16
-                    }
+                    "start": 0,
+                    "end": 16
                   },
                   "paragraphId": "para:story:slide:0:256:shape:0:0:0",
                   "level": 0,
@@ -88,14 +84,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:0",
                         "storyId": "story:slide:0:256:shape:0:0",
-                        "range": {
-                          "start": 0,
-                          "end": 16
-                        }
+                        "start": 0,
+                        "end": 16
                       },
                       "marks": [
                         {
@@ -146,27 +140,23 @@
             {
               "id": "s0.h1.t0",
               "anchor": {
-                "kind": "text",
+                "kind": "range",
                 "slideId": "slide:0:256",
                 "shapeId": "slide:0:256:shape:1",
                 "storyId": "story:slide:0:256:shape:1:0",
-                "range": {
-                  "start": 0,
-                  "end": 37
-                }
+                "start": 0,
+                "end": 37
               },
               "paragraphs": [
                 {
                   "id": "s0.h1.t0.p0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:1",
                     "storyId": "story:slide:0:256:shape:1:0",
-                    "range": {
-                      "start": 0,
-                      "end": 11
-                    }
+                    "start": 0,
+                    "end": 11
                   },
                   "paragraphId": "para:story:slide:0:256:shape:1:0:0",
                   "level": 0,
@@ -180,14 +170,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:1",
                         "storyId": "story:slide:0:256:shape:1:0",
-                        "range": {
-                          "start": 0,
-                          "end": 11
-                        }
+                        "start": 0,
+                        "end": 11
                       },
                       "marks": [],
                       "link": null,
@@ -199,14 +187,12 @@
                 {
                   "id": "s0.h1.t0.p1",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:1",
                     "storyId": "story:slide:0:256:shape:1:0",
-                    "range": {
-                      "start": 12,
-                      "end": 24
-                    }
+                    "start": 12,
+                    "end": 24
                   },
                   "paragraphId": "para:story:slide:0:256:shape:1:0:1",
                   "level": 1,
@@ -220,14 +206,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:1",
                         "storyId": "story:slide:0:256:shape:1:0",
-                        "range": {
-                          "start": 12,
-                          "end": 24
-                        }
+                        "start": 12,
+                        "end": 24
                       },
                       "marks": [],
                       "link": null,
@@ -239,14 +223,12 @@
                 {
                   "id": "s0.h1.t0.p2",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:1",
                     "storyId": "story:slide:0:256:shape:1:0",
-                    "range": {
-                      "start": 25,
-                      "end": 37
-                    }
+                    "start": 25,
+                    "end": 37
                   },
                   "paragraphId": "para:story:slide:0:256:shape:1:0:2",
                   "level": 0,
@@ -260,14 +242,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:1",
                         "storyId": "story:slide:0:256:shape:1:0",
-                        "range": {
-                          "start": 25,
-                          "end": 37
-                        }
+                        "start": 25,
+                        "end": 37
                       },
                       "marks": [],
                       "link": null,
@@ -311,27 +291,23 @@
             {
               "id": "s0.h2.t0",
               "anchor": {
-                "kind": "text",
+                "kind": "range",
                 "slideId": "slide:0:256",
                 "shapeId": "slide:0:256:shape:2",
                 "storyId": "story:slide:0:256:shape:2:0",
-                "range": {
-                  "start": 0,
-                  "end": 16
-                }
+                "start": 0,
+                "end": 16
               },
               "paragraphs": [
                 {
                   "id": "s0.h2.t0.p0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:2",
                     "storyId": "story:slide:0:256:shape:2:0",
-                    "range": {
-                      "start": 0,
-                      "end": 5
-                    }
+                    "start": 0,
+                    "end": 5
                   },
                   "paragraphId": "para:story:slide:0:256:shape:2:0:0",
                   "level": 0,
@@ -347,14 +323,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:2",
                         "storyId": "story:slide:0:256:shape:2:0",
-                        "range": {
-                          "start": 0,
-                          "end": 5
-                        }
+                        "start": 0,
+                        "end": 5
                       },
                       "marks": [],
                       "link": null,
@@ -366,14 +340,12 @@
                 {
                   "id": "s0.h2.t0.p1",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:2",
                     "storyId": "story:slide:0:256:shape:2:0",
-                    "range": {
-                      "start": 6,
-                      "end": 10
-                    }
+                    "start": 6,
+                    "end": 10
                   },
                   "paragraphId": "para:story:slide:0:256:shape:2:0:1",
                   "level": 0,
@@ -389,14 +361,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:2",
                         "storyId": "story:slide:0:256:shape:2:0",
-                        "range": {
-                          "start": 6,
-                          "end": 10
-                        }
+                        "start": 6,
+                        "end": 10
                       },
                       "marks": [],
                       "link": null,
@@ -408,14 +378,12 @@
                 {
                   "id": "s0.h2.t0.p2",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:2",
                     "storyId": "story:slide:0:256:shape:2:0",
-                    "range": {
-                      "start": 11,
-                      "end": 11
-                    }
+                    "start": 11,
+                    "end": 11
                   },
                   "paragraphId": "para:story:slide:0:256:shape:2:0:2",
                   "level": 0,
@@ -427,14 +395,12 @@
                 {
                   "id": "s0.h2.t0.p3",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:2",
                     "storyId": "story:slide:0:256:shape:2:0",
-                    "range": {
-                      "start": 12,
-                      "end": 16
-                    }
+                    "start": 12,
+                    "end": 16
                   },
                   "paragraphId": "para:story:slide:0:256:shape:2:0:3",
                   "level": 0,
@@ -450,14 +416,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:2",
                         "storyId": "story:slide:0:256:shape:2:0",
-                        "range": {
-                          "start": 12,
-                          "end": 16
-                        }
+                        "start": 12,
+                        "end": 16
                       },
                       "marks": [],
                       "link": null,
@@ -501,27 +465,23 @@
             {
               "id": "s0.h3.t0",
               "anchor": {
-                "kind": "text",
+                "kind": "range",
                 "slideId": "slide:0:256",
                 "shapeId": "slide:0:256:shape:3",
                 "storyId": "story:slide:0:256:shape:3:0",
-                "range": {
-                  "start": 0,
-                  "end": 7
-                }
+                "start": 0,
+                "end": 7
               },
               "paragraphs": [
                 {
                   "id": "s0.h3.t0.p0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:3",
                     "storyId": "story:slide:0:256:shape:3:0",
-                    "range": {
-                      "start": 0,
-                      "end": 3
-                    }
+                    "start": 0,
+                    "end": 3
                   },
                   "paragraphId": "para:story:slide:0:256:shape:3:0:0",
                   "level": 0,
@@ -537,14 +497,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:3",
                         "storyId": "story:slide:0:256:shape:3:0",
-                        "range": {
-                          "start": 0,
-                          "end": 3
-                        }
+                        "start": 0,
+                        "end": 3
                       },
                       "marks": [],
                       "link": null,
@@ -556,14 +514,12 @@
                 {
                   "id": "s0.h3.t0.p1",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:3",
                     "storyId": "story:slide:0:256:shape:3:0",
-                    "range": {
-                      "start": 4,
-                      "end": 7
-                    }
+                    "start": 4,
+                    "end": 7
                   },
                   "paragraphId": "para:story:slide:0:256:shape:3:0:1",
                   "level": 0,
@@ -579,14 +535,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:3",
                         "storyId": "story:slide:0:256:shape:3:0",
-                        "range": {
-                          "start": 4,
-                          "end": 7
-                        }
+                        "start": 4,
+                        "end": 7
                       },
                       "marks": [],
                       "link": null,
@@ -630,27 +584,23 @@
             {
               "id": "s0.h4.t0",
               "anchor": {
-                "kind": "text",
+                "kind": "range",
                 "slideId": "slide:0:256",
                 "shapeId": "slide:0:256:shape:4",
                 "storyId": "story:slide:0:256:shape:4:0",
-                "range": {
-                  "start": 0,
-                  "end": 3
-                }
+                "start": 0,
+                "end": 3
               },
               "paragraphs": [
                 {
                   "id": "s0.h4.t0.p0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:4",
                     "storyId": "story:slide:0:256:shape:4:0",
-                    "range": {
-                      "start": 0,
-                      "end": 3
-                    }
+                    "start": 0,
+                    "end": 3
                   },
                   "paragraphId": "para:story:slide:0:256:shape:4:0:0",
                   "level": 0,
@@ -666,14 +616,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:4",
                         "storyId": "story:slide:0:256:shape:4:0",
-                        "range": {
-                          "start": 0,
-                          "end": 3
-                        }
+                        "start": 0,
+                        "end": 3
                       },
                       "marks": [],
                       "link": null,
@@ -717,27 +665,23 @@
             {
               "id": "s0.h5.t0",
               "anchor": {
-                "kind": "text",
+                "kind": "range",
                 "slideId": "slide:0:256",
                 "shapeId": "slide:0:256:shape:5",
                 "storyId": "story:slide:0:256:shape:5:0",
-                "range": {
-                  "start": 0,
-                  "end": 29
-                }
+                "start": 0,
+                "end": 29
               },
               "paragraphs": [
                 {
                   "id": "s0.h5.t0.p0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:5",
                     "storyId": "story:slide:0:256:shape:5:0",
-                    "range": {
-                      "start": 0,
-                      "end": 29
-                    }
+                    "start": 0,
+                    "end": 29
                   },
                   "paragraphId": "para:story:slide:0:256:shape:5:0:0",
                   "level": 0,
@@ -747,14 +691,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:5",
                         "storyId": "story:slide:0:256:shape:5:0",
-                        "range": {
-                          "start": 0,
-                          "end": 4
-                        }
+                        "start": 0,
+                        "end": 4
                       },
                       "marks": [],
                       "link": {
@@ -766,14 +708,12 @@
                     },
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:5",
                         "storyId": "story:slide:0:256:shape:5:0",
-                        "range": {
-                          "start": 4,
-                          "end": 10
-                        }
+                        "start": 4,
+                        "end": 10
                       },
                       "marks": [],
                       "link": null,
@@ -782,14 +722,12 @@
                     },
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:5",
                         "storyId": "story:slide:0:256:shape:5:0",
-                        "range": {
-                          "start": 10,
-                          "end": 11
-                        }
+                        "start": 10,
+                        "end": 11
                       },
                       "marks": [],
                       "link": null,
@@ -799,14 +737,12 @@
                     },
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:5",
                         "storyId": "story:slide:0:256:shape:5:0",
-                        "range": {
-                          "start": 11,
-                          "end": 12
-                        }
+                        "start": 11,
+                        "end": 12
                       },
                       "marks": [],
                       "link": null,
@@ -814,14 +750,12 @@
                     },
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:5",
                         "storyId": "story:slide:0:256:shape:5:0",
-                        "range": {
-                          "start": 12,
-                          "end": 16
-                        }
+                        "start": 12,
+                        "end": 16
                       },
                       "marks": [],
                       "link": null,
@@ -830,14 +764,12 @@
                     },
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:5",
                         "storyId": "story:slide:0:256:shape:5:0",
-                        "range": {
-                          "start": 16,
-                          "end": 16
-                        }
+                        "start": 16,
+                        "end": 16
                       },
                       "marks": [],
                       "link": null,
@@ -846,14 +778,12 @@
                     },
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:5",
                         "storyId": "story:slide:0:256:shape:5:0",
-                        "range": {
-                          "start": 16,
-                          "end": 29
-                        }
+                        "start": 16,
+                        "end": 29
                       },
                       "marks": [],
                       "link": null,
@@ -926,27 +856,23 @@
                 {
                   "id": "s0.h6.h0.t0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:0:256",
                     "shapeId": "slide:0:256:shape:6.0",
                     "storyId": "story:slide:0:256:shape:6.0:0",
-                    "range": {
-                      "start": 0,
-                      "end": 11
-                    }
+                    "start": 0,
+                    "end": 11
                   },
                   "paragraphs": [
                     {
                       "id": "s0.h6.h0.t0.p0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:6.0",
                         "storyId": "story:slide:0:256:shape:6.0:0",
-                        "range": {
-                          "start": 0,
-                          "end": 11
-                        }
+                        "start": 0,
+                        "end": 11
                       },
                       "paragraphId": "para:story:slide:0:256:shape:6.0:0:0",
                       "level": 0,
@@ -956,14 +882,12 @@
                       "runs": [
                         {
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:0:256",
                             "shapeId": "slide:0:256:shape:6.0",
                             "storyId": "story:slide:0:256:shape:6.0:0",
-                            "range": {
-                              "start": 0,
-                              "end": 11
-                            }
+                            "start": 0,
+                            "end": 11
                           },
                           "marks": [],
                           "link": null,
@@ -1060,14 +984,12 @@
                   {
                     "id": "s0.h8.r0c0",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:0:256",
                       "shapeId": "slide:0:256:shape:8",
                       "storyId": "story:slide:0:256:shape:8:table:0:0",
-                      "range": {
-                        "start": 0,
-                        "end": 13
-                      }
+                      "start": 0,
+                      "end": 13
                     },
                     "row": 0,
                     "column": 0,
@@ -1078,27 +1000,23 @@
                     "story": {
                       "id": "s0.h8.r0c0.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:8",
                         "storyId": "story:slide:0:256:shape:8:table:0:0",
-                        "range": {
-                          "start": 0,
-                          "end": 13
-                        }
+                        "start": 0,
+                        "end": 13
                       },
                       "paragraphs": [
                         {
                           "id": "s0.h8.r0c0.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:0:256",
                             "shapeId": "slide:0:256:shape:8",
                             "storyId": "story:slide:0:256:shape:8:table:0:0",
-                            "range": {
-                              "start": 0,
-                              "end": 13
-                            }
+                            "start": 0,
+                            "end": 13
                           },
                           "paragraphId": "para:story:slide:0:256:shape:8:table:0:0:0",
                           "level": 0,
@@ -1108,14 +1026,12 @@
                           "runs": [
                             {
                               "anchor": {
-                                "kind": "text",
+                                "kind": "range",
                                 "slideId": "slide:0:256",
                                 "shapeId": "slide:0:256:shape:8",
                                 "storyId": "story:slide:0:256:shape:8:table:0:0",
-                                "range": {
-                                  "start": 0,
-                                  "end": 13
-                                }
+                                "start": 0,
+                                "end": 13
                               },
                               "marks": [],
                               "link": null,
@@ -1130,14 +1046,12 @@
                   {
                     "id": "s0.h8.r0c1",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:0:256",
                       "shapeId": "slide:0:256:shape:8",
                       "storyId": "story:slide:0:256:shape:8:table:0:1",
-                      "range": {
-                        "start": 0,
-                        "end": 5
-                      }
+                      "start": 0,
+                      "end": 5
                     },
                     "row": 0,
                     "column": 1,
@@ -1151,27 +1065,23 @@
                     "story": {
                       "id": "s0.h8.r0c1.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:8",
                         "storyId": "story:slide:0:256:shape:8:table:0:1",
-                        "range": {
-                          "start": 0,
-                          "end": 5
-                        }
+                        "start": 0,
+                        "end": 5
                       },
                       "paragraphs": [
                         {
                           "id": "s0.h8.r0c1.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:0:256",
                             "shapeId": "slide:0:256:shape:8",
                             "storyId": "story:slide:0:256:shape:8:table:0:1",
-                            "range": {
-                              "start": 0,
-                              "end": 5
-                            }
+                            "start": 0,
+                            "end": 5
                           },
                           "paragraphId": "para:story:slide:0:256:shape:8:table:0:1:0",
                           "level": 0,
@@ -1181,14 +1091,12 @@
                           "runs": [
                             {
                               "anchor": {
-                                "kind": "text",
+                                "kind": "range",
                                 "slideId": "slide:0:256",
                                 "shapeId": "slide:0:256:shape:8",
                                 "storyId": "story:slide:0:256:shape:8:table:0:1",
-                                "range": {
-                                  "start": 0,
-                                  "end": 5
-                                }
+                                "start": 0,
+                                "end": 5
                               },
                               "marks": [],
                               "link": null,
@@ -1207,14 +1115,12 @@
                   {
                     "id": "s0.h8.r1c0",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:0:256",
                       "shapeId": "slide:0:256:shape:8",
                       "storyId": "story:slide:0:256:shape:8:table:1:0",
-                      "range": {
-                        "start": 0,
-                        "end": 5
-                      }
+                      "start": 0,
+                      "end": 5
                     },
                     "row": 1,
                     "column": 0,
@@ -1225,27 +1131,23 @@
                     "story": {
                       "id": "s0.h8.r1c0.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:8",
                         "storyId": "story:slide:0:256:shape:8:table:1:0",
-                        "range": {
-                          "start": 0,
-                          "end": 5
-                        }
+                        "start": 0,
+                        "end": 5
                       },
                       "paragraphs": [
                         {
                           "id": "s0.h8.r1c0.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:0:256",
                             "shapeId": "slide:0:256:shape:8",
                             "storyId": "story:slide:0:256:shape:8:table:1:0",
-                            "range": {
-                              "start": 0,
-                              "end": 5
-                            }
+                            "start": 0,
+                            "end": 5
                           },
                           "paragraphId": "para:story:slide:0:256:shape:8:table:1:0:0",
                           "level": 0,
@@ -1255,14 +1157,12 @@
                           "runs": [
                             {
                               "anchor": {
-                                "kind": "text",
+                                "kind": "range",
                                 "slideId": "slide:0:256",
                                 "shapeId": "slide:0:256:shape:8",
                                 "storyId": "story:slide:0:256:shape:8:table:1:0",
-                                "range": {
-                                  "start": 0,
-                                  "end": 5
-                                }
+                                "start": 0,
+                                "end": 5
                               },
                               "marks": [],
                               "link": null,
@@ -1277,14 +1177,12 @@
                   {
                     "id": "s0.h8.r1c1",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:0:256",
                       "shapeId": "slide:0:256:shape:8",
                       "storyId": "story:slide:0:256:shape:8:table:1:1",
-                      "range": {
-                        "start": 0,
-                        "end": 1
-                      }
+                      "start": 0,
+                      "end": 1
                     },
                     "row": 1,
                     "column": 1,
@@ -1295,27 +1193,23 @@
                     "story": {
                       "id": "s0.h8.r1c1.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:0:256",
                         "shapeId": "slide:0:256:shape:8",
                         "storyId": "story:slide:0:256:shape:8:table:1:1",
-                        "range": {
-                          "start": 0,
-                          "end": 1
-                        }
+                        "start": 0,
+                        "end": 1
                       },
                       "paragraphs": [
                         {
                           "id": "s0.h8.r1c1.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:0:256",
                             "shapeId": "slide:0:256:shape:8",
                             "storyId": "story:slide:0:256:shape:8:table:1:1",
-                            "range": {
-                              "start": 0,
-                              "end": 1
-                            }
+                            "start": 0,
+                            "end": 1
                           },
                           "paragraphId": "para:story:slide:0:256:shape:8:table:1:1:0",
                           "level": 0,
@@ -1325,14 +1219,12 @@
                           "runs": [
                             {
                               "anchor": {
-                                "kind": "text",
+                                "kind": "range",
                                 "slideId": "slide:0:256",
                                 "shapeId": "slide:0:256:shape:8",
                                 "storyId": "story:slide:0:256:shape:8:table:1:1",
-                                "range": {
-                                  "start": 0,
-                                  "end": 1
-                                }
+                                "start": 0,
+                                "end": 1
                               },
                               "marks": [],
                               "link": null,
@@ -1651,27 +1543,23 @@
             {
               "id": "s1.h0.t0",
               "anchor": {
-                "kind": "text",
+                "kind": "range",
                 "slideId": "slide:1:257",
                 "shapeId": "slide:1:257:shape:0",
                 "storyId": "story:slide:1:257:shape:0:0",
-                "range": {
-                  "start": 0,
-                  "end": 12
-                }
+                "start": 0,
+                "end": 12
               },
               "paragraphs": [
                 {
                   "id": "s1.h0.t0.p0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:1:257",
                     "shapeId": "slide:1:257:shape:0",
                     "storyId": "story:slide:1:257:shape:0:0",
-                    "range": {
-                      "start": 0,
-                      "end": 12
-                    }
+                    "start": 0,
+                    "end": 12
                   },
                   "paragraphId": "para:story:slide:1:257:shape:0:0:0",
                   "level": 0,
@@ -1681,14 +1569,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:1:257",
                         "shapeId": "slide:1:257:shape:0",
                         "storyId": "story:slide:1:257:shape:0:0",
-                        "range": {
-                          "start": 0,
-                          "end": 12
-                        }
+                        "start": 0,
+                        "end": 12
                       },
                       "marks": [],
                       "link": null,
@@ -1756,27 +1642,23 @@
             {
               "id": "s2.h0.t0",
               "anchor": {
-                "kind": "text",
+                "kind": "range",
                 "slideId": "slide:2:258",
                 "shapeId": "slide:2:258:shape:0",
                 "storyId": "story:slide:2:258:shape:0:0",
-                "range": {
-                  "start": 0,
-                  "end": 0
-                }
+                "start": 0,
+                "end": 0
               },
               "paragraphs": [
                 {
                   "id": "s2.h0.t0.p0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:2:258",
                     "shapeId": "slide:2:258:shape:0",
                     "storyId": "story:slide:2:258:shape:0:0",
-                    "range": {
-                      "start": 0,
-                      "end": 0
-                    }
+                    "start": 0,
+                    "end": 0
                   },
                   "paragraphId": "para:story:slide:2:258:shape:0:0:0",
                   "level": 0,
@@ -1820,27 +1702,23 @@
             {
               "id": "s2.h1.t0",
               "anchor": {
-                "kind": "text",
+                "kind": "range",
                 "slideId": "slide:2:258",
                 "shapeId": "slide:2:258:shape:1",
                 "storyId": "story:slide:2:258:shape:1:0",
-                "range": {
-                  "start": 0,
-                  "end": 10
-                }
+                "start": 0,
+                "end": 10
               },
               "paragraphs": [
                 {
                   "id": "s2.h1.t0.p0",
                   "anchor": {
-                    "kind": "text",
+                    "kind": "range",
                     "slideId": "slide:2:258",
                     "shapeId": "slide:2:258:shape:1",
                     "storyId": "story:slide:2:258:shape:1:0",
-                    "range": {
-                      "start": 0,
-                      "end": 10
-                    }
+                    "start": 0,
+                    "end": 10
                   },
                   "paragraphId": "para:story:slide:2:258:shape:1:0:0",
                   "level": 0,
@@ -1850,14 +1728,12 @@
                   "runs": [
                     {
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:2:258",
                         "shapeId": "slide:2:258:shape:1",
                         "storyId": "story:slide:2:258:shape:1:0",
-                        "range": {
-                          "start": 0,
-                          "end": 10
-                        }
+                        "start": 0,
+                        "end": 10
                       },
                       "marks": [],
                       "link": null,
@@ -1906,14 +1782,12 @@
                   {
                     "id": "s2.h2.r0c0",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:2:258",
                       "shapeId": "slide:2:258:shape:2",
                       "storyId": "story:slide:2:258:shape:2:table:0:0",
-                      "range": {
-                        "start": 0,
-                        "end": 4
-                      }
+                      "start": 0,
+                      "end": 4
                     },
                     "row": 0,
                     "column": 0,
@@ -1924,27 +1798,23 @@
                     "story": {
                       "id": "s2.h2.r0c0.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:2:258",
                         "shapeId": "slide:2:258:shape:2",
                         "storyId": "story:slide:2:258:shape:2:table:0:0",
-                        "range": {
-                          "start": 0,
-                          "end": 4
-                        }
+                        "start": 0,
+                        "end": 4
                       },
                       "paragraphs": [
                         {
                           "id": "s2.h2.r0c0.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:2:258",
                             "shapeId": "slide:2:258:shape:2",
                             "storyId": "story:slide:2:258:shape:2:table:0:0",
-                            "range": {
-                              "start": 0,
-                              "end": 4
-                            }
+                            "start": 0,
+                            "end": 4
                           },
                           "paragraphId": "para:story:slide:2:258:shape:2:table:0:0:0",
                           "level": 0,
@@ -1954,14 +1824,12 @@
                           "runs": [
                             {
                               "anchor": {
-                                "kind": "text",
+                                "kind": "range",
                                 "slideId": "slide:2:258",
                                 "shapeId": "slide:2:258:shape:2",
                                 "storyId": "story:slide:2:258:shape:2:table:0:0",
-                                "range": {
-                                  "start": 0,
-                                  "end": 4
-                                }
+                                "start": 0,
+                                "end": 4
                               },
                               "marks": [],
                               "link": null,
@@ -1976,14 +1844,12 @@
                   {
                     "id": "s2.h2.r0c1",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:2:258",
                       "shapeId": "slide:2:258:shape:2",
                       "storyId": "story:slide:2:258:shape:2:table:0:1",
-                      "range": {
-                        "start": 0,
-                        "end": 1
-                      }
+                      "start": 0,
+                      "end": 1
                     },
                     "row": 0,
                     "column": 1,
@@ -1994,27 +1860,23 @@
                     "story": {
                       "id": "s2.h2.r0c1.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:2:258",
                         "shapeId": "slide:2:258:shape:2",
                         "storyId": "story:slide:2:258:shape:2:table:0:1",
-                        "range": {
-                          "start": 0,
-                          "end": 1
-                        }
+                        "start": 0,
+                        "end": 1
                       },
                       "paragraphs": [
                         {
                           "id": "s2.h2.r0c1.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:2:258",
                             "shapeId": "slide:2:258:shape:2",
                             "storyId": "story:slide:2:258:shape:2:table:0:1",
-                            "range": {
-                              "start": 0,
-                              "end": 1
-                            }
+                            "start": 0,
+                            "end": 1
                           },
                           "paragraphId": "para:story:slide:2:258:shape:2:table:0:1:0",
                           "level": 0,
@@ -2024,14 +1886,12 @@
                           "runs": [
                             {
                               "anchor": {
-                                "kind": "text",
+                                "kind": "range",
                                 "slideId": "slide:2:258",
                                 "shapeId": "slide:2:258:shape:2",
                                 "storyId": "story:slide:2:258:shape:2:table:0:1",
-                                "range": {
-                                  "start": 0,
-                                  "end": 1
-                                }
+                                "start": 0,
+                                "end": 1
                               },
                               "marks": [],
                               "link": null,
@@ -2050,14 +1910,12 @@
                   {
                     "id": "s2.h2.r1c0",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:2:258",
                       "shapeId": "slide:2:258:shape:2",
                       "storyId": "story:slide:2:258:shape:2:table:1:0",
-                      "range": {
-                        "start": 0,
-                        "end": 1
-                      }
+                      "start": 0,
+                      "end": 1
                     },
                     "row": 1,
                     "column": 0,
@@ -2071,27 +1929,23 @@
                     "story": {
                       "id": "s2.h2.r1c0.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:2:258",
                         "shapeId": "slide:2:258:shape:2",
                         "storyId": "story:slide:2:258:shape:2:table:1:0",
-                        "range": {
-                          "start": 0,
-                          "end": 1
-                        }
+                        "start": 0,
+                        "end": 1
                       },
                       "paragraphs": [
                         {
                           "id": "s2.h2.r1c0.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:2:258",
                             "shapeId": "slide:2:258:shape:2",
                             "storyId": "story:slide:2:258:shape:2:table:1:0",
-                            "range": {
-                              "start": 0,
-                              "end": 1
-                            }
+                            "start": 0,
+                            "end": 1
                           },
                           "paragraphId": "para:story:slide:2:258:shape:2:table:1:0:0",
                           "level": 0,
@@ -2101,14 +1955,12 @@
                           "runs": [
                             {
                               "anchor": {
-                                "kind": "text",
+                                "kind": "range",
                                 "slideId": "slide:2:258",
                                 "shapeId": "slide:2:258:shape:2",
                                 "storyId": "story:slide:2:258:shape:2:table:1:0",
-                                "range": {
-                                  "start": 0,
-                                  "end": 1
-                                }
+                                "start": 0,
+                                "end": 1
                               },
                               "marks": [],
                               "link": null,
@@ -2123,14 +1975,12 @@
                   {
                     "id": "s2.h2.r1c1",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:2:258",
                       "shapeId": "slide:2:258:shape:2",
                       "storyId": "story:slide:2:258:shape:2:table:1:1",
-                      "range": {
-                        "start": 0,
-                        "end": 1
-                      }
+                      "start": 0,
+                      "end": 1
                     },
                     "row": 1,
                     "column": 1,
@@ -2141,27 +1991,23 @@
                     "story": {
                       "id": "s2.h2.r1c1.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:2:258",
                         "shapeId": "slide:2:258:shape:2",
                         "storyId": "story:slide:2:258:shape:2:table:1:1",
-                        "range": {
-                          "start": 0,
-                          "end": 1
-                        }
+                        "start": 0,
+                        "end": 1
                       },
                       "paragraphs": [
                         {
                           "id": "s2.h2.r1c1.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:2:258",
                             "shapeId": "slide:2:258:shape:2",
                             "storyId": "story:slide:2:258:shape:2:table:1:1",
-                            "range": {
-                              "start": 0,
-                              "end": 1
-                            }
+                            "start": 0,
+                            "end": 1
                           },
                           "paragraphId": "para:story:slide:2:258:shape:2:table:1:1:0",
                           "level": 0,
@@ -2171,14 +2017,12 @@
                           "runs": [
                             {
                               "anchor": {
-                                "kind": "text",
+                                "kind": "range",
                                 "slideId": "slide:2:258",
                                 "shapeId": "slide:2:258:shape:2",
                                 "storyId": "story:slide:2:258:shape:2:table:1:1",
-                                "range": {
-                                  "start": 0,
-                                  "end": 1
-                                }
+                                "start": 0,
+                                "end": 1
                               },
                               "marks": [],
                               "link": null,
@@ -2197,14 +2041,12 @@
                   {
                     "id": "s2.h2.r2c0",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:2:258",
                       "shapeId": "slide:2:258:shape:2",
                       "storyId": "story:slide:2:258:shape:2:table:2:0",
-                      "range": {
-                        "start": 0,
-                        "end": 0
-                      }
+                      "start": 0,
+                      "end": 0
                     },
                     "row": 2,
                     "column": 0,
@@ -2218,27 +2060,23 @@
                     "story": {
                       "id": "s2.h2.r2c0.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:2:258",
                         "shapeId": "slide:2:258:shape:2",
                         "storyId": "story:slide:2:258:shape:2:table:2:0",
-                        "range": {
-                          "start": 0,
-                          "end": 0
-                        }
+                        "start": 0,
+                        "end": 0
                       },
                       "paragraphs": [
                         {
                           "id": "s2.h2.r2c0.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:2:258",
                             "shapeId": "slide:2:258:shape:2",
                             "storyId": "story:slide:2:258:shape:2:table:2:0",
-                            "range": {
-                              "start": 0,
-                              "end": 0
-                            }
+                            "start": 0,
+                            "end": 0
                           },
                           "paragraphId": "para:story:slide:2:258:shape:2:table:2:0:0",
                           "level": 0,
@@ -2253,14 +2091,12 @@
                   {
                     "id": "s2.h2.r2c1",
                     "anchor": {
-                      "kind": "text",
+                      "kind": "range",
                       "slideId": "slide:2:258",
                       "shapeId": "slide:2:258:shape:2",
                       "storyId": "story:slide:2:258:shape:2:table:2:1",
-                      "range": {
-                        "start": 0,
-                        "end": 1
-                      }
+                      "start": 0,
+                      "end": 1
                     },
                     "row": 2,
                     "column": 1,
@@ -2271,27 +2107,23 @@
                     "story": {
                       "id": "s2.h2.r2c1.t0",
                       "anchor": {
-                        "kind": "text",
+                        "kind": "range",
                         "slideId": "slide:2:258",
                         "shapeId": "slide:2:258:shape:2",
                         "storyId": "story:slide:2:258:shape:2:table:2:1",
-                        "range": {
-                          "start": 0,
-                          "end": 1
-                        }
+                        "start": 0,
+                        "end": 1
                       },
                       "paragraphs": [
                         {
                           "id": "s2.h2.r2c1.t0.p0",
                           "anchor": {
-                            "kind": "text",
+                            "kind": "range",
                             "slideId": "slide:2:258",
                             "shapeId": "slide:2:258:shape:2",
                             "storyId": "story:slide:2:258:shape:2:table:2:1",
-                            "range": {
-                              "start": 0,
-                              "end": 1
-                            }
+                            "start": 0,
+                            "end": 1
                           },
                           "paragraphId": "para:story:slide:2:258:shape:2:table:2:1:0",
                           "level": 0,
@@ -2301,14 +2133,12 @@
                           "runs": [
                             {
                               "anchor": {
-                                "kind": "text",
+                                "kind": "range",
                                 "slideId": "slide:2:258",
                                 "shapeId": "slide:2:258:shape:2",
                                 "storyId": "story:slide:2:258:shape:2:table:2:1",
-                                "range": {
-                                  "start": 0,
-                                  "end": 1
-                                }
+                                "start": 0,
+                                "end": 1
                               },
                               "marks": [],
                               "link": null,
@@ -2348,14 +2178,12 @@
       "code": "unsupported-numbering",
       "severity": "warning",
       "anchor": {
-        "kind": "text",
+        "kind": "range",
         "slideId": "slide:0:256",
         "shapeId": "slide:0:256:shape:4",
         "storyId": "story:slide:0:256:shape:4:0",
-        "range": {
-          "start": 0,
-          "end": 3
-        }
+        "start": 0,
+        "end": 3
       },
       "message": "The numbering scheme \"circleNumDbPlain\" cannot be formatted; the list marker is left unresolved."
     },
@@ -2363,14 +2191,12 @@
       "code": "field-cached-result",
       "severity": "info",
       "anchor": {
-        "kind": "text",
+        "kind": "range",
         "slideId": "slide:0:256",
         "shapeId": "slide:0:256:shape:5",
         "storyId": "story:slide:0:256:shape:5:0",
-        "range": {
-          "start": 10,
-          "end": 11
-        }
+        "start": 10,
+        "end": 11
       },
       "message": "Fields are exported with their cached results and never evaluated."
     },
@@ -2378,14 +2204,12 @@
       "code": "unsupported-content",
       "severity": "warning",
       "anchor": {
-        "kind": "text",
+        "kind": "range",
         "slideId": "slide:0:256",
         "shapeId": "slide:0:256:shape:5",
         "storyId": "story:slide:0:256:shape:5:0",
-        "range": {
-          "start": 16,
-          "end": 16
-        }
+        "start": 16,
+        "end": 16
       },
       "message": "a14:m in this paragraph is not represented in the export."
     },

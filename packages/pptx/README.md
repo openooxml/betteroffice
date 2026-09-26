@@ -201,12 +201,14 @@ deck model does not hold become placeholders with their alternative text and
 relationships; their data is never exported. Layout and master content is not
 exported, and an empty placeholder never shows its prompt text.
 
-Every record carries an anchor: `text` ranges use the story offsets of
-`readContent()`, `notes` and `comment` ranges index their plain text, and
-records seeded from the file carry `provenance` (part, SHA-256, element path,
-`sldId`, `cNvPr` id). Session anchors belong to the returned version and do not
-survive save and reopen. A collaboration session opened from an update seeded by
-an older release, without its source file, may not know which slides are hidden:
+Every record carries an anchor: `range` anchors are batch text targets in the
+story offsets of `readContent()`, so a session export's `range` anchor can be a
+step's `target` at the version it was read at; `notes` and `comment` ranges
+index their plain text, and records seeded from the file carry `provenance`
+(part, SHA-256, element path, `sldId`, `cNvPr` id). Session anchors belong to
+the returned version and do not survive save and reopen. A collaboration
+session opened from an update seeded by an older release, without its source
+file, may not know which slides are hidden:
 those slides are exported with `hidden: null` and a `visibility-unknown`
 diagnostic, and reopening the session with its source file restores their
 visibility. Hidden slides and shapes, speaker notes (plain text)

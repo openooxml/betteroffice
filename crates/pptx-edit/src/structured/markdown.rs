@@ -135,9 +135,11 @@ fn validate(content: &PptxStructuredContent) -> Result<(), ExportFailure> {
 
 fn range_of(anchor: &PptxAnchor) -> Option<TextSpan> {
     match anchor {
-        PptxAnchor::Text { range, .. }
-        | PptxAnchor::Notes { range, .. }
-        | PptxAnchor::Comment { range, .. } => Some(*range),
+        PptxAnchor::Range(range) => Some(TextSpan {
+            start: range.start,
+            end: range.end,
+        }),
+        PptxAnchor::Notes { range, .. } | PptxAnchor::Comment { range, .. } => Some(*range),
         _ => None,
     }
 }
@@ -362,13 +364,16 @@ impl Validator {
     ) -> Result<(), ExportFailure> {
         self.record(&story.id)?;
         let text_of = |anchor: &PptxAnchor| match anchor {
-            PptxAnchor::Text {
-                slide_id: owner_slide,
-                shape_id: owner_shape,
-                story_id,
-                range,
-            } if owner_slide == slide_id && Some(owner_shape.as_str()) == shape_id => {
-                Some((story_id.clone(), *range))
+            PptxAnchor::Range(range)
+                if range.slide_id == slide_id && Some(range.shape_id.as_str()) == shape_id =>
+            {
+                Some((
+                    range.story_id.clone(),
+                    TextSpan {
+                        start: range.start,
+                        end: range.end,
+                    },
+                ))
             }
             _ => None,
         };
@@ -1410,7 +1415,7 @@ mod tests {
         let runs = &mut content.slides[0].shapes[0].stories[0].paragraphs[0].runs;
         let mut linked = runs[0].clone();
         for (run, text, first) in [(&mut runs[0], "see!", true), (&mut linked, "Docs", false)] {
-            if let PptxAnchor::Text { range, .. } = &mut run.anchor {
+            if let PptxAnchor::Range(range) = &mut run.anchor {
                 if first {
                     range.end = range.start + 4;
                 } else {

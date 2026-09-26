@@ -39,9 +39,8 @@ def test_session_export_is_versioned_and_changes_nothing(sample_bytes):
     assert exported
     for paragraph in exported:
         anchor = paragraph["anchor"]
-        assert (anchor["range"]["start"], anchor["range"]["end"]) == ranges[
-            paragraph["paragraphId"]
-        ]
+        assert anchor["kind"] == "range"
+        assert (anchor["start"], anchor["end"]) == ranges[paragraph["paragraphId"]]
 
     markdown = deck.export_markdown()
     assert markdown["ok"] and markdown["version"] == version
@@ -62,6 +61,25 @@ def test_session_export_is_versioned_and_changes_nothing(sample_bytes):
     assert deck.version() == version
     assert not deck.is_edited
     assert not deck.can_undo
+
+
+def test_range_anchors_are_batch_targets(sample_bytes):
+    deck = bo.Presentation.open(sample_bytes)
+    read = deck.export_structured()
+    anchor = next(
+        run["anchor"]
+        for paragraph in _paragraphs(read["content"]["slides"][0]["shapes"])
+        for run in paragraph["runs"]
+        if run["kind"] == "text"
+    )
+    step = {"op": "replaceText", "target": anchor, "text": "Replaced"}
+    assert deck.apply_edits({"expectVersion": read["version"], "steps": [step]})["ok"]
+    story = next(
+        story
+        for story in deck.read_content()["stories"]
+        if story["storyId"] == anchor["storyId"]
+    )
+    assert story["text"][anchor["start"] : anchor["start"] + 8] == "Replaced"
 
 
 def test_bytes_exports_are_deterministic_snapshots(sample_bytes):

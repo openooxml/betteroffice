@@ -68,11 +68,12 @@ describe('structured export', () => {
           const anchor = exported.get(paragraph.paragraphId);
           if (!anchor) continue;
           expect(anchor).toEqual({
-            kind: 'text',
+            kind: 'range',
             slideId: story.slideId,
             shapeId: story.shapeId,
             storyId: story.storyId,
-            range: { start: paragraph.start, end: paragraph.end },
+            start: paragraph.start,
+            end: paragraph.end,
           });
           compared += 1;
         }
@@ -104,6 +105,28 @@ describe('structured export', () => {
       expect(deck.canUndo()).toBe(false);
       expect(updates).toBe(0);
       unsubscribe();
+    } finally {
+      deck.dispose();
+    }
+  });
+
+  test('a range anchor is a batch target', () => {
+    const deck = openPresentation(fixture, { clientId: 9402 });
+    try {
+      const read = content(deck.exportStructured());
+      const anchor = paragraphs(read.content.slides[0].shapes)
+        .flatMap((paragraph) => paragraph.runs)
+        .find((run) => run.kind === 'text')?.anchor;
+      if (anchor?.kind !== 'range') throw new Error('no text run');
+      const applied = deck.applyEdits({
+        expectVersion: read.version,
+        steps: [{ op: 'replaceText', target: anchor, text: 'Replaced' }],
+      });
+      expect(applied.ok).toBe(true);
+      const stories = deck.readContent({ slideIds: [anchor.slideId] });
+      if (!stories.ok) throw new Error(stories.failure.message);
+      const story = stories.stories.find((candidate) => candidate.storyId === anchor.storyId);
+      expect(story?.text.slice(anchor.start, anchor.start + 8)).toBe('Replaced');
     } finally {
       deck.dispose();
     }

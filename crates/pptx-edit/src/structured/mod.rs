@@ -19,6 +19,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::batch::DocumentVersion;
+use crate::target::TextRange;
 use crate::{DeckSession, EditResult};
 
 pub use markdown::render_pptx_markdown;
@@ -96,9 +97,10 @@ pub struct TextSpan {
     pub end: u32,
 }
 
-/// Where a record was read from. `text` ranges use the story offsets of
-/// [`DeckSession::read_content`]; `notes` and `comment` ranges index the plain text they carry;
-/// `sourcePart` addresses retained XML by element-child ordinals from the part's root.
+/// Where a record was read from. `range` anchors are [`TextTarget::Range`](crate::TextTarget)
+/// batch targets in the story offsets of [`DeckSession::read_content`]; `notes` and `comment`
+/// ranges index the plain text they carry; `sourcePart` addresses retained XML by element-child
+/// ordinals from the part's root.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
@@ -113,12 +115,7 @@ pub enum PptxAnchor {
         slide_id: String,
         shape_id: String,
     },
-    Text {
-        slide_id: String,
-        shape_id: String,
-        story_id: String,
-        range: TextSpan,
-    },
+    Range(TextRange),
     Notes {
         slide_id: String,
         range: TextSpan,

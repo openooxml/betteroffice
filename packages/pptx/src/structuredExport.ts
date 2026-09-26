@@ -8,13 +8,15 @@
  * order, a group's descendants at the group's position, table cells row by row. It is the
  * authored order, not a reading order inferred from geometry.
  *
- * `text` anchors use the story offsets of `readContent()`; `notes` and `comment` anchors index the
- * plain text they carry; `sourcePart` anchors address retained source XML by element-child
- * ordinals. Session anchors belong to the version they were read at; ids are deterministic
- * export-tree paths.
+ * `range` anchors are batch text targets in the story offsets of `readContent()`, so a session
+ * export's `range` anchor can be a step's `target` at the version it was read at; `notes` and
+ * `comment` anchors index the plain text they carry; `sourcePart` anchors address retained source
+ * XML by element-child ordinals. Session anchors belong to the version they were read at; ids are
+ * deterministic export-tree paths.
  */
 
 import type { OperationRefusal } from '../../../shared/host-contracts/edits';
+import type { PptxTextTarget } from './edits';
 import type {
   ExportCompletion,
   ExportDiagnostic,
@@ -40,7 +42,7 @@ export interface PptxTextSpan {
 export type PptxAnchor =
   | { kind: 'slide'; slideId: string }
   | { kind: 'shape'; slideId: string; shapeId: string }
-  | { kind: 'text'; slideId: string; shapeId: string; storyId: string; range: PptxTextSpan }
+  | Extract<PptxTextTarget, { kind: 'range' }>
   | { kind: 'notes'; slideId: string; range: PptxTextSpan }
   | { kind: 'comment'; slideId: string; commentId: string; range: PptxTextSpan }
   | { kind: 'sourcePart'; part: string; partSha256: string; path: number[] };

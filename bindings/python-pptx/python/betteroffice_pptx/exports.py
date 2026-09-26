@@ -2,7 +2,7 @@
 
 Keys are the engine's camelCase wire fields, shared with the TypeScript contract in
 ``packages/pptx/src/structuredExport.ts``. Records nested below a slide keep that contract's
-shape and are typed loosely here.
+shape and are typed loosely here. A ``range`` anchor is an edit-batch text target.
 """
 
 from __future__ import annotations

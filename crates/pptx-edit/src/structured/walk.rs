@@ -1559,7 +1559,7 @@ impl<T: ReadTxn> Walker<'_, T> {
             {
                 if open_field == Some(field_index)
                     && let Some(ExportRun {
-                        anchor: PptxAnchor::Text { range, .. },
+                        anchor: PptxAnchor::Range(range),
                         content: ExportRunKind::Field { text: cached, .. },
                         ..
                     }) = runs.last_mut()
@@ -1593,7 +1593,7 @@ impl<T: ReadTxn> Walker<'_, T> {
             let marks = marks_at(start);
             let link = link_at(start);
             if let Some(ExportRun {
-                anchor: PptxAnchor::Text { range, .. },
+                anchor: PptxAnchor::Range(range),
                 marks: last_marks,
                 link: last_link,
                 content: ExportRunKind::Text { text: last_text },
@@ -1962,16 +1962,7 @@ fn clip_row_spans(table: &mut ExportTable) {
 }
 
 fn text_anchor(view: &StoryView<'_>, start: u32, end: u32) -> PptxAnchor {
-    let range = view.range(start, end);
-    PptxAnchor::Text {
-        slide_id: range.slide_id,
-        shape_id: range.shape_id,
-        story_id: range.story_id,
-        range: TextSpan {
-            start: range.start,
-            end: range.end,
-        },
-    }
+    PptxAnchor::Range(view.range(start, end))
 }
 
 fn node_text(node: &ShapeNode) -> Option<&TextBody> {
