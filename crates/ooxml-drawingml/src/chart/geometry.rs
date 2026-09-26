@@ -2196,7 +2196,7 @@ fn legend_rows<S: PlotSink + ?Sized>(
         let entry_width = lead
             + lines
                 .iter()
-                .map(|line| text_width(line, style, ops))
+                .map(|line| legend_text_width(line, style, ops))
                 .fold(0.0, f64::max);
         let row = rows.last().unwrap();
         if !row.entries.is_empty() && row.width + gap + entry_width > width {
@@ -2217,6 +2217,19 @@ fn legend_rows<S: PlotSink + ?Sized>(
         });
     }
     rows
+}
+
+/// A row legend line's advance: measured, or estimated with the slack its text
+/// box gets, so a face wider than Calibri does not run into the next swatch.
+fn legend_text_width<S: PlotSink + ?Sized>(
+    label: &str,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> f64 {
+    ops.sink
+        .measure_text(label, &style.font)
+        .filter(|width| width.is_finite() && *width >= 0.0)
+        .unwrap_or_else(|| fallback_label_width(label, &style.font) + LEGEND_TEXT_SLACK)
 }
 
 /// A label's advance in `style`, measured by the sink where it can.
@@ -7162,6 +7175,34 @@ mod tests {
             );
         }
         assert!(fallback_label_width("WW", &font) > 2.0 * 0.85 * font.size_px);
+    }
+
+    #[test]
+    fn an_estimated_row_legend_leaves_each_label_at_least_the_room_it_had() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["EASTERN", "WESTERN"];
+        let ops = plot_chart(
+            &legend_chart(Some("bottom"), &names, &data),
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 180.0,
+            },
+        );
+        let size = chart_label_font().size_px;
+        let key = size * LEGEND_KEY_EM;
+        let swatches: Vec<f64> = rects(&ops)
+            .into_iter()
+            .filter(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01)
+            .map(|(x, ..)| x)
+            .collect();
+        let first = text_at(&ops, "EASTERN").1;
+        assert_eq!(swatches.len(), 2, "{swatches:?}");
+        assert!(
+            swatches[1] - first >= 7.0 * 0.5 * size + 14.0,
+            "{swatches:?} vs text at {first}"
+        );
     }
 
     #[test]

@@ -1101,10 +1101,10 @@ attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, column char
 {"baselineY":208,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":11.8,"x":236.685}
 {"fill":"#4472C4","h":63.632,"kind":"rect","w":30.466,"x":212.119,"y":123.868}
 {"fill":"#4472C4","h":79.54,"kind":"rect","w":30.466,"x":242.585,"y":107.96}
-{"fill":"#4472C4","h":5.3,"kind":"rect","w":5.3,"x":141.85,"y":81.71}
-{"baselineY":86.76,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North","width":40,"x":150.35}
+{"fill":"#4472C4","h":5.3,"kind":"rect","w":5.3,"x":128.85,"y":81.71}
+{"baselineY":86.76,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North","width":53,"x":137.35}
 {"fill":"#4472C4","h":5.3,"kind":"rect","w":5.3,"x":183.85,"y":81.71}
-{"baselineY":86.76,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"South","width":38.8,"x":192.35}
+{"baselineY":86.76,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"South","width":51.8,"x":192.35}
 # legend-bottom
 attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, column chart, 2 series, 2 categories"},"docEnd":5,"docStart":4}
 {"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
@@ -1129,10 +1129,10 @@ attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, column char
 {"baselineY":182,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":11.8,"x":236.685}
 {"fill":"#4472C4","h":63.632,"kind":"rect","w":30.466,"x":212.119,"y":97.868}
 {"fill":"#4472C4","h":79.54,"kind":"rect","w":30.466,"x":242.585,"y":81.96}
-{"fill":"#4472C4","h":5.3,"kind":"rect","w":5.3,"x":141.85,"y":200.85}
-{"baselineY":205.9,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North","width":40,"x":150.35}
+{"fill":"#4472C4","h":5.3,"kind":"rect","w":5.3,"x":128.85,"y":200.85}
+{"baselineY":205.9,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North","width":53,"x":137.35}
 {"fill":"#4472C4","h":5.3,"kind":"rect","w":5.3,"x":183.85,"y":200.85}
-{"baselineY":205.9,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"South","width":38.8,"x":192.35}
+{"baselineY":205.9,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"South","width":51.8,"x":192.35}
 # legend-hidden
 attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, column chart, 2 series, 2 categories"},"docEnd":5,"docStart":4}
 {"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
