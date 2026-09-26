@@ -3771,7 +3771,6 @@ fn panicking_native_observers_do_not_split_authority_and_projection() {
 fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
     let bytes = sample_xlsx();
     let mut workbook = Workbook::open_collaborative(&bytes, 1001).unwrap();
-    let range = CellRange::new(cell("A1"), cell("A2"));
     let structural_ops = vec![
         Op::InsertRows {
             sheet: SheetId(0),
@@ -3792,14 +3791,6 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
             sheet: SheetId(0),
             at: 0,
             count: 1,
-        },
-        Op::MergeCells {
-            sheet: SheetId(0),
-            range,
-        },
-        Op::UnmergeCells {
-            sheet: SheetId(0),
-            range,
         },
         Op::AddSheet {
             index: 1,
@@ -3931,6 +3922,159 @@ fn collaborative_freeze_panes_converge_undo_and_reopen_without_unfreezing_axes()
         Err(Error::CollaborativeStructureChanged)
     ));
     assert_eq!(right.encode_state_as_update_v1(), state);
+}
+
+#[test]
+fn collaborative_merges_converge_undo_and_reopen() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1101).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1102).unwrap();
+    let range = CellRange::parse_a1("A1:B2").unwrap();
+    assert!(
+        left.apply_ops(
+            vec![Op::MergeCells {
+                sheet: SheetId(0),
+                range
+            }],
+            options
+        )
+        .unwrap()
+        .applied
+    );
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(left.model().sheets[0].merges, vec![range]);
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        Workbook::open(&right.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .merges,
+        vec![range]
+    );
+
+    assert!(left.undo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert!(left.model().sheets[0].merges.is_empty());
+    assert_eq!(left.model(), right.model());
+    assert!(left.redo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].merges, vec![range]);
+}
+
+#[test]
+fn concurrent_disjoint_merges_on_one_sheet_converge_without_loss() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1103).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1104).unwrap();
+    let first = CellRange::parse_a1("A1:B2").unwrap();
+    let second = CellRange::parse_a1("D4:E5").unwrap();
+    left.apply_ops(
+        vec![Op::MergeCells {
+            sheet: SheetId(0),
+            range: first,
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::MergeCells {
+                sheet: SheetId(0),
+                range: second,
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![first, second]);
+}
+
+#[test]
+fn concurrent_overlapping_merges_choose_the_same_range_and_survive_reopen() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1105).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1106).unwrap();
+    let first = CellRange::parse_a1("A1:B2").unwrap();
+    let second = CellRange::parse_a1("B2:C3").unwrap();
+    left.apply_ops(
+        vec![Op::MergeCells {
+            sheet: SheetId(0),
+            range: first,
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::MergeCells {
+                sheet: SheetId(0),
+                range: second,
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![first]);
+    assert_eq!(
+        Workbook::open(&left.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .merges,
+        vec![first]
+    );
+
+    right.undo(options).unwrap();
+    left.apply_update_v1(
+        &right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap(),
+        options,
+    )
+    .unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![first]);
 }
 
 #[test]

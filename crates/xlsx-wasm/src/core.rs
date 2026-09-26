@@ -1343,6 +1343,40 @@ mod tests {
     }
 
     #[test]
+    fn collaborative_merges_cross_the_json_boundary() {
+        let bytes = sample_xlsx();
+        let mut left = Session::open_collaborative(&bytes, 717, None).unwrap();
+        let mut right = Session::open_collaborative(&bytes, 718, None).unwrap();
+        let operation = r#"{"ops":[{"type":"mergeCells","sheet":0,"range":{"start":{"row":0,"col":0},"end":{"row":1,"col":1}}}]}"#;
+        assert!(
+            left.apply_ops_json(operation, None)
+                .unwrap()
+                .contains(r#""applied":true"#)
+        );
+        right
+            .apply_update_json(
+                &left.encode_diff(&right.encode_state_vector()).unwrap(),
+                None,
+            )
+            .unwrap();
+        let query = r#"{"sheet":0,"range":"A1:B2"}"#;
+        assert!(
+            right
+                .merged_ranges_json(query)
+                .unwrap()
+                .contains(r#""start":{"row":0,"col":0}"#)
+        );
+        left.undo_json(None).unwrap();
+        right
+            .apply_update_json(
+                &left.encode_diff(&right.encode_state_vector()).unwrap(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(right.merged_ranges_json(query).unwrap(), r#"{"ranges":[]}"#);
+    }
+
+    #[test]
     fn proposals_preserve_wire_behavior() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let proposal = session

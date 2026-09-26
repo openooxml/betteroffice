@@ -29,7 +29,8 @@ use xlsx_render::{
 
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
-    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
+    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
+    is_collaborative_local_layout_op, is_structural_op,
 };
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -533,7 +534,7 @@ impl Workbook {
             return Ok(self.remote_mutation_result(&before, true));
         }
         let staged = self.stage_remote_updates(&[update], None)?;
-        if !staged.structure.same_except_freeze_panes(&structure) {
+        if !staged.structure.same_except_local_layout(&structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         if staged.pending {
@@ -575,7 +576,7 @@ impl Workbook {
         };
         let structure = candidate.structure().map_err(authority_error)?;
         if !structure.describes_same_workbook(&frozen)
-            && !structure.snapshot_same_except_freeze_panes(&frozen)
+            && !structure.snapshot_same_except_local_layout(&frozen)
         {
             return Err(Error::CollaborativeStructureChanged);
         }
@@ -678,7 +679,7 @@ impl Workbook {
                 Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
             );
             match staged {
-                Ok(staged) if !staged.structure.same_except_freeze_panes(structure) => {
+                Ok(staged) if !staged.structure.same_except_local_layout(structure) => {
                     self.pending_remote_updates.remove(index);
                 }
                 Ok(staged) if staged.pending => {
@@ -1325,7 +1326,7 @@ impl Workbook {
         if self.is_collaborative()
             && ops
                 .iter()
-                .any(|op| is_structural_op(op) && !matches!(op, Op::SetFreezePane { .. }))
+                .any(|op| is_structural_op(op) && !is_collaborative_local_layout_op(op))
         {
             return Err(Error::CollaborativeStructureOperation);
         }
@@ -1536,7 +1537,7 @@ impl Workbook {
             WorkbookMode::Collaborative { structure } => structure,
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
-        if !history.structure.same_except_freeze_panes(structure) {
+        if !history.structure.same_except_local_layout(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         let new_structure = history.structure;
@@ -2261,7 +2262,7 @@ impl Workbook {
             .authority
             .stage_local_ops_v1(ops, origin)
             .map_err(authority_error)?;
-        if !staged.structure.same_except_freeze_panes(structure) {
+        if !staged.structure.same_except_local_layout(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         validate_collaboration_size(&staged.update)?;
