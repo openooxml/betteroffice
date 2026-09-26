@@ -23,7 +23,7 @@ const NS: &str = concat!(
     r#"xmlns:bofx="urn:fidelity""#
 );
 
-const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:after="120"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="60"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:pPr><w:ind w:left="720"/><w:jc w:val="center"/></w:pPr><w:rPr><w:i/><w:caps/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ListNumber"><w:name w:val="List Number"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style>"#;
+const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:after="120"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="60"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:pPr><w:ind w:left="720"/><w:jc w:val="center"/></w:pPr><w:rPr><w:i/><w:caps/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ListNumber"><w:name w:val="List Number"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style><w:style w:type="paragraph" w:styleId="ListChild"><w:name w:val="List Child"/><w:basedOn w:val="ListNumber"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ListGrandchild"><w:name w:val="List Grandchild"/><w:basedOn w:val="ListChild"/></w:style><w:style w:type="paragraph" w:styleId="QuoteChild"><w:name w:val="Quote Child"/><w:basedOn w:val="Quote"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style>"#;
 
 const DATE: &str = "2026-09-24T12:00:00Z";
 
@@ -1345,20 +1345,43 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
         code(&doc, vec![suggested(set_style("00000002", "Quote"), "Ann")]),
         EditFailureCode::Unsupported
     );
-    for steps in [
-        vec![set_style("00000002", "ListNumber")],
-        vec![insert_paragraphs(
-            "00000002",
-            TargetEdge::End,
-            vec![new_paragraph("x", Some("ListNumber"))],
-        )],
-    ] {
-        let refusal = refuse(&doc, &UndoSession::new(), steps).failure;
-        assert_eq!(refusal.code, EditFailureCode::Unsupported);
-        assert_eq!(
-            refusal.message,
-            "style \"ListNumber\" defines list numbering, which v1 batches do not apply; retaining numbering definitions for batches is a follow-up"
-        );
+    for style in ["ListNumber", "ListChild", "ListGrandchild"] {
+        for steps in [
+            vec![set_style("00000002", style)],
+            vec![insert_paragraphs(
+                "00000002",
+                TargetEdge::End,
+                vec![new_paragraph("x", Some(style))],
+            )],
+        ] {
+            let refusal = refuse(&doc, &UndoSession::new(), steps).failure;
+            assert_eq!(refusal.code, EditFailureCode::Unsupported);
+            assert_eq!(
+                refusal.message,
+                format!(
+                    "style {style:?} defines list numbering, which v1 batches do not apply; retaining numbering definitions for batches is a follow-up"
+                )
+            );
+        }
+    }
+    let applied = apply(
+        &doc,
+        &undo,
+        vec![
+            set_style("00000002", "QuoteChild"),
+            insert_paragraphs(
+                "00000002",
+                TargetEdge::End,
+                vec![new_paragraph("inherited", Some("QuoteChild"))],
+            ),
+        ],
+    );
+    assert_eq!(accepted(&doc)[1..3], ["plain", "inherited"]);
+    for id in ["00000002", &applied.receipts[1].new_paragraphs[0].para_id] {
+        let inherited = properties(&doc, id);
+        assert_eq!(inherited.get("pStyle"), Some(&Any::from("QuoteChild")));
+        assert_eq!(inherited.get("alignment"), Some(&Any::from("center")));
+        assert!(!inherited.contains_key("numPr"));
     }
 }
 
@@ -1617,6 +1640,42 @@ fn deleting_the_story_tail_keeps_a_final_paragraph_mark() {
         vec![delete_paragraphs("00000001", "00000001")],
     );
     assert_eq!(accepted(&doc), ["after table"]);
+}
+
+#[test]
+fn deleting_a_paragraph_keeps_the_blocks_before_it() {
+    let table = format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+        p("0000C001", &r("cell"))
+    );
+    let control = format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="block"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+        p("0000D001", &r("control"))
+    );
+    for (block, kind) in [(table, "table"), (control, "blockSdt")] {
+        let doc = open(&format!(
+            "{}{block}{}{}",
+            p("00000001", &r("head")),
+            p("00000002", &r("gone")),
+            p("00000003", &r("tail"))
+        ));
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![delete_paragraphs("00000002", "00000002")],
+        );
+        let order: Vec<String> = doc
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                SegmentContent::Text(text) => Some(text),
+                SegmentContent::OtherEmbed { kind, .. } => Some(kind),
+                SegmentContent::Pilcrow(_) => None,
+            })
+            .collect();
+        assert_eq!(order, ["head", kind, "tail"]);
+    }
 }
 
 #[test]
