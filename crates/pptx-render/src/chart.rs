@@ -2,8 +2,8 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotDataLabels, PlotFont, PlotOp, PlotRect, PlotSink, PlotTextAlign,
-    chart_aria_label, plot_chart_into,
+    ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont, PlotOp, PlotRect, PlotSink,
+    PlotTextAlign, chart_aria_label, plot_chart_into,
 };
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
@@ -69,9 +69,13 @@ pub(crate) fn chart_primitive<'a>(
     })
 }
 
-/// Supplies value labels only for legacy charts without `c:dLbls`.
+/// Supplies value labels only for legacy charts without `c:dLbls`, and leaves
+/// a chart area with no `c:spPr` unfilled, as PowerPoint draws it.
 fn plot_model(space: &ChartSpace) -> PlotChart<'_> {
     let mut chart = PlotChart::from(space);
+    if space.fill.is_none() {
+        chart.fill = Some(PlotFill::None);
+    }
     for (group, plotted) in space.plot_groups.iter().zip(chart.plot_groups.iter_mut()) {
         if !group.show_data_labels {
             continue;
@@ -343,6 +347,7 @@ fn normalize(command: GeometryPathCommand, x: f64, y: f64, w: f64, h: f64) -> Ge
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ooxml_drawingml::chart::ChartFill;
     use pptx_parse::{
         ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup,
         ChartPoint, ChartSeries,
@@ -520,6 +525,37 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_chart_area_without_a_fill_stays_transparent() {
+        let bare = space(
+            "column",
+            vec![group(
+                "column",
+                vec![series("North", &[3.0, 1.0], "#112233")],
+            )],
+        );
+        assert!(!fills(&plot(&bare)).contains(&"#FFFFFF"));
+        let mut filled = bare.clone();
+        filled.fill = Some(ChartFill::Solid {
+            color: "#FFFFFF".to_owned(),
+        });
+        assert!(fills(&plot(&filled)).contains(&"#FFFFFF"));
+        filled.fill = Some(ChartFill::Gradient {
+            colors: vec!["#000000".to_owned(), "#FEFEFE".to_owned()],
+        });
+        assert!(fills(&plot(&filled)).contains(&"#7F7F7F"));
+        filled.fill = Some(ChartFill::Gradient {
+            colors: vec!["#00000000".to_owned(), "#FEFEFE00".to_owned()],
+        });
+        assert!(fills(&plot(&filled)).contains(&"#7F7F7F00"));
+        filled.fill = Some(ChartFill::Gradient {
+            colors: vec!["#00000000".to_owned(), "#FFFFFFFF".to_owned()],
+        });
+        assert!(fills(&plot(&filled)).contains(&"#FFFFFF7F"));
+        filled.fill = Some(ChartFill::Unsupported);
+        assert!(fills(&plot(&filled)).contains(&"#FFFFFF"));
     }
 
     #[test]

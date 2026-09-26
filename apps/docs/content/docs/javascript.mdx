@@ -139,6 +139,66 @@ their place through `handle.anchorCaret()` and `handle.resolveCaretAnchor()`,
 caret anchors that later edits, undo and remote updates move along; hosts can
 use them too.
 
+## Compose the XLSX toolbar
+
+The spreadsheet editor's built-in controls share one command store,
+`api.commands`, handed to `onReady`. Pass `toolbar` to replace the default
+chrome with parts bound to it; `EditorToolbar.FormulaBar` keeps the name box and
+formula input:
+
+```tsx
+import {
+  EditorToolbar,
+  ToolbarButton,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  ToolbarGroup,
+  XlsxEditor,
+} from "@betteroffice/xlsx-react";
+
+<XlsxEditor
+  file={bytes}
+  toolbar={
+    <EditorToolbar mode="commands">
+      <EditorToolbar.Toolbar>
+        <ToolbarGroup label="Formatting">
+          <ToolbarCommandSelect id="numberFormat" />
+          <ToolbarCommandButton id="bold" />
+        </ToolbarGroup>
+        <ToolbarCommandButton id="undo" />
+        <ToolbarButton title="Share" onClick={share}>Share</ToolbarButton>
+      </EditorToolbar.Toolbar>
+      <EditorToolbar.FormulaBar />
+    </EditorToolbar>
+  }
+/>;
+```
+
+Omit `toolbar` for the default chrome (hidden when `readOnly`), pass `null` for
+none, or set `showToolbar={false}`. Outside the editor, render the same parts
+inside `<XlsxCommandProvider commands={commands}>`, with `commands` captured from
+`onReady` (`null` until then). `execute(id, args)` runs in order with pastes
+and cell entries accepted before it, writes the cell or formula text typed so
+far, checks availability again, and resolves to `executed`, `noop`, `opened`,
+`requested` or a typed failure such as `target-changed`; a disabled command
+states why in `disabledReason`. The synchronous `api.save()` throws
+`XlsxSaveRefusedError` (`input-pending` or `input-failed`) instead of returning
+bytes without accepted input; `execute("save", null)` waits for it and saves.
+The editor API's `version`, `readCells`, `findText`, `validateEdits` and
+`applyEdits` wait for that input too, and reject with the exported
+`XlsxCommandAdmissionError` when they cannot run: its `code` is `input-failed`
+while a refused entry waits for correction, `gesture-active` during a chart drag
+and `document-replaced` when the workbook is replaced meanwhile.
+`selectCells` and `clearSelection` queue an open entry behind input that is
+still waiting, so it may not have landed when they return. An open entry the
+workbook refuses stays open and they change nothing; one it refused earlier
+reopens at its own cell once they land on its sheet.
+The store gates the editor's own UI, not direct
+`api.handle` calls. Existing prop-based `EditorToolbar` and `Toolbar` usage keeps
+working in the default legacy mode; `mode="commands"` rejects those props. Narrow
+rails move groups into an accessible More menu; wrap other host content in
+`ToolbarOverflow` to give it an entry there.
+
 ## Use the JavaScript core
 
 ```ts
@@ -199,6 +259,45 @@ list numbering is a v1 limitation: numbered paragraphs and styles that define or
 inherit numbering refuse with `unsupported` until a follow-up retains numbering
 definitions.
 
+## Edit PPTX in version-checked batches
+
+A presentation handle reads slides and story text with the version they were
+read at, then applies a batch against that version: every step commits in one
+transaction and one undo step, or the batch returns a typed refusal and nothing
+changes.
+
+```ts
+import { initWasm, openPresentation } from "@betteroffice/pptx";
+
+await initWasm();
+const deck = openPresentation(bytes);
+const read = deck.readContent();
+if (!read.ok) throw new Error(read.failure.message);
+const story = read.stories[0];
+const within = { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId };
+
+const result = deck.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: "replaceText", target: { kind: "search", within, text: "Q3" }, text: "Q4" },
+    { op: "setSlideNotes", target: { slideId: story.slideId }, text: "Updated for Q4" },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code);
+
+const saved = deck.save();
+```
+
+A story reads as its paragraphs joined by `\n`, with story-local UTF-16 offsets;
+the read reports each paragraph's span, soft line breaks and field results.
+Steps insert, replace and delete text within one paragraph, format and align
+text, replace speaker notes, and set a top-level shape's rectangle, fill or
+outline. Fields and soft line breaks are never replaced or deleted. Ids and
+versions belong to one open session. `PptxEditor` exposes the same
+`readContent`, `findText`, `validateEdits` and `applyEdits` on its editor API,
+flushing pending input first. The Rust `Presentation` and the Python binding
+take the same requests.
+
 ## Edit XLSX in version-checked batches
 
 A workbook reads cells with the version they were read at, then applies a batch
@@ -240,7 +339,8 @@ and sheet ids belong to one session. Batches do not insert or delete rows,
 columns or sheets, merge cells or move charts, and refuse writes to merged-cell
 followers, array-formula cells and protected sheets. The React editor's
 `onReady` API exposes the same operations, committing pending drafts, nudges and
-pastes first.
+pastes first, and rejecting with `XlsxCommandAdmissionError` when that input
+cannot be written or the workbook is replaced meanwhile.
 
 ## Export XLSX content with anchors
 
@@ -299,10 +399,10 @@ interaction separately when investigating input-to-paint latency.
 | `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, and flushed version-checked edit batches on its ref. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, version-checked atomic cell batches, anchored JSON and Markdown export, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
-| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with flushed version-checked edit batches on its `onReady` API. |
+| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts, and flushed version-checked edit batches on its `onReady` API. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
-| `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
-| `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with a command store and composable toolbar parts. |
+| `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, version-checked atomic edit batches, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
+| `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with a command store, composable toolbar parts, and flushed version-checked edit batches on its editor API. |
 | `@betteroffice/pptx-i18n` | UI locale strings and types for the PPTX React editor. |
 
 See [Collaboration](./collaboration) to connect editors through a shared relay.
