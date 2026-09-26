@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -68,6 +68,163 @@ struct LoweringContext {
     source_json: Arc<BTreeMap<String, String>>,
     plans: Vec<StoryPlan>,
     compatibility_mode: u8,
+    source: SourceStructure,
+}
+
+/// A story's source blocks as the save projection sees them when it puts raw XML back: each raw
+/// block goes in front of the first following source paragraph that still exists.
+enum SourceBlock {
+    Raw,
+    /// A paragraph with a source id, which a raw block can be restored in front of.
+    Anchor(String),
+    /// A table, control or id-less paragraph, which that search skips over.
+    Other,
+}
+
+/// Where the save projection puts a raw XML block back.
+pub(crate) enum Restoration {
+    /// In front of this live paragraph, where the source had it.
+    Before(String),
+    /// In front of a later paragraph, past blocks the source had after it.
+    Displaced,
+    /// By position, as no source paragraph follows it any more.
+    Unanchored,
+}
+
+/// Source structure the story stream does not carry, retained for batch planning.
+#[derive(Default)]
+struct SourceStructure {
+    /// Source block order of the stories that hold raw XML blocks.
+    blocks: HashMap<String, Vec<SourceBlock>>,
+    /// Paragraphs whose runs carry tracked formatting changes.
+    run_revisions: HashSet<(String, String)>,
+}
+
+/// Package context retained after lowering, for planning host edits in Rust.
+pub(crate) struct SourceMetadata {
+    styles: StyleResolver,
+    structure: SourceStructure,
+}
+
+/// A paragraph's style-derived pilcrow properties and run formatting.
+pub(crate) struct StyledParagraph {
+    pub properties: Vec<(String, Any)>,
+    pub run: Vec<(String, Any)>,
+}
+
+/// Pilcrow keys seeded from direct formatting with a paragraph-style fallback.
+const STYLE_FALLBACK_KEYS: [&str; 23] = [
+    "alignment",
+    "spaceBefore",
+    "spaceAfter",
+    "spaceBeforeLines",
+    "spaceAfterLines",
+    "beforeAutospacing",
+    "afterAutospacing",
+    "lineSpacing",
+    "lineSpacingRule",
+    "indentRight",
+    "borders",
+    "shading",
+    "tabs",
+    "pageBreakBefore",
+    "keepNext",
+    "keepLines",
+    "widowControl",
+    "contextualSpacing",
+    "snapToGrid",
+    "autoSpaceDE",
+    "autoSpaceDN",
+    "outlineLevel",
+    "bidi",
+];
+
+/// Every pilcrow key a seeded paragraph resolves through its style.
+pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
+    STYLE_FALLBACK_KEYS.into_iter().chain([
+        "spacingExplicit",
+        "indentLeft",
+        "indentFirstLine",
+        "hangingIndent",
+        "defaultTextFormatting",
+    ])
+}
+
+impl SourceMetadata {
+    pub(crate) fn has_paragraph_style(&self, style_id: &str) -> bool {
+        self.styles
+            .style(style_id)
+            .is_some_and(|style| string(field(Some(style), "type")) == Some("paragraph"))
+    }
+
+    /// What seeding produces for an unformatted paragraph carrying only `style_id`.
+    pub(crate) fn styled_paragraph(
+        &self,
+        style_id: Option<&str>,
+    ) -> Result<StyledParagraph, String> {
+        let formatting = style_id.map_or_else(|| json!({}), |id| json!({ "styleId": id }));
+        let paragraph = json!({ "type": "paragraph", "formatting": formatting, "content": [] });
+        let attrs = paragraph_attrs(&paragraph, &self.styles, &[], &[], None);
+        let run = marks_to_attrs(&formatting_to_marks(
+            paragraph_style_formatting(&paragraph, &self.styles, None).as_ref(),
+        ));
+        Ok(StyledParagraph {
+            properties: payload(para_attrs_to_ppr(attrs))?,
+            run: payload(run)?,
+        })
+    }
+
+    /// How the save projection restores each raw XML block of `story` when only the paragraphs
+    /// `alive` accepts remain.
+    pub(crate) fn opaque_restorations(
+        &self,
+        story: &str,
+        alive: impl Fn(&str) -> bool,
+    ) -> Vec<Restoration> {
+        let Some(blocks) = self.structure.blocks.get(story) else {
+            return Vec::new();
+        };
+        blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| matches!(block, SourceBlock::Raw))
+            .map(|(index, _)| {
+                let mut skipped = false;
+                for block in &blocks[index + 1..] {
+                    match block {
+                        SourceBlock::Anchor(id) if alive(id) => {
+                            return if skipped {
+                                Restoration::Displaced
+                            } else {
+                                Restoration::Before(id.clone())
+                            };
+                        }
+                        SourceBlock::Other => skipped = true,
+                        _ => {}
+                    }
+                }
+                Restoration::Unanchored
+            })
+            .collect()
+    }
+
+    pub(crate) fn run_revision(&self, story: &str, para_id: &str) -> bool {
+        self.structure
+            .run_revisions
+            .contains(&(story.to_owned(), para_id.to_owned()))
+    }
+}
+
+fn has_run_property_changes(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            (string(object.get("type")) == Some("run")
+                && !array(object.get("propertyChanges")).is_empty())
+                || object.values().any(has_run_property_changes)
+        }
+        Value::Array(values) => values.iter().any(has_run_property_changes),
+        _ => false,
+    }
 }
 
 fn compatibility_mode_from_package(package: Option<&Value>) -> u8 {
@@ -1885,31 +2042,7 @@ fn paragraph_attrs(
     if styles.enabled {
         let (style_ppr, resolved_run) = styles.resolve_paragraph_style(style_id);
         let style_ppr_ref = style_ppr.as_ref();
-        for key in [
-            "alignment",
-            "spaceBefore",
-            "spaceAfter",
-            "spaceBeforeLines",
-            "spaceAfterLines",
-            "beforeAutospacing",
-            "afterAutospacing",
-            "lineSpacing",
-            "lineSpacingRule",
-            "indentRight",
-            "borders",
-            "shading",
-            "tabs",
-            "pageBreakBefore",
-            "keepNext",
-            "keepLines",
-            "widowControl",
-            "contextualSpacing",
-            "snapToGrid",
-            "autoSpaceDE",
-            "autoSpaceDN",
-            "outlineLevel",
-            "bidi",
-        ] {
+        for key in STYLE_FALLBACK_KEYS {
             attrs.insert(
                 key.to_owned(),
                 field(formatting, key)
@@ -3194,13 +3327,31 @@ fn visit_story(
     let mut cursor = BlockCursor::default();
     let mut result_table_ids = BTreeMap::new();
     let mut last_kind = None;
+    let mut block_order = Vec::new();
     for (block_index, block) in blocks.iter().enumerate() {
         let position = cursor;
         let Some(block_id) = cursor.take(&story_id, block) else {
+            block_order.push(SourceBlock::Raw);
             continue;
         };
-        match string(field(Some(block), "type")).unwrap_or_default() {
+        let kind = string(field(Some(block), "type")).unwrap_or_default();
+        block_order.push(
+            if kind == "paragraph"
+                && string(field(Some(block), "paraId")).is_some_and(|id| !id.is_empty())
+            {
+                SourceBlock::Anchor(block_id.clone())
+            } else {
+                SourceBlock::Other
+            },
+        );
+        match kind {
             "paragraph" => {
+                if has_run_property_changes(field(Some(block), "content").unwrap_or(&Value::Null)) {
+                    context
+                        .source
+                        .run_revisions
+                        .insert((story_id.clone(), block_id.clone()));
+                }
                 let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(block);
                 if options.include_page_breaks {
                     for kind in leading_breaks {
@@ -3337,6 +3488,12 @@ fn visit_story(
                 last_kind = Some("blockSdt");
             }
         }
+    }
+    if block_order
+        .iter()
+        .any(|block| matches!(block, SourceBlock::Raw))
+    {
+        context.source.blocks.insert(story_id.clone(), block_order);
     }
     if options.append_body_tail && matches!(last_kind, Some("table" | "blockSdt")) {
         context.plans[plan_index].units.push(embed_unit(
@@ -3546,6 +3703,52 @@ pub(crate) fn seed_parsed_docx(
     drop(envelope);
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
+    let context = lower_package(package, source_json);
+    drop(parsed);
+    document
+        .create_empty_stories(
+            &context
+                .plans
+                .iter()
+                .map(|plan| plan.story_id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+    let mut batches = Vec::with_capacity(context.plans.len());
+    for plan in context.plans {
+        let (story_id, ops, fonts) = seed_plan(plan)?;
+        batches.push((story_id, ops));
+        referenced_fonts.extend(fonts);
+    }
+    document
+        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+        .map_err(|error| error.to_string())?;
+    document.install_source(
+        SourceMetadata {
+            styles: context.styles,
+            structure: context.source,
+        },
+        0,
+    );
+    Ok(referenced_fonts.into_iter().collect())
+}
+
+/// Source metadata for a package whose stories arrive another way, such as shared state.
+#[cfg(feature = "wasm")]
+pub(crate) fn source_metadata(
+    envelope: &docx_parse::S9WireEnvelope,
+) -> Result<SourceMetadata, String> {
+    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let package =
+        field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
+    let context = lower_package(package, BTreeMap::new());
+    Ok(SourceMetadata {
+        styles: context.styles,
+        structure: context.source,
+    })
+}
+
+fn lower_package(package: &Value, source_json: BTreeMap<String, String>) -> LoweringContext {
     let compatibility_mode = compatibility_mode_from_package(Some(package));
     let mut context = LoweringContext {
         styles: StyleResolver::new(field(Some(package), "styles")),
@@ -3553,6 +3756,7 @@ pub(crate) fn seed_parsed_docx(
         source_json: Arc::new(source_json),
         plans: Vec::new(),
         compatibility_mode,
+        source: SourceStructure::default(),
     };
     visit_story(
         &mut context,
@@ -3615,26 +3819,7 @@ pub(crate) fn seed_parsed_docx(
             );
         }
     }
-    drop(parsed);
-    document
-        .create_empty_stories(
-            &context
-                .plans
-                .iter()
-                .map(|plan| plan.story_id.clone())
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|error| error.to_string())?;
-    let mut batches = Vec::with_capacity(context.plans.len());
-    for plan in context.plans {
-        let (story_id, ops, fonts) = seed_plan(plan)?;
-        batches.push((story_id, ops));
-        referenced_fonts.extend(fonts);
-    }
-    document
-        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
-        .map_err(|error| error.to_string())?;
-    Ok(referenced_fonts.into_iter().collect())
+    context
 }
 
 pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
@@ -3651,6 +3836,7 @@ mod tests {
             source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
             compatibility_mode: 12,
+            source: SourceStructure::default(),
         };
         visit_story(
             &mut context,
@@ -3893,6 +4079,7 @@ mod tests {
             source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
             compatibility_mode: 12,
+            source: SourceStructure::default(),
         };
         visit_story(
             &mut context,

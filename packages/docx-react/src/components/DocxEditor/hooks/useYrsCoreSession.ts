@@ -27,7 +27,8 @@ export interface YrsCoreSession {
   displayPositionToLoc(position: number, storyId?: string): YrsLoc | null;
   locToDisplayPosition(loc: YrsLoc): number | null;
   documentFromYrs(baseDocument?: Document | null): Document | null;
-  publishDirectInput(storyId?: string): void;
+  /** Marks stories changed outside the save projection; the live selection's story by default. */
+  publishDirectInput(stories?: string | readonly string[]): void;
 }
 
 interface YrsCoreSessionCallbacks {
@@ -332,12 +333,17 @@ export function useYrsCoreSession(
     }
   }, []);
 
-  const publishDirectInput = useCallback((storyId?: string): void => {
+  const publishDirectInput = useCallback((stories?: string | readonly string[]): void => {
     const live = sessionRef.current;
     if (!live || !live.storyIds().includes('body')) return;
     inputPositionMapsRef.current.clear();
-    const activeStory = storyId ?? live.selection()?.head.story ?? 'body';
-    projectionStoriesRef.current.add(dirtyProjectionStory(activeStory));
+    const dirty =
+      stories === undefined
+        ? [live.selection()?.head.story ?? 'body']
+        : typeof stories === 'string'
+          ? [stories]
+          : stories;
+    for (const story of dirty) projectionStoriesRef.current.add(dirtyProjectionStory(story));
   }, []);
 
   return {

@@ -114,7 +114,7 @@ export interface YrsInputProps {
     residentLayoutReady?: boolean,
     residentCaretReady?: boolean
   ): void;
-  onDirectInput(story?: string): void;
+  onDirectInput(stories?: string | readonly string[]): void;
   /** One-owner body text path; false until the resident frame is initialized. */
   applyResidentInput?(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-owner collapsed delete/merge path; false until the resident frame is initialized. */
@@ -343,11 +343,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const finishMutation = useCallback(
-    (residentLayoutReady = false, residentCaretReady = false, dirtyStory?: string): void => {
+    (
+      residentLayoutReady = false,
+      residentCaretReady = false,
+      dirtyStories?: string | readonly string[]
+    ): void => {
       verticalCaretGoalRef.current.reset();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
       onCaretInput?.();
-      onDirectInput(dirtyStory);
+      onDirectInput(dirtyStories);
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
     [emitSelection, onCaretInput, onDirectInput]
