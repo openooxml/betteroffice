@@ -16,6 +16,7 @@ import {
   type XlsxEditRequest,
 } from '@betteroffice/xlsx';
 import { xlsxCommandController } from '../commands/createXlsxCommandStore';
+import { isMacPlatform } from '../commands/descriptors';
 import { pluginDefinition } from './defineXlsxPlugin';
 import * as publicApi from '../index';
 import {
@@ -219,7 +220,7 @@ async function queuePaste(view: ReturnType<typeof render>, api: XlsxEditorApi) {
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
 }
 
-const chord = { ctrlKey: true, metaKey: true };
+const chord = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
 const sheetTabs = (view: ReturnType<typeof render>) =>
   within(view.getByTestId('xlsx-sheet-tabs')).getAllByRole('tab');
