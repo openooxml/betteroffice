@@ -901,13 +901,9 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         target: &EditTarget,
     ) -> Result<(), EditFailure> {
         let ownership = self.ownership();
-        let chain = ownership.chain(story).map_err(|message| {
-            failure(
-                EditFailureCode::LimitExceeded,
-                message,
-                Some(target.clone()),
-            )
-        })?;
+        let chain = ownership
+            .chain(story)
+            .map_err(|(code, message)| failure(code, message, Some(target.clone())))?;
         if chain.iter().any(|owner| owner.content_locked()) {
             return Err(failure(
                 EditFailureCode::LockedTarget,
@@ -929,7 +925,7 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         let ownership = self.ownership();
         let chain = ownership
             .chain(story)
-            .map_err(|message| failure(EditFailureCode::LimitExceeded, message, None))?;
+            .map_err(|(code, message)| failure(code, message, None))?;
         if chain.iter().any(|owner| owner.revision) {
             return Err(failure(
                 EditFailureCode::Unsupported,
