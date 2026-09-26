@@ -47,6 +47,8 @@ DOCX, XLSX and PPTX crates are published to crates.io, Apache-2.0. Use a format 
 
 The native XLSX facade also offers `Workbook::apply_ops_profiled` for edit stage timings; see the [Rust guide](https://docs.betteroffice.dev/docs/rust).
 
+The native PPTX facade's slide render reports the font families it substituted: `RenderedSlide::font_substitutions` names each family the slide asked for that no registered face matched, the family drawn instead, and the first shape that asked for it.
+
 The per-layer crates expose individual pipeline stages:
 
 - [betteroffice-docx-parse](https://crates.io/crates/betteroffice-docx-parse): WordprocessingML parsing and the typed DOCX model.

@@ -117,6 +117,21 @@ function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
   };
 }
 
+/** Input accepted against one open workbook; `closed` settles when it is replaced. */
+interface PendingInput {
+  tasks: Set<Promise<void>>;
+  closed: Promise<void>;
+  close: () => void;
+}
+
+function pendingInput(): PendingInput {
+  let close!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    close = resolve;
+  });
+  return { tasks: new Set(), closed, close };
+}
+
 export interface XlsxEditorCollaborationOptions {
   /** Peer-unique Yrs client ID. Generated securely when omitted. */
   clientId?: number;
@@ -448,7 +463,7 @@ function XlsxEditorContent({
   const settlePendingEditsRef = useRef<() => boolean>(() => true);
   const pendingDraftRef = useRef<(EditState & { sheet: number }) | null>(null);
   // accepted input that lands after an await: clipboard pastes and cuts.
-  const pendingInputRef = useRef(new Set<Promise<void>>());
+  const pendingInputRef = useRef(pendingInput());
   const composingRef = useRef(false);
   // latest onReady, read (not depended on) by the open effect so a changing
   // callback identity never reopens the workbook.
@@ -590,18 +605,19 @@ function XlsxEditorContent({
   }, [readOnly]);
 
   const trackInput = useCallback((task: Promise<void>) => {
-    const pending = pendingInputRef.current;
-    pending.add(task);
+    const { tasks } = pendingInputRef.current;
+    tasks.add(task);
     const done = () => {
-      pending.delete(task);
+      tasks.delete(task);
     };
     task.then(done, done);
   }, []);
 
   const flushPendingInput = useCallback(async (opened: WorkbookHandle) => {
     if (handleRef.current !== opened) throw new Error('The workbook is no longer open');
-    while (pendingInputRef.current.size > 0) {
-      await Promise.allSettled([...pendingInputRef.current]);
+    const { tasks, closed } = pendingInputRef.current;
+    while (tasks.size > 0) {
+      await Promise.race([Promise.allSettled([...tasks]), closed]);
       if (handleRef.current !== opened) {
         throw new Error('The workbook changed while flushing input');
       }
@@ -674,6 +690,8 @@ function XlsxEditorContent({
     handleRef.current = null;
     setSheetInfo(null);
     setSelection(null);
+    const input = pendingInput();
+    pendingInputRef.current = input;
     let handle: WorkbookHandle | null = null;
     let unsubscribeUpdates = () => {};
     let cleanupReady = () => {};
@@ -782,6 +800,7 @@ function XlsxEditorContent({
       unsubscribeUpdates();
       handle?.dispose();
       handleRef.current = null;
+      input.close();
     };
   }, [
     file,
