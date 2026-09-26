@@ -1131,11 +1131,12 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                 0.0
             };
             let plot_y = plot_y.min(y + height);
+            // The plot gives up its minimum size before it or its labels cross
+            // the frame or a legend.
             PlotArea {
                 x: plot_x,
                 y: plot_y,
-                w: (region_w - gutter - right_margin - secondary_w).max(MIN_PLOT),
-                // The plot gives up its minimum before its labels leave the frame.
+                w: (region_w - gutter - right_margin - secondary_w).max(0.0),
                 h: (y + height - bottom - bands.bottom - plot_y).max(0.0),
                 gutter,
             }
@@ -7203,6 +7204,38 @@ mod tests {
             swatches[1] - first >= 7.0 * 0.5 * size + 14.0,
             "{swatches:?} vs text at {first}"
         );
+    }
+
+    #[test]
+    fn a_wide_category_gutter_shrinks_the_plot_before_it_reaches_a_side_legend() {
+        let data = Source {
+            categories: vec!["Worldwide Customer Management".to_owned()],
+            values: vec![10.0],
+        };
+        let mut chart = legend_chart(Some("right"), &["North"], &data);
+        chart.chart_type = "bar";
+        chart.title = None;
+        let ops = plot_chart(
+            &chart,
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 250.0,
+                h: 180.0,
+            },
+        );
+        let key = chart_label_font().size_px * LEGEND_KEY_EM;
+        let (swatches, bars): (Vec<_>, Vec<_>) = rects(&ops)
+            .into_iter()
+            .skip(1)
+            .partition(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01);
+        assert_eq!(swatches.len(), 1, "{swatches:?}");
+        for bar in &bars {
+            assert!(
+                bar.0 + bar.2 <= swatches[0].0,
+                "{bar:?} reaches {swatches:?}"
+            );
+        }
     }
 
     #[test]
