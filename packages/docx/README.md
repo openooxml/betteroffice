@@ -241,9 +241,11 @@ Anchors use the batch offsets: a range is paragraph-local UTF-16 in the view it
 names, one U+FFFC per atom, the same shape the edit batches take; ranges from a
 session export address the version it returned. Content without a session
 location (comment bodies, omitted raw XML) carries a `sourcePart` anchor: the
-part, its SHA-256, and element-child ordinals into its XML. Parsing gives a
-repeated paragraph id a fresh one; paragraphs a session gives a shared id are
-anchored with an empty `paraId`, which addresses nothing. Comment metadata reads
+part, its SHA-256, and element-child ordinals into its XML. Content with no
+location of its own carries `{ kind: 'unlocated', story, reason }`: the reason is
+`duplicate-paragraph-id` (parsing gives a repeated paragraph id a fresh one, but a
+session can give two paragraphs one id), `story-too-large`, `missing-story` or
+`provenance-unavailable`. Comment metadata reads
 the session's comment store once a field has been written there, and the source
 until then. Ids are deterministic export-tree paths, and a bytes export is
 identical across runs. Exports admit one top-level block at a time, charge text before copying it, and stop at

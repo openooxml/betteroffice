@@ -293,6 +293,22 @@ describe('structured export', () => {
     }
   });
 
+  it('anchors content without a location of its own as unlocated, with the reason', async () => {
+    const bytes = docx(
+      '<w:p w14:paraId="72000001"><w:commentRangeStart w:id="1"/><w:r><w:t>Annotated</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>' +
+        `<w:p w14:paraId="72000002"><w:r><w:t>${'x'.repeat(2_000_000)}</w:t></w:r></w:p>`,
+      '<w:comment w:id="1" w:author="Ann"><w:p w14:paraId="72000003"><w:r><w:t>Check</w:t></w:r></w:p></w:comment>'
+    );
+    const content = await exportDocxStructured(bytes, {
+      revisionView: 'accepted',
+      stories: ['comments'],
+      maxBytes: 65_536,
+    });
+    expect(content.stories[0]!.comment!.anchors).toEqual([
+      { kind: 'unlocated', story: 'body', reason: 'story-too-large' },
+    ]);
+  });
+
   it('truncates at whole blocks within the byte budget', async () => {
     const content = await exportDocxStructured(principal(), {
       revisionView: 'markup',

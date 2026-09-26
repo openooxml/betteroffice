@@ -102,7 +102,9 @@ Fields keep their cached result and are never evaluated, and images export alt
 text and relationship metadata, not image data. `max_blocks` and `max_bytes`
 stop the export at a whole block and set `truncated`. `export_markdown` and
 `render_docx_markdown(content)` add a `<!-- docx-export:N -->` marker per block,
-mapped to its anchor in `anchors`. Page fragments are not included yet.
+mapped to its anchor in `anchors`. Content with no location of its own is
+anchored `{"kind": "unlocated", "story": ..., "reason": ...}`, never as a
+paragraph. Page fragments are not included yet.
 
 ## Lay a document out
 

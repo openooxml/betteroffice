@@ -469,8 +469,8 @@ struct StoryCtx {
     chunks: Arc<Vec<Chunk>>,
     /// The anchor every node uses instead of its own, for content without a session location.
     owner: Option<Anchor>,
-    /// The same for the block being built: a field's anchor for its result blocks, source
-    /// provenance for a paragraph whose id another shares.
+    /// The same for the block being built: a field's anchor for its result blocks, no location
+    /// for a paragraph whose id another shares.
     block_owner: Option<Anchor>,
     /// Block ids a numeric field hides as its cached result: the field's paragraph and ordinal.
     hidden: HashMap<String, (usize, usize)>,
@@ -503,15 +503,21 @@ impl StoryCtx {
 
     /// A paragraph's anchor; one whose id another paragraph shares has no location.
     fn paragraph_anchor(&self, para_id: &str) -> Anchor {
-        let para_id = if self.duplicates.contains(para_id) {
-            ""
+        self.anchor(if self.duplicates.contains(para_id) {
+            self.unlocated(UnlocatedReason::DuplicateParagraphId)
         } else {
-            para_id
-        };
-        self.anchor(Anchor::Paragraph {
-            story: self.story.clone(),
-            para_id: para_id.to_owned(),
+            Anchor::Paragraph {
+                story: self.story.clone(),
+                para_id: para_id.to_owned(),
+            }
         })
+    }
+
+    fn unlocated(&self, reason: UnlocatedReason) -> Anchor {
+        Anchor::Unlocated {
+            story: self.story.clone(),
+            reason,
+        }
     }
 
     /// A child story name, when it names a story of the session.
@@ -1471,9 +1477,9 @@ impl<'a> Exporter<'a> {
             let ranges = entry.map(|(_, ranges)| ranges.clone()).unwrap_or_default();
             for (story, start, end) in ranges {
                 if !self.fits(Self::story_units(views, &story)) {
-                    let unlocated = Anchor::Paragraph {
+                    let unlocated = Anchor::Unlocated {
                         story: story.clone(),
-                        para_id: String::new(),
+                        reason: UnlocatedReason::StoryTooLarge,
                     };
                     self.note(
                         DiagnosticCode::ProvenanceUnavailable,
@@ -1492,9 +1498,9 @@ impl<'a> Exporter<'a> {
                         .or_insert_with(|| duplicate_ids(&projection));
                     if shared.contains(&range.start.para_id) || shared.contains(&range.end.para_id)
                     {
-                        let unlocated = Anchor::Paragraph {
+                        let unlocated = Anchor::Unlocated {
                             story,
-                            para_id: String::new(),
+                            reason: UnlocatedReason::DuplicateParagraphId,
                         };
                         ambiguous.push((id.clone(), unlocated.clone()));
                         anchors.push(unlocated);
@@ -1864,9 +1870,9 @@ impl<'a> Exporter<'a> {
             return Vec::new();
         };
         let Some(mut ctx) = self.story_ctx(views, story, prov, owner.clone(), part, limit) else {
-            let anchor = owner.unwrap_or_else(|| Anchor::Paragraph {
+            let anchor = owner.unwrap_or_else(|| Anchor::Unlocated {
                 story: story.to_owned(),
-                para_id: String::new(),
+                reason: UnlocatedReason::MissingStory,
             });
             self.note(
                 DiagnosticCode::UnresolvedReference,
@@ -2108,10 +2114,7 @@ impl<'a> Exporter<'a> {
         self.settle(output, held, root, None);
         for (element, provenance) in raws {
             let anchor = provenance.unwrap_or_else(|| {
-                ctx.anchor(Anchor::Paragraph {
-                    story: ctx.story.clone(),
-                    para_id: String::new(),
-                })
+                ctx.anchor(ctx.unlocated(UnlocatedReason::ProvenanceUnavailable))
             });
             self.note(
                 DiagnosticCode::UnsupportedContent,
@@ -2836,22 +2839,19 @@ impl<'a> Exporter<'a> {
         depth: usize,
         list: &mut ListState,
     ) -> Block {
+        let accepted = Rc::clone(&ctx.accepted);
+        let paragraph = &accepted.paragraphs[index];
         if !self.grow(1, 0) {
             return Block {
                 id: String::new(),
-                anchor: ctx.paragraph_anchor(""),
+                anchor: ctx.paragraph_anchor(&paragraph.para_id),
                 content: BlockKind::Unsupported {
                     element: "w:p".to_owned(),
                 },
             };
         }
-        let accepted = Rc::clone(&ctx.accepted);
-        let paragraph = &accepted.paragraphs[index];
         if ctx.duplicates.contains(&paragraph.para_id) && ctx.owner().is_none() {
-            let unlocated = Anchor::Paragraph {
-                story: ctx.story.clone(),
-                para_id: String::new(),
-            };
+            let unlocated = ctx.unlocated(UnlocatedReason::DuplicateParagraphId);
             self.note(
                 DiagnosticCode::AmbiguousIdentity,
                 Severity::Warning,
@@ -4557,8 +4557,13 @@ mod tests {
                 .find(|story| story.kind == StoryKind::Comment);
             if stories.contains(&StorySelection::Comments) && !content.truncated {
                 assert!(matches!(
-                    comment.and_then(|story| story.comment.as_ref()).map(|comment| comment.anchors.as_slice()),
-                    Some([Anchor::Paragraph { para_id, .. }]) if para_id.is_empty()
+                    comment
+                        .and_then(|story| story.comment.as_ref())
+                        .map(|comment| comment.anchors.as_slice()),
+                    Some([Anchor::Unlocated {
+                        reason: UnlocatedReason::StoryTooLarge,
+                        ..
+                    }])
                 ));
                 assert_eq!(comment.map(|story| story.blocks.len()), Some(1));
             }
