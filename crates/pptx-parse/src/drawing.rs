@@ -1492,6 +1492,11 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .attribute("baseline")
             .and_then(|value| value.parse::<i32>().ok())
             .map(|value| f64::from(value) / 1000.0),
+        kern_pt: element
+            .attribute("kern")
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|value| *value >= 0)
+            .map(|value| f64::from(value) / 100.0),
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
@@ -1577,6 +1582,25 @@ mod tests {
     use crate::ParseLimits;
     use crate::xml::parse_xml;
     use ooxml_drawingml::GeometryPathCommand;
+
+    #[test]
+    fn a_kern_threshold_reads_in_points_and_rejects_negatives() {
+        let limits = ParseLimits::default();
+        let kern = |attribute: &str| {
+            let xml = format!(r#"<a:rPr {attribute}/>"#);
+            let root = parse_xml(
+                xml.as_bytes(),
+                "ppt/slides/slide1.xml",
+                &mut ParseBudget::new(&limits),
+            )
+            .unwrap();
+            parse_run_properties(Some(&root)).kern_pt
+        };
+        assert_eq!(kern(r#"kern="1200""#), Some(12.0));
+        assert_eq!(kern(r#"kern="0""#), Some(0.0));
+        assert_eq!(kern(r#"kern="-100""#), None);
+        assert_eq!(kern(r#"sz="1100""#), None);
+    }
 
     #[test]
     fn a_custom_geometry_becomes_a_path_normalised_to_the_shape() {

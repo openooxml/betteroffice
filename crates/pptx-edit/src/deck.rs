@@ -400,6 +400,7 @@ impl DeckSession {
             draft.style.font_size_pt,
             draft.style.spacing_pt,
             draft.style.baseline_pct,
+            draft.style.kern_pt,
         )?;
         let shape_id = self.next_id("shape");
         let story_id = format!("story:{shape_id}:0");
