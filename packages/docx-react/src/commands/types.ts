@@ -1,10 +1,12 @@
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
 import type { ParagraphAlignment } from '@betteroffice/docx/types/document';
+import type { DocxEditRefusal } from '@betteroffice/docx/yrs';
 import type {
   CommandReason,
   CommandState,
 } from '../../../../shared/host-contracts/commands';
+import type { PluginCommandResult } from '../../../../shared/host-contracts/plugins';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 
 export type {
@@ -324,6 +326,9 @@ export interface DocxPluginCommandDescriptor {
 /** State of a contributed command; the plugin chooses its own disabled codes. */
 export type DocxPluginCommandState = CommandState;
 
+/** Outcome of a contributed command: a plugin-defined failure, or a refused edit batch as-is. */
+export type DocxPluginCommandResult = PluginCommandResult<DocxCommandStatus, DocxEditRefusal>;
+
 /** The command authority of one editor, shared by built-in and host chrome. */
 export interface DocxCommandStore {
   getDescriptor<K extends DocxCommandId>(id: K): DocxCommandDescriptor<K>;
@@ -336,5 +341,5 @@ export interface DocxCommandStore {
   /** Runs after input accepted before the call; availability is checked again first. */
   execute<K extends DocxCommandId>(id: K, args: DocxCommandArgs[K]): Promise<DocxCommandResult>;
   /** Runs a contributed command with its plugin's own clients, outside the input queue. */
-  execute(id: DocxPluginCommandId, args: null): Promise<DocxCommandResult>;
+  execute(id: DocxPluginCommandId, args: null): Promise<DocxPluginCommandResult>;
 }

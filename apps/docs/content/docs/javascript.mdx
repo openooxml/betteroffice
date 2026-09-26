@@ -113,14 +113,15 @@ const review = defineDocxPlugin<{ count: number }>({
       label: "Mark reviewed",
       mutatesDocument: true,
       async execute(context) {
+        if (!context.edits) return { ok: false, failure: { code: "not-granted", message: "Needs write access" } };
         const read = await context.read.readParagraphs({ view: "accepted" });
-        if (!read.ok || !context.edits) return { ok: true, status: "noop" };
+        if (!read.ok) return read;
         const first = read.paragraphs[0];
         const result = await context.edits.applyEdits({
           expectVersion: read.version,
           steps: [{ op: "insertText", target: { kind: "paragraph", story: "body", paraId: first.paraId }, at: "end", text: " ✓" }],
         });
-        return result.ok ? { ok: true, status: "executed" } : { ok: true, status: "noop" };
+        return result.ok ? { ok: true, status: "executed" } : result;
       },
     },
   ],
@@ -171,9 +172,10 @@ batches refuse locked content in Rust. In suggesting mode each batch step needs
 **Commands and toolbar.** Contributed commands register as
 `plugin:<pluginId>/<id>` on `ref.commands` and always run with their own
 plugin's clients, whether the default toolbar, a shortcut or the host invokes
-them. Plugin shortcuts must use Mod or Alt, or a function key; built-in and
-clipboard shortcuts take precedence, and a clashing plugin shortcut is reported
-and not bound. Keys
+them. A command's failure uses the plugin's own code, and a refused edit batch
+returned as-is reaches the caller unchanged. Plugin shortcuts must use Mod or
+Alt, or a function key; built-in and clipboard shortcuts take precedence, and a
+clashing plugin shortcut is reported and not bound. Keys
 pressed in plugin chrome are the user's: built-in shortcuts act on the editor
 there, and a plugin's text fields keep their own editing keys. Replacement chrome
 shows toolbar contributions with

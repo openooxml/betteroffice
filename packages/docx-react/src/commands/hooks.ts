@@ -12,6 +12,7 @@ import type {
   DocxCommandStore,
   DocxPluginCommandDescriptor,
   DocxPluginCommandId,
+  DocxPluginCommandResult,
   DocxPluginCommandState,
 } from './types';
 
@@ -79,7 +80,7 @@ export interface DocxBoundPluginCommand {
   /** The contributed label, or the id while no plugin contributes it. */
   label: string;
   shortcut: string | null;
-  execute(): Promise<DocxCommandResult>;
+  execute(): Promise<DocxPluginCommandResult>;
 }
 
 /** Binds one command for a custom control. */

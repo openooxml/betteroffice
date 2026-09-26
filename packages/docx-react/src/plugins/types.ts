@@ -28,6 +28,7 @@ import type {
   DocxCommandState,
   DocxPluginCommandDescriptor,
   DocxPluginCommandId,
+  DocxPluginCommandResult,
   DocxPluginCommandState,
 } from '../commands/types';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
@@ -84,7 +85,10 @@ export interface DocxPluginCommandClient {
     args: DocxCommandArgs[K]
   ): Promise<DocxCommandResult | DocxPluginRefusal>;
   /** Only this plugin's own contributed commands. */
-  execute(id: DocxPluginCommandId, args: null): Promise<DocxCommandResult | DocxPluginRefusal>;
+  execute(
+    id: DocxPluginCommandId,
+    args: null
+  ): Promise<DocxPluginCommandResult | DocxPluginRefusal>;
 }
 
 /** A rectangle in the units of the space it is used in. */
@@ -236,7 +240,7 @@ export interface DocxPluginCommand<S> {
   /** Chords such as `Mod+Shift+R`; built-in shortcuts take precedence. */
   shortcuts?: readonly string[];
   getState?(context: DocxPluginContext<S>): CommandState;
-  execute(context: DocxPluginContext<S>): MaybePromise<DocxCommandResult>;
+  execute(context: DocxPluginContext<S>): MaybePromise<DocxPluginCommandResult>;
 }
 
 /**

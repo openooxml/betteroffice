@@ -342,7 +342,9 @@ const review = defineDocxPlugin<State>({
 - **Contributed commands** register as `plugin:<pluginId>/<id>` on
   `ref.commands`. They always run with their own plugin's clients, even when the
   host's toolbar, shortcuts or `ref.commands` invoke them, and outside the input
-  queue, so a handler can await its own batches. `mutatesDocument` disables a
+  queue, so a handler can await its own batches. `execute` returns
+  `{ ok: true, status }` or a failure with the plugin's own code, or a refused
+  edit batch as-is; callers receive it unchanged. `mutatesDocument` disables a
   command in viewing and read-only modes but grants nothing. Plugin shortcuts
   must use Mod or Alt, or a function key; built-in and clipboard shortcuts win,
   and a clashing plugin shortcut is not bound and is reported. Keys pressed in
