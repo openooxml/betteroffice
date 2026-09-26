@@ -6,8 +6,7 @@ use yrs::{Any, Map, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::deck::SourceImport;
 use crate::{
-    DeckSession, DeckSnapshot, EditError, EditResult, META, MIGRATE_ORIGIN, ShapeSnapshot,
-    StorySnapshot,
+    DeckSession, EditError, EditResult, META, MIGRATE_ORIGIN, ShapeSnapshot, StorySnapshot,
 };
 
 #[derive(Clone, Copy)]
@@ -18,13 +17,11 @@ pub(crate) enum SourceProperty {
 }
 
 impl SourceProperty {
-    /// The meta flag a migration left, the package field, the story attribute.
-    /// Kern has no flag: a new key in the seed would shift every bootstrap id.
-    fn keys(self) -> (Option<&'static str>, &'static str, &'static str) {
+    fn keys(self) -> (&'static str, &'static str, &'static str) {
         match self {
-            Self::Baseline => (Some("baselinesPendingSource"), "baselinePct", "baseline"),
-            Self::Spacing => (Some("spacingPendingSource"), "spacingPt", "spacing"),
-            Self::Kern => (None, "kernPt", "kern"),
+            Self::Baseline => ("baselinesPendingSource", "baselinePct", "baseline"),
+            Self::Spacing => ("spacingPendingSource", "spacingPt", "spacing"),
+            Self::Kern => ("kernPendingSource", "kernPt", "kern"),
         }
     }
 
@@ -43,13 +40,10 @@ pub(crate) fn import_source(
     property: SourceProperty,
 ) -> EditResult<()> {
     let (pending_key, json_key, attribute) = property.keys();
-    let pending = match pending_key {
-        Some(key) => {
-            let txn = session.doc.transact();
-            txn.get_map(META)
-                .is_some_and(|meta| meta.get(&txn, key) == Some(Out::Any(Any::Bool(true))))
-        }
-        None => kern_pending(session, import)?,
+    let pending = {
+        let txn = session.doc.transact();
+        txn.get_map(META)
+            .is_some_and(|meta| meta.get(&txn, pending_key) == Some(Out::Any(Any::Bool(true))))
     };
     if !pending {
         return Ok(());
@@ -124,29 +118,8 @@ pub(crate) fn import_source(
     let meta = txn
         .get_map(META)
         .ok_or_else(|| EditError::InvalidState("missing metadata".into()))?;
-    if let Some(key) = pending_key {
-        meta.remove(&mut txn, key);
-    }
+    meta.remove(&mut txn, pending_key);
     Ok(())
-}
-
-/// A doc seeded before runs carried `kern` has none in any story while its
-/// source does; one seeded since carries the source's.
-fn kern_pending(session: &DeckSession, import: &mut SourceImport<'_>) -> EditResult<bool> {
-    fn carries_kern(snapshot: &DeckSnapshot) -> bool {
-        let mut stories = HashMap::new();
-        for slide in &snapshot.slides {
-            collect_stories(&slide.shapes, &mut stories);
-        }
-        stories.values().any(|story| {
-            story
-                .paragraphs
-                .iter()
-                .flat_map(|paragraph| &paragraph.runs)
-                .any(|run| run.style.kern_pt.is_some())
-        })
-    }
-    Ok(carries_kern(import.source_snapshot()?) && !carries_kern(&session.snapshot()?))
 }
 
 fn collect_stories<'a>(

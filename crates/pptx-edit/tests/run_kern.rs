@@ -4,9 +4,9 @@ use yrs::updates::decoder::Decode;
 use yrs::{Any, Doc, Map, ReadTxn, Text, TextRef, Transact, Update};
 
 const DECK: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/run-spacing.pptx");
-/// `DECK` with its first run's `kern` set to `0`.
+/// `DECK` with `kern="0"` on its first run and in its second shape's list style.
 const KERNED: &[u8] = include_bytes!("fixtures/run-kern.pptx");
-/// `KERNED` as a session seeded before runs carried `kern`.
+/// `KERNED` as schema 2.2 stored it, before runs carried `kern`.
 const PRE_KERN: &[u8] = include_bytes!("fixtures/run-kern-pre-kern.update.bin");
 const STORY: &str = "story:slide:0:256:shape:0:0";
 
@@ -23,6 +23,13 @@ fn story(txn: &yrs::TransactionMut<'_>) -> TextRef {
         .unwrap()
         .cast::<TextRef>()
         .unwrap()
+}
+
+fn package_kerns(session: &DeckSession) -> usize {
+    serde_json::to_string(session.package())
+        .unwrap()
+        .matches("\"kernPt\"")
+        .count()
 }
 
 fn slide_xml(bytes: &[u8]) -> String {
@@ -123,21 +130,61 @@ fn a_remote_kern_outside_the_schema_range_is_rejected() {
 fn a_session_stored_before_kern_recovers_it_from_its_source() {
     let detached = DeckSession::open_from_update(PRE_KERN, 32514).unwrap();
     assert_eq!(run_kern(&detached), None);
+    assert_eq!(package_kerns(&detached), 0);
 
     let reattached = DeckSession::open_from_update_with_source(PRE_KERN, KERNED, 32515).unwrap();
     assert_eq!(run_kern(&reattached), Some(0.0));
     assert_eq!(slide_xml(&reattached.save().unwrap()), slide_xml(KERNED));
+
     let persisted = reattached.encode_state_as_update_v1();
-    let again = DeckSession::open_from_update_with_source(&persisted, KERNED, 32516).unwrap();
+    let reopened = DeckSession::open_from_update(&persisted, 32516).unwrap();
+    assert_eq!(run_kern(&reopened), Some(0.0));
+    let fresh = DeckSession::open(KERNED, 32517).unwrap();
+    assert_eq!(package_kerns(&reopened), package_kerns(&fresh));
+    assert!(package_kerns(&fresh) >= 2, "the run and the list style");
+    let again = DeckSession::open_from_update_with_source(&persisted, KERNED, 32518).unwrap();
     assert_eq!(again.encode_state_as_update_v1(), persisted);
 }
 
 #[test]
+fn a_run_retyped_without_kern_stays_without_it_when_the_source_returns() {
+    let session = DeckSession::open(KERNED, 32519).unwrap();
+    let context = EditCtx::local("test");
+    let text = "OUR GREEN INITIATIVES";
+    session
+        .delete_text(&context, STORY, 0, text.encode_utf16().count() as u32)
+        .unwrap();
+    session
+        .insert_text(
+            &context,
+            STORY,
+            0,
+            text,
+            &TextStyle {
+                font_size_pt: Some(32.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(run_kern(&session), None);
+    let stored = session.encode_state_as_update_v1();
+    let reattached = DeckSession::open_from_update_with_source(&stored, KERNED, 32520).unwrap();
+    assert_eq!(run_kern(&reattached), None);
+    assert_eq!(
+        reattached.snapshot().unwrap(),
+        DeckSession::open_from_update(&stored, 32523)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+    );
+}
+
+#[test]
 fn reattaching_a_source_without_kern_leaves_the_session_untouched() {
-    let stored = DeckSession::open(DECK, 32517)
+    let stored = DeckSession::open(DECK, 32521)
         .unwrap()
         .encode_state_as_update_v1();
-    let reattached = DeckSession::open_from_update_with_source(&stored, DECK, 32518).unwrap();
+    let reattached = DeckSession::open_from_update_with_source(&stored, DECK, 32522).unwrap();
     assert_eq!(reattached.encode_state_as_update_v1(), stored);
     assert_eq!(run_kern(&reattached), None);
 }
