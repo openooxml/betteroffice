@@ -41,7 +41,8 @@
   processing and agent workflows.
 
 - **Host-controlled PPTX editing.** PPTX hosts can intercept saving, flush accepted input, query slide content
-  under the pointer, group undo with explicit boundaries, and reposition comments.
+  under the pointer, group undo with explicit boundaries, reposition comments, and anchor carets that
+  follow later edits.
 
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
@@ -63,6 +64,21 @@
   panels, overlays, sidebar items, lifecycle events, and explicitly granted
   commands and edit batches. Plugins read and navigate by default; every write
   is checked against its grant, the editor mode and document policy when it runs.
+
+- **Composable PPTX toolbars.** Arrange built-in slide controls in your own order
+  next to host actions, inside or outside the editor, through one command store
+  with disabled reasons, platform-aware shortcuts, and ordered execution.
+
+- **Version-checked PPTX edit batches.** PPTX JavaScript, React, Rust and
+  Python hosts read slides and story text with a session version, then apply
+  atomic text, speaker-notes and shape batches that commit as one undo step or
+  return a typed refusal with nothing changed. Text steps stay within one
+  paragraph and leave fields and line breaks whole.
+
+- **Host-owned PPTX plugins.** PPTX React supports host-owned plugins with
+  panels, overlays, lifecycle events, and explicitly granted commands and edit
+  batches. Plugins read and navigate by default; every write is checked against
+  its grant and `readOnly` when it runs.
 
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.

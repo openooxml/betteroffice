@@ -40,7 +40,8 @@ display-list emission stay in Rust. The package decodes the typed boundary and
 replays the resulting primitives on canvas. Font bytes are supplied by the host
 and registered with the Rust shaper through `openPresentation`.
 
-Beyond rendering, `PresentationHandle` covers editing: text
+Beyond rendering, `PresentationHandle` covers editing: version-checked batches
+(`readContent` / `findText` / `validateEdits` / `applyEdits`), text
 (`insertText` / `deleteText` / `formatText` / `setParagraphAlignment`), slides
 (`insertSlide` / `deleteSlide` / `moveSlide`), shapes
 (`addTextBox` / `addShape` / `addPicture` / `moveShape` / `resizeShape` /
@@ -109,6 +110,59 @@ Unrelated peer edits survive acceptance and Undo. Up to 64 proposals, each with
 Pending proposals belong to this open session: they are excluded from PPTX
 exports and collaboration updates. Accepted edits save and sync normally.
 `isProposalsAvailable()` supports hosts that load an older WASM build.
+
+## Version-checked edit batches
+
+Read the deck with its session version, then apply a batch against that
+version: every step commits in one transaction, one update and one undo step,
+or the batch returns a typed refusal and nothing changes.
+
+```ts
+const read = deck.readContent();
+if (!read.ok) throw new Error(read.failure.message);
+const story = read.stories[0];
+const within = { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId };
+
+const result = deck.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: 'replaceText', target: { kind: 'search', within, text: 'Q3' }, text: 'Q4' },
+    { op: 'setSlideNotes', target: { slideId: story.slideId }, text: 'Updated for Q4' },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code, result.failure.stepIndex);
+```
+
+A story reads as its paragraphs joined by `\n`. Offsets are story-local UTF-16
+positions, and each entry of `paragraphs` gives a paragraph's span, its soft
+line breaks (which also read as `\n`) and its field results. `findText()`
+searches exactly, case-sensitively and within paragraphs; a `search` target
+must match exactly once in its story, overlapping occurrences included. Every
+target and guard resolves against `expectVersion`, so a later step never sees
+an earlier step's offsets.
+
+Steps insert, replace and delete text within one paragraph, format text, align
+paragraphs, replace speaker notes, and set the rectangle, fill or outline of a
+shape at the top of a slide (fill and outline on preset shapes). An `expect`
+guard refuses its step unless the target still reads as expected. Receipts
+locate each change in the final state. `validateEdits()` runs every check,
+staging included, without changing anything. `history: 'none'` keeps a batch
+out of undo history and existing undo and redo entries in place;
+`source: 'agent'` records provenance only.
+
+Refusals carry a `code` (`stale-version`, `missing-target`, `ambiguous-target`,
+`content-mismatch`, `overlapping-steps`, `unsupported`, `invalid-step`,
+`limit-exceeded`), the failing `stepIndex` and the target; malformed requests
+throw, and so do NaN or infinite numbers. Current limits: text steps leave
+fields and soft line breaks whole, and a batch refuses when saving could turn a
+field into plain text, which it can rule out only while every field is non-empty
+and sits in the paragraph's unchanged leading or trailing text; a paragraph's alignment and its
+text cannot change in one batch; slides, shapes and paragraphs are neither
+created nor removed; a batch holds at most 128 steps and 1,048,576 inserted
+UTF-16 units; requests hold at most 16 MiB of JSON and reads and searches return
+at most 64 MiB, searches marking the cut with `truncated`. Slide, shape, story and paragraph
+ids anchor targets within one session only, and versions from one session
+never match another.
 
 ## Comments
 
@@ -187,6 +241,11 @@ the current group and preserves history; setting the same mode is a no-op.
 Auto preserves the existing policy (500 ms capture on native targets, separate
 transactions in the browser). Remote and agent origins remain outside local
 undo. These controls group history; they do not make edits atomic.
+
+`handle.anchorCaret(storyId, index)` returns a caret anchor, plain data that
+later edits, undo, redo and remote updates carry along with the text;
+`handle.resolveCaretAnchor(anchor)` returns its current UTF-16 offset, or `null`
+once the story is gone.
 
 `handle.setCommentPosition(commentId, { xEmu, yEmu })` moves an existing root
 comment on its current slide, preserving identity, author, text, replies, and

@@ -9,6 +9,15 @@ import type { InitInput } from './generated/pptx_wasm.js';
 import { StaleProposalError } from '../proposals';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
 import type {
+  PptxEditRequest,
+  PptxEditResult,
+  PptxFindRequest,
+  PptxFindResult,
+  PptxReadRequest,
+  PptxReadResult,
+  PptxValidationResult,
+} from '../edits';
+import type {
   CollaborationReplica,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
@@ -26,6 +35,7 @@ import type {
   Profiled,
   ProfiledLayout,
   PptxFontFace,
+  PptxCaretAnchor,
   PptxTextMatch,
   PptxTextSearchOptions,
   ShapeAdjustReceipt,
@@ -75,6 +85,26 @@ export interface PresentationHandle extends CollaborationReplica {
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
+  /** Anchors the UTF-16 caret `index` of a story so later edits move it along. */
+  anchorCaret(storyId: string, index: number): PptxCaretAnchor;
+  /** The anchor's current offset, or `null` once its story is gone. */
+  resolveCaretAnchor(anchor: PptxCaretAnchor): number | null;
+  /**
+   * The session-scoped version token. It changes with every committed change, local or remote,
+   * undo and redo included; compare tokens only within this session.
+   */
+  version(): string;
+  /** Slides and their stories' text, with the version they were read at. */
+  readContent(request?: PptxReadRequest): PptxReadResult;
+  /** Exact, case-sensitive, paragraph-local search; overlapping matches count separately. */
+  findText(request: PptxFindRequest): PptxFindResult;
+  /** Runs every check of `applyEdits`, staging included, without changing anything. */
+  validateEdits(request: PptxEditRequest): PptxValidationResult;
+  /**
+   * Applies every step or none against `expectVersion`, as one transaction, one update and, for
+   * `history: 'separate'`, one undo step. Policy failures are returned; malformed requests throw.
+   */
+  applyEdits(request: PptxEditRequest): PptxEditResult;
   /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
@@ -385,6 +415,35 @@ export function openPresentation(
     },
     story(storyId: string): StorySnapshot {
       return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));
+    },
+    anchorCaret(storyId, index): PptxCaretAnchor {
+      return jsonWasmCall(() => doc.anchorCaretJson(JSON.stringify({ storyId, index })));
+    },
+    resolveCaretAnchor(anchor): number | null {
+      return jsonWasmCall(() =>
+        doc.resolveCaretAnchorJson(
+          JSON.stringify({ storyId: anchor.storyId, position: anchor.position })
+        )
+      );
+    },
+    version(): string {
+      return wasmCall(() => doc.documentVersion());
+    },
+    readContent(request = {}) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.readContentJson(json));
+    },
+    findText(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.findTextJson(json));
+    },
+    validateEdits(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.validateEditsJson(json));
+    },
+    applyEdits(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.applyEditsJson(json), true);
     },
     searchText(query, options = {}) {
       if (!query) return [];
@@ -721,6 +780,16 @@ export function openPresentation(
     },
   };
   return handle;
+}
+
+/** JSON for a host request; `JSON.stringify` would turn NaN and infinities into `null`. */
+function requestJson(request: unknown): string {
+  return JSON.stringify(request, (_key, value: unknown) => {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new RangeError('host requests must not contain NaN or infinite numbers');
+    }
+    return value;
+  });
 }
 
 function registerFont(renderer: PptxRenderer, face: PptxFontFace, fallback = false): number {

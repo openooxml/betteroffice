@@ -134,6 +134,42 @@ Pending proposals are local to the open session and are excluded from saved
 PPTX files and collaboration updates. Accepted edits save and synchronize
 normally, and Undo preserves unrelated peer edits.
 
+## Edit in version-checked batches
+
+`read_content` returns the slides and each story's text with the session
+version it was read at; `apply_edits` applies a batch against that version as
+one transaction and one undo step, or returns a typed refusal with nothing
+changed:
+
+```python
+read = deck.read_content()
+story = read["stories"][0]
+within = {key: story[key] for key in ("slideId", "shapeId", "storyId")}
+result = deck.apply_edits({
+    "expectVersion": read["version"],
+    "steps": [
+        {"op": "replaceText", "target": {"kind": "search", "within": within, "text": "Q3"},
+         "text": "Q4"},
+        {"op": "setSlideNotes", "target": {"slideId": story["slideId"]}, "text": "Updated"},
+    ],
+})
+if not result["ok"]:
+    print(result["failure"]["code"], result["failure"].get("stepIndex"))
+```
+
+Requests and results are the dictionaries of the
+[TypeScript batch contract](../../packages/pptx/src/edits.ts), typed here as
+`PptxEditRequest`, `PptxEditResult` and friends. A story reads as its
+paragraphs joined by `\n`, with story-local UTF-16 offsets. `find_text`
+searches exactly and within paragraphs, and `validate_edits` runs every check
+without changing anything. Steps insert, replace and delete text within one
+paragraph, format and align text, replace speaker notes, and set a top-level
+shape's rectangle, fill or outline. `"history": "none"` keeps a batch out of
+undo history; `"source": "agent"` records provenance only. Policy failures come
+back with `"ok": False` and a `code`; a malformed request raises `ValueError`.
+Only an applied batch sets `is_edited`. Versions and ids belong to the open
+session.
+
 ## Lay a slide out
 
 **No font is compiled into the wheel**, so laying out a slide that has text
