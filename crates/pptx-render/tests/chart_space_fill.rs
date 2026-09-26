@@ -147,7 +147,7 @@ fn a_chart_space_fill_and_axis_lines_reach_the_display_list() {
     assert_eq!(bare_rules.len(), 2, "{bare_rules:?}");
     assert_rule(
         &bare_rules[0],
-        (143.62305, 128.6, 0.0, 256.9, "#666666", 1.0),
+        (143.62305, 137.96, 0.0, 247.54, "#666666", 1.0),
     );
     assert_rule(
         &bare_rules[1],
@@ -160,7 +160,7 @@ fn a_chart_space_fill_and_axis_lines_reach_the_display_list() {
     assert_eq!(solid_rules.len(), 2, "{solid_rules:?}");
     assert_rule(
         &solid_rules[0],
-        (143.62305, 128.6, 0.0, 256.9, "#6254E7", 1.0),
+        (143.62305, 137.96, 0.0, 247.54, "#6254E7", 1.0),
     );
     assert_rule(
         &solid_rules[1],
