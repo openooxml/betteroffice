@@ -719,7 +719,8 @@ pub(crate) struct MapIdentity {
 /// Maps the content of one capture onto its pages. Refuses a layout that shows a footnote on
 /// another page than its reference, whatever the export selects. Mapping stops one page past the
 /// page where the map outgrows its limits, so a truncated map costs about what it returns; the
-/// extra page settles the continuation flags of the last fragments kept.
+/// extra page settles the continuation flags of the last fragments kept. Later pages keep their
+/// records but report no diagnostics.
 pub(crate) fn build_layout_map(
     doc: &EditingDoc,
     content: &DocxStructuredContent,
@@ -779,7 +780,7 @@ pub(crate) fn build_layout_map(
         let mapping = last_mapped.is_none_or(|last| placed.page_index <= last);
         let page_index = placed.page_index as u32;
         let (record, unsupported) = export_page(placed.page_index, placed.page);
-        if let Some(format) = unsupported {
+        if let Some(format) = unsupported.filter(|_| mapping) {
             mapper.diagnostics.push(PageDiagnostic {
                 code: PageDiagnosticCode::UnsupportedNumbering,
                 node_id: None,
@@ -913,7 +914,11 @@ pub(crate) fn build_layout_map(
             last_mapped = Some(placed.page_index + 1);
         }
     }
-    for issue in &placements.issues {
+    for issue in placements
+        .issues
+        .iter()
+        .filter(|issue| last_mapped.is_none_or(|last| issue.page_index <= last))
+    {
         let (code, message) = match &issue.kind {
             PlacementIssueKind::UnresolvedFragment => (
                 PageDiagnosticCode::UnmappedContent,

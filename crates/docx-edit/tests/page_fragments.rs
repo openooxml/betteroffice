@@ -2060,3 +2060,57 @@ fn a_limited_map_stops_mapping_past_its_limits() {
         "the pages past the limit are never mapped"
     );
 }
+
+#[test]
+fn a_limited_map_reports_no_diagnostics_past_its_limits() {
+    let note: String = (0..40)
+        .map(|index| {
+            fixture::p(
+                &format!("5000{index:04X}"),
+                &fixture::r(&format!("note line {index}")),
+            )
+        })
+        .collect();
+    let body = format!(
+        r#"{}{}{}<w:sectPr><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/><w:pgNumType w:fmt="chineseCounting"/></w:sectPr>"#,
+        (0..12)
+            .map(|index| fixture::p(
+                &format!("6000{index:04X}"),
+                &fixture::r(&"filler words ".repeat(60))
+            ))
+            .collect::<String>(),
+        fixture::p(
+            "00000001",
+            &format!(
+                r#"<w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r>{}"#,
+                fixture::r("Anchor")
+            )
+        ),
+        fixture::p("00000002", &fixture::r(&"tail words ".repeat(40))),
+    );
+    let (engine, _) = fixture::laid_out(&fixture::with_body_and_note(&body, &note), 7);
+    let last_page = |map: &DocxLayoutMap, code: PageDiagnosticCode| {
+        map.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == code)
+            .filter_map(|diagnostic| diagnostic.page_index)
+            .max()
+    };
+    let full = export(&engine, &options(RevisionView::Markup)).layout;
+    assert!(last_page(&full, PageDiagnosticCode::UnsupportedNoteLayout) > Some(1));
+    assert!(last_page(&full, PageDiagnosticCode::UnsupportedNumbering) > Some(1));
+    let mut limited = options(RevisionView::Markup);
+    limited.max_fragments = Some(1);
+    let map = export(&engine, &limited).layout;
+    assert!(map.truncated);
+    assert_eq!(map.pages, full.pages);
+    assert!(
+        map.diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.page_index <= Some(1)),
+        "mapping stops a page past the limit, and so do the pages' diagnostics"
+    );
+    assert!(map.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == PageDiagnosticCode::Truncated && diagnostic.page_index == Some(0)
+    }));
+}
