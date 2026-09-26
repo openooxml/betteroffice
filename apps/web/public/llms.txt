@@ -24,6 +24,8 @@ DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope
 
 The DOCX and PPTX React editors render TIFF images in the browser (PPTX additionally renders supported bitmap-only WMF and EMF wrappers). Custom browser image loaders can use the same conversion with `presentationImageBlob(bytes)` from `@betteroffice/pptx`.
 
+PPTX pictures stored as SVG render in both backends. The browser packages hand the document to the browser's own SVG decoding. The Rust and Python `render_png` paths rasterize it natively under a sandbox: shapes, paths, fills, strokes, linear and radial gradients, clip paths and `<use>` draw, styled by attributes or by plain type, class and id stylesheet rules, with no DTD, no reference outside the document, and the cost of expanding and painting the document budgeted before any of it runs. That native rasterizer does not draw text, embedded raster images, markers, filters, masks or patterns; a hyperlink or an embedded image leaves the rest of the picture drawn, and a document past the sandbox's budgets, or one that both strokes and rotates or skews, is counted as a skipped image. A tiled SVG repeats at its intrinsic size. A picture that carries both a raster image and an SVG renders the raster.
+
 The XLSX and PPTX JavaScript cores expose opt-in operation profiles for edit and render/layout timings. Ordinary methods retain their existing return types; see the [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) for the profiling APIs.
 
 There is no Vue package. React and framework-free JavaScript are the supported entry points.
