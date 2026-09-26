@@ -153,6 +153,8 @@ describe('PPTX toolbar overflow', () => {
     expect(screen().getByTestId('pptx-bold').closest('[aria-hidden="true"]')).toBeNull();
     expect(screen().getByTestId('pptx-align-left').closest('[aria-hidden="true"]')).not.toBeNull();
     expect(screen().getByTestId('unrepresented').closest('[aria-hidden="true"]')).toBeNull();
+    const row = screen().getByRole('toolbar').querySelector<HTMLElement>('[data-toolbar-items]')!;
+    expect(row.style.overflowX).not.toBe('auto');
     const menu = openMenu();
     expect(items(menu).map((item) => item.dataset.label)).toEqual([
       'Alignment',
@@ -166,7 +168,7 @@ describe('PPTX toolbar overflow', () => {
     expect(menu.querySelector('[role="group"]')?.getAttribute('aria-labelledby')).toBeTruthy();
   });
 
-  test('keeps a group with a control that has no menu entry in the row', () => {
+  test('keeps a group with a control that has no menu entry reachable in the row', () => {
     const shared: string[] = [];
     railWidth = 1000;
     const controller = createPptxCommandController();
@@ -195,10 +197,21 @@ describe('PPTX toolbar overflow', () => {
       toolbar.querySelector<HTMLElement>(`[role="group"][aria-label="${label}"]`)!;
     expect(group('Sharing').getAttribute('aria-hidden')).toBeNull();
     expect((group('Sharing') as HTMLElement & { inert?: boolean }).inert).toBeFalsy();
-    fireEvent.click(within(toolbar).getByRole('button', { name: 'Share' }));
+    const share = within(toolbar).getByRole('button', { name: 'Share' });
+    fireEvent.click(share);
     expect(shared).toEqual(['share']);
+    const row = toolbar.querySelector<HTMLElement>('[data-toolbar-items]')!;
+    expect(row.style.overflowX).toBe('auto');
+    row.getBoundingClientRect = () => rect(10);
+    share.getBoundingClientRect = () =>
+      ({ ...rect(28), left: 30 - row.scrollLeft, right: 58 - row.scrollLeft }) as DOMRect;
+    act(() => share.focus());
+    expect(document.activeElement).toBe(share);
+    expect(row.scrollLeft).toBe(30);
     expect(group('History').getAttribute('aria-hidden')).toBe('true');
     expect(items(openMenu()).map((item) => item.dataset.label)).toEqual(['Undo', 'Redo']);
+    resize(1000);
+    expect(row.style.overflowX).not.toBe('auto');
   });
 
   test('navigates with arrows, Home, End and typeahead; Enter runs and returns focus', async () => {

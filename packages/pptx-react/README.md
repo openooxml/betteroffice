@@ -115,7 +115,8 @@ import {
   arrow, Home/End, typeahead and submenu navigation. Built-in controls keep all
   their choices there; host buttons and dropdowns get entries automatically,
   and `ToolbarOverflow` gives other content one. A group holding content
-  without an entry stays in the row.
+  without an entry stays in the row, which scrolls horizontally when that
+  content does not fit.
 - **Compatibility.** The prop-based `EditorToolbar`, `Toolbar`,
   `EditorToolbarContext` and `useEditorToolbar` still work and are deprecated:
   without `mode` they bind to their props, host children follow the default
