@@ -71,6 +71,7 @@ const styles: Record<string, CSSProperties> = {
   },
 };
 
+/** @experimental */
 export interface FormulaBarProps {
   className?: string;
   style?: CSSProperties;
@@ -80,6 +81,7 @@ export interface FormulaBarProps {
  * The name box and formula input of the surrounding `XlsxEditor`. It edits
  * the focused cell through the editor's input ordering, so commands issued
  * while a formula is typed land after it. Renders nothing outside an editor.
+ * @experimental
  */
 export function FormulaBar({ className, style }: FormulaBarProps) {
   const binding = useContext(FormulaBarContext);

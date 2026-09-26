@@ -126,6 +126,7 @@ export interface XlsxEditorApi {
   /**
    * The editor's command store, shared by its toolbar and host chrome. It
    * gates the editor's own UI; `handle` stays unrestricted host authority.
+   * @experimental
    */
   readonly commands: XlsxCommandStore;
   focus: () => void;
@@ -219,6 +220,7 @@ export interface XlsxEditorProps extends XlsxEditorPluginProps {
    * Replaces the default toolbar: omitted keeps it (hidden when read-only),
    * `null` removes it, and supplied chrome renders instead, also when
    * read-only. Compose it from `EditorToolbar mode="commands"` parts.
+   * @experimental
    */
   toolbar?: React.ReactNode;
   /** `false` hides the toolbar region, whatever `toolbar` is. */

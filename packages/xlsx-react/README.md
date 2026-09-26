@@ -78,8 +78,10 @@ host/agent-driven edits and the editor's `commands`), `collaboration`, `i18n`,
 
 ## Compose the toolbar
 
-Every built-in control runs through the editor's command store. Replace the
-default toolbar with the parts you need, in your order, next to your own actions:
+Every built-in control runs through the editor's command store. This command
+and toolbar composition API is experimental and may change in minor releases.
+Replace the default toolbar with the parts you need, in your order, next to your
+own actions:
 
 ```tsx
 import {

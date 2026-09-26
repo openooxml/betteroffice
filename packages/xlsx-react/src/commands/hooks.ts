@@ -16,7 +16,10 @@ import type {
   XlsxPluginCommandState,
 } from './types';
 
-/** The nearest editor's command store. */
+/**
+ * The nearest editor's command store.
+ * @experimental
+ */
 export function useXlsxCommands(): XlsxCommandStore {
   const store = useContext(XlsxCommandContext);
   if (!store) {
@@ -29,7 +32,10 @@ function parse<T>(key: string | undefined): T | undefined {
   return key === undefined ? undefined : (JSON.parse(key) as T);
 }
 
-/** Subscribes to one command's state, optionally for specific arguments. */
+/**
+ * Subscribes to one command's state, optionally for specific arguments.
+ * @experimental
+ */
 export function useXlsxCommandState<K extends XlsxCommandId>(
   id: K,
   args?: XlsxCommandArgs[K]
@@ -60,7 +66,10 @@ export function useXlsxCommandState(
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-/** A command bound to this component, with its localized label and shortcut. */
+/**
+ * A command bound to this component, with its localized label and shortcut.
+ * @experimental
+ */
 export interface XlsxBoundCommand<K extends XlsxCommandId> {
   id: K;
   descriptor: XlsxCommandDescriptor<K>;
@@ -84,7 +93,10 @@ export interface XlsxBoundPluginCommand {
   execute(): Promise<XlsxPluginCommandResult>;
 }
 
-/** Binds one command for a custom control. */
+/**
+ * Binds one command for a custom control.
+ * @experimental
+ */
 export function useXlsxCommand<K extends XlsxCommandId>(
   id: K,
   args?: XlsxCommandArgs[K]

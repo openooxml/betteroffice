@@ -106,7 +106,10 @@ const COLOR_DEFAULTS: Record<ColorCommandId, string> = {
   borderColor: '#000000',
 };
 
-/** Arguments a control binds; required when the command takes arguments. */
+/**
+ * Arguments a control binds; required when the command takes arguments.
+ * @experimental
+ */
 export type ToolbarCommandArgs<K extends XlsxCommandId | XlsxPluginCommandId> =
   K extends XlsxCommandId
     ? null extends XlsxCommandArgs[K]
@@ -114,7 +117,10 @@ export type ToolbarCommandArgs<K extends XlsxCommandId | XlsxPluginCommandId> =
       : { args: XlsxCommandArgs[K] }
     : { args?: null };
 
-/** A built-in or contributed command; a contributed one renders nothing while inactive. */
+/**
+ * A built-in or contributed command; a contributed one renders nothing while inactive.
+ * @experimental
+ */
 export type ToolbarCommandButtonProps<K extends XlsxCommandId | XlsxPluginCommandId> = {
   id: K;
   /** Button content; defaults to the command's icon, or its label when it has none. */
@@ -124,11 +130,13 @@ export type ToolbarCommandButtonProps<K extends XlsxCommandId | XlsxPluginComman
   className?: string;
 } & ToolbarCommandArgs<K>;
 
+/** @experimental */
 export interface ToolbarCommandSelectProps<K extends XlsxSelectCommandId> {
   id: K;
   className?: string;
 }
 
+/** @experimental */
 export interface ToolbarCommandProps<K extends XlsxCommandId | XlsxPluginCommandId> {
   id: K;
   /** Binds arguments; omit to render the command's full built-in control. */
@@ -371,7 +379,10 @@ function useCommandOverflow<K extends XlsxCommandId>(
   useOverflowSource(element, () => [commandOverflowEntry(store, t, id, args, tools)]);
 }
 
-/** A button bound to one command, showing its pressed and disabled state. */
+/**
+ * A button bound to one command, showing its pressed and disabled state.
+ * @experimental
+ */
 export function ToolbarCommandButton<K extends XlsxCommandId | XlsxPluginCommandId>(
   props: ToolbarCommandButtonProps<K>
 ) {
@@ -667,7 +678,10 @@ function dropdownTrigger(
   }
 }
 
-/** The built-in picker of a selector command. */
+/**
+ * The built-in picker of a selector command.
+ * @experimental
+ */
 export function ToolbarCommandSelect<K extends XlsxSelectCommandId>({
   id,
   className,
@@ -781,7 +795,10 @@ function CommandColorPicker({ id, className }: { id: ColorCommandId; className?:
   );
 }
 
-/** The built-in control of any command, as the default toolbar presents it. */
+/**
+ * The built-in control of any command, as the default toolbar presents it.
+ * @experimental
+ */
 export function ToolbarCommand<K extends XlsxCommandId | XlsxPluginCommandId>(
   props: ToolbarCommandProps<K>
 ) {
