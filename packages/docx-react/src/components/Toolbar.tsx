@@ -13,6 +13,7 @@ import { ToolbarCommand } from './toolbar/ToolbarCommand';
 import { ToolbarRail } from './toolbar/ToolbarOverflow';
 import { ToolbarGroup, ToolbarSeparator } from './toolbar/ToolbarPrimitives';
 
+/** @experimental */
 export interface ToolbarProps {
   /** The complete arrangement; omit to render the default controls. */
   children?: ReactNode;

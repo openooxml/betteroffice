@@ -154,9 +154,10 @@ after a mutation, use `syncYrsInputState(true)` to refresh the editor.
 ## Compose the toolbar
 
 Every built-in control runs through one command store, `ref.commands`, which
-hosts can use for their own chrome. Pass `toolbar` to replace the default chrome
-with an arrangement of public parts; the children of `EditorToolbar.Toolbar`
-are the complete row, in your order:
+hosts can use for their own chrome. This command and toolbar composition API is
+experimental and may change in minor releases. Pass `toolbar` to replace the
+default chrome with an arrangement of public parts; the children of
+`EditorToolbar.Toolbar` are the complete row, in your order:
 
 ```tsx
 import {

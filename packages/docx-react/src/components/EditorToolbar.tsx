@@ -34,6 +34,7 @@ import { useIsDark } from './DocxEditor/hooks/useIsDark';
 import { cn } from '../lib/utils';
 import { Z_INDEX } from '../styles/zIndex';
 
+/** @experimental */
 export interface EditorToolbarProps {
   /** Compound parts; defaults to the formatting rail. */
   children?: ReactNode;
@@ -102,6 +103,7 @@ function EditorToolbarBase({ children, className, style, i18n, colorMode }: Edit
   );
 }
 
+/** @experimental */
 const EditorToolbar = EditorToolbarBase as EditorToolbarComponent;
 EditorToolbar.TitleBar = TitleBar;
 EditorToolbar.Logo = Logo;
