@@ -218,6 +218,9 @@ describe('xlsx toolbar overflow', () => {
     act(() => share.focus());
     expect(document.activeElement).toBe(share);
     expect(row.scrollLeft).toBe(30);
+    row.scrollLeft = 0;
+    resize(9);
+    expect(row.scrollLeft).toBe(30);
     expect(group('History').getAttribute('aria-hidden')).toBe('true');
     expect(labels(openWithKeyboard())).toEqual(['Undo', 'Redo']);
     resize(4000);
