@@ -25,6 +25,9 @@ pub fn render_docx_markdown(
         output: String::new(),
         anchors: Vec::new(),
         lossy: BTreeSet::new(),
+        block_lossy: Vec::new(),
+        charged: 0,
+        trimming: false,
         max_bytes,
         truncated: false,
         in_list: false,
@@ -93,10 +96,17 @@ pub fn render_docx_markdown(
 const UNLINKED: &str =
     "Link targets other than http, https, mailto and internal anchors are not linked.";
 
+#[derive(Default)]
 struct Renderer {
     output: String,
     anchors: Vec<MarkdownAnchor>,
     lossy: BTreeSet<(DiagnosticCode, &'static str)>,
+    /// The notes in `lossy` the block being rendered added.
+    block_lossy: Vec<(DiagnosticCode, &'static str)>,
+    /// The fewest bytes the block being rendered adds, as [`Renderer::charge`] counts them.
+    charged: usize,
+    /// Whitespace charged now may lead a heading or list item's text, which trims it.
+    trimming: bool,
     max_bytes: usize,
     truncated: bool,
     in_list: bool,
@@ -498,12 +508,39 @@ impl Renderer {
     }
 
     fn lossy(&mut self, message: &'static str) {
-        self.lossy.insert((DiagnosticCode::MarkdownLossy, message));
+        let note = (DiagnosticCode::MarkdownLossy, message);
+        if self.lossy.insert(note) {
+            self.block_lossy.push(note);
+        }
+    }
+
+    /// Whether the block being rendered can no longer fit.
+    fn over(&self) -> bool {
+        self.output.len() + self.charged > self.max_bytes
+    }
+
+    /// Charges the fewest bytes `text` adds to the block once escaped in any context: each other
+    /// character's own bytes and one per whitespace character, except the leading whitespace a
+    /// heading or list item trims. Stops once the block cannot fit and returns whether it may.
+    fn charge(&mut self, text: &str) -> bool {
+        for ch in text.chars() {
+            if self.over() {
+                break;
+            }
+            if !ch.is_whitespace() {
+                self.trimming = false;
+                self.charged += ch.len_utf8();
+            } else if !self.trimming {
+                self.charged += 1;
+            }
+        }
+        !self.over()
     }
 
     /// The marker comment for `block`, recorded with its anchor.
     fn marker(&mut self, block: &Block) -> String {
         let marker = format!("docx-export:{}", self.anchors.len());
+        self.charge(&marker);
         self.anchors.push(MarkdownAnchor {
             marker: marker.clone(),
             anchor: block.anchor.clone(),
@@ -511,16 +548,23 @@ impl Renderer {
         format!("<!-- {marker} -->")
     }
 
-    /// Renders one root block with its marker, all or nothing.
+    /// Renders one root block with its marker, all or nothing, and stops rendering it as soon as
+    /// it cannot fit.
     fn block(&mut self, block: &Block, prefix: Option<&str>) -> bool {
         let anchors = self.anchors.len();
         let in_list = self.in_list;
+        self.charged = 0;
+        self.block_lossy.clear();
         let rendered = self.render_block(block, prefix);
-        if self.push(&rendered) {
+        if !self.over() && self.push(&rendered) {
             return true;
         }
+        self.truncated = true;
         self.anchors.truncate(anchors);
         self.in_list = in_list;
+        for note in self.block_lossy.drain(..) {
+            self.lossy.remove(&note);
+        }
         false
     }
 
@@ -548,7 +592,9 @@ impl Renderer {
                 if heading.outline_level > 5 {
                     self.lossy("Heading levels deeper than 6 are rendered as level 6.");
                 }
-                let text = self.inlines(&paragraph.inlines).replace("\\\n", "<br>");
+                let text = self
+                    .trimmed_inlines(&paragraph.inlines)
+                    .replace("\\\n", "<br>");
                 output.push_str(prefix);
                 let _ = write!(
                     output,
@@ -560,7 +606,7 @@ impl Renderer {
             BlockKind::ListItem {
                 paragraph, list, ..
             } => {
-                let text = lines(&self.inlines(&paragraph.inlines));
+                let text = lines(&self.trimmed_inlines(&paragraph.inlines));
                 let marker = self.list_marker(list);
                 output.push_str(prefix);
                 let _ = writeln!(
@@ -577,6 +623,9 @@ impl Renderer {
             }
             BlockKind::ContentControl { blocks, .. } => {
                 for block in blocks {
+                    if self.over() {
+                        break;
+                    }
                     let rendered = self.render_block(block, None);
                     output.push_str(&rendered);
                 }
@@ -608,6 +657,9 @@ impl Renderer {
             if !results.is_empty() {
                 self.lossy("Field results that span blocks are rendered after their paragraph.");
                 for result in results {
+                    if self.over() {
+                        break;
+                    }
                     let rendered = self.render_block(result, None);
                     output.push_str(&rendered);
                 }
@@ -660,8 +712,14 @@ impl Renderer {
         }
         let mut output = String::new();
         for (index, row) in table.rows.iter().enumerate() {
+            if self.over() {
+                break;
+            }
             output.push('|');
             for cell in &row.cells {
+                if self.over() {
+                    break;
+                }
                 let mut text = String::new();
                 for block in &cell.blocks {
                     text.push_str(&self.marker(block));
@@ -687,9 +745,15 @@ impl Renderer {
     fn html_table(&mut self, table: &TableData) -> String {
         let mut output = String::from("<table>\n");
         for row in &table.rows {
+            if self.over() {
+                break;
+            }
             output.push_str("<tr>");
             let tag = if row.header { "th" } else { "td" };
             for cell in row.cells.iter().filter(|cell| cell.row_span > 0) {
+                if self.over() {
+                    break;
+                }
                 let mut attributes = String::new();
                 if cell.grid_span > 1 {
                     let _ = write!(attributes, " colspan=\"{}\"", cell.grid_span);
@@ -717,6 +781,9 @@ impl Renderer {
     fn html_blocks<'b>(&mut self, blocks: impl IntoIterator<Item = &'b Block>) -> String {
         let mut output = String::new();
         for block in blocks {
+            if self.over() {
+                break;
+            }
             output.push_str(&self.marker(block));
             match &block.content {
                 BlockKind::Paragraph { paragraph } => {
@@ -782,6 +849,9 @@ impl Renderer {
     fn html_inlines(&mut self, inlines: &[Inline]) -> String {
         let mut output = String::new();
         for inline in inlines {
+            if self.over() {
+                break;
+            }
             let rendered = self.html_inline(inline);
             output.push_str(&rendered);
         }
@@ -790,7 +860,12 @@ impl Renderer {
 
     fn html_inline(&mut self, inline: &Inline) -> String {
         let body = match &inline.content {
-            InlineKind::Text { text } => html_text(text),
+            InlineKind::Text { text } => {
+                if !self.charge(text) {
+                    return String::new();
+                }
+                html_text(text)
+            }
             InlineKind::Tab => "\t".to_owned(),
             InlineKind::Break {
                 break_type: BreakType::Line,
@@ -810,10 +885,13 @@ impl Renderer {
                 CachedResult::Inline { inlines } => self.html_inlines(inlines),
                 CachedResult::Blocks { .. } | CachedResult::Missing => String::new(),
             },
-            InlineKind::Image { alt_text, .. } => format!(
-                "<img alt=\"{}\">",
-                attribute(alt_text.as_deref().unwrap_or("image"))
-            ),
+            InlineKind::Image { alt_text, .. } => {
+                let alt = alt_text.as_deref().unwrap_or("image");
+                if !self.charge(alt) {
+                    return String::new();
+                }
+                format!("<img alt=\"{}\">", attribute(alt))
+            }
             InlineKind::ContentControl { inlines, .. } => self.html_inlines(inlines),
             InlineKind::Unsupported { element, alt_text } => format!(
                 "<!-- docx-unsupported: {} -->{}",
@@ -872,9 +950,20 @@ impl Renderer {
         format!("<a href=\"{}\"{title}>{text}</a>", attribute(&href))
     }
 
+    /// [`Renderer::inlines`] of a heading or list item, whose leading whitespace is trimmed.
+    fn trimmed_inlines(&mut self, inlines: &[Inline]) -> String {
+        self.trimming = true;
+        let text = self.inlines(inlines);
+        self.trimming = false;
+        text
+    }
+
     fn inlines(&mut self, inlines: &[Inline]) -> String {
         let mut output = String::new();
         for inline in inlines {
+            if self.over() {
+                break;
+            }
             let rendered = self.inline(inline);
             output.push_str(&rendered);
         }
@@ -883,7 +972,12 @@ impl Renderer {
 
     fn inline(&mut self, inline: &Inline) -> String {
         let body = match &inline.content {
-            InlineKind::Text { text } => escape(text),
+            InlineKind::Text { text } => {
+                if !self.charge(text) {
+                    return String::new();
+                }
+                escape(text)
+            }
             InlineKind::Tab => "\t".to_owned(),
             InlineKind::Break {
                 break_type: BreakType::Line,
@@ -904,7 +998,11 @@ impl Renderer {
                 CachedResult::Blocks { .. } | CachedResult::Missing => String::new(),
             },
             InlineKind::Image { alt_text, .. } => {
-                format!("![{}]()", escape(alt_text.as_deref().unwrap_or("image")))
+                let alt = alt_text.as_deref().unwrap_or("image");
+                if !self.charge(alt) {
+                    return String::new();
+                }
+                format!("![{}]()", escape(alt))
             }
             InlineKind::ContentControl { inlines, .. } => self.inlines(inlines),
             InlineKind::Unsupported { element, alt_text } => match alt_text {
@@ -1018,55 +1116,68 @@ mod tests {
         }
     }
 
-    /// `inlines` as a paragraph on its own and inside a table only HTML can render.
-    fn render(inlines: Vec<Inline>) -> (String, String) {
-        let cell = |blocks: Vec<Block>| TableCell {
+    /// A table of `rows` one-cell rows holding `blocks`, which only HTML can render when the cell
+    /// spans two columns.
+    fn table(rows: usize, grid_span: u32, blocks: Vec<Block>) -> Block {
+        let cell = TableCell {
             anchor: anchor(),
             story: None,
             column: 0,
-            grid_span: 2,
+            grid_span,
             row_span: 1,
             vertical_merge: VerticalMerge::None,
             merge_origin: None,
             blocks,
         };
-        let table = Block {
+        Block {
             id: String::new(),
             anchor: anchor(),
             content: BlockKind::Table {
                 table: TableData {
-                    grid_columns: 2,
-                    rows: vec![TableRow {
-                        header: false,
-                        grid_before: 0,
-                        grid_after: 0,
-                        cells: vec![cell(vec![paragraph(inlines.clone())])],
-                    }],
+                    grid_columns: grid_span,
+                    rows: vec![
+                        TableRow {
+                            header: false,
+                            grid_before: 0,
+                            grid_after: 0,
+                            cells: vec![cell],
+                        };
+                        rows
+                    ],
                 },
             },
-        };
+        }
+    }
+
+    fn content(blocks: Vec<Block>) -> DocxStructuredContent {
+        DocxStructuredContent {
+            schema_version: super::super::SCHEMA_VERSION,
+            revision_view: RevisionView::Accepted,
+            anchor_scope: AnchorScope::Snapshot,
+            included_stories: Vec::new(),
+            include_formatting: true,
+            stories: vec![ExportStory {
+                story: "body".to_owned(),
+                kind: StoryKind::Body,
+                part: None,
+                note_id: None,
+                comment: None,
+                uses: Vec::new(),
+                blocks,
+            }],
+            diagnostics: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    /// `inlines` as a paragraph on its own and inside a table only HTML can render.
+    fn render(inlines: Vec<Inline>) -> (String, String) {
+        let table = table(1, 2, vec![paragraph(inlines.clone())]);
         let markdown = |block: Block| {
-            let content = DocxStructuredContent {
-                schema_version: super::super::SCHEMA_VERSION,
-                revision_view: RevisionView::Accepted,
-                anchor_scope: AnchorScope::Snapshot,
-                included_stories: Vec::new(),
-                include_formatting: true,
-                stories: vec![ExportStory {
-                    story: "body".to_owned(),
-                    kind: StoryKind::Body,
-                    part: None,
-                    note_id: None,
-                    comment: None,
-                    uses: Vec::new(),
-                    blocks: vec![block],
-                }],
-                diagnostics: Vec::new(),
-                truncated: false,
-            };
-            let mut markdown = render_docx_markdown(&content, &MarkdownOptions::default())
-                .unwrap()
-                .markdown;
+            let mut markdown =
+                render_docx_markdown(&content(vec![block]), &MarkdownOptions::default())
+                    .unwrap()
+                    .markdown;
             for marker in [
                 "<!-- docx-story: body body -->",
                 "<!-- docx-export:0 -->",
@@ -1210,6 +1321,34 @@ mod tests {
         let href = format!("https://example.test/?x=1&{}=1", "A".repeat(1 << 20));
         assert_eq!(effective_destination(&href).as_deref(), Some(href.as_str()));
         assert_eq!(entities_decoded("&newlinex&verbarx&amp"), "\nx|x&");
+    }
+
+    #[test]
+    fn oversized_blocks_stop_rendering_at_the_budget() {
+        let max_bytes = 1_024;
+        let cell = || vec![paragraph(vec![text("cell", None)])];
+        for block in [
+            paragraph(vec![text(&"x".repeat(1 << 22), None)]),
+            table(20_000, 1, cell()),
+            table(20_000, 2, cell()),
+        ] {
+            let mut renderer = Renderer {
+                max_bytes,
+                ..Renderer::default()
+            };
+            let partial = renderer.render_block(&block, None).len();
+            assert!(partial < 4 * max_bytes, "{partial}");
+            let markdown = render_docx_markdown(
+                &content(vec![paragraph(vec![text("kept", None)]), block]),
+                &MarkdownOptions {
+                    max_bytes: Some(max_bytes as u32),
+                },
+            )
+            .unwrap();
+            assert!(markdown.truncated);
+            assert_eq!(markdown.anchors.len(), 1);
+            assert!(markdown.markdown.contains("kept"), "{}", markdown.markdown);
+        }
     }
 
     #[test]

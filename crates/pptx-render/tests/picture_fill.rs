@@ -134,14 +134,10 @@ fn a_picture_filled_shape_paints_its_blip_through_its_own_outline() {
         )
     );
 
-    assert!(matches!(
-        &primitives[2],
-        Primitive::Shape {
-            fill: None,
-            stroke: None,
-            ..
-        }
-    ));
+    let Primitive::Image { tile, .. } = &primitives[2] else {
+        panic!("the tiled shape paints its picture fill")
+    };
+    assert!(tile.is_some(), "and paints it as a tile");
 }
 
 #[test]
@@ -158,7 +154,7 @@ fn a_picture_fill_survives_a_snapshot_round_trip() {
             .iter()
             .filter(|primitive| matches!(primitive, Primitive::Image { .. }))
             .count(),
-        2
+        3
     );
     let restored =
         DeckSession::open_from_update(&session.encode_state_as_update_v1(), 287).unwrap();
@@ -194,6 +190,7 @@ fn an_explicit_tiled_fill_blocks_a_placeholders_inherited_picture() {
     layout.shapes = vec![pptx_parse::ShapeNode::Shape(inherited)];
     package.slides[0].layout_part_path = Some(layout.part_path.clone());
     package.layouts = vec![layout];
+    let mut drawn = Vec::new();
     for explicit in [false, true] {
         let mut shape = tiled.clone();
         if !explicit {
@@ -206,9 +203,14 @@ fn an_explicit_tiled_fill_blocks_a_placeholders_inherited_picture() {
             .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
             .unwrap();
         assert_eq!(rendered.display_list.primitives.len(), 1);
-        assert_eq!(
-            matches!(rendered.display_list.primitives[0], Primitive::Image { .. }),
-            !explicit
-        );
+        let Primitive::Image { tile, .. } = &rendered.display_list.primitives[0] else {
+            panic!("expected a picture")
+        };
+        drawn.push((0, tile.is_some()));
     }
+    assert_eq!(
+        [drawn[0].1, drawn[1].1],
+        [false, true],
+        "the shape's own tile paints instead of the placeholder's stretched picture"
+    );
 }
