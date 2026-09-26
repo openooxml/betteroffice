@@ -62,8 +62,13 @@ export interface DocxSnapshotLayoutMap extends DocxPageMapContent {
   provenance: DocxSnapshotLayoutProvenance;
 }
 
-/** What both page maps hold. `exportFingerprint` identifies the structured content. */
+/**
+ * What both page maps hold. `exportFingerprint` identifies the structured content.
+ * `schemaVersion` versions the map on its own: additive fields keep it, and a change existing
+ * readers would misread bumps it.
+ */
 export interface DocxPageMapContent {
+  schemaVersion: 1;
   exportFingerprint: string;
   revisionView: DocxRevisionView;
   /** Pages are laid out with revision markup. */

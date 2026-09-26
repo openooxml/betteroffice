@@ -338,6 +338,10 @@ describe('paged structured export', () => {
     const marked = await renderDocxMarkdownWithPages(paged, { pageMarkers: true });
     expect(marked.markdown).toContain('<!-- docx-export:0 --><!-- docx-pages: 0=i -->');
     expect(marked.anchors).toEqual(plain.anchors);
+    expect(paged.layout.schemaVersion).toBe(1);
+    await expect(
+      renderDocxMarkdownWithPages({ ...paged, layout: { ...paged.layout, schemaVersion: 2 as never } })
+    ).rejects.toThrow('page map schema version 2 is not supported');
     const mismatched = await renderDocxMarkdownWithPages({
       ...paged,
       structured: { ...paged.structured, truncated: !paged.structured.truncated },

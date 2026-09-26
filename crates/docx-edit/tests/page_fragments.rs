@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use docx_edit::structured::{
     Anchor, AtomCoverage, Block, BlockKind, DocxLayoutMap, DocxPagedStructuredContent,
-    ExportFailureCode, FragmentSlice, InlineKind, MarkdownOptions, NotePlacement, NumberingStatus,
-    OccurrenceRegion, PageAnnotations, PageDiagnosticCode, PageExportOptions, PageFragment,
-    PageMarkdownOptions, RevisionView, StorySelection, render_docx_markdown,
-    render_docx_markdown_with_pages,
+    DocxSnapshotLayoutMap, ExportFailureCode, FragmentSlice, InlineKind, MarkdownOptions,
+    NotePlacement, NumberingStatus, OccurrenceRegion, PAGE_MAP_SCHEMA_VERSION, PageAnnotations,
+    PageDiagnosticCode, PageExportOptions, PageFragment, PageMarkdownOptions, RevisionView,
+    StorySelection, render_docx_markdown, render_docx_markdown_with_pages,
 };
 use docx_edit::{
     EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditTextView, EngineSession,
@@ -818,10 +818,35 @@ fn snapshot_maps_are_deterministic() {
     assert!(!first.contains("documentVersion") && !first.contains("layoutVersion"));
     let (engine, _) = fixture::laid_out(&bytes, 3);
     let session = export(&engine, &options(RevisionView::Markup));
-    let snap: DocxPagedStructuredContent<docx_edit::structured::DocxSnapshotLayoutMap> =
+    let snap: DocxPagedStructuredContent<DocxSnapshotLayoutMap> =
         serde_json::from_str(&first).unwrap();
     assert_eq!(snap.layout.pages, session.layout.pages);
     assert_eq!(snap.layout.fragments.len(), session.layout.fragments.len());
+}
+
+#[test]
+fn page_maps_carry_a_schema_version_of_their_own() {
+    let (engine, _) = fixture::laid_out(&fixture::unrevised_docx(), 5);
+    let session =
+        serde_json::to_value(export(&engine, &options(RevisionView::Markup)).layout).unwrap();
+    let mut snapshot = serde_json::to_value(
+        engine
+            .export_snapshot_with_pages(&options(RevisionView::Markup))
+            .unwrap()
+            .layout,
+    )
+    .unwrap();
+    assert_eq!(PAGE_MAP_SCHEMA_VERSION, 1);
+    assert_eq!(session["schemaVersion"], 1);
+    assert_eq!(snapshot["schemaVersion"], 1);
+    assert!(serde_json::from_value::<DocxLayoutMap>(session).is_ok());
+    snapshot["schemaVersion"] = 2.into();
+    let refused = serde_json::from_value::<DocxSnapshotLayoutMap>(snapshot).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("page map schema version 2 is not supported")
+    );
 }
 
 #[test]

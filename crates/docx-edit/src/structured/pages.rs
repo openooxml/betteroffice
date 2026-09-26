@@ -28,6 +28,9 @@ use crate::ops::ChunkKind;
 use crate::target::{EditTextView, StoryView, Views};
 use crate::{DEL, INS, KIND_KEY, PPR_CHANGE, PPR_DEL, PPR_INS, TextPosition, TextRange, story_ref};
 
+/// The only page-map schema version this crate reads and writes. Additive fields keep it; a
+/// change existing readers would misread bumps it.
+pub const PAGE_MAP_SCHEMA_VERSION: u8 = 1;
 /// Fragments a page map returns when the options name no limit.
 pub const DEFAULT_MAX_FRAGMENTS: u32 = 100_000;
 /// The largest fragment limit a page map accepts.
@@ -137,6 +140,8 @@ pub struct SnapshotLayoutProvenance {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocxLayoutMap {
+    #[serde(deserialize_with = "page_map_schema_version")]
+    pub schema_version: u8,
     pub document_version: crate::batch::DocumentVersion,
     pub layout_version: String,
     pub export_fingerprint: String,
@@ -155,6 +160,8 @@ pub struct DocxLayoutMap {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocxSnapshotLayoutMap {
+    #[serde(deserialize_with = "page_map_schema_version")]
+    pub schema_version: u8,
     pub snapshot_fingerprint: String,
     pub export_fingerprint: String,
     pub revision_view: RevisionView,
@@ -165,6 +172,18 @@ pub struct DocxSnapshotLayoutMap {
     pub fragments: Vec<PageFragment>,
     pub diagnostics: Vec<PageDiagnostic>,
     pub truncated: bool,
+}
+
+pub(crate) fn page_map_schema_version<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u8, D::Error> {
+    let version = u8::deserialize(deserializer)?;
+    if version != PAGE_MAP_SCHEMA_VERSION {
+        return Err(D::Error::custom(format!(
+            "page map schema version {version} is not supported; expected {PAGE_MAP_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(version)
 }
 
 impl DocxSnapshotLayoutMap {
@@ -186,6 +205,7 @@ impl DocxSnapshotLayoutMap {
             .as_bytes(),
         );
         Self {
+            schema_version: map.schema_version,
             snapshot_fingerprint,
             export_fingerprint: map.export_fingerprint,
             revision_view: map.revision_view,
@@ -976,6 +996,7 @@ pub(crate) fn build_layout_map(
     drop(mapper);
     Ok(assemble(
         DocxLayoutMap {
+            schema_version: PAGE_MAP_SCHEMA_VERSION,
             document_version: identity.document_version,
             layout_version: identity.layout_version,
             export_fingerprint: export_fingerprint(content),

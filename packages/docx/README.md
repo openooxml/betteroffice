@@ -335,4 +335,6 @@ page past the limit, so a truncated map leaves out the diagnostics of later page
 and of paragraphs no page shows. With
 `pageMarkers`, Markdown follows each block marker with
 `<!-- docx-pages: 0=i 1=ii -->` (labels percent-encoded) and writes no page break
-into the text; a map from other content is refused.
+into the text; a map from other content is refused. The map is `schemaVersion: 1`,
+versioned apart from the content: additive fields keep the version, and a change
+existing readers would misread bumps it.

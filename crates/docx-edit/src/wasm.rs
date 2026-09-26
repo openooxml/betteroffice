@@ -3686,6 +3686,11 @@ pub fn render_docx_markdown_with_pages_json(
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Layout {
+        #[serde(
+            rename = "schemaVersion",
+            deserialize_with = "crate::structured::pages::page_map_schema_version"
+        )]
+        _schema_version: u8,
         export_fingerprint: String,
         pages: Vec<crate::structured::ExportPage>,
         fragments: Vec<crate::structured::PageFragment>,

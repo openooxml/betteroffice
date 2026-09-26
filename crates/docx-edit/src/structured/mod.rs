@@ -28,9 +28,9 @@ pub use pages::{
     AtomCoverage, DEFAULT_MAX_FRAGMENTS, DocxLayoutMap, DocxPagedStructuredContent,
     DocxSnapshotLayoutMap, ExportPage, FragmentGeometry, FragmentRow, FragmentSlice,
     GeometryOrigin, GeometryRect, GeometryUnit, LayoutProvenance, LayoutRevisionView,
-    MAX_FRAGMENTS_LIMIT, NotePlacement, NumberingStatus, OccurrenceRegion, PageDiagnostic,
-    PageDiagnosticCode, PageExportOptions, PageFragment, PageMarkdownOptions, PageSize,
-    SnapshotLayoutProvenance, StoryOccurrence, export_fingerprint,
+    MAX_FRAGMENTS_LIMIT, NotePlacement, NumberingStatus, OccurrenceRegion, PAGE_MAP_SCHEMA_VERSION,
+    PageDiagnostic, PageDiagnosticCode, PageExportOptions, PageFragment, PageMarkdownOptions,
+    PageSize, SnapshotLayoutProvenance, StoryOccurrence, export_fingerprint,
 };
 
 /// The only structured-content schema version this crate reads and writes.
