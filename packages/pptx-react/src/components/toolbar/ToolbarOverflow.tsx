@@ -233,7 +233,7 @@ export interface ToolbarOverflowProps {
 
 /**
  * Gives arbitrary host content a menu entry, so it can move into the overflow
- * menu instead of staying clipped in a narrow toolbar.
+ * menu instead of scrolling with the row in a narrow toolbar.
  * @experimental
  */
 export function ToolbarOverflow({
