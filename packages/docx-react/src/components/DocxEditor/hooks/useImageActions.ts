@@ -22,7 +22,7 @@ interface ImageContext {
  *
  * Owns the open/closed state for each dialog; the JSX consumer reads the
  * `*Open` flags + the apply/cancel callbacks. `applyGeometry` writes to the
- * image the dialog opened for, resolved again by its identity.
+ * image the dialog opened for, wherever later edits moved it.
  */
 export function useImageActions({
   document,

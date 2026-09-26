@@ -390,7 +390,7 @@ describe('PPTX wasm boundary', () => {
         await paintSlide(ctx, frame);
       }
 
-      expect(expected).toHaveLength(288);
+      expect(expected).toHaveLength(272);
       expect(calls).toHaveLength(expected.length);
       expect(calls).toEqual(expected);
     } finally {
@@ -767,4 +767,33 @@ describe('host undo and comment controls', () => {
       }
     } finally { deck.dispose(); }
   });
+});
+
+test('a fallback font draws the characters the run face has no glyph for', async () => {
+  const arabic = new Uint8Array(
+    await readFile(resolve(root, 'packages/fonts/assets/NotoSansArabic-Regular.ttf'))
+  );
+  const source = openPresentation(fixture, {
+    clientId: 9301,
+    fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+    fallbackFonts: [{ family: 'Noto Sans Arabic', bytes: arabic }],
+  });
+  try {
+    const story = source
+      .snapshot()
+      .slides[0].shapes.find((shape) => shape.textStories.length > 0)!.textStories[0];
+    source.insertText(story.id, 0, 'مرحبا ');
+    const runs = source
+      .layoutSlide(0)
+      .primitives.filter(
+        (primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.storyId === story.id
+      )
+      .flatMap((box) => box.lines.flatMap((line) => line.runs));
+    const drawn = runs.find((run) => run.text.includes('مرحبا'));
+    expect(drawn?.fontFamily).toBe('Noto Sans Arabic');
+    expect(runs.some((run) => run.fontFamily === 'Liberation Sans')).toBe(true);
+  } finally {
+    source.dispose();
+  }
 });

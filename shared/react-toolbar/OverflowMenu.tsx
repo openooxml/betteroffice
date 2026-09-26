@@ -473,7 +473,12 @@ export const OverflowMenu = forwardRef<OverflowMenuHandle, OverflowMenuProps>(fu
       for (const menu of menus.current) if (menu.contains(target)) return;
       close();
     };
-    const onResize = () => close();
+    const onResize = () => {
+      const active = document.activeElement;
+      const focused = [...menus.current].some((menu) => menu.contains(active));
+      close();
+      if (focused) triggerRef.current?.focus({ preventScroll: true });
+    };
     document.addEventListener('mousedown', onPointerDown, true);
     window.addEventListener('resize', onResize);
     return () => {

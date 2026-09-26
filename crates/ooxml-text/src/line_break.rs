@@ -27,6 +27,42 @@ pub fn break_opportunities(text: &str) -> Vec<BreakOpportunity> {
         .collect()
 }
 
+/// UAX-14 keeps a hyphen glued to the number after it, so `COVID-19` never
+/// wraps. PowerPoint breaks there, as its own render of the corpus shows, so a
+/// slide takes this set instead: the UAX-14 opportunities plus one after every
+/// hyphen that a digit follows.
+pub fn presentation_break_opportunities(text: &str) -> Vec<BreakOpportunity> {
+    let mut opportunities = break_opportunities(text);
+    let mut extra: Vec<usize> = Vec::new();
+    for (byte_index, character) in text.char_indices() {
+        if !matches!(character, '-' | '\u{2010}') {
+            continue;
+        }
+        let after = byte_index + character.len_utf8();
+        let follows_word = text[..byte_index]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric);
+        let leads_digit = text[after..]
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_ascii_digit());
+        if follows_word && leads_digit {
+            extra.push(after);
+        }
+    }
+    if extra.is_empty() {
+        return opportunities;
+    }
+    extra.retain(|index| !opportunities.iter().any(|value| value.byte_index == *index));
+    opportunities.extend(extra.into_iter().map(|byte_index| BreakOpportunity {
+        byte_index,
+        mandatory: false,
+    }));
+    opportunities.sort_by_key(|value| value.byte_index);
+    opportunities
+}
+
 /// Word's default East Asian prohibited-start/prohibited-end refinement.
 /// UAX-14 supplies the broad opportunity set; kinsoku removes breaks that
 /// would strand opening punctuation at line end or closing punctuation at
@@ -54,6 +90,20 @@ fn word_kinsoku_allows(text: &str, byte_index: usize) -> bool {
 #[cfg(test)]
 mod word_tests {
     use super::*;
+
+    #[test]
+    fn a_slide_breaks_after_a_hyphen_that_a_digit_follows() {
+        let indexes = |text: &str| {
+            presentation_break_opportunities(text)
+                .into_iter()
+                .map(|value| value.byte_index)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(indexes("COVID-19 on"), [6, 9, 11]);
+        assert_eq!(indexes("2020-2021 x"), [5, 10, 11]);
+        assert_eq!(indexes("well-known thing"), [5, 11, 16]);
+        assert_eq!(indexes("-19 x"), [4, 5]);
+    }
 
     #[test]
     fn kinsoku_filters_breaks_before_closing_and_after_opening_punctuation() {

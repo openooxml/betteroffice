@@ -273,6 +273,16 @@ describe('toolbar overflow', () => {
     expect(document.activeElement).toBe(more());
   });
 
+  test('returns focus to More when a resize closes the focused menu', () => {
+    mount();
+    resize(10);
+    const menu = openWithKeyboard();
+    expect(menu.contains(document.activeElement)).toBe(true);
+    resize(10);
+    expect(screen().queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(more());
+  });
+
   test('host entries publish their changes to an open menu and run their latest action', () => {
     const selected: string[] = [];
     let update!: (next: { label: string; disabled: boolean }) => void;
