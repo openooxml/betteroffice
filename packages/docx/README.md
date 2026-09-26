@@ -298,7 +298,11 @@ exactly and case-sensitively, and `findContentControls` returns every match.
 `listDocxContentControls(bytes)` and `findDocxContentControls(bytes, query)` read
 bytes without a session and throw `DocxContentControlsError` for refused options.
 Control ids are engine locators scoped to the version or snapshot they were read
-at, not stable across save and reopen.
+at, not stable across save and reopen. An inline control's id locates it at that
+version and can name a different control after edits, so list again after a
+version change or select by tag. Concurrent fills from collaborators resolve
+last-writer-wins for an inline control and merge like concurrent typing for a
+block control.
 
 `setContentControlText` replaces the content of a plain- or rich-text control
 with plain text and clears its placeholder flag everywhere it is recorded,

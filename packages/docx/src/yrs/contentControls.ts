@@ -4,7 +4,10 @@
  * Plain JSON, produced by one Rust inventory for sessions, bytes, the native facade and Python.
  *
  * `controlId` is an opaque engine locator scoped to the version (or snapshot) it was read at; it
- * does not survive save and reopen. Fill controls with a `setContentControlText` edit step.
+ * does not survive save and reopen. An inline control's id can name a different control after
+ * edits, so list again after a version change or select by tag. Fill controls with a
+ * `setContentControlText` edit step; concurrent fills from collaborators resolve last-writer-wins
+ * for an inline control and merge like concurrent typing for a block control.
  */
 
 import type { OperationRefusal } from '../../../../shared/host-contracts/edits';
