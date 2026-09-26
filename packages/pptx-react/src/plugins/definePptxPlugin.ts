@@ -18,6 +18,8 @@ function frozenCommand<S>(command: PptxPluginCommand<S>): PptxPluginCommand<S> {
  * Wraps a plugin for `PptxEditor`'s `plugins` prop. The definition is checked when the editor
  * installs it; a problem is reported through `onPluginError` and disables only this plugin. Its
  * panel, commands and toolbar are copied and frozen, so changing them takes a new definition.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export function definePptxPlugin<S>(definition: PptxPluginDefinition<S>): PptxPlugin {
   const copy = { ...definition };

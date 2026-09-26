@@ -44,15 +44,25 @@ export type {
  * Built-in commands need their id listed and, when they mutate, `document: 'write'`; edit
  * batches need `document: 'write'` and `editBatches`, and `history: 'none'` also needs
  * `untrackedHistory`. `readOnly` refuses every write regardless.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export type PptxPluginGrant = PluginGrant<PptxCommandId>;
 
 export type PptxPluginFailureCode = PluginFailureCode;
 
-/** A client call refused before it reached the presentation. */
+/**
+ * A client call refused before it reached the presentation.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export type PptxPluginRefusal = PluginRefusal<PptxPluginFailureCode>;
 
-/** Versioned presentation reads. Each runs after pending input. */
+/**
+ * Versioned presentation reads. Each runs after pending input.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface PptxPluginReadClient {
   version(): Promise<{ ok: true; version: string } | PptxPluginRefusal>;
   readContent(request?: PptxReadRequest): Promise<PptxReadResult | PptxPluginRefusal>;
@@ -61,12 +71,20 @@ export interface PptxPluginReadClient {
   validateEdits(request: PptxEditRequest): Promise<PptxValidationResult | PptxPluginRefusal>;
 }
 
-/** Granted edit batches; the grant and `readOnly` are checked when the batch applies. */
+/**
+ * Granted edit batches; the grant and `readOnly` are checked when the batch applies.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface PptxPluginEditClient {
   applyEdits(request: PptxEditRequest): Promise<PptxEditResult | PptxPluginRefusal>;
 }
 
-/** The editor's commands as this plugin may use them. */
+/**
+ * The editor's commands as this plugin may use them.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface PptxPluginCommandClient {
   getDescriptor<K extends PptxCommandId>(id: K): PptxCommandDescriptor<K>;
   getDescriptor(id: PptxPluginCommandId): PptxPluginCommandDescriptor | null;
@@ -170,6 +188,7 @@ export type PptxPluginNavigationFailureCode =
   | 'layout-unavailable'
   | 'unsupported';
 
+/** @experimental The plugin API may change in minor releases. */
 export type PptxPluginNavigationResult =
   | { ok: true }
   | PptxPluginRefusal
@@ -182,7 +201,11 @@ export interface PptxPluginNavigationOptions {
   focus?: boolean;
 }
 
-/** Navigation after pending input, against the current presentation. */
+/**
+ * Navigation after pending input, against the current presentation.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface PptxPluginNavigation {
   goToSlide(
     target: { slideId: string },
@@ -213,7 +236,11 @@ export type PptxPluginEvent =
   | { type: 'layout-change'; generation: string; layout: PptxPluginLayout | null }
   | { type: 'grants-change'; generation: string; grant: PptxPluginGrant };
 
-/** What a hook, renderer or action receives. Clients refuse once it is superseded or ended. */
+/**
+ * What a hook, renderer or action receives. Clients refuse once it is superseded or ended.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface PptxPluginContext<S> {
   pluginId: string;
   snapshot: PptxPluginSnapshot;
@@ -264,6 +291,8 @@ export interface PptxPluginCommand<S> {
 /**
  * A plugin. `createState`, renderers and command `getState` must be pure; `initialize`,
  * `onEvent`, command `execute` and `context.run` are managed effects.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export interface PptxPluginDefinition<S> {
   id: string;
@@ -281,7 +310,11 @@ export interface PptxPluginDefinition<S> {
 
 declare const pptxPluginBrand: unique symbol;
 
-/** An installable plugin, created by `definePptxPlugin`. */
+/**
+ * An installable plugin, created by `definePptxPlugin`.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface PptxPlugin {
   readonly id: string;
   readonly revision?: string | number;
@@ -290,12 +323,23 @@ export interface PptxPlugin {
 
 export type PptxPluginErrorPhase = PluginErrorPhase;
 
-/** A plugin failure; the failing activation has already been stopped and cleaned up. */
+/**
+ * A plugin failure; the failing activation has already been stopped and cleaned up.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export type PptxPluginError = PluginError<PptxPluginErrorPhase>;
 
+/** @experimental The plugin API may change in minor releases. */
 export interface PptxEditorPluginProps {
+  /** @experimental The plugin API may change in minor releases. */
   plugins?: readonly PptxPlugin[];
-  /** Keyed by plugin id; omitted plugins read, validate and navigate only. */
+  /**
+   * Keyed by plugin id; omitted plugins read, validate and navigate only.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
   pluginGrants?: Readonly<Record<string, PptxPluginGrant>>;
+  /** @experimental The plugin API may change in minor releases. */
   onPluginError?(error: PptxPluginError): void;
 }

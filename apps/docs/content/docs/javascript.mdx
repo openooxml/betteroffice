@@ -265,7 +265,8 @@ use them too.
 `PptxEditor` installs host-owned tools through the same `plugins`,
 `pluginGrants` and `onPluginError` props as the DOCX editor. A plugin created
 with `definePptxPlugin` contributes a docked panel, an overlay on the slide and
-commands, and works through restricted clients:
+commands, and works through restricted clients. The plugin API is experimental
+and may change in minor releases:
 
 ```tsx
 import { PptxEditor, definePptxPlugin } from "@betteroffice/pptx-react";
