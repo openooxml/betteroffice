@@ -1602,17 +1602,16 @@ fn plot_fill_color(fill: PlotFill<'_>) -> Option<String> {
     }
 }
 
-/// The mean of the `#RRGGBB` or `#RRGGBBAA` colours that parse, or `None`
-/// when none does. Each colour weighs by its opacity, so a clear stop lends no
-/// hue, and the mean alpha stays in the result while it is below opaque.
+/// The mean of `#RRGGBB` or `#RRGGBBAA` colours, or `None` when there are
+/// none or any fails to parse. Each colour weighs by its opacity, so a clear
+/// stop lends no hue, and the mean alpha stays in the result while it is below
+/// opaque.
 fn mean_hex(colors: &[String]) -> Option<String> {
-    let parsed: Vec<[u8; 4]> = colors
+    let parsed = colors
         .iter()
-        .filter_map(|color| parse_rgba(color))
-        .collect();
-    if parsed.is_empty() {
-        return None;
-    }
+        .map(|color| parse_rgba(color))
+        .collect::<Option<Vec<[u8; 4]>>>()
+        .filter(|parsed| !parsed.is_empty())?;
     let count = parsed.len() as u64;
     let weight: u64 = parsed.iter().map(|rgba| u64::from(rgba[3])).sum();
     let channel = |index: usize| {
@@ -4453,6 +4452,13 @@ mod tests {
     fn a_gradient_with_many_opaque_stops_keeps_its_colour() {
         let stops = vec!["#FFFFFF".to_owned(); 70_000];
         assert_eq!(mean_hex(&stops).as_deref(), Some("#FFFFFF"));
+    }
+
+    #[test]
+    fn a_gradient_with_a_stop_that_does_not_parse_has_no_mean() {
+        let stops = ["#00000000".to_owned(), "invalid".to_owned()];
+        assert_eq!(mean_hex(&stops), None);
+        assert_eq!(mean_hex(&[]), None);
     }
 
     #[test]
