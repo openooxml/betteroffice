@@ -86,13 +86,15 @@ export function modeRefusal(
 
 /**
  * The editor's batch path: the mode gate, an input flush, `authorize` immediately before the
- * mutation, then one refresh of every changed story. A refusal never rolls back flushed typing.
+ * mutation, which runs inside `commit`, then one refresh of every changed story. A refusal never
+ * rolls back flushed typing.
  */
 export async function applyEditBatch<Refusal = never>(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
   mode: () => EditorMode,
   request: DocxEditRequest,
-  authorize?: () => Refusal | null
+  authorize?: () => Refusal | null,
+  commit: <T>(write: () => T) => T = (write) => write()
 ): Promise<{ flush: EditorFlushFailure } | { result: DocxEditResult | Refusal }> {
   const session = pagedEditorRef.current?.getYrsSession();
   if (!session) {
@@ -121,7 +123,7 @@ export async function applyEditBatch<Refusal = never>(
   if (denied) return { result: denied };
   const refused = modeRefusal(session, mode(), request);
   if (refused) return { result: refused };
-  const result = session.applyEdits(request);
+  const result = commit(() => session.applyEdits(request));
   if (result.ok && result.applied) {
     try {
       flushed.editor.syncYrsInputState(true, result.changedStories);

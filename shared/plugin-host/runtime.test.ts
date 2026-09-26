@@ -326,6 +326,52 @@ describe('plugin runtime lifecycle', () => {
     expect(runtime.activations().map((entry) => entry.pluginId)).toEqual(['slow']);
   });
 
+  test('a load hook that commits its own change runs once, keeps its signal and becomes ready', async () => {
+    const { runtime, change } = setup();
+    const seen: string[] = [];
+    let writes = 0;
+    runtime.setPlugins([
+      {
+        id: 'writer',
+        createState: () => 0,
+        onEvent(context, event) {
+          seen.push(`${event.type}:${event.version}`);
+          if (event.type !== 'load') return;
+          writes += 1;
+          const version = `own${writes}`;
+          context.invocation.commit(() => change(version));
+          expect(context.invocation.signal.aborted).toBe(false);
+          expect(context.invocation.setState(writes, version)).toBe(true);
+        },
+      },
+    ]);
+    runtime.open('g1');
+    await tick(10);
+    expect(seen).toEqual(['load:v1', 'document-change:own1']);
+    expect(runtime.activations()[0].context.invocation.state()).toBe(1);
+  });
+
+  test('a load hook superseded by changes it did not commit is stopped and reported', async () => {
+    const { runtime, change, errors } = setup();
+    let runs = 0;
+    runtime.setPlugins([
+      {
+        id: 'restless',
+        createState: () => null,
+        async onEvent(_context, event) {
+          if (event.type !== 'load') return;
+          runs += 1;
+          change(`v${runs + 1}`);
+        },
+      },
+    ]);
+    runtime.open('g1');
+    await tick(100);
+    expect(runs).toBe(10);
+    expect(errors.map(({ pluginId, phase }) => [pluginId, phase])).toEqual([['restless', 'event']]);
+    expect(runtime.activations()).toEqual([]);
+  });
+
   test('state updates need the current version', async () => {
     const { runtime, change } = setup();
     const { plugin, contexts } = recorder('versioned');
