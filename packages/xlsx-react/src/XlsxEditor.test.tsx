@@ -2389,6 +2389,39 @@ describe('XlsxEditor edit batches', () => {
     }
   });
 
+  it('keeps an unsettled paste on the workbook it was accepted for', async () => {
+    const clipboard = deferredClipboard();
+    try {
+      const { view, api } = await mountApi();
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 2, col: 1 }));
+      });
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      const outcome = api.version().then(
+        () => null,
+        (error: unknown) => error
+      );
+      let current = api;
+      view.rerender(
+        <XlsxEditor
+          file={plain.bytes.slice()}
+          onReady={(ready) => {
+            current = ready;
+          }}
+        />
+      );
+      await waitFor(() => expect(current).not.toBe(api));
+      const applied = await settled(() =>
+        current.applyEdits(setB3(current.handle.version(), 'fresh'))
+      );
+      expect(applied).toMatchObject({ ok: true, applied: true });
+      expect(current.handle.cell(0, 2, 1).input).toBe('fresh');
+      expect(await settled(() => outcome)).toMatchObject({ code: 'document-replaced' });
+    } finally {
+      clipboard.restore();
+    }
+  });
+
   it('rejects when the workbook is replaced while input is flushing', async () => {
     const clipboard = deferredClipboard();
     try {

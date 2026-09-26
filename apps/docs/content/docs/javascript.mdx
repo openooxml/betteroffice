@@ -325,12 +325,13 @@ const review = defineXlsxPlugin<{ sheets: number }>({
 ```
 
 **Lifecycle and grants** follow the DOCX editor: fresh state,
-`initialize` and one `load` event per workbook (repeated when it changes before
-that hook finishes), then coalesced `document-change`, `selection-change`, `mode-change` (with `readOnly`),
+`initialize` and one `load` event per workbook (repeated when a change the hook
+did not make arrives first, and stopped after ten runs), then coalesced
+`document-change`, `selection-change`, `mode-change` (with `readOnly`),
 `layout-change` and `grants-change` events. `document-change` comes from the
-workbook's committed versions after recalculation, so typing, commands,
-batches, undo, redo and remote updates each produce one, and refusals or no-ops
-none. Replacing the workbook, removing the plugin, changing its `revision`,
+workbook's committed versions after recalculation, so typing, commands, batches
+(a plugin's own included), undo, redo and remote updates each produce one, and
+refusals or no-ops none. Replacing the workbook, removing the plugin, changing its `revision`,
 unmounting or a failure ends the activation and runs its cleanups once. Without
 a grant a plugin reads (`read.version`, `readCells`, `findText`,
 `validateEdits`) and navigates; built-in commands need an allowlisted id,

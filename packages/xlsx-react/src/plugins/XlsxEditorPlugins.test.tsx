@@ -1479,30 +1479,64 @@ describe('XlsxEditor plugin adapters', () => {
     expect(input(api(), 2, 1)).toBe('Typed');
   });
 
-  test('a batch applied by the load hook keeps its receipt; load repeats at that version', async () => {
+  test('a load hook that applies a batch every run loads once, then sees its change', async () => {
     const receipts: unknown[] = [];
-    const loads: string[] = [];
-    const { plugin, log } = recorder('acme.review', {
+    const seen: string[] = [];
+    const { plugin } = recorder('acme.review', {
       async onEvent(context, event) {
-        if (event.type === 'document-change') log.push('document-change');
+        if (event.type === 'load' || event.type === 'document-change') {
+          seen.push(`${event.type}:${event.version}`);
+        }
         if (event.type !== 'load' || !context.edits) return;
-        loads.push(event.version);
-        receipts.push(await context.edits.applyEdits(setCell(event.version, 'B3', 'From load')));
+        const applied = await context.edits.applyEdits(
+          setCell(event.version, 'B3', `From load ${seen.length}`)
+        );
+        receipts.push(applied);
+        if (applied.ok) context.setState({ count: receipts.length }, applied.version);
+      },
+      panel: {
+        title: 'Loaded',
+        placement: 'left',
+        render: ({ context }) => <output data-testid="loaded">{context.state.count}</output>,
       },
     });
-    const { api } = await mount({ plugins: [plugin], pluginGrants: WRITE });
-    await until(() => receipts.length === 2);
+    const { api, view } = await mount({ plugins: [plugin], pluginGrants: WRITE });
+    await until(() => within(view.container).queryByTestId('loaded')?.textContent === '1');
+    await settle(150);
     const version = api().handle.version();
+    const [load] = seen;
     expect(receipts).toMatchObject([
-      { ok: true, applied: true, version },
-      { ok: true, applied: false, version },
+      { ok: true, applied: true, baseVersion: load.slice(5), version },
     ]);
-    expect(input(api(), 2, 1)).toBe('From load');
+    expect(input(api(), 2, 1)).toBe('From load 1');
+    expect(seen).toEqual([load, `document-change:${version}`]);
+  });
+
+  test('a change the load hook did not make delivers load again at the latest version', async () => {
+    const loads: string[] = [];
+    const changes: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((done) => (release = done));
+    const { plugin } = recorder('acme.review', {
+      async onEvent(_context, event) {
+        if (event.type === 'document-change') changes.push(event.version);
+        if (event.type !== 'load') return;
+        loads.push(event.version);
+        if (loads.length === 1) await gate;
+      },
+    });
+    const { api } = await mount({ plugins: [plugin] });
+    await until(() => loads.length === 1);
+    const before = api().handle.version();
+    await act(async () => {
+      await api().applyEdits(setCell(before, 'B3', 'External'));
+    });
+    release();
+    await until(() => loads.length === 2);
     await settle(50);
-    expect(loads).toHaveLength(2);
-    expect(loads[0]).not.toBe(version);
-    expect(loads[1]).toBe(version);
-    expect(log).toEqual(['initialize']);
+    expect(loads).toEqual([before, api().handle.version()]);
+    expect(loads[1]).not.toBe(before);
+    expect(changes).toEqual([]);
   });
 
   test('defineXlsxPlugin keeps the contributions it was given when they change in place', () => {

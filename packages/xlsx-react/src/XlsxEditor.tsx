@@ -881,17 +881,21 @@ function XlsxEditorContent({
     [afterInput]
   );
 
-  /** The editor's batch path after pending input: `authorize`, read-only, apply, `onChange`. */
+  /**
+   * The editor's batch path after pending input: `authorize`, read-only, apply inside
+   * `commit`, `onChange`.
+   */
   const applyBatch = useCallback(
     <Refusal,>(
       opened: WorkbookHandle,
       request: XlsxEditRequest,
-      authorize?: () => Refusal | null
+      authorize?: () => Refusal | null,
+      commit: <T>(write: () => T) => T = (write) => write()
     ): XlsxEditResult | Refusal => {
       const denied = authorize?.() ?? null;
       if (denied) return denied;
       if (readOnlyRef.current) return readOnlyRefusal(opened);
-      const result = opened.applyEdits(request);
+      const result = commit(() => opened.applyEdits(request));
       if (result.ok && result.applied) {
         onChangeRef.current?.();
         commandController.refresh();
@@ -936,8 +940,8 @@ function XlsxEditorContent({
       handle: () => handleRef.current,
       admit: (handle, operation) => pluginEditorRef.current.admit(handle, operation),
       readOnlyRefusal: (handle) => (readOnlyRef.current ? readOnlyRefusal(handle) : null),
-      applyEdits: (handle, request, authorize) =>
-        pluginEditorRef.current.applyBatch(handle, request, authorize),
+      applyEdits: (handle, request, authorize, commit) =>
+        pluginEditorRef.current.applyBatch(handle, request, authorize, commit),
       commands: () => commandController,
       navigator: {
         selectCells: (...args) => navigator().selectCells(...args),
@@ -1111,6 +1115,7 @@ function XlsxEditorContent({
       unsubscribeUpdates();
       handle?.dispose();
       handleRef.current = null;
+      coordinator.reset();
     };
   }, [
     file,
@@ -1122,6 +1127,7 @@ function XlsxEditorContent({
     applyBatch,
     beginPluginLoad,
     commandController,
+    coordinator,
     refreshProposals,
     selectCells,
   ]);

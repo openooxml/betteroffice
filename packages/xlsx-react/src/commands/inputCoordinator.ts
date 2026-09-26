@@ -56,6 +56,21 @@ export interface InputCoordinator {
   settle(): boolean;
   /** Runs `operation` once the input accepted before this call is written. */
   runAfterPendingInput<T>(operation: () => T | Promise<T>): Promise<T>;
+  /**
+   * Abandons the queue of a workbook being closed: input queued behind its unsettled input is
+   * dropped, work admitted after it rejects with `document-replaced`, and new input no longer
+   * waits on it.
+   */
+  reset(): void;
+}
+
+/** Settles when the workbook whose input is queued is closed. */
+function closing(): { closed: Promise<void>; close(): void } {
+  let close!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    close = resolve;
+  });
+  return { closed, close };
 }
 
 function isPromise(value: unknown): value is Promise<unknown> {
@@ -75,6 +90,7 @@ function sameCell(a: InputDraft, b: InputDraft): boolean {
 export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoordinator {
   let draft: InputDraft | null = null;
   let tail: Promise<void> | null = null;
+  let queue = closing();
   let failed = false;
   let sealing = false;
   let sealFailed = false;
@@ -103,9 +119,13 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
     });
   };
 
-  const enqueue = <T>(work: () => T | Promise<T>): Promise<T> => {
+  /** Runs `work` after the queued input, or `dropped` once that input's workbook is closed. */
+  const enqueue = <T>(work: () => T | Promise<T>, dropped: () => T): Promise<T> => {
     if (tail) {
-      const next = tail.then(work);
+      const ahead = tail.then(() => false);
+      const next = Promise.race([ahead, queue.closed.then(() => true)]).then((closed) =>
+        closed ? dropped() : work()
+      );
       follow(next);
       return next;
     }
@@ -122,6 +142,11 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
     }
     failed = false;
     return Promise.resolve(result);
+  };
+
+  const dropInput = (): void => undefined;
+  const replaced = (): never => {
+    throw new XlsxCommandAdmissionError('document-replaced');
   };
 
   const fail = () => {
@@ -150,7 +175,7 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
       failed = true;
       reject(finished);
       if (draft === null && hooks.restore(finished)) draft = finished;
-    });
+    }, dropInput);
   };
 
   const writeSealed = (sealed: InputDraft | null, generation: number) => {
@@ -193,7 +218,7 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
           result = false;
         }
         return isPromise(result) ? result.then(settle, () => settle(false)) : settle(result);
-      });
+      }, dropInput);
     },
     submit(finished) {
       if (draft === finished) draft = null;
@@ -259,14 +284,20 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
           if (sealed === undefined) throw new XlsxCommandAdmissionError('input-failed');
           writeSealed(sealed, generation);
           return operation();
-        });
+        }, replaced);
       }
       hooks.sync();
       const sealed = draft;
       return enqueue(() => {
         writeSealed(sealed, generation);
         return operation();
-      });
+      }, replaced);
+    },
+    reset() {
+      queue.close();
+      queue = closing();
+      tail = null;
+      failed = false;
     },
   };
 }

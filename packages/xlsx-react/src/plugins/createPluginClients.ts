@@ -64,12 +64,13 @@ export interface XlsxPluginEditorAccess {
   readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal | null;
   /**
    * The editor's batch path, run inside `admit`: `authorize`, the read-only refusal, one
-   * committed batch, then one `onChange` when it applied.
+   * batch committed inside `commit`, then one `onChange` when it applied.
    */
   applyEdits<Refusal>(
     handle: WorkbookHandle,
     request: XlsxEditRequest,
-    authorize: () => Refusal | null
+    authorize: () => Refusal | null,
+    commit: <T>(write: () => T) => T
   ): XlsxEditResult | Refusal;
   commands(): XlsxCommandController | null;
   navigator: XlsxPluginNavigator;
@@ -227,7 +228,12 @@ export function createPluginClients(
           const denied = batchDenial(request?.history);
           if (denied) return denied;
           return whenAdmitted((handle) =>
-            access.applyEdits(handle, request, () => batchDenial(request.history))
+            access.applyEdits(
+              handle,
+              request,
+              () => batchDenial(request.history),
+              (write) => invocation.commit(write)
+            )
           );
         },
       }
