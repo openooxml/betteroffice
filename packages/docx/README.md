@@ -210,10 +210,11 @@ Current limits: text targets stay within one paragraph; inline atoms cannot be
 replaced or deleted; content-locked controls, existing tracked changes a step
 would touch (including tracked run formatting), and pending paragraph-mark
 revisions refuse. Paragraph and style steps need a session opened from DOCX
-bytes (`openDocx`/`seedFromDocx`) and cannot be suggested. List numbering is a
-v1 limitation: restyling a numbered paragraph, or applying or inserting a style
-that defines numbering, refuses with `unsupported` until a follow-up retains
-numbering definitions in the session. Deleting spans that hold tables,
+bytes (`openDocx`/`seedFromDocx`) and cannot be suggested. Inserting or
+restyling a paragraph with a style that defines list numbering refuses with
+`unsupported`, as does restyling a paragraph that is already numbered. An
+inserted paragraph takes only its style's defaults, so it is not numbered even
+next to a list item numbered by direct formatting. Deleting spans that hold tables,
 controls, section breaks, opaque XML, fields' cached results, or comments and
 bookmarks crossing the span refuses, as does any step after which saving would
 move an opaque XML block, such as one that precedes a table. A batch holds at most 128 steps,
