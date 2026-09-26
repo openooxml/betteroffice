@@ -96,6 +96,7 @@ pub enum EditHistory {
     Separate,
     /// No undo step; existing undo and redo entries stay. Standalone history replays inverse
     /// operations, so undoing an older step that wrote the same cell still overwrites it.
+    /// Experimental: its interaction with standalone undo may change in a minor release.
     None,
 }
 

@@ -29,6 +29,8 @@ export type XlsxEditSource = 'host' | 'agent';
  * `separate`: exactly one undo step. `none`: no undo step, existing entries kept; standalone
  * undo replays inverse operations, so undoing an older step that wrote the same cell still
  * overwrites it.
+ *
+ * @experimental `none` only: its interaction with standalone undo may change in a minor release.
  */
 export type XlsxEditHistory = 'separate' | 'none';
 
