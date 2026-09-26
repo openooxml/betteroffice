@@ -710,7 +710,7 @@
           "name": "Data"
         }
       },
-      "message": "Cells in hidden rows are excluded; set includeHiddenRows to export them."
+      "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them."
     },
     {
       "code": "hidden-content-excluded",
@@ -722,7 +722,7 @@
           "name": "Data"
         }
       },
-      "message": "Cells in hidden columns are excluded; set includeHiddenColumns to export them."
+      "message": "Cells in hidden columns, and links and tables wholly inside them, are excluded; set includeHiddenColumns to export them."
     },
     {
       "code": "object-placeholder",
@@ -811,7 +811,7 @@
           "name": "Summary"
         }
       },
-      "message": "Cells in hidden rows are excluded; set includeHiddenRows to export them."
+      "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them."
     },
     {
       "code": "formula-cache-unverified",

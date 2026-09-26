@@ -296,9 +296,11 @@ pub enum XlsxExportValue {
 pub enum XlsxFormulaResult {
     /// A result is stored; nothing verifies it is current.
     Unverified,
-    /// No result is stored.
+    /// The file stored no result, and nothing has calculated or changed since it was read.
     Missing,
-    /// Empty inside an array formula's range, where empty can be a result.
+    /// Whether a result is stored cannot be established: something has calculated or
+    /// changed since the file was read, the cell cannot be traced to it, or it is empty
+    /// inside an array formula's range, where empty can be a result.
     Uncertain,
     /// The last calculation settled it as part of a circular reference.
     Cycle,

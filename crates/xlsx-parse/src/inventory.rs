@@ -96,7 +96,7 @@ pub struct SheetInventory {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SourceObject {
     Object(DrawingObject),
-    /// A malformed drawing part, whose objects are unknown.
+    /// A drawing part that is missing or malformed, whose objects are unknown.
     Unreadable(String),
     /// A part whose reading hit a parser cap or the inspection budget; nothing after it is
     /// visited.
@@ -284,6 +284,7 @@ impl PreservedPackage {
         }
         for drawing in drawings {
             let Some(bytes) = find_part(parts, &drawing) else {
+                visit(SourceObject::Unreadable(drawing))?;
                 continue;
             };
             let root = match budget.tree(bytes) {

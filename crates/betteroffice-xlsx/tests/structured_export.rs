@@ -261,6 +261,67 @@ fn facts_fixture() -> Vec<u8> {
     ])
 }
 
+/// One sheet with `sheet_xml`, `rels` beside it and `extra` parts.
+fn one_sheet_package(
+    sheet_xml: &str,
+    rels: &[(&str, &str, &str)],
+    extra: Vec<(&str, String)>,
+) -> Vec<u8> {
+    let mut parts = vec![
+        ("[Content_Types].xml", content_types()),
+        (
+            "_rels/.rels",
+            relationships(&[("rId1", "officeDocument", "xl/workbook.xml")]),
+        ),
+        (
+            "xl/workbook.xml",
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="{MAIN}" xmlns:r="{DOC_RELS}"><sheets><sheet name="Only" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            relationships(&[("rId1", "worksheet", "worksheets/sheet1.xml")]),
+        ),
+        ("xl/worksheets/sheet1.xml", worksheet(sheet_xml)),
+        ("xl/worksheets/_rels/sheet1.xml.rels", relationships(rels)),
+    ];
+    parts.extend(extra);
+    package(parts)
+}
+
+/// Links and a table wholly inside hidden row 2 or hidden column C, and a link reaching
+/// past row 2.
+fn hidden_links_fixture() -> Vec<u8> {
+    one_sheet_package(
+        concat!(
+            r#"<cols><col min="3" max="3" width="0" customWidth="1" hidden="1"/></cols><sheetData>"#,
+            r#"<row r="1"><c r="A1" t="inlineStr"><is><t>shown</t></is></c><c r="C1" t="inlineStr"><is><t>Code</t></is></c></row>"#,
+            r#"<row r="2" hidden="1"><c r="A2" t="inlineStr"><is><t>secret row</t></is></c></row>"#,
+            r#"<row r="3"><c r="A3" t="inlineStr"><is><t>after</t></is></c></row></sheetData>"#,
+            r#"<hyperlinks><hyperlink ref="A2" location="Only!A1" display="row secret"/><hyperlink ref="C1" location="Only!A1" display="column secret"/>"#,
+            r#"<hyperlink ref="A2:A3" location="Only!A1" display="reaches out"/><hyperlink ref="A1" location="Only!A3" display="shown link"/></hyperlinks>"#,
+            r#"<tableParts count="1"><tablePart r:id="rIdTable"/></tableParts>"#,
+        ),
+        &[("rIdTable", "table", "../tables/table1.xml")],
+        vec![(
+            "xl/tables/table1.xml",
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?><table xmlns="{MAIN}" id="1" name="Codes" displayName="Codes" ref="C1:C3"><tableColumns count="1"><tableColumn id="1" name="Code"/></tableColumns></table>"#
+            ),
+        )],
+    )
+}
+
+/// Formulas the engine cannot parse: one stored without a result, one with an empty one.
+fn blank_results_fixture() -> Vec<u8> {
+    one_sheet_package(
+        r#"<sheetData><row r="1"><c r="A1"><f>SUM(</f></c><c r="B1"><f>SUM(</f><v></v></c></row></sheetData>"#,
+        &[],
+        Vec::new(),
+    )
+}
+
 /// A picture drawing, a malformed drawing and one nested past the parser's depth cap.
 fn limited_drawing_fixture() -> Vec<u8> {
     let deep = format!(
@@ -1201,6 +1262,86 @@ fn a_recalculation_that_only_finds_a_cycle_moves_the_version() {
         Some(XlsxFormulaResult::Cycle)
     );
     assert_ne!(recalculated.version, opened.version);
+}
+
+#[test]
+fn an_empty_formula_value_is_missing_only_where_the_file_stored_none() {
+    let bytes = blank_results_fixture();
+    let stored = export(&bytes, json!({}));
+    assert_eq!(
+        cell(&stored, 0, "A1").formula_result,
+        Some(XlsxFormulaResult::Missing)
+    );
+    assert_eq!(
+        cell(&stored, 0, "B1").formula_result,
+        Some(XlsxFormulaResult::Unverified)
+    );
+
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    workbook.recalculate_all(CalculationOptions::default());
+    let calculated = workbook
+        .export_structured(&XlsxExportOptions::default())
+        .unwrap()
+        .unwrap()
+        .content;
+    for a1 in ["A1", "B1"] {
+        let exported = cell(&calculated, 0, a1);
+        assert_eq!(exported.value, XlsxExportValue::Empty, "{a1}");
+        assert_eq!(
+            exported.formula_result,
+            Some(XlsxFormulaResult::Uncertain),
+            "{a1}"
+        );
+    }
+}
+
+#[test]
+fn links_and_tables_wholly_in_excluded_rows_or_columns_are_left_out() {
+    let bytes = hidden_links_fixture();
+    let links = |content: &XlsxStructuredContent| {
+        content.sheets[0]
+            .hyperlinks
+            .iter()
+            .map(|link| link.display.clone().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let tables = |content: &XlsxStructuredContent| {
+        content.sheets[0]
+            .tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let content = export(&bytes, json!({}));
+    assert_eq!(links(&content), ["reaches out", "shown link"]);
+    assert!(tables(&content).is_empty());
+    let markdown = export_xlsx_markdown(
+        &bytes,
+        &XlsxExportOptions::default(),
+        &XlsxMarkdownOptions::default(),
+    )
+    .unwrap()
+    .markdown;
+    for secret in ["row secret", "column secret", "Codes"] {
+        assert!(!markdown.contains(secret), "{secret} in {markdown}");
+    }
+
+    let rows = export(&bytes, json!({"includeHiddenRows": true}));
+    assert_eq!(links(&rows), ["row secret", "reaches out", "shown link"]);
+    assert!(tables(&rows).is_empty());
+    let both = export(
+        &bytes,
+        json!({"includeHiddenRows": true, "includeHiddenColumns": true}),
+    );
+    assert_eq!(
+        links(&both),
+        ["row secret", "column secret", "reaches out", "shown link"]
+    );
+    assert_eq!(tables(&both), ["Codes"]);
+
+    let scoped = export(&bytes, json!({"scope": [{"sheet": 0, "range": "A2:B2"}]}));
+    assert!(links(&scoped).is_empty());
 }
 
 #[test]

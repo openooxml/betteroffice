@@ -473,6 +473,12 @@ fn within(outer: CellRange, inner: CellRange) -> bool {
     outer.contains(inner.start) && outer.contains(inner.end)
 }
 
+/// Whether one of the ordered, disjoint `spans` holds all of `first..=last`.
+fn covered(spans: &[(u32, u32)], first: u32, last: u32) -> bool {
+    let after = spans.partition_point(|&(start, _)| start <= first);
+    after > 0 && spans[after - 1].1 >= last
+}
+
 impl Walk<'_> {
     fn stop(&self, sheet: Option<&XlsxAnchor>, limit: Stop, after: Option<CellRef>) -> Stopped {
         Stopped {
@@ -742,17 +748,37 @@ impl Walk<'_> {
         let in_scope = |range: CellRange| selected.is_none_or(|selected| selected.overlaps(&range));
         let clipped = |range: CellRange| selected.is_some_and(|selected| !within(selected, range));
 
-        if let Some(range) = selected {
-            let letters = xlsx_model::addr::col_to_letters;
-            let rows = sheet
-                .hidden_row_spans(range.start.row..=range.end.row)
-                .map(|(first, last)| format!("{}:{}", first + 1, last + 1));
-            let columns = sheet
-                .hidden_col_spans(range.start.col..=range.end.col)
-                .map(|(first, last)| format!("{}:{}", letters(first), letters(last)));
-            self.hidden_spans(rows, true, &anchor)?;
-            self.hidden_spans(columns, false, &anchor)?;
-        }
+        let (hidden_rows, hidden_columns) = match selected {
+            Some(range) => (
+                self.hidden_spans(
+                    sheet.hidden_row_spans(range.start.row..=range.end.row),
+                    true,
+                    &anchor,
+                )?,
+                self.hidden_spans(
+                    sheet.hidden_col_spans(range.start.col..=range.end.col),
+                    false,
+                    &anchor,
+                )?,
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        let included = self.content.included;
+        let excluded = |range: CellRange| {
+            let Some(selected) = selected else {
+                return false;
+            };
+            let (top, bottom) = (
+                range.start.row.max(selected.start.row),
+                range.end.row.min(selected.end.row),
+            );
+            let (left, right) = (
+                range.start.col.max(selected.start.col),
+                range.end.col.min(selected.end.col),
+            );
+            (!included.hidden_rows && covered(&hidden_rows, top, bottom))
+                || (!included.hidden_columns && covered(&hidden_columns, left, right))
+        };
 
         let identity = source.identity(index);
         let range_anchor = |range: CellRange| XlsxAnchor::Range {
@@ -777,7 +803,10 @@ impl Walk<'_> {
         let mut ordinal = 0;
         for table in &source.model.tables {
             self.visit(at, 1)?;
-            if table.sheet != SheetId(index as u32) || !in_scope(table.range) {
+            if table.sheet != SheetId(index as u32)
+                || !in_scope(table.range)
+                || excluded(table.range)
+            {
                 continue;
             }
             let record = XlsxExportTable {
@@ -796,7 +825,7 @@ impl Walk<'_> {
         let mut ordinal = 0;
         for link in &sheet.hyperlinks {
             self.visit(at, 1)?;
-            if !in_scope(link.range) {
+            if !in_scope(link.range) || excluded(link.range) {
                 continue;
             }
             let record = XlsxExportHyperlink {
@@ -822,13 +851,14 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// Lists hidden spans as they are found, noting an exclusion before the first.
+    /// Lists hidden spans as they are found, noting an exclusion before the first, and
+    /// returns them.
     fn hidden_spans(
         &mut self,
-        spans: impl Iterator<Item = String>,
+        spans: impl Iterator<Item = (u32, u32)>,
         rows: bool,
         anchor: &XlsxAnchor,
-    ) -> std::result::Result<(), Stopped> {
+    ) -> std::result::Result<Vec<(u32, u32)>, Stopped> {
         let (include, what, option) = if rows {
             (
                 self.content.included.hidden_rows,
@@ -842,14 +872,23 @@ impl Walk<'_> {
                 "includeHiddenColumns",
             )
         };
-        for (ordinal, span) in spans.enumerate() {
+        let letters = xlsx_model::addr::col_to_letters;
+        let mut listed = Vec::new();
+        for (ordinal, (first, last)) in spans.enumerate() {
             if ordinal == 0 && !include {
                 self.info(
                     XlsxExportDiagnosticCode::HiddenContentExcluded,
                     anchor.clone(),
-                    format!("Cells in hidden {what} are excluded; set {option} to export them."),
+                    format!(
+                        "Cells in hidden {what}, and links and tables wholly inside them, are excluded; set {option} to export them."
+                    ),
                 )?;
             }
+            let span = if rows {
+                format!("{}:{}", first + 1, last + 1)
+            } else {
+                format!("{}:{}", letters(first), letters(last))
+            };
             self.metadata(&span, Some(anchor))?;
             let sheet = self.current();
             if rows {
@@ -857,8 +896,9 @@ impl Walk<'_> {
             } else {
                 sheet.hidden_columns.push(span);
             }
+            listed.push((first, last));
         }
-        Ok(())
+        Ok(listed)
     }
 
     fn current(&mut self) -> &mut XlsxExportSheet {
@@ -1193,7 +1233,9 @@ impl Walk<'_> {
 
     /// What is known about a formula cell's stored result. A result counts as missing only
     /// while nothing has calculated since a package that stored none was read; once
-    /// something has, or the cell cannot be traced to its source, it is uncertain.
+    /// something has, or the cell cannot be traced to its source, it is uncertain. An empty
+    /// value is a stored result only while nothing has calculated since a package that
+    /// stored it was read.
     fn formula_result(
         &mut self,
         index: usize,
@@ -1210,23 +1252,17 @@ impl Walk<'_> {
         if self.failures[1].contains(&key) {
             return Ok(XlsxFormulaResult::Limited);
         }
-        if matches!(cell.value, CellValue::Empty) {
-            let mut spilled = false;
+        let empty = matches!(cell.value, CellValue::Empty);
+        if empty {
             for (_, spill) in sheet.array_formulas() {
                 self.visit(Some(anchor), 1).map_err(|stopped| Stopped {
                     after: last,
                     ..stopped
                 })?;
                 if spill.contains(at) {
-                    spilled = true;
-                    break;
+                    return Ok(XlsxFormulaResult::Uncertain);
                 }
             }
-            return Ok(if spilled {
-                XlsxFormulaResult::Uncertain
-            } else {
-                XlsxFormulaResult::Missing
-            });
         }
         let source = self.source;
         let uncached = match source.facts(index) {
@@ -1236,11 +1272,13 @@ impl Walk<'_> {
                     Err(()) => None,
                 }
             }
-            _ => Some(false),
+            Some(_) => Some(false),
+            None if empty => None,
+            None => Some(false),
         };
         Ok(match uncached {
-            Some(false) => XlsxFormulaResult::Unverified,
             Some(true) if !source.edited => XlsxFormulaResult::Missing,
+            Some(false) if !empty || !source.edited => XlsxFormulaResult::Unverified,
             _ => XlsxFormulaResult::Uncertain,
         })
     }

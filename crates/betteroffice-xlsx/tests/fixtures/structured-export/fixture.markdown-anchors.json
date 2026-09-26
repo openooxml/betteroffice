@@ -164,7 +164,7 @@
         }
       },
       "code": "hidden-content-excluded",
-      "message": "Cells in hidden rows are excluded; set includeHiddenRows to export them.",
+      "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them.",
       "severity": "info"
     },
     {
@@ -176,7 +176,7 @@
         }
       },
       "code": "hidden-content-excluded",
-      "message": "Cells in hidden columns are excluded; set includeHiddenColumns to export them.",
+      "message": "Cells in hidden columns, and links and tables wholly inside them, are excluded; set includeHiddenColumns to export them.",
       "severity": "info"
     },
     {
@@ -265,7 +265,7 @@
         }
       },
       "code": "hidden-content-excluded",
-      "message": "Cells in hidden rows are excluded; set includeHiddenRows to export them.",
+      "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them.",
       "severity": "info"
     },
     {

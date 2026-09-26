@@ -798,6 +798,28 @@ fn a_drawing_past_the_depth_cap_is_a_limit_and_malformed_xml_is_unreadable() {
 }
 
 #[test]
+fn a_drawing_missing_from_the_package_is_unreadable() {
+    let mut parts = sources_package();
+    parts.retain(|(name, _)| name != "xl/drawings/drawing1.xml");
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut seen = Vec::new();
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |item| {
+            seen.push(item);
+            std::ops::ControlFlow::Continue(())
+        });
+    assert!(finished.is_continue());
+    assert_eq!(
+        seen,
+        [
+            crate::SourceObject::Unreadable("xl/drawings/drawing1.xml".to_owned()),
+            crate::SourceObject::Unreadable("xl/drawings/broken.xml".to_owned()),
+        ]
+    );
+}
+
+#[test]
 fn records_uncached_formulas_and_rich_inline_strings() {
     let parts = package(
         concat!(
