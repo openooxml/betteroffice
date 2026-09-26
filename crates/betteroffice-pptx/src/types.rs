@@ -1,7 +1,7 @@
 pub use pptx_edit::{
     CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx, EditError,
-    EditOrigin, ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft,
-    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
+    EditOrigin, InheritedGeometry, ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt,
+    ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, StorySnapshot, TextReceipt, TextRunSnapshot,
     TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateOrigin,
     UpdateSubscription,
@@ -19,8 +19,8 @@ pub use pptx_parse::{
     TextRun as ModelTextRun, TextStyleSet, ThemePart,
 };
 pub use pptx_render::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, HitTestResult, ImageCrop, ImageEffect,
-    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, RenderError,
-    RenderedSlide, Stroke, SurfaceDisplayList, TextAlign, TextAnchor,
+    CONTRACT_VERSION, CaretStop, FontSubstitution, GradientStop, GradientType, HitTestResult,
+    ImageCrop, ImageEffect, Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun,
+    Primitive, RenderError, RenderedSlide, Stroke, SurfaceDisplayList, TextAlign, TextAnchor,
     TextParagraph as DisplayTextParagraph, TextRun as DisplayTextRun, Transform,
 };
