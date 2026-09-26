@@ -16,7 +16,10 @@ import type {
   DocxPluginCommandState,
 } from './types';
 
-/** The nearest editor's command store. */
+/**
+ * The nearest editor's command store.
+ * @experimental
+ */
 export function useDocxCommands(): DocxCommandStore {
   const store = useContext(DocxCommandContext);
   if (!store) {
@@ -25,7 +28,10 @@ export function useDocxCommands(): DocxCommandStore {
   return store;
 }
 
-/** Subscribes to one command's state, optionally for specific arguments. */
+/**
+ * Subscribes to one command's state, optionally for specific arguments.
+ * @experimental
+ */
 export function useDocxCommandState<K extends DocxCommandId>(
   id: K,
   args?: DocxCommandArgs[K]
@@ -60,7 +66,10 @@ export function useDocxCommandState(
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-/** A command bound to this component, with its localized label and shortcut. */
+/**
+ * A command bound to this component, with its localized label and shortcut.
+ * @experimental
+ */
 export interface DocxBoundCommand<K extends DocxCommandId> {
   id: K;
   descriptor: DocxCommandDescriptor<K>;
@@ -83,7 +92,10 @@ export interface DocxBoundPluginCommand {
   execute(): Promise<DocxPluginCommandResult>;
 }
 
-/** Binds one command for a custom control. */
+/**
+ * Binds one command for a custom control.
+ * @experimental
+ */
 export function useDocxCommand<K extends DocxCommandId>(
   id: K,
   args?: DocxCommandArgs[K]

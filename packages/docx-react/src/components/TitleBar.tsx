@@ -104,6 +104,7 @@ function DefaultDocIcon() {
 // Logo
 // ============================================================================
 
+/** @experimental */
 export interface LogoProps {
   children: ReactNode;
 }
@@ -116,6 +117,7 @@ export function Logo({ children }: LogoProps) {
 // DocumentName
 // ============================================================================
 
+/** @experimental */
 export interface DocumentNameProps {
   value: string;
   onChange?: (value: string) => void;
@@ -158,6 +160,7 @@ export function DocumentName({ value, onChange, placeholder, editable = true }: 
 // TitleBarRight
 // ============================================================================
 
+/** @experimental */
 export interface TitleBarRightProps {
   children: ReactNode;
 }
@@ -293,6 +296,7 @@ export function MenuBar() {
 // TitleBar
 // ============================================================================
 
+/** @experimental */
 export interface TitleBarProps {
   children: ReactNode;
 }

@@ -110,7 +110,10 @@ const ALIGNMENT_ICONS: Record<string, string> = {
   both: 'format_align_justify',
 };
 
-/** Arguments a control binds; required when the command takes arguments. */
+/**
+ * Arguments a control binds; required when the command takes arguments.
+ * @experimental
+ */
 export type ToolbarCommandArgs<K extends DocxCommandId | DocxPluginCommandId> =
   K extends DocxCommandId
     ? null extends DocxCommandArgs[K]
@@ -118,7 +121,10 @@ export type ToolbarCommandArgs<K extends DocxCommandId | DocxPluginCommandId> =
       : { args: DocxCommandArgs[K] }
     : { args?: null };
 
-/** A built-in or contributed command; a contributed one renders nothing while inactive. */
+/**
+ * A built-in or contributed command; a contributed one renders nothing while inactive.
+ * @experimental
+ */
 export type ToolbarCommandButtonProps<K extends DocxCommandId | DocxPluginCommandId> = {
   id: K;
   /** Button content; defaults to the command's icon, or its label when it has none. */
@@ -128,11 +134,13 @@ export type ToolbarCommandButtonProps<K extends DocxCommandId | DocxPluginComman
   className?: string;
 } & ToolbarCommandArgs<K>;
 
+/** @experimental */
 export interface ToolbarCommandSelectProps<K extends DocxSelectCommandId> {
   id: K;
   className?: string;
 }
 
+/** @experimental */
 export interface ToolbarCommandProps<K extends DocxCommandId | DocxPluginCommandId> {
   id: K;
   /** Binds arguments; omit to render the command's full built-in control. */
@@ -682,7 +690,10 @@ function useCommandOverflow<K extends DocxCommandId>(
   useOverflowSource(element, () => [commandOverflowEntry(store, t, id, args, { theme, prompt })]);
 }
 
-/** A button bound to one command, showing its pressed and disabled state. */
+/**
+ * A button bound to one command, showing its pressed and disabled state.
+ * @experimental
+ */
 export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommandId>(
   props: ToolbarCommandButtonProps<K>
 ) {
@@ -747,7 +758,10 @@ function wrapToolbarValue(value: string | null): { wrapType: string; displayMode
   return { wrapType: value ?? 'inline', displayMode: value === 'inline' ? 'inline' : 'block', cssFloat: null };
 }
 
-/** The built-in picker of a selector command. */
+/**
+ * The built-in picker of a selector command.
+ * @experimental
+ */
 export function ToolbarCommandSelect<K extends DocxSelectCommandId>({
   id,
   className,
@@ -1056,7 +1070,10 @@ function CommandImageTransform() {
   );
 }
 
-/** The built-in control of any command, as the default toolbar presents it. */
+/**
+ * The built-in control of any command, as the default toolbar presents it.
+ * @experimental
+ */
 export function ToolbarCommand<K extends DocxCommandId | DocxPluginCommandId>(
   props: ToolbarCommandProps<K>
 ) {
