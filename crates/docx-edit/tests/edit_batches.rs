@@ -1578,6 +1578,42 @@ fn deleting_the_story_tail_keeps_a_final_paragraph_mark() {
 }
 
 #[test]
+fn deleting_a_paragraph_keeps_the_blocks_before_it() {
+    let table = format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+        p("0000C001", &r("cell"))
+    );
+    let control = format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="block"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+        p("0000D001", &r("control"))
+    );
+    for (block, kind) in [(table, "table"), (control, "blockSdt")] {
+        let doc = open(&format!(
+            "{}{block}{}{}",
+            p("00000001", &r("head")),
+            p("00000002", &r("gone")),
+            p("00000003", &r("tail"))
+        ));
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![delete_paragraphs("00000002", "00000002")],
+        );
+        let order: Vec<String> = doc
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                SegmentContent::Text(text) => Some(text),
+                SegmentContent::OtherEmbed { kind, .. } => Some(kind),
+                SegmentContent::Pilcrow(_) => None,
+            })
+            .collect();
+        assert_eq!(order, ["head", kind, "tail"]);
+    }
+}
+
+#[test]
 fn opaque_blocks_follow_the_live_paragraphs_they_are_restored_before() {
     let doc = open(&format!(
         "{}{RAW}{}{}",
