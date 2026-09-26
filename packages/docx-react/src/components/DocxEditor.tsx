@@ -191,6 +191,7 @@ export interface DocxEditorProps {
    * Replaces the built-in chrome: omit it for the default toolbar, pass
    * `null` for none, or pass chrome composed from the toolbar parts. Supplied
    * chrome also renders when `readOnly` is set; `showToolbar={false}` hides both.
+   * @experimental
    */
   toolbar?: ReactNode;
   /** Additional CSS class name */
@@ -330,7 +331,10 @@ export interface DocxEditorProps {
  * DocxEditor ref interface
  */
 export interface DocxEditorRef {
-  /** The editor's commands, shared by built-in and host chrome. */
+  /**
+   * The editor's commands, shared by built-in and host chrome.
+   * @experimental
+   */
   readonly commands: DocxCommandStore;
   /** Get the current document */
   getDocument: () => Document | null;

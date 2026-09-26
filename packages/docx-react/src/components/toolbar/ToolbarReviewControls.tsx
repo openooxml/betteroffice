@@ -2,6 +2,7 @@ import { useTranslation } from '../../i18n';
 import { ToolbarCommand } from './ToolbarCommand';
 import { ToolbarGroup } from './ToolbarPrimitives';
 
+/** @experimental */
 export interface ToolbarReviewControlsProps {
   className?: string;
 }

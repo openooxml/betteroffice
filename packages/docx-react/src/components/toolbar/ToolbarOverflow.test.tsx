@@ -166,6 +166,43 @@ describe('toolbar overflow', () => {
     ]);
   });
 
+  test('keeps a group with a control that has no menu entry in the row', () => {
+    const shared: string[] = [];
+    const controller = createDocxCommandController();
+    controller.attach(testBinding().binding);
+    render(
+      <DocxCommandProvider commands={controller.store}>
+        <EditorToolbar>
+          <EditorToolbar.Toolbar>
+            <ToolbarGroup label="Sharing">
+              <ToolbarCommandButton id="bold" />
+              <button type="button" onClick={() => shared.push('share')}>
+                Share
+              </button>
+            </ToolbarGroup>
+            <ToolbarGroup label="History">
+              <ToolbarCommandButton id="undo" />
+              <ToolbarCommandButton id="redo" />
+            </ToolbarGroup>
+          </EditorToolbar.Toolbar>
+        </EditorToolbar>
+      </DocxCommandProvider>
+    );
+    resize(10);
+    const toolbar = screen().getByRole('toolbar');
+    const group = (label: string) =>
+      toolbar.querySelector<HTMLElement>(`[role="group"][aria-label="${label}"]`)!;
+    expect(group('Sharing').getAttribute('aria-hidden')).toBeNull();
+    expect((group('Sharing') as HTMLElement & { inert?: boolean }).inert).toBeFalsy();
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Share' }));
+    expect(shared).toEqual(['share']);
+    expect(group('History').getAttribute('aria-hidden')).toBe('true');
+    expect(menuItems(openWithKeyboard()).map((item) => item.dataset.label)).toEqual([
+      'Undo',
+      'Redo',
+    ]);
+  });
+
   test('long labels need more room', () => {
     mount('Share with the whole team');
     resize(340);

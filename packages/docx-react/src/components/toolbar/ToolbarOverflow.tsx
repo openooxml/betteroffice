@@ -14,7 +14,10 @@ import {
   type OverflowMenuEntry,
   type OverflowMenuHandle,
 } from '../../../../../shared/react-toolbar/OverflowMenu';
-import { useToolbarOverflow } from '../../../../../shared/react-toolbar/useToolbarOverflow';
+import {
+  representsUnit,
+  useToolbarOverflow,
+} from '../../../../../shared/react-toolbar/useToolbarOverflow';
 import { docxCommandController } from '../../commands/createDocxCommandStore';
 import { useDocxCommands } from '../../commands/hooks';
 import { useTranslation } from '../../i18n';
@@ -106,7 +109,9 @@ export function ToolbarRail({ children, className, style, label, testId }: Toolb
   const { hidden, remeasure } = useToolbarOverflow({
     items: itemsRef,
     more: moreRef,
-    canHide: (unit) => unit.getAttribute('role') === 'separator' || sourcesIn(unit).length > 0,
+    canHide: (unit) =>
+      unit.getAttribute('role') === 'separator' ||
+      representsUnit(unit, sourcesIn(unit).map(({ element }) => element)),
     onFocusHidden: () => setFocusMore(true),
   });
 
@@ -195,6 +200,7 @@ export function ToolbarRail({ children, className, style, label, testId }: Toolb
   );
 }
 
+/** @experimental */
 export interface ToolbarOverflowProps {
   /** Label of the menu entry that replaces the content at narrow widths. */
   label: string;
@@ -210,6 +216,7 @@ export interface ToolbarOverflowProps {
 /**
  * Gives arbitrary host content a menu entry, so it can move into the overflow
  * menu instead of staying clipped in a narrow toolbar.
+ * @experimental
  */
 export function ToolbarOverflow({
   label,
