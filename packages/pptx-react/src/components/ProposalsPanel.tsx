@@ -80,6 +80,8 @@ export function ProposalsPanel({
     id: string;
     index: number;
   } | null>(null);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [preview, setPreview] = useState<{
     data: ProposalPreview;
     before: SlideDisplayList;
@@ -141,27 +143,38 @@ export function ProposalsPanel({
     setSelected({ id: proposal.id, index });
   };
 
-  /** Whether `reviewed` still shows the proposal; otherwise shows its latest preview. */
-  const stillReviewed = (id: string, at: number, reviewed: ProposalPreview) => {
+  /**
+   * Whether `reviewed` still shows the proposal of `target`. Otherwise the dialog shows the latest
+   * preview of `target`, unless the reviewer has selected something else since.
+   */
+  const stillReviewed = (
+    target: { id: string; index: number },
+    reviewed: ProposalPreview
+  ) => {
+    const shown = () =>
+      selectedRef.current?.id === target.id &&
+      selectedRef.current.index === target.index;
     try {
-      const latest = handle.previewProposal(id);
+      const latest = handle.previewProposal(target.id);
       if (
         JSON.stringify(latest.proposal.changes) ===
         JSON.stringify(reviewed.proposal.changes)
       ) {
         return true;
       }
-      const change = latest.proposal.changes[at];
+      if (!shown()) return false;
+      const change = latest.proposal.changes[target.index];
       const index = latest.snapshot.slides.findIndex(
         (slide) => slide.id === change.slideId
       );
       setPreview({
         data: latest,
         before: handle.layoutSlide(index),
-        after: handle.layoutProposalSlide(id, index),
+        after: handle.layoutProposalSlide(target.id, index),
       });
       setError(t('proposals.changedAgain'));
     } catch (value) {
+      if (!shown()) return false;
       setPreview(null);
       setError(value instanceof Error ? value.message : String(value));
     }
@@ -170,15 +183,15 @@ export function ProposalsPanel({
 
   const acceptPreview = (force: boolean) => {
     if (!selected || !preview) return;
-    const { id, index } = selected;
+    const target = selected;
     const reviewed = preview.data;
-    if (!stillReviewed(id, index, reviewed)) return;
+    if (!stillReviewed(target, reviewed)) return;
     const accept = pptxCommandController(store)?.defer('proposalAccept', {
-      proposalId: id,
+      proposalId: target.id,
       force,
     });
     void accept?.complete((perform) =>
-      stillReviewed(id, index, reviewed)
+      stillReviewed(target, reviewed)
         ? perform()
         : { ok: false, failure: commandReason('target-changed', { translate: t }) }
     );

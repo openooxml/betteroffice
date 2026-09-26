@@ -1069,6 +1069,47 @@ describe('PptxEditor commands', () => {
     }
   }, 30_000);
 
+  it('a deferred forced acceptance leaves a change selected meanwhile on screen', async () => {
+    const images = pauseImages();
+    try {
+      const { view, api } = await open();
+      const handle = api.handle;
+      const [first, second] = handle.snapshot().slides;
+      await act(async () => {
+        handle.propose('Review agent', null, [
+          { type: 'setSlideNotes', slideId: first.id, text: 'First proposed' },
+          { type: 'setSlideNotes', slideId: second.id, text: 'Second proposed' },
+        ]);
+        handle.setSlideNotes(first.id, 'Human notes');
+        api.refresh();
+      });
+      fireEvent.click(view.getByTestId('pptx-proposals-button'));
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(1));
+      fireEvent.click(view.getAllByTestId('pptx-proposal-preview')[0]);
+      await waitFor(() => expect(view.getByTestId('pptx-proposal-force')).toBeDefined());
+      fireEvent.click(view.getByTestId('pptx-proposal-force'));
+      handle.setSlideNotes(first.id, 'Newer human notes');
+      const dialog = view.getByTestId('pptx-proposal-preview-dialog');
+      const picker = within(dialog).getByRole('combobox', { name: 'Change' }) as HTMLSelectElement;
+      fireEvent.change(picker, { target: { value: '1' } });
+      await waitFor(() => expect(dialog.textContent).toContain('Second proposed'));
+      const layouts = spyOn(handle, 'layoutSlide');
+      await act(async () => images.pending[0].load());
+      await act(async () => {
+        await new Promise((done) => setTimeout(done, 50));
+      });
+      expect(layouts.mock.calls.map(([index]) => index)).not.toContain(0);
+      expect(dialog.textContent).not.toContain('The target changed again');
+      expect(picker.value).toBe('1');
+      expect(handle.snapshot().slides[0].notes).toBe('Newer human notes');
+      expect(handle.listProposals()).toHaveLength(1);
+      layouts.mockRestore();
+    } finally {
+      images.restore();
+    }
+  }, 30_000);
+
   it('formats through api.commands and the platform-aware shortcuts', async () => {
     const { view, api, shape, story } = await open();
     const end = api.handle.story(story.id).length - 1;
