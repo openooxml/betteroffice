@@ -2,11 +2,12 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 use yrs::types::Attrs;
-use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, Transact, TransactionMut};
+use yrs::{Any, Map, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::deck::SourceImport;
 use crate::{
-    DeckSession, EditError, EditResult, META, MIGRATE_ORIGIN, ShapeSnapshot, StorySnapshot,
+    DeckSession, DeckSnapshot, EditError, EditResult, META, MIGRATE_ORIGIN, ShapeSnapshot,
+    StorySnapshot,
 };
 
 #[derive(Clone, Copy)]
@@ -16,15 +17,14 @@ pub(crate) enum SourceProperty {
     Kern,
 }
 
-/// Marks a doc seeded with run kern thresholds; one without it predates them.
-pub(crate) const KERN_SEEDED: &str = "kernSeeded";
-
 impl SourceProperty {
-    fn keys(self) -> (&'static str, &'static str, &'static str) {
+    /// The meta flag a migration left, the package field, the story attribute.
+    /// Kern has no flag: a new key in the seed would shift every bootstrap id.
+    fn keys(self) -> (Option<&'static str>, &'static str, &'static str) {
         match self {
-            Self::Baseline => ("baselinesPendingSource", "baselinePct", "baseline"),
-            Self::Spacing => ("spacingPendingSource", "spacingPt", "spacing"),
-            Self::Kern => (KERN_SEEDED, "kernPt", "kern"),
+            Self::Baseline => (Some("baselinesPendingSource"), "baselinePct", "baseline"),
+            Self::Spacing => (Some("spacingPendingSource"), "spacingPt", "spacing"),
+            Self::Kern => (None, "kernPt", "kern"),
         }
     }
 
@@ -35,27 +35,6 @@ impl SourceProperty {
             Self::Kern => style.kern_pt,
         }
     }
-
-    /// Migrations flag the older properties as pending; kern flags the docs
-    /// that already carry it, so no schema bump locks older clients out.
-    fn pending<T: ReadTxn>(self, meta: &MapRef, txn: &T) -> bool {
-        let flagged = meta.get(txn, self.keys().0) == Some(Out::Any(Any::Bool(true)));
-        match self {
-            Self::Kern => !flagged,
-            Self::Baseline | Self::Spacing => flagged,
-        }
-    }
-
-    fn settle(self, meta: &MapRef, txn: &mut TransactionMut<'_>) {
-        match self {
-            Self::Kern => {
-                meta.insert(txn, KERN_SEEDED, true);
-            }
-            Self::Baseline | Self::Spacing => {
-                meta.remove(txn, self.keys().0);
-            }
-        }
-    }
 }
 
 pub(crate) fn import_source(
@@ -63,11 +42,14 @@ pub(crate) fn import_source(
     import: &mut SourceImport<'_>,
     property: SourceProperty,
 ) -> EditResult<()> {
-    let (_, json_key, attribute) = property.keys();
-    let pending = {
-        let txn = session.doc.transact();
-        txn.get_map(META)
-            .is_some_and(|meta| property.pending(&meta, &txn))
+    let (pending_key, json_key, attribute) = property.keys();
+    let pending = match pending_key {
+        Some(key) => {
+            let txn = session.doc.transact();
+            txn.get_map(META)
+                .is_some_and(|meta| meta.get(&txn, key) == Some(Out::Any(Any::Bool(true))))
+        }
+        None => kern_pending(session, import)?,
     };
     if !pending {
         return Ok(());
@@ -142,8 +124,29 @@ pub(crate) fn import_source(
     let meta = txn
         .get_map(META)
         .ok_or_else(|| EditError::InvalidState("missing metadata".into()))?;
-    property.settle(&meta, &mut txn);
+    if let Some(key) = pending_key {
+        meta.remove(&mut txn, key);
+    }
     Ok(())
+}
+
+/// A doc seeded before runs carried `kern` has none in any story while its
+/// source does; one seeded since carries the source's.
+fn kern_pending(session: &DeckSession, import: &mut SourceImport<'_>) -> EditResult<bool> {
+    fn carries_kern(snapshot: &DeckSnapshot) -> bool {
+        let mut stories = HashMap::new();
+        for slide in &snapshot.slides {
+            collect_stories(&slide.shapes, &mut stories);
+        }
+        stories.values().any(|story| {
+            story
+                .paragraphs
+                .iter()
+                .flat_map(|paragraph| &paragraph.runs)
+                .any(|run| run.style.kern_pt.is_some())
+        })
+    }
+    Ok(carries_kern(import.source_snapshot()?) && !carries_kern(&session.snapshot()?))
 }
 
 fn collect_stories<'a>(
