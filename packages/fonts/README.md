@@ -4,6 +4,12 @@ Bundled open fonts for the [BetterOffice](https://betteroffice.dev/) engine, plu
 
 Word documents overwhelmingly reference the MS core fonts (Calibri, Cambria, Arial, Times New Roman, Courier New), whose binaries cannot be redistributed. This package ships the open fonts the LibreOffice/ChromeOS ecosystem uses as drop-in metric replacements: same advance widths, so line breaks and pagination match Word even where glyph outlines differ slightly.
 
+Beyond the core replacements it also ships the families PowerPoint decks are
+commonly drawn with — Inter, Roboto, Source Sans 3, DM Sans, Open Sans and
+Montserrat, the fonts themselves — plus Gelasio for Georgia and Comic Relief for
+Comic Sans MS, both metric-compatible. A deck naming a family nobody has falls
+back to Calibri, which is what Office substitutes.
+
 ## Why it matters
 
 Measured across 813 real-world documents, scored against Word's own page count in `docProps/app.xml <Pages>`:

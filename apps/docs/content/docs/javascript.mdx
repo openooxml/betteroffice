@@ -137,13 +137,15 @@ const review = defineDocxPlugin<{ count: number }>({
 
 **Lifecycle.** When a document is ready each plugin gets fresh state, runs
 `initialize`, receives one `load` event (`loaded`, `replaced` or `attached`), and
-then its contributions appear; a document change before that hook finishes
-aborts it and delivers `load` again. `document-change` carries only the committed
-version, for typing, remote edits, undo, commands and batches, and never for a
-refusal or no-op; `selection-change`, `mode-change` (with the effective
-`readOnly`), `layout-change` and `grants-change` follow. Notifications describe
-current state, so several changes can arrive as one, and a newer one aborts the
-hook still handling the last (`context.signal`). Replacing the document,
+then its contributions appear; a document change the hook did not make itself
+aborts it and delivers `load` again, and after ten such runs the plugin is
+stopped and reported. `document-change` carries only the committed version, for
+typing, remote edits, undo, commands and batches (a plugin's own included), and
+never for a refusal or no-op; `selection-change`, `mode-change` (with the
+effective `readOnly`), `layout-change` and `grants-change` follow. Notifications
+describe current state, so several changes can arrive as one, and a newer one
+aborts the hook still handling the last (`context.signal`), unless that hook's
+own edit batch made it. Replacing the document,
 removing the plugin, changing its `revision`, unmounting or a failure ends the
 activation: signals abort, clients refuse, and each `onCleanup` disposer runs
 once with the reason. Plugins are matched by `id` and `revision`, so new array
@@ -311,11 +313,12 @@ const review = definePptxPlugin<{ slides: number }>({
 ```
 
 **Lifecycle and grants** follow the DOCX editor: fresh state, `initialize` and
-one `load` event per presentation (repeated when it changes before that hook
-finishes), then coalesced `document-change`, `selection-change`, `mode-change`
-(with `readOnly`), `layout-change` and `grants-change` events. `document-change` comes from the presentation's
-committed versions, so typing, commands, batches, undo, redo and remote updates
-each produce one, and refusals or no-ops none. Replacing the presentation,
+one `load` event per presentation (repeated when a change the hook did not make
+arrives first, and stopped after ten runs), then coalesced `document-change`,
+`selection-change`, `mode-change` (with `readOnly`), `layout-change` and
+`grants-change` events. `document-change` comes from the presentation's
+committed versions, so typing, commands, batches (a plugin's own included), undo,
+redo and remote updates each produce one, and refusals or no-ops none. Replacing the presentation,
 removing the plugin, changing its `revision`, unmounting or a failure ends the
 activation and runs its cleanups once. Without a grant a plugin reads
 (`read.version`, `readContent`, `findText`, `validateEdits`) and navigates;

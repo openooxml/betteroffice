@@ -214,20 +214,22 @@ const review = definePptxPlugin<State>({
 - **Lifecycle.** Once a presentation is open, each plugin gets fresh state,
   `initialize`, then one `load` event (`loaded`, `replaced`, or `attached` for a
   plugin added to an open presentation), and its contributions appear. A
-  presentation change before that hook finishes aborts it and delivers `load`
-  again. It then receives `document-change` (the committed version only, for
-  typing, commands, batches, undo, redo and remote updates, never for refusals
+  presentation change the hook did not make itself aborts it and delivers
+  `load` again; after ten such runs the plugin is stopped and reported. It then
+  receives `document-change` (the committed version only, for typing, commands,
+  batches, its own included, undo, redo and remote updates, never for refusals
   or no-ops), `selection-change`, `mode-change` (with `readOnly`),
   `layout-change` and `grants-change`. Events describe current state: several
   changes may arrive as one, and a newer one aborts the hook still handling the
-  previous (`context.signal`). Replacing the presentation, removing the plugin,
-  changing its `revision`, unmounting, or a failure ends the activation: its
-  signals abort, its clients refuse, and every `onCleanup` disposer runs once
-  with the reason. Plugins are matched by `id` and `revision`, so new array or
-  callback identities and reordering keep their state. `definePptxPlugin`
-  copies the panel, commands and toolbar, so changing them takes a new
-  definition. `context.run(action)` gives event handlers a fresh context and
-  isolates their failures. `onReady` is unaffected by plugins.
+  previous (`context.signal`), except a change that hook's own edit batch made.
+  Replacing the presentation, removing the plugin, changing its `revision`,
+  unmounting, or a failure ends the activation: its signals abort, its clients
+  refuse, and every `onCleanup` disposer runs once with the reason. Plugins are
+  matched by `id` and `revision`, so new array or callback identities and
+  reordering keep their state. `definePptxPlugin` copies the panel, commands
+  and toolbar, so changing them takes a new definition. `context.run(action)`
+  gives event handlers a fresh context and isolates their failures. `onReady` is
+  unaffected by plugins.
 - **Stale results.** `setState` returns false once the context is superseded or
   ended, or when the presentation is no longer at `atVersion` (by default the
   version the context was created at).

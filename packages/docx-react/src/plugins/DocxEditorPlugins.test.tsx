@@ -26,6 +26,9 @@ import {
   type DocxPluginError,
   type DocxPluginEvent,
 } from '../index';
+import { isMacPlatform } from '../commands/descriptors';
+
+const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
 
@@ -433,6 +436,36 @@ describe('DocxEditor plugins', () => {
     });
   });
 
+  test('a load hook that applies a batch every run loads once and keeps its state', async () => {
+    const loads: string[] = [];
+    const plugin = defineDocxPlugin<State>({
+      id: 'acme.review',
+      createState: () => ({ count: 0 }),
+      async onEvent(context, event) {
+        if (event.type !== 'load') return;
+        loads.push(event.version);
+        const read = await context.read.readParagraphs({ view: 'accepted' });
+        const paragraph = read.ok ? read.paragraphs.find((c) => c.text.length >= 3) : undefined;
+        if (!read.ok || !paragraph || !context.edits) return;
+        const applied = await context.edits.applyEdits(
+          appendRequest(read.version, paragraph.paraId)
+        );
+        if (applied.ok) context.setState({ count: loads.length }, applied.version);
+      },
+      panel: {
+        title: 'Loaded',
+        placement: 'left',
+        render: ({ context }) => <output data-testid="loaded">{context.state.count}</output>,
+      },
+    });
+    const { ref, view } = await mount({ plugins: [plugin], pluginGrants: WRITE });
+    const body = within(view.container);
+    await until(() => body.queryByTestId('loaded')?.textContent === '1');
+    await settle(150);
+    expect(loads).toHaveLength(1);
+    expect((await firstParagraph(ref)).paragraph.text).toMatch(/[^!]!$/);
+  });
+
   test('contributed commands run with their plugin, from the toolbar, ref and shortcuts', async () => {
     const calls: string[] = [];
     const errors: DocxPluginError[] = [];
@@ -476,7 +509,7 @@ describe('DocxEditor plugins', () => {
 
     expect(await act(() => ref.current!.commands.execute(id, null))).toMatchObject({ ok: true });
     const editor = view.container.querySelector('[data-testid="docx-editor"]')!;
-    fireEvent.keyDown(editor, { key: 'M', shiftKey: true, ctrlKey: true, metaKey: true });
+    fireEvent.keyDown(editor, { key: 'M', shiftKey: true, ...MOD });
     await settle();
     expect(calls).toEqual(['acme.review', 'acme.review', 'acme.review']);
 

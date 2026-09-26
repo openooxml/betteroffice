@@ -137,6 +137,8 @@ export interface ShapeSnapshot {
   rotationDeg: number;
   flipH: boolean;
   flipV: boolean;
+  /** The geometry the shape draws at, present only while it has none of its own. */
+  inherited?: InheritedGeometry | null;
   /** Hides this shape and its descendants; omitted when false. */
   hidden?: boolean;
   geometry: string;
@@ -153,6 +155,17 @@ export interface ShapeSnapshot {
   graphic: unknown | null;
   textStories: StorySnapshot[];
   children: ShapeSnapshot[];
+}
+
+/** The transform a placeholder takes from its layout or master. */
+export interface InheritedGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotationDeg: number;
+  flipH: boolean;
+  flipV: boolean;
 }
 
 export interface SlideSnapshot {
@@ -415,6 +428,7 @@ export interface ShapePrimitive extends PrimitiveBase {
 export type ImageEffect =
   | { kind: 'biLevel'; threshold: number }
   | { kind: 'grayscale' }
+  | { kind: 'alpha'; amount: number }
   | { kind: 'luminance'; brightness: number; contrast: number }
   | { kind: 'duotone'; shadow: string; highlight: string }
   | { kind: 'colorChange'; from: string; to: string; useAlpha?: boolean };
@@ -433,6 +447,8 @@ export interface ImagePrimitive extends PrimitiveBase {
   effects?: ImageEffect[];
   /** Fraction of the source discarded per edge, from `a:srcRect`. */
   crop?: ImageCrop;
+  /** `a:tile`: repeat the picture at its own size, scaled by these fractions. */
+  tile?: { scaleX: number; scaleY: number };
   /** Outline the picture is masked to, when its `spPr` gives it one. */
   path?: GeometryPathCommand[];
   /** The authored mask is unsupported and uses a rectangle fallback. */
@@ -504,6 +520,8 @@ export interface TextBoxPrimitive extends PrimitiveBase {
   }>;
   lines: PositionedTextLine[];
   overflow?: boolean;
+  /** `a:rPr/a:effectLst`: the shadow the box's glyphs are drawn with. */
+  textShadow?: Shadow;
 }
 
 export interface PlaceholderPrimitive extends PrimitiveBase {

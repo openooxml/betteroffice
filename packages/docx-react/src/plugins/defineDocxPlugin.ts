@@ -1,17 +1,34 @@
 import { normalizeChord } from '../commands/descriptors';
-import type { DocxPlugin, DocxPluginDefinition } from './types';
+import type { DocxPlugin, DocxPluginCommand, DocxPluginDefinition } from './types';
 
 const definitions = new WeakMap<object, DocxPluginDefinition<unknown>>();
 
 const LOCAL_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/;
 const PLACEMENTS: ReadonlySet<string> = new Set(['left', 'right', 'bottom']);
 
+function frozenCopy<T>(value: T): T {
+  if (Array.isArray(value)) return Object.freeze([...value]) as T;
+  return value !== null && typeof value === 'object' ? Object.freeze({ ...value }) : value;
+}
+
+function frozenCommand<S>(command: DocxPluginCommand<S>): DocxPluginCommand<S> {
+  if (command === null || typeof command !== 'object') return command;
+  return Object.freeze({ ...command, shortcuts: frozenCopy(command.shortcuts) });
+}
+
 /**
- * Wraps a plugin for `DocxEditor`'s `plugins` prop. The definition is checked when the editor
- * installs it; a problem is reported through `onPluginError` and disables only this plugin.
+ * Wraps a plugin for `DocxEditor`'s `plugins` prop. The definition is copied and frozen, down to
+ * its panel, commands, shortcuts and toolbar, and checked when the editor installs it; a problem
+ * is reported through `onPluginError` and disables only this plugin.
  */
 export function defineDocxPlugin<S>(definition: DocxPluginDefinition<S>): DocxPlugin {
-  const frozen = Object.freeze({ ...definition });
+  const commands = definition.commands;
+  const frozen = Object.freeze({
+    ...definition,
+    panel: frozenCopy(definition.panel),
+    commands: Array.isArray(commands) ? Object.freeze(commands.map(frozenCommand)) : commands,
+    toolbar: frozenCopy(definition.toolbar),
+  });
   const plugin = Object.freeze(
     frozen.revision === undefined ? { id: frozen.id } : { id: frozen.id, revision: frozen.revision }
   );

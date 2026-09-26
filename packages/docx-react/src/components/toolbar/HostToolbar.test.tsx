@@ -5,6 +5,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { createDocxCommandController } from '../../commands/createDocxCommandStore';
+import { isMacPlatform } from '../../commands/descriptors';
 import { PLAIN_CONTEXT, testBinding } from '../../commands/testing';
 import { useKeyboardShortcuts } from '../DocxEditor/hooks/useKeyboardShortcuts';
 import type { DocxCommandController } from '../../commands/createDocxCommandStore';
@@ -25,6 +26,8 @@ const {
 function screen() {
   return within(document.body);
 }
+
+const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
 afterEach(cleanup);
 afterAll(async () => {
@@ -148,7 +151,7 @@ describe('host-composed toolbar', () => {
     );
     const bold = screen().getByRole('button', { name: 'Bold' });
     fireEvent.click(bold);
-    fireEvent.keyDown(bold, { key: 'b', ctrlKey: true, metaKey: true });
+    fireEvent.keyDown(bold, { key: 'b', ...MOD });
     await act(async () => {});
     expect(harness.calls).toEqual([
       { id: 'bold', args: null, ordered: true },
@@ -177,7 +180,7 @@ describe('host-composed toolbar', () => {
     );
     const secondBold = within(screen().getByTestId('second')).getByRole('button', { name: 'Bold' });
     fireEvent.click(within(screen().getByTestId('first')).getByRole('button', { name: 'Undo' }));
-    fireEvent.keyDown(secondBold, { key: 'b', ctrlKey: true, metaKey: true });
+    fireEvent.keyDown(secondBold, { key: 'b', ...MOD });
     await act(async () => {});
     expect(first.harness.calls.map((call) => call.id)).toEqual(['undo']);
     expect(second.harness.calls.map((call) => call.id)).toEqual(['bold']);
@@ -263,7 +266,7 @@ describe('host-composed toolbar', () => {
     });
     const listbox = screen().getByRole('listbox');
     expect(screen().getByTestId('second').contains(listbox)).toBe(false);
-    const saved = fireEvent.keyDown(listbox, { key: 's', ctrlKey: true, metaKey: true });
+    const saved = fireEvent.keyDown(listbox, { key: 's', ...MOD });
     await act(async () => {});
     expect(saved).toBe(false);
     expect(first.harness.calls).toEqual([]);

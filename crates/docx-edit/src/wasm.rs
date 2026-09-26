@@ -675,6 +675,29 @@ fn json_to_any(value: &Value) -> Result<Any, JsValue> {
     Any::from_json(&value.to_string()).map_err(js_err)
 }
 
+/// Image geometry JSON → payload entries, with a nested `"other"` object
+/// flattened alongside the named fields.
+fn image_geometry_entries(geometry_json: &str) -> Result<Vec<(String, Any)>, JsValue> {
+    let value: Value = serde_json::from_str(geometry_json).map_err(js_err)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| js_err("image geometry must be a JSON object"))?;
+    let mut entries = Vec::new();
+    for (key, value) in object {
+        if key == "other" {
+            let other = value
+                .as_object()
+                .ok_or_else(|| js_err("image geometry \"other\" must be an object"))?;
+            for (other_key, other_value) in other {
+                entries.push((other_key.clone(), json_to_any(other_value)?));
+            }
+        } else {
+            entries.push((key.clone(), json_to_any(value)?));
+        }
+    }
+    Ok(entries)
+}
+
 /// A JSON object → yrs text/format attributes (`Arc<str>` keys, `Any` values).
 fn parse_attrs(value: Option<&Value>) -> Result<yrs::types::Attrs, JsValue> {
     let mut attrs = yrs::types::Attrs::new();
@@ -2866,28 +2889,37 @@ impl EditSession {
     /// `geometry_json` or its `"other"` is not an object, and when no embed
     /// has that id.
     pub fn set_image_geometry(&self, embed_id: &str, geometry_json: &str) -> Result<(), JsValue> {
-        let value: Value = serde_json::from_str(geometry_json).map_err(js_err)?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| js_err("set_image_geometry expects a JSON object"))?;
-        let mut entries = Vec::new();
-        for (key, value) in object {
-            if key == "other" {
-                let other = value
-                    .as_object()
-                    .ok_or_else(|| js_err("image geometry \"other\" must be an object"))?;
-                for (other_key, other_value) in other {
-                    entries.push((other_key.clone(), json_to_any(other_value)?));
-                }
-            } else {
-                entries.push((key.clone(), json_to_any(value)?));
-            }
-        }
+        let entries = image_geometry_entries(geometry_json)?;
         self.select_embed_story(embed_id)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
             .set_embed_attrs_by_id(&ctx, embed_id, entries)
+            .map(|_| ())
+            .map_err(js_err)
+    }
+
+    /// [`EditSession::set_image_geometry`] for the image embed at
+    /// `(story, para_id, offset)` — the way to reach one of several images
+    /// sharing a relationship id, which the id variant resolves to the first.
+    /// Errors when that position holds no image.
+    pub fn set_image_geometry_at(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        geometry_json: &str,
+    ) -> Result<(), JsValue> {
+        let entries = image_geometry_entries(geometry_json)?;
+        let doc = self.engine.doc();
+        let at = Position::new(story, loc_index(doc, story, para_id, offset)?);
+        if doc.embed_kind(&at).map_err(js_err)?.as_deref() != Some("image") {
+            return Err(js_err(format!(
+                "offset {offset} of paragraph {para_id:?} holds no image"
+            )));
+        }
+        let ctx = EditCtx::local(String::new(), String::new());
+        doc.set_embed_attrs(&ctx, at, entries)
             .map(|_| ())
             .map_err(js_err)
     }
@@ -3615,6 +3647,44 @@ mod tests {
             reopened.document.package.media_entries,
             expected.document.package.media_entries
         );
+    }
+
+    #[test]
+    fn image_geometry_at_a_position_reaches_one_of_several_images_sharing_an_id() {
+        let session = EditSession::new(22.0).unwrap();
+        session
+            .engine
+            .doc()
+            .create_story_with_paragraph_id("body", "p0", "AB", "Normal", "left")
+            .unwrap();
+        for offset in [2, 1] {
+            session
+                .insert_image("body", "p0", offset, r#"{"rId":"rIdShared"}"#, None, None)
+                .unwrap();
+        }
+        session
+            .set_image_geometry_at("body", "p0", 3, r#"{"alt":"second"}"#)
+            .unwrap();
+        session
+            .set_image_geometry("rIdShared", r#"{"title":"first"}"#)
+            .unwrap();
+
+        let images: Vec<_> = session
+            .engine
+            .doc()
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                SegmentContent::OtherEmbed { payload, .. } => Some(payload),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].get("alt"), None);
+        assert_eq!(images[0].get("title"), Some(&Any::from("first")));
+        assert_eq!(images[1].get("alt"), Some(&Any::from("second")));
+        assert_eq!(images[1].get("title"), None);
     }
 
     fn batch_docx() -> Vec<u8> {

@@ -61,12 +61,13 @@ export interface PptxPluginEditorAccess {
   readOnlyRefusal(handle: PresentationHandle): PptxEditRefusal | null;
   /**
    * The editor's batch path, run inside `admit`: `authorize`, the read-only refusal, one
-   * transaction, then one refresh when it applied.
+   * transaction inside `commit`, then one refresh when it applied.
    */
   applyEdits<Refusal>(
     handle: PresentationHandle,
     request: PptxEditRequest,
-    authorize: () => Refusal | null
+    authorize: () => Refusal | null,
+    commit: <T>(write: () => T) => T
   ): PptxEditResult | Refusal;
   commands(): PptxCommandController | null;
   navigator: PptxPluginNavigator;
@@ -221,7 +222,12 @@ export function createPluginClients(
           const denied = batchDenial(request.history);
           if (denied) return denied;
           return whenAdmitted((handle) =>
-            access.applyEdits(handle, request, () => batchDenial(request.history))
+            access.applyEdits(
+              handle,
+              request,
+              () => batchDenial(request.history),
+              (write) => invocation.commit(write)
+            )
           );
         },
       }

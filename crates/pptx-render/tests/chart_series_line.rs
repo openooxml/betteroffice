@@ -77,12 +77,13 @@ fn a_series_is_stroked_at_the_width_its_own_sp_pr_declares() {
     assert_widths(&segments(line, "#D64550"), 3, 41275.0 / 9525.0);
     assert_widths(&segments(line, "#1B4F9C"), 3, 2.0);
     assert!(segments(line, "#2F8F5B").is_empty());
-    assert_eq!(swatches(line, "#2F8F5B"), 5);
+    // One marker per point and no legend key: the chart carries no `c:legend`.
+    assert_eq!(swatches(line, "#2F8F5B"), 4);
 
     let scatter = &slides[1];
     assert_widths(&segments(scatter, "#7A3EA1"), 3, 3.0);
     assert!(segments(scatter, "#C77B12").is_empty());
-    assert_eq!(swatches(scatter, "#C77B12"), 5);
+    assert_eq!(swatches(scatter, "#C77B12"), 4);
 
     let radar = &slides[2];
     assert_widths(&segments(radar, "#0E7C86"), 4, 12700.0 / 9525.0);

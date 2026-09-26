@@ -839,36 +839,70 @@ describe('PptxEditor plugins', () => {
     expect(thumbnails[1].getAttribute('aria-current')).toBe('page');
   });
 
-  test('a batch the load hook applies reports its receipt, and load repeats at that version', async () => {
+  test('a load hook that applies a batch every run loads once, then sees its change', async () => {
     const outcomes: (PptxEditResult | PptxPluginRefusal)[] = [];
     const seen: string[] = [];
-    const plugin = definePptxPlugin<null>({
+    const plugin = definePptxPlugin<State>({
       id: 'acme.review',
-      createState: () => null,
+      createState: () => ({ count: 0 }),
       async onEvent(context, event) {
         if (event.type === 'load' || event.type === 'document-change') {
           seen.push(`${event.type}:${event.version}`);
         }
         if (event.type !== 'load' || !context.edits) return;
         const content = await context.read.readContent();
-        if (!content.ok || content.slides[0].notes === 'From load') return;
-        outcomes.push(
-          await context.edits.applyEdits(
-            notesRequest(content.version, content.slides[0].id, 'From load')
-          )
+        if (!content.ok) return;
+        const slideId = content.slides[0].id;
+        const applied = await context.edits.applyEdits(
+          notesRequest(content.version, slideId, `From load ${seen.length}`)
         );
+        outcomes.push(applied);
+        if (applied.ok) context.setState({ count: outcomes.length }, applied.version);
+      },
+      panel: {
+        title: 'Loaded',
+        placement: 'left',
+        render: ({ context }) => <output data-testid="loaded">{context.state.count}</output>,
       },
     });
-    const { api } = await mount({ plugins: [plugin], pluginGrants: WRITE });
-    await until(() => outcomes.length > 0);
+    const { api, view } = await mount({ plugins: [plugin], pluginGrants: WRITE });
+    await until(() => within(view.container).queryByTestId('loaded')?.textContent === '1');
+    await settle(150);
     const after = await read(api());
     expect(outcomes).toEqual([
       expect.objectContaining({ ok: true, applied: true, version: after.version }),
     ]);
-    await until(() => seen.includes(`load:${after.version}`));
-    await settle(50);
     const { baseVersion } = outcomes[0] as { baseVersion: string };
-    expect(seen).toEqual([`load:${baseVersion}`, `load:${after.version}`]);
+    expect(seen).toEqual([`load:${baseVersion}`, `document-change:${after.version}`]);
+  });
+
+  test('a change the load hook did not make delivers load again at the latest version', async () => {
+    const loads: string[] = [];
+    const changes: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((done) => (release = done));
+    const plugin = definePptxPlugin<null>({
+      id: 'acme.review',
+      createState: () => null,
+      async onEvent(_context, event) {
+        if (event.type === 'document-change') changes.push(event.version);
+        if (event.type !== 'load') return;
+        loads.push(event.version);
+        if (loads.length === 1) await gate;
+      },
+    });
+    const { api } = await mount({ plugins: [plugin] });
+    await until(() => loads.length === 1);
+    const before = await read(api());
+    await act(async () => {
+      await api().applyEdits(notesRequest(before.version, before.slides[0].id, 'External'));
+    });
+    release();
+    await until(() => loads.length === 2);
+    await settle(50);
+    const after = await read(api());
+    expect(loads).toEqual([before.version, after.version]);
+    expect(changes).toEqual([]);
   });
 
   test('layouts follow the presented frame, its version, slide and zoom', async () => {

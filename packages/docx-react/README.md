@@ -309,13 +309,15 @@ const review = defineDocxPlugin<State>({
 - **Lifecycle.** Once a document is ready, each plugin gets fresh state,
   `initialize`, then one `load` event (`loaded`, `replaced`, or `attached` for a
   plugin added to an open document), and its contributions appear. A document
-  change before that hook finishes aborts it and delivers `load` again. It then
-  receives `document-change` (the committed version only, for typing, remote
-  edits, undo, commands and batches, never for refusals or no-ops),
+  change the hook did not make itself aborts it and delivers `load` again; after
+  ten such runs the plugin is stopped and reported. It then receives
+  `document-change` (the committed version only, for typing, remote edits, undo,
+  commands and batches, its own included, never for refusals or no-ops),
   `selection-change`, `mode-change` (with the effective `readOnly`),
   `layout-change` and `grants-change`. Events describe current state: several
   changes may arrive as one, and a newer one aborts the hook still handling the
-  previous (`context.signal`). Replacing the document, removing the plugin,
+  previous (`context.signal`), except a change that hook's own edit batch
+  made. Replacing the document, removing the plugin,
   changing its `revision`, unmounting, or a failure ends the activation: its
   signals abort, its clients refuse, and every `onCleanup` disposer runs once
   with the reason. A disposer registered afterwards runs immediately. Plugins
