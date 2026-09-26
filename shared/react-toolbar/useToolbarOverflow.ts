@@ -28,9 +28,17 @@ const HIDDEN_STYLE = {
   insetInlineStart: '0',
 } as const satisfies Partial<Record<keyof CSSStyleDeclaration, string>>;
 
-type HiddenKey = keyof typeof HIDDEN_STYLE;
+const SCROLL_STYLE = {
+  overflowX: 'auto',
+  overflowY: 'hidden',
+  scrollbarWidth: 'thin',
+} as const satisfies Partial<Record<keyof CSSStyleDeclaration, string>>;
 
-const saved = new WeakMap<HTMLElement, Partial<Record<HiddenKey, string>>>();
+type StyleKey = keyof typeof HIDDEN_STYLE | keyof typeof SCROLL_STYLE;
+type SavedStyle = Partial<Record<StyleKey, string>>;
+
+const saved = new WeakMap<HTMLElement, SavedStyle>();
+const scrolling = new WeakMap<HTMLElement, SavedStyle>();
 
 const CONTROLS = [
   'a[href]',
@@ -66,24 +74,44 @@ function innerWidth(element: HTMLElement): number {
   return element.getBoundingClientRect().width - padding;
 }
 
-function setHidden(element: HTMLElement, hidden: boolean): void {
-  const previous = saved.get(element);
-  if (hidden && !previous) {
-    const values: Partial<Record<HiddenKey, string>> = {};
-    for (const key of Object.keys(HIDDEN_STYLE) as HiddenKey[]) {
+/** Applies `style` over the element's inline style, or restores it; returns whether it changed. */
+function swapStyle(
+  element: HTMLElement,
+  style: SavedStyle,
+  store: WeakMap<HTMLElement, SavedStyle>,
+  on: boolean
+): boolean {
+  const previous = store.get(element);
+  if (on === Boolean(previous)) return false;
+  const keys = Object.keys(style) as StyleKey[];
+  if (on) {
+    const values: SavedStyle = {};
+    for (const key of keys) {
       values[key] = element.style[key] as string;
-      element.style[key] = HIDDEN_STYLE[key];
+      element.style[key] = style[key] ?? '';
     }
-    saved.set(element, values);
-    element.setAttribute('aria-hidden', 'true');
-    (element as HTMLElement & { inert: boolean }).inert = true;
-  } else if (!hidden && previous) {
-    for (const key of Object.keys(HIDDEN_STYLE) as HiddenKey[]) {
-      element.style[key] = previous[key] ?? '';
-    }
-    saved.delete(element);
-    element.removeAttribute('aria-hidden');
-    (element as HTMLElement & { inert: boolean }).inert = false;
+    store.set(element, values);
+  } else {
+    for (const key of keys) element.style[key] = previous?.[key] ?? '';
+    store.delete(element);
+  }
+  return true;
+}
+
+function setHidden(element: HTMLElement, hidden: boolean): void {
+  if (!swapStyle(element, HIDDEN_STYLE, saved, hidden)) return;
+  if (hidden) element.setAttribute('aria-hidden', 'true');
+  else element.removeAttribute('aria-hidden');
+  (element as HTMLElement & { inert: boolean }).inert = hidden;
+}
+
+/** Scrolls `row` by the least amount that shows `target`, leaving other scrollers alone. */
+function reveal(row: HTMLElement, target: Element): void {
+  const bounds = row.getBoundingClientRect();
+  const box = target.getBoundingClientRect();
+  if (box.left < bounds.left) row.scrollLeft -= bounds.left - box.left;
+  else if (box.right > bounds.right) {
+    row.scrollLeft += Math.min(box.right - bounds.right, box.left - bounds.left);
   }
 }
 
@@ -94,7 +122,8 @@ function sameUnits(a: readonly HTMLElement[], b: readonly HTMLElement[]): boolea
 /**
  * Moves trailing units of a toolbar row into an overflow menu when the row is
  * too narrow. Hidden units stay mounted for measurement, but are inert and out
- * of the accessibility tree.
+ * of the accessibility tree. When the units that cannot hide still do not fit,
+ * the row scrolls, and a focused control scrolls into view.
  */
 export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOverflowState {
   const optionsRef = useRef(options);
@@ -120,6 +149,7 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
     const total =
       widths.reduce((sum, width) => sum + width, 0) + gap * Math.max(0, units.length - 1);
     const next: HTMLElement[] = [];
+    let overflows = false;
     if (total > available + 0.5) {
       const budget = available - moreWidthRef.current;
       const hideable = units.map((unit) => canHide(unit));
@@ -137,7 +167,9 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
         cut = true;
         next.push(unit);
       });
+      overflows = used - gap > (next.length > 0 ? budget : available) + 0.5;
     }
+    swapStyle(row, SCROLL_STYLE, scrolling, overflows);
     for (const unit of units) setHidden(unit, next.includes(unit));
     for (const unit of hiddenRef.current) if (!units.includes(unit)) setHidden(unit, false);
     const active = document.activeElement;
@@ -176,12 +208,18 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
             measure();
           });
     mutations?.observe(row, { childList: true });
+    const onFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof Element) reveal(row, event.target);
+    };
+    row.addEventListener('focusin', onFocusIn);
     window.addEventListener('resize', measure);
     void document.fonts?.ready.then(measure, () => undefined);
     return () => {
       observer?.disconnect();
       mutations?.disconnect();
+      row.removeEventListener('focusin', onFocusIn);
       window.removeEventListener('resize', measure);
+      swapStyle(row, SCROLL_STYLE, scrolling, false);
       for (const unit of Array.from(row.children)) {
         if (unit instanceof HTMLElement) setHidden(unit, false);
       }
