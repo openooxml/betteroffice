@@ -205,6 +205,7 @@ pub struct ParagraphIdentities {
 
 /// Why an anchor cannot be resolved here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum AnchorUnsupported {
     ForeignSession,
     ForeignPackage,
@@ -213,6 +214,7 @@ pub enum AnchorUnsupported {
 
 /// Result of [`EditingDoc::resolve_paragraph_anchor`].
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum AnchorResolution {
     Found(ParagraphRef),
     Missing,
@@ -236,6 +238,7 @@ pub struct ParagraphIdAssignment {
 
 /// A condition persistence reports without failing.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ParagraphIdDiagnostic {
     /// Saved claims to one ID conflict; the paragraphs keep it and resolve as ambiguous.
     ConflictingSavedIds {
@@ -255,6 +258,7 @@ pub struct PersistedParagraphIds {
 
 /// Why [`EditingDoc::persist_paragraph_ids`] changed nothing.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ParagraphIdRefusal {
     /// A duplicated comment paragraph ID needs repair, but the comment
     /// companion parts reference it, so which comment they mean is ambiguous.
