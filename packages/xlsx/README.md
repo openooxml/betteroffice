@@ -128,9 +128,11 @@ if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
   older steps over its cells. It is experimental: that interaction may change
   in a minor release. `source` records provenance only. Volatile functions see
   only `calculation.nowSerial`.
-- Versions and sheet ids are session-scoped. Batches do not insert or delete
-  rows, columns or sheets, merge cells or move charts, and refuse writes to
-  merged-cell followers, array-formula cells and protected sheets.
+- Versions and sheet ids are session-scoped; standalone sheet ids are
+  positional, so each is valid only for the version it was read at. Batches do
+  not insert or delete rows, columns or sheets, merge cells or move charts, and
+  refuse writes to merged-cell followers, array-formula cells and protected
+  sheets.
 
 ## Collaboration
 
