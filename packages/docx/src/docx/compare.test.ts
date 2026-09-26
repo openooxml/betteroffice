@@ -184,10 +184,13 @@ interface Unit {
   props: string[];
 }
 
-/** A paragraph's text units in one view, each with its direct run properties by attribute. */
+/**
+ * A paragraph's text units in one view, each with its direct run properties by attribute. Text
+ * must be `w:delText` in a deleted run and `w:t` anywhere else.
+ */
 function units(paragraph: XmlNode, view: 'plain' | 'original' | 'accepted'): Unit[] {
   const out: Unit[] = [];
-  const readRun = (runNode: XmlNode) => {
+  const readRun = (runNode: XmlNode, deleted = isW(paragraph, 'del')) => {
     const rPr = runNode.children.find((child) => isW(child, 'rPr'));
     const props = (rPr?.children ?? []).flatMap((child) => [
       child.local,
@@ -195,6 +198,7 @@ function units(paragraph: XmlNode, view: 'plain' | 'original' | 'accepted'): Uni
     ]);
     for (const child of runNode.children) {
       if (isW(child, 't') || isW(child, 'delText')) {
+        expect(child.local).toBe(deleted ? 'delText' : 't');
         for (let index = 0; index < child.text.length; index += 1) {
           out.push({ text: child.text[index]!, props });
         }
@@ -206,8 +210,8 @@ function units(paragraph: XmlNode, view: 'plain' | 'original' | 'accepted'): Uni
   };
   for (const child of paragraph.children) {
     if (isW(child, 'r')) readRun(child);
-    else if (isW(child, 'ins') && view === 'accepted') child.children.forEach(readRun);
-    else if (isW(child, 'del') && view === 'original') child.children.forEach(readRun);
+    else if (isW(child, 'ins') && view === 'accepted') child.children.forEach((run) => readRun(run, false));
+    else if (isW(child, 'del') && view === 'original') child.children.forEach((run) => readRun(run, true));
     else if ((isW(child, 'ins') || isW(child, 'del')) && view === 'plain') {
       throw new Error('a source paragraph holds a revision');
     }
