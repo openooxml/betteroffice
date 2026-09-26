@@ -1523,6 +1523,16 @@ fn title(content: &mut PptxStructuredContent) -> &mut pptx_edit::structured::Exp
     &mut content.slides[0].shapes[0].stories[0].paragraphs[0]
 }
 
+/// The first story with three or more paragraphs.
+fn list_story(content: &mut PptxStructuredContent) -> &mut pptx_edit::structured::ExportStory {
+    content.slides[0]
+        .shapes
+        .iter_mut()
+        .flat_map(|shape| &mut shape.stories)
+        .find(|story| story.paragraphs.len() >= 3)
+        .unwrap()
+}
+
 #[test]
 fn the_renderer_refuses_content_that_breaks_its_contract() {
     let content = export(&fixture(), json!({}));
@@ -1565,6 +1575,18 @@ fn the_renderer_refuses_content_that_breaks_its_contract() {
                 Some(vec![pptx_edit::structured::ExportMark::Bold; 1_000]);
         }),
         Box::new(|content| {
+            title(content).runs[0].marks = Some(vec![
+                pptx_edit::structured::ExportMark::Italic,
+                pptx_edit::structured::ExportMark::Italic,
+            ]);
+        }),
+        Box::new(|content| {
+            list_story(content).paragraphs.remove(1);
+        }),
+        Box::new(|content| {
+            list_story(content).paragraphs.pop();
+        }),
+        Box::new(|content| {
             let table = content.slides[0].shapes[8].table.as_mut().unwrap();
             table.rows[1].cells.swap(0, 1);
         }),
@@ -1583,6 +1605,54 @@ fn the_renderer_refuses_content_that_breaks_its_contract() {
     for mutate in &mutations {
         assert_eq!(refused(mutate.as_ref()), ExportFailureCode::InvalidContent);
     }
+}
+
+#[test]
+fn caller_content_renders_without_overflow_or_block_syntax() {
+    let mut content = export(
+        &fixture(),
+        json!({"includeNotes": true, "includeComments": true}),
+    );
+    content.slides[0].index = u32::MAX;
+    let text = "# Heading\n- item\n1. one\n    code\n===";
+    let range = pptx_edit::structured::TextSpan {
+        start: 0,
+        end: text.encode_utf16().count() as u32,
+    };
+    let notes = content.slides[0].notes.as_mut().unwrap();
+    notes.text = text.to_owned();
+    if let PptxAnchor::Notes {
+        range: anchored, ..
+    } = &mut notes.anchor
+    {
+        *anchored = range;
+    }
+    let comment = &mut content.slides[0].comments[0];
+    (comment.author, comment.date) = (None, None);
+    comment.text = text.to_owned();
+    if let PptxAnchor::Comment {
+        range: anchored, ..
+    } = &mut comment.anchor
+    {
+        *anchored = range;
+    }
+    let markdown = render_pptx_markdown(&content, &PptxMarkdownOptions::default())
+        .unwrap()
+        .markdown;
+    assert!(markdown.contains("## Slide 4294967296\n"), "{markdown}");
+    for line in [
+        r"> \# Heading",
+        r"> \- item",
+        r"> 1\. one",
+        "> code",
+        r"> \===",
+    ] {
+        assert!(
+            markdown.lines().any(|candidate| candidate == line),
+            "{line}: {markdown}"
+        );
+    }
+    assert!(markdown.contains(r"- \# Heading<br>- item"), "{markdown}");
 }
 
 #[test]

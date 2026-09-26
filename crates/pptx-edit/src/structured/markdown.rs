@@ -103,12 +103,10 @@ fn invalid(message: impl Into<String>) -> ExportFailure {
 const MAX_RENDER_DEPTH: usize = 128;
 /// Records and metadata entries one rendering validates before it refuses the content.
 const MAX_RENDER_RECORDS: usize = 16 * MAX_BLOCKS_LIMIT as usize;
-/// Formatting marks one run may carry: one of each kind.
-const MAX_MARKS: usize = 7;
-
 /// Checks the content contract rendering relies on: the schema version, anchor kinds and owners,
-/// UTF-16 ranges that match the text they carry, unique ids, cells in column order, resolvable
-/// merge origins and a bounded count of records and metadata entries.
+/// UTF-16 ranges that match the text they carry, paragraphs that tile their story (a truncated
+/// export may stop short), at most one formatting mark of each kind per run, unique ids, cells in
+/// column order, resolvable merge origins and a bounded count of records and metadata entries.
 fn validate(content: &PptxStructuredContent) -> Result<(), ExportFailure> {
     if content.schema_version != SCHEMA_VERSION {
         return Err(invalid(format!(
@@ -116,7 +114,10 @@ fn validate(content: &PptxStructuredContent) -> Result<(), ExportFailure> {
             content.schema_version
         )));
     }
-    let mut validator = Validator::default();
+    let mut validator = Validator {
+        truncated: content.truncated,
+        ..Validator::default()
+    };
     for slide in &content.slides {
         validator.slide(slide)?;
     }
@@ -159,6 +160,8 @@ fn units(text: &str) -> u32 {
 struct Validator {
     ids: HashSet<String>,
     records: usize,
+    /// Whether the content says it stopped at its limits, so a story may end early.
+    truncated: bool,
 }
 
 impl Validator {
@@ -376,7 +379,7 @@ impl Validator {
                 story.id
             )));
         };
-        let mut previous_end = None;
+        let mut previous_end: Option<u32> = None;
         for paragraph in &story.paragraphs {
             self.record(&paragraph.id)?;
             let range = match text_of(&paragraph.anchor) {
@@ -388,9 +391,10 @@ impl Validator {
                     )));
                 }
             };
+            let expected_start = previous_end.map_or(0, |end| u64::from(end) + 1);
             if range.start > range.end
                 || range.end > span.end
-                || previous_end.is_some_and(|end| range.start <= end)
+                || u64::from(range.start) != expected_start
             {
                 return Err(invalid(format!(
                     "paragraph {} is out of order or outside its story",
@@ -401,13 +405,9 @@ impl Validator {
             let mut at = range.start;
             self.charge(paragraph.runs.len())?;
             for run in &paragraph.runs {
-                if run
-                    .marks
-                    .as_ref()
-                    .is_some_and(|marks| marks.len() > MAX_MARKS)
-                {
+                if run.marks.as_deref().is_some_and(repeats_a_mark) {
                     return Err(invalid(format!(
-                        "a run of paragraph {} carries more than {MAX_MARKS} formatting marks",
+                        "a run of paragraph {} carries a formatting mark more than once",
                         paragraph.id
                     )));
                 }
@@ -443,8 +443,34 @@ impl Validator {
                 )));
             }
         }
+        if !self.truncated && previous_end.unwrap_or(0) != span.end {
+            return Err(invalid(format!(
+                "the paragraphs of story {} do not cover its text",
+                story.id
+            )));
+        }
         Ok(())
     }
+}
+
+/// Whether `marks` holds a kind of mark more than once.
+fn repeats_a_mark(marks: &[ExportMark]) -> bool {
+    let mut seen = 0_u8;
+    marks.iter().any(|mark| {
+        let bit = 1_u8
+            << match mark {
+                ExportMark::Bold => 0,
+                ExportMark::Italic => 1,
+                ExportMark::Underline { .. } => 2,
+                ExportMark::Superscript => 3,
+                ExportMark::Subscript => 4,
+                ExportMark::SmallCaps => 5,
+                ExportMark::AllCaps => 6,
+            };
+        let repeated = seen & bit != 0;
+        seen |= bit;
+        repeated
+    })
 }
 
 struct Renderer {
@@ -897,7 +923,7 @@ impl Renderer {
         self.end_list();
         let name = slide.name.as_deref().filter(|name| !name.trim().is_empty());
         self.block(name.map_or(0, least), |renderer| {
-            let mut heading = format!("## Slide {}", slide.index + 1);
+            let mut heading = format!("## Slide {}", u64::from(slide.index) + 1);
             if let Some(name) = name {
                 let _ = write!(heading, ": {}", escape(name));
             }
@@ -1286,7 +1312,7 @@ impl Renderer {
                     if line.trim().is_empty() {
                         ">".to_owned()
                     } else {
-                        format!("> {}", escape(line))
+                        format!("> {}", line_start(escape(line.trim_start())))
                     }
                 })
                 .collect::<Vec<_>>()
@@ -1299,7 +1325,7 @@ impl Renderer {
         if first {
             self.end_list();
         }
-        self.block(least(&comment.text), |renderer| {
+        self.block(least(comment.text.trim_start()), |renderer| {
             let heading = if first { "**Comments**\n\n" } else { "" };
             let marker = renderer.marker(&comment.anchor);
             let indent = if comment.parent_id.is_some() {
@@ -1327,7 +1353,7 @@ impl Renderer {
                 .collect::<Vec<_>>()
                 .join("<br>");
             let line = if attribution.is_empty() {
-                text
+                line_start(text.trim_start().to_owned())
             } else {
                 format!("{}: {text}", attribution.join(" "))
             };
