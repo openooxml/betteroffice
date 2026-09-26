@@ -415,6 +415,41 @@ describe('wasm collaboration', () => {
     }
   });
 
+  it('authors disjoint hyperlinks through the public handle, converges, undoes, and reopens XLSX', () => {
+    const left = collaborative(6011);
+    const right = collaborative(6012);
+    const first = { range: { start: { row: 0, col: 0 }, end: { row: 0, col: 0 } }, location: 'Empty!A1' };
+    const second = { range: { start: { row: 1, col: 1 }, end: { row: 1, col: 1 } }, location: 'Data!B1' };
+    const viewport = { x: 0, y: 0, width: 300, height: 100 };
+    try {
+      const baseline = left.encodeStateVector();
+      expect(left.setHyperlink(0, first).applied).toBe(true);
+      expect(right.setHyperlink(0, second).applied).toBe(true);
+      const leftUpdate = left.encodeStateAsUpdate(baseline);
+      const rightUpdate = right.encodeStateAsUpdate(baseline);
+      expect(left.applyUpdate(rightUpdate).applied).toBe(true);
+      expect(right.applyUpdate(leftUpdate).applied).toBe(true);
+      expect(left.displayList(viewport).hyperlinks?.map(link => link.location)).toEqual(['Empty!A1', 'Data!B1']);
+      expect(right.displayList(viewport).hyperlinks).toEqual(left.displayList(viewport).hyperlinks);
+
+      expect(left.undo().applied).toBe(true);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(true);
+      expect(right.displayList(viewport).hyperlinks?.map(link => link.location)).toEqual(['Data!B1']);
+      const reopened = openWorkbook(right.save());
+      try {
+        expect(reopened.displayList(viewport).hyperlinks?.map(link => link.location)).toEqual(['Data!B1']);
+      } finally {
+        reopened.dispose();
+      }
+      expect(right.removeHyperlink(0, second.range).applied).toBe(true);
+      expect(left.applyUpdate(right.encodeStateAsUpdate(left.encodeStateVector())).applied).toBe(true);
+      expect(left.displayList(viewport).hyperlinks ?? []).toEqual([]);
+    } finally {
+      left.dispose();
+      right.dispose();
+    }
+  });
+
   it('drags a chart in a collaborative session and converges the peer', () => {
     const source = collaborativeCharts(6101);
     const target = collaborativeCharts(6102);

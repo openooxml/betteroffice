@@ -100,6 +100,14 @@ pub enum Op {
         sheet: SheetId,
         hyperlinks: Vec<Hyperlink>,
     },
+    SetHyperlink {
+        sheet: SheetId,
+        hyperlink: Hyperlink,
+    },
+    RemoveHyperlink {
+        sheet: SheetId,
+        range: CellRange,
+    },
     #[doc(hidden)]
     RestoreColStyles {
         sheet: SheetId,

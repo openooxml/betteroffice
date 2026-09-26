@@ -88,7 +88,7 @@ struct UpdateObservers {
 
 enum WorkbookMode {
     Standalone,
-    Collaborative { structure: WorkbookStructure },
+    Collaborative { structure: Box<WorkbookStructure> },
 }
 
 /// Package identity the model does not carry: per current sheet, the source
@@ -441,7 +441,7 @@ impl Workbook {
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {
-                structure: authority.structure().map_err(authority_error)?,
+                structure: Box::new(authority.structure().map_err(authority_error)?),
             },
             None => WorkbookMode::Standalone,
         };
@@ -595,7 +595,9 @@ impl Workbook {
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation;
-        self.mode = WorkbookMode::Collaborative { structure };
+        self.mode = WorkbookMode::Collaborative {
+            structure: Box::new(structure),
+        };
         self.pending_remote_updates.clear();
         self.undo.clear();
         self.preserved_undo.clear();
@@ -751,7 +753,7 @@ impl Workbook {
             .map_err(authority_error)?;
         self.install_model(model)?;
         self.mode = WorkbookMode::Collaborative {
-            structure: new_structure,
+            structure: Box::new(new_structure),
         };
         self.invalidate_sheet_info();
         self.graph = Some(graph);
@@ -1164,6 +1166,24 @@ impl Workbook {
             .collect())
     }
 
+    pub fn set_hyperlink(
+        &mut self,
+        sheet: SheetId,
+        hyperlink: Hyperlink,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.apply_ops(vec![Op::SetHyperlink { sheet, hyperlink }], options)
+    }
+
+    pub fn remove_hyperlink(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.apply_ops(vec![Op::RemoveHyperlink { sheet, range }], options)
+    }
+
     pub fn edit_cell(
         &mut self,
         sheet: SheetId,
@@ -1547,7 +1567,7 @@ impl Workbook {
         retain_array_formulas(&self.model, &mut restored);
         self.install_model(restored)?;
         self.mode = WorkbookMode::Collaborative {
-            structure: new_structure,
+            structure: Box::new(new_structure),
         };
         self.invalidate_sheet_info();
         self.edited_since_open = true;
@@ -2160,7 +2180,7 @@ impl Workbook {
             retain_array_formulas(&self.model, &mut model);
             self.install_model(model)?;
             self.mode = WorkbookMode::Collaborative {
-                structure: new_structure,
+                structure: Box::new(new_structure),
             };
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
@@ -2219,7 +2239,7 @@ impl Workbook {
             retain_array_formulas(&self.model, &mut model);
             self.install_model(model)?;
             self.mode = WorkbookMode::Collaborative {
-                structure: new_structure,
+                structure: Box::new(new_structure),
             };
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
@@ -2352,6 +2372,8 @@ impl Workbook {
                 | Op::SetRowHeight { sheet, .. }
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
+                | Op::SetHyperlink { sheet, .. }
+                | Op::RemoveHyperlink { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
                 | Op::MergeCells { sheet, .. }
                 | Op::UnmergeCells { sheet, .. }
@@ -2999,6 +3021,8 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetRowHeight { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
+        | Op::SetHyperlink { sheet, .. }
+        | Op::RemoveHyperlink { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
@@ -3087,6 +3111,14 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::SetHyperlinks { sheet, hyperlinks } => {
             require_sheet(model, *sheet)?;
             validate_hyperlinks(hyperlinks)?;
+        }
+        Op::SetHyperlink { sheet, hyperlink } => {
+            require_sheet(model, *sheet)?;
+            validate_hyperlinks(std::slice::from_ref(hyperlink))?;
+        }
+        Op::RemoveHyperlink { sheet, range } => {
+            require_sheet(model, *sheet)?;
+            validate_range(*range)?;
         }
         Op::SetChartAnchor {
             sheet,
