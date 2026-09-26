@@ -2,13 +2,17 @@
 
 import {
   definePptxPlugin,
-  type PptxCommandResult,
+  type PptxPluginCommandResult,
   type PptxPluginContext,
   type PptxPluginGeometry,
 } from "@betteroffice/pptx-react";
 
 const REVIEW_PLUGIN_ID = "demo.review";
 const REVIEWED = "Reviewed ✓";
+const WRITE_NOT_GRANTED = {
+  code: "write-not-granted",
+  message: "Write access is not granted.",
+};
 
 interface ReviewSlide {
   slideId: string;
@@ -46,21 +50,25 @@ async function refresh(context: ReviewContext): Promise<void> {
 
 async function markReviewed(
   context: ReviewContext,
-): Promise<PptxCommandResult> {
-  const read = await context.read.readContent();
-  const slideId =
-    context.snapshot.selection?.slideId ??
-    (read.ok ? read.slides[0]?.id : undefined);
-  const slide = read.ok
-    ? read.slides.find((candidate) => candidate.id === slideId)
-    : undefined;
-  if (!read.ok || !slide || !context.edits) {
-    const message = read.ok
-      ? "Write access is not granted."
-      : read.failure.message;
-    context.setState((previous) => ({ ...previous, message }));
-    return { ok: true, status: "noop" };
+): Promise<PptxPluginCommandResult> {
+  if (!context.edits) {
+    context.setState((previous) => ({
+      ...previous,
+      message: WRITE_NOT_GRANTED.message,
+    }));
+    return { ok: false, failure: WRITE_NOT_GRANTED };
   }
+  const read = await context.read.readContent();
+  if (!read.ok) {
+    context.setState((previous) => ({
+      ...previous,
+      message: read.failure.message,
+    }));
+    return read;
+  }
+  const slideId = context.snapshot.selection?.slideId ?? read.slides[0]?.id;
+  const slide = read.slides.find((candidate) => candidate.id === slideId);
+  if (!slide) return { ok: true, status: "noop" };
   const notes = slide.notes ?? "";
   const result = await context.edits.applyEdits({
     expectVersion: read.version,
@@ -80,9 +88,7 @@ async function markReviewed(
     (previous) => ({ ...previous, message }),
     "version" in result ? result.version : undefined,
   );
-  return result.ok
-    ? { ok: true, status: "executed" }
-    : { ok: true, status: "noop" };
+  return result.ok ? { ok: true, status: "executed" } : result;
 }
 
 function ReviewPanel({ context }: { context: ReviewContext }) {
@@ -193,13 +199,7 @@ export const reviewPlugin = definePptxPlugin<ReviewState>({
       getState: (context) =>
         context.edits
           ? { enabled: true }
-          : {
-              enabled: false,
-              disabledReason: {
-                code: "write-not-granted",
-                message: "Write access is not granted.",
-              },
-            },
+          : { enabled: false, disabledReason: WRITE_NOT_GRANTED },
       execute: markReviewed,
     },
   ],

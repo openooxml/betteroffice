@@ -15,7 +15,11 @@ import {
 } from '../commands/createPptxCommandStore';
 import { BUILT_IN_CHORDS, EDITING_CHORDS, normalizeChord } from '../commands/descriptors';
 import { commandReason } from '../commands/evaluate';
-import type { PptxCommandResult, PptxCommandStore, PptxPluginCommandId } from '../commands/types';
+import type {
+  PptxCommandStore,
+  PptxPluginCommandId,
+  PptxPluginCommandResult,
+} from '../commands/types';
 import {
   createPluginClients,
   pluginCommandScope,
@@ -104,10 +108,10 @@ function checkedState(value: unknown) {
   return value as ReturnType<NonNullable<PptxPluginCommand<unknown>['getState']>>;
 }
 
-function checkedResult(value: unknown): PptxCommandResult {
+function checkedResult(value: unknown): PptxPluginCommandResult {
   const result = value as { ok?: unknown } | null | undefined;
   return result && typeof result.ok === 'boolean'
-    ? (value as PptxCommandResult)
+    ? (value as PptxPluginCommandResult)
     : { ok: true, status: 'executed' };
 }
 
@@ -293,7 +297,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess): PptxPluginHo
   const executeCommand = async (
     pluginId: string,
     command: PptxPluginCommand<unknown>
-  ): Promise<PptxCommandResult> => {
+  ): Promise<PptxPluginCommandResult> => {
     const outcome = await runtime.invoke(pluginId, 'command', (context) =>
       command.execute(context)
     );

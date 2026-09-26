@@ -289,14 +289,16 @@ const review = definePptxPlugin<{ slides: number }>({
       label: "Mark reviewed",
       mutatesDocument: true,
       async execute(context) {
+        if (!context.edits) return { ok: false, failure: { code: "not-granted", message: "Needs write access" } };
         const read = await context.read.readContent();
+        if (!read.ok) return read;
         const slideId = context.snapshot.selection?.slideId;
-        if (!read.ok || !slideId || !context.edits) return { ok: true, status: "noop" };
+        if (!slideId) return { ok: true, status: "noop" };
         const result = await context.edits.applyEdits({
           expectVersion: read.version,
           steps: [{ op: "setSlideNotes", target: { slideId }, text: "Reviewed" }],
         });
-        return result.ok ? { ok: true, status: "executed" } : { ok: true, status: "noop" };
+        return result.ok ? { ok: true, status: "executed" } : result;
       },
     },
   ],
@@ -326,7 +328,8 @@ built-in commands need an allowlisted id, mutating ones refuse with
 `unsupported-policy`, and `applyEdits` needs `document: "write"` and
 `editBatches`. Grants and `readOnly` are checked again right before each change.
 Each client call waits for pending input in order with it; plugin handlers run
-outside that queue.
+outside that queue. A contributed command's failure uses the plugin's own code,
+and a refused edit batch returned as-is reaches the caller unchanged.
 
 **Selection and navigation.** `snapshot.selection` names the current slide
 (session `slideId` and one-based `slide`) and a slide, shape or text target;

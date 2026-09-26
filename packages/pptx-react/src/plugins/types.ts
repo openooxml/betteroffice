@@ -27,6 +27,7 @@ import type {
   PptxCommandState,
   PptxPluginCommandDescriptor,
   PptxPluginCommandId,
+  PptxPluginCommandResult,
   PptxPluginCommandState,
 } from '../commands/types';
 import type { PptxPointPosition } from '../PptxEditor';
@@ -80,7 +81,10 @@ export interface PptxPluginCommandClient {
     args: PptxCommandArgs[K]
   ): Promise<PptxCommandResult | PptxPluginRefusal>;
   /** Only this plugin's own contributed commands. */
-  execute(id: PptxPluginCommandId, args: null): Promise<PptxCommandResult | PptxPluginRefusal>;
+  execute(
+    id: PptxPluginCommandId,
+    args: null
+  ): Promise<PptxPluginCommandResult | PptxPluginRefusal>;
 }
 
 /** A rectangle in the units of the space it is used in. */
@@ -254,7 +258,7 @@ export interface PptxPluginCommand<S> {
   /** Chords such as `Mod+Shift+R`; built-in shortcuts take precedence. */
   shortcuts?: readonly string[];
   getState?(context: PptxPluginContext<S>): CommandState;
-  execute(context: PptxPluginContext<S>): MaybePromise<PptxCommandResult>;
+  execute(context: PptxPluginContext<S>): MaybePromise<PptxPluginCommandResult>;
 }
 
 /**

@@ -16,6 +16,7 @@ import type {
   PptxCommandStore,
   PptxPluginCommandDescriptor,
   PptxPluginCommandId,
+  PptxPluginCommandResult,
   PptxPluginCommandState,
 } from './types';
 
@@ -89,7 +90,7 @@ export interface PptxPluginCommandBinding {
   /** The plugin's own state; the editor's gate applies on top. */
   state(): PptxPluginCommandState;
   /** Runs the plugin's handler with that plugin's clients. */
-  execute(): Promise<PptxCommandResult>;
+  execute(): Promise<PptxPluginCommandResult>;
 }
 
 /** Who a scoped store acts for; asked again inside every operation boundary. */
@@ -305,20 +306,36 @@ export function createPptxCommandController(): PptxCommandController {
     }
   };
 
-  const run = async (
-    id: AnyCommandId,
+  type Perform<R> = (env: PptxCommandEnvironment) => R | Promise<R>;
+
+  function run(
+    id: PptxCommandId,
     args: unknown,
-    perform: (env: PptxCommandEnvironment) => PptxCommandResult | Promise<PptxCommandResult>,
+    perform: Perform<PptxCommandResult>,
     deferred?: { origin: PptxCommandOrigin | null },
     scope?: PptxCommandScope
-  ): Promise<PptxCommandResult> => {
+  ): Promise<PptxCommandResult>;
+  function run(
+    id: AnyCommandId,
+    args: unknown,
+    perform: Perform<PptxPluginCommandResult>,
+    deferred?: { origin: PptxCommandOrigin | null },
+    scope?: PptxCommandScope
+  ): Promise<PptxPluginCommandResult>;
+  async function run(
+    id: AnyCommandId,
+    args: unknown,
+    perform: Perform<PptxPluginCommandResult>,
+    deferred?: { origin: PptxCommandOrigin | null },
+    scope?: PptxCommandScope
+  ): Promise<PptxPluginCommandResult> {
     const current = binding;
     if (!current) return failure('editor-unavailable', null);
     const builtIn = isPluginCommandId(id) ? null : id;
     const ordered =
       deferred !== undefined || (builtIn !== null && current.ordered(builtIn, args as never));
     const origin = deferred ? deferred.origin : ordered && builtIn ? capture(builtIn) : undefined;
-    const attempt = () => {
+    const attempt = (): PptxPluginCommandResult | Promise<PptxPluginCommandResult> => {
       if (origin !== undefined) {
         const stale = origin ? current.resume(origin) : 'editor-unavailable';
         if (stale) return failure(stale, environment(true));
@@ -327,7 +344,7 @@ export function createPptxCommandController(): PptxCommandController {
       if (denied) return failure(denied, environment(true));
       const env = environment(true);
       const state = compute(id, args, env);
-      if (!state.enabled) return { ok: false, failure: state.disabledReason } as PptxCommandResult;
+      if (!state.enabled) return { ok: false, failure: state.disabledReason };
       if (scope && mutatingBuiltIn(id)) return failure('unsupported-policy', env);
       return perform(env!);
     };
@@ -341,7 +358,7 @@ export function createPptxCommandController(): PptxCommandController {
     } finally {
       refresh();
     }
-  };
+  }
 
   const perform = (id: AnyCommandId, args: unknown, env: PptxCommandEnvironment) =>
     isPluginCommandId(id)
@@ -352,7 +369,7 @@ export function createPptxCommandController(): PptxCommandController {
     id: unknown,
     args: unknown,
     scope?: PptxCommandScope
-  ): Promise<PptxCommandResult> => {
+  ): Promise<PptxPluginCommandResult> => {
     if (!knownCommand(id)) {
       return Promise.resolve(failure('unsupported-command', environment(false)));
     }
@@ -424,7 +441,8 @@ export function createPptxCommandController(): PptxCommandController {
       prepare(id) {
         const origin = capture(id);
         return {
-          execute: (args) => run(id, args, (env) => perform(id, args, env), { origin }, scope),
+          execute: (args) =>
+            run(id, args, (env) => binding!.perform(id, args, env), { origin }, scope),
         };
       },
     });
@@ -460,7 +478,7 @@ export function createPptxCommandController(): PptxCommandController {
     prepare(id) {
       const origin = capture(id);
       return {
-        execute: (args) => run(id, args, (env) => perform(id, args, env), { origin }),
+        execute: (args) => run(id, args, (env) => binding!.perform(id, args, env), { origin }),
       };
     },
     registerChrome(element) {

@@ -1,6 +1,7 @@
-import type { ParagraphAlignment } from '@betteroffice/pptx';
+import type { ParagraphAlignment, PptxEditRefusal } from '@betteroffice/pptx';
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import type { CommandReason, CommandState } from '../../../../shared/host-contracts/commands';
+import type { PluginCommandResult } from '../../../../shared/host-contracts/plugins';
 import type { PptxEditorTool, PptxZoom } from '../components/toolbarTypes';
 
 export type {
@@ -211,6 +212,9 @@ export interface PptxPluginCommandDescriptor {
 /** State of a contributed command; the plugin chooses its own disabled codes. */
 export type PptxPluginCommandState = CommandState;
 
+/** Outcome of a contributed command: a plugin-defined failure, or a refused edit batch as-is. */
+export type PptxPluginCommandResult = PluginCommandResult<PptxCommandStatus, PptxEditRefusal>;
+
 /** The command authority of one editor, shared by built-in and host chrome. */
 export interface PptxCommandStore {
   getDescriptor<K extends PptxCommandId>(id: K): PptxCommandDescriptor<K>;
@@ -223,5 +227,5 @@ export interface PptxCommandStore {
   /** Runs after input accepted before the call; availability is checked again first. */
   execute<K extends PptxCommandId>(id: K, args: PptxCommandArgs[K]): Promise<PptxCommandResult>;
   /** Runs a contributed command with its plugin's own clients, outside the input queue. */
-  execute(id: PptxPluginCommandId, args: null): Promise<PptxCommandResult>;
+  execute(id: PptxPluginCommandId, args: null): Promise<PptxPluginCommandResult>;
 }

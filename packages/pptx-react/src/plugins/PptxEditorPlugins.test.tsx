@@ -24,10 +24,12 @@ import {
   definePptxPlugin,
   usePptxCommand,
   usePptxCommands,
+  type PptxCommandResult,
   type PptxCommandStore,
   type PptxEditorApi,
   type PptxEditorProps,
   type PptxPlugin,
+  type PptxPluginCommandResult,
   type PptxPluginContext,
   type PptxPluginDefinition,
   type PptxPluginError,
@@ -603,6 +605,58 @@ describe('PptxEditor plugins', () => {
     await until(
       () => within(custom.view.container).queryByRole('button', { name: 'Mark' }) !== null
     );
+  });
+
+  test('contributed commands return their own failures and batch refusals unchanged', async () => {
+    const returned: PptxPluginCommandResult[] = [];
+    const paused = { code: 'paused', message: 'Paused' };
+    let slideId = '';
+    const owner = recorder('acme.review', {
+      commands: [
+        {
+          id: 'quota',
+          label: 'Quota',
+          mutatesDocument: false,
+          getState: (context) =>
+            context.state.count > 0
+              ? { enabled: false, disabledReason: paused }
+              : { enabled: true },
+          execute(context) {
+            context.setState({ count: 1 });
+            returned.push({ ok: false, failure: { code: 'quota-exceeded', message: 'Try later' } });
+            return last(returned);
+          },
+        },
+        {
+          id: 'stale',
+          label: 'Stale',
+          mutatesDocument: true,
+          async execute(context) {
+            const result = await context.edits!.applyEdits(notesRequest('stale', slideId, 'Late'));
+            returned.push(result.ok ? { ok: true, status: 'executed' } : result);
+            return last(returned);
+          },
+        },
+      ],
+    });
+    const { api } = await mount({ plugins: [owner.plugin], pluginGrants: WRITE });
+    await until(() => owner.log.includes('load:loaded'));
+    const content = await read(api());
+    slideId = content.slides[0].id;
+    const commands = api().commands;
+
+    expect(await act(() => commands.execute('plugin:acme.review/quota', null))).toBe(returned[0]);
+    expect(await act(() => commands.execute('plugin:acme.review/quota', null))).toEqual({
+      ok: false,
+      failure: paused,
+    });
+    const stale = await act(() => commands.execute('plugin:acme.review/stale', null));
+    expect(stale).toBe(returned[1]);
+    if (stale.ok || !('version' in stale)) throw new Error('expected a batch refusal');
+    expect([stale.version, stale.failure.code]).toEqual([content.version, 'stale-version']);
+
+    const builtIn: PptxCommandResult = await act(() => commands.execute('zoom', { scale: 2 }));
+    expect(builtIn.ok).toBe(true);
   });
 
   test('a failing contribution is isolated and the others keep working', async () => {

@@ -70,6 +70,7 @@ export type {
   PptxCommandValues,
   PptxPluginCommandDescriptor,
   PptxPluginCommandId,
+  PptxPluginCommandResult,
   PptxPluginCommandState,
   PptxSelectCommandId,
   PptxZOrderMove,

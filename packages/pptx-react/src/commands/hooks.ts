@@ -12,6 +12,7 @@ import type {
   PptxCommandStore,
   PptxPluginCommandDescriptor,
   PptxPluginCommandId,
+  PptxPluginCommandResult,
   PptxPluginCommandState,
 } from './types';
 
@@ -82,7 +83,7 @@ export interface PptxBoundPluginCommand {
   /** The contributed label, or the id while no plugin contributes it. */
   label: string;
   shortcut: string | null;
-  execute(): Promise<PptxCommandResult>;
+  execute(): Promise<PptxPluginCommandResult>;
 }
 
 /** Binds one command for a custom control. */

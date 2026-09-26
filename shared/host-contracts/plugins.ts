@@ -76,6 +76,18 @@ export interface PluginError<Phase extends string = PluginErrorPhase> {
 /** The id a contributed command is registered under. */
 export type PluginCommandId = `plugin:${string}/${string}`;
 
+/**
+ * Outcome of a contributed command. Failure codes are the plugin's own, and a refused edit batch
+ * can be returned as-is, keeping its structured failure.
+ */
+export type PluginCommandResult<
+  Status extends string = string,
+  Refusal extends { ok: false } = never
+> =
+  | { ok: true; status: Status }
+  | { ok: false; failure: CommandReason }
+  | Refusal;
+
 export interface PluginLoadEvent {
   type: 'load';
   generation: string;
