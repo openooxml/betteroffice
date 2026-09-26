@@ -1221,6 +1221,35 @@ describe('XlsxEditor edit batches', () => {
     }
   });
 
+  it('keeps an unsettled paste on the workbook it was accepted for', async () => {
+    const clipboard = deferredClipboard();
+    try {
+      const { view, api } = await mountApi();
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 2, col: 1 }));
+      });
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      const outcome = api.version().then(
+        () => null,
+        (error: unknown) => error
+      );
+      let current = api;
+      view.rerender(
+        <XlsxEditor
+          file={plain.bytes.slice()}
+          onReady={(ready) => {
+            current = ready;
+          }}
+        />
+      );
+      await waitFor(() => expect(current).not.toBe(api));
+      expect(await settled(() => current.version())).toBe(current.handle.version());
+      expect(String(await settled(() => outcome))).toMatch(/changed while flushing/);
+    } finally {
+      clipboard.restore();
+    }
+  });
+
   function deferredClipboardWrite() {
     let settle!: () => void;
     const written = new Promise<void>((done) => {
