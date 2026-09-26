@@ -229,10 +229,16 @@ export type PptxCommandResult =
   | { ok: true; status: PptxCommandStatus }
   | { ok: false; failure: CommandReason<PptxCommandFailureCode> };
 
-/** A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`. */
+/**
+ * A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`.
+ * @experimental
+ */
 export type PptxPluginCommandId = `plugin:${string}/${string}`;
 
-/** Static description of a contributed command. */
+/**
+ * Static description of a contributed command.
+ * @experimental
+ */
 export interface PptxPluginCommandDescriptor {
   id: PptxPluginCommandId;
   label: string;
@@ -240,7 +246,10 @@ export interface PptxPluginCommandDescriptor {
   shortcuts: readonly { chord: string; args: null }[];
 }
 
-/** State of a contributed command; the plugin chooses its own disabled codes. */
+/**
+ * State of a contributed command; the plugin chooses its own disabled codes.
+ * @experimental
+ */
 export type PptxPluginCommandState = CommandState;
 
 /**

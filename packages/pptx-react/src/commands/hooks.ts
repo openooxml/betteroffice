@@ -83,7 +83,10 @@ export interface PptxBoundCommand<K extends PptxCommandId> {
   execute(args?: PptxCommandArgs[K]): Promise<PptxCommandResult>;
 }
 
-/** A contributed command bound to this component. */
+/**
+ * A contributed command bound to this component.
+ * @experimental
+ */
 export interface PptxBoundPluginCommand {
   id: PptxPluginCommandId;
   /** Null while no active plugin contributes the command. */
