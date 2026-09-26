@@ -12,6 +12,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 ooxml-opc = { package = "betteroffice-opc", path = "../crates/ooxml-opc" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "../crates/pptx-parse" }
+pptx-raster = { package = "betteroffice-pptx-raster", path = "../crates/pptx-raster", features = ["fuzzing"] }
 pptx-render = { package = "betteroffice-pptx-render", path = "../crates/pptx-render", features = ["fuzzing"] }
 
 [[bin]]
@@ -24,6 +25,13 @@ bench = false
 [[bin]]
 name = "pptx-package-parse"
 path = "fuzz_targets/pptx-package-parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "svg-decode"
+path = "fuzz_targets/svg-decode.rs"
 test = false
 doc = false
 bench = false
