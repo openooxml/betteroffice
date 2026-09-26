@@ -23,7 +23,6 @@ interface ReviewState {
 
 type ReviewContext = DocxPluginContext<ReviewState>;
 
-/** Reads the first paragraphs with the version they were read at. */
 async function refresh(context: ReviewContext): Promise<void> {
   const read = await context.read.readParagraphs({ view: "accepted" });
   if (!read.ok) return;
@@ -37,7 +36,6 @@ async function refresh(context: ReviewContext): Promise<void> {
   );
 }
 
-/** Appends a check mark to the first paragraph as one guarded batch. */
 async function markReviewed(
   context: ReviewContext,
 ): Promise<DocxCommandResult> {
@@ -190,7 +188,6 @@ function SelectionOverlay({
   );
 }
 
-/** A small review aid built only from `@betteroffice/docx-react` exports. */
 export const reviewPlugin = defineDocxPlugin<ReviewState>({
   id: REVIEW_PLUGIN_ID,
   createState: () => ({ version: null, paragraphs: [], message: null }),
