@@ -32,7 +32,7 @@ export interface UsePptxPluginHostOptions extends PptxEditorPluginProps {
   access: PptxPluginEditorAccess;
   commands: PptxCommandController;
   readOnly: boolean;
-  /** The presentation once it is open and laid out, else null. */
+  /** The presentation once it is open and laid out, else null. Plugins open it while it is current. */
   handle: PresentationHandle | null;
   /** Proposal review paints a preview over the slide, so no layout is published meanwhile. */
   reviewing: boolean;
@@ -80,7 +80,7 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
 
   useLayoutEffect(() => {
     host.setGrants(options.pluginGrants);
-  }, [host, options.pluginGrants]);
+  });
 
   useLayoutEffect(() => {
     host.setPlugins(options.plugins);
@@ -89,10 +89,10 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
   useEffect(() => () => host.close('unmounted'), [host]);
 
   useEffect(() => {
-    if (!options.handle) return;
+    if (!options.handle || options.access.handle() !== options.handle) return;
     host.open(options.handle);
     return () => host.close('document-replaced');
-  }, [host, options.handle]);
+  }, [host, options.access, options.handle]);
 
   useEffect(() => {
     host.syncCommands();

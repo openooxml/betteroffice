@@ -5,7 +5,7 @@ import {
   type PptxCommandScope,
   type PptxPluginCommandBinding,
 } from './createPptxCommandStore';
-import { BUILT_IN_CHORDS, isPluginCommandId, normalizeChord } from './descriptors';
+import { BUILT_IN_CHORDS, isPluginCommandId, matchesChord, normalizeChord } from './descriptors';
 import { testBinding } from './testing';
 import type { PptxCommandFailureCode, PptxCommandId, PptxPluginCommandId } from './types';
 
@@ -180,6 +180,16 @@ describe('contributed commands', () => {
     expect(normalizeChord('Shift+Mod+b')).toBe('Mod+Shift+b');
     expect(normalizeChord('Ctrl+B')).toBeNull();
     expect(normalizeChord('Mod++')).toBe('Mod++');
+    const plus = {
+      key: '+',
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: false,
+      altKey: false,
+    };
+    expect(matchesChord('Mod+=', plus as KeyboardEvent, false)).toBe(false);
+    expect(matchesChord('Mod++', plus as KeyboardEvent, false)).toBe(true);
+    expect(BUILT_IN_CHORDS.has('Mod++') || BUILT_IN_CHORDS.has('Mod+=')).toBe(false);
     expect(BUILT_IN_CHORDS.has('Mod+b')).toBe(true);
     expect(BUILT_IN_CHORDS.has('Mod+Shift+z')).toBe(true);
     expect(BUILT_IN_CHORDS.has(normalizeChord('Mod+Shift+M')!)).toBe(false);

@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { StrictMode } from 'react';
+import { StrictMode, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -509,6 +509,22 @@ describe('PptxEditor plugins', () => {
         failure: { code: 'permission-denied' },
       });
       expect((await read(api())).version).toBe(version);
+
+      const grant: { document: 'write'; editBatches?: true } = {
+        document: 'write',
+        editBatches: true,
+      };
+      const grants = { 'acme.review': grant };
+      const changes = () => log.filter((entry) => entry === 'grants-change').length;
+      rerender({ plugins: [plugin], pluginGrants: grants });
+      await until(() => changes() === 2);
+      delete grant.editBatches;
+      rerender({ plugins: [plugin], pluginGrants: grants });
+      await until(() => changes() === 3);
+      expect(await edits.applyEdits(notesRequest(version, slideId, 'In place'))).toMatchObject({
+        ok: false,
+        failure: { code: 'permission-denied' },
+      });
     } finally {
       globalThis.Image = originalImage;
     }
@@ -692,6 +708,34 @@ describe('PptxEditor plugins', () => {
     expect(await fresh.read.version()).toMatchObject({ ok: true });
   });
 
+  test('a presentation replaced as it opens activates plugins once, over the new one', async () => {
+    const { plugin, log, contexts } = recorder();
+    const plugins = [plugin];
+    const errors: PptxPluginError[] = [];
+    let replace = true;
+    function Host() {
+      const [file, setFile] = useState(fixture);
+      return (
+        <PptxEditor
+          file={file}
+          fonts={faces}
+          plugins={plugins}
+          onPluginError={(error) => errors.push(error)}
+          onReady={() => {
+            if (replace) setFile(fixture.slice());
+            replace = false;
+          }}
+        />
+      );
+    }
+    render(<Host />);
+    await until(() => log.includes('load:loaded'));
+    await settle(150);
+    expect(log).toEqual(['initialize', 'load:loaded']);
+    expect(await last(contexts).read.version()).toMatchObject({ ok: true });
+    expect(errors).toEqual([]);
+  });
+
   test('StrictMode setup, cleanup and setup leaves one live activation', async () => {
     const { plugin, log, contexts } = recorder();
     await mount({ plugins: [plugin] }, true);
@@ -795,17 +839,19 @@ describe('PptxEditor plugins', () => {
     expect(thumbnails[1].getAttribute('aria-current')).toBe('page');
   });
 
-  test('a batch a lifecycle hook applies reports its committed receipt', async () => {
+  test('a batch the load hook applies reports its receipt, and load repeats at that version', async () => {
     const outcomes: (PptxEditResult | PptxPluginRefusal)[] = [];
-    const changes: string[] = [];
+    const seen: string[] = [];
     const plugin = definePptxPlugin<null>({
       id: 'acme.review',
       createState: () => null,
       async onEvent(context, event) {
-        if (event.type === 'document-change') changes.push(event.version);
+        if (event.type === 'load' || event.type === 'document-change') {
+          seen.push(`${event.type}:${event.version}`);
+        }
         if (event.type !== 'load' || !context.edits) return;
         const content = await context.read.readContent();
-        if (!content.ok) return;
+        if (!content.ok || content.slides[0].notes === 'From load') return;
         outcomes.push(
           await context.edits.applyEdits(
             notesRequest(content.version, content.slides[0].id, 'From load')
@@ -816,9 +862,13 @@ describe('PptxEditor plugins', () => {
     const { api } = await mount({ plugins: [plugin], pluginGrants: WRITE });
     await until(() => outcomes.length > 0);
     const after = await read(api());
-    expect(outcomes).toEqual([expect.objectContaining({ ok: true, version: after.version })]);
-    await until(() => changes.includes(after.version));
-    expect(changes).toEqual([after.version]);
+    expect(outcomes).toEqual([
+      expect.objectContaining({ ok: true, applied: true, version: after.version }),
+    ]);
+    await until(() => seen.includes(`load:${after.version}`));
+    await settle(50);
+    const { baseVersion } = outcomes[0] as { baseVersion: string };
+    expect(seen).toEqual([`load:${baseVersion}`, `load:${after.version}`]);
   });
 
   test('layouts follow the presented frame, its version, slide and zoom', async () => {
