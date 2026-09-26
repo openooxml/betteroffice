@@ -2249,11 +2249,14 @@ const FALLBACK_ADVANCES: [u16; 95] = [
     230, 799, 526, 528, 526, 526, 348, 391, 335, 526, 452, 715, 433, 452, 395, 314, 460, 314, 498,
 ];
 
-/// One character's estimated advance in ems: a full em for East Asian wide
-/// characters, a little over half an em for any other character outside ASCII.
+/// One character's estimated advance in ems: Carlito's for ASCII but never
+/// under half an em, so a face wider than Calibri still fits its box; a full em
+/// for East Asian wide characters, a little over half an em for the rest.
 fn fallback_advance(character: char) -> f64 {
     match character as u32 {
-        code @ 0x20..=0x7E => f64::from(FALLBACK_ADVANCES[(code - 0x20) as usize]) / 1000.0,
+        code @ 0x20..=0x7E => {
+            (f64::from(FALLBACK_ADVANCES[(code - 0x20) as usize]) / 1000.0).max(0.5)
+        }
         0x1100..=0x115F
         | 0x2E80..=0xA4CF
         | 0xAC00..=0xD7A3
@@ -7149,6 +7152,19 @@ mod tests {
     }
 
     #[test]
+    fn an_estimated_label_is_never_narrower_than_half_an_em_a_character() {
+        let font = chart_label_font();
+        for label in ["July", "illicit", "WW", "Q1"] {
+            let floor = label.chars().count() as f64 * font.size_px * 0.5;
+            assert!(
+                fallback_label_width(label, &font) >= floor - 1e-9,
+                "{label}"
+            );
+        }
+        assert!(fallback_label_width("WW", &font) > 2.0 * 0.85 * font.size_px);
+    }
+
+    #[test]
     fn a_short_frame_shrinks_the_plot_before_its_labels_leave_it() {
         let data = source(&[10.0, 20.0]);
         let mut chart = legend_chart(None, &["North"], &data);
@@ -7533,7 +7549,7 @@ mod tests {
             let upper_tick = text_at(&ops, "8");
             let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
             assert!(upper_tick.2 - CHART_LABEL_SIZE_PX >= title_bottom);
-            assert_eq!(upper_tick.1 + upper_tick.3 / 2.0, 242.135);
+            assert!((upper_tick.1 + upper_tick.3 / 2.0 - 238.965).abs() < 1e-9);
             assert_eq!(text_at(&ops, "4").2, 188.0);
         }
     }
