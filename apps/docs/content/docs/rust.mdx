@@ -66,6 +66,26 @@ let saved = presentation.save()?;
 `open_with_limits` on DOCX and PPTX accepts custom parser resource limits. Files
 that exceed those limits are rejected.
 
+`Document::export_structured` exports the current DOCX model as read-only
+structured content, and `export_markdown` renders it as Markdown with source
+anchors:
+
+```rust
+use betteroffice_docx::{Document, ExportOptions, RevisionView, StorySelection};
+
+let document = Document::open(&docx_bytes)?;
+let content = document.export_structured(&ExportOptions {
+    stories: Some(vec![StorySelection::Body, StorySelection::Headers]),
+    ..ExportOptions::new(RevisionView::Accepted)
+})?;
+let markdown = document.export_markdown(&ExportOptions::new(RevisionView::Markup))?;
+```
+
+The export reads edits made through the model, lists omitted and unsupported
+content in `diagnostics`, and returns `Error::Export` for unusable limits. The
+same content comes from `docx_edit::structured` for a live `EditingDoc` or raw
+bytes. Page fragments are not included yet.
+
 ## PowerPoint comments
 
 `comment_flavor` reports whether a deck uses legacy or modern comments. Modern

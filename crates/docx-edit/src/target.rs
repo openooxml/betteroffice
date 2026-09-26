@@ -300,10 +300,13 @@ impl ParagraphView {
 
     /// Projected offset of raw story index `raw`, clamped into this paragraph.
     pub fn offset_of_raw(&self, raw: u32) -> u32 {
-        self.spans
-            .iter()
-            .map(|span| raw.saturating_sub(span.raw).min(span.len))
-            .sum()
+        match self.spans.partition_point(|span| span.raw <= raw) {
+            0 => 0,
+            after => {
+                let span = &self.spans[after - 1];
+                span.view + (raw - span.raw).min(span.len)
+            }
+        }
     }
 
     /// Whether `offset` falls between Unicode scalar values of the projected text.
@@ -496,12 +499,29 @@ impl StoryView {
         story_id: &str,
         view: EditTextView,
     ) -> Option<Self> {
+        Self::build_within(doc, txn, story_id, view, u32::MAX).map(|(view, _)| view)
+    }
+
+    /// The paragraphs of `story_id` that end within its first `limit` units, and whether they
+    /// are all of it. Nothing past the last of them is copied.
+    pub fn build_within<T: ReadTxn>(
+        doc: &EditingDoc,
+        txn: &T,
+        story_id: &str,
+        view: EditTextView,
+        limit: u32,
+    ) -> Option<(Self, bool)> {
         let story = story_ref(txn, story_id).ok()?;
         let chunks = doc.chunk_snapshot(story_id, &story, txn);
         let source = doc.source_metadata();
         let mut paragraphs = Vec::new();
         let mut current = ParagraphBuilder::new(0);
+        let mut complete = true;
         for chunk in chunks.iter() {
+            if chunk.end() > limit {
+                complete = false;
+                break;
+            }
             let ins = chunk.attr_active(INS);
             let del = chunk.attr_active(DEL);
             match &chunk.kind {
@@ -576,11 +596,14 @@ impl StoryView {
                 }
             }
         }
-        Some(Self {
-            story: story_id.to_owned(),
-            view,
-            paragraphs,
-        })
+        Some((
+            Self {
+                story: story_id.to_owned(),
+                view,
+                paragraphs,
+            },
+            complete,
+        ))
     }
 
     pub fn lookup(&self, para_id: &str) -> Lookup {
@@ -609,8 +632,10 @@ impl StoryView {
     pub fn position_of_raw(&self, raw: u32) -> Option<TextPosition> {
         let paragraph = self
             .paragraphs
-            .iter()
-            .find(|paragraph| raw <= paragraph.pilcrow)
+            .get(
+                self.paragraphs
+                    .partition_point(|paragraph| paragraph.pilcrow < raw),
+            )
             .or_else(|| self.paragraphs.last())?;
         Some(TextPosition {
             para_id: paragraph.para_id.clone(),
@@ -699,6 +724,28 @@ impl<'a, T: ReadTxn> Views<'a, T> {
             .entry((story.to_owned(), view))
             .or_insert_with(|| StoryView::build(doc, txn, story, view).map(Rc::new))
             .clone()
+    }
+
+    #[cfg(test)]
+    pub fn built(&self, story: &str, view: EditTextView) -> bool {
+        self.cache.contains_key(&(story.to_owned(), view))
+    }
+
+    /// The story's projection when it is built or has at most `limit` units, else the
+    /// uncached prefix [`StoryView::build_within`] reads, with whether it is complete.
+    pub fn story_within(
+        &mut self,
+        story: &str,
+        view: EditTextView,
+        limit: u32,
+    ) -> Option<(Rc<StoryView>, bool)> {
+        let cached = self.cache.contains_key(&(story.to_owned(), view));
+        let units = yrs::Text::len(&story_ref(self.txn, story).ok()?, self.txn);
+        if cached || units <= limit {
+            return self.story(story, view).map(|built| (built, true));
+        }
+        StoryView::build_within(self.doc, self.txn, story, view, limit)
+            .map(|(built, complete)| (Rc::new(built), complete))
     }
 
     pub fn ownership(&mut self) -> Rc<Ownership> {

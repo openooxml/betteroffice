@@ -325,6 +325,18 @@ export class EditSession {
      */
     encoded_selection(): string;
     /**
+     * [`EditSession::export_structured_json`] rendered as Markdown from the same read:
+     * `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
+     */
+    export_markdown_json(options: string): string;
+    /**
+     * Structured export of the committed document state:
+     * `{"revisionView","stories"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
+     * `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Anchors are scoped
+     * to the returned version. Reads only: nothing is committed, minted or published.
+     */
+    export_structured_json(options: string): string;
+    /**
      * Exact, case-sensitive, paragraph-local search:
      * `{"text","within","view","limit"?}` ->
      * `{"ok":true,"version","matches":[{"text","range"}],"truncated"}`.
@@ -360,6 +372,11 @@ export class EditSession {
      * Returns `{"ok":true,"version"}` or a refusal.
      */
     format_text_target_json(target_json: string, delta_json: string): string;
+    /**
+     * The headings of `story` in document order, classified as the structured export
+     * classifies them: `[{"paraId","heading":{"outlineLevel","source"}}]`.
+     */
+    headings_json(story: string): string;
     /**
      * Stories changed by the latest undo or redo, sorted.
      */
@@ -914,6 +931,17 @@ export function close_display_list(handle: number): void;
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
 
 /**
+ * [`export_docx_structured_json`] rendered as Markdown.
+ */
+export function export_docx_markdown_json(bytes: Uint8Array, options: string): string;
+
+/**
+ * Structured export of DOCX bytes as a snapshot; `options` as for
+ * [`EditSession::export_structured_json`]. No session is created.
+ */
+export function export_docx_structured_json(bytes: Uint8Array, options: string): string;
+
+/**
  * wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
  * point in, document position (or `null`) as JSON out.
  */
@@ -1073,6 +1101,12 @@ export function register_measure_font(bytes: Uint8Array): number;
 export function register_substitute_measure_font(base: number, requested_family: string): number;
 
 /**
+ * Renders structured content as Markdown: `content` is a schema-version-1 export and
+ * `options` is `{"maxBytes"?}`.
+ */
+export function render_docx_markdown_json(content: string, options: string): string;
+
+/**
  * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -1152,9 +1186,12 @@ export interface InitOutput {
     readonly editsession_encode_state_vector: (a: number) => [number, number];
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
+    readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_find_text_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
@@ -1227,21 +1264,9 @@ export interface InitOutput {
     readonly editsession_validate_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_version: (a: number) => [number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s4: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s5: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s6: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s7: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s8: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s9: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly parse_relationships_xml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
-    readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
-    readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
-    readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1262,6 +1287,21 @@ export interface InitOutput {
     readonly clear_measure_fonts: () => void;
     readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
+    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s4: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s5: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s6: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s7: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s8: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s9: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly parse_relationships_xml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
+    readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
+    readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
+    readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

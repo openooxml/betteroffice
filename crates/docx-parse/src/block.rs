@@ -115,11 +115,7 @@ impl StoryParser<'_, '_> {
         let mut open_fields: Vec<OpenField> = Vec::new();
 
         for child in transparent_children(parent, false) {
-            let recognized = matches!(
-                child.local_name(),
-                "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
-            );
-            if !recognized {
+            if !typed_block(child) {
                 if let Some(crate::inline::InlineNode::RawXml(raw)) =
                     crate::inline::raw_foreign_inline(child)
                 {
@@ -440,26 +436,78 @@ impl StoryParser<'_, '_> {
 /// and `w:smartTag` wrappers, and through `w:sdt`/`w:sdtContent` when `through_sdt`.
 pub(crate) fn transparent_children(parent: &XmlElement, through_sdt: bool) -> Vec<&XmlElement> {
     let mut children = Vec::new();
-    collect_transparent_children(parent, through_sdt, &mut children);
+    visit_transparent_children(parent, through_sdt, &mut Vec::new(), &mut |_, child| {
+        children.push(child)
+    });
     children
 }
 
-fn collect_transparent_children<'a>(
+fn visit_transparent_children<'a>(
     parent: &'a XmlElement,
     through_sdt: bool,
-    children: &mut Vec<&'a XmlElement>,
+    path: &mut Vec<u32>,
+    visit: &mut impl FnMut(&[u32], &'a XmlElement),
 ) {
-    for child in parent.child_elements() {
+    for (ordinal, child) in parent.child_elements().enumerate() {
+        path.push(ordinal as u32);
         if child.matches_name("w", "customXml") || child.matches_name("w", "smartTag") {
-            collect_transparent_children(child, through_sdt, children);
+            visit_transparent_children(child, through_sdt, path, visit);
         } else if through_sdt && child.matches_name("w", "sdt") {
-            if let Some(content) = child.child("w", "sdtContent") {
-                collect_transparent_children(content, through_sdt, children);
+            if let Some((index, content)) = child
+                .child_elements()
+                .enumerate()
+                .find(|(_, element)| element.matches_name("w", "sdtContent"))
+            {
+                path.push(index as u32);
+                visit_transparent_children(content, through_sdt, path, visit);
+                path.pop();
             }
         } else {
-            children.push(child);
+            visit(path, child);
         }
+        path.pop();
     }
+}
+
+/// Whether the story dispatcher reads `element` as a typed block.
+fn typed_block(element: &XmlElement) -> bool {
+    matches!(
+        element.local_name(),
+        "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
+    )
+}
+
+/// Whether the story dispatcher reads `element` as a block: a typed one, or foreign markup it
+/// keeps as a raw block.
+fn is_story_block(element: &XmlElement) -> bool {
+    typed_block(element) || crate::inline::is_foreign(element)
+}
+
+/// The elements [`StoryParser::parse_blocks`] reads as blocks from `parent`, in order, each with
+/// its element-child ordinals below `parent`.
+pub fn story_block_elements(parent: &XmlElement) -> Vec<(Vec<u32>, &XmlElement)> {
+    let mut blocks = Vec::new();
+    visit_transparent_children(parent, false, &mut Vec::new(), &mut |path, child| {
+        if is_story_block(child) {
+            blocks.push((path.to_vec(), child));
+        }
+    });
+    blocks
+}
+
+/// The rows of a `w:tbl`, or the cells of a `w:tr`, as the table parser reads them, each with
+/// its element-child ordinals below `parent`.
+pub fn table_part_elements<'a>(
+    parent: &'a XmlElement,
+    local: &str,
+) -> Vec<(Vec<u32>, &'a XmlElement)> {
+    let mut parts = Vec::new();
+    visit_transparent_children(parent, true, &mut Vec::new(), &mut |path, child| {
+        if child.matches_name("w", local) {
+            parts.push((path.to_vec(), child));
+        }
+    });
+    parts
 }
 
 fn scan_field_block_events(root: &XmlElement) -> FieldEvents {

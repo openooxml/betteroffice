@@ -1,0 +1,2954 @@
+{
+  "schemaVersion": 1,
+  "revisionView": "accepted",
+  "anchorScope": "snapshot",
+  "includedStories": [
+    "body",
+    "headers",
+    "footers",
+    "footnotes",
+    "endnotes",
+    "comments"
+  ],
+  "includeFormatting": true,
+  "stories": [
+    {
+      "story": "body",
+      "kind": "body",
+      "part": "word/document.xml",
+      "noteId": null,
+      "comment": null,
+      "uses": [],
+      "blocks": [
+        {
+          "id": "s0.b0",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000001"
+          },
+          "kind": "heading",
+          "paragraph": {
+            "styleId": "Heading1",
+            "inlines": [
+              {
+                "id": "s0.b0.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000001",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000001",
+                    "offset": 17
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "bold"
+                  }
+                ],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Structured export"
+              }
+            ]
+          },
+          "heading": {
+            "outlineLevel": 0,
+            "source": {
+              "kind": "style",
+              "styleId": "Heading1"
+            }
+          }
+        },
+        {
+          "id": "s0.b1",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000002"
+          },
+          "kind": "heading",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b1.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000002",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000002",
+                    "offset": 14
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Direct outline"
+              }
+            ]
+          },
+          "heading": {
+            "outlineLevel": 1,
+            "source": {
+              "kind": "direct"
+            }
+          }
+        },
+        {
+          "id": "s0.b2",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000003"
+          },
+          "kind": "heading",
+          "paragraph": {
+            "styleId": "Title",
+            "inlines": [
+              {
+                "id": "s0.b2.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000003",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000003",
+                    "offset": 23
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "bold"
+                  }
+                ],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Inherited from Heading1"
+              }
+            ]
+          },
+          "heading": {
+            "outlineLevel": 0,
+            "source": {
+              "kind": "style",
+              "styleId": "Title"
+            }
+          }
+        },
+        {
+          "id": "s0.b3",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000004"
+          },
+          "kind": "heading",
+          "paragraph": {
+            "styleId": "Heading2",
+            "inlines": [
+              {
+                "id": "s0.b3.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000004",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000004",
+                    "offset": 23
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Built-in style fallback"
+              }
+            ]
+          },
+          "heading": {
+            "outlineLevel": 1,
+            "source": {
+              "kind": "builtinStyleId",
+              "styleId": "Heading2"
+            }
+          }
+        },
+        {
+          "id": "s0.b4",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000005"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": "Heading3",
+            "inlines": [
+              {
+                "id": "s0.b4.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000005",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000005",
+                    "offset": 19
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Explicit body level"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b5",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000006"
+          },
+          "kind": "listItem",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b5.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000006",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000006",
+                    "offset": 5
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "First"
+              }
+            ]
+          },
+          "list": {
+            "numId": "1",
+            "abstractNumId": "0",
+            "level": 0,
+            "format": "decimal",
+            "marker": "1.",
+            "suffix": "tab",
+            "markerHidden": false
+          },
+          "heading": null
+        },
+        {
+          "id": "s0.b6",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000007"
+          },
+          "kind": "listItem",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b6.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000007",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000007",
+                    "offset": 6
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Nested"
+              }
+            ]
+          },
+          "list": {
+            "numId": "1",
+            "abstractNumId": "0",
+            "level": 1,
+            "format": "lowerLetter",
+            "marker": "a)",
+            "suffix": "tab",
+            "markerHidden": false
+          },
+          "heading": null
+        },
+        {
+          "id": "s0.b7",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000008"
+          },
+          "kind": "listItem",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b7.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000008",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000008",
+                    "offset": 6
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Bullet"
+              }
+            ]
+          },
+          "list": {
+            "numId": "1",
+            "abstractNumId": "0",
+            "level": 2,
+            "format": "bullet",
+            "marker": "•",
+            "suffix": "tab",
+            "markerHidden": false
+          },
+          "heading": null
+        },
+        {
+          "id": "s0.b8",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000009"
+          },
+          "kind": "listItem",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b8.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000009",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000009",
+                    "offset": 6
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Second"
+              }
+            ]
+          },
+          "list": {
+            "numId": "1",
+            "abstractNumId": "0",
+            "level": 0,
+            "format": "decimal",
+            "marker": "2.",
+            "suffix": "tab",
+            "markerHidden": false
+          },
+          "heading": null
+        },
+        {
+          "id": "s0.b9",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "0000000A"
+          },
+          "kind": "listItem",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b9.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "0000000A",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "0000000A",
+                    "offset": 16
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Overridden start"
+              }
+            ]
+          },
+          "list": {
+            "numId": "2",
+            "abstractNumId": "0",
+            "level": 0,
+            "format": "decimal",
+            "marker": "7.",
+            "suffix": "tab",
+            "markerHidden": false
+          },
+          "heading": null
+        },
+        {
+          "id": "s0.b10",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "0000000B"
+          },
+          "kind": "listItem",
+          "paragraph": {
+            "styleId": "Heading1",
+            "inlines": [
+              {
+                "id": "s0.b10.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "0000000B",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "0000000B",
+                    "offset": 16
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "bold"
+                  }
+                ],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Numbered heading"
+              }
+            ]
+          },
+          "list": {
+            "numId": "3",
+            "abstractNumId": "1",
+            "level": 0,
+            "format": "upperRoman",
+            "marker": "I.",
+            "suffix": "tab",
+            "markerHidden": false
+          },
+          "heading": {
+            "outlineLevel": 0,
+            "source": {
+              "kind": "style",
+              "styleId": "Heading1"
+            }
+          }
+        },
+        {
+          "id": "s0.b11",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "0000000C"
+          },
+          "kind": "listItem",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b11.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "0000000C",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "0000000C",
+                    "offset": 17
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Unrendered format"
+              }
+            ]
+          },
+          "list": {
+            "numId": "4",
+            "abstractNumId": "2",
+            "level": 0,
+            "format": "cardinalText",
+            "marker": null,
+            "suffix": "tab",
+            "markerHidden": false
+          },
+          "heading": null
+        },
+        {
+          "id": "s0.b12",
+          "anchor": {
+            "kind": "table",
+            "story": "body",
+            "tableIndex": 0
+          },
+          "kind": "table",
+          "table": {
+            "gridColumns": 3,
+            "rows": [
+              {
+                "header": true,
+                "gridBefore": 0,
+                "gridAfter": 0,
+                "cells": [
+                  {
+                    "anchor": {
+                      "kind": "paragraph",
+                      "story": "body:t0:r0c0",
+                      "paraId": "10000001"
+                    },
+                    "story": "body:t0:r0c0",
+                    "column": 0,
+                    "gridSpan": 2,
+                    "rowSpan": 1,
+                    "verticalMerge": "none",
+                    "mergeOrigin": null,
+                    "blocks": [
+                      {
+                        "id": "s0.b12.r0.c0.b0",
+                        "anchor": {
+                          "kind": "paragraph",
+                          "story": "body:t0:r0c0",
+                          "paraId": "10000001"
+                        },
+                        "kind": "paragraph",
+                        "paragraph": {
+                          "styleId": null,
+                          "inlines": [
+                            {
+                              "id": "s0.b12.r0.c0.b0.i0",
+                              "anchor": {
+                                "kind": "range",
+                                "story": "body:t0:r0c0",
+                                "start": {
+                                  "paraId": "10000001",
+                                  "offset": 0
+                                },
+                                "end": {
+                                  "paraId": "10000001",
+                                  "offset": 11
+                                },
+                                "view": "accepted"
+                              },
+                              "marks": [],
+                              "link": null,
+                              "revisions": [],
+                              "kind": "text",
+                              "text": "Wide header"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "anchor": {
+                      "kind": "paragraph",
+                      "story": "body:t0:r0c1",
+                      "paraId": "10000002"
+                    },
+                    "story": "body:t0:r0c1",
+                    "column": 2,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "verticalMerge": "none",
+                    "mergeOrigin": null,
+                    "blocks": [
+                      {
+                        "id": "s0.b12.r0.c1.b0",
+                        "anchor": {
+                          "kind": "paragraph",
+                          "story": "body:t0:r0c1",
+                          "paraId": "10000002"
+                        },
+                        "kind": "paragraph",
+                        "paragraph": {
+                          "styleId": null,
+                          "inlines": [
+                            {
+                              "id": "s0.b12.r0.c1.b0.i0",
+                              "anchor": {
+                                "kind": "range",
+                                "story": "body:t0:r0c1",
+                                "start": {
+                                  "paraId": "10000002",
+                                  "offset": 0
+                                },
+                                "end": {
+                                  "paraId": "10000002",
+                                  "offset": 12
+                                },
+                                "view": "accepted"
+                              },
+                              "marks": [],
+                              "link": null,
+                              "revisions": [],
+                              "kind": "text",
+                              "text": "Right header"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "header": false,
+                "gridBefore": 0,
+                "gridAfter": 0,
+                "cells": [
+                  {
+                    "anchor": {
+                      "kind": "paragraph",
+                      "story": "body:t0:r1c0",
+                      "paraId": "10000003"
+                    },
+                    "story": "body:t0:r1c0",
+                    "column": 0,
+                    "gridSpan": 1,
+                    "rowSpan": 2,
+                    "verticalMerge": "restart",
+                    "mergeOrigin": null,
+                    "blocks": [
+                      {
+                        "id": "s0.b12.r1.c0.b0",
+                        "anchor": {
+                          "kind": "paragraph",
+                          "story": "body:t0:r1c0",
+                          "paraId": "10000003"
+                        },
+                        "kind": "paragraph",
+                        "paragraph": {
+                          "styleId": null,
+                          "inlines": [
+                            {
+                              "id": "s0.b12.r1.c0.b0.i0",
+                              "anchor": {
+                                "kind": "range",
+                                "story": "body:t0:r1c0",
+                                "start": {
+                                  "paraId": "10000003",
+                                  "offset": 0
+                                },
+                                "end": {
+                                  "paraId": "10000003",
+                                  "offset": 6
+                                },
+                                "view": "accepted"
+                              },
+                              "marks": [],
+                              "link": null,
+                              "revisions": [],
+                              "kind": "text",
+                              "text": "Merged"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "anchor": {
+                      "kind": "paragraph",
+                      "story": "body:t0:r1c1",
+                      "paraId": "10000004"
+                    },
+                    "story": "body:t0:r1c1",
+                    "column": 1,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "verticalMerge": "none",
+                    "mergeOrigin": null,
+                    "blocks": [
+                      {
+                        "id": "s0.b12.r1.c1.b0",
+                        "anchor": {
+                          "kind": "paragraph",
+                          "story": "body:t0:r1c1",
+                          "paraId": "10000004"
+                        },
+                        "kind": "paragraph",
+                        "paragraph": {
+                          "styleId": null,
+                          "inlines": [
+                            {
+                              "id": "s0.b12.r1.c1.b0.i0",
+                              "anchor": {
+                                "kind": "range",
+                                "story": "body:t0:r1c1",
+                                "start": {
+                                  "paraId": "10000004",
+                                  "offset": 0
+                                },
+                                "end": {
+                                  "paraId": "10000004",
+                                  "offset": 6
+                                },
+                                "view": "accepted"
+                              },
+                              "marks": [],
+                              "link": null,
+                              "revisions": [],
+                              "kind": "text",
+                              "text": "Middle"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "anchor": {
+                      "kind": "paragraph",
+                      "story": "body:t0:r1c2",
+                      "paraId": "10000005"
+                    },
+                    "story": "body:t0:r1c2",
+                    "column": 2,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "verticalMerge": "none",
+                    "mergeOrigin": null,
+                    "blocks": [
+                      {
+                        "id": "s0.b12.r1.c2.b0",
+                        "anchor": {
+                          "kind": "paragraph",
+                          "story": "body:t0:r1c2",
+                          "paraId": "10000005"
+                        },
+                        "kind": "paragraph",
+                        "paragraph": {
+                          "styleId": null,
+                          "inlines": [
+                            {
+                              "id": "s0.b12.r1.c2.b0.i0",
+                              "anchor": {
+                                "kind": "range",
+                                "story": "body:t0:r1c2",
+                                "start": {
+                                  "paraId": "10000005",
+                                  "offset": 0
+                                },
+                                "end": {
+                                  "paraId": "10000005",
+                                  "offset": 7
+                                },
+                                "view": "accepted"
+                              },
+                              "marks": [],
+                              "link": null,
+                              "revisions": [],
+                              "kind": "text",
+                              "text": "Nested:"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "s0.b12.r1.c2.b1",
+                        "anchor": {
+                          "kind": "table",
+                          "story": "body:t0:r1c2",
+                          "tableIndex": 0
+                        },
+                        "kind": "table",
+                        "table": {
+                          "gridColumns": 1,
+                          "rows": [
+                            {
+                              "header": false,
+                              "gridBefore": 0,
+                              "gridAfter": 0,
+                              "cells": [
+                                {
+                                  "anchor": {
+                                    "kind": "paragraph",
+                                    "story": "body:t0:r1c2:t0:r0c0",
+                                    "paraId": "10000006"
+                                  },
+                                  "story": "body:t0:r1c2:t0:r0c0",
+                                  "column": 0,
+                                  "gridSpan": 1,
+                                  "rowSpan": 1,
+                                  "verticalMerge": "none",
+                                  "mergeOrigin": null,
+                                  "blocks": [
+                                    {
+                                      "id": "s0.b12.r1.c2.b1.r0.c0.b0",
+                                      "anchor": {
+                                        "kind": "paragraph",
+                                        "story": "body:t0:r1c2:t0:r0c0",
+                                        "paraId": "10000006"
+                                      },
+                                      "kind": "paragraph",
+                                      "paragraph": {
+                                        "styleId": null,
+                                        "inlines": [
+                                          {
+                                            "id": "s0.b12.r1.c2.b1.r0.c0.b0.i0",
+                                            "anchor": {
+                                              "kind": "range",
+                                              "story": "body:t0:r1c2:t0:r0c0",
+                                              "start": {
+                                                "paraId": "10000006",
+                                                "offset": 0
+                                              },
+                                              "end": {
+                                                "paraId": "10000006",
+                                                "offset": 5
+                                              },
+                                              "view": "accepted"
+                                            },
+                                            "marks": [],
+                                            "link": null,
+                                            "revisions": [],
+                                            "kind": "text",
+                                            "text": "Inner"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "s0.b12.r1.c2.b2",
+                        "anchor": {
+                          "kind": "paragraph",
+                          "story": "body:t0:r1c2",
+                          "paraId": "10000007"
+                        },
+                        "kind": "paragraph",
+                        "paragraph": {
+                          "styleId": null,
+                          "inlines": []
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "header": false,
+                "gridBefore": 0,
+                "gridAfter": 0,
+                "cells": [
+                  {
+                    "anchor": {
+                      "kind": "table",
+                      "story": "body",
+                      "tableIndex": 0
+                    },
+                    "story": null,
+                    "column": 0,
+                    "gridSpan": 1,
+                    "rowSpan": 0,
+                    "verticalMerge": "continue",
+                    "mergeOrigin": {
+                      "row": 1,
+                      "column": 0
+                    },
+                    "blocks": []
+                  },
+                  {
+                    "anchor": {
+                      "kind": "paragraph",
+                      "story": "body:t0:r2c0",
+                      "paraId": "10000009"
+                    },
+                    "story": "body:t0:r2c0",
+                    "column": 1,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "verticalMerge": "none",
+                    "mergeOrigin": null,
+                    "blocks": [
+                      {
+                        "id": "s0.b12.r2.c1.b0",
+                        "anchor": {
+                          "kind": "paragraph",
+                          "story": "body:t0:r2c0",
+                          "paraId": "10000009"
+                        },
+                        "kind": "paragraph",
+                        "paragraph": {
+                          "styleId": null,
+                          "inlines": [
+                            {
+                              "id": "s0.b12.r2.c1.b0.i0",
+                              "anchor": {
+                                "kind": "range",
+                                "story": "body:t0:r2c0",
+                                "start": {
+                                  "paraId": "10000009",
+                                  "offset": 0
+                                },
+                                "end": {
+                                  "paraId": "10000009",
+                                  "offset": 12
+                                },
+                                "view": "accepted"
+                              },
+                              "marks": [],
+                              "link": null,
+                              "revisions": [],
+                              "kind": "text",
+                              "text": "Lower middle"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "anchor": {
+                      "kind": "paragraph",
+                      "story": "body:t0:r2c1",
+                      "paraId": "1000000A"
+                    },
+                    "story": "body:t0:r2c1",
+                    "column": 2,
+                    "gridSpan": 1,
+                    "rowSpan": 1,
+                    "verticalMerge": "none",
+                    "mergeOrigin": null,
+                    "blocks": [
+                      {
+                        "id": "s0.b12.r2.c2.b0",
+                        "anchor": {
+                          "kind": "paragraph",
+                          "story": "body:t0:r2c1",
+                          "paraId": "1000000A"
+                        },
+                        "kind": "paragraph",
+                        "paragraph": {
+                          "styleId": null,
+                          "inlines": [
+                            {
+                              "id": "s0.b12.r2.c2.b0.i0",
+                              "anchor": {
+                                "kind": "range",
+                                "story": "body:t0:r2c1",
+                                "start": {
+                                  "paraId": "1000000A",
+                                  "offset": 0
+                                },
+                                "end": {
+                                  "paraId": "1000000A",
+                                  "offset": 11
+                                },
+                                "view": "accepted"
+                              },
+                              "marks": [],
+                              "link": null,
+                              "revisions": [],
+                              "kind": "text",
+                              "text": "Lower right"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "header": false,
+                "gridBefore": 1,
+                "gridAfter": 0,
+                "cells": [
+                  {
+                    "anchor": {
+                      "kind": "paragraph",
+                      "story": "body:t0:r3c0",
+                      "paraId": "1000000B"
+                    },
+                    "story": "body:t0:r3c0",
+                    "column": 1,
+                    "gridSpan": 2,
+                    "rowSpan": 1,
+                    "verticalMerge": "none",
+                    "mergeOrigin": null,
+                    "blocks": [
+                      {
+                        "id": "s0.b12.r3.c0.b0",
+                        "anchor": {
+                          "kind": "paragraph",
+                          "story": "body:t0:r3c0",
+                          "paraId": "1000000B"
+                        },
+                        "kind": "paragraph",
+                        "paragraph": {
+                          "styleId": null,
+                          "inlines": [
+                            {
+                              "id": "s0.b12.r3.c0.b0.i0",
+                              "anchor": {
+                                "kind": "range",
+                                "story": "body:t0:r3c0",
+                                "start": {
+                                  "paraId": "1000000B",
+                                  "offset": 0
+                                },
+                                "end": {
+                                  "paraId": "1000000B",
+                                  "offset": 22
+                                },
+                                "view": "accepted"
+                              },
+                              "marks": [],
+                              "link": null,
+                              "revisions": [],
+                              "kind": "text",
+                              "text": "After a skipped column"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b13",
+          "anchor": {
+            "kind": "control",
+            "story": "body",
+            "controlId": "body:sdt0"
+          },
+          "kind": "contentControl",
+          "control": {
+            "controlId": "body:sdt0",
+            "ooxmlId": "-501",
+            "controlType": "richText",
+            "tag": "clause",
+            "alias": "Clause",
+            "lock": null,
+            "showingPlaceholder": true,
+            "dataBound": false
+          },
+          "story": "body:sdt0",
+          "blocks": [
+            {
+              "id": "s0.b13.b0",
+              "anchor": {
+                "kind": "paragraph",
+                "story": "body:sdt0",
+                "paraId": "0000000D"
+              },
+              "kind": "paragraph",
+              "paragraph": {
+                "styleId": null,
+                "inlines": [
+                  {
+                    "id": "s0.b13.b0.i0",
+                    "anchor": {
+                      "kind": "range",
+                      "story": "body:sdt0",
+                      "start": {
+                        "paraId": "0000000D",
+                        "offset": 0
+                      },
+                      "end": {
+                        "paraId": "0000000D",
+                        "offset": 22
+                      },
+                      "view": "accepted"
+                    },
+                    "marks": [],
+                    "link": null,
+                    "revisions": [],
+                    "kind": "text",
+                    "text": "Inside a block control"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "id": "s0.b14",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "0000000E"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b14.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "0000000E",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "0000000E",
+                    "offset": 5
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Dear "
+              },
+              {
+                "id": "s0.b14.i1",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "0000000E",
+                    "offset": 5
+                  },
+                  "end": {
+                    "paraId": "0000000E",
+                    "offset": 6
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "contentControl",
+                "control": {
+                  "controlId": "body|0000000E|0",
+                  "ooxmlId": "11",
+                  "controlType": "plainText",
+                  "tag": "name",
+                  "alias": "Name",
+                  "lock": null,
+                  "showingPlaceholder": false,
+                  "dataBound": false
+                },
+                "inlines": [
+                  {
+                    "id": "s0.b14.i1.i0",
+                    "anchor": {
+                      "kind": "control",
+                      "story": "body",
+                      "controlId": "body|0000000E|0"
+                    },
+                    "marks": [],
+                    "link": null,
+                    "revisions": [],
+                    "kind": "text",
+                    "text": "Ada"
+                  }
+                ]
+              },
+              {
+                "id": "s0.b14.i2",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "0000000E",
+                    "offset": 6
+                  },
+                  "end": {
+                    "paraId": "0000000E",
+                    "offset": 11
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": " and "
+              },
+              {
+                "id": "s0.b14.i3",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "0000000E",
+                    "offset": 11
+                  },
+                  "end": {
+                    "paraId": "0000000E",
+                    "offset": 12
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "contentControl",
+                "control": {
+                  "controlId": "body|0000000E|1",
+                  "ooxmlId": "12",
+                  "controlType": "plainText",
+                  "tag": "name",
+                  "alias": "Name",
+                  "lock": null,
+                  "showingPlaceholder": false,
+                  "dataBound": false
+                },
+                "inlines": [
+                  {
+                    "id": "s0.b14.i3.i0",
+                    "anchor": {
+                      "kind": "control",
+                      "story": "body",
+                      "controlId": "body|0000000E|1"
+                    },
+                    "marks": [],
+                    "link": null,
+                    "revisions": [],
+                    "kind": "text",
+                    "text": "Grace"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b15",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "0000000F"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b15.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "0000000F",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "0000000F",
+                    "offset": 14
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Keep added end"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b16",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000010"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b16.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000010",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000010",
+                    "offset": 6
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Logo: "
+              },
+              {
+                "id": "s0.b16.i1",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000010",
+                    "offset": 6
+                  },
+                  "end": {
+                    "paraId": "00000010",
+                    "offset": 7
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "image",
+                "altText": "Company logo",
+                "relationshipId": "rIdImage",
+                "part": "word/media/logo.png",
+                "externalTarget": null
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b17",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000011"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b17.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000011",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000011",
+                    "offset": 5
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Page "
+              },
+              {
+                "id": "s0.b17.i1",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000011",
+                    "offset": 5
+                  },
+                  "end": {
+                    "paraId": "00000011",
+                    "offset": 6
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "field",
+                "fieldType": "PAGE",
+                "instruction": " PAGE ",
+                "cachedResult": {
+                  "kind": "inline",
+                  "inlines": [
+                    {
+                      "id": "s0.b17.i1.i0",
+                      "anchor": {
+                        "kind": "range",
+                        "story": "body",
+                        "start": {
+                          "paraId": "00000011",
+                          "offset": 5
+                        },
+                        "end": {
+                          "paraId": "00000011",
+                          "offset": 6
+                        },
+                        "view": "accepted"
+                      },
+                      "marks": [],
+                      "link": null,
+                      "revisions": [],
+                      "kind": "text",
+                      "text": "4"
+                    }
+                  ]
+                },
+                "dirty": false,
+                "locked": false
+              },
+              {
+                "id": "s0.b17.i2",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000011",
+                    "offset": 6
+                  },
+                  "end": {
+                    "paraId": "00000011",
+                    "offset": 13
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": ", year "
+              },
+              {
+                "id": "s0.b17.i3",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000011",
+                    "offset": 13
+                  },
+                  "end": {
+                    "paraId": "00000011",
+                    "offset": 14
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "field",
+                "fieldType": "DATE",
+                "instruction": "DATE \\@ \"yyyy\"",
+                "cachedResult": {
+                  "kind": "inline",
+                  "inlines": [
+                    {
+                      "id": "s0.b17.i3.i0",
+                      "anchor": {
+                        "kind": "range",
+                        "story": "body",
+                        "start": {
+                          "paraId": "00000011",
+                          "offset": 13
+                        },
+                        "end": {
+                          "paraId": "00000011",
+                          "offset": 14
+                        },
+                        "view": "accepted"
+                      },
+                      "marks": [],
+                      "link": null,
+                      "revisions": [],
+                      "kind": "text",
+                      "text": "2026"
+                    }
+                  ]
+                },
+                "dirty": false,
+                "locked": false
+              },
+              {
+                "id": "s0.b17.i4",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000011",
+                    "offset": 14
+                  },
+                  "end": {
+                    "paraId": "00000011",
+                    "offset": 23
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": ", author "
+              },
+              {
+                "id": "s0.b17.i5",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000011",
+                    "offset": 23
+                  },
+                  "end": {
+                    "paraId": "00000011",
+                    "offset": 24
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "field",
+                "fieldType": "AUTHOR",
+                "instruction": " AUTHOR ",
+                "cachedResult": {
+                  "kind": "missing"
+                },
+                "dirty": false,
+                "locked": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b18",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000012"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b18.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000012",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000012",
+                    "offset": 15
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Commented words"
+              },
+              {
+                "id": "s0.b18.i1",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000012",
+                    "offset": 15
+                  },
+                  "end": {
+                    "paraId": "00000012",
+                    "offset": 16
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "commentReference",
+                "commentId": "1",
+                "story": "comment:1"
+              },
+              {
+                "id": "s0.b18.i2",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000012",
+                    "offset": 16
+                  },
+                  "end": {
+                    "paraId": "00000012",
+                    "offset": 28
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": " with a note"
+              },
+              {
+                "id": "s0.b18.i3",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000012",
+                    "offset": 28
+                  },
+                  "end": {
+                    "paraId": "00000012",
+                    "offset": 29
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "superscript"
+                  }
+                ],
+                "link": null,
+                "revisions": [],
+                "kind": "noteReference",
+                "noteKind": "footnote",
+                "noteId": "1",
+                "story": "fn:1"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b19",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000013"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b19.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000013",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000013",
+                    "offset": 4
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "See "
+              },
+              {
+                "id": "s0.b19.i1",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000013",
+                    "offset": 4
+                  },
+                  "end": {
+                    "paraId": "00000013",
+                    "offset": 10
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "underline",
+                    "style": "single"
+                  }
+                ],
+                "link": {
+                  "href": "https://example.com/docs",
+                  "title": "Visit"
+                },
+                "revisions": [],
+                "kind": "text",
+                "text": "a link"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b20",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000014"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b20.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000014",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000014",
+                    "offset": 6
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Atoms:"
+              },
+              {
+                "id": "s0.b20.i1",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000014",
+                    "offset": 6
+                  },
+                  "end": {
+                    "paraId": "00000014",
+                    "offset": 7
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "italic"
+                  }
+                ],
+                "link": null,
+                "revisions": [],
+                "kind": "tab"
+              },
+              {
+                "id": "s0.b20.i2",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000014",
+                    "offset": 7
+                  },
+                  "end": {
+                    "paraId": "00000014",
+                    "offset": 13
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "italic"
+                  }
+                ],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "tabbed"
+              },
+              {
+                "id": "s0.b20.i3",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000014",
+                    "offset": 13
+                  },
+                  "end": {
+                    "paraId": "00000014",
+                    "offset": 14
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "italic"
+                  }
+                ],
+                "link": null,
+                "revisions": [],
+                "kind": "break",
+                "breakType": "line"
+              },
+              {
+                "id": "s0.b20.i4",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000014",
+                    "offset": 14
+                  },
+                  "end": {
+                    "paraId": "00000014",
+                    "offset": 22
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "italic"
+                  }
+                ],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "é 😀 ￼ "
+              },
+              {
+                "id": "s0.b20.i5",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000014",
+                    "offset": 22
+                  },
+                  "end": {
+                    "paraId": "00000014",
+                    "offset": 26
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "done"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b21",
+          "anchor": {
+            "kind": "sourcePart",
+            "part": "word/document.xml",
+            "partSha256": "c4bc66994e7816966948a28cc8ecc805cdf87249aa2f044749b739062bcb0799",
+            "path": [
+              0,
+              21
+            ]
+          },
+          "kind": "unsupported",
+          "element": "bofx:block"
+        },
+        {
+          "id": "s0.b22",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000015"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b22.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000015",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000015",
+                    "offset": 6
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Shape "
+              },
+              {
+                "id": "s0.b22.i1",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000015",
+                    "offset": 6
+                  },
+                  "end": {
+                    "paraId": "00000015",
+                    "offset": 7
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "unsupported",
+                "element": "wps:wsp",
+                "altText": "Process arrow"
+              },
+              {
+                "id": "s0.b22.i2",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000015",
+                    "offset": 7
+                  },
+                  "end": {
+                    "paraId": "00000015",
+                    "offset": 18
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": ", equation "
+              },
+              {
+                "id": "s0.b22.i3",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000015",
+                    "offset": 18
+                  },
+                  "end": {
+                    "paraId": "00000015",
+                    "offset": 19
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "unsupported",
+                "element": "m:oMath",
+                "altText": "x=1"
+              },
+              {
+                "id": "s0.b22.i4",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000015",
+                    "offset": 19
+                  },
+                  "end": {
+                    "paraId": "00000015",
+                    "offset": 34
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": ", unread chart "
+              },
+              {
+                "id": "s0.b22.i5",
+                "anchor": {
+                  "kind": "paragraph",
+                  "story": "body",
+                  "paraId": "00000015"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "unsupported",
+                "element": "w:drawing",
+                "altText": null
+              },
+              {
+                "id": "s0.b22.i6",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000015",
+                    "offset": 34
+                  },
+                  "end": {
+                    "paraId": "00000015",
+                    "offset": 37
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "end"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b23",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000018"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b23.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000018",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000018",
+                    "offset": 13
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Moved to here"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b24",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000019"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b24.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000019",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000019",
+                    "offset": 4
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Page"
+              },
+              {
+                "id": "s0.b24.i1",
+                "anchor": {
+                  "kind": "paragraph",
+                  "story": "body",
+                  "paraId": "00000019"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "break",
+                "breakType": "page"
+              },
+              {
+                "id": "s0.b24.i2",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000019",
+                    "offset": 4
+                  },
+                  "end": {
+                    "paraId": "00000019",
+                    "offset": 10
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "break "
+              },
+              {
+                "id": "s0.b24.i3",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000019",
+                    "offset": 10
+                  },
+                  "end": {
+                    "paraId": "00000019",
+                    "offset": 11
+                  },
+                  "view": "accepted"
+                },
+                "marks": [
+                  {
+                    "kind": "bold"
+                  }
+                ],
+                "link": null,
+                "revisions": [],
+                "kind": "field",
+                "fieldType": "REF",
+                "instruction": "REF _Ref1 \\h",
+                "cachedResult": {
+                  "kind": "inline",
+                  "inlines": [
+                    {
+                      "id": "s0.b24.i3.i0",
+                      "anchor": {
+                        "kind": "range",
+                        "story": "body",
+                        "start": {
+                          "paraId": "00000019",
+                          "offset": 10
+                        },
+                        "end": {
+                          "paraId": "00000019",
+                          "offset": 11
+                        },
+                        "view": "accepted"
+                      },
+                      "marks": [
+                        {
+                          "kind": "bold"
+                        }
+                      ],
+                      "link": null,
+                      "revisions": [],
+                      "kind": "text",
+                      "text": "Bold"
+                    },
+                    {
+                      "id": "s0.b24.i3.i1",
+                      "anchor": {
+                        "kind": "range",
+                        "story": "body",
+                        "start": {
+                          "paraId": "00000019",
+                          "offset": 10
+                        },
+                        "end": {
+                          "paraId": "00000019",
+                          "offset": 11
+                        },
+                        "view": "accepted"
+                      },
+                      "marks": [],
+                      "link": null,
+                      "revisions": [],
+                      "kind": "tab"
+                    },
+                    {
+                      "id": "s0.b24.i3.i2",
+                      "anchor": {
+                        "kind": "range",
+                        "story": "body",
+                        "start": {
+                          "paraId": "00000019",
+                          "offset": 10
+                        },
+                        "end": {
+                          "paraId": "00000019",
+                          "offset": 11
+                        },
+                        "view": "accepted"
+                      },
+                      "marks": [],
+                      "link": null,
+                      "revisions": [],
+                      "kind": "text",
+                      "text": "result"
+                    }
+                  ]
+                },
+                "dirty": false,
+                "locked": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b25",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000016"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b25.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000016",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000016",
+                    "offset": 18
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "End of section one"
+              }
+            ]
+          }
+        },
+        {
+          "id": "s0.b26",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000016"
+          },
+          "kind": "sectionBreak",
+          "sectionIndex": 1,
+          "breakType": "nextPage"
+        },
+        {
+          "id": "s0.b27",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "body",
+            "paraId": "00000017"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s0.b27.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "body",
+                  "start": {
+                    "paraId": "00000017",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "00000017",
+                    "offset": 11
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Section two"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "story": "hf:rIdHeader1",
+      "kind": "header",
+      "part": "word/header1.xml",
+      "noteId": null,
+      "comment": null,
+      "uses": [
+        {
+          "sectionIndex": 0,
+          "variant": "default"
+        },
+        {
+          "sectionIndex": 1,
+          "variant": "default"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "s1.b0",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "hf:rIdHeader1",
+            "paraId": "20000001"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s1.b0.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "hf:rIdHeader1",
+                  "start": {
+                    "paraId": "20000001",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "20000001",
+                    "offset": 14
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Default header"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "story": "hf:rIdHeader2",
+      "kind": "header",
+      "part": "word/header2.xml",
+      "noteId": null,
+      "comment": null,
+      "uses": [
+        {
+          "sectionIndex": 1,
+          "variant": "first"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "s2.b0",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "hf:rIdHeader2",
+            "paraId": "20000002"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s2.b0.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "hf:rIdHeader2",
+                  "start": {
+                    "paraId": "20000002",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "20000002",
+                    "offset": 17
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "First page header"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "story": "hf:rIdFooter1",
+      "kind": "footer",
+      "part": "word/footer1.xml",
+      "noteId": null,
+      "comment": null,
+      "uses": [
+        {
+          "sectionIndex": 0,
+          "variant": "default"
+        },
+        {
+          "sectionIndex": 1,
+          "variant": "default"
+        }
+      ],
+      "blocks": [
+        {
+          "id": "s3.b0",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "hf:rIdFooter1",
+            "paraId": "20000003"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s3.b0.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "hf:rIdFooter1",
+                  "start": {
+                    "paraId": "20000003",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "20000003",
+                    "offset": 11
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Footer text"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "story": "fn:1",
+      "kind": "footnote",
+      "part": "word/footnotes.xml",
+      "noteId": "1",
+      "comment": null,
+      "uses": [],
+      "blocks": [
+        {
+          "id": "s4.b0",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "fn:1",
+            "paraId": "20000004"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s4.b0.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "fn:1",
+                  "start": {
+                    "paraId": "20000004",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "20000004",
+                    "offset": 13
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Footnote text"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "story": "en:1",
+      "kind": "endnote",
+      "part": "word/endnotes.xml",
+      "noteId": "1",
+      "comment": null,
+      "uses": [],
+      "blocks": [
+        {
+          "id": "s5.b0",
+          "anchor": {
+            "kind": "paragraph",
+            "story": "en:1",
+            "paraId": "20000005"
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s5.b0.i0",
+                "anchor": {
+                  "kind": "range",
+                  "story": "en:1",
+                  "start": {
+                    "paraId": "20000005",
+                    "offset": 0
+                  },
+                  "end": {
+                    "paraId": "20000005",
+                    "offset": 20
+                  },
+                  "view": "accepted"
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Unreferenced endnote"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "story": "comment:1",
+      "kind": "comment",
+      "part": "word/comments.xml",
+      "noteId": null,
+      "comment": {
+        "id": "1",
+        "author": "Ann",
+        "date": "2026-01-04T00:00:00Z",
+        "parentId": null,
+        "resolved": false,
+        "anchors": [
+          {
+            "kind": "range",
+            "story": "body",
+            "start": {
+              "paraId": "00000012",
+              "offset": 0
+            },
+            "end": {
+              "paraId": "00000012",
+              "offset": 15
+            },
+            "view": "accepted"
+          }
+        ]
+      },
+      "uses": [],
+      "blocks": [
+        {
+          "id": "s6.b0",
+          "anchor": {
+            "kind": "sourcePart",
+            "part": "word/comments.xml",
+            "partSha256": "e75e5de6053650e58802fa71cd3299795cb5b95708fe13f1cf4f192e7fa17a91",
+            "path": [
+              0
+            ]
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s6.b0.i0",
+                "anchor": {
+                  "kind": "sourcePart",
+                  "part": "word/comments.xml",
+                  "partSha256": "e75e5de6053650e58802fa71cd3299795cb5b95708fe13f1cf4f192e7fa17a91",
+                  "path": [
+                    0
+                  ]
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Please review"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "story": "comment:2",
+      "kind": "comment",
+      "part": "word/comments.xml",
+      "noteId": null,
+      "comment": {
+        "id": "2",
+        "author": "Bob",
+        "date": "2026-01-05T00:00:00Z",
+        "parentId": null,
+        "resolved": false,
+        "anchors": []
+      },
+      "uses": [],
+      "blocks": [
+        {
+          "id": "s7.b0",
+          "anchor": {
+            "kind": "sourcePart",
+            "part": "word/comments.xml",
+            "partSha256": "e75e5de6053650e58802fa71cd3299795cb5b95708fe13f1cf4f192e7fa17a91",
+            "path": [
+              1
+            ]
+          },
+          "kind": "paragraph",
+          "paragraph": {
+            "styleId": null,
+            "inlines": [
+              {
+                "id": "s7.b0.i0",
+                "anchor": {
+                  "kind": "sourcePart",
+                  "part": "word/comments.xml",
+                  "partSha256": "e75e5de6053650e58802fa71cd3299795cb5b95708fe13f1cf4f192e7fa17a91",
+                  "path": [
+                    1
+                  ]
+                },
+                "marks": [],
+                "link": null,
+                "revisions": [],
+                "kind": "text",
+                "text": "Unanchored remark"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "stories-omitted",
+      "severity": "info",
+      "anchor": null,
+      "message": "2 footnote separator notes are not exported."
+    },
+    {
+      "code": "stories-omitted",
+      "severity": "info",
+      "anchor": null,
+      "message": "2 endnote separator notes are not exported."
+    },
+    {
+      "code": "unsupported-numbering",
+      "severity": "warning",
+      "anchor": {
+        "kind": "paragraph",
+        "story": "body",
+        "paraId": "0000000C"
+      },
+      "message": "Numbering format cardinalText is not rendered, so the marker is unresolved."
+    },
+    {
+      "code": "merge-continuation-content-omitted",
+      "severity": "warning",
+      "anchor": {
+        "kind": "table",
+        "story": "body",
+        "tableIndex": 0
+      },
+      "message": "The merged continuation cell at row 2, column 0 holds content the export omits."
+    },
+    {
+      "code": "image-data-omitted",
+      "severity": "info",
+      "anchor": {
+        "kind": "range",
+        "story": "body",
+        "start": {
+          "paraId": "00000010",
+          "offset": 6
+        },
+        "end": {
+          "paraId": "00000010",
+          "offset": 7
+        },
+        "view": "accepted"
+      },
+      "message": "Image data is not exported; the image is described by its alt text and relationship."
+    },
+    {
+      "code": "field-cached-result",
+      "severity": "info",
+      "anchor": {
+        "kind": "range",
+        "story": "body",
+        "start": {
+          "paraId": "00000011",
+          "offset": 5
+        },
+        "end": {
+          "paraId": "00000011",
+          "offset": 6
+        },
+        "view": "accepted"
+      },
+      "message": "PAGE field is exported with its cached result and is not evaluated."
+    },
+    {
+      "code": "field-cached-result",
+      "severity": "info",
+      "anchor": {
+        "kind": "range",
+        "story": "body",
+        "start": {
+          "paraId": "00000011",
+          "offset": 13
+        },
+        "end": {
+          "paraId": "00000011",
+          "offset": 14
+        },
+        "view": "accepted"
+      },
+      "message": "DATE field is exported with its cached result and is not evaluated."
+    },
+    {
+      "code": "field-cached-result",
+      "severity": "info",
+      "anchor": {
+        "kind": "range",
+        "story": "body",
+        "start": {
+          "paraId": "00000011",
+          "offset": 23
+        },
+        "end": {
+          "paraId": "00000011",
+          "offset": 24
+        },
+        "view": "accepted"
+      },
+      "message": "AUTHOR field is exported with its cached result and is not evaluated."
+    },
+    {
+      "code": "missing-field-result",
+      "severity": "warning",
+      "anchor": {
+        "kind": "range",
+        "story": "body",
+        "start": {
+          "paraId": "00000011",
+          "offset": 23
+        },
+        "end": {
+          "paraId": "00000011",
+          "offset": 24
+        },
+        "view": "accepted"
+      },
+      "message": "AUTHOR field has no cached result."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "sourcePart",
+        "part": "word/document.xml",
+        "partSha256": "c4bc66994e7816966948a28cc8ecc805cdf87249aa2f044749b739062bcb0799",
+        "path": [
+          0,
+          21
+        ]
+      },
+      "message": "A bofx:block block is not represented in the export."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "range",
+        "story": "body",
+        "start": {
+          "paraId": "00000015",
+          "offset": 6
+        },
+        "end": {
+          "paraId": "00000015",
+          "offset": 7
+        },
+        "view": "accepted"
+      },
+      "message": "An inline wps:wsp is not represented in the export."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "range",
+        "story": "body",
+        "start": {
+          "paraId": "00000015",
+          "offset": 18
+        },
+        "end": {
+          "paraId": "00000015",
+          "offset": 19
+        },
+        "view": "accepted"
+      },
+      "message": "An inline m:oMath is not represented in the export."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "paragraph",
+        "story": "body",
+        "paraId": "00000015"
+      },
+      "message": "An inline w:drawing is not represented in the export; it stays in the package."
+    },
+    {
+      "code": "field-cached-result",
+      "severity": "info",
+      "anchor": {
+        "kind": "range",
+        "story": "body",
+        "start": {
+          "paraId": "00000019",
+          "offset": 10
+        },
+        "end": {
+          "paraId": "00000019",
+          "offset": 11
+        },
+        "view": "accepted"
+      },
+      "message": "REF field is exported with its cached result and is not evaluated."
+    },
+    {
+      "code": "revision-content-excluded",
+      "severity": "info",
+      "anchor": null,
+      "message": "Pending deletions are excluded from the accepted view."
+    }
+  ],
+  "truncated": false
+}

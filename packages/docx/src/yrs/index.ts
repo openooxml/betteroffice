@@ -35,8 +35,17 @@ import type {
   DocxTextTarget,
   DocxValidationResult,
 } from './edits';
+import type { DocxParagraphHeading } from './readTypes';
+import type {
+  DocxExportOptions,
+  DocxExportResult,
+  DocxMarkdownContent,
+  DocxStructuredContent,
+} from './structuredExport';
 
 export * from './edits';
+export * from './readTypes';
+export * from './structuredExport';
 export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
@@ -1001,6 +1010,22 @@ export interface YrsSession extends CollaborationReplica {
   /** Accepted-view texts around a paragraph-keyed selection. @internal */
   selectionText(range: YrsStoryRange): YrsSelectionText;
 
+  // -- structured export --
+
+  /**
+   * Exports the committed document as read-only structured content with the version it was read
+   * at; anchors resolve against that version. Nothing is committed, flushed or published.
+   * Unusable options are refused; malformed ones throw.
+   */
+  exportStructured(options: DocxExportOptions): DocxExportResult<DocxStructuredContent>;
+  /** {@link exportStructured} rendered as Markdown from the same read. */
+  exportMarkdown(options: DocxExportOptions): DocxExportResult<DocxMarkdownContent>;
+  /**
+   * The heading paragraphs of `story` in document order, classified as the structured export
+   * classifies them. Throws for an unknown story.
+   */
+  headings(story: string): DocxParagraphHeading[];
+
   /** Drops the observer and frees the wasm-side replica. Idempotent. */
   destroy(): void;
 }
@@ -1918,6 +1943,16 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
+
+    exportStructured: (options) =>
+      JSON.parse(
+        session.export_structured_json(JSON.stringify(options))
+      ) as DocxExportResult<DocxStructuredContent>,
+    exportMarkdown: (options) =>
+      JSON.parse(
+        session.export_markdown_json(JSON.stringify(options))
+      ) as DocxExportResult<DocxMarkdownContent>,
+    headings: (story) => JSON.parse(session.headings_json(story)) as DocxParagraphHeading[],
 
     version: () => session.version(),
     readParagraphs: (request) =>

@@ -52,6 +52,7 @@ use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
 use crate::segments::SegKind;
+use crate::structured::ExportOptions;
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditRequest, EditTextView, EditingDoc,
     EngineSession, FindTextRequest, FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc,
@@ -1020,13 +1021,16 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
 
 impl EditSession {
     fn open_docx_inner(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
-        let envelope = crate::seed::parse_docx_for_edit(bytes).map_err(js_err)?;
+        let (envelope, parts) = crate::seed::parse_docx_with_parts(bytes).map_err(js_err)?;
         let host_envelope = thin_docx_envelope(&envelope);
         let referenced_fonts = if seed_stories {
-            crate::seed::seed_parsed_docx(self.engine.doc(), envelope).map_err(js_err)?
+            crate::seed::seed_parsed_docx_with(self.engine.doc(), envelope, Some(&parts))
+                .map_err(js_err)?
         } else {
             let fonts = crate::seed::referenced_fonts(&envelope).map_err(js_err)?;
-            let source = crate::seed::source_metadata(&envelope).map_err(js_err)?;
+            let mut source =
+                crate::seed::source_metadata(&envelope, Some(&parts)).map_err(js_err)?;
+            source.watch_comments(self.engine.doc());
             self.engine.doc().install_source(source, js_entropy());
             drop(envelope);
             fonts
@@ -3175,6 +3179,36 @@ impl EditSession {
         outcome_json(&outcome).map_err(js_err)
     }
 
+    /// Structured export of the committed document state:
+    /// `{"revisionView","stories"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
+    /// `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Anchors are scoped
+    /// to the returned version. Reads only: nothing is committed, minted or published.
+    pub fn export_structured_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
+        outcome_json(&self.engine.doc().export_structured(&options)).map_err(js_err)
+    }
+
+    /// [`EditSession::export_structured_json`] rendered as Markdown from the same read:
+    /// `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
+    pub fn export_markdown_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
+        outcome_json(&self.engine.doc().export_markdown(&options)).map_err(js_err)
+    }
+
+    /// The headings of `story` in document order, classified as the structured export
+    /// classifies them: `[{"paraId","heading":{"outlineLevel","source"}}]`.
+    pub fn headings_json(&self, story: &str) -> Result<String, JsValue> {
+        let headings: Vec<_> = self
+            .engine
+            .doc()
+            .paragraph_headings(story)
+            .map_err(js_err)?
+            .into_iter()
+            .map(|(para_id, heading)| json!({ "paraId": para_id, "heading": heading }))
+            .collect();
+        serde_json::to_string(&headings).map_err(js_err)
+    }
+
     /// Resolves a text target and formats it in one call (legacy agent
     /// helpers). `delta_json` is the [`EditSession::format_range`] delta.
     /// Returns `{"ok":true,"version"}` or a refusal.
@@ -3544,6 +3578,48 @@ impl EditSession {
     }
 }
 
+/// A snapshot export as `{"ok":true,"content"}` or `{"ok":false,"failure"}`; unreadable packages
+/// and malformed options throw.
+fn snapshot_json<T: Serialize>(
+    outcome: Result<T, crate::structured::ExportError>,
+) -> Result<String, JsValue> {
+    let outcome = match outcome {
+        Ok(content) => Ok(json!({ "content": content })),
+        Err(crate::structured::ExportError::Refused(failure)) => Err(json!({ "failure": failure })),
+        Err(crate::structured::ExportError::Parse(message)) => return Err(js_err(message)),
+    };
+    outcome_json(&outcome).map_err(js_err)
+}
+
+/// Structured export of DOCX bytes as a snapshot; `options` as for
+/// [`EditSession::export_structured_json`]. No session is created.
+#[wasm_bindgen]
+pub fn export_docx_structured_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
+    let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(crate::structured::export_docx_structured(bytes, &options))
+}
+
+/// [`export_docx_structured_json`] rendered as Markdown.
+#[wasm_bindgen]
+pub fn export_docx_markdown_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
+    let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(crate::structured::export_docx_markdown(bytes, &options))
+}
+
+/// Renders structured content as Markdown: `content` is a schema-version-1 export and
+/// `options` is `{"maxBytes"?}`.
+#[wasm_bindgen]
+pub fn render_docx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
+    let content: crate::structured::DocxStructuredContent =
+        serde_json::from_str(content).map_err(js_err)?;
+    let options: crate::structured::MarkdownOptions =
+        serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(
+        crate::structured::render_docx_markdown(&content, &options)
+            .map_err(crate::structured::ExportError::Refused),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3693,6 +3769,80 @@ mod tests {
             session.engine.doc().paragraphs("body").unwrap()[0].text,
             "AlphaBETA"
         );
+    }
+
+    #[test]
+    fn export_envelopes_carry_versions_and_refusals_as_data() {
+        let session = EditSession::new(73.0).unwrap();
+        session.open_docx(&batch_docx(), true).unwrap();
+        let version = session.version();
+        let read = envelope(
+            &session
+                .export_structured_json(r#"{"revisionView":"accepted"}"#)
+                .unwrap(),
+        );
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["version"], version.as_str());
+        assert_eq!(read["content"]["schemaVersion"], 1);
+        assert_eq!(read["content"]["anchorScope"], "session");
+        assert_eq!(
+            read["content"]["stories"][0]["blocks"][0]["paragraph"]["inlines"][1]["kind"],
+            "break"
+        );
+        let markdown = envelope(
+            &session
+                .export_markdown_json(r#"{"revisionView":"markup","includeFormatting":false}"#)
+                .unwrap(),
+        );
+        assert_eq!(markdown["ok"], true);
+        assert!(
+            markdown["content"]["markdown"]
+                .as_str()
+                .unwrap()
+                .contains("Alpha\\\nbeta")
+        );
+        let refused = envelope(
+            &session
+                .export_structured_json(r#"{"revisionView":"accepted","maxBytes":8}"#)
+                .unwrap(),
+        );
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["version"], version.as_str());
+        assert_eq!(refused["failure"]["code"], "invalid-options");
+        assert_eq!(refused["failure"]["target"], Value::Null);
+        assert!(
+            refused["failure"]
+                .as_object()
+                .unwrap()
+                .contains_key("target")
+        );
+        assert_eq!(session.version(), version);
+        let empty = EditSession::new(74.0).unwrap();
+        let unsupported = envelope(
+            &empty
+                .export_structured_json(r#"{"revisionView":"accepted"}"#)
+                .unwrap(),
+        );
+        assert_eq!(unsupported["failure"]["code"], "unsupported");
+        assert_eq!(unsupported["failure"]["target"], Value::Null);
+    }
+
+    #[test]
+    fn snapshot_exports_have_no_version_and_render_from_content() {
+        let options = r#"{"revisionView":"accepted"}"#;
+        let exported = envelope(&export_docx_structured_json(&batch_docx(), options).unwrap());
+        assert_eq!(exported["ok"], true);
+        assert!(exported.get("version").is_none());
+        assert_eq!(exported["content"]["anchorScope"], "snapshot");
+        let rendered =
+            envelope(&render_docx_markdown_json(&exported["content"].to_string(), "{}").unwrap());
+        let markdown = envelope(&export_docx_markdown_json(&batch_docx(), options).unwrap());
+        assert_eq!(rendered, markdown);
+        let refused = envelope(
+            &render_docx_markdown_json(&exported["content"].to_string(), r#"{"maxBytes":1}"#)
+                .unwrap(),
+        );
+        assert_eq!(refused["failure"]["code"], "invalid-options");
     }
 
     #[test]
