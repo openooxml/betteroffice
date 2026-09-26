@@ -18,6 +18,7 @@ import {
   type CollaborationTransport,
 } from "../collab";
 import { cn } from "../../lib/cn";
+import { CompactToolbar } from "./CompactToolbar";
 import { buildTotalsEdits } from "./demoAgent";
 
 const SHOWCASE = { url: "/showcase.xlsx", name: "showcase.xlsx" };
@@ -118,6 +119,7 @@ export function XlsxDemoClient() {
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(!bootEmpty);
   const [error, setError] = useState<string | null>(null);
+  const [compact, setCompact] = useState(false);
   const apiRef = useRef<XlsxEditorApi | null>(null);
   // set once the user opens their own document, so the async showcase auto-load
   // can't clobber that choice if it resolves afterwards.
@@ -294,6 +296,14 @@ export function XlsxDemoClient() {
             />
           )}
           <div className="flex items-center gap-2 max-[720px]:flex-none">
+            <button
+              type="button"
+              className={cn(btnGhost, "aria-pressed:bg-surface aria-pressed:text-fg")}
+              aria-pressed={compact}
+              onClick={() => setCompact((value) => !value)}
+            >
+              Compact toolbar
+            </button>
             <OpenFileLabel className={btn} testId="file-input" onPick={onPick} />
             <button
               className={btn}
@@ -397,6 +407,15 @@ export function XlsxDemoClient() {
                 : undefined
             }
             onReady={onReady}
+            toolbar={
+              compact ? (
+                <CompactToolbar
+                  onShare={() =>
+                    void navigator.clipboard?.writeText(window.location.href)
+                  }
+                />
+              ) : undefined
+            }
           />
 
           {!file &&

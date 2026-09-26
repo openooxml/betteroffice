@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { SetStateAction } from 'react';
 import {
   buildA11yGrid,
   cellAtPoint,
@@ -28,13 +29,13 @@ import {
   selectionAt,
   selectionKeyReducer,
   safeExternalHyperlink,
-  StaleProposalError,
   toTsv,
 } from '@betteroffice/xlsx';
 import type {
   CellAddr,
   CellEdit,
   CellInputEdit,
+  CellRange,
   CapturedFormat,
   ChartRegion,
   DisplayList,
@@ -55,14 +56,25 @@ import type {
 } from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
+import { createXlsxCommandController } from './commands/createXlsxCommandStore';
+import { commandForEvent } from './commands/descriptors';
+import { useXlsxCommand } from './commands/hooks';
+import {
+  createInputCoordinator,
+  type InputCoordinatorHooks,
+  type InputDraft,
+} from './commands/inputCoordinator';
+import type { XlsxCommandStore } from './commands/types';
+import { useCommandShortcuts } from './commands/useCommandShortcuts';
+import { useXlsxCommandBinding, type XlsxEditorBridge } from './commands/useXlsxCommands';
+import { XlsxCommandContext } from './commands/XlsxCommandProvider';
 import { EditorToolbar } from './components/EditorToolbar';
-import type {
-  FormattingAction,
-  MergeAction,
-  SelectionFormatting,
-} from './components/Toolbar';
-import { ToolbarButton, ToolbarGroup } from './components/ui/ToolbarPrimitives';
+import { EditorChromeContext } from './components/EditorToolbarContext';
+import type { BorderStyle } from './components/Toolbar';
+import { FormulaBarContext, type FormulaBarBinding } from './components/toolbar/FormulaBar';
+import { ToolbarCommandButton } from './components/toolbar/ToolbarCommand';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
+import { ToolbarButtonBase, ToolbarGroup } from './components/ui/ToolbarPrimitives';
 import {
   expandRangeToMergedCells,
   PresenceStrip,
@@ -76,13 +88,51 @@ import { ProposalsPanel } from './proposals/ProposalsPanel';
  * external caller (e.g. a demo agent) stages proposals on the same handle.
  */
 export interface XlsxEditorApi {
+  /**
+   * Closes the open cell entry and clears the selection. The entry is written
+   * at once, or queued behind input still waiting to be written. An entry the
+   * workbook refuses stays open, and nothing changes; one it refused earlier
+   * on this sheet reopens at its own cell.
+   */
   clearSelection: () => void;
+  /**
+   * The editor's command store, shared by its toolbar and host chrome. It
+   * gates the editor's own UI; `handle` stays unrestricted host authority.
+   * @experimental
+   */
+  readonly commands: XlsxCommandStore;
   focus: () => void;
   handle: WorkbookHandle;
   refreshProposals: () => void;
+  /**
+   * Writes the open cell entry and returns the workbook bytes at once. Throws
+   * {@link XlsxSaveRefusedError} rather than return bytes without accepted
+   * input: `input-pending` while earlier entries or a paste still wait to be
+   * written (await `commands.execute('save', null)` instead), `input-failed`
+   * while an entry the workbook refused waits for correction.
+   */
   save: () => Uint8Array;
-  /** Scrolls the focus cell into view. */
+  /**
+   * Scrolls the focus cell into view. Commands run after it, even in the same
+   * handler, act on this selection and sheet. The open cell entry is written
+   * first, or queued behind input still waiting to be written, so it may not
+   * have landed when this returns. False, changing nothing, for an invalid
+   * target or an open entry the workbook refuses; an entry it refused earlier
+   * on `sheet` reopens at its own cell.
+   */
   selectCells: (sheet: number, selection: Selection) => boolean;
+}
+
+/** Why a synchronous {@link XlsxEditorApi.save} did not return bytes. */
+export class XlsxSaveRefusedError extends Error {
+  constructor(readonly code: 'input-pending' | 'input-failed') {
+    super(
+      code === 'input-pending'
+        ? 'Accepted input is still being written; await commands.execute("save", null)'
+        : 'A cell entry could not be written; correct or discard it first'
+    );
+    this.name = 'XlsxSaveRefusedError';
+  }
 }
 
 export interface XlsxEditorCollaborationOptions {
@@ -121,6 +171,15 @@ export interface XlsxEditorProps {
   className?: string;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  /**
+   * Replaces the default toolbar: omitted keeps it (hidden when read-only),
+   * `null` removes it, and supplied chrome renders instead, also when
+   * read-only. Compose it from `EditorToolbar mode="commands"` parts.
+   * @experimental
+   */
+  toolbar?: React.ReactNode;
+  /** `false` hides the toolbar region, whatever `toolbar` is. */
+  showToolbar?: boolean;
 }
 
 /** the open in-cell editor: which cell it targets and its current draft text. */
@@ -140,15 +199,13 @@ const CHART_NUDGE_PX = 1;
 const CHART_NUDGE_MULTIPLIER = 10;
 // how long a run of arrow presses may stay local before it lands as one edit.
 const CHART_NUDGE_SETTLE_MS = 250;
+const PAINT_SETTLE_MS = 1000;
 const CHART_NUDGE_KEYS: Record<string, [number, number] | undefined> = {
   ArrowLeft: [-1, 0],
   ArrowRight: [1, 0],
   ArrowUp: [0, -1],
   ArrowDown: [0, 1],
 };
-// chrome shortcuts that stay live while a chart is selected; every other key
-// stops at the chart rather than reaching the cells behind it.
-const CHART_GLOBAL_KEYS = new Set(['z', 'y', 's']);
 
 // a placeholder grid frame so the shell paints something real when no file is
 // open. real files render through the wasm display list instead.
@@ -241,6 +298,29 @@ function pngName(fileName: string | undefined): string {
   return `${(fileName ?? 'workbook.xlsx').replace(/\.xlsx$/i, '')}.png`;
 }
 
+/** The workbook, sheet and range a clipboard command read when it was invoked. */
+interface CellTarget {
+  handle: WorkbookHandle;
+  sheet: number;
+  range: CellRange;
+}
+
+interface PaintMark {
+  generation: number;
+  mutation: number;
+  /** Sheet and zoom. */
+  view: string;
+}
+
+/** Whether a paint shows everything `wanted` asks for. */
+function covers(painted: PaintMark, wanted: PaintMark): boolean {
+  return (
+    painted.generation === wanted.generation &&
+    painted.view === wanted.view &&
+    painted.mutation >= wanted.mutation
+  );
+}
+
 function scaledRect(rect: { x: number; y: number; w: number; h: number }, zoom: number) {
   return {
     x: rect.x * zoom,
@@ -292,52 +372,8 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     borderRight: '1px solid rgba(226, 232, 240, 0.9)',
     flex: '0 0 auto',
   },
-  formulaGroup: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 4,
-    flex: '1 1 320px',
-    minWidth: 240,
-    padding: '0 6px',
-    borderRight: '1px solid rgba(226, 232, 240, 0.9)',
-  },
-  nameBox: {
-    appearance: 'none',
-    width: 64,
-    height: 28,
+  host: {
     flex: '0 0 auto',
-    boxSizing: 'border-box',
-    border: '1px solid #e2e8f0',
-    borderRadius: 6,
-    background: '#f8fafc',
-    color: '#0f172a',
-    font: '600 12px ui-monospace, SFMono-Regular, Menlo, monospace',
-    textAlign: 'center',
-    outlineColor: '#2563eb',
-  },
-  formulaMark: {
-    display: 'grid',
-    placeItems: 'center',
-    width: 20,
-    height: 28,
-    flex: '0 0 auto',
-    color: '#64748b',
-    font: 'italic 700 12px Georgia, serif',
-    userSelect: 'none',
-  },
-  formulaInput: {
-    appearance: 'none',
-    flex: '1 1 260px',
-    minWidth: 140,
-    height: 28,
-    boxSizing: 'border-box',
-    border: '1px solid #e2e8f0',
-    borderRadius: 6,
-    padding: '0 8px',
-    background: '#ffffff',
-    color: '#0f172a',
-    font: '13px ui-sans-serif, system-ui, sans-serif',
-    outlineColor: '#2563eb',
   },
   proposals: {
     marginLeft: 'auto',
@@ -362,14 +398,25 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
 };
 
 /**
+ * React state whose latest value the command authority reads at once: the
+ * setter updates the ref synchronously and schedules the render.
+ */
+function useSyncedState<T>(initial: T) {
+  const [value, setValue] = useState(initial);
+  const ref = useRef(value);
+  const set = useCallback((next: SetStateAction<T>) => {
+    ref.current = typeof next === 'function' ? (next as (previous: T) => T)(ref.current) : next;
+    setValue(ref.current);
+  }, []);
+  return [value, set, ref] as const;
+}
+
+/**
  * The xlsx editor React component.
  */
-export function XlsxEditor({
-  i18n,
-  ...props
-}: XlsxEditorProps) {
+export function XlsxEditor(props: XlsxEditorProps) {
   return (
-    <LocaleProvider i18n={i18n}>
+    <LocaleProvider i18n={props.i18n}>
       <XlsxEditorContent {...props} />
     </LocaleProvider>
   );
@@ -384,14 +431,18 @@ function XlsxEditorContent({
   onReady,
   className,
   readOnly = false,
-}: Omit<XlsxEditorProps, 'i18n'>) {
+  toolbar,
+  showToolbar = true,
+  i18n,
+}: XlsxEditorProps) {
   const { t } = useTranslation();
   const collaborationEnabled = collaboration !== undefined;
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
   const collaborationOnReplica = collaboration?.onReplica;
   const collaborationProvider = collaboration?.provider;
-  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [toolbarElement, setToolbarElement] = useState<HTMLDivElement | null>(null);
+  const [commandController] = useState(createXlsxCommandController);
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const handleRef = useRef<WorkbookHandle | null>(null);
@@ -402,7 +453,9 @@ function XlsxEditorContent({
   // current model — either would answer for pixels that are not on screen.
   const paintedRef = useRef<{ frame: DisplayList; zoom: number } | null>(null);
   const rafRef = useRef<number | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const editorInputRef = useRef<HTMLInputElement>(null);
+  const formulaInputRef = useRef<HTMLInputElement>(null);
   const draggingRef = useRef(false);
   const clickStartRef = useRef<CellAddr | null>(null);
   // an in-flight chart drag: which chart, and where the pointer went down.
@@ -414,7 +467,31 @@ function XlsxEditorContent({
   const pendingSheetViewRef = useRef(false);
   const flushNudgeRef = useRef<() => void>(() => {});
   const settlePendingEditsRef = useRef<() => boolean>(() => true);
-  const pendingDraftRef = useRef<(EditState & { sheet: number }) | null>(null);
+  const hasRejectedRef = useRef<() => boolean>(() => false);
+  // bumped when a workbook opens or closes; drafts and commands from an older
+  // document never write into the next one.
+  const generationRef = useRef(0);
+  const mutationRef = useRef(0);
+  const inputHooksRef = useRef<Omit<InputCoordinatorHooks, 'generation'> | null>(null);
+  const [coordinator] = useState(() =>
+    createInputCoordinator({
+      generation: () => generationRef.current,
+      seal: () => inputHooksRef.current?.seal() ?? {},
+      sync: () => inputHooksRef.current?.sync(),
+      write: (draft) => inputHooksRef.current?.write(draft) ?? false,
+      close: (draft) => inputHooksRef.current?.close(draft),
+      restore: (draft) => inputHooksRef.current?.restore(draft) ?? false,
+    })
+  );
+  // an IME composition in the cell editor or formula bar, settled when it ends.
+  const compositionRef = useRef<{
+    source: InputDraft['source'];
+    done: Promise<boolean>;
+    settle: (ended: boolean) => void;
+  } | null>(null);
+  const suppressFormulaBlurRef = useRef(false);
+  const paintMarkRef = useRef<PaintMark | null>(null);
+  const paintWaitersRef = useRef<{ mark: PaintMark; resolve: (painted: boolean) => void }[]>([]);
   // latest onReady, read (not depended on) by the open effect so a changing
   // callback identity never reopens the workbook.
   const onReadyRef = useRef(onReady);
@@ -424,40 +501,38 @@ function XlsxEditorContent({
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
 
-  const [sheetInfo, setSheetInfo] = useState<SheetInfo | null>(null);
+  const [sheetInfo, setSheetInfo, sheetInfoRef] = useSyncedState<SheetInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [frame, setFrame] = useState<DisplayList | null>(null);
-  const [selection, setSelection] = useState<Selection | null>(null);
+  const [selection, setSelection, selectionRef] = useSyncedState<Selection | null>(null);
   const [editing, setEditing] = useState<EditState | null>(null);
   const [focusedCell, setFocusedCell] = useState<CellEdit | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
   const [toolbarHeight, setToolbarHeight] = useState(DEFAULT_XLSX_TOOLBAR_HEIGHT);
-  const [zoom, setZoom] = useState(1);
-  const zoomRef = useRef(zoom);
-  zoomRef.current = zoom;
+  const [zoom, setZoom, zoomRef] = useSyncedState(1);
   const [revision, setRevision] = useState(0);
   const [dragging, setDragging] = useState(false);
   // the selected chart, and the live pointer offset while it is dragged.
   // `movable` rides along so the arrow keys never depend on a frame lookup.
-  const [selectedChart, setSelectedChart] = useState<{ id: string; movable: boolean } | null>(
+  const [selectedChart, setSelectedChart, selectedChartRef] = useSyncedState<{
+    id: string;
+    movable: boolean;
+  } | null>(
     null
   );
   const [chartDragOffset, setChartDragOffset] = useState<{ x: number; y: number } | null>(null);
   // logical-px preview of an arrow burst that has not landed yet.
   const [nudgeOffset, setNudgeOffset] = useState<{ x: number; y: number } | null>(null);
-  const [selectionFormatting, setSelectionFormatting] = useState<SelectionFormatting>({});
-  const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
-  const [mergedRanges, setMergedRanges] = useState<
-    Array<{ start: CellAddr; end: CellAddr }>
-  >([]);
   const [visibleMergedRanges, setVisibleMergedRanges] = useState<readonly MergedRange[]>([]);
-  const [borderStyleChoice, setBorderStyleChoice] = useState<SelectionFormatting['borderStyle']>();
-  const [borderColorChoice, setBorderColorChoice] = useState<string>();
-  const [capturedFormat, setCapturedFormat] = useState<CapturedFormat | null>(null);
+  const borderStyleChoiceRef = useRef<BorderStyle | undefined>(undefined);
+  const borderColorChoiceRef = useRef<string | undefined>(undefined);
+  const [capturedFormat, setCapturedFormat, capturedFormatRef] =
+    useSyncedState<CapturedFormat | null>(null);
   const paintSourceRef = useRef<string | null>(null);
-  const [proposals, setProposals] = useState<Proposal[]>([]);
-  const [proposalsPanelOpen, setProposalsPanelOpen] = useState(false);
+  const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
+  const [proposalsPanelOpen, setProposalsPanelOpen, proposalsPanelOpenRef] =
+    useSyncedState(false);
   const [collaborationReplica, setCollaborationReplica] =
     useState<CollaborationReplica | null>(null);
   const [awarenessPeers, setAwarenessPeers] = useState<readonly AwarenessPeer[]>([]);
@@ -466,21 +541,70 @@ function XlsxEditorContent({
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
 
   const activeSheet = sheetInfo?.activeSheet ?? 0;
-  pendingDraftRef.current = editing
-    ? { sheet: activeSheet, ...editing }
-    : selection && formulaDraft !== null
-      ? { sheet: activeSheet, ...selection.focus, value: formulaDraft }
-      : null;
+  const activeSheetRef = useMemo(
+    () => ({
+      get current() {
+        return sheetInfoRef.current?.activeSheet ?? 0;
+      },
+    }),
+    [sheetInfoRef]
+  );
+
+  const draftFor = useCallback(
+    (source: InputDraft['source'], row: number, col: number, value: string): InputDraft => ({
+      generation: generationRef.current,
+      sheet: activeSheetRef.current,
+      row,
+      col,
+      value,
+      source,
+    }),
+    []
+  );
+
+  const showDraft = useCallback((draft: InputDraft) => {
+    setSelection(selectionAt({ row: draft.row, col: draft.col }));
+    if (draft.source === 'cell') setEditing({ row: draft.row, col: draft.col, value: draft.value });
+    else setFormulaDraft(draft.value);
+  }, []);
+
+  const showRejected = useCallback(
+    (sheet: number) => {
+      if (coordinator.draft) return;
+      const entry = coordinator.rejected.find(
+        (candidate) => candidate.sheet === sheet && candidate.generation === generationRef.current
+      );
+      if (!entry) return;
+      coordinator.setDraft(entry);
+      showDraft(entry);
+    },
+    [coordinator, showDraft]
+  );
+
+  const dropDrafts = useCallback(() => {
+    coordinator.setDraft(null);
+    setEditing(null);
+    setFormulaDraft(null);
+  }, [coordinator]);
 
   const clearSelection = useCallback(() => {
     if (!settlePendingEditsRef.current()) return;
     setSelection(null);
     setSelectedChart(null);
-    setEditing(null);
-    setFormulaDraft(null);
+    dropDrafts();
     setCapturedFormat(null);
     paintSourceRef.current = null;
-  }, []);
+    showRejected(activeSheetRef.current);
+    commandController.refresh();
+  }, [
+    dropDrafts,
+    showRejected,
+    activeSheetRef,
+    commandController,
+    setSelection,
+    setSelectedChart,
+    setCapturedFormat,
+  ]);
 
   const selectCells = useCallback(
     (sheet: number, nextSelection: Selection): boolean => {
@@ -503,10 +627,10 @@ function XlsxEditorContent({
           focus: { ...nextSelection.focus },
         });
         setSelectedChart(null);
-        setEditing(null);
-        setFormulaDraft(null);
+        dropDrafts();
         setCapturedFormat(null);
         paintSourceRef.current = null;
+        showRejected(sheet);
         requestAnimationFrame(() => {
           const scroll = scrollRef.current;
           if (!scroll) return;
@@ -514,6 +638,7 @@ function XlsxEditorContent({
           scroll.scrollTop = position.y * zoomRef.current;
         });
         setError(null);
+        commandController.refresh();
         return true;
       } catch {
         return false;
@@ -524,8 +649,7 @@ function XlsxEditorContent({
 
   useEffect(() => {
     if (!readOnly) return;
-    setEditing(null);
-    setFormulaDraft(null);
+    dropDrafts();
     setCapturedFormat(null);
     paintSourceRef.current = null;
     chartDragRef.current = null;
@@ -545,14 +669,16 @@ function XlsxEditorContent({
   const proposalsAvailable = useMemo(() => isProposalsAvailable(), []);
 
   useEffect(() => {
-    const toolbar = toolbarRef.current;
-    if (!toolbar) return;
-    const updateHeight = () => setToolbarHeight(toolbar.offsetHeight);
+    if (!toolbarElement) {
+      setToolbarHeight(0);
+      return;
+    }
+    const updateHeight = () => setToolbarHeight(toolbarElement.offsetHeight);
     updateHeight();
     const observer = new ResizeObserver(updateHeight);
-    observer.observe(toolbar);
+    observer.observe(toolbarElement);
     return () => observer.disconnect();
-  }, [readOnly]);
+  }, [toolbarElement]);
 
   // re-read the pending proposal list and queue a repaint — ghosts paint into
   // the engine frame, so every lifecycle change (propose/accept/reject) must
@@ -575,8 +701,8 @@ function XlsxEditorContent({
   // open the workbook when the file changes; dispose it on change/unmount and
   // reset all editing state so a dropped file starts clean.
   useEffect(() => {
-    setEditing(null);
-    setFormulaDraft(null);
+    generationRef.current += 1;
+    dropDrafts();
     setSelectedChart(null);
     // a burst belongs to the document it was typed on: its timer would fire
     // against whatever workbook `handleRef` holds by then.
@@ -590,12 +716,9 @@ function XlsxEditorContent({
     setStaleFor({});
     setProposalsPanelOpen(false);
     setCollaborationReplica(null);
-    setSelectionFormatting({});
-    setHistoryState({ canUndo: false, canRedo: false });
-    setMergedRanges([]);
     setVisibleMergedRanges([]);
-    setBorderStyleChoice(undefined);
-    setBorderColorChoice(undefined);
+    borderStyleChoiceRef.current = undefined;
+    borderColorChoiceRef.current = undefined;
     setCapturedFormat(null);
     setRenderError(null);
     paintSourceRef.current = null;
@@ -635,6 +758,7 @@ function XlsxEditorContent({
           handleRef.current = handle;
           unsubscribeUpdates = handle.onUpdate(() => {
             if (disposed || !handle) return;
+            mutationRef.current += 1;
             try {
               setSheetInfo(handle.sheetInfo());
               setRevision((current) => current + 1);
@@ -653,13 +777,14 @@ function XlsxEditorContent({
           refreshProposals();
           const cleanup = onReadyRef.current?.({
             clearSelection,
+            commands: commandController.store,
             handle,
             refreshProposals,
             focus: () => scrollRef.current?.focus(),
             save: () => {
-              if (!settlePendingEditsRef.current()) {
-                throw new Error('Could not commit pending workbook edits');
-              }
+              if (hasRejectedRef.current()) throw new XlsxSaveRefusedError('input-failed');
+              if (coordinator.pending) throw new XlsxSaveRefusedError('input-pending');
+              if (!settlePendingEditsRef.current()) throw new XlsxSaveRefusedError('input-failed');
               return handle!.save();
             },
             selectCells,
@@ -698,6 +823,7 @@ function XlsxEditorContent({
     collaborationClientId,
     collaborationInitialUpdate,
     clearSelection,
+    commandController,
     refreshProposals,
     selectCells,
   ]);
@@ -803,6 +929,16 @@ function XlsxEditorContent({
     setRenderError(null);
     setVisibleMergedRanges(nextMergedRanges);
     setFrame(dl);
+    if (!handle) return;
+    const painted: PaintMark = {
+      generation: generationRef.current,
+      mutation: mutationRef.current,
+      view: `${activeSheet}:${zoom}`,
+    };
+    paintMarkRef.current = painted;
+    const waiters = paintWaitersRef.current;
+    paintWaitersRef.current = waiters.filter((waiter) => !covers(painted, waiter.mark));
+    for (const waiter of waiters) if (covers(painted, waiter.mark)) waiter.resolve(true);
   }, [activeSheet, t, zoom]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open
@@ -831,6 +967,31 @@ function XlsxEditorContent({
     };
   }, [doPaint, sheetInfo, error, revision]);
 
+  // true once the canvas paints every committed change; false if none does in time.
+  const afterPaint = useCallback((): Promise<boolean> => {
+    const mark: PaintMark = {
+      generation: generationRef.current,
+      mutation: mutationRef.current,
+      view: `${activeSheetRef.current}:${zoomRef.current}`,
+    };
+    const painted = paintMarkRef.current;
+    if (painted && covers(painted, mark)) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      const waiter = {
+        mark,
+        resolve: (painted: boolean) => {
+          clearTimeout(timer);
+          resolve(painted);
+        },
+      };
+      const timer = setTimeout(() => {
+        paintWaitersRef.current = paintWaitersRef.current.filter((entry) => entry !== waiter);
+        resolve(false);
+      }, PAINT_SETTLE_MS);
+      paintWaitersRef.current.push(waiter);
+    });
+  }, []);
+
   // read the focused cell's editable text for the name box + formula bar; reruns
   // as the selection moves or the workbook mutates.
   useEffect(() => {
@@ -855,29 +1016,6 @@ function XlsxEditorContent({
     window.addEventListener('mouseup', stop);
     return () => window.removeEventListener('mouseup', stop);
   }, []);
-
-  useEffect(() => {
-    const handle = handleRef.current;
-    if (!handle || !selection || !sheetInfo) {
-      setSelectionFormatting({});
-      setHistoryState({ canUndo: false, canRedo: false });
-      setMergedRanges([]);
-      return;
-    }
-    const range = normalizeRange(selection);
-    try {
-      const from = handle.cell(activeSheet, range.top, range.left).a1;
-      const to = handle.cell(activeSheet, range.bottom, range.right).a1;
-      const a1 = `${from}:${to}`;
-      setSelectionFormatting(handle.selectionFormatting(activeSheet, a1));
-      setHistoryState(handle.historyState());
-      setMergedRanges(handle.mergedRanges(activeSheet, a1));
-    } catch {
-      setSelectionFormatting({});
-      setHistoryState({ canUndo: false, canRedo: false });
-      setMergedRanges([]);
-    }
-  }, [selection, sheetInfo, activeSheet, revision]);
 
   // rebuilt from the live frame so the offscreen mirror never lags a mutation;
   // the visible window is small, so a rebuild per paint frame is cheap enough.
@@ -909,6 +1047,7 @@ function XlsxEditorContent({
   // pending proposals because structural ops and undo/redo can drop them.
   const applyResult = useCallback(
     (result: EditResult) => {
+      mutationRef.current += 1;
       setSheetInfo(result.sheetInfo);
       setRevision((r) => r + 1);
       refreshProposals();
@@ -917,29 +1056,74 @@ function XlsxEditorContent({
     [refreshProposals]
   );
 
-  settlePendingEditsRef.current = () => {
-    const handle = handleRef.current;
-    if (!handle) return false;
-    flushNudgeRef.current();
-    chartDragRef.current = null;
-    setChartDragOffset(null);
-    setDragging(false);
-    const draft = pendingDraftRef.current;
-    if (!draft || readOnlyRef.current) return true;
-    try {
-      const result = handle.editCell(draft.sheet, draft.row, draft.col, draft.value);
-      pendingDraftRef.current = null;
+  // before a command runs, an arrow burst lands and a composition ends.
+  inputHooksRef.current = {
+    seal() {
+      if (chartDragRef.current) return { refused: 'gesture-active' };
+      flushNudgeRef.current();
+      const composition = compositionRef.current;
+      if (!composition) return {};
+      if (composition.source === 'cell') {
+        suppressBlurRef.current = true;
+        editorInputRef.current?.blur();
+        suppressBlurRef.current = false;
+      } else {
+        suppressFormulaBlurRef.current = true;
+        formulaInputRef.current?.blur();
+        suppressFormulaBlurRef.current = false;
+      }
+      return { composition: composition.done };
+    },
+    sync() {
+      const draft = coordinator.draft;
+      const input = draft?.source === 'cell' ? editorInputRef.current : formulaInputRef.current;
+      if (draft && input && input.value !== draft.value) {
+        coordinator.setDraft({ ...draft, value: input.value });
+      }
+    },
+    write(draft) {
+      const handle = handleRef.current;
+      if (!handle) return false;
+      if (readOnlyRef.current) return true;
+      try {
+        if (handle.cell(draft.sheet, draft.row, draft.col).input !== draft.value) {
+          applyResult(handle.editCell(draft.sheet, draft.row, draft.col, draft.value));
+        }
+        return true;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return false;
+      }
+    },
+    close(draft) {
+      if (draft.source === 'formula') {
+        setFormulaDraft(null);
+        return;
+      }
+      const focused = document.activeElement === editorInputRef.current;
       suppressBlurRef.current = true;
       editorInputRef.current?.blur();
       suppressBlurRef.current = false;
       setEditing(null);
-      setFormulaDraft(null);
-      applyResult(result);
+      if (focused) focusContainer();
+    },
+    restore(draft) {
+      if (draft.sheet !== activeSheetRef.current) return false;
+      showDraft(draft);
       return true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return false;
-    }
+    },
+  };
+
+  hasRejectedRef.current = () =>
+    coordinator.rejected.some((entry) => entry.generation === generationRef.current);
+
+  settlePendingEditsRef.current = () => {
+    if (!handleRef.current) return false;
+    flushNudgeRef.current();
+    chartDragRef.current = null;
+    setChartDragOffset(null);
+    setDragging(false);
+    return coordinator.settle();
   };
 
   const selectedRangeA1 = useCallback(
@@ -1017,13 +1201,19 @@ function XlsxEditorContent({
     (id: string, dx: number, dy: number) => {
       const handle = handleRef.current;
       if (!handle || readOnly || (dx === 0 && dy === 0)) return;
-      try {
-        applyResult(handle.moveChart(activeSheet, id, dx, dy));
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
+      const sheet = activeSheet;
+      void coordinator.input(() => {
+        if (handleRef.current !== handle || readOnlyRef.current) return;
+        try {
+          applyResult(handle.moveChart(sheet, id, dx, dy));
+          return true;
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+          return false;
+        }
+      });
     },
-    [activeSheet, applyResult, readOnly]
+    [activeSheet, applyResult, readOnly, coordinator]
   );
 
   // land a run of arrow nudges as one edit. key repeat fires as fast as the os
@@ -1111,224 +1301,155 @@ function XlsxEditorContent({
   const openEditor = useCallback(
     (seed?: string) => {
       const handle = handleRef.current;
+      const selection = selectionRef.current;
       if (!handle || !selection || readOnly) return;
       const { row, col } = selection.focus;
       let value = seed ?? '';
       if (seed === undefined) {
         try {
-          value = handle.cell(activeSheet, row, col).input;
+          value = handle.cell(activeSheetRef.current, row, col).input;
         } catch {
           value = '';
         }
       }
       setEditing({ row, col, value });
+      coordinator.setDraft(draftFor('cell', row, col, value));
     },
-    [selection, activeSheet, readOnly]
+    [selectionRef, activeSheetRef, readOnly, coordinator, draftFor]
   );
 
-  // commit the open editor, optionally stepping the selection like excel.
+  // commit the open editor, optionally stepping the selection like excel. the
+  // write lands in input order; a write that fails keeps the editor open.
   const commitEditor = useCallback(
     (move?: Direction) => {
-      const handle = handleRef.current;
-      if (!handle || !editing || readOnly) return;
-      suppressBlurRef.current = true;
+      if (!handleRef.current || !editing || readOnly) return;
       const { row, col, value } = editing;
-      try {
-        applyResult(handle.editCell(activeSheet, row, col, value));
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
+      const live = coordinator.draft;
+      const draft =
+        live?.source === 'cell' && live.row === row && live.col === col
+          ? live
+          : draftFor('cell', row, col, value);
+      if (!coordinator.submit(draft)) return;
+      suppressBlurRef.current = true;
       setEditing(null);
       const base = selectionAt({ row, col });
       setSelection(move ? moveFocus(base, move, { limits: limits() }) : base);
       focusContainer();
+      showRejected(activeSheetRef.current);
     },
-    [editing, activeSheet, applyResult, limits, focusContainer, readOnly]
+    [editing, limits, focusContainer, readOnly, coordinator, draftFor, showRejected]
   );
 
   const cancelEditor = useCallback(() => {
     suppressBlurRef.current = true;
+    const draft = coordinator.draft;
+    if (draft?.source === 'cell') coordinator.discard(draft);
+    coordinator.setDraft(null);
     setEditing(null);
     focusContainer();
-  }, [focusContainer]);
+    showRejected(activeSheetRef.current);
+  }, [focusContainer, coordinator, showRejected]);
+
+  const captureTarget = useCallback(() => {
+    const handle = handleRef.current;
+    const selection = selectionRef.current;
+    if (!handle || !selection) return null;
+    return { handle, sheet: activeSheetRef.current, range: normalizeRange(selection) };
+  }, [selectionRef, activeSheetRef]);
+
+  const clearTarget = useCallback(
+    ({ handle, sheet, range }: CellTarget) => {
+      if (readOnly) return;
+      const edits: CellInputEdit[] = [];
+      for (let row = range.top; row <= range.bottom; row++) {
+        for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
+      }
+      void coordinator.input(() => {
+        if (handleRef.current !== handle || readOnlyRef.current) return;
+        try {
+          applyResult(handle.editCells(sheet, edits));
+          return true;
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+          return false;
+        }
+      });
+    },
+    [applyResult, readOnly, coordinator]
+  );
 
   const clearCells = useCallback(() => {
-    const handle = handleRef.current;
-    if (!handle || !selection || readOnly) return;
-    const r = normalizeRange(selection);
-    const edits: CellInputEdit[] = [];
-    for (let row = r.top; row <= r.bottom; row++) {
-      for (let col = r.left; col <= r.right; col++) edits.push({ row, col, input: '' });
-    }
-    try {
-      applyResult(handle.editCells(activeSheet, edits));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [selection, activeSheet, applyResult, readOnly]);
+    const target = captureTarget();
+    if (target) clearTarget(target);
+  }, [captureTarget, clearTarget]);
 
-  const copySelection = useCallback(async () => {
-    const handle = handleRef.current;
-    if (!handle || !selection) return;
-    const r = normalizeRange(selection);
+  const copyTarget = useCallback(async ({ handle, sheet, range }: CellTarget) => {
     try {
-      const from = handle.cell(activeSheet, r.top, r.left).a1;
-      const to = handle.cell(activeSheet, r.bottom, r.right).a1;
-      const cells = handle.rangeCells(activeSheet, `${from}:${to}`);
+      const from = handle.cell(sheet, range.top, range.left).a1;
+      const to = handle.cell(sheet, range.bottom, range.right).a1;
+      const cells = handle.rangeCells(sheet, `${from}:${to}`);
       const tsv = toTsv(
         cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula })))
       );
       await navigator.clipboard.writeText(tsv);
+      return true;
     } catch {
       // clipboard denied or read failed — nothing to paste, leave state as-is.
+      return false;
     }
-  }, [selection, activeSheet]);
+  }, []);
+
+  const copySelection = useCallback(async () => {
+    const target = captureTarget();
+    if (target) await copyTarget(target);
+  }, [captureTarget, copyTarget]);
 
   const cutSelection = useCallback(async () => {
-    await copySelection();
-    clearCells();
-  }, [copySelection, clearCells]);
+    const target = captureTarget();
+    if (target && (await copyTarget(target))) clearTarget(target);
+  }, [captureTarget, copyTarget, clearTarget]);
 
-  const pasteSelection = useCallback(async () => {
+  // the clipboard is read while the key press still grants access; the write
+  // takes its place in input order.
+  const pasteSelection = useCallback(() => {
     const handle = handleRef.current;
-    if (!handle || !selection || readOnly) return;
-    let text: string;
-    try {
-      text = await navigator.clipboard.readText();
-    } catch {
-      return;
-    }
-    if (readOnlyRef.current || handleRef.current !== handle) return;
-    const grid = fromTsv(text);
-    if (grid.length === 0) return;
-    const r = normalizeRange(selection);
-    const edits: CellInputEdit[] = [];
-    let width = 1;
-    grid.forEach((rowArr, dr) => {
-      width = Math.max(width, rowArr.length);
-      rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
-    });
-    try {
-      applyResult(handle.editCells(activeSheet, edits));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    setSelection({
-      anchor: { row: r.top, col: r.left },
-      focus: { row: r.top + grid.length - 1, col: r.left + width - 1 },
-    });
-  }, [selection, activeSheet, applyResult, readOnly]);
-
-  const formatSelection = useCallback(
-    (action: FormattingAction) => {
-      const handle = handleRef.current;
-      if (!handle || !selection || readOnly) return;
-      const range = selectedRangeA1(selection);
-      if (!range) return;
-      if (action === 'paintFormat') {
-        if (capturedFormat) {
-          setCapturedFormat(null);
-          paintSourceRef.current = null;
-          return;
-        }
-        try {
-          setCapturedFormat(handle.captureFormat(activeSheet, range));
-          const normalized = normalizeRange(selection);
-          paintSourceRef.current = `${activeSheet}:${normalized.top}:${normalized.left}:${normalized.bottom}:${normalized.right}`;
-        } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
-        }
-        return;
-      }
+    const selection = selectionRef.current;
+    if (!handle || !selection || readOnly) return Promise.resolve();
+    const reading = (async () => {
       try {
-        let result: EditResult;
-        if (action === 'currency') {
-          result = handle.setNumberFormat(activeSheet, range, 'currency');
-        } else if (action === 'percent') {
-          result = handle.setNumberFormat(activeSheet, range, 'percent');
-        } else if (action === 'increaseDecimal') {
-          result = handle.setNumberFormat(activeSheet, range, 'increaseDecimal');
-        } else if (action === 'decreaseDecimal') {
-          result = handle.setNumberFormat(activeSheet, range, 'decreaseDecimal');
-        } else if (action === 'bold') {
-          result = handle.patchRangeStyle(activeSheet, range, {
-            bold: !selectionFormatting.bold,
-          });
-        } else if (action === 'italic') {
-          result = handle.patchRangeStyle(activeSheet, range, {
-            italic: !selectionFormatting.italic,
-          });
-        } else if (action === 'strikethrough') {
-          result = handle.patchRangeStyle(activeSheet, range, {
-            strikethrough: !selectionFormatting.strikethrough,
-          });
-        } else if (action.type === 'numberFormat') {
-          result =
-            action.value === 'custom'
-              ? handle.setNumberFormat(activeSheet, range, {
-                  type: 'custom',
-                  pattern: selectionFormatting.numberFormatPattern ?? '0.00',
-                })
-              : handle.setNumberFormat(activeSheet, range, action.value);
-        } else if (action.type === 'fontFamily') {
-          result = handle.patchRangeStyle(activeSheet, range, { fontFamily: action.value });
-        } else if (action.type === 'fontSize') {
-          result = handle.patchRangeStyle(activeSheet, range, { fontSize: action.value });
-        } else if (action.type === 'textColor') {
-          result = handle.patchRangeStyle(activeSheet, range, { textColor: action.value });
-        } else if (action.type === 'fillColor') {
-          result = handle.patchRangeStyle(activeSheet, range, { fillColor: action.value });
-        } else if (action.type === 'borderPreset') {
-          result = handle.patchRangeStyle(activeSheet, range, {
-            border: {
-              preset: action.value,
-              style: borderStyleChoice ?? selectionFormatting.borderStyle ?? 'solid',
-              color: borderColorChoice ?? selectionFormatting.borderColor ?? '#000000',
-            },
-          });
-        } else if (action.type === 'borderStyle') {
-          setBorderStyleChoice(action.value);
-          result = handle.patchRangeStyle(activeSheet, range, {
-            border: { style: action.value },
-          });
-        } else if (action.type === 'borderColor') {
-          setBorderColorChoice(action.value);
-          result = handle.patchRangeStyle(activeSheet, range, {
-            border: { color: action.value },
-          });
-        } else if (action.type === 'horizontalAlignment') {
-          result = handle.patchRangeStyle(activeSheet, range, {
-            horizontalAlignment: action.value,
-          });
-        } else if (action.type === 'verticalAlignment') {
-          result = handle.patchRangeStyle(activeSheet, range, {
-            verticalAlignment: action.value,
-          });
-        } else {
-          result = handle.patchRangeStyle(activeSheet, range, {
-            textWrapping: action.value,
-          });
-        }
-        applyResult(result);
-        focusContainer();
+        return await navigator.clipboard.readText();
+      } catch {
+        return null;
+      }
+    })();
+    const sheet = activeSheetRef.current;
+    const r = normalizeRange(selection);
+    return coordinator.input(async () => {
+      const text = await reading;
+      if (text === null || readOnlyRef.current || handleRef.current !== handle) return;
+      const grid = fromTsv(text);
+      if (grid.length === 0) return;
+      const edits: CellInputEdit[] = [];
+      let width = 1;
+      grid.forEach((rowArr, dr) => {
+        width = Math.max(width, rowArr.length);
+        rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
+      });
+      try {
+        applyResult(handle.editCells(sheet, edits));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
+        return false;
       }
-    },
-    [
-      selection,
-      selectedRangeA1,
-      capturedFormat,
-      activeSheet,
-      selectionFormatting,
-      borderStyleChoice,
-      borderColorChoice,
-      applyResult,
-      focusContainer,
-      readOnly,
-    ]
-  );
+      if (selectionRef.current === selection && activeSheetRef.current === sheet) {
+        setSelection({
+          anchor: { row: r.top, col: r.left },
+          focus: { row: r.top + grid.length - 1, col: r.left + width - 1 },
+        });
+      }
+      return true;
+    });
+  }, [selectionRef, activeSheetRef, applyResult, readOnly, coordinator, setSelection]);
 
   useEffect(() => {
     const handle = handleRef.current;
@@ -1338,14 +1459,21 @@ function XlsxEditorContent({
     if (key === paintSourceRef.current) return;
     const range = selectedRangeA1(selection);
     if (!range) return;
-    try {
-      applyResult(handle.applyFormat(activeSheet, range, capturedFormat));
-      setCapturedFormat(null);
-      paintSourceRef.current = null;
-      focusContainer();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+    const sheet = activeSheet;
+    const format = capturedFormat;
+    setCapturedFormat(null);
+    paintSourceRef.current = null;
+    void coordinator.input(() => {
+      if (handleRef.current !== handle || readOnlyRef.current) return;
+      try {
+        applyResult(handle.applyFormat(sheet, range, format));
+        focusContainer();
+        return true;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return false;
+      }
+    });
   }, [
     selection,
     capturedFormat,
@@ -1355,192 +1483,60 @@ function XlsxEditorContent({
     applyResult,
     focusContainer,
     readOnly,
+    coordinator,
   ]);
 
-  const undo = useCallback(() => {
-    const handle = handleRef.current;
-    if (!handle || readOnly) return;
-    flushNudgeRef.current();
-    try {
-      applyResult(handle.undo());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [applyResult, readOnly]);
-
-  const redo = useCallback(() => {
-    const handle = handleRef.current;
-    if (!handle || readOnly) return;
-    flushNudgeRef.current();
-    try {
-      applyResult(handle.redo());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [applyResult, readOnly]);
-
-  const print = useCallback(() => window.print(), []);
-
-  const searchMenus = useCallback(() => undefined, []);
-
-  const mergeSelection = useCallback(
-    (action: MergeAction) => {
-      const handle = handleRef.current;
-      if (!handle || !selection || readOnly) return;
-      const range = normalizeRange(selection);
-      const cell = (row: number, col: number) => ({ row, col });
-      const mergeRange = (top: number, left: number, bottom: number, right: number) => ({
-        start: cell(top, left),
-        end: cell(bottom, right),
-      });
-      const ops: unknown[] = [];
-      if (action === 'all') {
-        ops.push({
-          type: 'mergeCells',
-          sheet: activeSheet,
-          range: mergeRange(range.top, range.left, range.bottom, range.right),
-        });
-      } else if (action === 'horizontal') {
-        for (let row = range.top; row <= range.bottom; row++) {
-          ops.push({
-            type: 'mergeCells',
-            sheet: activeSheet,
-            range: mergeRange(row, range.left, row, range.right),
-          });
-        }
-      } else if (action === 'vertical') {
-        for (let col = range.left; col <= range.right; col++) {
-          ops.push({
-            type: 'mergeCells',
-            sheet: activeSheet,
-            range: mergeRange(range.top, col, range.bottom, col),
-          });
-        }
-      } else {
-        for (const merged of mergedRanges) {
-          ops.push({
-            type: 'unmergeCells',
-            sheet: activeSheet,
-            range: mergeRange(
-              merged.start.row,
-              merged.start.col,
-              merged.end.row,
-              merged.end.col
-            ),
-          });
-        }
-      }
-      if (ops.length === 0) return;
-      try {
-        applyResult(handle.applyOps(ops));
-        focusContainer();
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    },
-    [selection, activeSheet, mergedRanges, applyResult, focusContainer, readOnly]
-  );
-
-  // accept a proposal (optionally forcing past drift): apply it, drop any stale
-  // warning, refresh the list, repaint, and return focus to the grid.
-  const acceptProposal = useCallback(
-    (id: string, force?: boolean) => {
-      const handle = handleRef.current;
-      if (!handle || readOnly) return;
-      try {
-        applyResult(handle.acceptProposal(id, { force }));
-        setStaleFor(({ [id]: _dropped, ...rest }) => rest);
-        refreshProposals();
-        focusContainer();
-      } catch (e) {
-        if (e instanceof StaleProposalError) {
-          setStaleFor((m) => ({ ...m, [id]: e.cells }));
-          refreshProposals();
-        } else setError(e instanceof Error ? e.message : String(e));
-      }
-    },
-    [applyResult, refreshProposals, focusContainer, readOnly]
-  );
-
-  // reject a proposal: drop it and its warning, then refresh so its border
-  // chrome disappears and the canvas repaints without its ghost.
-  const rejectProposal = useCallback(
-    (id: string) => {
-      const handle = handleRef.current;
-      if (!handle || readOnly) return;
-      try {
-        handle.rejectProposal(id);
-        setStaleFor(({ [id]: _dropped, ...rest }) => rest);
-        refreshProposals();
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    },
-    [refreshProposals, readOnly]
-  );
-
-  const save = useCallback(() => {
-    const handle = handleRef.current;
-    if (!handle) return;
-    if (!settlePendingEditsRef.current()) return;
-    try {
-      const bytes = handle.save();
+  const deliverSave = useCallback(
+    (bytes: Uint8Array) => {
       if (onSave) onSave(bytes);
       else downloadBytes(bytes, fileName ?? 'workbook.xlsx', XLSX_MIME);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [onSave, fileName]);
+    },
+    [onSave, fileName]
+  );
 
   // render the current scroll window to png via the raster backend and download
   // it — the same display list the canvas paints, rasterized in the core.
   const exportPng = useCallback(() => {
     const handle = handleRef.current;
     const scroll = scrollRef.current;
-    if (!handle || !scroll) return;
-    try {
-      const png = handle.renderPng({
-        x: scroll.scrollLeft / zoom,
-        y: scroll.scrollTop / zoom,
-        width: scroll.clientWidth / zoom,
-        height: scroll.clientHeight / zoom,
-      });
-      downloadBytes(png, pngName(fileName), 'image/png');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+    if (!handle || !scroll) throw new Error('the workbook is not open');
+    const png = handle.renderPng({
+      x: scroll.scrollLeft / zoom,
+      y: scroll.scrollTop / zoom,
+      width: scroll.clientWidth / zoom,
+      height: scroll.clientHeight / zoom,
+    });
+    downloadBytes(png, pngName(fileName), 'image/png');
   }, [fileName, zoom]);
 
   // commit the formula bar draft to the focused cell.
   const commitFormula = useCallback(
     (move?: Direction) => {
-      const handle = handleRef.current;
-      if (!handle || !selection || formulaDraft == null || readOnly) return;
-      const { row, col } = selection.focus;
-      try {
-        applyResult(handle.editCell(activeSheet, row, col, formulaDraft));
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
+      const draft = coordinator.draft;
+      if (!handleRef.current || draft?.source !== 'formula' || readOnly) return;
+      if (!coordinator.submit(draft)) return;
       setFormulaDraft(null);
       if (move) setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits() }) : prev));
+      showRejected(activeSheetRef.current);
     },
-    [selection, formulaDraft, activeSheet, applyResult, limits, readOnly]
+    [coordinator, limits, readOnly, showRejected]
   );
 
-  // grid-level keyboard: chrome shortcuts first, then the pure selection reducer.
+  // grid-level keyboard: command shortcuts belong to the editor's dispatcher,
+  // clipboard keys stay here, then the pure selection reducer.
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       const handle = handleRef.current;
       if (!handle || !selection || !sheetInfo || editing) return;
+      if (commandForEvent(e)) return;
       const mod = e.metaKey || e.ctrlKey;
       const lower = e.key.toLowerCase();
 
       // a selected chart owns the keyboard: arrows nudge it, escape drops it,
       // and nothing else reaches the cells hidden behind it — the grid overlay
       // is suppressed while it is selected, so a delete or a keystroke there
-      // would edit a target the user cannot see. undo/redo/save stay global.
-      if (selectedChart && !(mod && CHART_GLOBAL_KEYS.has(lower))) {
+      // would edit a target the user cannot see.
+      if (selectedChart) {
         if (e.key === 'Escape') {
           // escape cancels the whole gesture, pointer or keyboard: an armed
           // drag must not land a move the user just abandoned.
@@ -1583,21 +1579,6 @@ function XlsxEditorContent({
           e.preventDefault();
           return;
         }
-        if (lower === 'z') {
-          e.shiftKey ? redo() : undo();
-          e.preventDefault();
-          return;
-        }
-        if (lower === 'y') {
-          redo();
-          e.preventDefault();
-          return;
-        }
-        if (lower === 's') {
-          save();
-          e.preventDefault();
-          return;
-        }
       }
 
       const action = selectionKeyReducer(
@@ -1636,9 +1617,6 @@ function XlsxEditorContent({
       copySelection,
       pasteSelection,
       cutSelection,
-      undo,
-      redo,
-      save,
       openEditor,
       clearCells,
       selectedChart,
@@ -1784,8 +1762,7 @@ function XlsxEditorContent({
           scroll.scrollTop = position.y * zoom;
         });
         setSelection(selectionAt({ row: destination.row, col: destination.col }));
-        setEditing(null);
-        setFormulaDraft(null);
+        dropDrafts();
         setCapturedFormat(null);
         paintSourceRef.current = null;
         setError(null);
@@ -1865,13 +1842,6 @@ function XlsxEditorContent({
   const spacerWidth = sheetInfo ? sheetInfo.contentWidth * zoom : undefined;
   const spacerHeight = sheetInfo ? sheetInfo.contentHeight * zoom : undefined;
   const formulaValue = formulaDraft ?? focusedCell?.input ?? '';
-  const normalizedSelection = selection ? normalizeRange(selection) : null;
-  const selectionRows = normalizedSelection
-    ? normalizedSelection.bottom - normalizedSelection.top + 1
-    : 1;
-  const selectionColumns = normalizedSelection
-    ? normalizedSelection.right - normalizedSelection.left + 1
-    : 1;
 
   // switch sheets: retarget the core, reset scroll + selection, reread info.
   const switchSheet = (index: number) => {
@@ -1884,18 +1854,175 @@ function XlsxEditorContent({
       pendingSheetViewRef.current = true;
       setSelection(selectionAt({ row: 0, col: 0 }));
       setSelectedChart(null);
-      setEditing(null);
-      setFormulaDraft(null);
+      dropDrafts();
       setCapturedFormat(null);
       paintSourceRef.current = null;
       setSheetInfo(handle.sheetInfo());
+      showRejected(index);
+      commandController.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  return (
+  const bridge: XlsxEditorBridge = {
+    handle: () => handleRef.current,
+    status: () => (handleRef.current ? 'ready' : file && !error ? 'loading' : 'empty'),
+    readOnly: () => readOnlyRef.current,
+    collaborative: () => collaborationEnabled,
+    mutation: () => mutationRef.current,
+    generation: () => generationRef.current,
+    view: () => ({
+      sheet: activeSheetRef.current,
+      selection: selectionRef.current,
+      chartSelected: selectedChartRef.current !== null,
+      zoom: zoomRef.current,
+      capturedFormat: capturedFormatRef.current,
+      borderStyle: borderStyleChoiceRef.current,
+      borderColor: borderColorChoiceRef.current,
+      proposals: proposalsRef.current,
+      proposalsAvailable,
+      proposalsPanelOpen: proposalsPanelOpenRef.current,
+      pngExport: pngExportAvailable,
+    }),
+    coordinator,
+    i18n: () => i18n,
+    translate: t,
+    apply: applyResult,
+    fail: (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
+    setZoom,
+    setProposalsPanelOpen,
+    setCapturedFormat: (format, source) => {
+      setCapturedFormat(format);
+      paintSourceRef.current = source;
+    },
+    setBorderStyle: (style) => {
+      borderStyleChoiceRef.current = style;
+    },
+    setBorderColor: (color) => {
+      borderColorChoiceRef.current = color;
+    },
+    markStale: (proposalId, cells) =>
+      setStaleFor(({ [proposalId]: _dropped, ...rest }) =>
+        cells ? { ...rest, [proposalId]: cells } : rest
+      ),
+    refreshProposals,
+    deliver: deliverSave,
+    exportPng,
+    afterPaint,
+    focusGrid: focusContainer,
+  };
+  useXlsxCommandBinding(commandController, bridge);
+  useCommandShortcuts(commandController, rootRef);
+
+  const startComposition = (source: InputDraft['source']) => {
+    let settle: (ended: boolean) => void = () => {};
+    const done = new Promise<boolean>((resolve) => {
+      settle = (ended) => setTimeout(() => resolve(ended), 0);
+    });
+    compositionRef.current = { source, done, settle };
+  };
+  const endComposition = () => {
+    compositionRef.current?.settle(true);
+    compositionRef.current = null;
+  };
+  // a composition whose input goes away never ends; commands waiting on it fail.
+  const abandonComposition = useCallback((source: InputDraft['source']) => {
+    const composition = compositionRef.current;
+    if (composition?.source !== source) return;
+    composition.settle(false);
+    compositionRef.current = null;
+  }, []);
+  const attachCellInput = useCallback(
+    (element: HTMLInputElement | null) => {
+      editorInputRef.current = element;
+      if (!element) abandonComposition('cell');
+    },
+    [abandonComposition]
+  );
+  const attachFormulaInput = useCallback(
+    (element: HTMLInputElement | null) => {
+      formulaInputRef.current = element;
+      if (!element) abandonComposition('formula');
+    },
+    [abandonComposition]
+  );
+
+  const formulaWritable = !readOnly && selection !== null && selectedChart === null;
+  const formulaBar: FormulaBarBinding = {
+    a1: focusedCell?.a1 ?? '',
+    value: formulaValue,
+    disabled: !sheetInfo || !selection,
+    readOnly: !formulaWritable,
+    inputRef: attachFormulaInput,
+    onChange: (value) => {
+      const current = selectionRef.current;
+      if (!formulaWritable || readOnlyRef.current || !current || selectedChartRef.current) return;
+      setFormulaDraft(value);
+      coordinator.setDraft(draftFor('formula', current.focus.row, current.focus.col, value));
+    },
+    onCommit: (move) => {
+      commitFormula(move);
+      focusContainer();
+    },
+    onCancel: () => {
+      const draft = coordinator.draft;
+      if (draft?.source === 'formula') {
+        coordinator.discard(draft);
+        coordinator.setDraft(null);
+      }
+      setFormulaDraft(null);
+      focusContainer();
+      showRejected(activeSheet);
+    },
+    onBlur: () => {
+      if (!suppressFormulaBlurRef.current) commitFormula();
+    },
+    onCompositionStart: () => startComposition('formula'),
+    onCompositionEnd: endComposition,
+  };
+
+  const defaultToolbar = (
+    <EditorToolbar mode="commands">
+      <EditorToolbar.Toolbar />
+      <div style={xlsxToolbarStyles.rail} role="group" aria-label={t('toolbar.formulaBarLabel')}>
+        <ToolbarGroup
+          style={{ ...xlsxToolbarStyles.group, paddingLeft: 0 }}
+          label={t('toolbar.fileActionsLabel')}
+        >
+          <ToolbarCommandButton id="save">
+            <ToolbarIcon name="save" size={18} />
+          </ToolbarCommandButton>
+          <ToolbarCommandButton id="exportPng">
+            <ToolbarIcon name="image" size={18} />
+          </ToolbarCommandButton>
+        </ToolbarGroup>
+        <EditorToolbar.FormulaBar />
+        <PresenceStrip
+          peers={awarenessPeers}
+          sheetIds={sheetInfo?.sheetIds ?? []}
+          sheetNames={sheetInfo?.sheetNames ?? []}
+          activeSheet={activeSheet}
+        />
+        {proposalsAvailable && (
+          <div style={xlsxToolbarStyles.proposals}>
+            <ProposalsButton />
+          </div>
+        )}
+      </div>
+    </EditorToolbar>
+  );
+  const toolbarContent = !showToolbar
+    ? null
+    : toolbar === undefined
+      ? readOnly
+        ? null
+        : defaultToolbar
+      : toolbar;
+
+  const editor = (
     <div
+      ref={rootRef}
       className={className}
       role="application"
       aria-label={t('editor.appLabel')}
@@ -1911,132 +2038,19 @@ function XlsxEditorContent({
         fontFamily: 'ui-sans-serif, system-ui, sans-serif',
       }}
     >
-      {!readOnly && (
-        <div ref={toolbarRef} data-testid="xlsx-toolbar" style={xlsxToolbarStyles.shell}>
-        <EditorToolbar
-          currentFormatting={{
-            ...selectionFormatting,
-            borderStyle: borderStyleChoice ?? selectionFormatting.borderStyle,
-            borderColor: borderColorChoice ?? selectionFormatting.borderColor,
-            paintFormat: capturedFormat !== null,
-          }}
-          selectionShape={{
-            rows: selectionRows,
-            columns: selectionColumns,
-            canUnmerge: mergedRanges.length > 0,
-          }}
-          onSearchMenus={searchMenus}
-          onUndo={undo}
-          onRedo={redo}
-          canUndo={historyState.canUndo}
-          canRedo={historyState.canRedo}
-          onPrint={print}
-          zoom={zoom}
-          onZoomChange={setZoom}
-          onFormat={formatSelection}
-          onMerge={mergeSelection}
+      {toolbarContent != null && (
+        <div
+          ref={setToolbarElement}
+          data-testid="xlsx-toolbar"
+          style={toolbar === undefined ? xlsxToolbarStyles.shell : xlsxToolbarStyles.host}
         >
-          <EditorToolbar.Toolbar />
-          <div
-            style={xlsxToolbarStyles.rail}
-            role="group"
-            aria-label={t('toolbar.formulaBarLabel')}
-          >
-            <ToolbarGroup
-              style={{ ...xlsxToolbarStyles.group, paddingLeft: 0 }}
-              label={t('toolbar.fileActionsLabel')}
-            >
-              <ToolbarButton
-                testId="xlsx-save"
-                onClick={save}
-                disabled={!sheetInfo}
-                title={t('toolbar.save')}
-              >
-                <ToolbarIcon name="save" size={18} />
-              </ToolbarButton>
-              <ToolbarButton
-                testId="xlsx-export-png"
-                onClick={exportPng}
-                disabled={!sheetInfo || !pngExportAvailable}
-                title={t('toolbar.exportPng')}
-              >
-                <ToolbarIcon name="image" size={18} />
-              </ToolbarButton>
-            </ToolbarGroup>
-            <div
-              style={xlsxToolbarStyles.formulaGroup}
-              role="group"
-              aria-label={t('toolbar.formulaBarLabel')}
-            >
-              <input
-                data-testid="xlsx-name-box"
-                readOnly
-                value={focusedCell?.a1 ?? ''}
-                placeholder={t('toolbar.nameBoxPlaceholder')}
-                aria-label={t('toolbar.nameBoxPlaceholder')}
-                style={xlsxToolbarStyles.nameBox}
-              />
-              <span style={xlsxToolbarStyles.formulaMark} aria-hidden="true">
-                fx
-              </span>
-              <input
-                data-testid="xlsx-formula-input"
-                value={formulaValue}
-                placeholder={t('toolbar.formulaPlaceholder')}
-                aria-label={t('toolbar.formulaPlaceholder')}
-                disabled={!sheetInfo}
-                onChange={(e) => setFormulaDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    commitFormula(e.shiftKey ? 'up' : 'down');
-                    focusContainer();
-                    e.preventDefault();
-                  } else if (e.key === 'Escape') {
-                    setFormulaDraft(null);
-                    focusContainer();
-                    e.preventDefault();
-                  }
-                }}
-                onBlur={() => commitFormula()}
-                style={xlsxToolbarStyles.formulaInput}
-              />
-            </div>
-            <PresenceStrip
-              peers={awarenessPeers}
-              sheetIds={sheetInfo?.sheetIds ?? []}
-              sheetNames={sheetInfo?.sheetNames ?? []}
-              activeSheet={activeSheet}
-            />
-            {proposalsAvailable && (
-              <div style={xlsxToolbarStyles.proposals}>
-                <ToolbarButton
-                  testId="xlsx-proposals-button"
-                  onClick={() => setProposalsPanelOpen((open) => !open)}
-                  disabled={!sheetInfo}
-                  active={proposalsPanelOpen}
-                  ariaExpanded={proposalsPanelOpen}
-                  title={t('proposals.panelLabel')}
-                  style={{ width: proposals.length > 0 ? 42 : 28 }}
-                >
-                  <ToolbarIcon name="proposals" size={18} />
-                  {proposals.length > 0 && (
-                    <span data-testid="xlsx-proposals-count" style={xlsxToolbarStyles.count}>
-                      {proposals.length}
-                    </span>
-                  )}
-                </ToolbarButton>
-              </div>
-            )}
-          </div>
-        </EditorToolbar>
+          {toolbarContent}
         </div>
       )}
-      {!readOnly && proposalsAvailable && proposalsPanelOpen && (
+      {proposalsAvailable && proposalsPanelOpen && (
         <ProposalsPanel
           proposals={proposals}
           staleFor={staleFor}
-          onAccept={acceptProposal}
-          onReject={rejectProposal}
           style={{
             top: toolbarHeight + 4,
             right: 8,
@@ -2146,14 +2160,19 @@ function XlsxEditorContent({
             />
             {!readOnly && editing && scaledEditRect && (
               <input
-                ref={editorInputRef}
+                ref={attachCellInput}
                 data-testid="xlsx-cell-editor"
                 value={editing.value}
-                onChange={(e) =>
-                  setEditing((prev) => (prev ? { ...prev, value: e.target.value } : prev))
-                }
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setEditing((prev) => (prev ? { ...prev, value } : prev));
+                  if (editing) coordinator.setDraft(draftFor('cell', editing.row, editing.col, value));
+                }}
+                onCompositionStart={() => startComposition('cell')}
+                onCompositionEnd={endComposition}
                 onKeyDown={(e) => {
-                  e.stopPropagation();
+                  if (!commandForEvent(e)) e.stopPropagation();
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                   if (e.key === 'Enter') {
                     commitEditor(e.shiftKey ? 'up' : 'down');
                     e.preventDefault();
@@ -2295,5 +2314,39 @@ function XlsxEditorContent({
         </div>
       )}
     </div>
+  );
+
+  return (
+    <XlsxCommandContext.Provider value={commandController.store}>
+      <EditorChromeContext.Provider value={true}>
+        <FormulaBarContext.Provider value={formulaBar}>{editor}</FormulaBarContext.Provider>
+      </EditorChromeContext.Provider>
+    </XlsxCommandContext.Provider>
+  );
+}
+
+/** The proposals-panel toggle, with the number of pending proposals. */
+function ProposalsButton() {
+  const command = useXlsxCommand('proposalsPanel');
+  const count = command.state.value ?? 0;
+  return (
+    <ToolbarButtonBase
+      testId="xlsx-proposals-button"
+      onClick={() => void command.execute()}
+      disabled={!command.state.enabled}
+      description={command.state.enabled ? undefined : command.state.disabledReason.message}
+      active={command.state.active === true}
+      toggle
+      ariaExpanded={command.state.active === true}
+      title={command.label}
+      style={{ width: count > 0 ? 42 : 28 }}
+    >
+      <ToolbarIcon name="proposals" size={18} />
+      {count > 0 && (
+        <span data-testid="xlsx-proposals-count" style={xlsxToolbarStyles.count}>
+          {count}
+        </span>
+      )}
+    </ToolbarButtonBase>
   );
 }

@@ -86,6 +86,29 @@ content in `diagnostics`, and returns `Error::Export` for unusable limits. The
 same content comes from `docx_edit::structured` for a live `EditingDoc` or raw
 bytes. Page fragments are not included yet.
 
+PPTX edits can also run as version-checked batches. `Presentation::read_content`
+and `find_text` return story text with the session version, and `apply_edits`
+applies every step against that version as one transaction and one undo step.
+Policy refusals, such as a stale version or an ambiguous search, come back as the
+inner `Err(EditRefusal)` with the deck unchanged:
+
+```rust
+use betteroffice_pptx::{EditRequest, ReadRequest};
+
+let read = presentation.read_content(&ReadRequest::default())?.expect("readable deck");
+let request: EditRequest = serde_json::from_value(serde_json::json!({
+    "expectVersion": read.version,
+    "steps": [{"op": "setSlideNotes", "target": {"slideId": read.slides[0].id}, "text": "Updated"}],
+}))?;
+match presentation.apply_edits(&request)? {
+    Ok(applied) => assert!(applied.applied),
+    Err(refusal) => eprintln!("{:?}: {}", refusal.failure.code, refusal.failure.message),
+}
+```
+
+The request types are the JSON contract the JavaScript core and Python binding
+use; `validate_edits` runs the same checks without changing anything.
+
 ## PowerPoint comments
 
 `comment_flavor` reports whether a deck uses legacy or modern comments. Modern
