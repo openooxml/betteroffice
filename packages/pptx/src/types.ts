@@ -106,6 +106,8 @@ export interface ShapeSnapshot {
   rotationDeg: number;
   flipH: boolean;
   flipV: boolean;
+  /** The geometry the shape draws at, present only while it has none of its own. */
+  inherited?: InheritedGeometry | null;
   /** Hides this shape and its descendants; omitted when false. */
   hidden?: boolean;
   geometry: string;
@@ -122,6 +124,17 @@ export interface ShapeSnapshot {
   graphic: unknown | null;
   textStories: StorySnapshot[];
   children: ShapeSnapshot[];
+}
+
+/** The transform a placeholder takes from its layout or master. */
+export interface InheritedGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotationDeg: number;
+  flipH: boolean;
+  flipV: boolean;
 }
 
 export interface SlideSnapshot {

@@ -1,5 +1,7 @@
 import { useCallback, useRef } from 'react';
-import type { YrsLoc, YrsSession, YrsStoryRange } from '@betteroffice/docx/yrs';
+import type { YrsLoc, YrsSelection, YrsSession, YrsStoryRange } from '@betteroffice/docx/yrs';
+import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
+import type { DocxCommandResult } from '../../../commands/types';
 import {
   findAllMatches,
   type FindMatch,
@@ -8,6 +10,7 @@ import {
 } from '../../dialogs/findReplaceUtils';
 import type { useFindReplace } from '../../../hooks/useFindReplace';
 import type { PagedEditorRef } from '../PagedEditor';
+import { commandOutcome } from './useDocxCommands';
 
 export type YrsFindMatch = FindMatch & {
   displayFrom: number;
@@ -55,15 +58,34 @@ function findMatchesInYrs(
   return matches;
 }
 
-/** Yrs-backed find, navigation, and replacement for the canvas editor. */
+function selects(selection: YrsSelection | null, range: YrsStoryRange): boolean {
+  if (!selection || selection.anchor.story !== range.story || selection.head.story !== range.story) {
+    return false;
+  }
+  const at = (loc: YrsSelection['anchor'], point: YrsStoryRange['start']) =>
+    loc.paraId === point.paraId && loc.offset === point.offset;
+  return (
+    (at(selection.anchor, range.start) && at(selection.head, range.end)) ||
+    (at(selection.anchor, range.end) && at(selection.head, range.start))
+  );
+}
+
+/**
+ * Yrs-backed find, navigation, and replacement for the canvas editor.
+ * Replacements run through `complete`, after accepted input, and find their
+ * target again in the document as it is then.
+ */
 export function useFindReplaceBridge({
   pagedEditorRef,
   findReplace,
+  complete,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   findReplace: ReturnType<typeof useFindReplace>;
+  complete: (write: () => DocxCommandResult) => Promise<DocxCommandResult>;
 }) {
   const findResultRef = useRef<FindResult | null>(null);
+  const searchRef = useRef<{ text: string; options: FindOptions } | null>(null);
 
   const goToMatch = useCallback(
     (match: YrsFindMatch | undefined, index: number): FindMatch | null => {
@@ -95,9 +117,11 @@ export function useFindReplaceBridge({
       const session = editor?.getYrsSession();
       if (!editor || !session || !searchText.trim()) {
         findResultRef.current = null;
+        searchRef.current = null;
         findReplace.setMatches([], 0);
         return null;
       }
+      searchRef.current = { text: searchText, options };
       const matches = findMatchesInYrs(
         session,
         (loc) => editor.yrsLocToDisplayPosition(loc),
@@ -128,55 +152,65 @@ export function useFindReplaceBridge({
   }, [goToMatch]);
 
   const handleReplace = useCallback(
-    (replaceText: string): boolean => {
-      const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
-      const result = findResultRef.current as YrsFindResult | null;
-      const match = result?.matches[result.currentIndex];
-      if (!editor || !session || !match) return false;
-      try {
+    async (replaceText: string): Promise<boolean> => {
+      const result = await complete(() => {
+        const editor = pagedEditorRef.current;
+        const session = editor?.getYrsSession();
+        const search = searchRef.current;
+        if (!editor || !session || !search) return commandOutcome(false);
+        const selection = session.selection();
+        const match = findMatchesInYrs(
+          session,
+          (loc) => editor.yrsLocToDisplayPosition(loc),
+          search.text,
+          search.options
+        ).find((candidate) => selects(selection, candidate.yrsRange));
+        if (!match) throw new DocxCommandAdmissionError('target-changed');
         session.replaceRange(match.yrsRange, replaceText);
         session.setSelection({
           story: match.yrsRange.story,
           paraId: match.yrsRange.start.paraId,
           offset: match.yrsRange.start.offset + replaceText.length,
         });
-        return editor.syncYrsInputState(true);
-      } catch (error) {
-        console.error('Replace failed:', error);
-        return false;
-      }
+        return commandOutcome(editor.syncYrsInputState(true));
+      });
+      return result.ok && result.status === 'executed';
     },
-    [pagedEditorRef]
+    [complete, pagedEditorRef]
   );
 
   const handleReplaceAll = useCallback(
-    (searchText: string, replaceText: string, options: FindOptions): number => {
-      const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
-      if (!editor || !session || !searchText.trim()) return 0;
-      const matches = findMatchesInYrs(
-        session,
-        (loc) => editor.yrsLocToDisplayPosition(loc),
-        searchText,
-        options
-      );
-      if (matches.length === 0) return 0;
-      for (const match of [...matches].sort((a, b) => b.displayFrom - a.displayFrom)) {
-        session.replaceRange(match.yrsRange, replaceText);
-      }
-      const first = matches[0];
-      session.setSelection({
-        story: first.yrsRange.story,
-        paraId: first.yrsRange.start.paraId,
-        offset: first.yrsRange.start.offset + replaceText.length,
+    async (searchText: string, replaceText: string, options: FindOptions): Promise<number> => {
+      let replaced = 0;
+      const result = await complete(() => {
+        const editor = pagedEditorRef.current;
+        const session = editor?.getYrsSession();
+        if (!editor || !session || !searchText.trim()) return commandOutcome(false);
+        const matches = findMatchesInYrs(
+          session,
+          (loc) => editor.yrsLocToDisplayPosition(loc),
+          searchText,
+          options
+        );
+        if (matches.length === 0) return commandOutcome(false);
+        for (const match of [...matches].sort((a, b) => b.displayFrom - a.displayFrom)) {
+          session.replaceRange(match.yrsRange, replaceText);
+        }
+        const first = matches[0];
+        session.setSelection({
+          story: first.yrsRange.story,
+          paraId: first.yrsRange.start.paraId,
+          offset: first.yrsRange.start.offset + replaceText.length,
+        });
+        editor.syncYrsInputState(true);
+        findResultRef.current = null;
+        findReplace.setMatches([], 0);
+        replaced = matches.length;
+        return commandOutcome(true);
       });
-      editor.syncYrsInputState(true);
-      findResultRef.current = null;
-      findReplace.setMatches([], 0);
-      return matches.length;
+      return result.ok ? replaced : 0;
     },
-    [findReplace, pagedEditorRef]
+    [complete, findReplace, pagedEditorRef]
   );
 
   return {

@@ -45,7 +45,7 @@ fn an_unpinned_value_axis_counts_in_round_steps_and_leaves_headroom() {
     let labels: Vec<&str> = ticks.iter().map(|(text, _)| text.as_str()).collect();
     assert_eq!(labels, ["0", "2", "4", "6", "8", "10", "12", "14"]);
     for (index, (_, baseline)) in ticks.iter().enumerate() {
-        close(*baseline, 401.0 - 39.142857 * index as f32);
+        close(*baseline, 388.0 - 36.7 * index as f32);
     }
 
     let top = primitives
@@ -60,8 +60,9 @@ fn an_unpinned_value_axis_counts_in_round_steps_and_leaves_headroom() {
             _ => None,
         })
         .fold(f32::MAX, f32::min);
-    close(top, 157.27142);
-    let (tick_14, tick_12) = (ticks[7].1 - 3.0, ticks[6].1 - 3.0);
+    close(top, 159.795);
+    let lift = 0.25 * 13.0;
+    let (tick_14, tick_12) = (ticks[7].1 - lift, ticks[6].1 - lift);
     assert!(
         tick_14 < top && top < tick_12,
         "{top} not in {tick_14}..{tick_12}"

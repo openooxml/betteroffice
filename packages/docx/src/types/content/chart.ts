@@ -135,7 +135,7 @@ export interface ChartPlotGroup {
 }
 
 export interface ChartLegend {
-  position?: 'left' | 'right' | 'top' | 'bottom';
+  position?: 'left' | 'right' | 'top' | 'bottom' | 'topRight';
   visible?: boolean;
   /** `c:overlay`: the legend sits on the plot instead of taking a band of it. */
   overlay?: boolean;

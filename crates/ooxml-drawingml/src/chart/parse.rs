@@ -728,6 +728,7 @@ fn parse_legend<E: ChartXml>(chart_space: &E) -> Option<ChartLegend> {
         Some("r") => Some("right"),
         Some("t") => Some("top"),
         Some("b") => Some("bottom"),
+        Some("tr") => Some("topRight"),
         _ => None,
     };
     Some(ChartLegend {
