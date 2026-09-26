@@ -89,7 +89,7 @@ bytes. Page fragments are not included yet.
 `Document::list_content_controls` lists the content controls of the current model
 in document order, with the structured export's control metadata plus placement,
 anchor, parent control, current text and effective lock; `find_content_controls`
-keeps the exact matches of an id, tag or alias:
+keeps the exact matches of an id, tag, authored `w:id` or alias:
 
 ```rust
 use betteroffice_docx::{ContentControlQuery, ContentControlsOptions, Document};

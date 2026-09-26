@@ -136,7 +136,8 @@ layout, and page fragments are not included yet.
 `listContentControls` lists a session's content controls in document order with
 their tag, alias, type, lock, placement, anchor and current text, and the version
 they were read at. A `setContentControlText` step in an edit batch fills a plain-
-or rich-text control by its `controlId`, or by a tag only one control carries.
+or rich-text control by its `controlId`, or by a tag or `ooxmlId` (the authored
+`w:id`) only one control carries.
 
 ```ts
 const read = session.listContentControls();
@@ -158,12 +159,13 @@ LF, LF is a line break in an inline control and a new paragraph in a block
 control, and a plain-text control accepts it only with `w:multiLine`. The new
 text takes the formatting of the control's first text run, or the control's own
 run properties while it shows its placeholder. Every step commits or none does;
-missing or duplicate tags, locked, data-bound and nested controls, and content
-other than text, tabs and line breaks are refused as data with a `reason`.
-`findContentControls(query)` returns every exact match of an id, tag or alias,
-and `listDocxContentControls(bytes)` and `findDocxContentControls` read bytes
-without a session. Control ids belong to the version they were read at and do not
-survive save and reopen. Checkbox, dropdown and date controls keep
+missing or duplicate tags and `ooxmlId`s, locked, data-bound and nested controls,
+and content other than text, tabs and line breaks are refused as data with a
+`reason`. `findContentControls(query)` returns every exact match of an id, tag,
+`ooxmlId` or alias, and `listDocxContentControls(bytes)` and
+`findDocxContentControls` read bytes without a session. Control ids belong to the
+version they were read at and do not survive save and reopen; `ooxmlId` does, and
+tags are the template author's names. Checkbox, dropdown and date controls keep
 `setContentControlValue`; passing a string to it fills a text control the same
 way. The React editor exposes `listContentControls` and `findContentControls` on
 its ref. Filling needs a session opened from DOCX bytes; rich-text run input is

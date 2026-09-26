@@ -66,6 +66,10 @@ fn by_tag_step(tag: &str, text: &str) -> Value {
     json!({"op": "setContentControlText", "target": {"kind": "tag", "tag": tag}, "text": text})
 }
 
+fn by_ooxml_id_step(ooxml_id: &str, text: &str) -> Value {
+    json!({"op": "setContentControlText", "target": {"kind": "ooxmlId", "ooxmlId": ooxml_id}, "text": text})
+}
+
 fn request(doc: &EditingDoc, steps: Vec<Value>) -> EditRequest {
     serde_json::from_value(json!({"expectVersion": doc.version().as_str(), "steps": steps}))
         .unwrap()
@@ -610,6 +614,128 @@ fn fills_by_unique_tag_and_keeps_formatting_of_the_first_run() {
     }
 }
 
+/// Saves `bytes` through the native serializer.
+fn resave(bytes: &[u8]) -> Vec<u8> {
+    let wire = docx_parse::parse_docx_s9_wire(bytes, Default::default()).unwrap();
+    let body = docx_parse::parse_docx_s8_projection(bytes).unwrap().body;
+    let request = serde_json::from_value(json!({
+        "determinism": {
+            "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "now": "2030-01-02T03:04:05.006Z"
+        },
+        "document": body,
+        "relationshipEntries": wire.document.package.relationship_entries,
+        "headerEntries": wire.document.package.header_entries,
+        "options": {"updateModifiedDate": false}
+    }))
+    .unwrap();
+    docx_parse::serializer::s13::write_docx_s13(request, bytes).unwrap()
+}
+
+#[test]
+fn fills_by_ooxml_id_after_save_and_reopen() {
+    let bytes = template();
+    let read = list(&open(&bytes));
+    let ooxml_id = |tag: &str| by_tag(&read, tag).metadata.ooxml_id.clone().unwrap();
+    let (name, address) = (ooxml_id("customer.name"), ooxml_id("customer.address"));
+    let saved = resave(&bytes);
+    let document = |bytes: &[u8]| {
+        ooxml_opc::unzip_parts(bytes)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap()
+            .1
+    };
+    assert_ne!(document(&saved), document(&bytes));
+    let doc = open(&saved);
+    let applied = apply(
+        &doc,
+        &UndoSession::new(),
+        vec![
+            by_ooxml_id_step(&name, "Ada Lovelace"),
+            by_ooxml_id_step(&address, "12 Example Street\nLondon"),
+        ],
+    );
+    let after = list(&doc);
+    let resolved: Vec<&str> = applied
+        .receipts
+        .iter()
+        .map(|receipt| receipt.control.as_ref().unwrap().control_id.as_str())
+        .collect();
+    assert_eq!(
+        resolved,
+        [
+            by_tag(&after, "customer.name").metadata.control_id.as_str(),
+            by_tag(&after, "customer.address")
+                .metadata
+                .control_id
+                .as_str()
+        ]
+    );
+    assert_eq!(text(by_tag(&after, "customer.name")), "Ada Lovelace");
+    assert_eq!(
+        text(by_tag(&after, "customer.address")),
+        "12 Example Street\nLondon"
+    );
+    assert_eq!(
+        by_tag(&after, "customer.name").metadata.ooxml_id,
+        Some(name)
+    );
+}
+
+#[test]
+fn ooxml_ids_must_name_exactly_one_control() {
+    let bytes = package(&para(
+        "20000001",
+        &format!(
+            "{}{}{}",
+            inline_sdt(
+                r#"<w:tag w:val="first"/><w:id w:val="7"/><w:text/>"#,
+                &run("one")
+            ),
+            inline_sdt(
+                r#"<w:tag w:val="second"/><w:id w:val="7"/><w:text/>"#,
+                &run("two")
+            ),
+            inline_sdt(
+                r#"<w:tag w:val="third"/><w:id w:val="8"/><w:text/>"#,
+                &run("three")
+            )
+        ),
+    ));
+    let query: ContentControlQuery =
+        serde_json::from_value(json!({"kind": "ooxmlId", "ooxmlId": "7"})).unwrap();
+    let found =
+        find_docx_content_controls(&bytes, &query, &ContentControlsOptions::default()).unwrap();
+    assert_eq!(found.controls.len(), 2);
+    let doc = open(&bytes);
+    let state = doc.encode_state_as_update_v1();
+    assert_eq!(
+        reason(&doc, vec![by_ooxml_id_step("7", "x")]),
+        (
+            EditFailureCode::AmbiguousTarget,
+            Some(EditFailureReason::AmbiguousOoxmlId)
+        )
+    );
+    assert_eq!(
+        reason(&doc, vec![by_ooxml_id_step("9", "x")]),
+        (
+            EditFailureCode::MissingTarget,
+            Some(EditFailureReason::MissingOoxmlId)
+        )
+    );
+    assert_eq!(doc.encode_state_as_update_v1(), state);
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![by_ooxml_id_step("8", "filled")],
+    );
+    let snapshot = list(&doc);
+    assert_eq!(text(by_tag(&snapshot, "third")), "filled");
+    assert_eq!(text(by_tag(&snapshot, "first")), "one");
+}
+
 #[test]
 fn equal_text_is_a_no_op_unless_the_placeholder_shows() {
     let doc = open(&template());
@@ -1002,13 +1128,18 @@ fn sessions_without_source_list_but_do_not_fill() {
             Some(EditFailureReason::ProvenanceUnavailable)
         )
     );
-    assert_eq!(
-        reason(&doc, vec![by_tag_step("customer.name", "x")]),
-        (
-            EditFailureCode::Unsupported,
-            Some(EditFailureReason::ProvenanceUnavailable)
-        )
-    );
+    for step in [
+        by_tag_step("customer.name", "x"),
+        by_ooxml_id_step("101", "x"),
+    ] {
+        assert_eq!(
+            reason(&doc, vec![step]),
+            (
+                EditFailureCode::Unsupported,
+                Some(EditFailureReason::ProvenanceUnavailable)
+            )
+        );
+    }
 }
 
 #[test]
@@ -1520,14 +1651,19 @@ fn controls_parsing_leaves_out_block_tag_writes() {
         );
         let doc = open(&bytes);
         assert_eq!(list(&doc).controls, snapshot.controls, "{wrapper}");
-        assert_eq!(
-            reason(&doc, vec![by_tag_step("customer.name", "x")]),
-            (
-                EditFailureCode::Unsupported,
-                Some(EditFailureReason::ProvenanceUnavailable)
-            ),
-            "{wrapper}"
-        );
+        for step in [
+            by_tag_step("customer.name", "x"),
+            by_ooxml_id_step("1", "x"),
+        ] {
+            assert_eq!(
+                reason(&doc, vec![step]),
+                (
+                    EditFailureCode::Unsupported,
+                    Some(EditFailureReason::ProvenanceUnavailable)
+                ),
+                "{wrapper}"
+            );
+        }
         let undo = UndoSession::new();
         apply(
             &doc,

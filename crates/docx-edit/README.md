@@ -40,9 +40,11 @@ effective lock: `EditingDoc::list_content_controls` and `find_content_controls`
 read a live session with its version, and `list_docx_content_controls` and
 `list_package_content_controls` read bytes and parsed packages. A
 `SetContentControlText` batch step fills a plain- or rich-text control by engine
-id or unique tag, replacing inline control content or a block control's child
-story and clearing its placeholder state in the same transaction; locked, bound,
-nested and non-text controls and ambiguous tags are refused as data. Text
+id (valid for the version it was read at), unique tag or unique authored `w:id`
+(`ooxml_id`, which survives save and reopen), replacing inline control content or
+a block control's child story and clearing its placeholder state in the same
+transaction; locked, bound, nested and non-text controls and ambiguous tags or
+`w:id`s are refused as data. Text
 controls hold their text as content: local embed and raw writes never introduce,
 replace or move an authored text `value`, retyping a valued control drops it,
 and a fill drops it outside undo history. Collaboration updates integrate

@@ -71,6 +71,8 @@ def test_find_returns_every_exact_match(template_bytes: bytes) -> None:
     assert len(ids) == 2 and len(set(ids)) == 2
     assert document.find_content_controls({"kind": "tag", "tag": "ACCOUNT.reference"})["controls"] == []
     assert len(document.find_content_controls({"kind": "alias", "alias": "Address"})["controls"]) == 1
+    by_ooxml_id = document.find_content_controls({"kind": "ooxmlId", "ooxmlId": "105"})
+    assert [control["tag"] for control in by_ooxml_id["controls"]] == ["customer.address"]
     headers = document.list_content_controls(stories=["headers"])
     assert [control["tag"] for control in headers["controls"]] == ["document.title"]
 

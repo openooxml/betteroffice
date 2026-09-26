@@ -97,7 +97,7 @@ Omitted and unsupported content is listed in `diagnostics`; unusable limits rais
 
 `list_content_controls` lists the document's content controls as a dict in the
 same camelCase schema, and `find_content_controls` returns every exact match of a
-tag, alias or control id:
+tag, alias, `ooxmlId` (the authored `w:id`) or control id:
 
 ```python
 controls = document.list_content_controls()["controls"]

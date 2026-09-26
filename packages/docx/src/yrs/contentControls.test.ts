@@ -311,6 +311,80 @@ describe('content controls', () => {
     }
   });
 
+  it('fills by ooxmlId, which survives save and reopen', async () => {
+    const session = await open();
+    const reopened = await createYrsSession({ clientId: nextClientId++ });
+    try {
+      const base = session.materializeDocx();
+      if (!base) throw new Error('the opened package must materialize');
+      yrsToDocument(session, base);
+      const content = snapshot(session.listContentControls());
+      const name = byTag(content, 'customer.name');
+      const address = byTag(content, 'customer.address');
+      const fill = (target: YrsSession, texts: [string, string]) =>
+        applied(
+          target.applyEdits({
+            expectVersion: target.version(),
+            steps: [
+              { op: 'setContentControlText', target: { kind: 'ooxmlId', ooxmlId: name.ooxmlId! }, text: texts[0] },
+              { op: 'setContentControlText', target: { kind: 'ooxmlId', ooxmlId: address.ooxmlId! }, text: texts[1] },
+            ],
+          })
+        );
+      const filled = fill(session, ['Ada Lovelace', '12 Example Street\nLondon']);
+      expect(filled.receipts.map((receipt) => receipt.control?.controlId)).toEqual([
+        name.controlId,
+        address.controlId,
+      ]);
+
+      reopened.openDocx(new Uint8Array(await repackDocx(yrsToDocument(session, base))), true);
+      fill(reopened, ['Grace Hopper', '1 New Road']);
+      const again = snapshot(reopened.listContentControls());
+      expect(byTag(again, 'customer.name')).toMatchObject({
+        ooxmlId: name.ooxmlId,
+        value: { kind: 'text', text: 'Grace Hopper' },
+      });
+      expect(byTag(again, 'customer.address')).toMatchObject({
+        ooxmlId: address.ooxmlId,
+        value: { kind: 'text', text: '1 New Road' },
+      });
+    } finally {
+      reopened.destroy();
+      session.destroy();
+    }
+  });
+
+  it('refuses a duplicate or missing ooxmlId without changing anything', async () => {
+    const parts: PartsMap = new Map(Object.entries(unzipContainer(template())));
+    const xml = new TextDecoder().decode(parts.get('word/document.xml'));
+    parts.set('word/document.xml', toBytes(xml.replace('<w:id w:val="103"/>', '<w:id w:val="102"/>')));
+    const session = await open(new Uint8Array(rezipPartsToArrayBuffer(parts)));
+    try {
+      const version = session.version();
+      expect(
+        snapshot(session.findContentControls({ kind: 'ooxmlId', ooxmlId: '102' })).controls.map(
+          (control) => control.controlId
+        )
+      ).toEqual(['body|10000003|0', 'body|10000004|0']);
+      const fill = (ooxmlId: string) =>
+        session.applyEdits({
+          expectVersion: version,
+          steps: [{ op: 'setContentControlText', target: { kind: 'ooxmlId', ooxmlId }, text: 'x' }],
+        });
+      expect(fill('102')).toMatchObject({
+        ok: false,
+        failure: { code: 'ambiguous-target', reason: 'ambiguous-ooxml-id' },
+      });
+      expect(fill('999')).toMatchObject({
+        ok: false,
+        failure: { code: 'missing-target', reason: 'missing-ooxml-id' },
+      });
+      expect(session.version()).toBe(version);
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('loads a legacy text value as it is and saves the control content, as before', async () => {
     const bytes = template();
     const session = await createYrsSession({ clientId: nextClientId++ });

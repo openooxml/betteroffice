@@ -115,7 +115,8 @@ pub struct ContentControlsOptions {
     pub max_bytes: Option<u32>,
 }
 
-/// The control a write addresses: its engine id, or its tag, which must then be unique.
+/// The control a write addresses. A tag or `w:id` must be carried by exactly one control of the
+/// whole document.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
@@ -124,8 +125,12 @@ pub struct ContentControlsOptions {
     deny_unknown_fields
 )]
 pub enum ContentControlSelector {
+    /// The engine locator, valid for the version it was read at.
     Id { control_id: String },
+    /// The template author's name for the control.
     Tag { tag: String },
+    /// The authored `w:id` as listings report it; it survives save and reopen.
+    OoxmlId { ooxml_id: String },
 }
 
 /// Which controls a find returns: every exact, case-sensitive match.
@@ -139,6 +144,7 @@ pub enum ContentControlSelector {
 pub enum ContentControlQuery {
     Id { control_id: String },
     Tag { tag: String },
+    OoxmlId { ooxml_id: String },
     Alias { alias: String },
 }
 
@@ -1450,6 +1456,9 @@ impl ContentControlQuery {
         match self {
             Self::Id { control_id } => &control.metadata.control_id == control_id,
             Self::Tag { tag } => control.metadata.tag.as_deref() == Some(tag.as_str()),
+            Self::OoxmlId { ooxml_id } => {
+                control.metadata.ooxml_id.as_deref() == Some(ooxml_id.as_str())
+            }
             Self::Alias { alias } => control.metadata.alias.as_deref() == Some(alias.as_str()),
         }
     }

@@ -5,7 +5,7 @@
  *
  * `controlId` is an opaque engine locator scoped to the version (or snapshot) it was read at; it
  * does not survive save and reopen. An inline control's id can name a different control after
- * edits, so list again after a version change or select by tag. Fill controls with a
+ * edits, so list again after a version change or select by tag or `ooxmlId`. Fill controls with a
  * `setContentControlText` edit step; concurrent fills from collaborators resolve last-writer-wins
  * for an inline control and merge like concurrent typing for a block control.
  */
@@ -61,10 +61,16 @@ export interface DocxContentControlsOptions {
   maxBytes?: number;
 }
 
-/** The control a write addresses: its engine id, or its tag, which must then be unique. */
+/**
+ * The control a write addresses. `controlId` is the engine locator for the version it was read
+ * at; `tag` is the template author's name; `ooxmlId` is the authored `w:id` as listings report it,
+ * which survives save and reopen. A tag or `ooxmlId` must be carried by exactly one control of the
+ * whole document.
+ */
 export type DocxContentControlSelector =
   | { kind: 'id'; controlId: string }
-  | { kind: 'tag'; tag: string };
+  | { kind: 'tag'; tag: string }
+  | { kind: 'ooxmlId'; ooxmlId: string };
 
 /** Which controls a find returns: every exact, case-sensitive match, none trimmed. */
 export type DocxContentControlQuery = DocxContentControlSelector | { kind: 'alias'; alias: string };

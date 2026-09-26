@@ -120,8 +120,8 @@ Rust APIs produce: the control's id, `w:id`, type, tag, alias, lock and
 placeholder state, whether it is data-bound, its placement, anchor, parent,
 current `value` and effective lock. `stories` defaults to every category, and
 `max_controls` or `max_bytes` refuse with `ExportError` rather than returning a
-partial list. Tags and aliases match exactly. Filling controls needs a
-JavaScript editing session and is not available from Python yet.
+partial list. Tags, aliases and `ooxmlId`s match exactly. Filling controls needs
+a JavaScript editing session and is not available from Python yet.
 
 ## Lay a document out
 

@@ -153,6 +153,8 @@ export type DocxEditFailureReason =
   | 'missing-tag'
   | 'ambiguous-tag'
   | 'ambiguous-control-id'
+  | 'missing-ooxml-id'
+  | 'ambiguous-ooxml-id'
   | 'content-locked'
   | 'bound-control'
   | 'unsupported-control-type'

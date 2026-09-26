@@ -338,8 +338,8 @@ export class EditSession {
     export_structured_json(options: string): string;
     /**
      * [`EditSession::list_content_controls_json`] keeping the controls that match `query`
-     * (`{"kind":"id","controlId"}`, `{"kind":"tag","tag"}` or `{"kind":"alias","alias"}`)
-     * exactly.
+     * (`{"kind":"id","controlId"}`, `{"kind":"tag","tag"}`, `{"kind":"ooxmlId","ooxmlId"}` or
+     * `{"kind":"alias","alias"}`) exactly.
      */
     find_content_controls_json(query: string, options: string): string;
     /**

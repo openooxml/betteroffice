@@ -3258,8 +3258,8 @@ impl EditSession {
     }
 
     /// [`EditSession::list_content_controls_json`] keeping the controls that match `query`
-    /// (`{"kind":"id","controlId"}`, `{"kind":"tag","tag"}` or `{"kind":"alias","alias"}`)
-    /// exactly.
+    /// (`{"kind":"id","controlId"}`, `{"kind":"tag","tag"}`, `{"kind":"ooxmlId","ooxmlId"}` or
+    /// `{"kind":"alias","alias"}`) exactly.
     pub fn find_content_controls_json(
         &self,
         query: &str,

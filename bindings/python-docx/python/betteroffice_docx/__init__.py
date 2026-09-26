@@ -265,7 +265,8 @@ class Document:
         """The content controls matching ``query`` exactly, case-sensitively.
 
         ``query`` is ``{"kind": "tag", "tag": ...}``, ``{"kind": "alias",
-        "alias": ...}`` or ``{"kind": "id", "controlId": ...}``. Every match is
+        "alias": ...}``, ``{"kind": "ooxmlId", "ooxmlId": ...}`` (the authored
+        ``w:id``) or ``{"kind": "id", "controlId": ...}``. Every match is
         returned; none and several are both results.
         """
         return self._inner.find_content_controls(

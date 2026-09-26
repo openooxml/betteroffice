@@ -353,6 +353,8 @@ pub enum EditFailureReason {
     MissingTag,
     AmbiguousTag,
     AmbiguousControlId,
+    MissingOoxmlId,
+    AmbiguousOoxmlId,
     ContentLocked,
     BoundControl,
     UnsupportedControlType,
@@ -1447,29 +1449,37 @@ fn resolve_control<'a>(
                 EditFailureReason::AmbiguousControlId,
                 format!("control id {control_id:?}"),
             ),
-            ContentControlSelector::Tag { tag } => {
-                if inventory.unidentified {
-                    return Err(control_failure(
-                        EditFailureCode::Unsupported,
-                        EditFailureReason::ProvenanceUnavailable,
-                        format!(
-                            "content controls may exist that this session cannot see, so tag {tag:?} cannot be shown to be unique"
-                        ),
-                        target,
-                    ));
-                }
-                (
-                    addressable()
-                        .filter(|(_, record)| {
-                            record.control.metadata.tag.as_deref() == Some(tag.as_str())
-                        })
-                        .collect(),
-                    EditFailureReason::MissingTag,
-                    EditFailureReason::AmbiguousTag,
-                    format!("tag {tag:?}"),
-                )
-            }
+            ContentControlSelector::Tag { tag } => (
+                addressable()
+                    .filter(|(_, record)| {
+                        record.control.metadata.tag.as_deref() == Some(tag.as_str())
+                    })
+                    .collect(),
+                EditFailureReason::MissingTag,
+                EditFailureReason::AmbiguousTag,
+                format!("tag {tag:?}"),
+            ),
+            ContentControlSelector::OoxmlId { ooxml_id } => (
+                addressable()
+                    .filter(|(_, record)| {
+                        record.control.metadata.ooxml_id.as_deref() == Some(ooxml_id.as_str())
+                    })
+                    .collect(),
+                EditFailureReason::MissingOoxmlId,
+                EditFailureReason::AmbiguousOoxmlId,
+                format!("w:id {ooxml_id:?}"),
+            ),
         };
+    if inventory.unidentified && !matches!(selector, ContentControlSelector::Id { .. }) {
+        return Err(control_failure(
+            EditFailureCode::Unsupported,
+            EditFailureReason::ProvenanceUnavailable,
+            format!(
+                "content controls may exist that this session cannot see, so {named} cannot be shown to be unique"
+            ),
+            target,
+        ));
+    }
     match matches.as_slice() {
         [] => Err(control_failure(
             EditFailureCode::MissingTarget,
