@@ -355,10 +355,16 @@ export type DocxCommandResult =
   | { ok: true; status: DocxCommandStatus }
   | { ok: false; failure: CommandReason<DocxCommandFailureCode> };
 
-/** A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`. */
+/**
+ * A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`.
+ * @experimental
+ */
 export type DocxPluginCommandId = `plugin:${string}/${string}`;
 
-/** Static description of a contributed command. */
+/**
+ * Static description of a contributed command.
+ * @experimental
+ */
 export interface DocxPluginCommandDescriptor {
   id: DocxPluginCommandId;
   label: string;
@@ -366,7 +372,10 @@ export interface DocxPluginCommandDescriptor {
   shortcuts: readonly { chord: string; args: null }[];
 }
 
-/** State of a contributed command; the plugin chooses its own disabled codes. */
+/**
+ * State of a contributed command; the plugin chooses its own disabled codes.
+ * @experimental
+ */
 export type DocxPluginCommandState = CommandState;
 
 /**

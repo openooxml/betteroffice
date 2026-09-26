@@ -80,7 +80,10 @@ export interface DocxBoundCommand<K extends DocxCommandId> {
   execute(args?: DocxCommandArgs[K]): Promise<DocxCommandResult>;
 }
 
-/** A contributed command bound to this component. */
+/**
+ * A contributed command bound to this component.
+ * @experimental
+ */
 export interface DocxBoundPluginCommand {
   id: DocxPluginCommandId;
   /** Null while no active plugin contributes the command. */
