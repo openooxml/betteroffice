@@ -24,7 +24,6 @@ interface ReviewState {
 
 type ReviewContext = PptxPluginContext<ReviewState>;
 
-/** Reads every slide's first line and notes with the version they were read at. */
 async function refresh(context: ReviewContext): Promise<void> {
   const read = await context.read.readContent();
   if (!read.ok) return;
@@ -45,7 +44,6 @@ async function refresh(context: ReviewContext): Promise<void> {
   );
 }
 
-/** Appends a review mark to the current slide's notes as one guarded batch. */
 async function markReviewed(
   context: ReviewContext,
 ): Promise<PptxCommandResult> {
@@ -168,7 +166,6 @@ function SelectionOverlay({
   );
 }
 
-/** A small review aid built only from `@betteroffice/pptx-react` exports. */
 export const reviewPlugin = definePptxPlugin<ReviewState>({
   id: REVIEW_PLUGIN_ID,
   createState: () => ({ version: null, slides: [], message: null }),
