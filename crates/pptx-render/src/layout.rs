@@ -2738,8 +2738,9 @@ fn resolve_style(
         .unwrap_or(0.0);
     // PowerPoint kerns only at or above `kern`, and not at all at `0`; with no
     // threshold anywhere in the cascade every size is kerned.
-    let kerned = fallback
-        .and_then(|value| value.kern_pt)
+    let kerned = direct
+        .kern_pt
+        .or_else(|| fallback.and_then(|value| value.kern_pt))
         .is_none_or(|threshold| threshold > 0.0 && f64::from(font_size_pt) >= threshold);
     let baseline_shift_px = points_to_px(font_size_pt) * baseline_pct / 100.0;
     let font_size_pt = if baseline_pct == 0.0 {
@@ -4895,6 +4896,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
             .or_else(|| linked.then(|| "sng".to_owned())),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
+        kern_pt: properties.kern_pt,
         caps: properties.caps,
     }
 }
@@ -10115,6 +10117,22 @@ mod tests {
                 .unwrap()
                 .kerned
         };
+        let direct = |size: f64, own: f64, inherited: f64| {
+            let fallback = RunProperties {
+                font_size_pt: Some(size),
+                kern_pt: Some(inherited),
+                ..RunProperties::default()
+            };
+            let style = TextStyle {
+                kern_pt: Some(own),
+                ..TextStyle::default()
+            };
+            resolve_style(&renderer, &theme, &style, Some(&fallback))
+                .unwrap()
+                .kerned
+        };
+        assert!(direct(10.0, 1.0, 12.0), "the run's own threshold wins");
+        assert!(!direct(40.0, 0.0, 12.0), "a run can turn its kerning off");
         assert!(kerned(11.0, None), "no threshold kerns every size");
         assert!(!kerned(11.0, Some(12.0)));
         assert!(kerned(12.0, Some(12.0)));

@@ -46,6 +46,9 @@ pub struct TextStyle {
     pub spacing_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,
+    /// `a:rPr@kern`: the smallest size, in points, the run is kerned at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kern_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps: Option<TextCaps>,
 }

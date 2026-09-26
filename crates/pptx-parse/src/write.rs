@@ -2188,6 +2188,7 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
         && source.italic == target.italic
         && source.font_size_pt == target.font_size_pt
         && source.spacing_pt == target.spacing_pt
+        && source.kern_pt == target.kern_pt
         && source.underline == target.underline
         && source.caps == target.caps
         && source.font_family == target.font_family
@@ -2707,6 +2708,12 @@ fn apply_run_properties(
             base.attributes.remove("spc");
         }
     }
+    match properties.kern_pt {
+        Some(kern) => base.set_attribute("kern", format_fixed(kern * 100.0)),
+        None => {
+            base.attributes.remove("kern");
+        }
+    }
     match properties.baseline_pct {
         Some(baseline) => base.set_attribute("baseline", format_fixed(baseline * 1000.0)),
         None => {
@@ -2892,6 +2899,10 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
     }
     if let Some(spacing) = properties.spacing_pt {
         element.set_attribute("spc", format_fixed(spacing * 100.0));
+        present = true;
+    }
+    if let Some(kern) = properties.kern_pt {
+        element.set_attribute("kern", format_fixed(kern * 100.0));
         present = true;
     }
     if let Some(baseline) = properties.baseline_pct {

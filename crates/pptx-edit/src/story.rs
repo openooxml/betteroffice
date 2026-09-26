@@ -49,6 +49,7 @@ pub(crate) fn validate_style_values(
     font_size_pt: Option<f64>,
     spacing_pt: Option<f64>,
     baseline_pct: Option<f64>,
+    kern_pt: Option<f64>,
 ) -> EditResult<()> {
     if let Some(font_family) = font_family {
         validate_xml_text(font_family)?;
@@ -80,6 +81,13 @@ pub(crate) fn validate_style_values(
     {
         return Err(EditError::InvalidText(format!(
             "letter spacing {spacing}pt is outside the -4000-4000pt range"
+        )));
+    }
+    if let Some(kern) = kern_pt
+        && (!kern.is_finite() || !(0.0..=4_000.0).contains(&kern))
+    {
+        return Err(EditError::InvalidText(format!(
+            "kerning threshold {kern}pt is outside the 0-4000pt range"
         )));
     }
     if let Some(baseline) = baseline_pct
@@ -300,6 +308,7 @@ impl DeckSession {
             style.font_size_pt,
             style.spacing_pt,
             style.baseline_pct,
+            style.kern_pt,
         )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
@@ -359,6 +368,7 @@ impl DeckSession {
             patch.font_size_pt,
             patch.spacing_pt,
             patch.baseline_pct,
+            None,
         )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
@@ -591,6 +601,7 @@ fn baseline_style(style: TextStyle) -> TextStyle {
         font_size_pt: style.font_size_pt.filter(|value| value.is_finite()),
         spacing_pt: style.spacing_pt.filter(|value| value.is_finite()),
         baseline_pct: style.baseline_pct.filter(|value| value.is_finite()),
+        kern_pt: style.kern_pt.filter(|value| value.is_finite()),
         ..style
     }
 }
@@ -747,7 +758,7 @@ fn insert_styled_text(
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 9] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 10] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -783,6 +794,7 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 9] {
             "baseline",
             style.baseline_pct.map(Any::Number).unwrap_or(Any::Null),
         ),
+        ("kern", style.kern_pt.map(Any::Number).unwrap_or(Any::Null)),
         (
             "caps",
             style
@@ -830,6 +842,7 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
         underline: properties.underline.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
+        kern_pt: properties.kern_pt,
         caps: properties.caps,
     }
 }
@@ -844,6 +857,7 @@ fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
         underline: attrs.and_then(|attrs| any_string(attrs.get("underline"))),
         spacing_pt: attrs.and_then(|attrs| any_number(attrs.get("spacing"))),
         baseline_pct: attrs.and_then(|attrs| any_number(attrs.get("baseline"))),
+        kern_pt: attrs.and_then(|attrs| any_number(attrs.get("kern"))),
         caps: attrs
             .and_then(|attrs| any_string(attrs.get("caps")))
             .as_deref()
