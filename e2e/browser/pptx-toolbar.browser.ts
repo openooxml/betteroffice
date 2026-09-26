@@ -86,7 +86,6 @@ function lookup(strings: Strings, key: string): string {
   return value;
 }
 
-/** Serves the editor with every English string lengthened, as a verbose locale would. */
 async function lengthenStrings(page: Page, strings: Strings) {
   const pairs: [string, string][] = [];
   const walk = (node: Strings) => {
