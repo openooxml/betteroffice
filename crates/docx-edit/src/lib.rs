@@ -64,6 +64,8 @@ use yrs::{
 };
 
 mod batch;
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+mod compare;
 mod ctx;
 mod deterministic;
 mod format;

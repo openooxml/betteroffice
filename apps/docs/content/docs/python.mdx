@@ -95,6 +95,9 @@ markdown = document.export_markdown(revision_view="markup")["markdown"]
 Omitted and unsupported content is listed in `diagnostics`; unusable limits raise
 `ExportError`. Page fragments are not included yet.
 
+Comparing two DOCX files into tracked changes is not available from Python yet;
+the JavaScript package's `compareDocx` offers it today.
+
 ## PPTX
 
 [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) reads decks,

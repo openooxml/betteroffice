@@ -15,11 +15,11 @@ use yrs::updates::decoder::Decode;
 use yrs::{ReadTxn, StateVector, Transact, Update};
 
 use crate::ops::paragraph::{ParagraphRecord, StylePlan, plan_paragraph_style};
-use crate::ops::text::validate_text;
+use crate::ops::text::{RichRun, validate_text};
 use crate::ops::utf16_len;
 use crate::seed::{Restoration, SourceMetadata};
 use crate::target::{
-    EditTextView, ParagraphTarget, SearchScope, StoryView, TextRange, TextTarget, Views,
+    EditTextView, ParagraphTarget, SearchScope, Selection, StoryView, TextRange, TextTarget, Views,
     comment_spans, field_result_blocks,
 };
 use crate::{
@@ -236,6 +236,27 @@ pub struct EditRequest {
     pub steps: Vec<EditStep>,
 }
 
+/// A tracked replacement with explicit runs over `start..end` of the accepted text of the
+/// `paragraph`-th paragraph of `story`, for comparisons. Empty `runs` delete; an empty range
+/// inserts.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RichReplacement {
+    pub story: String,
+    pub paragraph: usize,
+    pub start: u32,
+    pub end: u32,
+    pub expect: EditGuard,
+    pub runs: Vec<RichRun>,
+    pub suggest: EditSuggestion,
+}
+
+/// One step of a batch: a request step, or a comparison's rich replacement.
+#[derive(Clone, Copy)]
+pub(crate) enum BatchStep<'a> {
+    Edit(&'a EditStep),
+    Rich(&'a RichReplacement),
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -398,6 +419,12 @@ enum Effect {
         end: u32,
         ctx: EditCtx,
     },
+    Rich {
+        start: u32,
+        end: u32,
+        runs: Vec<RichRun>,
+        ctx: EditCtx,
+    },
     Paragraphs {
         at: u32,
         records: Vec<ParagraphRecord>,
@@ -416,6 +443,7 @@ impl Effect {
             Self::Insert { at, .. } | Self::Paragraphs { at, .. } => Some(*at),
             Self::Replace { start, .. }
             | Self::Delete { start, .. }
+            | Self::Rich { start, .. }
             | Self::RemoveParagraphs { start, .. } => Some(*start),
             Self::Style(_) => None,
         }
@@ -577,7 +605,19 @@ fn refuse_suggestion(step: &EditStep, target: &EditTarget) -> Result<(), EditFai
     Ok(())
 }
 
-fn inserted_units(step: &EditStep) -> (usize, usize) {
+fn inserted_units(step: &BatchStep<'_>) -> (usize, usize) {
+    let step = match step {
+        BatchStep::Edit(step) => step,
+        BatchStep::Rich(rich) => {
+            return (
+                rich.runs
+                    .iter()
+                    .map(|run| utf16_len(&run.text) as usize)
+                    .sum(),
+                0,
+            );
+        }
+    };
     match &step.operation {
         EditOperation::InsertText { text, .. } | EditOperation::ReplaceText { text, .. } => {
             (utf16_len(text) as usize, 0)
@@ -593,12 +633,12 @@ fn inserted_units(step: &EditStep) -> (usize, usize) {
     }
 }
 
-fn check_budget(request: &EditRequest) -> Result<(), EditFailure> {
+fn check_budget(steps: &[BatchStep<'_>]) -> Result<(), EditFailure> {
     let limit = |message: String| failure(EditFailureCode::LimitExceeded, message, None);
-    if request.steps.len() > MAX_STEPS {
+    if steps.len() > MAX_STEPS {
         return Err(limit(format!("a batch holds at most {MAX_STEPS} steps")));
     }
-    let (units, paragraphs) = request.steps.iter().map(inserted_units).fold(
+    let (units, paragraphs) = steps.iter().map(inserted_units).fold(
         (0, 0),
         |(units, paragraphs), (more_units, more_paragraphs)| {
             (units + more_units, paragraphs + more_paragraphs)
@@ -617,6 +657,15 @@ fn check_budget(request: &EditRequest) -> Result<(), EditFailure> {
     Ok(())
 }
 
+/// What a text step writes over its selection.
+#[derive(Clone, Copy)]
+enum Replacement<'a> {
+    Insert(&'a str, TargetEdge),
+    Text(&'a str),
+    Rich(&'a [RichRun]),
+    Delete,
+}
+
 /// Text steps: insertion at an unambiguous boundary, or a contiguous run of plain text.
 fn plan_text<T: ReadTxn>(
     views: &mut Views<'_, T>,
@@ -624,11 +673,89 @@ fn plan_text<T: ReadTxn>(
     index: u32,
     step: &EditStep,
     target: &TextTarget,
-    replacement: Option<(&str, Option<TargetEdge>)>,
+    replacement: Replacement<'_>,
 ) -> Result<Planned, EditFailure> {
     let requested = EditTarget::from(target.clone());
     let selection = views.text(target)?;
-    guard(&step.expect, &selection.text(), &requested)?;
+    plan_selection(
+        views,
+        source,
+        index,
+        (&step.expect, &step.suggest),
+        requested,
+        selection,
+        replacement,
+    )
+}
+
+/// A comparison's rich replacement, resolved by paragraph position in the captured state.
+fn plan_rich<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    source: Option<&SourceMetadata>,
+    index: u32,
+    rich: &RichReplacement,
+) -> Result<Planned, EditFailure> {
+    let missing = || {
+        failure(
+            EditFailureCode::MissingTarget,
+            format!(
+                "paragraph {} of story {:?} was not found",
+                rich.paragraph, rich.story
+            ),
+            None,
+        )
+    };
+    let story = views
+        .story(&rich.story, EditTextView::Accepted)
+        .ok_or_else(missing)?;
+    let paragraph = story.paragraphs.get(rich.paragraph).ok_or_else(missing)?;
+    let position = |offset: u32| crate::TextPosition {
+        para_id: paragraph.para_id.clone(),
+        offset,
+    };
+    let requested = EditTarget::Range(TextRange {
+        story: rich.story.clone(),
+        start: position(rich.start),
+        end: position(rich.end),
+        view: EditTextView::Accepted,
+    });
+    if rich.end < rich.start
+        || rich.end > paragraph.len()
+        || !paragraph.is_scalar_boundary(rich.start)
+        || !paragraph.is_scalar_boundary(rich.end)
+    {
+        return Err(invalid(
+            "the replaced range is not a scalar range of the paragraph",
+            &requested,
+        ));
+    }
+    let selection = Selection {
+        view: story,
+        paragraph: rich.paragraph,
+        start: rich.start,
+        end: rich.end,
+    };
+    plan_selection(
+        views,
+        source,
+        index,
+        (&Some(rich.expect.clone()), &Some(rich.suggest.clone())),
+        requested,
+        selection,
+        Replacement::Rich(&rich.runs),
+    )
+}
+
+fn plan_selection<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    source: Option<&SourceMetadata>,
+    index: u32,
+    (expect, suggest): (&Option<EditGuard>, &Option<EditSuggestion>),
+    requested: EditTarget,
+    selection: Selection,
+    replacement: Replacement<'_>,
+) -> Result<Planned, EditFailure> {
+    guard(expect, &selection.text(), &requested)?;
     let story = selection.view.story.clone();
     views.check_story_writable(&story, &requested)?;
     check_opaque_order(views, source, &story, &requested)?;
@@ -644,15 +771,28 @@ fn plan_text<T: ReadTxn>(
             &requested,
         ));
     }
-    let ctx = edit_ctx(&step.suggest, &requested)?;
-    let suggesting = step.suggest.is_some();
-    if let Some((text, _)) = replacement {
+    let ctx = edit_ctx(suggest, &requested)?;
+    let suggesting = suggest.is_some();
+    let inserted: Vec<&str> = match replacement {
+        Replacement::Insert(text, _) | Replacement::Text(text) => vec![text],
+        Replacement::Rich(runs) => runs.iter().map(|run| run.text.as_str()).collect(),
+        Replacement::Delete => Vec::new(),
+    };
+    for text in &inserted {
         validate_text(text).map_err(|_| {
             invalid(
                 "inserted text may not contain paragraph or line breaks; use insertParagraphs",
                 &requested,
             )
         })?;
+    }
+    if matches!(replacement, Replacement::Rich(_))
+        && inserted.iter().any(|text| text.contains('\u{FFFC}'))
+    {
+        return Err(invalid(
+            "inserted runs may not contain object replacement characters",
+            &requested,
+        ));
     }
     let resolved = EditTarget::Range(selection.range());
     let paragraph = selection.paragraph();
@@ -730,7 +870,7 @@ fn plan_text<T: ReadTxn>(
     let selected = selection.text();
     let (start, end) = (selection.start, selection.end);
     let (claims, effect, shape) = match replacement {
-        Some((text, Some(edge))) => {
+        Replacement::Insert(text, edge) => {
             let at = point(if edge == TargetEdge::Start {
                 start
             } else {
@@ -748,7 +888,7 @@ fn plan_text<T: ReadTxn>(
                 Shape::Raw { start: at, len },
             )
         }
-        Some((text, None)) => {
+        Replacement::Text(text) => {
             let (raw_start, raw_end) = if start == end {
                 let at = point(start)?;
                 (at, at)
@@ -781,7 +921,35 @@ fn plan_text<T: ReadTxn>(
                 },
             )
         }
-        None => {
+        Replacement::Rich(runs) => {
+            let (raw_start, raw_end) = if start == end {
+                let at = point(start)?;
+                (at, at)
+            } else {
+                span(start, end)?
+            };
+            let claim = if raw_start == raw_end {
+                Claim::Point(raw_start)
+            } else {
+                Claim::Span(raw_start, raw_end)
+            };
+            let len = runs.iter().map(|run| utf16_len(&run.text)).sum::<u32>();
+            let effect = (raw_start != raw_end || len > 0).then(|| Effect::Rich {
+                start: raw_start,
+                end: raw_end,
+                runs: runs.to_vec(),
+                ctx,
+            });
+            (
+                vec![claim],
+                effect,
+                Shape::Raw {
+                    start: raw_start,
+                    len,
+                },
+            )
+        }
+        Replacement::Delete => {
             if start == end {
                 let at = paragraph.raw_at(start);
                 (
@@ -1264,13 +1432,20 @@ fn plan_step<T: ReadTxn>(
     step: &EditStep,
 ) -> Result<Planned, EditFailure> {
     match &step.operation {
-        EditOperation::InsertText { target, at, text } => {
-            plan_text(views, source, index, step, target, Some((text, Some(*at))))
-        }
+        EditOperation::InsertText { target, at, text } => plan_text(
+            views,
+            source,
+            index,
+            step,
+            target,
+            Replacement::Insert(text, *at),
+        ),
         EditOperation::ReplaceText { target, text } => {
-            plan_text(views, source, index, step, target, Some((text, None)))
+            plan_text(views, source, index, step, target, Replacement::Text(text))
         }
-        EditOperation::DeleteText { target } => plan_text(views, source, index, step, target, None),
+        EditOperation::DeleteText { target } => {
+            plan_text(views, source, index, step, target, Replacement::Delete)
+        }
         EditOperation::InsertParagraphs {
             target,
             at,
@@ -1360,6 +1535,17 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
             Some(Effect::Delete { start, end, ctx }) => {
                 let receipt = stage
                     .delete_range(ctx, StoryRange::new(story, *start, *end))
+                    .map_err(fail)?;
+                outcome.revision_ids = receipt.revision_ids;
+            }
+            Some(Effect::Rich {
+                start,
+                end,
+                runs,
+                ctx,
+            }) => {
+                let receipt = stage
+                    .replace_range_rich(ctx, StoryRange::new(story, *start, *end), runs)
                     .map_err(fail)?;
                 outcome.revision_ids = receipt.revision_ids;
             }
@@ -1476,11 +1662,29 @@ impl EditingDoc {
         request: &EditRequest,
         capture: bool,
     ) -> Result<(Plan, Option<Base>), EditRefusal> {
+        let steps: Vec<BatchStep<'_>> = request.steps.iter().map(BatchStep::Edit).collect();
+        self.plan_steps(
+            &request.expect_version,
+            request.source,
+            &steps,
+            capture,
+            MAX_STAGING_BYTES,
+        )
+    }
+
+    fn plan_steps(
+        &self,
+        expect_version: &DocumentVersion,
+        edit_source: EditSource,
+        steps: &[BatchStep<'_>],
+        capture: bool,
+        staging_limit: usize,
+    ) -> Result<(Plan, Option<Base>), EditRefusal> {
         let nonce = self.version_nonce.load(Ordering::Relaxed);
         let epoch = self.epoch.load(Ordering::Relaxed);
         let version = version_token(nonce, epoch);
-        check_budget(request).map_err(|failure| refusal(version.clone(), failure))?;
-        if request.expect_version != version {
+        check_budget(steps).map_err(|failure| refusal(version.clone(), failure))?;
+        if *expect_version != version {
             return Err(refusal(
                 version,
                 failure(
@@ -1503,12 +1707,15 @@ impl EditingDoc {
         }
         let source = self.source_metadata();
         let mut views = Views::new(self, &txn);
-        let mut steps = Vec::with_capacity(request.steps.len());
-        for (index, step) in request.steps.iter().enumerate() {
+        let mut planned_steps = Vec::with_capacity(steps.len());
+        for (index, step) in steps.iter().enumerate() {
             let index = index as u32;
-            let planned = plan_step(&mut views, source.as_deref(), index, step)
-                .map_err(|failure| refusal(version.clone(), failure.at(index)))?;
-            if let Some(earlier) = steps
+            let planned = match step {
+                BatchStep::Edit(step) => plan_step(&mut views, source.as_deref(), index, step),
+                BatchStep::Rich(rich) => plan_rich(&mut views, source.as_deref(), index, rich),
+            }
+            .map_err(|failure| refusal(version.clone(), failure.at(index)))?;
+            if let Some(earlier) = planned_steps
                 .iter()
                 .find(|earlier: &&Planned| earlier.conflicts(&planned))
             {
@@ -1521,16 +1728,17 @@ impl EditingDoc {
                 conflict.conflicting_step_index = Some(earlier.index);
                 return Err(refusal(version, conflict));
             }
-            steps.push(planned);
+            planned_steps.push(planned);
         }
+        let steps = planned_steps;
         let base = if capture && steps.iter().any(|planned| planned.effect.is_some()) {
             let update = deterministic::encode_state_as_update_v1(&txn, &StateVector::default());
-            if update.len() > MAX_STAGING_BYTES {
+            if update.len() > staging_limit {
                 return Err(refusal(
                     version,
                     failure(
                         EditFailureCode::LimitExceeded,
-                        format!("batches stage documents of at most {MAX_STAGING_BYTES} bytes"),
+                        format!("batches stage documents of at most {staging_limit} bytes"),
                         None,
                     ),
                 ));
@@ -1547,7 +1755,7 @@ impl EditingDoc {
                 base_version: version,
                 nonce,
                 epoch,
-                source: request.source,
+                source: edit_source,
                 steps,
             },
             base,
@@ -1596,15 +1804,37 @@ impl EditingDoc {
         request: &EditRequest,
         history: &UndoSession,
     ) -> EditResult<Result<EditApplication, EditRefusal>> {
+        let steps: Vec<BatchStep<'_>> = request.steps.iter().map(BatchStep::Edit).collect();
+        self.apply_steps(
+            &request.expect_version,
+            request.source,
+            request.history,
+            &steps,
+            history,
+            MAX_STAGING_BYTES,
+        )
+    }
+
+    /// [`EditingDoc::apply_edits`] over batch steps, staging at most `staging_limit` bytes.
+    pub(crate) fn apply_steps(
+        &self,
+        expect_version: &DocumentVersion,
+        edit_source: EditSource,
+        history_mode: EditHistory,
+        steps: &[BatchStep<'_>],
+        history: &UndoSession,
+        staging_limit: usize,
+    ) -> EditResult<Result<EditApplication, EditRefusal>> {
         if !history.belongs_to(self) {
             return Err(EditError::InvalidUpdate(
                 "the undo history belongs to another document".to_owned(),
             ));
         }
-        let (plan, base) = match self.plan(request, true) {
-            Ok(planned) => planned,
-            Err(refusal) => return Ok(Err(refusal)),
-        };
+        let (plan, base) =
+            match self.plan_steps(expect_version, edit_source, steps, true, staging_limit) {
+                Ok(planned) => planned,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
         let Some(base) = base else {
             let txn = self.yrs_doc().transact();
             let mut views = Views::new(self, &txn);
@@ -1632,13 +1862,13 @@ impl EditingDoc {
         if let Err(refusal) = self.check_commit(&plan) {
             return Ok(Err(refusal));
         }
-        match request.history {
+        match history_mode {
             EditHistory::Separate => history.track(self),
             EditHistory::None => {}
         }
         history.add_undo_barrier();
         {
-            let mut txn = match request.history {
+            let mut txn = match history_mode {
                 EditHistory::Separate => self.yrs_doc().transact_mut_with(self.client_id),
                 EditHistory::None => self.yrs_doc().transact_mut_with(HOST_ORIGIN),
             };

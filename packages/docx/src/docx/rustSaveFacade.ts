@@ -15,8 +15,16 @@ export interface RustSaveDeterminism {
   now: string;
 }
 
+/** Main-document body paragraphs a save replaces by source location, guarded by the part digest. */
+export interface RustSourceParagraphs {
+  partSha256: string;
+  paragraphs: Array<{ path: number[]; block: number }>;
+}
+
 export interface RustSelectiveSave {
   changedParaIds: Iterable<string>;
+  /** Replace only these paragraphs and keep every other part's source bytes. */
+  sourceParagraphs?: RustSourceParagraphs;
 }
 
 export interface RustSaveResult {
@@ -65,7 +73,14 @@ export async function writeDocumentWithRust(
     },
     ...(selective === undefined
       ? {}
-      : { selective: { changedParaIds: [...selective.changedParaIds] } }),
+      : {
+          selective: {
+            changedParaIds: [...selective.changedParaIds],
+            ...(selective.sourceParagraphs === undefined
+              ? {}
+              : { sourceParagraphs: selective.sourceParagraphs }),
+          },
+        }),
   };
   assertSafeSaveTree(request, 'save');
   const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));

@@ -86,6 +86,10 @@ content in `diagnostics`, and returns `Error::Export` for unusable limits. The
 same content comes from `docx_edit::structured` for a live `EditingDoc` or raw
 bytes. Page fragments are not included yet.
 
+Comparing two DOCX files into tracked changes is available from the
+JavaScript package's `compareDocx`. The native Rust and Python APIs do not
+offer it yet: they follow once edited sessions save natively.
+
 ## PowerPoint comments
 
 `comment_flavor` reports whether a deck uses legacy or modern comments. Modern
@@ -143,6 +147,7 @@ XML. The ZIP container is rebuilt, so the complete file may differ byte for byte
 | --- | --- |
 | `betteroffice-opc` | The OPC container reader and writer, with ZIP expansion limits and path validation. |
 | `betteroffice-ooxml-text` | Shared text shaping, measurement, line breaking, and bidirectional text. |
+| `betteroffice-ooxml-diff` | The bounded token LCS diff behind PPTX proposal previews and DOCX comparison. |
 | `betteroffice-drawingml` | The DrawingML colors, themes, shape models, and preset geometry shared by all three formats. |
 | `betteroffice-docx-parse` | WordprocessingML parsing, typed relationship models, and the typed document model. |
 | `betteroffice-docx-layout` | DOCX pagination, line flow, tables, floats, notes, and display lists. |
