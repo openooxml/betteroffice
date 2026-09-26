@@ -1613,23 +1613,24 @@ fn mean_hex(colors: &[String]) -> Option<String> {
     if parsed.is_empty() {
         return None;
     }
-    let weight: u32 = parsed.iter().map(|rgba| u32::from(rgba[3])).sum();
+    let count = parsed.len() as u64;
+    let weight: u64 = parsed.iter().map(|rgba| u64::from(rgba[3])).sum();
     let channel = |index: usize| {
         parsed
             .iter()
-            .map(|rgba| u32::from(rgba[index]) * u32::from(rgba[3]))
-            .sum::<u32>()
+            .map(|rgba| u64::from(rgba[index]) * u64::from(rgba[3]))
+            .sum::<u64>()
             .checked_div(weight)
             .unwrap_or_else(|| {
                 parsed
                     .iter()
-                    .map(|rgba| u32::from(rgba[index]))
-                    .sum::<u32>()
-                    / parsed.len() as u32
+                    .map(|rgba| u64::from(rgba[index]))
+                    .sum::<u64>()
+                    / count
             })
     };
     let rgb = format!("#{:02X}{:02X}{:02X}", channel(0), channel(1), channel(2));
-    Some(match weight / parsed.len() as u32 {
+    Some(match weight / count {
         255 => rgb,
         alpha => format!("{rgb}{alpha:02X}"),
     })
@@ -4447,6 +4448,12 @@ mod tests {
     };
 
     const DEFAULT_MARKER_PX: f64 = DEFAULT_MARKER_PT * 4.0 / 3.0;
+
+    #[test]
+    fn a_gradient_with_many_opaque_stops_keeps_its_colour() {
+        let stops = vec!["#FFFFFF".to_owned(); 70_000];
+        assert_eq!(mean_hex(&stops).as_deref(), Some("#FFFFFF"));
+    }
 
     #[test]
     fn an_unmeasured_legend_label_is_never_negative_and_counts_gaps_between() {
