@@ -463,6 +463,25 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    /// Export the committed workbook with the version it was read at; nothing recalculates.
+    #[wasm_bindgen(js_name = exportStructuredJson)]
+    pub fn export_structured_json(&self, options: &str) -> Result<String, JsValue> {
+        self.session
+            .export_structured_json(options)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = exportMarkdownJson)]
+    pub fn export_markdown_json(
+        &self,
+        options: &str,
+        markdown_options: &str,
+    ) -> Result<String, JsValue> {
+        self.session
+            .export_markdown_json(options, markdown_options)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// serialize the current workbook back to `.xlsx` bytes.
     #[wasm_bindgen(js_name = saveBytes)]
     pub fn save_bytes(&self) -> Result<Vec<u8>, JsValue> {
@@ -473,6 +492,27 @@ impl XlsxDocument {
     pub fn version() -> String {
         Session::version().to_string()
     }
+}
+
+/// Export `.xlsx` bytes as read: stored formula results, no clock.
+#[wasm_bindgen(js_name = exportXlsxStructuredJson)]
+pub fn export_xlsx_structured_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
+    core::export_xlsx_structured_json(bytes, options).map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen(js_name = exportXlsxMarkdownJson)]
+pub fn export_xlsx_markdown_json(
+    bytes: &[u8],
+    options: &str,
+    markdown_options: &str,
+) -> Result<String, JsValue> {
+    core::export_xlsx_markdown_json(bytes, options, markdown_options)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen(js_name = renderXlsxMarkdownJson)]
+pub fn render_xlsx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
+    core::render_xlsx_markdown_json(content, options).map_err(|e| JsValue::from_str(&e))
 }
 
 fn parse_client_id(client_id: f64) -> Result<u64, JsValue> {

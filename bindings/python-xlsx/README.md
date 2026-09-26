@@ -165,6 +165,32 @@ malformed request raises `ValueError`. Batches do not insert or delete rows,
 columns or sheets, and refuse writes to merged-cell followers, array-formula
 cells and protected sheets.
 
+## Structured export
+
+`export_structured` returns sparse cells, sheet metadata and diagnostics with
+the version they were read at; `export_markdown` renders the same read as
+bounded Markdown grids with `<!-- xlsx-export:N -->` markers. Neither
+recalculates: formula results are the stored values.
+
+```python
+result = wb.export_structured(scope=[{"sheet": 0, "range": "A1:D20"}])
+if result["ok"]:
+    for cell in result["content"]["sheets"][0]["cells"]:
+        print(cell["anchor"]["a1"], cell["value"], cell["formula"], cell["displayText"])
+
+from betteroffice_xlsx import export_xlsx_markdown
+print(export_xlsx_markdown(data, markdown_options={"maxRows": 50})["markdown"])
+```
+
+Anchors carry `sheet: {"sheetId", "index", "name"}`: a cell or range anchor's
+`{"sheetId": anchor["sheet"]["sheetId"], "range": {"kind": "a1", "a1": anchor["a1"]}}`
+is its `apply_edits` target at the exported version (`sheet:{index}` ids for
+bytes). Hidden sheets, rows, columns and names are excluded unless asked for
+(`include_hidden_sheets=True`, ...). Comments, rich-text runs, charts and
+pictures are diagnosed or exported as placeholders. `max_cells` and `max_bytes`
+stop at a complete record with `truncated`. Unusable scopes come back as
+`{"ok": False, ...}`; malformed options raise `ValueError`.
+
 ## Formatting
 
 ```python
@@ -225,6 +251,8 @@ formulas evaluated or a sheet rasterized, that is the gap this fills.
 | `wb.propose(...)` / `proposals()` / `accept_proposal` / `reject_proposal` | staged agent edits |
 | `wb.version()` / `read_cells(...)` / `find_text(...)` | versioned reads |
 | `wb.validate_edits(...)` / `apply_edits(...)` | version-checked edit batches |
+| `wb.export_structured(...)` / `export_markdown(...)` | anchored JSON and Markdown export, never recalculated |
+| `export_xlsx_structured(data)` / `export_xlsx_markdown(data)` / `render_xlsx_markdown(content)` | the same from bytes or content |
 | `wb.set_style(...)` / `set_number_format(...)` | formatting over a range |
 | `wb.diff(sv)` / `apply_update(u)` / `state_vector()` / `state_as_update()` | exchange Yrs updates |
 | `wb.client_id` / `wb.is_collaborative` | which kind of workbook you are holding |

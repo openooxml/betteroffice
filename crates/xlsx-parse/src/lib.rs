@@ -4,6 +4,7 @@
 mod axis;
 mod chart;
 mod formula;
+mod inventory;
 mod package;
 mod patch;
 mod read;
@@ -15,8 +16,11 @@ mod xml;
 
 pub use axis::SheetAxes;
 pub use chart::{chart_space, preserved_chart_space};
-pub use package::PreservedPackage;
-pub use read::{LegacySheetDimensions, SharedStringCells, parse_workbook};
+pub use inventory::{
+    DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
+};
+pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
+pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
 pub use reference::UnpatchableReference;
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
@@ -59,6 +63,8 @@ pub fn parse_workbook_with_owned_package(
         parsed.active_sheet,
         &parsed.shared_string_cells,
         &parsed.declined_parts,
+        parsed.rich_shared_strings,
+        parsed.cell_facts,
     )?;
     Ok(ParsedWorkbook {
         workbook: parsed.workbook,

@@ -1,0 +1,391 @@
+{
+  "anchors": [
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "marker": "<!-- xlsx-export:0 -->"
+    },
+    {
+      "anchor": {
+        "a1": "A1:K13",
+        "kind": "range",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "marker": "<!-- xlsx-export:1 -->"
+    },
+    {
+      "anchor": {
+        "a1": "A1:D3",
+        "kind": "range",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "marker": "<!-- xlsx-export:2 -->"
+    },
+    {
+      "anchor": {
+        "a1": "A7",
+        "kind": "range",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "marker": "<!-- xlsx-export:3 -->"
+    },
+    {
+      "anchor": {
+        "a1": "H2:J6",
+        "kind": "range",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "marker": "<!-- xlsx-export:4 -->"
+    },
+    {
+      "anchor": {
+        "a1": "K11",
+        "kind": "cell",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "marker": "<!-- xlsx-export:5 -->"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 1,
+          "name": "Summary",
+          "sheetId": "sheet:1"
+        }
+      },
+      "marker": "<!-- xlsx-export:6 -->"
+    },
+    {
+      "anchor": {
+        "a1": "A1:A3",
+        "kind": "range",
+        "sheet": {
+          "index": 1,
+          "name": "Summary",
+          "sheetId": "sheet:1"
+        }
+      },
+      "marker": "<!-- xlsx-export:7 -->"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 5,
+          "name": "Dialog",
+          "sheetId": "sheet:5"
+        }
+      },
+      "marker": "<!-- xlsx-export:8 -->"
+    },
+    {
+      "anchor": {
+        "kind": "definedName",
+        "localSheet": null,
+        "name": "Total",
+        "ordinal": 1
+      },
+      "marker": "<!-- xlsx-export:9 -->"
+    },
+    {
+      "anchor": {
+        "kind": "definedName",
+        "localSheet": {
+          "index": 1,
+          "name": "Summary",
+          "sheetId": "sheet:1"
+        },
+        "name": "Local",
+        "ordinal": 2
+      },
+      "marker": "<!-- xlsx-export:10 -->"
+    }
+  ],
+  "diagnostics": [
+    {
+      "anchor": null,
+      "code": "hidden-content-excluded",
+      "message": "Hidden defined names are excluded (1); set includeHiddenNames to list them.",
+      "severity": "info"
+    },
+    {
+      "anchor": null,
+      "code": "hidden-content-excluded",
+      "message": "Defined names scoped to excluded hidden sheets are excluded (1).",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "comments-omitted",
+      "message": "Comments on this sheet are not exported (2).",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "unsupported-content",
+      "message": "This sheet carries content the export does not represent: conditional formatting.",
+      "severity": "warning"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "hidden-content-excluded",
+      "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "hidden-content-excluded",
+      "message": "Cells in hidden columns, and links and tables wholly inside them, are excluded; set includeHiddenColumns to export them.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "object-placeholder",
+      "message": "Drawing objects on this sheet are exported as placeholders without chart data, image bytes or shape text.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sourcePart",
+        "part": "xl/drawings/drawing1.xml",
+        "partSha256": "688b5a4a8d46e0d539bce79d9cbfd49d0e4f5d50e8fa2048cc7df205dfe020ef",
+        "path": [
+          1
+        ]
+      },
+      "code": "unreadable-object",
+      "message": "A chart in xl/drawings/drawing1.xml could not be read; it is exported as a placeholder only.",
+      "severity": "warning"
+    },
+    {
+      "anchor": {
+        "a1": "A2",
+        "kind": "cell",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "rich-text-omitted",
+      "message": "Text formatting runs inside cells on this sheet are not exported; the text is.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "a1": "D2",
+        "kind": "cell",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "formula-cache-unverified",
+      "message": "Formula results on this sheet are the stored values; the export does not recalculate or verify them.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "a1": "F2",
+        "kind": "cell",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "formatting-approximate",
+      "message": "The number format \"# ?/?\" is only approximated, so displayText falls back to General here and wherever this sheet uses it.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "a1": "D3",
+        "kind": "cell",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "formula-result-missing",
+      "message": "This formula has no stored result, or none that can be confirmed; its value is what the engine holds, not a result the file stored. Each cell's formulaResult says which formulas this applies to.",
+      "severity": "warning"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 1,
+          "name": "Summary",
+          "sheetId": "sheet:1"
+        }
+      },
+      "code": "hidden-content-excluded",
+      "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "a1": "A1",
+        "kind": "cell",
+        "sheet": {
+          "index": 1,
+          "name": "Summary",
+          "sheetId": "sheet:1"
+        }
+      },
+      "code": "formula-cache-unverified",
+      "message": "Formula results on this sheet are the stored values; the export does not recalculate or verify them.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 2,
+          "name": "Secret",
+          "sheetId": "sheet:2"
+        }
+      },
+      "code": "hidden-content-excluded",
+      "message": "The sheet is hidden and excluded; set includeHiddenSheets to export it.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 3,
+          "name": "Ghost",
+          "sheetId": "sheet:3"
+        }
+      },
+      "code": "hidden-content-excluded",
+      "message": "The sheet is hidden and excluded; set includeHiddenSheets to export it.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 4,
+          "name": "Odd",
+          "sheetId": "sheet:4"
+        }
+      },
+      "code": "visibility-unknown",
+      "message": "The sheet's visibility is unavailable or not a known state, so it is excluded as hidden; set includeHiddenSheets to export it.",
+      "severity": "warning"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 5,
+          "name": "Dialog",
+          "sheetId": "sheet:5"
+        }
+      },
+      "code": "unsupported-sheet",
+      "message": "This is not a worksheet; only its drawing objects are exported.",
+      "severity": "warning"
+    },
+    {
+      "anchor": null,
+      "code": "markdown-lossy",
+      "message": "Markdown shows each cell's display text; formulas, typed values and number formats stay in the structured export.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "markdown-lossy",
+      "message": "Markdown shows only part of this sheet's selected range; the rest stays in the structured export.",
+      "severity": "info"
+    },
+    {
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "index": 0,
+          "name": "Data",
+          "sheetId": "sheet:0"
+        }
+      },
+      "code": "markdown-lossy",
+      "message": "Values stored in cells a merge covers are not shown in Markdown; the structured export keeps them.",
+      "severity": "info"
+    }
+  ],
+  "truncated": true
+}

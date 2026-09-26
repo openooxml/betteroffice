@@ -62,6 +62,11 @@
   delete rows, columns or sheets, and refuse writes to merged-cell followers,
   array-formula cells and protected sheets.
 
+- **Structured XLSX export.** XLSX exports bounded sparse worksheet content and
+  Markdown with positional anchors, formulas, stored values, formatted text,
+  explicit hidden-content options, and omission diagnostics. Export does not
+  recalculate formulas.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 
