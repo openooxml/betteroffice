@@ -4,12 +4,14 @@ use std::sync::{Arc, Mutex};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
-use yrs::Subscription;
+use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::Encode;
+use yrs::{StickyIndex, Subscription};
 
 use crate::{
-    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, PictureDraft, PresetShapeDraft, ShapeDraft,
-    ShapeReceipt, ShapeRect, ShapeStroke, SlideReceipt, TextReceipt, TextStyle, TextStylePatch,
-    TransformReceipt, UpdateEvent, UpdateOrigin,
+    CaretAnchor, CommentFlavor, DeckSession, DeckSnapshot, EditCtx, PictureDraft, PresetShapeDraft,
+    ShapeDraft, ShapeReceipt, ShapeRect, ShapeStroke, SlideReceipt, TextReceipt, TextStyle,
+    TextStylePatch, TransformReceipt, UpdateEvent, UpdateOrigin,
 };
 
 #[wasm_bindgen]
@@ -42,6 +44,21 @@ struct SearchTextArgs {
 #[serde(rename_all = "camelCase")]
 struct StoryArgs {
     story_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnchorCaretArgs {
+    story_id: String,
+    index: u32,
+}
+
+/// A caret anchor across the JSON boundary: the story and its base64 v1-encoded sticky index.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaretAnchorJson {
+    story_id: String,
+    position: String,
 }
 
 #[derive(Deserialize)]
@@ -387,6 +404,34 @@ impl PptxDocument {
     pub fn story_json(&self, args: &str) -> Result<String, JsValue> {
         let args: StoryArgs = parse_args(args)?;
         json(self.session.story(&args.story_id).map_err(js_error)?)
+    }
+
+    /// Anchors a caret offset so that later edits, undo and remote updates move it.
+    #[wasm_bindgen(js_name = anchorCaretJson)]
+    pub fn anchor_caret_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: AnchorCaretArgs = parse_args(args)?;
+        let anchor = self
+            .session
+            .anchor_caret(&args.story_id, args.index)
+            .map_err(js_error)?;
+        json(CaretAnchorJson {
+            position: base64::engine::general_purpose::STANDARD.encode(anchor.position.encode_v1()),
+            story_id: anchor.story_id,
+        })
+    }
+
+    /// The current offset of an anchor from `anchorCaretJson`, or `null` once its story is gone.
+    #[wasm_bindgen(js_name = resolveCaretAnchorJson)]
+    pub fn resolve_caret_anchor_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: CaretAnchorJson = parse_args(args)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(args.position)
+            .map_err(js_error)?;
+        let position = StickyIndex::decode_v1(&bytes).map_err(js_error)?;
+        json(self.session.resolve_caret_anchor(&CaretAnchor {
+            story_id: args.story_id,
+            position,
+        }))
     }
 
     #[wasm_bindgen(js_name = mediaBytes)]

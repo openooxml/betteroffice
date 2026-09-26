@@ -27,6 +27,10 @@ const PptxEditor = dynamic(
   () => import("@betteroffice/pptx-react").then((module) => module.PptxEditor),
   { ssr: false },
 );
+const CompactToolbar = dynamic(
+  () => import("./CompactToolbar").then((module) => module.CompactToolbar),
+  { ssr: false },
+);
 
 const SHOWCASE = {
   url: "/betteroffice-demo.pptx",
@@ -65,6 +69,7 @@ export function PptxDemoClient() {
   const [assets, setAssets] = useState<DemoAssets | null>(null);
   const [user, setUser] = useState<CollaborationUser | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [compact, setCompact] = useState(false);
   const room = useDemoRoom();
   const createProvider = useCallback(
     (replica: CollaborationReplica, transport: CollaborationTransport) =>
@@ -136,6 +141,14 @@ export function PptxDemoClient() {
         )}
 
         <div className="flex flex-none items-center gap-2">
+          <button
+            type="button"
+            className="rounded-[5px] px-2 py-1 text-[12.5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg aria-pressed:bg-surface aria-pressed:text-fg"
+            aria-pressed={compact}
+            onClick={() => setCompact((value) => !value)}
+          >
+            Compact toolbar
+          </button>
           <CollaborationControls
             status={collab.status}
             synced={collab.synced}
@@ -175,6 +188,15 @@ export function PptxDemoClient() {
             file={assets.file}
             fonts={assets.fonts}
             collaboration={collaboration}
+            toolbar={
+              compact ? (
+                <CompactToolbar
+                  onShare={() =>
+                    void navigator.clipboard?.writeText(window.location.href)
+                  }
+                />
+              ) : undefined
+            }
           />
         ) : (
           <p className="m-auto text-mute">Loading presentation…</p>
