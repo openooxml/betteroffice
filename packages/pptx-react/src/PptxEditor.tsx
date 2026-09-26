@@ -2,6 +2,7 @@ import {
   initWasm,
   openPresentation,
   paintSlide,
+  decodePresentationImage,
   presentationImageBlob,
   PRESENCE_LABEL_DURATION_MS,
   sizeCanvasForSlide,
@@ -2714,24 +2715,12 @@ function resolveImage(
   return pending;
 }
 
-async function decodeImage(
+function decodeImage(
   bytes: Uint8Array | undefined,
   errorMessage: string
 ): Promise<CanvasImageSource | null> {
-  if (!bytes) return null;
-  const blob = presentationImageBlob(bytes);
-  if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
-  const url = URL.createObjectURL(blob);
-  try {
-    return await new Promise<HTMLImageElement>((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error(errorMessage));
-      image.src = url;
-    });
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  if (!bytes) return Promise.resolve(null);
+  return decodePresentationImage(bytes, errorMessage);
 }
 
 function caretLinesFor(

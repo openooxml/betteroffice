@@ -6,8 +6,37 @@ compile_error!("betteroffice-pptx-raster is server-side only");
 
 mod blur;
 mod font;
+mod svg;
+
+/// Entry points for the fuzz targets in `fuzz/`; not a stable API.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::svg::{SvgImage, parse as parse_svg};
+
+    /// Decodes `bytes` as a picture on a slide with `pixels` of its image
+    /// budget left, as a slide render would, returning the decoded size.
+    pub fn decode(bytes: &[u8], pixels: u64) -> Option<(u32, u32)> {
+        let pixels = pixels.min(crate::MAX_SLIDE_IMAGE_PIXELS);
+        let mut budget = crate::ImageBudget {
+            pixels: crate::MAX_SLIDE_IMAGE_PIXELS - pixels,
+            bytes: crate::MAX_SLIDE_IMAGE_BYTES - pixels * 8,
+        };
+        let image = budget.decode(bytes, &[])?;
+        Some((image.pixmap.width(), image.pixmap.height()))
+    }
+}
 
 pub use font::GlyphCache;
+pub use svg::{
+    MAX_SVG_ATTRIBUTES, MAX_SVG_BYTES, MAX_SVG_COLLECT_WORK, MAX_SVG_DEPTH,
+    MAX_SVG_ELEMENT_ATTRIBUTES, MAX_SVG_EXPANDED_BYTES, MAX_SVG_EXPANDED_NODES,
+    MAX_SVG_GRADIENT_STOPS, MAX_SVG_INHERIT_WORK, MAX_SVG_LAYER_DEPTH, MAX_SVG_NAMESPACES,
+    MAX_SVG_NODES, MAX_SVG_OVERDRAW, MAX_SVG_PAINT_BYTES, MAX_SVG_PATH_BYTES, MAX_SVG_RASTER_DIM,
+    MAX_SVG_RENDER_WORK, MAX_SVG_SANITIZED_BYTES, MAX_SVG_SELECTOR_BYTES, MAX_SVG_SELECTOR_PARTS,
+    MAX_SVG_STROKE_SPAN, MAX_SVG_STROKE_VERBS, MAX_SVG_STYLE_COPIES, MAX_SVG_STYLE_RULES,
+    MAX_SVG_STYLE_WORK, MAX_SVG_VALUE_BYTES, SVG_MEMORY_ENVELOPE, SVG_TIME_ENVELOPE, SvgRefusal,
+};
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
@@ -617,10 +646,14 @@ impl Painter<'_, '_> {
                 mask = Some(bound);
             }
             match asset_id.and_then(|asset_id| self.decode(asset_id, effects)) {
-                Some(source) => {
+                Some(DecodedImage {
+                    pixmap: source,
+                    intrinsic,
+                }) => {
                     let tiled = tile.and_then(|tile| {
                         tiled_fill(
                             &source,
+                            intrinsic,
                             crop,
                             tile,
                             frame.width(),
@@ -939,7 +972,7 @@ impl Painter<'_, '_> {
         &mut self,
         asset_id: &str,
         effects: &[pptx_render::ImageEffect],
-    ) -> Option<Arc<Pixmap>> {
+    ) -> Option<DecodedImage> {
         let bytes = self.resources.images.get(asset_id)?;
         let source = match self.asset_hashes.get(asset_id) {
             Some(source) => *source,
@@ -963,9 +996,11 @@ impl Painter<'_, '_> {
 const MAX_TILED_PIXELS: f32 = 8_388_608.0;
 
 /// `a:tile` over a `w`-by-`h` frame, cropped by `a:srcRect` first, as one
-/// surface the stretched-picture path can draw, clip and shadow unchanged.
+/// surface the stretched-picture path can draw, clip and shadow unchanged. The
+/// tile repeats at the source's `intrinsic` size, whatever it was rasterised at.
 fn tiled_fill(
     source: &Pixmap,
+    intrinsic: (f32, f32),
     crop: ImageCrop,
     tile: ImageTile,
     w: f32,
@@ -973,7 +1008,14 @@ fn tiled_fill(
     scale: f32,
 ) -> Option<Pixmap> {
     let usable = |value: f32| value.is_finite() && value > 0.0;
-    if !(usable(tile.scale_x) && usable(tile.scale_y) && usable(w) && usable(h) && usable(scale)) {
+    if !(usable(tile.scale_x)
+        && usable(tile.scale_y)
+        && usable(intrinsic.0)
+        && usable(intrinsic.1)
+        && usable(w)
+        && usable(h)
+        && usable(scale))
+    {
         return None;
     }
     let fraction = |value: f32| {
@@ -1004,7 +1046,10 @@ fn tiled_fill(
         SpreadMode::Repeat,
         FilterQuality::Bicubic,
         1.0,
-        Transform::from_scale(tile.scale_x * resolution, tile.scale_y * resolution),
+        Transform::from_scale(
+            tile.scale_x * resolution * intrinsic.0 / source_w,
+            tile.scale_y * resolution * intrinsic.1 / source_h,
+        ),
     );
     surface.fill_rect(
         Rect::from_xywh(0.0, 0.0, width, height)?,
@@ -1271,13 +1316,21 @@ fn stroke_paint(
 /// Decoded assets shared across the slides of one render job, keyed by asset
 /// identity and effects; each entry paints once rather than once per reference.
 pub struct ImageCache {
-    decoded: HashMap<ImageKey, Arc<Pixmap>>,
+    decoded: HashMap<ImageKey, DecodedImage>,
     order: VecDeque<ImageKey>,
     retained: u64,
     cap: u64,
 }
 
 type ImageKey = (u64, u64);
+
+/// A decoded picture and the size in CSS px its pixels span: a raster's own
+/// pixel size, or an SVG's intrinsic size however far it was supersampled.
+#[derive(Clone)]
+struct DecodedImage {
+    pixmap: Arc<Pixmap>,
+    intrinsic: (f32, f32),
+}
 
 impl Default for ImageCache {
     fn default() -> Self {
@@ -1299,29 +1352,29 @@ impl ImageCache {
         bytes: &[u8],
         effects: &[pptx_render::ImageEffect],
         budget: &mut ImageBudget,
-    ) -> Option<Arc<Pixmap>> {
-        if let Some(pixmap) = self.decoded.get(&key) {
-            return Some(Arc::clone(pixmap));
+    ) -> Option<DecodedImage> {
+        if let Some(image) = self.decoded.get(&key) {
+            return Some(image.clone());
         }
-        let pixmap = Arc::new(budget.decode(bytes, effects)?);
-        self.remember(key, Arc::clone(&pixmap));
-        Some(pixmap)
+        let image = budget.decode(bytes, effects)?;
+        self.remember(key, image.clone());
+        Some(image)
     }
 
     /// Keeps a decode while the cache has room; oldest insertions evict first.
-    fn remember(&mut self, key: ImageKey, pixmap: Arc<Pixmap>) {
-        let cost = pixmap.data().len() as u64;
+    fn remember(&mut self, key: ImageKey, image: DecodedImage) {
+        let cost = image.pixmap.data().len() as u64;
         while self.retained + cost > self.cap {
             let Some(oldest) = self.order.pop_front() else {
                 return;
             };
             if let Some(evicted) = self.decoded.remove(&oldest) {
-                self.retained -= evicted.data().len() as u64;
+                self.retained -= evicted.pixmap.data().len() as u64;
             }
         }
         self.retained += cost;
         self.order.push_back(key);
-        self.decoded.insert(key, pixmap);
+        self.decoded.insert(key, image);
     }
 }
 
@@ -1386,9 +1439,32 @@ struct ImageBudget {
 impl ImageBudget {
     /// Decoded pixels, or `None` for content this backend will not draw: bytes
     /// it cannot decode, an image past [`MAX_IMAGE_PIXELS`], or one the slide
-    /// has no budget left for. Declared pixels are charged before the decoder
-    /// allocates, so a stream that fails late still costs what it claimed.
-    fn decode(&mut self, bytes: &[u8], effects: &[pptx_render::ImageEffect]) -> Option<Pixmap> {
+    /// has no budget left for.
+    fn decode(
+        &mut self,
+        bytes: &[u8],
+        effects: &[pptx_render::ImageEffect],
+    ) -> Option<DecodedImage> {
+        let (mut data, size, intrinsic) = if svg::looks_like_svg(bytes) {
+            self.rasterize_svg(bytes)?
+        } else {
+            let (data, size) = self.decode_raster(bytes)?;
+            (data, size, (size.width() as f32, size.height() as f32))
+        };
+        pptx_render::apply_image_effects(&mut data, effects);
+        let (pixels, _) = data.as_chunks_mut::<4>();
+        for pixel in pixels {
+            let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
+            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
+        }
+        Some(DecodedImage {
+            pixmap: Arc::new(Pixmap::from_vec(data, size)?),
+            intrinsic,
+        })
+    }
+
+    /// Straight-alpha RGBA from any format `image` identifies.
+    fn decode_raster(&mut self, bytes: &[u8]) -> Option<(Vec<u8>, IntSize)> {
         use image::ImageDecoder as _;
 
         let mut decoder = image::ImageReader::new(Cursor::new(bytes))
@@ -1398,29 +1474,44 @@ impl ImageBudget {
             .ok()?;
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
-        if declared > MAX_IMAGE_PIXELS || self.pixels + declared > MAX_SLIDE_IMAGE_PIXELS {
-            return None;
-        }
         let cost = decoder
             .total_bytes()
             .saturating_add(declared.saturating_mul(4));
-        if cost > MAX_IMAGE_BYTES || self.bytes + cost > MAX_SLIDE_IMAGE_BYTES {
-            return None;
-        }
-        self.pixels += declared;
-        self.bytes += cost;
+        self.charge(declared, cost)?;
         let orientation = decoder.orientation().ok()?;
         let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
         decoded.apply_orientation(orientation);
         let size = IntSize::from_wh(decoded.width(), decoded.height())?;
-        let mut data = decoded.into_rgba8().into_raw();
-        pptx_render::apply_image_effects(&mut data, effects);
-        let (pixels, _) = data.as_chunks_mut::<4>();
-        for pixel in pixels {
-            let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
+        Some((decoded.into_rgba8().into_raw(), size))
+    }
+
+    /// The same, from an SVG the sandbox accepts, with its intrinsic size,
+    /// supersampled only as far as the budget left allows. The charge covers
+    /// the raster and every layer the render stacks on it. A refusal is an
+    /// undecodable image like any other, and carries nothing from the document.
+    fn rasterize_svg(&mut self, bytes: &[u8]) -> Option<(Vec<u8>, IntSize, (f32, f32))> {
+        let left = (MAX_SLIDE_IMAGE_PIXELS.saturating_sub(self.pixels))
+            .min(MAX_SLIDE_IMAGE_BYTES.saturating_sub(self.bytes) / 8)
+            .min(MAX_IMAGE_PIXELS);
+        let image = svg::parse_within(bytes, left).ok()?;
+        let pixels = image.pixels();
+        self.charge(pixels, pixels.saturating_mul(8))?;
+        let (data, size) = image.render().ok()?;
+        Some((data, size, image.intrinsic()))
+    }
+
+    /// Charges a decode before it allocates, so a stream that fails late still
+    /// costs what it claimed.
+    fn charge(&mut self, pixels: u64, bytes: u64) -> Option<()> {
+        if pixels > MAX_IMAGE_PIXELS || self.pixels + pixels > MAX_SLIDE_IMAGE_PIXELS {
+            return None;
         }
-        Pixmap::from_vec(data, size)
+        if bytes > MAX_IMAGE_BYTES || self.bytes + bytes > MAX_SLIDE_IMAGE_BYTES {
+            return None;
+        }
+        self.pixels += pixels;
+        self.bytes += bytes;
+        Some(())
     }
 }
 
@@ -1577,7 +1668,8 @@ mod tests {
                 &effects,
                 &mut ImageBudget::default(),
             )
-            .unwrap();
+            .unwrap()
+            .pixmap;
         assert_eq!(
             image.pixel(0, 0).unwrap(),
             ColorU8::from_rgba(255, 255, 255, 128).premultiply()
@@ -1590,11 +1682,43 @@ mod tests {
                 &[],
                 &mut ImageBudget::default(),
             )
-            .unwrap();
+            .unwrap()
+            .pixmap;
         assert_eq!(
             source.pixel(0, 0).unwrap(),
             ColorU8::from_rgba(3, 167, 223, 128).premultiply()
         );
+    }
+
+    #[test]
+    fn an_svg_decode_charges_the_slide_budget_and_a_refusal_charges_nothing() {
+        let bytes = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><rect width="8" height="8" fill="#0000ff"/></svg>"##;
+        let mut budget = ImageBudget::default();
+        let decoded = ImageCache::default()
+            .decode(image_key("icon.svg", bytes, &[]), bytes, &[], &mut budget)
+            .expect("decode")
+            .pixmap;
+        assert_eq!((decoded.width(), decoded.height()), (32, 32));
+        assert_eq!(
+            decoded.pixel(0, 0).unwrap(),
+            ColorU8::from_rgba(0, 0, 255, 255).premultiply()
+        );
+        assert_eq!(budget.pixels, 32 * 32);
+
+        let refused =
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"/>"##;
+        let mut empty = ImageBudget::default();
+        assert!(
+            ImageCache::default()
+                .decode(
+                    image_key("huge.svg", refused, &[]),
+                    refused,
+                    &[],
+                    &mut empty
+                )
+                .is_none()
+        );
+        assert_eq!((empty.pixels, empty.bytes), (0, 0));
     }
 
     #[test]
@@ -1615,10 +1739,12 @@ mod tests {
         let effects = [pptx_render::ImageEffect::Grayscale];
         let first = cache
             .decode(image_key("a.png", &bytes, &[]), &bytes, &[], &mut budget)
-            .unwrap();
+            .unwrap()
+            .pixmap;
         let repeat = cache
             .decode(image_key("a.png", &bytes, &[]), &bytes, &[], &mut budget)
-            .unwrap();
+            .unwrap()
+            .pixmap;
         assert!(Arc::ptr_eq(&first, &repeat));
         assert_eq!(cache.decoded.len(), 1);
         let gray = cache
@@ -1628,11 +1754,13 @@ mod tests {
                 &effects,
                 &mut budget,
             )
-            .unwrap();
+            .unwrap()
+            .pixmap;
         assert!(!Arc::ptr_eq(&first, &gray));
         let other_asset = cache
             .decode(image_key("b.png", &bytes, &[]), &bytes, &[], &mut budget)
-            .unwrap();
+            .unwrap()
+            .pixmap;
         assert!(!Arc::ptr_eq(&first, &other_asset));
         assert_eq!(cache.decoded.len(), 3);
         assert!(
@@ -1647,7 +1775,10 @@ mod tests {
             cap: 8,
             ..ImageCache::default()
         };
-        let pixmap = || Arc::new(Pixmap::new(1, 1).unwrap());
+        let pixmap = || DecodedImage {
+            pixmap: Arc::new(Pixmap::new(1, 1).unwrap()),
+            intrinsic: (1.0, 1.0),
+        };
         cache.remember((1, 0), pixmap());
         cache.remember((2, 0), pixmap());
         cache.remember((3, 0), pixmap());
@@ -2558,6 +2689,303 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn split_source_svg() -> Vec<u8> {
+        concat!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4">"##,
+            r##"<rect x="0" y="0" width="2" height="4" fill="#ff0000"/>"##,
+            r##"<rect x="2" y="0" width="2" height="4" fill="#0000ff"/></svg>"##
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
+    fn split_source_png() -> Vec<u8> {
+        let mut source = Pixmap::new(4, 4).unwrap();
+        for (index, pixel) in source.pixels_mut().iter_mut().enumerate() {
+            let blue = index % 4 >= 2;
+            *pixel = if blue {
+                ColorU8::from_rgba(0, 0, 255, 255)
+            } else {
+                ColorU8::from_rgba(255, 0, 0, 255)
+            }
+            .premultiply();
+        }
+        source.encode_png().unwrap()
+    }
+
+    fn picture_on_a_strip(asset: &str, crop: ImageCrop) -> SurfaceDisplayList {
+        let mut list = empty_list(400.0, 100.0);
+        list.primitives.push(Primitive::Image {
+            tile: None,
+            geometry_fallback: false,
+            object_id: 1,
+            shape_id: None,
+            name: "picture".into(),
+            x: 100.0,
+            y: 20.0,
+            w: 200.0,
+            h: 60.0,
+            asset_id: Some(asset.to_owned()),
+            effects: Vec::new(),
+            crop,
+            path: None,
+            stroke: None,
+            shadow: None,
+            transform: SlideTransform::default(),
+        });
+        list
+    }
+
+    #[test]
+    fn an_svg_picture_paints_and_crops_like_the_raster_picture_it_matches() {
+        let fonts = FontStore::new();
+        let svg = split_source_svg();
+        let png = split_source_png();
+        let images = AssetMap::from([("icon.svg", svg.as_slice()), ("icon.png", png.as_slice())]);
+        let render = |asset: &str, crop: ImageCrop| {
+            let slide = render_slide(
+                &picture_on_a_strip(asset, crop),
+                &resources(&fonts, &images),
+                &RenderOptions {
+                    background: Background::Transparent,
+                    ..RenderOptions::default()
+                },
+            )
+            .expect("render");
+            assert_eq!(slide.skipped_images, 0, "{asset}");
+            Pixmap::decode_png(&slide.bytes).unwrap()
+        };
+
+        let whole_svg = render("icon.svg", ImageCrop::default());
+        let whole_png = render("icon.png", ImageCrop::default());
+        assert_eq!(
+            whole_svg.pixel(120, 50).unwrap(),
+            ColorU8::from_rgba(255, 0, 0, 255).premultiply()
+        );
+        assert_eq!(
+            whole_svg.pixel(280, 50).unwrap(),
+            ColorU8::from_rgba(0, 0, 255, 255).premultiply()
+        );
+        for (x, y) in [(120, 50), (280, 50)] {
+            assert_eq!(
+                whole_svg.pixel(x, y).unwrap(),
+                whole_png.pixel(x, y).unwrap(),
+                "stretched to the frame at {x},{y}"
+            );
+        }
+        for (x, y) in [(50, 50), (350, 50), (200, 5), (200, 95)] {
+            assert_eq!(
+                whole_svg.pixel(x, y).unwrap().alpha(),
+                0,
+                "outside the frame at {x},{y}"
+            );
+        }
+
+        let crop = ImageCrop {
+            left: 0.5,
+            ..ImageCrop::default()
+        };
+        let cropped_svg = render("icon.svg", crop);
+        let cropped_png = render("icon.png", crop);
+        assert_eq!(
+            cropped_svg.pixel(250, 50).unwrap(),
+            ColorU8::from_rgba(0, 0, 255, 255).premultiply()
+        );
+        assert_eq!(
+            cropped_svg.pixel(250, 50).unwrap(),
+            cropped_png.pixel(250, 50).unwrap()
+        );
+        for pixels in [&cropped_svg, &cropped_png] {
+            for x in [110, 150, 200, 290] {
+                let pixel = pixels.pixel(x, 50).unwrap();
+                assert!(
+                    pixel.blue() > pixel.red(),
+                    "the discarded half leaks in at {x}: {pixel:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_svg_the_sandbox_refuses_is_skipped_and_counted() {
+        let fonts = FontStore::new();
+        let deep = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4">{}{}</svg>"##,
+            "<g>".repeat(MAX_SVG_DEPTH + 1),
+            "</g>".repeat(MAX_SVG_DEPTH + 1)
+        );
+        let fills = r##"<rect width="96" height="96" fill="#f00"/>"##.repeat(10_000);
+        let refused: Vec<Vec<u8>> = vec![
+            br##"<!DOCTYPE svg [<!ENTITY a SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><desc>&a;</desc></svg>"##.to_vec(),
+            br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><use href="https://example.invalid/p.svg#icon"/></svg>"##.to_vec(),
+            deep.into_bytes(),
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"><rect width="100000" height="100000" fill="#000"/></svg>"##.to_vec(),
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><desc>{}</desc></svg>"##,
+                " ".repeat(MAX_SVG_BYTES)
+            )
+            .into_bytes(),
+            svg::tests::marker_chain(6, 12).into_bytes(),
+            br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><marker id="m" markerWidth="1e30" markerHeight="1e30" viewBox="0 0 1 1"><rect width="1" height="1"/></marker><path d="M0 0L5 5" stroke="#000" stroke-width="1e30" marker-end="url(#m)"/></svg>"##.to_vec(),
+            svg::tests::use_fan_out(10, 10).into_bytes(),
+            svg::tests::use_chain(256).into_bytes(),
+            svg::tests::document(r##"<g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g>"##).into_bytes(),
+            svg::tests::document(&fills).into_bytes(),
+            svg::tests::opacity_nest(MAX_SVG_LAYER_DEPTH + 1).into_bytes(),
+            svg::tests::document(r##"<rect width="96" height="96" fill="URL(http://example.invalid/p.svg#g)"/>"##).into_bytes(),
+        ];
+        for (index, bytes) in refused.iter().enumerate() {
+            let images = AssetMap::from([("icon.svg", bytes.as_slice())]);
+            let rendered = render_slide(
+                &picture_on_a_strip("icon.svg", ImageCrop::default()),
+                &resources(&fonts, &images),
+                &RenderOptions::default(),
+            )
+            .expect("render");
+            assert_eq!(rendered.skipped_images, 1, "refused document {index}");
+        }
+    }
+
+    fn render_strip(asset: &[u8]) -> (usize, Pixmap) {
+        let fonts = FontStore::new();
+        let images = AssetMap::from([("icon.svg", asset)]);
+        let rendered = render_slide(
+            &picture_on_a_strip("icon.svg", ImageCrop::default()),
+            &resources(&fonts, &images),
+            &RenderOptions {
+                background: Background::Transparent,
+                ..RenderOptions::default()
+            },
+        )
+        .expect("render");
+        (
+            rendered.skipped_images,
+            Pixmap::decode_png(&rendered.bytes).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_hyperlink_and_an_embedded_raster_leave_the_shapes_drawn() {
+        let source = concat!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 4 4">"##,
+            r##"<a xlink:href="https://example.invalid/"><rect width="2" height="4" fill="#ff0000"/></a>"##,
+            r##"<image x="2" width="2" height="4" preserveAspectRatio="none" "##,
+            r##"href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg=="/></svg>"##
+        );
+        let (skipped, strip) = render_strip(source.as_bytes());
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            strip.pixel(150, 50).unwrap(),
+            ColorU8::from_rgba(255, 0, 0, 255).premultiply(),
+            "the linked rect draws"
+        );
+        assert_eq!(
+            strip.pixel(250, 50).unwrap().alpha(),
+            0,
+            "the embedded raster is dropped"
+        );
+    }
+
+    #[test]
+    fn an_office_icon_with_a_stylesheet_and_a_gradient_renders() {
+        let source = concat!(
+            r##"<svg viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" id="Icons_Gear" overflow="hidden">"##,
+            "<style>\n.MsftOfcThm_Accent1_Fill_v2 {\n fill:#4472C4; \n}\n</style>",
+            r##"<defs><linearGradient x1="48" y1="0" x2="96" y2="0" gradientUnits="userSpaceOnUse" id="fill">"##,
+            r##"<stop offset="0" stop-color="#FF0000"/><stop offset="1" stop-color="#0000FF"/></linearGradient></defs>"##,
+            r##"<g id="Icons"><path d="M0 0H48V96H0Z" class="MsftOfcThm_Accent1_Fill_v2"/>"##,
+            r##"<path d="M48 0H96V96H48Z" fill="url(#fill)"/></g></svg>"##
+        );
+        let (skipped, strip) = render_strip(source.as_bytes());
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            strip.pixel(150, 50).unwrap(),
+            ColorU8::from_rgba(0x44, 0x72, 0xc4, 255).premultiply(),
+            "the class rule fills the left half"
+        );
+        let blend = strip.pixel(250, 50).unwrap();
+        assert!(
+            blend.red() > 64 && blend.blue() > 64 && blend.green() < 16,
+            "the gradient spans the right half: {blend:?}"
+        );
+    }
+
+    #[test]
+    fn an_svg_layer_is_charged_before_it_allocates() {
+        let bytes = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><g opacity="0.5"><rect width="8" height="8" fill="#0000ff"/></g></svg>"##;
+        let mut budget = ImageBudget::default();
+        ImageCache::default()
+            .decode(image_key("icon.svg", bytes, &[]), bytes, &[], &mut budget)
+            .expect("decode");
+        assert!(
+            (32 * 32 + 36 * 36..=32 * 32 + 38 * 38).contains(&budget.pixels),
+            "the output raster plus the layer its opacity group paints into: {}",
+            budget.pixels
+        );
+    }
+
+    #[test]
+    fn a_tiled_svg_repeats_with_the_period_of_the_raster_it_matches() {
+        let svg = concat!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">"##,
+            r##"<rect width="5" height="10" fill="#ff0000"/><rect x="5" width="5" height="10" fill="#0000ff"/></svg>"##
+        );
+        let mut halves = Pixmap::new(10, 10).unwrap();
+        for (index, pixel) in halves.pixels_mut().iter_mut().enumerate() {
+            *pixel = if index % 10 < 5 {
+                ColorU8::from_rgba(255, 0, 0, 255)
+            } else {
+                ColorU8::from_rgba(0, 0, 255, 255)
+            }
+            .premultiply();
+        }
+        let png = halves.encode_png().unwrap();
+        let fonts = FontStore::new();
+        let images = AssetMap::from([("tile.svg", svg.as_bytes()), ("tile.png", png.as_slice())]);
+        let render = |asset: &str| {
+            let mut list = empty_list(200.0, 100.0);
+            list.primitives.push(Primitive::Image {
+                tile: Some(ImageTile {
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                }),
+                geometry_fallback: false,
+                object_id: 1,
+                shape_id: None,
+                name: "tiled".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 100.0,
+                asset_id: Some(asset.into()),
+                effects: Vec::new(),
+                crop: ImageCrop::default(),
+                path: None,
+                stroke: None,
+                shadow: None,
+                transform: SlideTransform::default(),
+            });
+            let rendered = render_slide(
+                &list,
+                &resources(&fonts, &images),
+                &RenderOptions::default(),
+            )
+            .expect("render");
+            assert_eq!(rendered.skipped_images, 0, "{asset}");
+            let image = Pixmap::decode_png(&rendered.bytes).unwrap();
+            (0..20)
+                .flat_map(|period| [period * 10 + 2, period * 10 + 7])
+                .map(|x| {
+                    let pixel = image.pixel(x, 50).unwrap();
+                    pixel.red() > pixel.blue()
+                })
+                .collect::<Vec<_>>()
+        };
+        let raster = render("tile.png");
+        assert_eq!(raster, [true, false].repeat(20), "red then blue every 10px");
+        assert_eq!(render("tile.svg"), raster);
     }
 
     #[test]
