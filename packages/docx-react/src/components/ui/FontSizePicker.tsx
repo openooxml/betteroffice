@@ -16,6 +16,7 @@ import { MaterialSymbol } from './MaterialSymbol';
 import { cn } from '../../lib/utils';
 import { useFixedDropdown } from '../../hooks/useFixedDropdown';
 import { useTranslation } from '../../i18n';
+import { useDisabledDescription } from './disabledDescription';
 
 // ============================================================================
 // TYPES
@@ -26,6 +27,8 @@ export interface FontSizePickerProps {
   onChange?: (size: number) => void;
   sizes?: number[];
   disabled?: boolean;
+  /** Why the picker is disabled. */
+  description?: string;
   className?: string;
   placeholder?: string;
   width?: number | string;
@@ -84,12 +87,14 @@ export function FontSizePicker({
   onChange,
   sizes = DEFAULT_SIZES,
   disabled = false,
+  description,
   className,
   placeholder = '11',
   minSize = DEFAULT_MIN_SIZE,
   maxSize = DEFAULT_MAX_SIZE,
 }: FontSizePickerProps) {
   const { t } = useTranslation();
+  const reason = useDisabledDescription(disabled, description);
   const [isEditing, setIsEditing] = useState(false);
   const [inputValue, setInputValue] = useState('');
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -114,7 +119,7 @@ export function FontSizePicker({
 
   // Handle decrease font size
   const handleDecrease = useCallback(
-    (e: React.MouseEvent) => {
+    (e: React.MouseEvent | React.KeyboardEvent) => {
       e.preventDefault();
       if (disabled) return;
       const newSize = getPrevSize(currentValue, sizes, minSize);
@@ -125,7 +130,7 @@ export function FontSizePicker({
 
   // Handle increase font size
   const handleIncrease = useCallback(
-    (e: React.MouseEvent) => {
+    (e: React.MouseEvent | React.KeyboardEvent) => {
       e.preventDefault();
       if (disabled) return;
       const newSize = getNextSize(currentValue, sizes, maxSize);
@@ -232,6 +237,9 @@ export function FontSizePicker({
           disabled && 'opacity-30 cursor-not-allowed'
         )}
         onMouseDown={handleDecrease}
+        onClick={(event) => {
+          if (event.detail === 0) handleDecrease(event);
+        }}
         disabled={disabled || currentValue <= minSize}
         aria-label={t('fontSize.decrease')}
         data-testid="font-size-decrease"
@@ -268,13 +276,15 @@ export function FontSizePicker({
               'rounded-none',
               disabled && 'opacity-50 cursor-not-allowed'
             )}
-            disabled={disabled}
+            {...reason.triggerProps}
+            title={reason.title}
             aria-label={t('fontSize.selectAriaLabel')}
             aria-haspopup="listbox"
             aria-expanded={isDropdownOpen}
             data-testid="font-size-display"
           >
             {displayValue}
+            {reason.node}
           </button>
         )}
       </div>
@@ -325,6 +335,9 @@ export function FontSizePicker({
           disabled && 'opacity-30 cursor-not-allowed'
         )}
         onMouseDown={handleIncrease}
+        onClick={(event) => {
+          if (event.detail === 0) handleIncrease(event);
+        }}
         disabled={disabled || currentValue >= maxSize}
         aria-label={t('fontSize.increase')}
         data-testid="font-size-increase"

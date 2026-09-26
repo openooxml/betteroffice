@@ -53,6 +53,15 @@ export interface PptxTextSearchOptions {
   limit?: number;
 }
 
+/**
+ * A caret position in a story that later edits, undo, redo and remote updates
+ * move along with the text. Plain data; `position` is opaque.
+ */
+export interface PptxCaretAnchor {
+  storyId: string;
+  position: string;
+}
+
 /** Zero-based slide index; story-local UTF-16 offsets. */
 export interface PptxTextMatch {
   slideIndex: number;

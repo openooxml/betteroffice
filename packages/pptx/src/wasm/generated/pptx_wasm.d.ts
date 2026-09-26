@@ -13,6 +13,10 @@ export class PptxDocument {
     addTextBoxProfiledJson(args: string): string;
     addUndoBoundary(): void;
     /**
+     * Anchors a caret offset so that later edits, undo and remote updates move it.
+     */
+    anchorCaretJson(args: string): string;
+    /**
      * Applies a batch all-or-nothing: `{"ok":true,"baseVersion","version","applied","source",
      * "changedSlides","changedStories","receipts"}`.
      */
@@ -81,6 +85,10 @@ export class PptxDocument {
     removeShapeJson(args: string): string;
     replyToCommentJson(args: string): string;
     resizeShapeJson(args: string): string;
+    /**
+     * The current offset of an anchor from `anchorCaretJson`, or `null` once its story is gone.
+     */
+    resolveCaretAnchorJson(args: string): string;
     /**
      * Serializes the deck back to `.pptx` bytes, edits included.
      */
@@ -187,6 +195,7 @@ export interface InitOutput {
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addUndoBoundary: (a: number) => void;
+    readonly pptxdocument_anchorCaretJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_bringShapeForwardJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -229,6 +238,7 @@ export interface InitOutput {
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_replyToCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_resolveCaretAnchorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly pptxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_sendShapeBackwardJson: (a: number, b: number, c: number) => [number, number, number, number];
