@@ -13,7 +13,10 @@ export type {
   JsonValue,
 } from '../../../../shared/host-contracts/commands';
 
-/** Table operations available from the table toolbar and menus. */
+/**
+ * Table operations available from the table toolbar and menus.
+ * @experimental
+ */
 export type DocxTableAction =
   | 'addRowAbove'
   | 'addRowBelow'
@@ -71,16 +74,23 @@ export type DocxTableAction =
  * A direct text color: RGB hex, or a theme color optionally lightened
  * (`themeTint`) or darkened (`themeShade`) by a hex byte; `'auto'` clears it
  * to Word's automatic color.
+ * @experimental
  */
 export type DocxTextColor =
   | { rgb: string }
   | { themeColor: string; themeTint?: string; themeShade?: string }
   | 'auto';
 
-/** Image rotation and mirroring. */
+/**
+ * Image rotation and mirroring.
+ * @experimental
+ */
 export type DocxImageTransform = 'rotateCW' | 'rotateCCW' | 'flipH' | 'flipV';
 
-/** Formatting of the table cell at the selection. */
+/**
+ * Formatting of the table cell at the selection.
+ * @experimental
+ */
 export type DocxTableValue = {
   /** RGB hex without `#`. */
   borderColor: string | null;
@@ -89,7 +99,10 @@ export type DocxTableValue = {
   justification: string | null;
 };
 
-/** Arguments of every DOCX editor command, keyed by command id. */
+/**
+ * Arguments of every DOCX editor command, keyed by command id.
+ * @experimental
+ */
 export interface DocxCommandArgs {
   undo: null;
   redo: null;
@@ -147,9 +160,13 @@ export interface DocxCommandArgs {
   zoom: { scale: number };
 }
 
+/** @experimental */
 export type DocxCommandId = keyof DocxCommandArgs;
 
-/** Commands presented as a choice between options. */
+/**
+ * Commands presented as a choice between options.
+ * @experimental
+ */
 export type DocxSelectCommandId =
   | 'paragraphStyle'
   | 'fontFamily'
@@ -160,7 +177,10 @@ export type DocxSelectCommandId =
   | 'editingMode'
   | 'zoom';
 
-/** Current values reported in {@link DocxCommandState.value}, keyed by command id. */
+/**
+ * Current values reported in {@link DocxCommandState.value}, keyed by command id.
+ * @experimental
+ */
 export interface DocxCommandValues {
   undo: null;
   redo: null;
@@ -214,7 +234,10 @@ export interface DocxCommandValues {
   zoom: number;
 }
 
-/** Why a command is unavailable. */
+/**
+ * Why a command is unavailable.
+ * @experimental
+ */
 export type DocxCommandDisabledCode =
   | 'editor-unavailable'
   | 'document-loading'
@@ -243,7 +266,10 @@ export type DocxCommandDisabledCode =
   | 'unsupported-command'
   | 'invalid-arguments';
 
-/** Why an executed command did not complete. */
+/**
+ * Why an executed command did not complete.
+ * @experimental
+ */
 export type DocxCommandFailureCode =
   | DocxCommandDisabledCode
   | 'input-failed'
@@ -251,7 +277,10 @@ export type DocxCommandFailureCode =
   | 'target-changed'
   | 'command-failed';
 
-/** Presentation hints for an option preview. */
+/**
+ * Presentation hints for an option preview.
+ * @experimental
+ */
 export type DocxCommandOptionPreview = {
   /** CSS `font-family` value. */
   fontFamily?: string;
@@ -265,14 +294,20 @@ export type DocxCommandOptionPreview = {
   group?: string;
 };
 
-/** One choice of a selector command. */
+/**
+ * One choice of a selector command.
+ * @experimental
+ */
 export interface DocxCommandOption<K extends DocxCommandId = DocxCommandId> {
   args: DocxCommandArgs[K];
   label: string;
   preview?: DocxCommandOptionPreview;
 }
 
-/** Serializable state of one DOCX command, optionally for specific arguments. */
+/**
+ * Serializable state of one DOCX command, optionally for specific arguments.
+ * @experimental
+ */
 export type DocxCommandState<K extends DocxCommandId = DocxCommandId> = CommandState<
   DocxCommandValues[K],
   DocxCommandDisabledCode
@@ -281,13 +316,19 @@ export type DocxCommandState<K extends DocxCommandId = DocxCommandId> = CommandS
   options?: readonly DocxCommandOption<K>[];
 };
 
-/** A keyboard binding; `Mod` is Cmd on macOS and Ctrl elsewhere. */
+/**
+ * A keyboard binding; `Mod` is Cmd on macOS and Ctrl elsewhere.
+ * @experimental
+ */
 export interface DocxCommandShortcut<K extends DocxCommandId = DocxCommandId> {
   chord: string;
   args: DocxCommandArgs[K];
 }
 
-/** Static, serializable description of a command. */
+/**
+ * Static, serializable description of a command.
+ * @experimental
+ */
 export interface DocxCommandDescriptor<K extends DocxCommandId = DocxCommandId> {
   id: K;
   labelKey: TranslationKey;
@@ -295,18 +336,23 @@ export interface DocxCommandDescriptor<K extends DocxCommandId = DocxCommandId> 
   shortcuts: readonly DocxCommandShortcut<K>[];
 }
 
+/** @experimental */
 export type DocxCommandStatus = 'executed' | 'noop' | 'opened' | 'requested';
 
 /**
  * Outcome of {@link DocxCommandStore.execute}: `executed` changed something,
  * `noop` was valid but changed nothing, `opened` showed a dialog or picker,
  * and `requested` handed the change to the host.
+ * @experimental
  */
 export type DocxCommandResult =
   | { ok: true; status: DocxCommandStatus }
   | { ok: false; failure: CommandReason<DocxCommandFailureCode> };
 
-/** The command authority of one editor, shared by built-in and host chrome. */
+/**
+ * The command authority of one editor, shared by built-in and host chrome.
+ * @experimental
+ */
 export interface DocxCommandStore {
   getDescriptor<K extends DocxCommandId>(id: K): DocxCommandDescriptor<K>;
   /** Snapshots are stable until the state changes; pass `args` to evaluate one option. */
