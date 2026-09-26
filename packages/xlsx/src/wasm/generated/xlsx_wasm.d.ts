@@ -84,6 +84,8 @@ export class XlsxDocument {
      * a rectangular block of cells for clipboard copy.
      */
     rangeCellsJson(args: string): string;
+    /** Stored cell addresses in row-major pages, including formatted blanks. */
+    storedCellAddressesJson(args: string): string;
     /**
      * redo the last undone transaction; same shape as `undoJson`.
      */
@@ -166,6 +168,7 @@ export interface InitOutput {
     readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_storedCellAddressesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];

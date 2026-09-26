@@ -320,6 +320,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = storedCellAddressesJson)]
+    pub fn stored_cell_addresses_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .stored_cell_addresses_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen(js_name = searchTextJson)]
     pub fn search_text_json(&self, args: &str) -> Result<String, JsValue> {
         self.session

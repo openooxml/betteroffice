@@ -99,6 +99,8 @@ export type {
   WorkbookUpdateOrigin,
   CellEdit,
   CellPosition,
+  StoredCellAddress,
+  StoredCellPage,
   CellInputEdit,
   EditResult,
   EditProfile,

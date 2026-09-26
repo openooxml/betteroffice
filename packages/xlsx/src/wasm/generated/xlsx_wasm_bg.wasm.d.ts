@@ -33,6 +33,7 @@ export const xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number)
 export const xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_storedCellAddressesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_redoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
