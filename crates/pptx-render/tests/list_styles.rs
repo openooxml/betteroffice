@@ -317,6 +317,57 @@ fn a_punctuation_run_between_latin_words_reads_left_to_right() {
     assert!((hello.x + hello.width - comma.x).abs() < 0.01);
 }
 
+#[test]
+fn a_marker_its_bullet_font_cannot_draw_keeps_its_slot_but_paints_nothing() {
+    let layout = |marker: &str| {
+        let mut parts = ooxml_opc::unzip_parts(DECK).unwrap();
+        for (path, bytes) in &mut parts {
+            if path == "ppt/slides/slide1.xml" {
+                let xml = String::from_utf8(bytes.clone()).unwrap();
+                let pp = format!(
+                    r#"<a:pPr lvl="0"><a:buFont typeface="Georgia" /><a:buChar char="{marker}" /></a:pPr><a:r><a:rPr /><a:t>First level</a:t>"#
+                );
+                let rewritten = xml.replacen(
+                    r#"<a:pPr lvl="0" /><a:r><a:rPr /><a:t>First level</a:t>"#,
+                    &pp,
+                    1,
+                );
+                assert_ne!(rewritten, xml);
+                *bytes = rewritten.into_bytes();
+            }
+        }
+        let session = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 2949).unwrap();
+        let mut renderer = renderer();
+        for bold in [false, true] {
+            renderer
+                .register_font("Georgia", bold, false, FONT)
+                .unwrap();
+        }
+        let list = renderer
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list;
+        lines(&list, 3)[0].clone()
+    };
+    let drawn = layout("\u{2022}");
+    let missing = layout("\u{2713}");
+    assert_eq!(drawn.runs[0].text, "\u{2022}");
+    assert_ne!(drawn.runs[0].color, "#00000000");
+    assert_eq!(missing.runs[0].text, "\u{2713}");
+    assert_eq!(missing.runs[0].color, "#00000000");
+    let text_x = |line: &PositionedTextLine| {
+        line.runs
+            .iter()
+            .find(|run| run.text.starts_with("First"))
+            .unwrap()
+            .x
+    };
+    assert!(
+        (text_x(&drawn) - text_x(&missing)).abs() < 0.01,
+        "the text stays where the marker's slot puts it"
+    );
+}
+
 fn clear_bullets(body: &mut TextBody) {
     for properties in body
         .default_list_style

@@ -2533,9 +2533,17 @@ fn resolve_content(
             .then(|| resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering))
             .flatten()
             .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
-        let marker_drawn = marker.as_deref().is_none_or(|marker| {
-            bullet_font_draws(renderer, theme, properties.bullet_font.as_ref(), marker)
-        });
+        let bullet_style = marker
+            .as_deref()
+            .map(|marker| {
+                let mut style = resolve_bullet_style(renderer, theme, &properties, &runs[0].style)?;
+                let font = properties.bullet_font.as_ref();
+                if !bullet_font_draws(renderer, theme, font, style.face.id, marker) {
+                    style.color = TRANSPARENT.to_owned();
+                }
+                Ok::<_, RenderError>(style)
+            })
+            .transpose()?;
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
@@ -2553,17 +2561,7 @@ fn resolve_content(
                 properties.indent.unwrap_or_default(),
             ),
             default_tab_px: resolve_default_tab(properties.default_tab_size),
-            bullet_style: marker
-                .is_some()
-                .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
-                .transpose()?
-                .map(|mut style| {
-                    // The marker keeps its slot but paints nothing.
-                    if !marker_drawn {
-                        style.color = TRANSPARENT.to_owned();
-                    }
-                    style
-                }),
+            bullet_style,
             marker,
             rtl: properties.rtl.unwrap_or(false),
             runs,
@@ -5465,6 +5463,7 @@ fn bullet_font_draws(
     renderer: &SlideRenderer,
     theme: &Theme,
     font: Option<&BulletFont>,
+    face: FontId,
     marker: &str,
 ) -> bool {
     let Some(BulletFont::Typeface(typeface)) = font else {
@@ -5478,13 +5477,10 @@ fn bullet_font_draws(
     if ooxml_text::SymbolFont::named(&family).is_some() || !renderer.has_face_for(&family) {
         return true;
     }
-    let Ok(face) = renderer.resolve_face(&family, false, false) else {
-        return true;
-    };
     marker
         .chars()
         .filter(|character| !character.is_whitespace())
-        .all(|character| renderer.fonts.covers(face.id, character).unwrap_or(true))
+        .all(|character| renderer.fonts.covers(face, character).unwrap_or(true))
 }
 
 /// A `buFont` symbol face reaches its glyphs by font position, so `buChar`
@@ -10095,43 +10091,17 @@ mod tests {
             .register_font("Georgia", false, false, FONT)
             .unwrap();
         let theme = Theme::default();
-        let georgia = BulletFont::Typeface("Georgia".to_owned());
-        assert!(bullet_font_draws(
-            &renderer,
-            &theme,
-            Some(&georgia),
-            "\u{2022}"
-        ));
-        assert!(
-            !renderer
-                .fonts
-                .covers(
-                    renderer.resolve_face("Georgia", false, false).unwrap().id,
-                    '\u{2713}'
-                )
-                .unwrap()
-        );
-        assert!(!bullet_font_draws(
-            &renderer,
-            &theme,
-            Some(&georgia),
-            "\u{2713}"
-        ));
-        let wingdings = BulletFont::Typeface("Wingdings".to_owned());
-        assert!(bullet_font_draws(
-            &renderer,
-            &theme,
-            Some(&wingdings),
-            "\u{2713}"
-        ));
-        let unregistered = BulletFont::Typeface("Futura".to_owned());
-        assert!(bullet_font_draws(
-            &renderer,
-            &theme,
-            Some(&unregistered),
-            "\u{2713}"
-        ));
-        assert!(bullet_font_draws(&renderer, &theme, None, "\u{2713}"));
+        let face = renderer.resolve_face("Georgia", false, false).unwrap().id;
+        let draws = |family: Option<&str>, marker: &str| {
+            let font = family.map(|family| BulletFont::Typeface(family.to_owned()));
+            bullet_font_draws(&renderer, &theme, font.as_ref(), face, marker)
+        };
+        assert!(!renderer.fonts.covers(face, '\u{2713}').unwrap());
+        assert!(draws(Some("Georgia"), "\u{2022}"));
+        assert!(!draws(Some("Georgia"), "\u{2713}"));
+        assert!(draws(Some("Wingdings"), "\u{2713}"));
+        assert!(draws(Some("Futura"), "\u{2713}"));
+        assert!(draws(None, "\u{2713}"));
     }
 
     #[test]
