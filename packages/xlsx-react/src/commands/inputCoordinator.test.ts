@@ -209,7 +209,7 @@ describe('input coordinator', () => {
     expect(log).toEqual(['paste', 'refused first', 'write second', 'seal', 'save']);
   });
 
-  test('never shows a rejected draft outside its sheet, and a rejected live draft only closes', async () => {
+  test('never shows a rejected draft outside its sheet, and keeps a live one open until written', async () => {
     const { coordinator, log, state, draft, hold } = harness();
     state.sheet = 1;
     const release = hold();
@@ -223,11 +223,66 @@ describe('input coordinator', () => {
     expect(coordinator.rejected).toEqual([onFirstSheet]);
     expect(log).toEqual(['paste', 'refused oversized', 'restore oversized']);
 
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(coordinator.pending).toBe(false);
     coordinator.setDraft(onFirstSheet);
+    expect(coordinator.settle()).toBe(false);
+    expect(coordinator.draft).toBe(onFirstSheet);
+    expect(coordinator.rejected).toEqual([onFirstSheet]);
+    expect(log).not.toContain('close oversized');
+
+    state.accept = true;
     expect(coordinator.settle()).toBe(true);
     expect(coordinator.draft).toBeNull();
-    expect(coordinator.rejected).toEqual([onFirstSheet]);
-    expect(log[log.length - 1]).toBe('close oversized');
+    expect(coordinator.rejected).toEqual([]);
+    expect(log.slice(-2)).toEqual(['write oversized', 'close oversized']);
+  });
+
+  test('a queued correction supersedes the refusal of its cell', async () => {
+    const { coordinator, log, state, draft, hold } = harness();
+    state.accept = false;
+    const refused = draft('oversized');
+    coordinator.setDraft(refused);
+    expect(coordinator.submit(refused)).toBe(false);
+    const release = hold();
+    state.accept = true;
+    coordinator.setDraft(draft('corrected'));
+    expect(coordinator.settle()).toBe(true);
+    expect(coordinator.draft).toBeNull();
+    expect(coordinator.rejected).toEqual([]);
+    release();
+    await coordinator.runAfterPendingInput(() => log.push('save'));
+    expect(coordinator.draft).toBeNull();
+    expect(log).toEqual([
+      'refused oversized',
+      'close corrected',
+      'seal',
+      'paste',
+      'write corrected',
+      'save',
+    ]);
+  });
+
+  test('never restores a failed write over a later queued write of its cell', async () => {
+    const { coordinator, log, state, draft, hold } = harness();
+    const releaseFirst = hold();
+    const first = draft('first');
+    coordinator.setDraft(first);
+    expect(coordinator.submit(first)).toBe(true);
+    const releaseSecond = hold();
+    coordinator.setDraft(draft('second'));
+    expect(coordinator.settle()).toBe(true);
+    state.accept = false;
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(coordinator.draft).toBeNull();
+    expect(coordinator.rejected).toEqual([]);
+    state.accept = true;
+    releaseSecond();
+    await coordinator.input(() => {});
+    expect(coordinator.draft).toBeNull();
+    expect(coordinator.rejected).toEqual([]);
+    expect(log).toEqual(['close second', 'paste', 'refused first', 'paste', 'write second']);
   });
 
   test('keeps a composed draft ahead of the command even when Enter commits it first', async () => {

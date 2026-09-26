@@ -34,7 +34,8 @@ export interface InputCoordinatorHooks {
 /**
  * Orders every input write and the commands admitted after it in one queue.
  * A draft whose write failed stays rejected, at its own cell, until it is
- * written or discarded; until then every command fails with `input-failed`.
+ * written, discarded or superseded by a queued write of that cell; until then
+ * every command fails with `input-failed`.
  */
 export interface InputCoordinator {
   readonly draft: InputDraft | null;
@@ -50,8 +51,8 @@ export interface InputCoordinator {
   discard(draft: InputDraft): void;
   /**
    * Closes the live draft for a synchronous host call: it is written now when
-   * nothing is queued, else queued behind that input. False when it was written
-   * at once and refused for the first time.
+   * nothing is queued, else queued behind that input. False, leaving it open,
+   * when it was written at once and refused.
    */
   settle(): boolean;
   /** Runs `operation` once the input accepted before this call is written. */
@@ -96,6 +97,7 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
   let sealFailed = false;
   const written = new WeakSet<InputDraft>();
   let rejected: readonly InputDraft[] = [];
+  const queued: InputDraft[] = [];
 
   const settleRejected = (target: InputDraft) =>
     (rejected = rejected.filter((entry) => !sameCell(entry, target)));
@@ -168,11 +170,19 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
     return rejected.length > 0;
   };
 
-  /** Writes a finished draft after everything queued before it; a refused one stays rejected. */
+  /**
+   * Writes a finished draft after everything queued before it. It supersedes
+   * the refusal of its cell; a refused one stays rejected unless a later
+   * queued write of its cell supersedes it in turn.
+   */
   const queueWrite = (finished: InputDraft) => {
+    settleRejected(finished);
+    queued.push(finished);
     void enqueue(() => {
+      queued.splice(queued.indexOf(finished), 1);
       if (finished.generation !== hooks.generation() || writeOnce(finished)) return;
       failed = true;
+      if (queued.some((entry) => sameCell(entry, finished))) return;
       reject(finished);
       if (draft === null && hooks.restore(finished)) draft = finished;
     }, dropInput);
@@ -248,11 +258,7 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
         queueWrite(current);
         return true;
       }
-      const known = rejected.some((entry) => sameCell(entry, current));
-      if (!writeOnce(current)) {
-        if (!known) return false;
-        reject(current);
-      }
+      if (!writeOnce(current)) return false;
       if (draft === current) {
         draft = null;
         hooks.close(current);

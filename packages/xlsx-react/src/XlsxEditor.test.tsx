@@ -1362,7 +1362,7 @@ describe('XlsxEditor commands', () => {
 
   const oversized = 'x'.repeat(32_768);
 
-  it('blocks every command while a rejected entry waits for correction on its own cell', async () => {
+  const blocksUntilCorrected = async (leave: 'Enter' | 'clearSelection') => {
     const clipboard = holdClipboard();
     try {
       const editor = await mountCommands();
@@ -1388,7 +1388,8 @@ describe('XlsxEditor commands', () => {
       expect(editor.saves).toHaveLength(0);
       expect(() => editor.api().save()).toThrow(XlsxSaveRefusedError);
 
-      fireEvent.keyDown(formula, { key: 'Enter' });
+      if (leave === 'Enter') fireEvent.keyDown(formula, { key: 'Enter' });
+      else await act(async () => editor.api().clearSelection());
       expect(editor.api().handle.cell(0, 5, 2).input).toBe('Newer');
       await waitFor(() => expect(formula.value).toBe(oversized));
       expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
@@ -1409,7 +1410,13 @@ describe('XlsxEditor commands', () => {
     } finally {
       clipboard.restore();
     }
-  });
+  };
+
+  it('blocks every command while a rejected entry waits for correction on its own cell', () =>
+    blocksUntilCorrected('Enter'));
+
+  it('reopens a rejected entry at its own cell when a host clears the selection', () =>
+    blocksUntilCorrected('clearSelection'));
 
   it('refuses a synchronous save while accepted input waits, and saves it through the command', async () => {
     const clipboard = holdClipboard();
@@ -1647,7 +1654,7 @@ describe('XlsxEditor commands', () => {
     }
   });
 
-  it('keeps a rejected entry on its own sheet and lets Escape discard it', async () => {
+  const keepsRejectedOnItsSheet = async (back: 'tab' | 'selectCells') => {
     const source = openWorkbook(plain.bytes.slice());
     source.applyOps([{ type: 'addSheet', index: 1, name: 'Second' }]);
     const file = source.save();
@@ -1680,7 +1687,8 @@ describe('XlsxEditor commands', () => {
       expect(editor.api().handle.cell(0, 3, 1).input).not.toBe(oversized);
 
       await act(async () => {
-        fireEvent.click(editor.view.getAllByRole('tab')[0]);
+        if (back === 'tab') fireEvent.click(editor.view.getAllByRole('tab')[0]);
+        else editor.api().selectCells(0, selectionAt({ row: 0, col: 0 }));
       });
       await waitFor(() => expect(formula.value).toBe(oversized));
       expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
@@ -1693,6 +1701,44 @@ describe('XlsxEditor commands', () => {
       } finally {
         saved.dispose();
       }
+    } finally {
+      clipboard.restore();
+    }
+  };
+
+  it('keeps a rejected entry on its own sheet and lets Escape discard it', () =>
+    keepsRejectedOnItsSheet('tab'));
+
+  it('reopens a rejected entry at its own cell when a host selects its sheet', () =>
+    keepsRejectedOnItsSheet('selectCells'));
+
+  it('never reopens a rejected entry whose correction a host selection queued', async () => {
+    const clipboard = holdClipboard();
+    try {
+      const editor = await mountCommands();
+      const formula = editor.view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+      const nameBox = editor.view.getByTestId('xlsx-name-box') as HTMLInputElement;
+      await act(async () => {
+        editor.api().selectCells(0, selectionAt({ row: 3, col: 1 }));
+      });
+      fireEvent.change(formula, { target: { value: oversized } });
+      fireEvent.keyDown(formula, { key: 'Enter' });
+      expect(formula.value).toBe(oversized);
+      fireEvent.keyDown(editor.view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      fireEvent.change(formula, { target: { value: 'Corrected' } });
+      let selected: boolean | undefined;
+      await act(async () => {
+        selected = editor.api().selectCells(0, selectionAt({ row: 0, col: 0 }));
+      });
+      expect(selected).toBe(true);
+      expect(nameBox.value).toBe('A1');
+      expect(formula.value).not.toBe(oversized);
+
+      await act(async () => clipboard.resolve('Pasted'));
+      expect(editor.api().handle.cell(0, 3, 1).input).toBe('Corrected');
+      expect(nameBox.value).toBe('A1');
+      expect(formula.value).not.toBe(oversized);
+      expect(await editor.execute('save', null)).toEqual({ ok: true, status: 'executed' });
     } finally {
       clipboard.restore();
     }
@@ -1891,7 +1937,7 @@ describe('XlsxEditor commands', () => {
     expect(api!.commands).toBe(store);
   });
 
-  it('keeps a failed Enter commit open in the editor', async () => {
+  it('keeps a failed Enter commit open in the editor, also through host selection calls', async () => {
     const editor = await mountCommands();
     const input = editor.typeInCell('Locked');
     const handle = editor.api().handle;
@@ -1899,11 +1945,17 @@ describe('XlsxEditor commands', () => {
     handle.editCell = () => {
       throw new Error('cell is locked');
     };
+    let selected: boolean | undefined;
     try {
       fireEvent.keyDown(input, { key: 'Enter' });
+      await act(async () => {
+        selected = editor.api().selectCells(0, selectionAt({ row: 5, col: 2 }));
+        editor.api().clearSelection();
+      });
     } finally {
       handle.editCell = editCell;
     }
+    expect(selected).toBe(false);
     expect((editor.view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('Locked');
     expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A3');
     fireEvent.keyDown(editor.view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
