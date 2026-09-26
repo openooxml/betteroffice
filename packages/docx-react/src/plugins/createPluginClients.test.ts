@@ -110,6 +110,7 @@ async function setup(
     setState: () => false,
     onCleanup: () => {},
     run: async () => {},
+    commit: (write) => write(),
     refusal: () => state.ended ?? (controller.signal.aborted ? 'aborted' : null),
   };
   const clients = createPluginClients(

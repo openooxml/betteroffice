@@ -167,7 +167,8 @@ export function createPluginClients(
             access.pagedEditorRef,
             access.writeMode,
             request,
-            () => batchDenial(request.history)
+            () => batchDenial(request.history),
+            (write) => invocation.commit(write)
           );
           if (!('flush' in outcome)) return outcome.result;
           return (

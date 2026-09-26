@@ -34,27 +34,19 @@ const PRINT_CANVAS_CSS =
   'img.print-page:last-child { break-after: auto; }\n' +
   '@page { margin: 0; size: auto; }';
 
-// Print once fonts + images have settled, then close. Prints as soon as
-// everything is ready (usually well under the cap) with a hard timeout so a
-// browser that never resolves `fonts.ready`/`decode()` still prints.
-function finishPrint(w: Window, images: HTMLImageElement[] = []): void {
-  let done = false;
-  const runPrint = () => {
-    if (done || w.closed) return;
-    done = true;
-    w.focus();
-    w.print();
-    w.close();
-  };
-  Promise.all([
+// Resolves once fonts + images have settled (usually well under the cap), with
+// a hard timeout so a browser that never resolves `fonts.ready`/`decode()`
+// still prints.
+function settled(w: Window, images: HTMLImageElement[]): Promise<void> {
+  const loaded = Promise.all([
     w.document.fonts?.ready ?? Promise.resolve(),
     ...images.map((img) => img.decode().catch(() => undefined)),
-  ]).then(runPrint, runPrint);
-  setTimeout(runPrint, 2000);
+  ]).then(() => undefined, () => undefined);
+  return Promise.race([loaded, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
 }
 
-/** Prints display-list pages as PNG images without interpolating data into markup. */
-async function printDisplayListPages(
+/** Fills `w` with display-list pages as PNG images without interpolating data into markup. */
+async function renderDisplayListPages(
   w: Window,
   displayList: DisplayList,
   resolveImage: ImageResolver
@@ -75,13 +67,15 @@ async function printDisplayListPages(
       // Skip an unexpectedly tainted page without exposing markup.
     }
   }
-  finishPrint(w, images);
+  await settled(w, images);
 }
 
 /** A print window opened during a user gesture, filled once the document has settled. */
 export interface DocxPrintJob {
-  /** Prints `displayList`; false when the reserved window was closed first. */
-  finish(displayList: DisplayList): Promise<boolean>;
+  /** Renders `displayList` into the reserved window and waits for its pages to load. */
+  prepare(displayList: DisplayList): Promise<void>;
+  /** Prints the prepared pages; false when the reserved window was closed first. */
+  print(): boolean;
   cancel(): void;
 }
 
@@ -171,12 +165,17 @@ export function useFileIO({
   const reservePrint = useCallback((): DocxPrintJob => {
     const w = openPrintWindow('Print', '');
     return {
-      async finish(displayList) {
+      async prepare(displayList) {
+        if (w && !w.closed) await renderDisplayListPages(w, displayList, resolveImage);
+      },
+      print() {
         if (!w) {
           window.print();
         } else {
           if (w.closed) return false;
-          await printDisplayListPages(w, displayList, resolveImage);
+          w.focus();
+          w.print();
+          w.close();
         }
         onPrint?.();
         return true;

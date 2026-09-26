@@ -696,15 +696,20 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         case 'print': {
           const job = current.reservePrint();
           const session = editor?.session() ?? null;
+          const assertCurrent = () => {
+            if (bridge()?.session() !== session) {
+              throw new DocxCommandAdmissionError('document-replaced');
+            }
+          };
           return (async (): Promise<DocxCommandResult> => {
             try {
               if (!editor || !session) throw new DocxCommandAdmissionError('editor-unavailable');
               await editor.runAfterPendingInput(() => undefined);
               const displayList = await latest.current.renderedDisplayList();
-              if (bridge()?.session() !== session) {
-                throw new DocxCommandAdmissionError('document-replaced');
-              }
-              return executed(await job.finish(displayList));
+              assertCurrent();
+              await job.prepare(displayList);
+              assertCurrent();
+              return executed(job.print());
             } catch (error) {
               job.cancel();
               throw error;

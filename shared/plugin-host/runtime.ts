@@ -52,6 +52,11 @@ export interface PluginInvocation<Snapshot extends RuntimeSnapshot> {
   onCleanup(cleanup: (reason: PluginCleanupReason) => MaybePromise<void>): void;
   /** Runs `action` with a fresh invocation; a failure quarantines instead of rejecting. */
   run(action: (invocation: PluginInvocation<Snapshot>) => MaybePromise<void>): Promise<void>;
+  /**
+   * Runs `write`, which commits synchronously through this invocation's clients. The document
+   * changes it notifies are this invocation's own: they never abort or repeat its hook.
+   */
+  commit<T>(write: () => T): T;
   /** Why this invocation may no longer act, or null while it may. */
   refusal(): InvocationRefusal | null;
 }
@@ -157,6 +162,9 @@ function revisionKey(plugin: RuntimePlugin<unknown, unknown>): string {
   return plugin.revision === undefined ? '' : `${typeof plugin.revision}:${plugin.revision}`;
 }
 
+/** How often a load hook runs before changes it did not make count as a failure. */
+const MAX_LOAD_RUNS = 10;
+
 /** Load and document changes share a channel: a newer version supersedes both. */
 function channelOf(event: RuntimeEvent): string {
   return event.type === 'load' ? 'document-change' : event.type;
@@ -202,6 +210,7 @@ export function createPluginRuntime<
   const listeners = new Set<() => void>();
   let epoch = 0;
   let activations = 0;
+  let committing: AbortSignal | null = null;
   let published: readonly Entry[] = [];
   let scheduled = false;
 
@@ -351,6 +360,15 @@ export function createPluginRuntime<
         }
       },
       run: (action) => runAction(activation, action),
+      commit(write) {
+        const outer = committing;
+        committing = signal;
+        try {
+          return write();
+        } finally {
+          committing = outer;
+        }
+      },
       refusal: () => refusalOf(activation, signal),
     };
     return invocation;
@@ -424,7 +442,10 @@ export function createPluginRuntime<
     } else {
       activation.pending.push(event);
     }
-    if (activation.running?.channel === channel) activation.running.controller.abort();
+    const running = activation.running;
+    if (running?.channel === channel && running.controller.signal !== committing) {
+      running.controller.abort();
+    }
     if (activation.status === 'ready') queueMicrotask(() => void pump(activation));
   };
 
@@ -463,8 +484,16 @@ export function createPluginRuntime<
       );
       if (initialized === 'ended') return;
     }
-    let loaded: 'ok' | 'aborted' | 'ended';
-    do {
+    let loaded: 'ok' | 'aborted' | 'ended' = 'aborted';
+    for (let runs = 0; loaded === 'aborted' && activation.status !== 'disposed'; runs += 1) {
+      if (runs === MAX_LOAD_RUNS) {
+        quarantine(
+          activation,
+          'event',
+          new Error(`Document changes superseded the load hook ${MAX_LOAD_RUNS} times`)
+        );
+        return;
+      }
       activation.pending = [];
       loaded = await hook(activation, 'event', 'document-change', (context, invocation) =>
         activation.registration.plugin.onEvent?.(
@@ -472,8 +501,8 @@ export function createPluginRuntime<
           options.loadEvent(invocation.snapshot, reason)
         )
       );
-    } while (loaded === 'aborted' && activation.status !== 'disposed');
-    if (loaded === 'ended' || activation.status === 'disposed') return;
+    }
+    if (loaded !== 'ok' || activation.status === 'disposed') return;
     activation.status = 'ready';
     changed();
     void pump(activation);
