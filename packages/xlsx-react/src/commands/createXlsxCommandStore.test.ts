@@ -268,4 +268,18 @@ describe('xlsx command descriptors', () => {
     expect(commandForEvent(event({ key: 'Z', shiftKey: true, ...mod }))?.id).toBe('redo');
     expect(commandForEvent(event({ key: 'c', ...mod }))).toBeNull();
   });
+
+  test('a chord with an extra modifier invokes nothing', () => {
+    const event = (init: Partial<KeyboardEvent>) =>
+      ({ key: 'b', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...init }) as KeyboardEvent;
+    for (const mac of [false, true]) {
+      const mod = mac ? { metaKey: true } : { ctrlKey: true };
+      expect(matchesChord('Mod+B', event(mod), mac)).toBe(true);
+      expect(matchesChord('Mod+B', event({ ...mod, altKey: true }), mac)).toBe(false);
+      expect(matchesChord('Mod+B', event({ ...mod, shiftKey: true }), mac)).toBe(false);
+      expect(matchesChord('Mod+B', event({ ctrlKey: true, metaKey: true }), mac)).toBe(false);
+    }
+    expect(commandForEvent(event({ ctrlKey: true, metaKey: true }))).toBeNull();
+    expect(commandForEvent(event({ key: 's', ctrlKey: true, metaKey: true }))).toBeNull();
+  });
 });

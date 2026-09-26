@@ -142,8 +142,10 @@ import {
 - Every cell write goes through one queue. `api.selectCells`, `api.clearSelection`
   and switching sheets close the open entry and write it at once when nothing
   waits; otherwise it is queued behind the earlier input, so it may not have
-  landed when they return. Commands run right after them, even in the same
-  handler, act on the new selection and sheet.
+  landed when they return. An open entry the workbook refuses stays open and
+  they change nothing (`selectCells` returns `false`); one it refused earlier
+  reopens at its own cell once they land on its sheet. Commands run right
+  after them, even in the same handler, act on the new selection and sheet.
 - The store enforces read-only mode, the selection a command needs and its
   arguments for the editor's UI. `api.handle` stays unrestricted host
   authority, and the store is not workbook protection.

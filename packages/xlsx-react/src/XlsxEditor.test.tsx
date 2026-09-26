@@ -1355,7 +1355,7 @@ describe('XlsxEditor commands', () => {
 
   const oversized = 'x'.repeat(32_768);
 
-  it('blocks every command while a rejected entry waits for correction on its own cell', async () => {
+  const blocksUntilCorrected = async (leave: 'Enter' | 'clearSelection') => {
     const clipboard = holdClipboard();
     try {
       const editor = await mountCommands();
@@ -1381,7 +1381,8 @@ describe('XlsxEditor commands', () => {
       expect(editor.saves).toHaveLength(0);
       expect(() => editor.api().save()).toThrow(XlsxSaveRefusedError);
 
-      fireEvent.keyDown(formula, { key: 'Enter' });
+      if (leave === 'Enter') fireEvent.keyDown(formula, { key: 'Enter' });
+      else await act(async () => editor.api().clearSelection());
       expect(editor.api().handle.cell(0, 5, 2).input).toBe('Newer');
       await waitFor(() => expect(formula.value).toBe(oversized));
       expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
@@ -1402,7 +1403,13 @@ describe('XlsxEditor commands', () => {
     } finally {
       clipboard.restore();
     }
-  });
+  };
+
+  it('blocks every command while a rejected entry waits for correction on its own cell', () =>
+    blocksUntilCorrected('Enter'));
+
+  it('reopens a rejected entry at its own cell when a host clears the selection', () =>
+    blocksUntilCorrected('clearSelection'));
 
   it('refuses a synchronous save while accepted input waits, and saves it through the command', async () => {
     const clipboard = holdClipboard();
@@ -1640,7 +1647,7 @@ describe('XlsxEditor commands', () => {
     }
   });
 
-  it('keeps a rejected entry on its own sheet and lets Escape discard it', async () => {
+  const keepsRejectedOnItsSheet = async (back: 'tab' | 'selectCells') => {
     const source = openWorkbook(plain.bytes.slice());
     source.applyOps([{ type: 'addSheet', index: 1, name: 'Second' }]);
     const file = source.save();
@@ -1673,7 +1680,8 @@ describe('XlsxEditor commands', () => {
       expect(editor.api().handle.cell(0, 3, 1).input).not.toBe(oversized);
 
       await act(async () => {
-        fireEvent.click(editor.view.getAllByRole('tab')[0]);
+        if (back === 'tab') fireEvent.click(editor.view.getAllByRole('tab')[0]);
+        else editor.api().selectCells(0, selectionAt({ row: 0, col: 0 }));
       });
       await waitFor(() => expect(formula.value).toBe(oversized));
       expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
@@ -1689,7 +1697,13 @@ describe('XlsxEditor commands', () => {
     } finally {
       clipboard.restore();
     }
-  });
+  };
+
+  it('keeps a rejected entry on its own sheet and lets Escape discard it', () =>
+    keepsRejectedOnItsSheet('tab'));
+
+  it('reopens a rejected entry at its own cell when a host selects its sheet', () =>
+    keepsRejectedOnItsSheet('selectCells'));
 
   it('prints a replacement workbook only after it painted', async () => {
     let paints = 0;
@@ -1884,7 +1898,7 @@ describe('XlsxEditor commands', () => {
     expect(api!.commands).toBe(store);
   });
 
-  it('keeps a failed Enter commit open in the editor', async () => {
+  it('keeps a failed Enter commit open in the editor, also through host selection calls', async () => {
     const editor = await mountCommands();
     const input = editor.typeInCell('Locked');
     const handle = editor.api().handle;
@@ -1892,11 +1906,17 @@ describe('XlsxEditor commands', () => {
     handle.editCell = () => {
       throw new Error('cell is locked');
     };
+    let selected: boolean | undefined;
     try {
       fireEvent.keyDown(input, { key: 'Enter' });
+      await act(async () => {
+        selected = editor.api().selectCells(0, selectionAt({ row: 5, col: 2 }));
+        editor.api().clearSelection();
+      });
     } finally {
       handle.editCell = editCell;
     }
+    expect(selected).toBe(false);
     expect((editor.view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('Locked');
     expect((editor.view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A3');
     fireEvent.keyDown(editor.view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });

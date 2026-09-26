@@ -131,7 +131,9 @@ states why in `disabledReason`. The synchronous `api.save()` throws
 `XlsxSaveRefusedError` (`input-pending` or `input-failed`) instead of returning
 bytes without accepted input; `execute("save", null)` waits for it and saves.
 `selectCells` and `clearSelection` queue an open entry behind input that is
-still waiting, so it may not have landed when they return.
+still waiting, so it may not have landed when they return. An open entry the
+workbook refuses stays open and they change nothing; one it refused earlier
+reopens at its own cell once they land on its sheet.
 The store gates the editor's own UI, not direct
 `api.handle` calls. Existing prop-based `EditorToolbar` and `Toolbar` usage keeps
 working in the default legacy mode; `mode="commands"` rejects those props. Narrow

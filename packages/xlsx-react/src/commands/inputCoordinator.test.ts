@@ -209,7 +209,7 @@ describe('input coordinator', () => {
     expect(log).toEqual(['paste', 'refused first', 'write second', 'seal', 'save']);
   });
 
-  test('never shows a rejected draft outside its sheet, and a rejected live draft only closes', async () => {
+  test('never shows a rejected draft outside its sheet, and keeps a live one open until written', async () => {
     const { coordinator, log, state, draft, hold } = harness();
     state.sheet = 1;
     const release = hold();
@@ -223,11 +223,19 @@ describe('input coordinator', () => {
     expect(coordinator.rejected).toEqual([onFirstSheet]);
     expect(log).toEqual(['paste', 'refused oversized', 'restore oversized']);
 
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(coordinator.pending).toBe(false);
     coordinator.setDraft(onFirstSheet);
+    expect(coordinator.settle()).toBe(false);
+    expect(coordinator.draft).toBe(onFirstSheet);
+    expect(coordinator.rejected).toEqual([onFirstSheet]);
+    expect(log).not.toContain('close oversized');
+
+    state.accept = true;
     expect(coordinator.settle()).toBe(true);
     expect(coordinator.draft).toBeNull();
-    expect(coordinator.rejected).toEqual([onFirstSheet]);
-    expect(log[log.length - 1]).toBe('close oversized');
+    expect(coordinator.rejected).toEqual([]);
+    expect(log.slice(-2)).toEqual(['write oversized', 'close oversized']);
   });
 
   test('keeps a composed draft ahead of the command even when Enter commits it first', async () => {

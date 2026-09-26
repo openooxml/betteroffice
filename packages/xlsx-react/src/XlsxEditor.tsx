@@ -90,7 +90,9 @@ import { ProposalsPanel } from './proposals/ProposalsPanel';
 export interface XlsxEditorApi {
   /**
    * Closes the open cell entry and clears the selection. The entry is written
-   * at once, or queued behind input still waiting to be written.
+   * at once, or queued behind input still waiting to be written. An entry the
+   * workbook refuses stays open, and nothing changes; one it refused earlier
+   * on this sheet reopens at its own cell.
    */
   clearSelection: () => void;
   /**
@@ -113,7 +115,9 @@ export interface XlsxEditorApi {
    * Scrolls the focus cell into view. Commands run after it, even in the same
    * handler, act on this selection and sheet. The open cell entry is written
    * first, or queued behind input still waiting to be written, so it may not
-   * have landed when this returns.
+   * have landed when this returns. False, changing nothing, for an invalid
+   * target or an open entry the workbook refuses; an entry it refused earlier
+   * on `sheet` reopens at its own cell.
    */
   selectCells: (sheet: number, selection: Selection) => boolean;
 }
@@ -193,7 +197,6 @@ const CHART_NUDGE_PX = 1;
 const CHART_NUDGE_MULTIPLIER = 10;
 // how long a run of arrow presses may stay local before it lands as one edit.
 const CHART_NUDGE_SETTLE_MS = 250;
-// how long print waits for the canvas to show the latest change before failing.
 const PAINT_SETTLE_MS = 1000;
 const CHART_NUDGE_KEYS: Record<string, [number, number] | undefined> = {
   ArrowLeft: [-1, 0],
@@ -485,7 +488,6 @@ function XlsxEditorContent({
     settle: (ended: boolean) => void;
   } | null>(null);
   const suppressFormulaBlurRef = useRef(false);
-  // what the canvas last painted: the document, its changes and the view.
   const paintMarkRef = useRef<PaintMark | null>(null);
   const paintWaitersRef = useRef<{ mark: PaintMark; resolve: (painted: boolean) => void }[]>([]);
   // latest onReady, read (not depended on) by the open effect so a changing
@@ -521,7 +523,6 @@ function XlsxEditorContent({
   // logical-px preview of an arrow burst that has not landed yet.
   const [nudgeOffset, setNudgeOffset] = useState<{ x: number; y: number } | null>(null);
   const [visibleMergedRanges, setVisibleMergedRanges] = useState<readonly MergedRange[]>([]);
-  // the border style and color the next border preset applies.
   const borderStyleChoiceRef = useRef<BorderStyle | undefined>(undefined);
   const borderColorChoiceRef = useRef<string | undefined>(undefined);
   const [capturedFormat, setCapturedFormat, capturedFormatRef] =
@@ -559,15 +560,12 @@ function XlsxEditorContent({
     []
   );
 
-  // puts a draft back into its own input at its own cell.
   const showDraft = useCallback((draft: InputDraft) => {
     setSelection(selectionAt({ row: draft.row, col: draft.col }));
     if (draft.source === 'cell') setEditing({ row: draft.row, col: draft.col, value: draft.value });
     else setFormulaDraft(draft.value);
   }, []);
 
-  // a rejected draft waits for correction on its own sheet, once no other
-  // draft is open there.
   const showRejected = useCallback(
     (sheet: number) => {
       if (coordinator.draft) return;
@@ -594,8 +592,17 @@ function XlsxEditorContent({
     dropDrafts();
     setCapturedFormat(null);
     paintSourceRef.current = null;
+    showRejected(activeSheetRef.current);
     commandController.refresh();
-  }, [dropDrafts, commandController, setSelection, setSelectedChart, setCapturedFormat]);
+  }, [
+    dropDrafts,
+    showRejected,
+    activeSheetRef,
+    commandController,
+    setSelection,
+    setSelectedChart,
+    setCapturedFormat,
+  ]);
 
   const selectCells = useCallback(
     (sheet: number, nextSelection: Selection): boolean => {
@@ -621,6 +628,7 @@ function XlsxEditorContent({
         dropDrafts();
         setCapturedFormat(null);
         paintSourceRef.current = null;
+        showRejected(sheet);
         requestAnimationFrame(() => {
           const scroll = scrollRef.current;
           if (!scroll) return;
@@ -1186,7 +1194,7 @@ function XlsxEditorContent({
   }, [frame, selectedChart]);
 
   // slide a chart through the engine's edit path, so the new anchor is
-  // undoable and reaches the drawing part on save. it lands in input order.
+  // undoable and reaches the drawing part on save.
   const moveChartBy = useCallback(
     (id: string, dx: number, dy: number) => {
       const handle = handleRef.current;

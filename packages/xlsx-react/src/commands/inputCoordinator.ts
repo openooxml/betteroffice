@@ -50,8 +50,8 @@ export interface InputCoordinator {
   discard(draft: InputDraft): void;
   /**
    * Closes the live draft for a synchronous host call: it is written now when
-   * nothing is queued, else queued behind that input. False when it was written
-   * at once and refused for the first time.
+   * nothing is queued, else queued behind that input. False, leaving it open,
+   * when it was written at once and refused.
    */
   settle(): boolean;
   /** Runs `operation` once the input accepted before this call is written. */
@@ -223,11 +223,7 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
         queueWrite(current);
         return true;
       }
-      const known = rejected.some((entry) => sameCell(entry, current));
-      if (!writeOnce(current)) {
-        if (!known) return false;
-        reject(current);
-      }
+      if (!writeOnce(current)) return false;
       if (draft === current) {
         draft = null;
         hooks.close(current);
