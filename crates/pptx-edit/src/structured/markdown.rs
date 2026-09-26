@@ -763,6 +763,21 @@ fn line_start(text: String) -> String {
     text
 }
 
+/// Escaped `text` at the start of a line, its leading spaces and tabs kept as no-break spaces,
+/// which cannot indent a code block, and what follows escaped against opening a block.
+fn indented_line_start(text: &str) -> String {
+    let rest = text.trim_start_matches([' ', '\t']);
+    let mut output = String::with_capacity(text.len() + 8);
+    for ch in text[..text.len() - rest.len()].chars() {
+        output.push_str(if ch == '\t' {
+            "\u{a0}\u{a0}\u{a0}\u{a0}"
+        } else {
+            "\u{a0}"
+        });
+    }
+    output + &line_start(rest.to_owned())
+}
+
 fn is_ordered_marker(marker: &str) -> bool {
     let digits = marker.chars().take_while(char::is_ascii_digit).count();
     (1..=9).contains(&digits) && digits + 1 == marker.len() && marker.ends_with(['.', ')'])
@@ -1312,7 +1327,7 @@ impl Renderer {
                     if line.trim().is_empty() {
                         ">".to_owned()
                     } else {
-                        format!("> {}", line_start(escape(line.trim_start())))
+                        format!("> {}", indented_line_start(&escape(line)))
                     }
                 })
                 .collect::<Vec<_>>()
@@ -1353,7 +1368,7 @@ impl Renderer {
                 .collect::<Vec<_>>()
                 .join("<br>");
             let line = if attribution.is_empty() {
-                line_start(text.trim_start().to_owned())
+                indented_line_start(&text)
             } else {
                 format!("{}: {text}", attribution.join(" "))
             };

@@ -1614,27 +1614,26 @@ fn caller_content_renders_without_overflow_or_block_syntax() {
         json!({"includeNotes": true, "includeComments": true}),
     );
     content.slides[0].index = u32::MAX;
-    let text = "# Heading\n- item\n1. one\n    code\n===";
-    let range = pptx_edit::structured::TextSpan {
+    let span = |text: &str| pptx_edit::structured::TextSpan {
         start: 0,
         end: text.encode_utf16().count() as u32,
     };
     let notes = content.slides[0].notes.as_mut().unwrap();
-    notes.text = text.to_owned();
+    notes.text = "# Heading\n- item\n1. one\n    code\n\t- nested\n  # indented\n===".to_owned();
     if let PptxAnchor::Notes {
         range: anchored, ..
     } = &mut notes.anchor
     {
-        *anchored = range;
+        *anchored = span(&notes.text);
     }
     let comment = &mut content.slides[0].comments[0];
     (comment.author, comment.date) = (None, None);
-    comment.text = text.to_owned();
+    comment.text = "  # Heading\n- item".to_owned();
     if let PptxAnchor::Comment {
         range: anchored, ..
     } = &mut comment.anchor
     {
-        *anchored = range;
+        *anchored = span(&comment.text);
     }
     let markdown = render_pptx_markdown(&content, &PptxMarkdownOptions::default())
         .unwrap()
@@ -1644,7 +1643,9 @@ fn caller_content_renders_without_overflow_or_block_syntax() {
         r"> \# Heading",
         r"> \- item",
         r"> 1\. one",
-        "> code",
+        "> \u{a0}\u{a0}\u{a0}\u{a0}code",
+        "> \u{a0}\u{a0}\u{a0}\u{a0}\\- nested",
+        "> \u{a0}\u{a0}\\# indented",
         r"> \===",
     ] {
         assert!(
@@ -1652,7 +1653,10 @@ fn caller_content_renders_without_overflow_or_block_syntax() {
             "{line}: {markdown}"
         );
     }
-    assert!(markdown.contains(r"- \# Heading<br>- item"), "{markdown}");
+    assert!(
+        markdown.contains("- \u{a0}\u{a0}\\# Heading<br>- item"),
+        "{markdown}"
+    );
 }
 
 #[test]
