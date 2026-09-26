@@ -188,6 +188,11 @@ Auto preserves the existing policy (500 ms capture on native targets, separate
 transactions in the browser). Remote and agent origins remain outside local
 undo. These controls group history; they do not make edits atomic.
 
+`handle.anchorCaret(storyId, index)` returns a caret anchor, plain data that
+later edits, undo, redo and remote updates carry along with the text;
+`handle.resolveCaretAnchor(anchor)` returns its current UTF-16 offset, or `null`
+once the story is gone.
+
 `handle.setCommentPosition(commentId, { xEmu, yEmu })` moves an existing root
 comment on its current slide, preserving identity, author, text, replies, and
 resolution state through collaboration, undo/redo, and export. Coordinates must
