@@ -95,8 +95,8 @@ changes. Versions belong to one session and change with every committed edit.
 The React editor exposes the same `readParagraphs`, `findText`, `validateEdits`
 and `applyEdits` on its ref, flushing pending input first. Paragraph and style
 steps need a session opened from DOCX bytes, inline atoms cannot be replaced, and
-list numbering is a v1 limitation: numbered paragraphs and styles that define
-numbering refuse with `unsupported` until a follow-up retains numbering
+list numbering is a v1 limitation: numbered paragraphs and styles that define or
+inherit numbering refuse with `unsupported` until a follow-up retains numbering
 definitions.
 
 ## Edit XLSX in version-checked batches
