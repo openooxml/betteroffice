@@ -36,9 +36,14 @@ export interface PptxCommandOrigin {
 export interface PptxDeferredCommand {
   /**
    * Runs `write` after input accepted before this call, once the command's gate
-   * passes again and the document the action opened for is current.
+   * passes again and the document the action opened for is current. `perform` runs the
+   * command itself, so `write` can first check what the action showed is still current.
    */
-  complete(write: () => PptxCommandResult | Promise<PptxCommandResult>): Promise<PptxCommandResult>;
+  complete(
+    write: (
+      perform: () => PptxCommandResult | Promise<PptxCommandResult>
+    ) => PptxCommandResult | Promise<PptxCommandResult>
+  ): Promise<PptxCommandResult>;
 }
 
 /** Editor-owned implementation behind a command store. */
@@ -295,7 +300,12 @@ export function createPptxCommandController(): PptxCommandController {
     },
     defer(id, args) {
       const origin = capture(id);
-      return { complete: (write) => run(id, args, () => write(), { origin }) };
+      return {
+        complete: (write) => {
+          const current = binding;
+          return run(id, args, (env) => write(() => current!.perform(id, args, env)), { origin });
+        },
+      };
     },
     prepare(id) {
       const origin = capture(id);

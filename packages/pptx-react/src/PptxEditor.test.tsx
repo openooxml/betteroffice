@@ -8,6 +8,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { useState } from 'react';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
 import type { PptxFontFace, PptxPresenceCursor, SlideDisplayList } from '@betteroffice/pptx';
@@ -994,6 +995,66 @@ describe('PptxEditor commands', () => {
     const file = new File([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], 'queued.png', { type: 'image/png' });
     fireEvent.change(view.getByTestId('pptx-insert-image-input'), { target: { files: [file] } });
   }
+
+  it('follows a presentation the host replaces from onReady', async () => {
+    const opened: PptxEditorApi[] = [];
+    const errors: Error[] = [];
+    const fonts = faces();
+    function Host() {
+      const [file, setFile] = useState(fixture);
+      return (
+        <PptxEditor
+          file={file}
+          fonts={fonts}
+          onError={(error) => errors.push(error)}
+          onReady={(api) => {
+            if (opened.push(api) === 1) setFile(new Uint8Array(fixture));
+          }}
+        />
+      );
+    }
+    render(<Host />);
+    await waitFor(() => expect(opened).toHaveLength(2), { timeout: 15_000 });
+    const api = opened[1];
+    expect(api.commands.getState('undo').enabled).toBe(false);
+    const slideId = api.handle.snapshot().slides[0].id;
+    await act(async () => {
+      api.handle.setSlideNotes(slideId, 'After replacement');
+    });
+    await waitFor(() => expect(api.commands.getState('undo').enabled).toBe(true));
+    expect(errors).toEqual([]);
+  }, 30_000);
+
+  it('forced acceptance checks the reviewed preview again once pending input has run', async () => {
+    const images = pauseImages();
+    try {
+      const { view, api } = await open();
+      const handle = api.handle;
+      const slideId = handle.snapshot().slides[0].id;
+      await act(async () => {
+        handle.propose('Review agent', null, [{ type: 'setSlideNotes', slideId, text: 'Proposed notes' }]);
+        handle.setSlideNotes(slideId, 'Human notes');
+        api.refresh();
+      });
+      fireEvent.click(view.getByTestId('pptx-proposals-button'));
+      chooseImage(view);
+      await waitFor(() => expect(images.pending).toHaveLength(1));
+      fireEvent.click(view.getByTestId('pptx-proposal-preview'));
+      await waitFor(() => expect(view.getByTestId('pptx-proposal-force')).toBeDefined());
+      fireEvent.click(view.getByTestId('pptx-proposal-force'));
+      handle.setSlideNotes(slideId, 'Newer human notes');
+      await act(async () => images.pending[0].load());
+      await waitFor(() =>
+        expect(view.getByTestId('pptx-proposal-preview-dialog').textContent).toContain('Newer human notes')
+      );
+      expect(handle.snapshot().slides[0].notes).toBe('Newer human notes');
+      expect(handle.listProposals()).toHaveLength(1);
+      fireEvent.click(view.getByTestId('pptx-proposal-force'));
+      await waitFor(() => expect(handle.snapshot().slides[0].notes).toBe('Proposed notes'));
+    } finally {
+      images.restore();
+    }
+  }, 30_000);
 
   it('formats through api.commands and the platform-aware shortcuts', async () => {
     const { view, api, shape, story } = await open();

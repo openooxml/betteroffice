@@ -84,6 +84,7 @@ export interface PptxCommandActions {
 
 /** Everything the command binding reads from the editor, refreshed every render. */
 export interface PptxCommandInputs {
+  /** The presentation this render shows; observed only while it is still the open one. */
   handle: PresentationHandle | null;
   handleRef: RefObject<PresentationHandle | null>;
   modelRef: RefObject<{
@@ -533,9 +534,9 @@ export function usePptxCommandBinding(
     controller.refresh();
   }, inputs.stamp);
 
-  const { handle } = inputs;
+  const { handle, handleRef } = inputs;
   useEffect(() => {
-    if (!handle) return;
+    if (!handle || handleRef.current !== handle) return;
     let scheduled = false;
     return handle.onUpdate(() => {
       if (scheduled) return;
@@ -545,7 +546,7 @@ export function usePptxCommandBinding(
         controller.refresh();
       });
     });
-  }, [handle, controller]);
+  }, [handle, handleRef, controller]);
 
   return useCallback(
     <K extends PptxCommandId>(id: K, args?: PptxCommandArgs[K]) =>

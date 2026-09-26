@@ -10,6 +10,8 @@ import type {
   ProposalPreview,
   SlideDisplayList,
 } from '@betteroffice/pptx';
+import { pptxCommandController } from '../commands/createPptxCommandStore';
+import { commandReason } from '../commands/evaluate';
 import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
 import { useTranslation } from '../i18n';
 import { useDisabledDescription } from './ui/ToolbarPrimitives';
@@ -139,31 +141,47 @@ export function ProposalsPanel({
     setSelected({ id: proposal.id, index });
   };
 
-  const acceptPreview = (force: boolean) => {
-    if (!selected || !preview) return;
+  /** Whether `reviewed` still shows the proposal; otherwise shows its latest preview. */
+  const stillReviewed = (id: string, at: number, reviewed: ProposalPreview) => {
     try {
-      const latest = handle.previewProposal(selected.id);
+      const latest = handle.previewProposal(id);
       if (
-        JSON.stringify(latest.proposal.changes) !==
-        JSON.stringify(preview.data.proposal.changes)
+        JSON.stringify(latest.proposal.changes) ===
+        JSON.stringify(reviewed.proposal.changes)
       ) {
-        const change = latest.proposal.changes[selected.index];
-        const index = latest.snapshot.slides.findIndex(
-          (slide) => slide.id === change.slideId
-        );
-        setPreview({
-          data: latest,
-          before: handle.layoutSlide(index),
-          after: handle.layoutProposalSlide(selected.id, index),
-        });
-        setError(t('proposals.changedAgain'));
-        return;
+        return true;
       }
-      void store.execute('proposalAccept', { proposalId: selected.id, force });
+      const change = latest.proposal.changes[at];
+      const index = latest.snapshot.slides.findIndex(
+        (slide) => slide.id === change.slideId
+      );
+      setPreview({
+        data: latest,
+        before: handle.layoutSlide(index),
+        after: handle.layoutProposalSlide(id, index),
+      });
+      setError(t('proposals.changedAgain'));
     } catch (value) {
       setPreview(null);
       setError(value instanceof Error ? value.message : String(value));
     }
+    return false;
+  };
+
+  const acceptPreview = (force: boolean) => {
+    if (!selected || !preview) return;
+    const { id, index } = selected;
+    const reviewed = preview.data;
+    if (!stillReviewed(id, index, reviewed)) return;
+    const accept = pptxCommandController(store)?.defer('proposalAccept', {
+      proposalId: id,
+      force,
+    });
+    void accept?.complete((perform) =>
+      stillReviewed(id, index, reviewed)
+        ? perform()
+        : { ok: false, failure: commandReason('target-changed', { translate: t }) }
+    );
   };
 
   return (
