@@ -99,6 +99,45 @@ list numbering is a v1 limitation: numbered paragraphs and styles that define
 numbering refuse with `unsupported` until a follow-up retains numbering
 definitions.
 
+## Edit PPTX in version-checked batches
+
+A presentation handle reads slides and story text with the version they were
+read at, then applies a batch against that version: every step commits in one
+transaction and one undo step, or the batch returns a typed refusal and nothing
+changes.
+
+```ts
+import { initWasm, openPresentation } from "@betteroffice/pptx";
+
+await initWasm();
+const deck = openPresentation(bytes);
+const read = deck.readContent();
+if (!read.ok) throw new Error(read.failure.message);
+const story = read.stories[0];
+const within = { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId };
+
+const result = deck.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: "replaceText", target: { kind: "search", within, text: "Q3" }, text: "Q4" },
+    { op: "setSlideNotes", target: { slideId: story.slideId }, text: "Updated for Q4" },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code);
+
+const saved = deck.save();
+```
+
+A story reads as its paragraphs joined by `\n`, with story-local UTF-16 offsets;
+the read reports each paragraph's span, soft line breaks and field results.
+Steps insert, replace and delete text within one paragraph, format and align
+text, replace speaker notes, and set a top-level shape's rectangle, fill or
+outline. Fields and soft line breaks are never replaced or deleted. Ids and
+versions belong to one open session. `PptxEditor` exposes the same
+`readContent`, `findText`, `validateEdits` and `applyEdits` on its editor API,
+flushing pending input first. The Rust `Presentation` and the Python binding
+take the same requests.
+
 ## Operation profiles
 
 XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
@@ -119,8 +158,8 @@ interaction separately when investigating input-to-paint latency.
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
-| `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
-| `@betteroffice/pptx-react` | The slides editor and viewer as a React component. |
+| `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, version-checked atomic edit batches, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
+| `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with flushed version-checked edit batches on its editor API. |
 | `@betteroffice/pptx-i18n` | UI locale strings and types for the PPTX React editor. |
 
 See [Collaboration](./collaboration) to connect editors through a shared relay.
