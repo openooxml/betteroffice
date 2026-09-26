@@ -31,6 +31,7 @@ use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
     StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
 };
+use crate::move_range::move_range_ops;
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
@@ -39,7 +40,7 @@ use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
     ProposalRequest, Result, SelectionFormatting, SheetInfo, TextSearchMatch, UpdateEvent,
-    UpdateOrigin,
+    UpdateOrigin, WorkbookCellInput, WorkbookFormatInput,
 };
 #[cfg(feature = "raster")]
 use crate::{RenderOptions, RenderedPng};
@@ -1287,6 +1288,94 @@ impl Workbook {
             options.now_serial,
         );
         Ok(self.mutation_result(true, result, &seeds))
+    }
+
+    /// Applies raw cell inputs and captured formats across worksheets in one transaction.
+    pub fn edit_workbook_cells(
+        &mut self,
+        edits: &[WorkbookCellInput],
+        formats: &[WorkbookFormatInput],
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        if edits.is_empty() && formats.is_empty() {
+            return Ok(MutationResult::default());
+        }
+        let mut preview = self.model.clone();
+        let mut ops = Vec::with_capacity(edits.len() + formats.len());
+        for edit in edits {
+            self.validate_target(edit.sheet, edit.cell)?;
+            let state = edit_cell_state(&preview, edit.sheet, edit.cell, &edit.input);
+            validate_cell_state(&state)?;
+            if cell_states_semantically_equal(
+                &current_cell_state(&preview, edit.sheet, edit.cell),
+                &state,
+            ) {
+                continue;
+            }
+            preview
+                .sheet_mut(edit.sheet)
+                .expect("sheet validated")
+                .set_cell(edit.cell, state.clone().into());
+            ops.push(Op::SetCell {
+                sheet: edit.sheet,
+                at: edit.cell,
+                cell: state,
+            });
+        }
+        for item in formats {
+            self.validate_bounded_range(item.sheet, item.range)?;
+            ops.push(Op::ApplyRangeFormat {
+                sheet: item.sheet,
+                range: item.range,
+                format: item.format.clone(),
+            });
+        }
+        self.apply_ops(ops, options)
+    }
+
+    /// Moves a bounded range within one worksheet in one undoable transaction.
+    /// Formulas that refer to the moved cells follow them; partially moved
+    /// ranges and package features that cannot be rewritten are refused.
+    pub fn move_range(
+        &mut self,
+        sheet: SheetId,
+        source: CellRange,
+        destination: CellRef,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        let (rows, cols) = self.validate_bounded_range(sheet, source)?;
+        self.validate_target(sheet, destination)?;
+        let end_row = destination
+            .row
+            .checked_add(rows as u32 - 1)
+            .ok_or(Error::CellOutOfRange(destination))?;
+        let end_col = destination
+            .col
+            .checked_add(cols as u32 - 1)
+            .ok_or(Error::CellOutOfRange(destination))?;
+        let target = CellRange::new(destination, CellRef::new(end_row, end_col));
+        self.validate_bounded_range(sheet, target)?;
+        if source.start.row == destination.row && source.start.col == destination.col {
+            return Ok(MutationResult::default());
+        }
+        if let Some(package) = self.source_package.as_ref() {
+            if let Some(part) = package.range_move_unsupported_part() {
+                return Err(Error::InvalidOperation(format!(
+                    "{part} contains worksheet features a cell move cannot safely preserve"
+                )));
+            }
+            let name = &self.sheet(sheet)?.name;
+            let stranded = package
+                .reference_moved_by_rows(name, source.start.row)
+                .or_else(|| package.reference_moved_by_cols(name, source.start.col));
+            if let Some(part) = stranded {
+                return Err(Error::InvalidOperation(format!(
+                    "{part} references cells this move would relocate, and it cannot be rewritten"
+                )));
+            }
+        }
+        let ops = move_range_ops(&self.model, sheet, source, target)?;
+        self.apply_ops(ops, options)
     }
 
     pub fn apply_ops(

@@ -4,7 +4,8 @@ use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
     CellRef, EditProfile, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
-    UpdateEvent, UpdateSubscription, Viewport, Workbook,
+    UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookCellInput as CrossSheetCellInput,
+    WorkbookFormatInput,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,10 +42,38 @@ struct EditBatchArgs {
 }
 
 #[derive(Deserialize)]
+struct MoveRangeArgs {
+    sheet: u32,
+    source: String,
+    destination: String,
+}
+
+#[derive(Deserialize)]
 struct CellEditInput {
     row: u32,
     col: u32,
     input: String,
+}
+
+#[derive(Deserialize)]
+struct WorkbookEditArgs {
+    edits: Vec<WorkbookCellEditInput>,
+    formats: Vec<WorkbookFormatEditInput>,
+}
+
+#[derive(Deserialize)]
+struct WorkbookCellEditInput {
+    sheet: u32,
+    row: u32,
+    col: u32,
+    input: String,
+}
+
+#[derive(Deserialize)]
+struct WorkbookFormatEditInput {
+    sheet: u32,
+    range: String,
+    format: CapturedFormat,
 }
 
 #[derive(Deserialize)]
@@ -480,6 +509,62 @@ impl Session {
         let result = self
             .workbook
             .edit_cells(SheetId(args.sheet), &edits, calculation_options(now_serial))
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn edit_workbook_cells_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: WorkbookEditArgs = serde_json::from_str(args)
+            .map_err(|error| format!("bad workbook edit args: {error}"))?;
+        let edits = args
+            .edits
+            .into_iter()
+            .map(|edit| CrossSheetCellInput {
+                sheet: SheetId(edit.sheet),
+                cell: CellRef::new(edit.row, edit.col),
+                input: edit.input,
+            })
+            .collect::<Vec<_>>();
+        let formats = args
+            .formats
+            .into_iter()
+            .map(|item| {
+                Ok(WorkbookFormatInput {
+                    sheet: SheetId(item.sheet),
+                    range: parse_range(&item.range)?,
+                    format: item.format,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let result = self
+            .workbook
+            .edit_workbook_cells(&edits, &formats, calculation_options(now_serial))
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn move_range_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: MoveRangeArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad move range args: {error}"))?;
+        let source = parse_range(&args.source)?;
+        let destination = CellRef::parse_a1(&args.destination)
+            .map_err(|error| format!("bad move destination: {error}"))?;
+        let result = self
+            .workbook
+            .move_range(
+                SheetId(args.sheet),
+                source,
+                destination,
+                calculation_options(now_serial),
+            )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }
@@ -1005,6 +1090,99 @@ mod tests {
                 .cell_json(r#"{"sheet":0,"row":2,"col":0}"#)
                 .unwrap()
                 .contains(r#""isFormula":true"#)
+        );
+    }
+
+    #[test]
+    fn move_range_json_commits_one_formula_aware_edit() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":40,"col":0,"input":"19"}"#, None)
+            .unwrap();
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":40,"col":1,"input":"=A41*2"}"#, None)
+            .unwrap();
+        let before = session.workbook.history_state().undo_depth;
+        let result = session
+            .move_range_json(
+                r#"{"sheet":0,"source":"A41:B41","destination":"D43"}"#,
+                None,
+            )
+            .unwrap();
+        assert!(result.contains(r#""applied":true"#));
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(42, 4))
+                .unwrap()
+                .input,
+            "=D43*2"
+        );
+        assert!(
+            session
+                .move_range_json(
+                    r#"{"sheet":0,"source":"D43:E43","destination":"XFE1"}"#,
+                    None,
+                )
+                .is_err()
+        );
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+    }
+
+    #[test]
+    fn workbook_edit_json_batches_cross_sheet_inputs_and_format() {
+        let mut source = Session::open(&sample_xlsx(), None).unwrap();
+        source
+            .patch_range_style_json(r#"{"sheet":0,"range":"A1","patch":{"bold":true}}"#, None)
+            .unwrap();
+        let mut session = Session::open(&source.save().unwrap(), None).unwrap();
+        let captured: serde_json::Value = serde_json::from_str(
+            &session
+                .capture_format_json(r#"{"sheet":0,"range":"A1"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        let request = serde_json::json!({
+            "edits":[
+                {"sheet":0,"row":2,"col":0,"input":"=A1*2"},
+                {"sheet":1,"row":0,"col":0,"input":"7"}
+            ],
+            "formats":[{"sheet":1,"range":"A1","format":captured}]
+        });
+        session
+            .edit_workbook_cells_json(&request.to_string(), None)
+            .unwrap();
+        assert!(
+            session
+                .cell_json(r#"{"sheet":0,"row":2,"col":0}"#)
+                .unwrap()
+                .contains("=A1*2")
+        );
+        assert!(
+            session
+                .selection_formatting_json(r#"{"sheet":1,"range":"A1"}"#)
+                .unwrap()
+                .contains(r#""bold":true"#)
+        );
+        assert!(
+            session
+                .history_state_json()
+                .unwrap()
+                .contains(r#""undoDepth":1"#)
+        );
+        session.undo_json(None).unwrap();
+        assert!(
+            session
+                .cell_json(r#"{"sheet":0,"row":2,"col":0}"#)
+                .unwrap()
+                .contains(r#""input":"""#)
+        );
+        assert!(
+            session
+                .selection_formatting_json(r#"{"sheet":1,"range":"A1"}"#)
+                .unwrap()
+                .contains(r#""bold":false"#)
         );
     }
 
