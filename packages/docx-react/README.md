@@ -234,8 +234,8 @@ editor's locale, and its keyboard shortcuts reach that editor only.
   widths trailing groups move into a More menu with arrow, Home/End, typeahead
   and submenu navigation, keeping every choice of the built-in controls; custom
   colors and sizes are asked for in a dialog. Wrap host content in
-  `ToolbarOverflow` to give it a menu entry; content without one stays in the
-  row.
+  `ToolbarOverflow` to give it a menu entry; content without one, and any group
+  holding it, stays in the row.
 
 ## Framework notes
 

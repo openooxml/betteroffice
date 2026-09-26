@@ -119,7 +119,7 @@ export function ToolbarButton({
   );
 }
 
-/** A labelled cluster of controls; groups move into the overflow menu whole. */
+/** A labelled cluster of controls; it overflows whole, and only when each control has a menu entry. */
 export function ToolbarGroup({ label, children, className }: ToolbarGroupProps) {
   return (
     <div
