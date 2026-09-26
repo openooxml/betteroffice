@@ -52,11 +52,13 @@ export function toOverlayRect(
 export function createPluginGeometry(
   layout: DocxPluginLayout,
   dom: RenderedDomContext,
-  layer: HTMLElement
+  layer: HTMLElement,
+  current: () => boolean
 ): DocxPluginGeometry {
   return {
     layout,
     dom,
-    toOverlayRect: (rect) => toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect),
+    toOverlayRect: (rect) =>
+      current() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,
   };
 }

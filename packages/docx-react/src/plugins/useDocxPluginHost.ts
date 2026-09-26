@@ -44,6 +44,8 @@ import type {
 const NO_ACTIVATIONS: readonly DocxPluginActivation[] = Object.freeze([]);
 const LAYOUT_WAIT_MS = 1000;
 
+type RenderedDom = { context: RenderedDomContext; queries: DisplayListQueries };
+
 export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   writeModeRef: React.RefObject<EditorMode>;
@@ -175,12 +177,13 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     };
   }, [managed, options.selectionChangeSubscribersRef, publishSelection]);
 
-  const [dom, setDom] = useState<{
-    context: RenderedDomContext;
-    queries: DisplayListQueries;
-  } | null>(null);
+  const domRef = useRef<RenderedDom | null>(null);
+  const [dom, setDom] = useState<RenderedDom | null>(null);
   const onRenderedDomContext = useCallback(
-    (context: RenderedDomContext, queries: DisplayListQueries) => setDom({ context, queries }),
+    (context: RenderedDomContext, queries: DisplayListQueries) => {
+      domRef.current = { context, queries };
+      setDom(domRef.current);
+    },
     []
   );
   useEffect(() => {
@@ -238,11 +241,19 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const geometry = useMemo(
     () =>
       currentLayout && dom && dom.queries === options.queries && layer
-        ? createPluginGeometry(currentLayout, dom.context, layer)
+        ? createPluginGeometry(
+            currentLayout,
+            dom.context,
+            layer,
+            () =>
+              host.layoutId() === currentLayout.id &&
+              domRef.current === dom &&
+              dom.context.pagesContainer.isConnected
+          )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [currentLayout, dom, options.queries, layer, moved]
+    [host, currentLayout, dom, options.queries, layer, moved]
   );
   geometryRef.current = geometry;
 

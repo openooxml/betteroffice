@@ -20,6 +20,8 @@ function frozenCommand<S>(command: DocxPluginCommand<S>): DocxPluginCommand<S> {
  * Wraps a plugin for `DocxEditor`'s `plugins` prop. The definition is copied and frozen, down to
  * its panel, commands, shortcuts and toolbar, and checked when the editor installs it; a problem
  * is reported through `onPluginError` and disables only this plugin.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export function defineDocxPlugin<S>(definition: DocxPluginDefinition<S>): DocxPlugin {
   const commands = definition.commands;

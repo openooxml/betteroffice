@@ -15,7 +15,11 @@ import {
 } from '../commands/createDocxCommandStore';
 import { BUILT_IN_CHORDS, EDITING_CHORDS, normalizeChord } from '../commands/descriptors';
 import { commandReason } from '../commands/evaluate';
-import type { DocxCommandResult, DocxCommandStore, DocxPluginCommandId } from '../commands/types';
+import type {
+  DocxCommandStore,
+  DocxPluginCommandId,
+  DocxPluginCommandResult,
+} from '../commands/types';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { readSessionVersion } from '../components/DocxEditor/internals/layoutProvenance';
 import {
@@ -64,6 +68,11 @@ export interface DocxPluginHost {
   selectionChanged(selection: DocxPluginSelection): void;
   modeChanged(mode: EditorMode, readOnly: boolean): void;
   layoutChanged(layout: DocxPluginLayout | null): void;
+  /**
+   * The id of the layout plugins may use now. It clears in the same step as a committed change or
+   * a replaced document, before React renders.
+   */
+  layoutId(): string | null;
   /** Geometry moved without a new layout, as on resize or scroll-container changes. */
   geometryChanged(): void;
   activations(): readonly DocxPluginActivation[];
@@ -105,10 +114,10 @@ function checkedState(value: unknown) {
   return value as ReturnType<NonNullable<DocxPluginCommand<unknown>['getState']>>;
 }
 
-function checkedResult(value: unknown): DocxCommandResult {
+function checkedResult(value: unknown): DocxPluginCommandResult {
   const result = value as { ok?: unknown } | null | undefined;
   return result && typeof result.ok === 'boolean'
-    ? (value as DocxCommandResult)
+    ? (value as DocxPluginCommandResult)
     : { ok: true, status: 'executed' };
 }
 
@@ -289,7 +298,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   const executeCommand = async (
     pluginId: string,
     command: DocxPluginCommand<unknown>
-  ): Promise<DocxCommandResult> => {
+  ): Promise<DocxPluginCommandResult> => {
     const outcome = await runtime.invoke(pluginId, 'command', (context) =>
       command.execute(context)
     );
@@ -372,6 +381,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       const generation = runtime.generation();
       if (generation) notify({ type: 'layout-change', generation, layout });
     },
+
+    layoutId: () => (runtime.generation() === null ? null : state.layout?.id ?? null),
 
     geometryChanged: () => runtime.touch(),
 

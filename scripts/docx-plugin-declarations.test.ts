@@ -50,7 +50,7 @@ export const review = defineDocxPlugin<State>({
     if (read.ok) context.setState({ count: read.paragraphs.length }, read.version);
   },
   panel: { title: 'Review', placement: 'right', render: Panel },
-  overlay: ({ geometry }) => <div style={{ left: geometry.toOverlayRect({ x: 0, y: 0, width: 1, height: 1 }).x }} />,
+  overlay: ({ geometry }) => <div style={{ left: geometry.toOverlayRect({ x: 0, y: 0, width: 1, height: 1 })?.x }} />,
   getSidebarItems: () => [card],
   commands: [{ id: 'mark', label: 'Mark', mutatesDocument: false, execute: () => ({ ok: true, status: 'executed' }) }],
   toolbar: ['mark'],

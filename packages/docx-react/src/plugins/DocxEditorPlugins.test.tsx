@@ -18,13 +18,16 @@ import {
   defineDocxPlugin,
   useDocxCommand,
   useDocxCommands,
+  type DocxCommandResult,
   type DocxEditorProps,
   type DocxEditorRef,
   type DocxPlugin,
+  type DocxPluginCommandResult,
   type DocxPluginContext,
   type DocxPluginDefinition,
   type DocxPluginError,
   type DocxPluginEvent,
+  type DocxPluginGeometry,
 } from '../index';
 import { isMacPlatform } from '../commands/descriptors';
 
@@ -534,6 +537,58 @@ describe('DocxEditor plugins', () => {
     );
   });
 
+  test('contributed commands return their own failures and batch refusals unchanged', async () => {
+    const returned: DocxPluginCommandResult[] = [];
+    const paused = { code: 'paused', message: 'Paused' };
+    let paraId = '';
+    const owner = recorder('acme.review', {
+      commands: [
+        {
+          id: 'quota',
+          label: 'Quota',
+          mutatesDocument: false,
+          getState: (context) =>
+            context.state.count > 0
+              ? { enabled: false, disabledReason: paused }
+              : { enabled: true },
+          execute(context) {
+            context.setState({ count: 1 });
+            returned.push({ ok: false, failure: { code: 'quota-exceeded', message: 'Try later' } });
+            return returned.at(-1)!;
+          },
+        },
+        {
+          id: 'stale',
+          label: 'Stale',
+          mutatesDocument: true,
+          async execute(context) {
+            const result = await context.edits!.applyEdits(appendRequest('stale', paraId));
+            returned.push(result.ok ? { ok: true, status: 'executed' } : result);
+            return returned.at(-1)!;
+          },
+        },
+      ],
+    });
+    const { ref } = await mount({ plugins: [owner.plugin], pluginGrants: WRITE });
+    await until(() => owner.log.includes('load:loaded'));
+    const { version, paragraph } = await firstParagraph(ref);
+    paraId = paragraph.paraId;
+    const commands = ref.current!.commands;
+
+    expect(await act(() => commands.execute('plugin:acme.review/quota', null))).toBe(returned[0]);
+    expect(await act(() => commands.execute('plugin:acme.review/quota', null))).toEqual({
+      ok: false,
+      failure: paused,
+    });
+    const stale = await act(() => commands.execute('plugin:acme.review/stale', null));
+    expect(stale).toBe(returned[1]);
+    if (stale.ok || !('version' in stale)) throw new Error('expected a batch refusal');
+    expect([stale.version, stale.failure.code]).toEqual([version, 'stale-version']);
+
+    const builtIn: DocxCommandResult = await act(() => commands.execute('zoom', { scale: 1 }));
+    expect(builtIn.ok).toBe(true);
+  });
+
   test('a failing contribution is isolated and the others keep working', async () => {
     const errors: DocxPluginError[] = [];
     const broken = defineDocxPlugin({
@@ -685,6 +740,7 @@ describe('DocxEditor plugins', () => {
   test('overlays follow the rendered layout version; navigation reports missing geometry', async () => {
     const layouts: (string | null)[] = [];
     const contexts: DocxPluginContext<null>[] = [];
+    const geometries: DocxPluginGeometry[] = [];
     const plugin = defineDocxPlugin<null>({
       id: 'acme.review',
       createState: () => null,
@@ -692,19 +748,25 @@ describe('DocxEditor plugins', () => {
         contexts.push(context);
         if (event.type === 'layout-change') layouts.push(event.layout?.version ?? null);
       },
-      overlay: ({ context, geometry }) => (
-        <div
-          data-testid="layout-marker"
-          data-version={geometry.layout.version}
-          data-snapshot={context.snapshot.version}
-        />
-      ),
+      overlay: ({ context, geometry }) => {
+        geometries.push(geometry);
+        return (
+          <div
+            data-testid="layout-marker"
+            data-version={geometry.layout.version}
+            data-snapshot={context.snapshot.version}
+          />
+        );
+      },
     });
     const { ref, view } = await mount({ plugins: [plugin] });
     const marker = () => view.container.querySelector<HTMLElement>('[data-testid="layout-marker"]');
     await until(() => marker() !== null);
     const { version, paragraph } = await firstParagraph(ref);
     expect(marker()!.dataset).toMatchObject({ version, snapshot: version });
+    const unit = { x: 0, y: 0, width: 1, height: 1 };
+    const retained = geometries.at(-1)!;
+    expect(retained.toOverlayRect(unit)).not.toBeNull();
 
     let next = '';
     await act(async () => {
@@ -715,6 +777,8 @@ describe('DocxEditor plugins', () => {
     const afterEdit = layouts.slice(layouts.lastIndexOf(version) + 1);
     expect(afterEdit[0]).toBeNull();
     expect(afterEdit.at(-1)).toBe(next);
+    expect(retained.toOverlayRect(unit)).toBeNull();
+    expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
 
     // happy-dom lays out no pixels, so the pages have no client geometry to scroll to.
     expect(

@@ -28,6 +28,7 @@ import type {
   DocxCommandState,
   DocxPluginCommandDescriptor,
   DocxPluginCommandId,
+  DocxPluginCommandResult,
   DocxPluginCommandState,
 } from '../commands/types';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
@@ -45,15 +46,25 @@ export type {
  * Built-in commands need their id listed and, when they mutate, `document: 'write'`; edit
  * batches need `document: 'write'` and `editBatches`, and `history: 'none'` also needs
  * `untrackedHistory`. Viewing mode and `readOnly` refuse every write regardless.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export type DocxPluginGrant = PluginGrant<DocxCommandId>;
 
 export type DocxPluginFailureCode = PluginFailureCode;
 
-/** A client call refused before it reached the document. */
+/**
+ * A client call refused before it reached the document.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export type DocxPluginRefusal = PluginRefusal<DocxPluginFailureCode>;
 
-/** Versioned document reads. Each flushes pending input first. */
+/**
+ * Versioned document reads. Each flushes pending input first.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface DocxPluginReadClient {
   version(): Promise<{ ok: true; version: string } | DocxPluginRefusal>;
   readParagraphs(
@@ -64,12 +75,20 @@ export interface DocxPluginReadClient {
   validateEdits(request: DocxEditRequest): Promise<DocxValidationResult | DocxPluginRefusal>;
 }
 
-/** Granted edit batches; grant, mode and document policy are checked when the batch applies. */
+/**
+ * Granted edit batches; grant, mode and document policy are checked when the batch applies.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface DocxPluginEditClient {
   applyEdits(request: DocxEditRequest): Promise<DocxEditResult | DocxPluginRefusal>;
 }
 
-/** The editor's commands as this plugin may use them. */
+/**
+ * The editor's commands as this plugin may use them.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface DocxPluginCommandClient {
   getDescriptor<K extends DocxCommandId>(id: K): DocxCommandDescriptor<K>;
   getDescriptor(id: DocxPluginCommandId): DocxPluginCommandDescriptor | null;
@@ -84,7 +103,10 @@ export interface DocxPluginCommandClient {
     args: DocxCommandArgs[K]
   ): Promise<DocxCommandResult | DocxPluginRefusal>;
   /** Only this plugin's own contributed commands. */
-  execute(id: DocxPluginCommandId, args: null): Promise<DocxCommandResult | DocxPluginRefusal>;
+  execute(
+    id: DocxPluginCommandId,
+    args: null
+  ): Promise<DocxPluginCommandResult | DocxPluginRefusal>;
 }
 
 /** A rectangle in the units of the space it is used in. */
@@ -126,12 +148,14 @@ export interface DocxPluginSnapshot {
 
 /**
  * Local geometry of the rendered layout. `dom` answers in pages-container units divided by zoom;
- * `toOverlayRect` converts one of those rectangles into overlay-layer pixels.
+ * `toOverlayRect` converts one of those rectangles into overlay-layer pixels, and returns null
+ * once its layout is no longer rendered.
  */
 export interface DocxPluginGeometry {
   layout: DocxPluginLayout;
+  /** @experimental DOM access that a data-only geometry facade may replace in a minor release. */
   dom: RenderedDomContext;
-  toOverlayRect(rect: DocxPluginRect): DocxPluginRect;
+  toOverlayRect(rect: DocxPluginRect): DocxPluginRect | null;
 }
 
 export type DocxPluginNavigationFailureCode =
@@ -141,6 +165,7 @@ export type DocxPluginNavigationFailureCode =
   | 'layout-unavailable'
   | 'unsupported';
 
+/** @experimental The plugin API may change in minor releases. */
 export interface DocxPluginNavigation {
   /**
    * Scrolls a body paragraph into view once pending input and the layout are current. Focus and
@@ -170,7 +195,11 @@ export type DocxPluginEvent =
   | { type: 'layout-change'; generation: string; layout: DocxPluginLayout | null }
   | { type: 'grants-change'; generation: string; grant: DocxPluginGrant };
 
-/** What a hook, renderer or action receives. Clients refuse once it is superseded or ended. */
+/**
+ * What a hook, renderer or action receives. Clients refuse once it is superseded or ended.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface DocxPluginContext<S> {
   pluginId: string;
   snapshot: DocxPluginSnapshot;
@@ -236,12 +265,14 @@ export interface DocxPluginCommand<S> {
   /** Chords such as `Mod+Shift+R`; built-in shortcuts take precedence. */
   shortcuts?: readonly string[];
   getState?(context: DocxPluginContext<S>): CommandState;
-  execute(context: DocxPluginContext<S>): MaybePromise<DocxCommandResult>;
+  execute(context: DocxPluginContext<S>): MaybePromise<DocxPluginCommandResult>;
 }
 
 /**
  * A plugin. `createState`, renderers, `getSidebarItems` and command `getState` must be pure;
  * `initialize`, `onEvent`, command `execute` and `context.run` are managed effects.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export interface DocxPluginDefinition<S> {
   id: string;
@@ -260,7 +291,11 @@ export interface DocxPluginDefinition<S> {
 
 declare const docxPluginBrand: unique symbol;
 
-/** An installable plugin, created by `defineDocxPlugin`. */
+/**
+ * An installable plugin, created by `defineDocxPlugin`.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface DocxPlugin {
   readonly id: string;
   readonly revision?: string | number;
@@ -269,12 +304,23 @@ export interface DocxPlugin {
 
 export type DocxPluginErrorPhase = PluginErrorPhase | 'sidebar';
 
-/** A plugin failure; the failing activation has already been stopped and cleaned up. */
+/**
+ * A plugin failure; the failing activation has already been stopped and cleaned up.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export type DocxPluginError = PluginError<DocxPluginErrorPhase>;
 
+/** @experimental The plugin API may change in minor releases. */
 export interface DocxEditorPluginProps {
+  /** @experimental The plugin API may change in minor releases. */
   plugins?: readonly DocxPlugin[];
-  /** Keyed by plugin id; omitted plugins read, validate and navigate only. */
+  /**
+   * Keyed by plugin id; omitted plugins read, validate and navigate only.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
   pluginGrants?: Readonly<Record<string, DocxPluginGrant>>;
+  /** @experimental The plugin API may change in minor releases. */
   onPluginError?(error: DocxPluginError): void;
 }

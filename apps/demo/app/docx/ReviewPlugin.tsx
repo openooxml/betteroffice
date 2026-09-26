@@ -2,13 +2,17 @@
 
 import {
   defineDocxPlugin,
-  type DocxCommandResult,
+  type DocxPluginCommandResult,
   type DocxPluginContext,
   type DocxPluginGeometry,
   type DocxPluginSidebarItem,
 } from "@betteroffice/docx-react";
 
 const REVIEW_PLUGIN_ID = "demo.review";
+const WRITE_NOT_GRANTED = {
+  code: "write-not-granted",
+  message: "Write access is not granted.",
+};
 
 interface ReviewParagraph {
   paraId: string;
@@ -38,18 +42,26 @@ async function refresh(context: ReviewContext): Promise<void> {
 
 async function markReviewed(
   context: ReviewContext,
-): Promise<DocxCommandResult> {
-  const read = await context.read.readParagraphs({ view: "accepted" });
-  const target = read.ok
-    ? read.paragraphs.find((paragraph) => paragraph.text.trim().length > 0)
-    : undefined;
-  if (!read.ok || !target || !context.edits) {
-    const message = read.ok
-      ? "Write access is not granted."
-      : read.failure.message;
-    context.setState((previous) => ({ ...previous, message }));
-    return { ok: true, status: "noop" };
+): Promise<DocxPluginCommandResult> {
+  if (!context.edits) {
+    context.setState((previous) => ({
+      ...previous,
+      message: WRITE_NOT_GRANTED.message,
+    }));
+    return { ok: false, failure: WRITE_NOT_GRANTED };
   }
+  const read = await context.read.readParagraphs({ view: "accepted" });
+  if (!read.ok) {
+    context.setState((previous) => ({
+      ...previous,
+      message: read.failure.message,
+    }));
+    return read;
+  }
+  const target = read.paragraphs.find(
+    (paragraph) => paragraph.text.trim().length > 0,
+  );
+  if (!target) return { ok: true, status: "noop" };
   const result = await context.edits.applyEdits({
     expectVersion: read.version,
     source: "agent",
@@ -69,9 +81,7 @@ async function markReviewed(
     (previous) => ({ ...previous, message }),
     "version" in result ? result.version : undefined,
   );
-  return result.ok
-    ? { ok: true, status: "executed" }
-    : { ok: true, status: "noop" };
+  return result.ok ? { ok: true, status: "executed" } : result;
 }
 
 function ReviewPanel({ context }: { context: ReviewContext }) {
@@ -171,17 +181,19 @@ function SelectionOverlay({
         .map((rect, index) => {
           const box = geometry.toOverlayRect(rect);
           return (
-            <div
-              key={index}
-              style={{
-                position: "absolute",
-                left: box.x,
-                top: box.y,
-                width: box.width,
-                height: box.height,
-                outline: "2px dashed rgba(37, 99, 235, 0.7)",
-              }}
-            />
+            box && (
+              <div
+                key={index}
+                style={{
+                  position: "absolute",
+                  left: box.x,
+                  top: box.y,
+                  width: box.width,
+                  height: box.height,
+                  outline: "2px dashed rgba(37, 99, 235, 0.7)",
+                }}
+              />
+            )
           );
         })}
     </>
@@ -228,13 +240,7 @@ export const reviewPlugin = defineDocxPlugin<ReviewState>({
       getState: (context) =>
         context.edits
           ? { enabled: true }
-          : {
-              enabled: false,
-              disabledReason: {
-                code: "write-not-granted",
-                message: "Write access is not granted.",
-              },
-            },
+          : { enabled: false, disabledReason: WRITE_NOT_GRANTED },
       execute: markReviewed,
     },
   ],

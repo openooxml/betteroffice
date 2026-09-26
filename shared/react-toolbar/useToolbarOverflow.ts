@@ -32,6 +32,28 @@ type HiddenKey = keyof typeof HIDDEN_STYLE;
 
 const saved = new WeakMap<HTMLElement, Partial<Record<HiddenKey, string>>>();
 
+const CONTROLS = [
+  'a[href]',
+  'button',
+  'input:not([type="hidden"])',
+  'select',
+  'textarea',
+  'summary',
+  '[tabindex]',
+  '[contenteditable]:not([contenteditable="false"])',
+].join(', ');
+
+/**
+ * Whether `sources`, elements with overflow-menu entries, cover every control
+ * in `unit`, so hiding the unit loses no action.
+ */
+export function representsUnit(unit: HTMLElement, sources: readonly HTMLElement[]): boolean {
+  if (sources.length === 0) return false;
+  const controls = Array.from(unit.querySelectorAll(CONTROLS));
+  if (unit.matches(CONTROLS)) controls.push(unit);
+  return controls.every((control) => sources.some((source) => source.contains(control)));
+}
+
 function outerWidth(element: HTMLElement): number {
   const style = getComputedStyle(element);
   const margins = (parseFloat(style.marginLeft) || 0) + (parseFloat(style.marginRight) || 0);

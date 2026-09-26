@@ -91,8 +91,11 @@ describe('plugin overlay geometry', () => {
       expect(overlay.height).toBeCloseTo(RANGE.height * zoom);
 
       const layout = { id: 'layout', version: 'v', zoom, pageCount: 1 };
-      const geometry = createPluginGeometry(layout, dom, layer);
+      let current = true;
+      const geometry = createPluginGeometry(layout, dom, layer, () => current);
       expect(geometry.toOverlayRect(rect)).toEqual(overlay);
+      current = false;
+      expect(geometry.toOverlayRect(rect)).toBeNull();
     }
   });
 
