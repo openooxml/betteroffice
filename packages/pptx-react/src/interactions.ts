@@ -1,5 +1,6 @@
 import type {
   DeckSnapshot,
+  ShapeRect,
   ShapeSnapshot,
   SlideDisplayList,
   SlidePrimitive,
@@ -116,13 +117,32 @@ export function gestureOwnsPointer<T extends { pointerId: number }>(
   return gesture?.pointerId === pointerId;
 }
 
+/** The rectangle the shape is drawn at: its own, or the one it inherits from
+ *  the layout or master while it has none. */
+export function effectiveShapeRect(shape: ShapeSnapshot): ShapeRect | null {
+  if (shape.width > 0 && shape.height > 0) {
+    return { x: shape.x, y: shape.y, width: shape.width, height: shape.height };
+  }
+  const inherited = shape.inherited;
+  if (!inherited || inherited.width <= 0 || inherited.height <= 0) return null;
+  return {
+    x: inherited.x,
+    y: inherited.y,
+    width: inherited.width,
+    height: inherited.height,
+  };
+}
+
 export function canMoveShape(shape: ShapeSnapshot): boolean {
-  return shape.width > 0 && shape.height > 0;
+  return effectiveShapeRect(shape) !== null;
 }
 
 export function canResizeShape(shape: ShapeSnapshot): boolean {
-  const rotation = ((shape.rotationDeg % 360) + 360) % 360;
-  return canMoveShape(shape) && rotation === 0 && !shape.flipH && !shape.flipV;
+  const degrees = shape.inherited?.rotationDeg ?? shape.rotationDeg;
+  const rotation = ((degrees % 360) + 360) % 360;
+  const flipH = shape.inherited?.flipH ?? shape.flipH;
+  const flipV = shape.inherited?.flipV ?? shape.flipV;
+  return canMoveShape(shape) && rotation === 0 && !flipH && !flipV;
 }
 
 export function frameBoundsForShape(
@@ -136,19 +156,13 @@ export function frameBoundsForShape(
     (primitive) => primitive.shapeId && shapeIds.has(primitive.shapeId)
   );
   if (primitives.length === 0) {
-    if (
-      shape.width <= 0 ||
-      shape.height <= 0 ||
-      deck.widthEmu <= 0 ||
-      deck.heightEmu <= 0
-    ) {
-      return null;
-    }
+    const rect = effectiveShapeRect(shape);
+    if (!rect || deck.widthEmu <= 0 || deck.heightEmu <= 0) return null;
     return {
-      x: (shape.x * frame.width) / deck.widthEmu,
-      y: (shape.y * frame.height) / deck.heightEmu,
-      width: (shape.width * frame.width) / deck.widthEmu,
-      height: (shape.height * frame.height) / deck.heightEmu,
+      x: (rect.x * frame.width) / deck.widthEmu,
+      y: (rect.y * frame.height) / deck.heightEmu,
+      width: (rect.width * frame.width) / deck.widthEmu,
+      height: (rect.height * frame.height) / deck.heightEmu,
     };
   }
   const bounds = primitives.map((primitive) => {
@@ -283,15 +297,20 @@ function hasCaretNear(textBox: TextBoxPrimitive, y: number): boolean {
   return nearest.caretStops.length > 0;
 }
 
-export function movedShapePosition(
+/** The rectangle the shape is drawn at, shifted by a drag. The editor commits
+ *  only its position, through `moveShape`, and the core supplies the rest. */
+export function movedShapeRect(
   deck: DeckSnapshot,
   frame: SlideDisplayList,
   shape: ShapeSnapshot,
   delta: SlidePoint
-): Pick<ShapeSnapshot, 'x' | 'y'> {
+): ShapeRect | null {
+  const rect = effectiveShapeRect(shape);
+  if (!rect) return null;
   return {
-    x: shape.x + Math.round((delta.x * deck.widthEmu) / frame.width),
-    y: shape.y + Math.round((delta.y * deck.heightEmu) / frame.height),
+    ...rect,
+    x: rect.x + Math.round((delta.x * deck.widthEmu) / frame.width),
+    y: rect.y + Math.round((delta.y * deck.heightEmu) / frame.height),
   };
 }
 
@@ -387,12 +406,9 @@ export function resizedShapeBox(
     x: Math.round((delta.x * deck.widthEmu) / frame.width),
     y: Math.round((delta.y * deck.heightEmu) / frame.height),
   };
-  const box = resizedBounds(
-    { x: shape.x, y: shape.y, width: shape.width, height: shape.height },
-    handle,
-    emu,
-    MIN_SHAPE_SIZE_EMU
-  );
+  const rect = effectiveShapeRect(shape);
+  if (!rect) return null;
+  const box = resizedBounds(rect, handle, emu, MIN_SHAPE_SIZE_EMU);
   return { x: box.x, y: box.y, width: box.width, height: box.height };
 }
 

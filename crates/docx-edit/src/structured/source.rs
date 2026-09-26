@@ -249,8 +249,9 @@ pub(crate) struct RawSource {
     pub xml: String,
 }
 
-/// The package parts provenance resolves against: the main document part, the XML parts below
-/// `word/` and their relationship parts.
+/// The package parts provenance resolves against: the main document part, the note and comment
+/// parts, the header and footer parts the main document relates, wherever they sit, and their
+/// relationship parts. Part names match ignoring ASCII case, as the parser matches them.
 pub(crate) struct SourceParts {
     pub document: String,
     pub parts: Vec<(String, Vec<u8>)>,
@@ -259,20 +260,49 @@ pub(crate) struct SourceParts {
 impl SourceParts {
     pub(crate) fn new(parts: Vec<(String, Vec<u8>)>) -> Self {
         let limits = docx_parse::ParseLimits::default();
-        let document = docx_parse::relationships::office_document_path(
-            &parts,
-            &mut docx_parse::ParseBudget::new(&limits),
-        )
-        .unwrap_or_else(|_| DOCUMENT_PART.to_owned());
+        let mut budget = docx_parse::ParseBudget::new(&limits);
+        let document = docx_parse::relationships::office_document_path(&parts, &mut budget)
+            .unwrap_or_else(|_| DOCUMENT_PART.to_owned());
+        let mut stories = vec![
+            document.clone(),
+            FOOTNOTES_PART.to_owned(),
+            ENDNOTES_PART.to_owned(),
+            COMMENTS_PART.to_owned(),
+        ];
         let rels = relationship_part(&document);
+        if let Some((path, bytes)) = parts
+            .iter()
+            .find(|(path, _)| path.eq_ignore_ascii_case(&rels))
+            && let Ok(relationships) =
+                docx_parse::relationships::parse_relationships(bytes, path, &mut budget)
+        {
+            use docx_parse::relationships::relationship_types::{FOOTER, HEADER};
+            stories.extend(
+                relationships
+                    .values()
+                    .filter(|relationship| {
+                        matches!(relationship.relationship_type.as_str(), HEADER | FOOTER)
+                    })
+                    .filter_map(|relationship| {
+                        match docx_parse::resolve_relationship_target(&document, relationship) {
+                            Ok(docx_parse::RelationshipTarget::Internal(part)) => Some(part),
+                            _ => None,
+                        }
+                    }),
+            );
+        }
+        let kept: HashSet<String> = stories
+            .iter()
+            .flat_map(|part| {
+                [
+                    part.to_ascii_lowercase(),
+                    relationship_part(part).to_ascii_lowercase(),
+                ]
+            })
+            .collect();
         let parts = parts
             .into_iter()
-            .filter(|(path, _)| {
-                path == &document
-                    || path == &rels
-                    || (path.starts_with("word/")
-                        && (path.ends_with(".xml") || path.ends_with(".rels")))
-            })
+            .filter(|(path, _)| kept.contains(&path.to_ascii_lowercase()))
             .collect();
         Self { document, parts }
     }
@@ -280,7 +310,7 @@ impl SourceParts {
     fn part(&self, path: &str) -> Option<&[u8]> {
         self.parts
             .iter()
-            .find(|(name, _)| name == path)
+            .find(|(name, _)| name.eq_ignore_ascii_case(path))
             .map(|(_, bytes)| bytes.as_slice())
     }
 }

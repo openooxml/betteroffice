@@ -80,8 +80,9 @@
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
-    PlotDataLabels, PlotGroup, PlotLegend, PlotMarker, PlotMarkerSymbol, PlotOp, PlotPoint,
-    PlotRect, PlotSeries, PlotSink, PlotTextStyle, chart_aria_label, plot_chart_into,
+    PlotDataLabels, PlotGroup, PlotLegend, PlotLine, PlotMarker, PlotMarkerSymbol, PlotOp,
+    PlotPoint, PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label,
+    fallback_label_width, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -2334,6 +2335,8 @@ struct ChartLegendIn {
     #[serde(default)]
     visible: Option<bool>,
     #[serde(default)]
+    overlay: bool,
+    #[serde(default)]
     text: Option<ChartTextIn>,
 }
 
@@ -2371,6 +2374,8 @@ struct ChartAxisIn {
     #[serde(default)]
     minor_gridlines: bool,
     #[serde(default)]
+    cross_between: Option<String>,
+    #[serde(default)]
     number_format: Option<String>,
     #[serde(default)]
     position: Option<String>,
@@ -2380,6 +2385,22 @@ struct ChartAxisIn {
     hidden: bool,
     #[serde(default)]
     text: Option<ChartTextIn>,
+    #[serde(default)]
+    major_gridline_line: Option<ChartLineIn>,
+    #[serde(default)]
+    minor_gridline_line: Option<ChartLineIn>,
+}
+
+/// `c:spPr/a:ln` of a chart part.
+#[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChartLineIn {
+    #[serde(default)]
+    none: bool,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    width_emu: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -8191,6 +8212,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
         legend: chart.legend.as_ref().map(|legend| PlotLegend {
             position: legend.position.as_deref(),
             visible: legend.visible,
+            overlay: legend.overlay,
         }),
         value_axis: chart
             .axes
@@ -8251,6 +8273,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
             ),
         },
         fill: None,
+        plot_layout: None,
     }
 }
 
@@ -8330,12 +8353,23 @@ fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
         minor_tick_mark: axis.minor_tick_mark.as_deref(),
         major_gridlines: axis.major_gridlines,
         minor_gridlines: axis.minor_gridlines,
+        cross_between: axis.cross_between.as_deref(),
         number_format: axis.number_format.as_deref(),
         position: axis.position.as_deref(),
         title: axis.title.as_deref(),
         hidden: axis.hidden,
         text: plot_text_from(axis.text.as_ref()),
         line: None,
+        major_gridline: axis.major_gridline_line.as_ref().map(plot_line_from),
+        minor_gridline: axis.minor_gridline_line.as_ref().map(plot_line_from),
+    }
+}
+
+fn plot_line_from(line: &ChartLineIn) -> PlotLine<'_> {
+    PlotLine {
+        none: line.none,
+        color: line.color.as_deref(),
+        width_emu: line.width_emu,
     }
 }
 
@@ -8354,6 +8388,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
                 color: point.color.as_deref(),
                 marker: plot_marker_from(point.marker.as_ref()),
                 label: point.label.as_deref(),
+                label_runs: None,
                 explosion: point.explosion,
                 labels: None,
             })
@@ -8454,30 +8489,41 @@ impl PlotSink for PrimitiveSink<'_> {
                 width,
                 font,
                 color,
-                align: _,
-            } => prims.push(Primitive::Text(TextRunPrimitive {
-                text,
-                x: px(x),
-                baseline_y: px(baseline_y),
-                width: px(width),
-                paint_clip: None,
-                letter_spacing: (font.letter_spacing_px != 0.0).then(|| px(font.letter_spacing_px)),
-                font: font.css(),
-                color,
-                word_spacing: None,
-                rtl: None,
-                opacity: None,
-                rotation_deg: None,
-                horizontal_scale: None,
-                all_caps: false,
-                small_caps: false,
-                hidden: false,
-                text_shadow: None,
-                text_outline: false,
-                emphasis_mark: None,
-                text_effect: None,
-                attrs: attrs.clone(),
-            })),
+                align,
+                rotation_deg: _,
+            } => {
+                let (x, width) = match align {
+                    PlotTextAlign::Start => (x, width),
+                    PlotTextAlign::Center => {
+                        let run = fallback_label_width(&text, &font);
+                        (x + (width - run) / 2.0, run)
+                    }
+                };
+                prims.push(Primitive::Text(TextRunPrimitive {
+                    x: px(x),
+                    text,
+                    baseline_y: px(baseline_y),
+                    width: px(width),
+                    paint_clip: None,
+                    letter_spacing: (font.letter_spacing_px != 0.0)
+                        .then(|| px(font.letter_spacing_px)),
+                    font: font.css(),
+                    color,
+                    word_spacing: None,
+                    rtl: None,
+                    opacity: None,
+                    rotation_deg: None,
+                    horizontal_scale: None,
+                    all_caps: false,
+                    small_caps: false,
+                    hidden: false,
+                    text_shadow: None,
+                    text_outline: false,
+                    emphasis_mark: None,
+                    text_effect: None,
+                    attrs: attrs.clone(),
+                }))
+            }
             PlotOp::Line {
                 x1,
                 y1,
@@ -10834,6 +10880,84 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_centred_chart_label_is_centred_in_its_box() {
+        let attrs = DocAttrs::default();
+        let mut prims = Vec::new();
+        let mut sink = PrimitiveSink {
+            prims: &mut prims,
+            attrs: &attrs,
+        };
+        let font = ooxml_drawingml::chart::chart_label_font();
+        for align in [PlotTextAlign::Start, PlotTextAlign::Center] {
+            sink.push_op(PlotOp::Text {
+                text: "Revenue".to_owned(),
+                x: 10.0,
+                baseline_y: 20.0,
+                width: 200.0,
+                font: font.clone(),
+                color: "#000000".to_owned(),
+                align,
+                rotation_deg: 0.0,
+            });
+        }
+        let starts: Vec<f64> = prims
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Text(text) => text.x.as_f64(),
+                _ => None,
+            })
+            .collect();
+        let estimate = fallback_label_width("Revenue", &font);
+        assert_eq!(starts[0], 10.0);
+        assert!(
+            (starts[1] - (10.0 + (200.0 - estimate) / 2.0)).abs() < 0.01,
+            "{starts:?}"
+        );
+        let widths: Vec<f64> = prims
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Text(text) => text.width.as_f64(),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            (widths[1] - estimate).abs() < 0.01,
+            "a centred run reports its own width"
+        );
+    }
+
+    #[test]
+    fn a_label_wider_than_its_box_spills_evenly_both_ways() {
+        let attrs = DocAttrs::default();
+        let mut prims = Vec::new();
+        let mut sink = PrimitiveSink {
+            prims: &mut prims,
+            attrs: &attrs,
+        };
+        let font = ooxml_drawingml::chart::chart_label_font();
+        let text = "North / Q1 / 10.0";
+        sink.push_op(PlotOp::Text {
+            text: text.to_owned(),
+            x: 100.0,
+            baseline_y: 20.0,
+            width: 40.0,
+            font: font.clone(),
+            color: "#000000".to_owned(),
+            align: PlotTextAlign::Center,
+            rotation_deg: 0.0,
+        });
+        let Some(Primitive::Text(run)) = prims.first() else {
+            panic!("a text run");
+        };
+        let (left, width) = (run.x.as_f64().unwrap(), run.width.as_f64().unwrap());
+        assert!(width > 40.0 && left < 100.0);
+        assert!(
+            (left + width / 2.0 - 120.0).abs() < 0.01,
+            "centred on the box"
+        );
+    }
 
     #[test]
     fn a_wrapping_float_is_clamped_to_the_page_and_wrap_none_is_not() {
