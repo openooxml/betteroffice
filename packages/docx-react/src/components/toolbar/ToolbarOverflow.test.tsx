@@ -147,6 +147,8 @@ describe('toolbar overflow', () => {
     expect(history.getAttribute('aria-hidden')).toBe('true');
     expect((history as HTMLElement & { inert: boolean }).inert).toBe(true);
     expect(screen().getByTestId('unrepresented').getAttribute('aria-hidden')).toBeNull();
+    const row = toolbar.querySelector<HTMLElement>('[data-toolbar-items]')!;
+    expect(row.style.overflowX).not.toBe('auto');
 
     const menu = openWithKeyboard();
     const labels = menuItems(menu).map((item) => item.dataset.label);
@@ -166,7 +168,7 @@ describe('toolbar overflow', () => {
     ]);
   });
 
-  test('keeps a group with a control that has no menu entry in the row', () => {
+  test('keeps a group with a control that has no menu entry reachable in the row', () => {
     const shared: string[] = [];
     const controller = createDocxCommandController();
     controller.attach(testBinding().binding);
@@ -194,13 +196,24 @@ describe('toolbar overflow', () => {
       toolbar.querySelector<HTMLElement>(`[role="group"][aria-label="${label}"]`)!;
     expect(group('Sharing').getAttribute('aria-hidden')).toBeNull();
     expect((group('Sharing') as HTMLElement & { inert?: boolean }).inert).toBeFalsy();
-    fireEvent.click(within(toolbar).getByRole('button', { name: 'Share' }));
+    const share = within(toolbar).getByRole('button', { name: 'Share' });
+    fireEvent.click(share);
     expect(shared).toEqual(['share']);
+    const row = toolbar.querySelector<HTMLElement>('[data-toolbar-items]')!;
+    expect(row.style.overflowX).toBe('auto');
+    row.getBoundingClientRect = () => rect(10);
+    share.getBoundingClientRect = () =>
+      ({ ...rect(28), left: 30 - row.scrollLeft, right: 58 - row.scrollLeft }) as DOMRect;
+    act(() => share.focus());
+    expect(document.activeElement).toBe(share);
+    expect(row.scrollLeft).toBe(30);
     expect(group('History').getAttribute('aria-hidden')).toBe('true');
     expect(menuItems(openWithKeyboard()).map((item) => item.dataset.label)).toEqual([
       'Undo',
       'Redo',
     ]);
+    resize(1000);
+    expect(row.style.overflowX).not.toBe('auto');
   });
 
   test('long labels need more room', () => {
