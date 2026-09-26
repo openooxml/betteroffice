@@ -159,6 +159,7 @@ pub struct ParagraphInput {
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
+#[non_exhaustive]
 pub enum EditOperation {
     InsertText {
         target: TextTarget,
@@ -237,6 +238,7 @@ pub struct EditRequest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum EditFailureCode {
     StaleVersion,
     MissingTarget,
@@ -257,6 +259,7 @@ pub enum EditFailureCode {
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
+#[non_exhaustive]
 pub enum EditTarget {
     Paragraph(ParagraphTarget),
     Range(TextRange),
