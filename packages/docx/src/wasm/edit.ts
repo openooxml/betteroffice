@@ -15,6 +15,8 @@ import wasmInit, {
   EditSession,
   export_docx_markdown_json,
   export_docx_structured_json,
+  find_docx_content_controls_json,
+  list_docx_content_controls_json,
   render_docx_markdown_json,
 } from './generated/edit/docx_edit.js';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
@@ -58,6 +60,22 @@ export function exportDocxMarkdownJson(bytes: Uint8Array, options: string): stri
 export function renderDocxMarkdownJson(content: string, options: string): string {
   state.ensure();
   return render_docx_markdown_json(content, options);
+}
+
+/** Content controls of DOCX bytes: `{ok: true, content}` or `{ok: false, failure}` JSON. */
+export function listDocxContentControlsJson(bytes: Uint8Array, options: string): string {
+  state.ensure();
+  return list_docx_content_controls_json(bytes, options);
+}
+
+/** The content controls of DOCX bytes matching a query, as {@link listDocxContentControlsJson}. */
+export function findDocxContentControlsJson(
+  bytes: Uint8Array,
+  query: string,
+  options: string
+): string {
+  state.ensure();
+  return find_docx_content_controls_json(bytes, query, options);
 }
 
 export type { EditSession };

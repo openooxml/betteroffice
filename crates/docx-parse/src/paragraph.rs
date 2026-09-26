@@ -548,7 +548,7 @@ fn parse_paragraph_contents(
                             node_type: InlineSdtType::InlineSdt,
                             properties: parse_sdt_properties(
                                 child.child("w", "sdtPr"),
-                                None,
+                                child.child("w", "sdtEndPr"),
                                 theme,
                             ),
                             content: filter_field_inline(parsed),
@@ -871,7 +871,7 @@ fn parse_inline_sdt_composed(
         // Pinned hyperlink quirk: the SDT's own run properties omit theme.
         properties: parse_sdt_properties(
             element.child("w", "sdtPr"),
-            None,
+            element.child("w", "sdtEndPr"),
             property_theme.then_some(theme).flatten(),
         ),
         content,

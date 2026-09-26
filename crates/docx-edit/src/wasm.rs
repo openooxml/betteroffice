@@ -48,15 +48,16 @@ use wasm_bindgen::prelude::*;
 use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
 
 use crate::batch::outcome_json;
+use crate::content_controls::{ContentControlQuery, ContentControlsOptions};
 use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
 use crate::segments::SegKind;
 use crate::structured::ExportOptions;
 use crate::{
-    CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditRequest, EditTextView, EditingDoc,
-    EngineSession, FindTextRequest, FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc,
-    LocRange, MergeDirection, ParaAttrDelta, ParaSelector, Patch, Position, RawOp,
+    CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditRefusal, EditRequest, EditTextView,
+    EditingDoc, EngineSession, FindTextRequest, FontFamilyPatch, FormatPolicy, InlineFormatDelta,
+    Loc, LocRange, MergeDirection, ParaAttrDelta, ParaSelector, Patch, Position, RawOp,
     ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, StoryRange, TabStop,
     TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
@@ -1132,6 +1133,16 @@ impl EditSession {
             }
         }
         Ok(story)
+    }
+
+    /// An edit request, or the refusal a step's unrepresentable text earns.
+    fn edit_request(&self, json: &str) -> Result<Result<EditRequest, EditRefusal>, JsValue> {
+        Ok(EditRequest::from_json(json)
+            .map_err(js_err)?
+            .map_err(|failure| EditRefusal {
+                version: self.engine.doc().version(),
+                failure,
+            }))
     }
 }
 
@@ -2807,8 +2818,10 @@ impl EditSession {
     }
 
     /// Sets the authored `value` (any JSON) on the content-control embed
-    /// carrying `embed_id`, searching every story. Errors when no embed has
-    /// that id.
+    /// carrying `embed_id`, searching every story. A plain- or rich-text
+    /// control takes a string, which fills its content as one
+    /// version-checked batch step instead. Errors when no embed has that id
+    /// and when a fill is refused.
     pub fn set_content_control_value(
         &self,
         embed_id: &str,
@@ -2816,6 +2829,10 @@ impl EditSession {
     ) -> Result<(), JsValue> {
         let value = Any::from_json(value_json).map_err(js_err)?;
         self.select_embed_story(embed_id)?;
+        let (story, index) = self.engine.doc().embed_position(embed_id).map_err(js_err)?;
+        if self.fill_text_control(&story, index, &value)? {
+            return Ok(());
+        }
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
@@ -2827,8 +2844,9 @@ impl EditSession {
     /// Sets the authored `value` on the content-control embed at
     /// `(story, para_id, offset)` — the way to reach a control with no
     /// authored `w:id` or tag, which
-    /// [`EditSession::set_content_control_value`] cannot address. Errors when
-    /// that position holds no embed.
+    /// [`EditSession::set_content_control_value`] cannot address. A text
+    /// control's string value fills it as that method does. Errors when that
+    /// position holds no embed.
     pub fn set_content_control_value_at(
         &self,
         story: &str,
@@ -2838,6 +2856,9 @@ impl EditSession {
     ) -> Result<(), JsValue> {
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let value = Any::from_json(value_json).map_err(js_err)?;
+        if self.fill_text_control(story, index, &value)? {
+            return Ok(());
+        }
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
@@ -2850,9 +2871,37 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// Fills the text control at `index` of `story` with a string value; `false` when the embed
+    /// there is not a text control.
+    fn fill_text_control(&self, story: &str, index: u32, value: &Any) -> Result<bool, JsValue> {
+        let doc = self.engine.doc();
+        if !doc.text_control_at(story, index).map_err(js_err)? {
+            return Ok(false);
+        }
+        let Any::String(text) = value else {
+            return Err(js_err(
+                "a plain- or rich-text content control takes a string value",
+            ));
+        };
+        match doc
+            .fill_text_control_at(story, index, text, &self.undo)
+            .map_err(js_err)?
+        {
+            Ok(_) => Ok(true),
+            Err(refusal) => Err(js_err(format!(
+                "{}: {}",
+                serde_json::to_value(refusal.failure.code)
+                    .ok()
+                    .and_then(|code| code.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+                refusal.failure.message
+            ))),
+        }
+    }
+
     /// Removes the authored `value` from the content-control embed carrying
-    /// `embed_id`, leaving the control itself in place. Errors when no embed
-    /// has that id.
+    /// `embed_id`, leaving the control and its content in place: it never
+    /// erases a text control's text. Errors when no embed has that id.
     pub fn clear_content_control_value(&self, embed_id: &str) -> Result<(), JsValue> {
         self.select_embed_story(embed_id)?;
         let ctx = EditCtx::local(String::new(), String::new());
@@ -3160,8 +3209,10 @@ impl EditSession {
     /// Runs every check of [`EditSession::apply_edits_json`], staging included,
     /// without changing anything: `{"ok":true,"baseVersion","wouldApply","previews"}`.
     pub fn validate_edits_json(&self, request: &str) -> Result<String, JsValue> {
-        let request: EditRequest = serde_json::from_str(request).map_err(js_err)?;
-        let outcome = self.engine.doc().validate_edits(&request).map_err(js_err)?;
+        let outcome = match self.edit_request(request)? {
+            Ok(request) => self.engine.doc().validate_edits(&request).map_err(js_err)?,
+            Err(refusal) => Err(refusal),
+        };
         outcome_json(&outcome).map_err(js_err)
     }
 
@@ -3170,12 +3221,14 @@ impl EditSession {
     /// "receipts"}`. An applied batch commits one transaction; `history`
     /// `"separate"` makes it exactly one undo step.
     pub fn apply_edits_json(&self, request: &str) -> Result<String, JsValue> {
-        let request: EditRequest = serde_json::from_str(request).map_err(js_err)?;
-        let outcome = self
-            .engine
-            .doc()
-            .apply_edits(&request, &self.undo)
-            .map_err(js_err)?;
+        let outcome = match self.edit_request(request)? {
+            Ok(request) => self
+                .engine
+                .doc()
+                .apply_edits(&request, &self.undo)
+                .map_err(js_err)?,
+            Err(refusal) => Err(refusal),
+        };
         outcome_json(&outcome).map_err(js_err)
     }
 
@@ -3193,6 +3246,28 @@ impl EditSession {
     pub fn export_markdown_json(&self, options: &str) -> Result<String, JsValue> {
         let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
         outcome_json(&self.engine.doc().export_markdown(&options)).map_err(js_err)
+    }
+
+    /// The content controls of the committed state:
+    /// `{"stories"?,"maxControls"?,"maxBytes"?}` -> `{"ok":true,"version","content"}` or
+    /// `{"ok":false,"version","failure"}`. Control ids and anchors are scoped to the returned
+    /// version. Reads only.
+    pub fn list_content_controls_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
+        outcome_json(&self.engine.doc().list_content_controls(&options)).map_err(js_err)
+    }
+
+    /// [`EditSession::list_content_controls_json`] keeping the controls that match `query`
+    /// (`{"kind":"id","controlId"}`, `{"kind":"tag","tag"}`, `{"kind":"ooxmlId","ooxmlId"}` or
+    /// `{"kind":"alias","alias"}`) exactly.
+    pub fn find_content_controls_json(
+        &self,
+        query: &str,
+        options: &str,
+    ) -> Result<String, JsValue> {
+        let query: ContentControlQuery = serde_json::from_str(query).map_err(js_err)?;
+        let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
+        outcome_json(&self.engine.doc().find_content_controls(&query, &options)).map_err(js_err)
     }
 
     /// The headings of `story` in document order, classified as the structured export
@@ -3604,6 +3679,30 @@ pub fn export_docx_structured_json(bytes: &[u8], options: &str) -> Result<String
 pub fn export_docx_markdown_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
     let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
     snapshot_json(crate::structured::export_docx_markdown(bytes, &options))
+}
+
+/// The content controls of DOCX bytes as a snapshot; `options` as for
+/// [`EditSession::list_content_controls_json`]. No session is created.
+#[wasm_bindgen]
+pub fn list_docx_content_controls_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
+    let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(crate::content_controls::list_docx_content_controls(
+        bytes, &options,
+    ))
+}
+
+/// The content controls of DOCX bytes that match `query` exactly.
+#[wasm_bindgen]
+pub fn find_docx_content_controls_json(
+    bytes: &[u8],
+    query: &str,
+    options: &str,
+) -> Result<String, JsValue> {
+    let query: ContentControlQuery = serde_json::from_str(query).map_err(js_err)?;
+    let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(crate::content_controls::find_docx_content_controls(
+        bytes, &query, &options,
+    ))
 }
 
 /// Renders structured content as Markdown: `content` is a schema-version-1 export and
@@ -4070,5 +4169,164 @@ mod tests {
         assert_eq!(snapshot["frameEpoch"], 1);
         assert_eq!(caret["pageIndex"], 0);
         assert!((caret["x"].as_f64().unwrap() - 40.0).abs() < 0.001);
+    }
+
+    fn content_controls_docx() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/docx/src/yrs/__fixtures__/content-controls/template.docx"
+        ))
+        .unwrap()
+    }
+
+    fn control_text(session: &EditSession, tag: &str) -> Value {
+        let listed = envelope(&session.list_content_controls_json("{}").unwrap());
+        listed["content"]["controls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|control| control["tag"] == tag)
+            .map(|control| control["value"].clone())
+            .unwrap()
+    }
+
+    #[test]
+    fn content_control_envelopes_refuse_as_data() {
+        let bytes = content_controls_docx();
+        let session = EditSession::new(72.0).unwrap();
+        session.open_docx(&bytes, true).unwrap();
+        let listed = envelope(&session.list_content_controls_json("{}").unwrap());
+        assert_eq!(listed["ok"], true);
+        assert_eq!(listed["version"], session.version().as_str());
+        assert_eq!(listed["content"]["schemaVersion"], 1);
+        assert_eq!(listed["content"]["anchorScope"], "session");
+        assert_eq!(listed["content"]["controls"].as_array().unwrap().len(), 7);
+        assert_eq!(
+            listed["content"]["controls"][0]["parentControlId"],
+            Value::Null
+        );
+        let refused = envelope(
+            &session
+                .list_content_controls_json(r#"{"maxControls":1}"#)
+                .unwrap(),
+        );
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["failure"]["code"], "limit-exceeded");
+        let found = envelope(
+            &session
+                .find_content_controls_json(r#"{"kind":"alias","alias":"Address"}"#, "{}")
+                .unwrap(),
+        );
+        assert_eq!(found["content"]["controls"][0]["controlId"], "body:sdt0");
+
+        let request = json!({
+            "expectVersion": session.version(),
+            "steps": [{"op": "setContentControlText",
+                "target": {"kind": "tag", "tag": "account.reference"}, "text": "x"}]
+        });
+        let ambiguous = envelope(&session.apply_edits_json(&request.to_string()).unwrap());
+        assert_eq!(ambiguous["failure"]["code"], "ambiguous-target");
+        assert_eq!(ambiguous["failure"]["reason"], "ambiguous-tag");
+
+        session.clear_content_control_value("102").unwrap();
+        assert_eq!(
+            control_text(&session, "account.reference")["text"],
+            "REF-000"
+        );
+
+        let snapshot = envelope(&list_docx_content_controls_json(&bytes, "{}").unwrap());
+        assert_eq!(snapshot["ok"], true);
+        assert_eq!(snapshot["content"]["anchorScope"], "snapshot");
+        let matched = envelope(
+            &find_docx_content_controls_json(
+                &bytes,
+                r#"{"kind":"tag","tag":"customer.name"}"#,
+                "{}",
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            matched["content"]["controls"][0]["showingPlaceholder"],
+            true
+        );
+    }
+
+    #[test]
+    fn loading_shared_state_keeps_legacy_values_as_they_are() {
+        let bytes = content_controls_docx();
+        let author = EditSession::new(73.0).unwrap();
+        author.open_docx(&bytes, true).unwrap();
+        {
+            let doc = author.engine.doc();
+            let stories = doc.yrs_doc().transact().get_map(crate::STORIES).unwrap();
+            let mut txn = doc.yrs_doc().transact_mut();
+            let Some(yrs::Out::YText(body)) = stories.get(&txn, "body") else {
+                panic!("body");
+            };
+            let map = yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+                .into_iter()
+                .find_map(|diff| match diff.insert {
+                    yrs::Out::YMap(map)
+                        if map.get(&txn, "tag")
+                            == Some(yrs::Out::Any(Any::from("account.reference"))) =>
+                    {
+                        Some(map)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            map.insert(&mut txn, "value", "REF-LEGACY");
+        }
+        let joiner = EditSession::new(74.0).unwrap();
+        joiner.open_docx(&bytes, false).unwrap();
+        joiner.load(&author.encode_state()).unwrap();
+        assert_eq!(
+            control_text(&joiner, "account.reference")["text"],
+            "REF-000"
+        );
+        assert_eq!(joiner.encode_state_vector(), author.encode_state_vector());
+        let listed = envelope(&joiner.list_content_controls_json("{}").unwrap());
+        assert!(
+            listed["content"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == "legacy-control-value")
+        );
+        assert!(!joiner.can_undo());
+    }
+
+    #[test]
+    fn unpaired_surrogates_in_fill_text_are_invalid_text() {
+        let session = EditSession::new(75.0).unwrap();
+        session.open_docx(&content_controls_docx(), true).unwrap();
+        let request = |text: &str| {
+            format!(
+                r#"{{"expectVersion":"{}","steps":[{{"op":"setContentControlText","target":{{"kind":"tag","tag":"document.title"}},"text":"{text}"}}]}}"#,
+                session.version()
+            )
+        };
+        for outcome in [
+            session.validate_edits_json(&request(r"a\ud800b")).unwrap(),
+            session.apply_edits_json(&request(r"\udc00")).unwrap(),
+        ] {
+            let outcome = envelope(&outcome);
+            assert_eq!(outcome["ok"], false);
+            assert_eq!(outcome["failure"]["code"], "invalid-step");
+            assert_eq!(outcome["failure"]["reason"], "invalid-text");
+            assert_eq!(outcome["failure"]["stepIndex"], 0);
+        }
+        assert!(!session.can_undo());
+        let paired = envelope(
+            &session
+                .validate_edits_json(&request(r"\ud83d\ude00"))
+                .unwrap(),
+        );
+        assert_eq!(paired["wouldApply"], true);
+        let elsewhere = format!(
+            r#"{{"expectVersion":"{}","steps":[{{"op":"setContentControlText","target":{{"kind":"tag","tag":"\ud800"}},"text":"x"}}]}}"#,
+            session.version()
+        );
+        assert!(EditRequest::from_json(&elsewhere).is_err());
     }
 }

@@ -449,7 +449,11 @@ pub fn synthesize_sdt_properties(properties: &SdtProperties) -> String {
     }
     match properties.sdt_type.as_str() {
         "plainText" => {
-            body.start_element("w:text").end_element();
+            body.start_element("w:text");
+            if properties.multi_line == Some(true) {
+                body.attribute("w:multiLine", "1");
+            }
+            body.end_element();
         }
         "date" => {
             body.start_element("w:date");

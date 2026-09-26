@@ -35,6 +35,11 @@ as read-only structured content or Markdown with source anchors, and
 unsupported content is listed in the content's diagnostics, and options out of
 range return `Error::Export`. Page fragments are not included yet.
 
+`list_content_controls` and `find_content_controls` list the content controls of
+the current model, edits included, with their tag, alias, type, lock, placement,
+anchor and current text; ids and anchors address the returned snapshot. Filling
+controls needs an `EditingDoc` session; the facade does not fill them yet.
+
 ## Rendering
 
 The `raster` feature is opt-in; the raster backend is server-side only and the

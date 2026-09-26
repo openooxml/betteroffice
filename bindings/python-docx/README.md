@@ -106,6 +106,23 @@ mapped to its anchor in `anchors`. Content with no location of its own is
 anchored `{"kind": "unlocated", "story": ..., "reason": ...}`, never as a
 paragraph. Page fragments are not included yet.
 
+## List content controls
+
+```python
+for control in document.list_content_controls()["controls"]:
+    print(control["tag"], control["controlType"], control["value"])
+
+matches = document.find_content_controls({"kind": "tag", "tag": "customer.name"})
+```
+
+Controls come in document order with the same camelCase fields the JavaScript and
+Rust APIs produce: the control's id, `w:id`, type, tag, alias, lock and
+placeholder state, whether it is data-bound, its placement, anchor, parent,
+current `value` and effective lock. `stories` defaults to every category, and
+`max_controls` or `max_bytes` refuse with `ExportError` rather than returning a
+partial list. Tags, aliases and `ooxmlId`s match exactly. Filling controls needs
+a JavaScript editing session and is not available from Python yet.
+
 ## Lay a document out
 
 Layout is a two-stage contract. Something else measures text — the browser, or
@@ -188,6 +205,7 @@ is the gap this fills.
 | `document.warnings` / `template_variables` | what the parser found |
 | `document.replace_text(para_id, text)` | rewrite one paragraph |
 | `document.export_structured(...)` / `export_markdown(...)` | read-only structured content or Markdown |
+| `document.list_content_controls(...)` / `find_content_controls(query)` | the document's content controls |
 | `render_docx_markdown(content)` | render exported content as Markdown |
 | `document.author` / `origin` / `timestamp` | how an edit is attributed and stamped |
 | `document.layout(input)` | paginate a measured envelope |
@@ -197,7 +215,7 @@ is the gap this fills.
 
 Errors raise `DocxError` or a more specific subclass: `ParseError`,
 `EditError`, `UnsupportedEditError`, `LayoutError`, `RenderError`,
-`ExportError` (export options the engine refuses; its `failure` is the refusal
+`ExportError` (export or content-control read options the engine refuses; its `failure` is the refusal
 as a dict). An unknown
 paragraph ID raises `KeyError`, an out-of-range index `IndexError`, and a bad
 argument — an unknown parse limit, an unknown image scope, malformed font bytes

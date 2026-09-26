@@ -14,6 +14,11 @@ pub use error::Error;
 pub use render::{MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
 pub use types::{DocumentModel, DocumentStructure, LayoutResult, SaveOptions};
 
+pub use docx_edit::content_controls;
+pub use docx_edit::content_controls::{
+    ContentControl, ContentControlQuery, ContentControlSelector, ContentControlsOptions,
+    ContentControlsSnapshot,
+};
 pub use docx_edit::structured;
 pub use docx_edit::structured::{
     DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions, RevisionView,

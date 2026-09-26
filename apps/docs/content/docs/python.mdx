@@ -95,6 +95,19 @@ markdown = document.export_markdown(revision_view="markup")["markdown"]
 Omitted and unsupported content is listed in `diagnostics`; unusable limits raise
 `ExportError`. Page fragments are not included yet.
 
+`list_content_controls` lists the document's content controls as a dict in the
+same camelCase schema, and `find_content_controls` returns every exact match of a
+tag, alias, `ooxmlId` (the authored `w:id`) or control id:
+
+```python
+controls = document.list_content_controls()["controls"]
+named = document.find_content_controls({"kind": "tag", "tag": "customer.name"})
+```
+
+Each control carries its tag, alias, type, lock, placement, anchor and current
+`value`. Filling controls needs a JavaScript editing session and is not available
+from Python yet.
+
 ## PPTX
 
 [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) reads decks,

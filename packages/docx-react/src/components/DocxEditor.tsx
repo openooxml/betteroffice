@@ -13,6 +13,9 @@ import { useRef, useCallback, useState, useEffect, useMemo, forwardRef } from 'r
 import type { CSSProperties, ReactNode } from 'react';
 import type { Document, Theme } from '@betteroffice/docx/types/document';
 import type {
+  DocxContentControlQuery,
+  DocxContentControlsOptions,
+  DocxContentControlsResult,
   DocxEditRequest,
   DocxEditResult,
   DocxFindTextRequest,
@@ -349,6 +352,16 @@ export interface DocxEditorRef {
    * is replaced while input is flushing.
    */
   applyEdits: (request: DocxEditRequest) => Promise<DocxEditResult>;
+  /**
+   * Flushes pending input, then lists the document's content controls with the version they were
+   * read at. Fill text controls with `setContentControlText` steps through {@link applyEdits}.
+   */
+  listContentControls: (options?: DocxContentControlsOptions) => Promise<DocxContentControlsResult>;
+  /** Flushes pending input, then returns the content controls matching `query` exactly. */
+  findContentControls: (
+    query: DocxContentControlQuery,
+    options?: DocxContentControlsOptions
+  ) => Promise<DocxContentControlsResult>;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */

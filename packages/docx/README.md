@@ -265,3 +265,72 @@ anchor in `anchors`. Only http, https, mailto and internal-anchor targets are li
 judged after entity and percent decoding, and `&` in a target is written `&amp;`; document text, titles and alt text never keep a
 line break or unescaped HTML. It does not
 preserve Word pagination or layout. Page fragments are not included yet.
+
+### Content controls
+
+List a document's content controls and fill its plain- and rich-text controls in
+one version-checked batch.
+
+```ts
+const read = session.listContentControls();
+if (!read.ok) throw new Error(read.failure.message);
+const name = read.content.controls.find((control) => control.tag === 'customer.name')!;
+
+const result = session.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: 'setContentControlText', target: { kind: 'id', controlId: name.controlId }, text: 'Ada Lovelace' },
+    { op: 'setContentControlText', target: { kind: 'tag', tag: 'customer.address' }, text: '12 Example Street\nLondon' },
+  ],
+});
+```
+
+Controls come in document order (body, headers, footers, footnotes, endnotes,
+comments; a control before the controls inside it), each with the structured
+export's control metadata (`controlId`, `ooxmlId`, `controlType`, `tag`, `alias`,
+`lock`, `showingPlaceholder`, `dataBound`) plus `placement`, `anchor`,
+`parentControlId`, `value` (its text with tabs as `\t` and line and paragraph
+breaks as LF, or `unavailable` with a reason), `multiLine` and `effectiveLock`,
+which folds in the locks of the controls containing it. `stories` narrows the read
+to some categories; `maxControls` (10,000) and `maxBytes` (8,388,608) refuse with
+`limit-exceeded` rather than returning part of the list, and `complete: false`
+comes with diagnostics naming what could not be covered. Tags, aliases and
+`ooxmlId`s match exactly and case-sensitively, and `findContentControls` returns
+every match. `listDocxContentControls(bytes)` and
+`findDocxContentControls(bytes, query)` read bytes without a session and throw
+`DocxContentControlsError` for refused options. Concurrent fills from
+collaborators resolve last-writer-wins for an inline control and merge like
+concurrent typing for a block control.
+
+A step's `target` is `{ kind: 'id', controlId }`, `{ kind: 'tag', tag }` or
+`{ kind: 'ooxmlId', ooxmlId }`. `controlId` is the per-version locator: scoped to
+the version or snapshot it was read at, it does not survive save and reopen, and
+an inline control's id can name a different control after edits, so list again
+after a version change. Tags are the template author's names for
+controls. `ooxmlId` is the control's authored `w:id`, the identity that survives
+save and reopen. A tag or `ooxmlId` write searches every story regardless of read
+filters and needs exactly one control in the document to carry it; while
+controls may exist that the session cannot see, such as those in text boxes, it
+refuses with `provenance-unavailable` rather than pick one.
+
+`setContentControlText` replaces the content of a plain- or rich-text control
+with plain text and clears its placeholder flag everywhere it is recorded,
+leaving tags, aliases, ids, bindings and every other property as captured. CRLF
+becomes LF; LF is a line break in an inline control and a paragraph in a block
+control, where surviving paragraphs keep their ids and properties and new ones
+take the first paragraph's style defaults. A plain-text control accepts LF only
+when its `w:text` sets `w:multiLine`. The text takes the formatting of the
+control's first text run, or the control's own run properties while it shows its
+placeholder. Equal text is a no-op unless the placeholder still shows. Refusals
+carry the batch code and a `reason`: `missing-control`, `missing-tag` or
+`missing-ooxml-id`, `ambiguous-control-id`, `ambiguous-tag` or
+`ambiguous-ooxml-id`, `content-locked`, `bound-control`,
+`unsupported-control-type`, `unsupported-children` (content other than text,
+tabs and line breaks, such as bookmarks, fields or tables), `nested-controls`,
+`unknown-lock`, `unsupported-suggestion`, `provenance-unavailable` (the session
+was not opened from DOCX bytes), `unsupported-story` (a control kept only in
+source XML, such as a comment body), `multiline-not-allowed` and `invalid-text`.
+Checkbox, dropdown and date controls keep `setContentControlValue`; a
+string passed to it fills a text control through the same step, and
+`clearContentControlValue` never erases a text control's text. Explicit rich-text
+runs are not supported yet.

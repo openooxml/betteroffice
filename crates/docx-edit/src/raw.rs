@@ -10,6 +10,7 @@ use yrs::{
     TransactionMut,
 };
 
+use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::op::{OpError, OpResult};
 use crate::{COMMENTS, EditCtx, EditingDoc, KIND_KEY, anchor_value, out_len, story_ref};
 
@@ -70,9 +71,23 @@ fn embed_at<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32) -> OpResult<M
     })
 }
 
+/// Refuses inserting a text content control that carries an authored value.
+fn guard_inserted_values(ops: &[RawOp]) -> OpResult<()> {
+    for op in ops {
+        if let RawOp::InsertEmbed { kind, payload, .. } = op {
+            guard_embed_insert(
+                kind,
+                payload.iter().map(|(key, value)| (key.as_str(), value)),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl EditingDoc {
     /// Applies raw story operations in one transaction.
     pub fn apply_raw_ops(&self, story_id: &str, ops: Vec<RawOp>, ctx: &EditCtx) -> OpResult<()> {
+        guard_inserted_values(&ops)?;
         let mut txn = self.transact_for(ctx);
         apply_raw_ops_to_story(&mut txn, story_id, ops, false)
     }
@@ -82,6 +97,9 @@ impl EditingDoc {
         batches: Vec<(String, Vec<RawOp>)>,
         ctx: &EditCtx,
     ) -> OpResult<()> {
+        for (_, ops) in &batches {
+            guard_inserted_values(ops)?;
+        }
         let mut txn = self.transact_for(ctx);
         for (story_id, ops) in batches {
             apply_raw_ops_to_story(&mut txn, &story_id, ops, true)?;
@@ -408,7 +426,11 @@ fn apply_raw_op_absolute(
         }
         RawOp::SetEmbedAttr { index, key, value } => {
             let embed = embed_at(story, txn, index)?;
+            let retyped = guard_embed_write(&embed, txn, [(key.as_str(), &value)])?;
             embed.insert(txn, key, value);
+            if retyped {
+                embed.remove(txn, "value");
+            }
         }
         RawOp::SetComment {
             id,

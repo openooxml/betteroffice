@@ -4,7 +4,7 @@
 //! executes the resulting plan on a private clone that shares this replica's client id, rehearses
 //! the clone's update against an untouched copy of the base, and adopts it as one transaction.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,9 +14,17 @@ use serde_json::Value;
 use yrs::updates::decoder::Decode;
 use yrs::{ReadTxn, StateVector, Transact, Update};
 
+use crate::content_controls::{
+    ContentControlSelector, ControlRecord, ControlValue, Site, ValueUnavailable, content_items,
+    item_stamped,
+};
+use crate::ops::content_control::{
+    ControlFill, ParagraphFill, TextRefusal, fill_text, formatting, inline_content, property_patch,
+};
 use crate::ops::paragraph::{ParagraphRecord, StylePlan, plan_paragraph_style};
 use crate::ops::text::validate_text;
 use crate::ops::utf16_len;
+use crate::read_types::Anchor;
 use crate::seed::{Restoration, SourceMetadata};
 use crate::target::{
     EditTextView, ParagraphTarget, SearchScope, StoryView, TextRange, TextTarget, Views,
@@ -189,6 +197,12 @@ pub enum EditOperation {
         target: ParagraphTarget,
         style_id: String,
     },
+    /// Replaces the content of a plain- or rich-text content control with plain text and clears
+    /// its placeholder state. LF breaks lines inline and paragraphs in a block control.
+    SetContentControlText {
+        target: ContentControlSelector,
+        text: String,
+    },
 }
 
 /// One batch step; on the wire the operation's fields sit beside `expect` and `suggest`.
@@ -236,6 +250,85 @@ pub struct EditRequest {
     pub steps: Vec<EditStep>,
 }
 
+impl EditRequest {
+    /// Parses a request. A `setContentControlText` text holding an unpaired UTF-16 surrogate,
+    /// which JSON written from JavaScript can escape but no Rust string can hold, fails its step
+    /// as `invalid-text` instead of failing the parse.
+    pub fn from_json(json: &str) -> Result<Result<Self, EditFailure>, serde_json::Error> {
+        let error = match serde_json::from_str(json) {
+            Ok(request) => return Ok(Ok(request)),
+            Err(error) => error,
+        };
+        let Some(Ok(request)) =
+            mark_lone_surrogates(json).map(|marked| serde_json::from_str::<Self>(&marked))
+        else {
+            return Err(error);
+        };
+        request
+            .steps
+            .iter()
+            .enumerate()
+            .find_map(|(index, step)| match &step.operation {
+                EditOperation::SetContentControlText { target, text }
+                    if text.contains(LONE_SURROGATE) =>
+                {
+                    Some(
+                        failure(
+                            EditFailureCode::InvalidStep,
+                            "the text holds an unpaired UTF-16 surrogate".to_owned(),
+                            Some(EditTarget::ContentControl {
+                                selector: target.clone(),
+                            }),
+                        )
+                        .because(EditFailureReason::InvalidText)
+                        .at(index as u32),
+                    )
+                }
+                _ => None,
+            })
+            .map(Err)
+            .ok_or(error)
+    }
+}
+
+/// What [`mark_lone_surrogates`] writes for an unpaired surrogate; content controls refuse it.
+const LONE_SURROGATE: char = '\u{FFFF}';
+
+/// `json` with each escaped unpaired UTF-16 surrogate replaced by [`LONE_SURROGATE`], or `None`
+/// when it holds none.
+fn mark_lone_surrogates(json: &str) -> Option<String> {
+    let bytes = json.as_bytes();
+    let unit = |at: usize| {
+        (bytes.get(at) == Some(&b'\\') && bytes.get(at + 1) == Some(&b'u'))
+            .then(|| json.get(at + 2..at + 6))
+            .flatten()
+            .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+    };
+    let mut marked = String::with_capacity(json.len());
+    let (mut copied, mut at) = (0, 0);
+    while at < bytes.len() {
+        if bytes[at] != b'\\' {
+            at += 1;
+            continue;
+        }
+        match unit(at) {
+            Some(0xD800..=0xDBFF) if matches!(unit(at + 6), Some(0xDC00..=0xDFFF)) => at += 12,
+            Some(0xD800..=0xDFFF) => {
+                marked.push_str(&json[copied..at]);
+                marked.push_str("\\uffff");
+                at += 6;
+                copied = at;
+            }
+            Some(_) => at += 6,
+            None => at += 2,
+        }
+    }
+    (copied > 0).then(|| {
+        marked.push_str(&json[copied..]);
+        marked
+    })
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -250,6 +343,29 @@ pub enum EditFailureCode {
     Unsupported,
     InvalidStep,
     LimitExceeded,
+}
+
+/// Why a content-control step was refused, beside its failure code.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EditFailureReason {
+    MissingControl,
+    MissingTag,
+    AmbiguousTag,
+    AmbiguousControlId,
+    MissingOoxmlId,
+    AmbiguousOoxmlId,
+    ContentLocked,
+    BoundControl,
+    UnsupportedControlType,
+    UnsupportedChildren,
+    NestedControls,
+    UnknownLock,
+    UnsupportedSuggestion,
+    ProvenanceUnavailable,
+    UnsupportedStory,
+    MultilineNotAllowed,
+    InvalidText,
 }
 
 /// What a failure or preview refers to: a step's text target or a paragraph span.
@@ -273,12 +389,25 @@ pub enum EditTarget {
         first_para_id: String,
         last_para_id: String,
     },
+    ContentControl {
+        selector: ContentControlSelector,
+    },
+}
+
+/// The content control a step resolved to, and where it is.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedControl {
+    pub control_id: String,
+    pub anchor: Anchor,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditFailure {
     pub code: EditFailureCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<EditFailureReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,6 +420,11 @@ pub struct EditFailure {
 impl EditFailure {
     fn at(mut self, step_index: u32) -> Self {
         self.step_index = Some(step_index);
+        self
+    }
+
+    fn because(mut self, reason: EditFailureReason) -> Self {
+        self.reason = Some(reason);
         self
     }
 }
@@ -310,6 +444,7 @@ pub(crate) fn failure(
 ) -> EditFailure {
     EditFailure {
         code,
+        reason: None,
         step_index: None,
         conflicting_step_index: None,
         target: target.map(Box::new),
@@ -333,6 +468,8 @@ pub struct EditReceipt {
     pub new_paragraphs: Vec<ParagraphTarget>,
     pub removed_paragraphs: Vec<ParagraphTarget>,
     pub revision_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<ResolvedControl>,
 }
 
 /// What one step would do, resolved against the validated state. It reserves nothing.
@@ -344,6 +481,8 @@ pub struct EditPreview {
     pub would_change: bool,
     pub new_paragraph_count: u32,
     pub would_create_revisions: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<ResolvedControl>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -407,6 +546,7 @@ enum Effect {
         end: u32,
     },
     Style(StylePlan),
+    Control(ControlFill),
 }
 
 impl Effect {
@@ -417,7 +557,7 @@ impl Effect {
             Self::Replace { start, .. }
             | Self::Delete { start, .. }
             | Self::RemoveParagraphs { start, .. } => Some(*start),
-            Self::Style(_) => None,
+            Self::Style(_) | Self::Control(_) => None,
         }
     }
 }
@@ -450,6 +590,8 @@ enum Shape {
     },
     Paragraph(String),
     NewParagraphs,
+    /// Every paragraph of the step's story.
+    Story,
 }
 
 struct Planned {
@@ -464,6 +606,12 @@ struct Planned {
     removed: Vec<String>,
     new_paragraph_count: u32,
     suggest: bool,
+    control: Option<ResolvedControl>,
+    /// Another story the step changes: a block control's owning story.
+    also_changes: Option<String>,
+    /// Fills the copy of the step's control that another story reading its part holds; it
+    /// has no preview or receipt of its own.
+    companion: bool,
 }
 
 impl Planned {
@@ -579,9 +727,9 @@ fn refuse_suggestion(step: &EditStep, target: &EditTarget) -> Result<(), EditFai
 
 fn inserted_units(step: &EditStep) -> (usize, usize) {
     match &step.operation {
-        EditOperation::InsertText { text, .. } | EditOperation::ReplaceText { text, .. } => {
-            (utf16_len(text) as usize, 0)
-        }
+        EditOperation::InsertText { text, .. }
+        | EditOperation::ReplaceText { text, .. }
+        | EditOperation::SetContentControlText { text, .. } => (utf16_len(text) as usize, 0),
         EditOperation::InsertParagraphs { paragraphs, .. } => (
             paragraphs
                 .iter()
@@ -818,6 +966,9 @@ fn plan_text<T: ReadTxn>(
         removed: Vec::new(),
         new_paragraph_count: 0,
         suggest: suggesting,
+        control: None,
+        also_changes: None,
+        companion: false,
     })
 }
 
@@ -916,6 +1067,9 @@ fn plan_insert_paragraphs<T: ReadTxn>(
         removed: Vec::new(),
         new_paragraph_count: count,
         suggest: false,
+        control: None,
+        also_changes: None,
+        companion: false,
     })
 }
 
@@ -1171,6 +1325,9 @@ fn plan_delete_paragraphs<T: ReadTxn>(
         removed: ids,
         new_paragraph_count: 0,
         suggest: false,
+        control: None,
+        also_changes: None,
+        companion: false,
     })
 }
 
@@ -1254,6 +1411,637 @@ fn plan_style<T: ReadTxn>(
         removed: Vec::new(),
         new_paragraph_count: 0,
         suggest: false,
+        control: None,
+        also_changes: None,
+        companion: false,
+    })
+}
+
+fn control_failure(
+    code: EditFailureCode,
+    reason: EditFailureReason,
+    message: impl Into<String>,
+    target: &EditTarget,
+) -> EditFailure {
+    failure(code, message.into(), Some(target.clone())).because(reason)
+}
+
+/// The one control `selector` names in the complete inventory, independent of read filters.
+fn resolve_control<'a>(
+    inventory: &'a crate::content_controls::Inventory,
+    selector: &ContentControlSelector,
+    target: &EditTarget,
+) -> Result<(usize, &'a ControlRecord), EditFailure> {
+    let addressable = || {
+        inventory
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| !record.alias)
+    };
+    let (matches, missing, ambiguous, named): (Vec<(usize, &ControlRecord)>, _, _, String) =
+        match selector {
+            ContentControlSelector::Id { control_id } => (
+                addressable()
+                    .filter(|(_, record)| record.id() == control_id)
+                    .collect(),
+                EditFailureReason::MissingControl,
+                EditFailureReason::AmbiguousControlId,
+                format!("control id {control_id:?}"),
+            ),
+            ContentControlSelector::Tag { tag } => (
+                addressable()
+                    .filter(|(_, record)| {
+                        record.control.metadata.tag.as_deref() == Some(tag.as_str())
+                    })
+                    .collect(),
+                EditFailureReason::MissingTag,
+                EditFailureReason::AmbiguousTag,
+                format!("tag {tag:?}"),
+            ),
+            ContentControlSelector::OoxmlId { ooxml_id } => (
+                addressable()
+                    .filter(|(_, record)| {
+                        record.control.metadata.ooxml_id.as_deref() == Some(ooxml_id.as_str())
+                    })
+                    .collect(),
+                EditFailureReason::MissingOoxmlId,
+                EditFailureReason::AmbiguousOoxmlId,
+                format!("w:id {ooxml_id:?}"),
+            ),
+        };
+    if inventory.unidentified && !matches!(selector, ContentControlSelector::Id { .. }) {
+        return Err(control_failure(
+            EditFailureCode::Unsupported,
+            EditFailureReason::ProvenanceUnavailable,
+            format!(
+                "content controls may exist that this session cannot see, so {named} cannot be shown to be unique"
+            ),
+            target,
+        ));
+    }
+    match matches.as_slice() {
+        [] => Err(control_failure(
+            EditFailureCode::MissingTarget,
+            missing,
+            format!("no content control has {named}"),
+            target,
+        )),
+        [found] => Ok(*found),
+        many => Err(control_failure(
+            EditFailureCode::AmbiguousTarget,
+            ambiguous,
+            format!("{} content controls have {named}", many.len()),
+            target,
+        )),
+    }
+}
+
+/// The parsed `w:rPr` of a control's own properties.
+fn control_run_properties(payload: &HashMap<String, yrs::Any>) -> Option<Value> {
+    if let Some(yrs::Any::String(json)) = payload.get("propertiesJson") {
+        return serde_json::from_str::<Value>(json)
+            .ok()?
+            .get("runProperties")
+            .cloned();
+    }
+    let yrs::Any::String(raw) = payload.get("rawPropertiesXml")? else {
+        return None;
+    };
+    serde_json::to_value(
+        docx_parse::parse_sdt_properties_xml(raw)
+            .ok()?
+            .run_properties?,
+    )
+    .ok()
+}
+
+fn plan_control<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    source: Option<&SourceMetadata>,
+    index: u32,
+    step: &EditStep,
+    selector: &ContentControlSelector,
+    text: &str,
+) -> Result<Vec<Planned>, EditFailure> {
+    let requested = EditTarget::ContentControl {
+        selector: selector.clone(),
+    };
+    let inventory = views.controls()?;
+    let (position, record) = resolve_control(&inventory, selector, &requested)?;
+    let control = &record.control;
+    let resolved = EditTarget::ContentControl {
+        selector: ContentControlSelector::Id {
+            control_id: record.id().to_owned(),
+        },
+    };
+    let refuse = |code: EditFailureCode, reason: EditFailureReason, message: &str| {
+        control_failure(code, reason, message, &resolved)
+    };
+    let current = match &control.value {
+        ControlValue::Text { text } => Some(text.as_str()),
+        ControlValue::Unavailable { .. } => None,
+    };
+    if let Some(expected) = &step.expect
+        && current != Some(expected.text.as_str())
+    {
+        return Err(failure(
+            EditFailureCode::ContentMismatch,
+            match current {
+                Some(actual) => format!(
+                    "the control reads {actual:?}, not the expected {:?}",
+                    expected.text
+                ),
+                None => "the control has no text value to compare".to_owned(),
+            },
+            Some(resolved.clone()),
+        ));
+    }
+    if step.suggest.is_some() {
+        return Err(refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::UnsupportedSuggestion,
+            "filling a content control cannot be recorded as a tracked change",
+        ));
+    }
+    if matches!(record.site, Site::Source) {
+        return Err(refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::UnsupportedStory,
+            "the control lives in source content the session does not edit",
+        ));
+    }
+    if !matches!(
+        control.metadata.control_type.as_str(),
+        "plainText" | "richText"
+    ) {
+        return Err(refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::UnsupportedControlType,
+            &format!(
+                "{} controls are not filled with text",
+                control.metadata.control_type
+            ),
+        ));
+    }
+    if control.metadata.data_bound {
+        return Err(refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::BoundControl,
+            "the control is bound to custom XML data",
+        ));
+    }
+    if !control.effective_lock.known {
+        return Err(refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::UnknownLock,
+            "the control or a control containing it carries an unknown lock",
+        ));
+    }
+    if inventory.divergent.contains(&position) {
+        return Err(refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::UnsupportedStory,
+            "another story reads the control's part but now holds different controls, so a fill cannot keep both in step",
+        ));
+    }
+    if record
+        .safety
+        .as_ref()
+        .is_some_and(|safety| safety.uncertain)
+    {
+        return Err(refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::UnknownLock,
+            "the control's lock or data binding cannot be read reliably from its XML",
+        ));
+    }
+    if control.effective_lock.content {
+        return Err(refuse(
+            EditFailureCode::LockedTarget,
+            EditFailureReason::ContentLocked,
+            "the control's content is locked",
+        ));
+    }
+    if control.parent_control_id.is_some() || record.children {
+        return Err(refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::NestedControls,
+            "controls nested in or containing other controls are not filled",
+        ));
+    }
+    let source = source.ok_or_else(|| {
+        refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::ProvenanceUnavailable,
+            "filling a control needs a document opened from DOCX bytes in this session",
+        )
+    })?;
+    match &record.safety {
+        None => {
+            return Err(refuse(
+                EditFailureCode::Unsupported,
+                EditFailureReason::ProvenanceUnavailable,
+                "the control could not be matched to its source content, so a fill cannot be shown to be safe",
+            ));
+        }
+        Some(safety) if safety.revisions => {
+            return Err(revision_conflict(
+                "the control's source content carries tracked changes",
+                &resolved,
+            ));
+        }
+        Some(safety) if !safety.safe() => {
+            return Err(refuse(
+                EditFailureCode::Unsupported,
+                EditFailureReason::UnsupportedChildren,
+                &format!(
+                    "the control holds {} that a text fill would destroy",
+                    safety.unsupported.join(", ")
+                ),
+            ));
+        }
+        Some(_) => {}
+    }
+    if record.stamped
+        || matches!(
+            control.value,
+            ControlValue::Unavailable {
+                reason: ValueUnavailable::TrackedRevisions
+            }
+        )
+    {
+        return Err(revision_conflict(
+            "the control carries a tracked change",
+            &resolved,
+        ));
+    }
+    if matches!(
+        control.value,
+        ControlValue::Unavailable {
+            reason: ValueUnavailable::NonTextContent
+        }
+    ) {
+        return Err(refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::UnsupportedChildren,
+            "the control holds content other than text, tabs and line breaks",
+        ));
+    }
+    let allow_breaks =
+        control.metadata.control_type == "richText" || control.multi_line == Some(true);
+    let text = fill_text(text, allow_breaks).map_err(|refusal| match refusal {
+        TextRefusal::Invalid(message) => refuse(
+            EditFailureCode::InvalidStep,
+            EditFailureReason::InvalidText,
+            &message,
+        ),
+        TextRefusal::Multiline => refuse(
+            EditFailureCode::InvalidStep,
+            EditFailureReason::MultilineNotAllowed,
+            "the plain-text control does not accept line breaks",
+        ),
+    })?;
+    let copies = inventory.companions.get(&position).into_iter().flatten();
+    let mut planned = Vec::new();
+    for (copy, target) in std::iter::once(record)
+        .chain(copies.map(|copy| &inventory.records[*copy]))
+        .enumerate()
+    {
+        let patch = property_patch(&target.payload).map_err(|message| {
+            failure(
+                EditFailureCode::Unsupported,
+                message,
+                Some(resolved.clone()),
+            )
+        })?;
+        let unchanged = match &target.control.value {
+            ControlValue::Text { text: current } => *current == text,
+            ControlValue::Unavailable { .. } => false,
+        };
+        let fill = Fill {
+            index,
+            record: target,
+            resolved: resolved.clone(),
+            source,
+            unchanged,
+            text: text.clone(),
+            patch,
+            drop_value: target
+                .payload
+                .get("value")
+                .is_some_and(|value| !matches!(value, yrs::Any::Null | yrs::Any::Undefined)),
+        };
+        let mut step = match &target.site {
+            Site::Inline { raw, para_id } => plan_inline_fill(views, fill, *raw, para_id),
+            Site::Block { raw, child } => plan_block_fill(views, fill, *raw, child),
+            Site::Nested | Site::Source => Err(fill.refuse(
+                EditFailureCode::Unsupported,
+                EditFailureReason::NestedControls,
+                "the control cannot be filled",
+            )),
+        }?;
+        step.companion = copy > 0;
+        planned.push(step);
+    }
+    Ok(planned)
+}
+
+/// A fill whose target, guard and text passed the checks both placements share.
+struct Fill<'a> {
+    index: u32,
+    record: &'a ControlRecord,
+    resolved: EditTarget,
+    source: &'a SourceMetadata,
+    text: String,
+    patch: Vec<(String, yrs::Any)>,
+    unchanged: bool,
+    drop_value: bool,
+}
+
+impl Fill<'_> {
+    fn refuse(
+        &self,
+        code: EditFailureCode,
+        reason: EditFailureReason,
+        message: &str,
+    ) -> EditFailure {
+        control_failure(code, reason, message, &self.resolved)
+    }
+
+    /// The formatting typed text takes in a paragraph of `style` inside this control.
+    fn control_run(&self, style: Option<&str>) -> Result<Vec<(String, yrs::Any)>, EditFailure> {
+        self.source
+            .control_run(style, control_run_properties(&self.record.payload).as_ref())
+            .map_err(|message| invalid(message, &self.resolved))
+    }
+
+    fn placeholder(&self) -> bool {
+        self.record.control.metadata.showing_placeholder
+    }
+
+    fn writable<T: ReadTxn>(
+        &self,
+        views: &mut Views<'_, T>,
+        story: &str,
+    ) -> Result<(), EditFailure> {
+        views
+            .check_story_writable(story, &self.resolved)
+            .map_err(|failure| match failure.code {
+                EditFailureCode::LockedTarget => failure.because(EditFailureReason::ContentLocked),
+                _ => failure,
+            })?;
+        check_opaque_order(views, Some(self.source), story, &self.resolved)
+    }
+
+    fn resolved_control(&self) -> Option<ResolvedControl> {
+        Some(ResolvedControl {
+            control_id: self.record.id().to_owned(),
+            anchor: self.record.control.anchor.clone(),
+        })
+    }
+}
+
+/// An inline fill replaces the control embed's frozen content in place.
+fn plan_inline_fill<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    fill: Fill<'_>,
+    raw: u32,
+    para_id: &str,
+) -> Result<Planned, EditFailure> {
+    let story = fill.record.story.clone();
+    fill.writable(views, &story)?;
+    let (view, paragraph) = views.paragraph(
+        &ParagraphTarget {
+            story: story.clone(),
+            para_id: para_id.to_owned(),
+        },
+        EditTextView::Accepted,
+    )?;
+    let paragraph = &view.paragraphs[paragraph];
+    if paragraph.run_revisions {
+        return Err(revision_conflict(
+            "the paragraph's runs carry tracked formatting changes",
+            &fill.resolved,
+        ));
+    }
+    let content = if fill.unchanged {
+        None
+    } else {
+        let first = content_items(&fill.record.payload)
+            .iter()
+            .filter_map(|item| match item {
+                yrs::Any::Map(item) => Some(item),
+                _ => None,
+            })
+            .find(|item| {
+                matches!(item.get("kind"), Some(yrs::Any::String(kind)) if kind.as_ref() == "text")
+            });
+        let attrs = match first {
+            Some(item) if !fill.placeholder() && !item_stamped(item) => match item.get("attrs") {
+                Some(yrs::Any::Map(attrs)) => formatting(attrs),
+                _ => Vec::new(),
+            },
+            _ => fill.control_run(paragraph.mark.style_id().as_deref())?,
+        };
+        Some(inline_content(&fill.text, &attrs))
+    };
+    let control = fill.resolved_control();
+    let effect = (content.is_some() || !fill.patch.is_empty() || fill.drop_value).then(|| {
+        Effect::Control(ControlFill::Inline {
+            raw,
+            content,
+            drop_value: fill.drop_value,
+            patch: fill.patch,
+        })
+    });
+    Ok(Planned {
+        index: fill.index,
+        story,
+        target: fill.resolved,
+        claims: vec![Claim::Span(raw, raw + 1)],
+        touched: vec![para_id.to_owned()],
+        exclusive: false,
+        effect,
+        shape: Shape::Raw { start: raw, len: 1 },
+        removed: Vec::new(),
+        new_paragraph_count: 0,
+        suggest: false,
+        control,
+        also_changes: None,
+        companion: false,
+    })
+}
+
+/// A block fill rewrites the control's child story: surviving paragraphs keep their ids and
+/// properties, extra ones take the first paragraph's style defaults.
+fn plan_block_fill<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    fill: Fill<'_>,
+    raw: u32,
+    child: &str,
+) -> Result<Planned, EditFailure> {
+    fill.writable(views, child)?;
+    let unsupported = |message: &str| {
+        fill.refuse(
+            EditFailureCode::Unsupported,
+            EditFailureReason::UnsupportedChildren,
+            message,
+        )
+    };
+    let view = views
+        .story(child, EditTextView::Accepted)
+        .ok_or_else(|| unsupported("the control's story was not found"))?;
+    if !fill.source.opaque_restorations(child, |_| true).is_empty() {
+        return Err(unsupported("the control holds raw XML blocks"));
+    }
+    for (position, paragraph) in view.paragraphs.iter().enumerate() {
+        if view.structurally_revised(position) || paragraph.has_revisions() {
+            return Err(revision_conflict(
+                "a paragraph of the control carries a tracked change",
+                &fill.resolved,
+            ));
+        }
+        if paragraph.node_start > paragraph.start {
+            return Err(unsupported(
+                "the control holds a table, a nested control or a break block",
+            ));
+        }
+        if let Some((kind, _)) = paragraph.embeds.iter().find(|(kind, _)| kind != "break") {
+            return Err(unsupported(&format!("the control holds a {kind:?} embed")));
+        }
+        if paragraph.mark.section() {
+            return Err(unsupported("the control holds a section break"));
+        }
+        if matches!(paragraph.mark.properties.get("bookmarks"), Some(yrs::Any::Array(bookmarks)) if !bookmarks.is_empty())
+        {
+            return Err(unsupported("the control holds a bookmark"));
+        }
+    }
+    let bound = field_result_blocks(&view, views.txn());
+    if view
+        .paragraphs
+        .iter()
+        .any(|paragraph| bound.contains(&paragraph.para_id))
+    {
+        return Err(unsupported("the control holds a field's cached result"));
+    }
+    if !comment_spans(views.txn(), child).is_empty() {
+        return Err(unsupported("a comment is anchored in the control"));
+    }
+    let (Some(first), Some(last)) = (view.paragraphs.first(), view.paragraphs.last()) else {
+        return Err(unsupported("the control's story holds no paragraph"));
+    };
+    let lines: Vec<&str> = fill.text.split('\n').collect();
+    if lines.len().saturating_sub(view.paragraphs.len()) > MAX_INSERTED_PARAGRAPHS {
+        return Err(failure(
+            EditFailureCode::LimitExceeded,
+            format!("a batch inserts at most {MAX_INSERTED_PARAGRAPHS} paragraphs"),
+            Some(fill.resolved.clone()),
+        ));
+    }
+    let text = story_ref(views.txn(), child)
+        .map_err(|_| unsupported("the control's story was not found"))?;
+    let chunks = views.doc().chunk_snapshot(child, &text, views.txn());
+    let first_text = |paragraph: &crate::target::ParagraphView| {
+        chunks
+            .iter()
+            .filter(|chunk| chunk.start >= paragraph.node_start && chunk.end() <= paragraph.pilcrow)
+            .find(|chunk| matches!(chunk.kind, crate::ops::ChunkKind::Text(_)))
+            .map(|chunk| formatting(&chunk.attrs.clone().into_iter().collect()))
+    };
+    let baseline = match first_text(first) {
+        Some(attrs) if !fill.placeholder() => attrs,
+        _ => fill.control_run(first.mark.style_id().as_deref())?,
+    };
+    let mut paragraphs = Vec::new();
+    let mut remove = None;
+    let mut insert = None;
+    let mut removed = Vec::new();
+    let mut new_paragraph_count = 0;
+    if !fill.unchanged {
+        for (paragraph, line) in view.paragraphs.iter().zip(&lines) {
+            if paragraph.embeds.is_empty() && paragraph.text == *line {
+                continue;
+            }
+            let attrs = match first_text(paragraph) {
+                Some(attrs) if !fill.placeholder() => attrs,
+                _ => fill.control_run(paragraph.mark.style_id().as_deref())?,
+            };
+            paragraphs.push(ParagraphFill {
+                node_start: paragraph.node_start,
+                pilcrow: paragraph.pilcrow,
+                text: (*line).to_owned(),
+                attrs,
+            });
+        }
+        if lines.len() < view.paragraphs.len() {
+            remove = Some((view.paragraphs[lines.len()].start, last.pilcrow + 1));
+            removed = view.paragraphs[lines.len()..]
+                .iter()
+                .map(|paragraph| paragraph.para_id.clone())
+                .collect();
+        }
+        if lines.len() > view.paragraphs.len() {
+            let styled = fill
+                .source
+                .styled_paragraph(first.mark.style_id().as_deref())
+                .map_err(|message| invalid(message, &fill.resolved))?;
+            if styled.properties.iter().any(|(key, _)| key == "numPr") {
+                return Err(failure(
+                    EditFailureCode::Unsupported,
+                    format!(
+                        "the control's paragraph style defines list numbering, which v1 batches do not apply to new paragraphs; {NUMBERING_FOLLOW_UP}"
+                    ),
+                    Some(fill.resolved.clone()),
+                ));
+            }
+            let records: Vec<ParagraphRecord> = lines[view.paragraphs.len()..]
+                .iter()
+                .map(|line| ParagraphRecord {
+                    text: (*line).to_owned(),
+                    properties: styled.properties.clone(),
+                    run: baseline.clone(),
+                })
+                .collect();
+            new_paragraph_count = records.len() as u32;
+            insert = Some((last.pilcrow + 1, records));
+        }
+    }
+    let control = fill.resolved_control();
+    let parent = fill.record.story.clone();
+    let changes_content = !paragraphs.is_empty() || remove.is_some() || insert.is_some();
+    let effect = (changes_content || !fill.patch.is_empty() || fill.drop_value).then(|| {
+        Effect::Control(ControlFill::Block {
+            parent: parent.clone(),
+            raw,
+            drop_value: fill.drop_value,
+            patch: fill.patch,
+            child: child.to_owned(),
+            paragraphs,
+            remove,
+            insert,
+        })
+    });
+    Ok(Planned {
+        index: fill.index,
+        story: child.to_owned(),
+        target: fill.resolved,
+        claims: vec![Claim::Span(0, last.pilcrow + 1)],
+        touched: view
+            .paragraphs
+            .iter()
+            .map(|paragraph| paragraph.para_id.clone())
+            .collect(),
+        exclusive: true,
+        effect,
+        shape: Shape::Story,
+        removed,
+        new_paragraph_count,
+        suggest: false,
+        control,
+        also_changes: Some(parent),
+        companion: false,
     })
 }
 
@@ -1262,8 +2050,8 @@ fn plan_step<T: ReadTxn>(
     source: Option<&SourceMetadata>,
     index: u32,
     step: &EditStep,
-) -> Result<Planned, EditFailure> {
-    match &step.operation {
+) -> Result<Vec<Planned>, EditFailure> {
+    let planned = match &step.operation {
         EditOperation::InsertText { target, at, text } => {
             plan_text(views, source, index, step, target, Some((text, Some(*at))))
         }
@@ -1292,7 +2080,11 @@ fn plan_step<T: ReadTxn>(
         EditOperation::SetParagraphStyle { target, style_id } => {
             plan_style(views, source, index, step, target, style_id)
         }
-    }
+        EditOperation::SetContentControlText { target, text } => {
+            return plan_control(views, source, index, step, target, text);
+        }
+    }?;
+    Ok(vec![planned])
 }
 
 /// One executed step: the story-length change and what the operation minted.
@@ -1310,11 +2102,23 @@ fn staging_error(index: u32, error: impl fmt::Display) -> EditError {
 fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Executed>>> {
     let mut executed: Vec<Option<Executed>> = steps.iter().map(|_| None).collect();
     for (slot, planned) in steps.iter().enumerate() {
-        if let Some(Effect::Style(plan)) = &planned.effect {
-            stage
-                .apply_style_plan(&planned.story, plan)
-                .map_err(|error| staging_error(planned.index, error))?;
-            executed[slot] = Some(Executed::default());
+        match &planned.effect {
+            Some(Effect::Style(plan)) => {
+                stage
+                    .apply_style_plan(&planned.story, plan)
+                    .map_err(|error| staging_error(planned.index, error))?;
+                executed[slot] = Some(Executed::default());
+            }
+            Some(Effect::Control(fill)) => {
+                let new_ids = stage
+                    .apply_control_fill(&planned.story, fill)
+                    .map_err(|error| staging_error(planned.index, error))?;
+                executed[slot] = Some(Executed {
+                    new_ids,
+                    ..Executed::default()
+                });
+            }
+            _ => {}
         }
     }
     let mut order: Vec<usize> = (0..steps.len())
@@ -1373,7 +2177,7 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                     .remove_paragraph_records(story, *start, *end)
                     .map_err(fail)?;
             }
-            Some(Effect::Style(_)) | None => continue,
+            Some(Effect::Style(_) | Effect::Control(_)) | None => continue,
         }
         outcome.delta = i64::from(stage.story_len(story)?) - i64::from(before);
         executed[slot] = Some(outcome);
@@ -1402,6 +2206,7 @@ fn receipts<T: ReadTxn>(
     steps
         .iter()
         .zip(executed)
+        .filter(|(planned, _)| !planned.companion)
         .map(|(planned, outcome)| {
             let story = views.story(&planned.story, EditTextView::Accepted);
             let paragraph_range = |story: &StoryView, para_id: &str| {
@@ -1425,6 +2230,17 @@ fn receipts<T: ReadTxn>(
                     let (first, _) = paragraph_range(story, ids.first()?)?;
                     let (last, len) = paragraph_range(story, ids.last()?)?;
                     Some(text_range(&planned.story, &first, 0, &last, len))
+                }
+                Shape::Story => {
+                    let first = story.paragraphs.first()?;
+                    let last = story.paragraphs.last()?;
+                    Some(text_range(
+                        &planned.story,
+                        &first.para_id,
+                        0,
+                        &last.para_id,
+                        last.len(),
+                    ))
                 }
             });
             let paragraphs = |ids: &[String]| {
@@ -1450,6 +2266,7 @@ fn receipts<T: ReadTxn>(
                 revision_ids: outcome
                     .as_ref()
                     .map_or_else(Vec::new, |outcome| outcome.revision_ids.clone()),
+                control: planned.control.clone(),
             }
         })
         .collect()
@@ -1508,20 +2325,36 @@ impl EditingDoc {
             let index = index as u32;
             let planned = plan_step(&mut views, source.as_deref(), index, step)
                 .map_err(|failure| refusal(version.clone(), failure.at(index)))?;
-            if let Some(earlier) = steps
-                .iter()
-                .find(|earlier: &&Planned| earlier.conflicts(&planned))
-            {
-                let mut conflict = failure(
-                    EditFailureCode::OverlappingSteps,
-                    format!("step {index} conflicts with step {}", earlier.index),
-                    Some(planned.target.clone()),
-                )
-                .at(index);
-                conflict.conflicting_step_index = Some(earlier.index);
-                return Err(refusal(version, conflict));
+            for planned in planned {
+                if let Some(earlier) = steps
+                    .iter()
+                    .find(|earlier: &&Planned| earlier.conflicts(&planned))
+                {
+                    let mut conflict = failure(
+                        EditFailureCode::OverlappingSteps,
+                        format!("step {index} conflicts with step {}", earlier.index),
+                        Some(planned.target.clone()),
+                    )
+                    .at(index);
+                    conflict.conflicting_step_index = Some(earlier.index);
+                    return Err(refusal(version, conflict));
+                }
+                steps.push(planned);
             }
-            steps.push(planned);
+        }
+        let inserted: usize = steps
+            .iter()
+            .map(|planned| planned.new_paragraph_count as usize)
+            .sum();
+        if inserted > MAX_INSERTED_PARAGRAPHS {
+            return Err(refusal(
+                version,
+                failure(
+                    EditFailureCode::LimitExceeded,
+                    format!("a batch inserts at most {MAX_INSERTED_PARAGRAPHS} paragraphs"),
+                    None,
+                ),
+            ));
         }
         let base = if capture && steps.iter().any(|planned| planned.effect.is_some()) {
             let update = deterministic::encode_state_as_update_v1(&txn, &StateVector::default());
@@ -1575,12 +2408,14 @@ impl EditingDoc {
             previews: plan
                 .steps
                 .iter()
+                .filter(|planned| !planned.companion)
                 .map(|planned| EditPreview {
                     step_index: planned.index,
                     target: planned.target.clone(),
                     would_change: planned.effect.is_some(),
                     new_paragraph_count: planned.new_paragraph_count,
                     would_create_revisions: planned.suggest && planned.effect.is_some(),
+                    control: planned.control.clone(),
                 })
                 .collect(),
         }))
@@ -1637,7 +2472,7 @@ impl EditingDoc {
             EditHistory::None => {}
         }
         history.add_undo_barrier();
-        {
+        let valued = {
             let mut txn = match request.history {
                 EditHistory::Separate => self.yrs_doc().transact_mut_with(self.client_id),
                 EditHistory::None => self.yrs_doc().transact_mut_with(HOST_ORIGIN),
@@ -1648,10 +2483,13 @@ impl EditingDoc {
                 drop(txn);
                 return Ok(Err(stale(self.version())));
             }
+            let valued = valued_embeds(&txn, &plan.steps)?;
             txn.apply_update(adoption)
                 .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        }
+            valued
+        };
         history.add_undo_barrier();
+        self.drop_values(&valued);
         self.id_counter.store(
             staged.stage.id_counter.load(Ordering::Relaxed),
             Ordering::Relaxed,
@@ -1680,7 +2518,9 @@ impl EditingDoc {
             .iter()
             .zip(&executed)
             .filter(|(_, outcome)| outcome.is_some())
-            .map(|(planned, _)| planned.story.clone())
+            .flat_map(|(planned, _)| {
+                std::iter::once(planned.story.clone()).chain(planned.also_changes.clone())
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -1703,6 +2543,20 @@ impl EditingDoc {
         }))
     }
 
+    /// Drops the authored values of the text controls a committed batch filled, in a transaction
+    /// of its own so undoing the fill never brings them back.
+    fn drop_values(&self, valued: &[yrs::MapRef]) {
+        if valued.is_empty() {
+            return;
+        }
+        let mut txn = self.yrs_doc().transact_mut_with(HOST_ORIGIN);
+        for map in valued {
+            if !AsRef::<yrs::branch::Branch>::as_ref(map).is_deleted() {
+                yrs::Map::remove(map, &mut txn, "value");
+            }
+        }
+    }
+
     fn check_commit(&self, plan: &Plan) -> Result<(), EditRefusal> {
         let txn = self.yrs_doc().transact();
         let current = self.version();
@@ -1723,6 +2577,33 @@ impl EditingDoc {
         }
         Ok(())
     }
+}
+
+/// The embeds of the text controls `steps` fill that carry an authored value, read from the state
+/// they were planned on.
+fn valued_embeds<T: ReadTxn>(txn: &T, steps: &[Planned]) -> EditResult<Vec<yrs::MapRef>> {
+    steps
+        .iter()
+        .filter_map(|planned| match &planned.effect {
+            Some(Effect::Control(ControlFill::Inline {
+                raw,
+                drop_value: true,
+                ..
+            })) => Some((planned.story.as_str(), *raw)),
+            Some(Effect::Control(ControlFill::Block {
+                parent,
+                raw,
+                drop_value: true,
+                ..
+            })) => Some((parent.as_str(), *raw)),
+            _ => None,
+        })
+        .map(|(story, raw)| {
+            let text = story_ref(txn, story)?;
+            crate::ops::embed::embed_map_at(&text, txn, raw)
+                .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+        })
+        .collect()
 }
 
 fn stale(version: DocumentVersion) -> EditRefusal {

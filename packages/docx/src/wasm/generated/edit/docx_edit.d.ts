@@ -179,8 +179,8 @@ export class EditSession {
     cell_selection(): string;
     /**
      * Removes the authored `value` from the content-control embed carrying
-     * `embed_id`, leaving the control itself in place. Errors when no embed
-     * has that id.
+     * `embed_id`, leaving the control and its content in place: it never
+     * erases a text control's text. Errors when no embed has that id.
      */
     clear_content_control_value(embed_id: string): void;
     /**
@@ -337,6 +337,12 @@ export class EditSession {
      */
     export_structured_json(options: string): string;
     /**
+     * [`EditSession::list_content_controls_json`] keeping the controls that match `query`
+     * (`{"kind":"id","controlId"}`, `{"kind":"tag","tag"}`, `{"kind":"ooxmlId","ooxmlId"}` or
+     * `{"kind":"alias","alias"}`) exactly.
+     */
+    find_content_controls_json(query: string, options: string): string;
+    /**
      * Exact, case-sensitive, paragraph-local search:
      * `{"text","within","view","limit"?}` ->
      * `{"ok":true,"version","matches":[{"text","range"}],"truncated"}`.
@@ -454,6 +460,13 @@ export class EditSession {
      * needs as JSON out, so the host can register fonts before laying out.
      */
     layout_font_requirements_json(input: string): string;
+    /**
+     * The content controls of the committed state:
+     * `{"stories"?,"maxControls"?,"maxBytes"?}` -> `{"ok":true,"version","content"}` or
+     * `{"ok":false,"version","failure"}`. Control ids and anchors are scoped to the returned
+     * version. Reads only.
+     */
+    list_content_controls_json(options: string): string;
     /**
      * Every pending tracked change across all stories, in deterministic
      * story-then-position order:
@@ -716,16 +729,19 @@ export class EditSession {
     set_column_width(at_json: string, width_twips: number): string;
     /**
      * Sets the authored `value` (any JSON) on the content-control embed
-     * carrying `embed_id`, searching every story. Errors when no embed has
-     * that id.
+     * carrying `embed_id`, searching every story. A plain- or rich-text
+     * control takes a string, which fills its content as one
+     * version-checked batch step instead. Errors when no embed has that id
+     * and when a fill is refused.
      */
     set_content_control_value(embed_id: string, value_json: string): void;
     /**
      * Sets the authored `value` on the content-control embed at
      * `(story, para_id, offset)` — the way to reach a control with no
      * authored `w:id` or tag, which
-     * [`EditSession::set_content_control_value`] cannot address. Errors when
-     * that position holds no embed.
+     * [`EditSession::set_content_control_value`] cannot address. A text
+     * control's string value fills it as that method does. Errors when that
+     * position holds no embed.
      */
     set_content_control_value_at(story: string, para_id: string, offset: number, value_json: string): void;
     /**
@@ -942,6 +958,11 @@ export function export_docx_markdown_json(bytes: Uint8Array, options: string): s
 export function export_docx_structured_json(bytes: Uint8Array, options: string): string;
 
 /**
+ * The content controls of DOCX bytes that match `query` exactly.
+ */
+export function find_docx_content_controls_json(bytes: Uint8Array, query: string, options: string): string;
+
+/**
  * wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
  * point in, document position (or `null`) as JSON out.
  */
@@ -973,6 +994,12 @@ export function install_panic_hook(): void;
  * wasm wrapper over [`layout_to_json`].
  */
 export function layout_document_json(input: string): string;
+
+/**
+ * The content controls of DOCX bytes as a snapshot; `options` as for
+ * [`EditSession::list_content_controls_json`]. No session is created.
+ */
+export function list_docx_content_controls_json(bytes: Uint8Array, options: string): string;
 
 /**
  * Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
@@ -1188,6 +1215,7 @@ export interface InitOutput {
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_find_content_controls_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_find_text_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1205,6 +1233,7 @@ export interface InitOutput {
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_list_content_controls_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1266,6 +1295,8 @@ export interface InitOutput {
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly find_docx_content_controls_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
