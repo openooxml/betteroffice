@@ -11,8 +11,8 @@ use crate::TextRange;
 /// Paragraph, range, table and control anchors resolve against the session version (or the
 /// snapshot) they were read at; table indices and control ids are not stable across saves. A
 /// source-part anchor addresses retained source XML: the part, its SHA-256, and zero-based
-/// element-child ordinals from the part's root element. It is provenance, not an edit target. A
-/// paragraph anchor with an empty id marks content with no location of its own.
+/// element-child ordinals from the part's root element. It is provenance, not an edit target. An
+/// unlocated anchor marks content of `story` with no location of its own, and says why.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
@@ -38,6 +38,24 @@ pub enum Anchor {
         part_sha256: String,
         path: Vec<u32>,
     },
+    Unlocated {
+        story: String,
+        reason: UnlocatedReason,
+    },
+}
+
+/// Why content has no location of its own.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnlocatedReason {
+    /// Another paragraph of the story carries the same paragraph id.
+    DuplicateParagraphId,
+    /// The story is too large to read within the export's byte limit.
+    StoryTooLarge,
+    /// The story does not exist.
+    MissingStory,
+    /// Content the editing stream leaves out whose source XML can no longer be found.
+    ProvenanceUnavailable,
 }
 
 /// A category of stories a read covers.
