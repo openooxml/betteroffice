@@ -1705,6 +1705,38 @@ describe('XlsxEditor commands', () => {
   it('reopens a rejected entry at its own cell when a host selects its sheet', () =>
     keepsRejectedOnItsSheet('selectCells'));
 
+  it('never reopens a rejected entry whose correction a host selection queued', async () => {
+    const clipboard = holdClipboard();
+    try {
+      const editor = await mountCommands();
+      const formula = editor.view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+      const nameBox = editor.view.getByTestId('xlsx-name-box') as HTMLInputElement;
+      await act(async () => {
+        editor.api().selectCells(0, selectionAt({ row: 3, col: 1 }));
+      });
+      fireEvent.change(formula, { target: { value: oversized } });
+      fireEvent.keyDown(formula, { key: 'Enter' });
+      expect(formula.value).toBe(oversized);
+      fireEvent.keyDown(editor.view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      fireEvent.change(formula, { target: { value: 'Corrected' } });
+      let selected: boolean | undefined;
+      await act(async () => {
+        selected = editor.api().selectCells(0, selectionAt({ row: 0, col: 0 }));
+      });
+      expect(selected).toBe(true);
+      expect(nameBox.value).toBe('A1');
+      expect(formula.value).not.toBe(oversized);
+
+      await act(async () => clipboard.resolve('Pasted'));
+      expect(editor.api().handle.cell(0, 3, 1).input).toBe('Corrected');
+      expect(nameBox.value).toBe('A1');
+      expect(formula.value).not.toBe(oversized);
+      expect(await editor.execute('save', null)).toEqual({ ok: true, status: 'executed' });
+    } finally {
+      clipboard.restore();
+    }
+  });
+
   it('prints a replacement workbook only after it painted', async () => {
     let paints = 0;
     const getContext = HTMLCanvasElement.prototype.getContext;
