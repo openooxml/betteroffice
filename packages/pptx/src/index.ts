@@ -1,5 +1,5 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
-export { presentationImageBlob } from './render/image';
+export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
 export { StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
@@ -70,6 +70,7 @@ export type {
   Profiled,
   ProfiledLayout,
   PptxFontFace,
+  PptxCaretAnchor,
   PptxTextMatch,
   PptxTextSearchOptions,
   PrimitiveTransform,

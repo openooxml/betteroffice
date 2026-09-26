@@ -746,6 +746,34 @@ describe('host undo and comment controls', () => {
     } finally { deck.dispose(); }
   });
 
+  test('caret anchors follow typing, undo, redo and remote edits as plain data', () => {
+    const deck = openPresentation(fixture, { clientId: 9982 });
+    const peer = openPresentation(fixture, { clientId: 9983, initialUpdate: deck.encodeStateAsUpdate() });
+    try {
+      const story = deck.snapshot().slides[0].shapes.find((shape) => shape.textStories.length)!
+        .textStories[0];
+      const first = deck.story(story.id).paragraphs[0].runs[0].text[0];
+      deck.addUndoBoundary();
+      deck.insertText(story.id, 0, first);
+      const anchor = JSON.parse(JSON.stringify(deck.anchorCaret(story.id, 1)));
+      expect(Object.keys(anchor).sort()).toEqual(['position', 'storyId']);
+      deck.undo();
+      expect(deck.resolveCaretAnchor(anchor)).toBe(0);
+      deck.redo();
+      expect(deck.resolveCaretAnchor(anchor)).toBe(1);
+      peer.applyUpdate(deck.encodeStateAsUpdate());
+      peer.insertText(story.id, 0, 'Remote ');
+      deck.applyUpdate(peer.encodeStateAsUpdate());
+      expect(deck.resolveCaretAnchor(anchor)).toBe(8);
+      expect(peer.resolveCaretAnchor(anchor)).toBe(8);
+      expect(() => deck.anchorCaret(story.id, 100_000)).toThrow();
+      expect(() => deck.resolveCaretAnchor({ storyId: story.id, position: 'not base64!' })).toThrow();
+    } finally {
+      peer.dispose();
+      deck.dispose();
+    }
+  });
+
   test('moves modern comments without losing their thread or exported position', async () => {
     const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/modern-comments.pptx'));
     const deck = openPresentation(bytes, { clientId: 9982 });

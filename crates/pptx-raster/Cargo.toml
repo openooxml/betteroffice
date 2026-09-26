@@ -14,6 +14,9 @@ categories = ["rendering", "multimedia::images"]
 [lib]
 name = "pptx_raster"
 
+[features]
+fuzzing = []
+
 [dependencies]
 image = { version = "0.25", default-features = false, features = [
   "bmp",
@@ -27,6 +30,9 @@ ooxml-drawingml.workspace = true
 ooxml-text.workspace = true
 png = "0.18"
 pptx-render.workspace = true
+resvg = { version = "0.48", default-features = false }
+simplecss = "=0.2.2"
+svgtypes = "=0.16.1"
 tiny-skia = "0.12"
 
 [dev-dependencies]

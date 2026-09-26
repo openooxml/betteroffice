@@ -9,8 +9,11 @@ import type {
   ProposalDiffSlide,
   SlideDisplayList,
 } from '@betteroffice/pptx';
+import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
 import { frameBoundsForShape } from '../interactions';
 import { useTranslation } from '../i18n';
+import { useSyncedState } from '../useSyncedState';
+import { useDisabledDescription } from './ui/ToolbarPrimitives';
 
 export function useProposalCanvas(
   handle: PresentationHandle | null,
@@ -18,8 +21,8 @@ export function useProposalCanvas(
   snapshot: DeckSnapshot | undefined,
   slideIndex: number
 ) {
-  const [enabled, setEnabled] = useState(true);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [enabled, setEnabled, enabledRef] = useSyncedState(true);
+  const [selectedId, setSelectedId, selectedIdRef] = useSyncedState<string | null>(null);
   const slideId = snapshot?.slides[slideIndex]?.id;
   const available = useMemo(
     () =>
@@ -49,7 +52,7 @@ export function useProposalCanvas(
   useEffect(() => {
     setEnabled(true);
     setSelectedId(null);
-  }, [handle]);
+  }, [handle, setEnabled, setSelectedId]);
   return {
     ...result,
     available,
@@ -58,6 +61,9 @@ export function useProposalCanvas(
     setEnabled,
     select: setSelectedId,
     reviewing: enabled && selected !== null,
+    /** Read before the next render, such as by a command right after another. */
+    enabledRef,
+    selectedIdRef,
   };
 }
 
@@ -66,20 +72,31 @@ type CanvasReview = ReturnType<typeof useProposalCanvas>;
 export function ProposalCanvasToolbar({
   review,
   ready,
-  onAccept,
-  onReject,
-  onDetails,
 }: {
   review: CanvasReview;
   ready: boolean;
-  onAccept: (id: string) => void;
-  onReject: (id: string) => void;
-  onDetails: () => void;
 }) {
   const { t } = useTranslation();
+  const store = usePptxCommands();
+  const proposalId = review.selected?.id ?? '';
+  const accept = usePptxCommandState('proposalAccept', { proposalId });
+  const reject = usePptxCommandState('proposalReject', { proposalId });
+  const pending = review.enabled && !ready;
+  const acceptReason = !accept.enabled
+    ? accept.disabledReason.message
+    : review.error
+      ? t('commands.reasons.previewFailed')
+      : pending
+        ? t('commands.reasons.previewPending')
+        : undefined;
+  const acceptable = accept.enabled && !review.error && !pending;
+  const acceptDescribed = useDisabledDescription(!acceptable, acceptReason);
+  const rejectDescribed = useDisabledDescription(
+    !reject.enabled,
+    reject.enabled ? undefined : reject.disabledReason.message
+  );
   if (!review.selected) return null;
   const stale = review.selected.staleTargets.length > 0;
-  const disabled = stale || Boolean(review.error) || (review.enabled && !ready);
   return (
     <div style={styles.toolbar} data-testid="pptx-canvas-review-toolbar">
       <div style={styles.row}>
@@ -88,10 +105,9 @@ export function ProposalCanvasToolbar({
           <select
             aria-label={t('proposals.canvasTitle')}
             value={review.selected.id}
-            onChange={(event) => {
-              review.select(event.target.value);
-              review.setEnabled(true);
-            }}
+            onChange={(event) =>
+              void store.execute('proposalSelect', { proposalId: event.target.value })
+            }
             style={styles.select}
           >
             {review.available.map((proposal, index) => (
@@ -107,34 +123,47 @@ export function ProposalCanvasToolbar({
           style={styles.button}
           data-testid="pptx-canvas-review-toggle"
           aria-pressed={review.enabled}
-          onClick={() => review.setEnabled(!review.enabled)}
+          onClick={() => void store.execute('proposalDiff', { enabled: !review.enabled })}
         >
           {t(review.enabled ? 'proposals.editSlide' : 'proposals.showDiff')}
         </button>
-        <button type="button" style={styles.button} onClick={onDetails}>
+        <button
+          type="button"
+          style={styles.button}
+          onClick={() => void store.execute('proposalsPanel', { open: true })}
+        >
           {t('proposals.details')}
         </button>
         <button
           type="button"
           style={{
             ...styles.primary,
-            opacity: disabled ? 0.45 : 1,
-            cursor: disabled ? 'default' : 'pointer',
+            opacity: acceptable ? 1 : 0.45,
+            cursor: acceptable ? 'pointer' : 'default',
           }}
-          disabled={disabled}
+          {...acceptDescribed.props}
+          title={acceptDescribed.reason}
           data-testid="pptx-canvas-proposal-accept"
-          onClick={() => onAccept(review.selected!.id)}
+          onClick={() => {
+            if (acceptable) void store.execute('proposalAccept', { proposalId });
+          }}
         >
           {t('proposals.accept')}
         </button>
+        {acceptDescribed.node}
         <button
           type="button"
           style={styles.button}
+          {...rejectDescribed.props}
+          title={rejectDescribed.reason}
           data-testid="pptx-canvas-proposal-reject"
-          onClick={() => onReject(review.selected!.id)}
+          onClick={() => {
+            if (reject.enabled) void store.execute('proposalReject', { proposalId });
+          }}
         >
           {t('proposals.reject')}
         </button>
+        {rejectDescribed.node}
       </div>
       {review.enabled && (
         <div style={styles.legend}>

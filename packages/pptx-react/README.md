@@ -42,9 +42,87 @@ trigger Rust reflow, drag or resize shapes on the canvas, or use the toolbar
 for bold, italic, size, color, slides, text boxes, image insertion, and shape ordering.
 
 Props: `file`, `fonts`, `collaboration`, `i18n`, `className`, `fileName`,
-`onReady` (exposes the core `PresentationHandle`, a `refresh` callback for
-host-driven edits, `refreshProposals`, and `save`), `onChange` (deck snapshots), `onError`, and
-`onSave` (receives the saved bytes; without it, saving downloads the file).
+`onReady` (exposes the core `PresentationHandle`, the editor's `commands`, a
+`refresh` callback for host-driven edits, `refreshProposals`, and `save`),
+`onChange` (deck snapshots), `onError`, `onSave` (receives the saved bytes;
+without it, saving downloads the file), `readOnly`, `toolbar`, and `showToolbar`.
+
+## Compose the toolbar
+
+Every built-in control runs through one command store per editor,
+`api.commands`. This command and toolbar composition API is experimental and
+may change in minor releases. Hosts arrange the same controls with their own
+actions:
+
+```tsx
+import {
+  EditorToolbar,
+  PptxEditor,
+  ToolbarButton,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  ToolbarGroup,
+} from '@betteroffice/pptx-react';
+
+<PptxEditor
+  file={file}
+  fonts={fonts}
+  toolbar={
+    <EditorToolbar mode="commands">
+      <EditorToolbar.Toolbar>
+        <ToolbarGroup label="Text">
+          <ToolbarCommandSelect id="fontFamily" />
+          <ToolbarCommandButton id="bold" />
+        </ToolbarGroup>
+        <ToolbarCommandButton id="undo" />
+        <ToolbarCommandButton id="slideshow" />
+        <ToolbarButton title="Share" onClick={share}>Share</ToolbarButton>
+      </EditorToolbar.Toolbar>
+    </EditorToolbar>
+  }
+/>;
+```
+
+- **Toolbar region.** `showToolbar={false}` hides it; otherwise omitting
+  `toolbar` keeps the default controls (read-only shows only the Present
+  button), `null` removes them, and supplied chrome replaces them, also while
+  `readOnly`. Collaborator chips stay beside supplied chrome.
+- **Outside the editor.** Capture `api.commands` from `onReady` into state and
+  render the parts under `<PptxCommandProvider commands={commands}>`;
+  `commands={null}` reports the editor as unavailable until it is ready. Such
+  chrome follows the editor's locale, and shortcuts pressed inside it reach the
+  editor.
+- **Command contract.** `getState(id, args?)` returns serializable state
+  (`enabled`, `active` with `'mixed'`, `value`, and `options` that each carry
+  their own `state`); a disabled state
+  always carries `disabledReason: { code, message }`, for example
+  `text-selection-required`, `shape-required`, `z-order-boundary`,
+  `review-active` or `proposal-stale`. `getDescriptor(id)` lists the label key
+  and shortcuts, which labels show per platform (`Ctrl+B`, `⌘B`).
+  `usePptxCommand` and `usePptxCommandState` bind custom controls.
+- **Ordering.** `execute(id, args)` waits for input accepted before it, such as
+  a picture still decoding, keeps later typing behind it, checks availability
+  again and resolves to `executed`, `noop`, `opened`, `requested` or a coded
+  failure (`input-failed`, `document-replaced`, `target-changed`,
+  `gesture-active`, `command-failed`). Keystrokes typed meanwhile land in the
+  text they were typed into, and a picture on the slide the picker opened on;
+  input queued for a replaced document is dropped. Save runs the host's `onSaveRequest` outside that queue, so the request
+  may await `flushPendingInput()`.
+- **Authority.** Commands enforce read-only mode and the other gates for the UI.
+  `api.handle` stays direct, unrestricted host access; call `api.refresh()`
+  after using it.
+- **Overflow.** At narrow widths trailing groups move into a More menu with
+  arrow, Home/End, typeahead and submenu navigation. Built-in controls keep all
+  their choices there; host buttons and dropdowns get entries automatically,
+  and `ToolbarOverflow` gives other content one. A group holding content
+  without an entry stays in the row, which scrolls horizontally when that
+  content does not fit.
+- **Compatibility.** The prop-based `EditorToolbar`, `Toolbar`,
+  `EditorToolbarContext` and `useEditorToolbar` still work and are deprecated:
+  without `mode` they bind to their props, host children follow the default
+  controls, and command-mode chrome rejects those props. Inside
+  `EditorToolbar mode="commands"`, `useEditorToolbar()` returns a view of the
+  commands whose callbacks run them; mixed marks read as `undefined`.
 
 ## Host editing controls
 
@@ -54,7 +132,8 @@ it. Promises are awaited and concurrent requests are coalesced. `onSave` still
 receives the resulting bytes when built-in saving continues. A request waiting
 on a replaced or closed document is discarded.
 
-The API received by `onReady` exposes `flushPendingInput(): Promise<void>`.
+The API received by `onReady` exposes `flushPendingInput(): Promise<void>` and
+the `commands` store described above.
 Await it before inspecting or mutating the core from a host workflow, then call
 `api.save()` for explicit serialization without re-entering `onSaveRequest`.
 `save()` remains synchronous and rejects while asynchronous input is pending.
@@ -78,6 +157,8 @@ proposal previews return `null`. Use `api.refresh()` after core mutations.
 - Text editing with caret and selection computed by the engine
 - Slide management (add, delete), text boxes, image insertion, shape ordering, undo/redo
 - Saving the deck back to `.pptx` — toolbar button, Ctrl/Cmd+S, or `api.save()`
+- A command store behind every control, with composable toolbar parts and an
+  accessible overflow menu
 - Localized UI via the `i18n` prop
   ([`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n))
 - Real-time collaboration with people or agents; the deck is a CRDT

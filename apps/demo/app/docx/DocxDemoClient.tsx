@@ -27,6 +27,10 @@ const DocxEditor = dynamic(
   () => import("@betteroffice/docx-react").then((m) => m.DocxEditor),
   { ssr: false }
 );
+const CompactToolbar = dynamic(
+  () => import("./CompactToolbar").then((m) => m.CompactToolbar),
+  { ssr: false }
+);
 
 const SHOWCASE = { url: "/betteroffice-demo.docx", name: "betteroffice-demo.docx" };
 
@@ -57,6 +61,7 @@ export function DocxDemoClient() {
     createProvider,
   );
   const [error, setError] = useState<string | null>(null);
+  const [compact, setCompact] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -161,6 +166,14 @@ export function DocxDemoClient() {
         )}
 
         <div className="flex flex-none items-center gap-2">
+          <button
+            type="button"
+            className="rounded-[5px] px-2 py-1 text-[12.5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg aria-pressed:bg-surface aria-pressed:text-fg"
+            aria-pressed={compact}
+            onClick={() => setCompact((value) => !value)}
+          >
+            Compact toolbar
+          </button>
           <CollaborationControls
             status={collab.status}
             synced={collab.synced}
@@ -204,6 +217,15 @@ export function DocxDemoClient() {
             documentName={source.name}
             onOpen={handleOpen}
             onError={(cause) => setError(cause.message)}
+            toolbar={
+              compact ? (
+                <CompactToolbar
+                  onShare={() =>
+                    void navigator.clipboard?.writeText(window.location.href)
+                  }
+                />
+              ) : undefined
+            }
             showToolbar
             showRuler
             showZoomControl
