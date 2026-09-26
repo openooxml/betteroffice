@@ -272,6 +272,8 @@ flushes. `proposeChange`, `addComment` and `applyFormatting` resolve their
 
 ## Host plugins
 
+The plugin API is experimental and may change in minor releases.
+
 Host-owned tools (review aids, templates, checks) install through the `plugins`
 prop. A plugin contributes a panel, an overlay, sidebar cards, and commands, and
 works through restricted clients rather than the editor or its session:

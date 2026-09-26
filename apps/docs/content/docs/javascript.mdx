@@ -89,7 +89,8 @@ in `ToolbarOverflow` to give it an entry there.
 
 Host-owned tools install through the `plugins` prop. A plugin created with
 `defineDocxPlugin` can contribute a docked panel, an overlay, sidebar cards and
-commands; it reads and edits through restricted clients, never the session:
+commands; it reads and edits through restricted clients, never the session. The
+plugin API is experimental and may change in minor releases:
 
 ```tsx
 import { DocxEditor, defineDocxPlugin } from "@betteroffice/docx-react";

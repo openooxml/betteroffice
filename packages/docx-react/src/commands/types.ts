@@ -326,7 +326,11 @@ export interface DocxPluginCommandDescriptor {
 /** State of a contributed command; the plugin chooses its own disabled codes. */
 export type DocxPluginCommandState = CommandState;
 
-/** Outcome of a contributed command: a plugin-defined failure, or a refused edit batch as-is. */
+/**
+ * Outcome of a contributed command: a plugin-defined failure, or a refused edit batch as-is.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export type DocxPluginCommandResult = PluginCommandResult<DocxCommandStatus, DocxEditRefusal>;
 
 /** The command authority of one editor, shared by built-in and host chrome. */
