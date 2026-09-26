@@ -50,7 +50,9 @@ without it, saving downloads the file), `readOnly`, `toolbar`, and `showToolbar`
 ## Compose the toolbar
 
 Every built-in control runs through one command store per editor,
-`api.commands`. Hosts arrange the same controls with their own actions:
+`api.commands`. This command and toolbar composition API is experimental and
+may change in minor releases. Hosts arrange the same controls with their own
+actions:
 
 ```tsx
 import {

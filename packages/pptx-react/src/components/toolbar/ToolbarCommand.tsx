@@ -149,13 +149,17 @@ function hintFor(id: PptxCommandId, args: unknown): string | null {
   return commandShortcut(id, args as never);
 }
 
-/** Arguments a control binds; required when the command cannot run without them. */
+/**
+ * Arguments a control binds; required when the command cannot run without them.
+ * @experimental
+ */
 export type ToolbarCommandArgs<K extends PptxCommandId> = null extends PptxCommandArgs[K]
   ? { args?: PptxCommandArgs[K] }
   : {} extends PptxCommandArgs[K]
   ? { args?: PptxCommandArgs[K] }
   : { args: PptxCommandArgs[K] };
 
+/** @experimental */
 export type ToolbarCommandButtonProps<K extends PptxCommandId> = {
   id: K;
   /** Button content; defaults to the command's icon, or its label when it has none. */
@@ -166,12 +170,16 @@ export type ToolbarCommandButtonProps<K extends PptxCommandId> = {
   style?: CSSProperties;
 } & ToolbarCommandArgs<K>;
 
+/** @experimental */
 export interface ToolbarCommandSelectProps<K extends PptxSelectCommandId> {
   id: K;
   className?: string;
 }
 
-/** Commands whose full built-in control chooses their arguments. */
+/**
+ * Commands whose full built-in control chooses their arguments.
+ * @experimental
+ */
 export type PptxControlCommandId =
   | PptxSelectCommandId
   | 'textColor'
@@ -180,6 +188,7 @@ export type PptxControlCommandId =
   | 'zOrder'
   | 'fontSizeStep';
 
+/** @experimental */
 export type ToolbarCommandProps<K extends PptxCommandId> = {
   id: K;
   className?: string;
@@ -405,7 +414,10 @@ function useCommandOverflow<K extends PptxCommandId>(
   useOverflowSource(element, () => [commandOverflowEntry(store, t, id, args, { prompt })]);
 }
 
-/** A button bound to one command, showing its pressed and disabled state. */
+/**
+ * A button bound to one command, showing its pressed and disabled state.
+ * @experimental
+ */
 export function ToolbarCommandButton<K extends PptxCommandId>(props: ToolbarCommandButtonProps<K>) {
   const { id, children, label, className, style } = props;
   const args = (props as { args?: PptxCommandArgs[K] }).args;
@@ -831,7 +843,10 @@ function ProposalPicker({ className }: { className?: string }) {
   );
 }
 
-/** The built-in picker of a selector command. */
+/**
+ * The built-in picker of a selector command.
+ * @experimental
+ */
 export function ToolbarCommandSelect<K extends PptxSelectCommandId>({
   id,
   className,
@@ -988,7 +1003,10 @@ function FontSizeSteps() {
   );
 }
 
-/** The built-in control of any command, as the default toolbar presents it. */
+/**
+ * The built-in control of any command, as the default toolbar presents it.
+ * @experimental
+ */
 export function ToolbarCommand<K extends PptxCommandId>(props: ToolbarCommandProps<K>) {
   const { id, className } = props;
   const args = (props as { args?: PptxCommandArgs[K] }).args;

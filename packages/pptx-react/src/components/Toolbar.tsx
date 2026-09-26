@@ -71,7 +71,10 @@ export interface ToolbarProps {
 
 type LegacyStateKey = Exclude<keyof ToolbarProps, 'mode' | 'className' | 'style' | 'children'>;
 
-/** Props of a toolbar bound to the nearest editor's commands. */
+/**
+ * Props of a toolbar bound to the nearest editor's commands.
+ * @experimental
+ */
 export type CommandToolbarProps = {
   /** Binds every control to the command store of the nearest editor or `PptxCommandProvider`. */
   mode: 'commands';
