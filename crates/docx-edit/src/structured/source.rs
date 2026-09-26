@@ -922,6 +922,9 @@ impl ReadSource {
                 if !source.story.starts_with("comment:") {
                     blocks.insert(path.clone());
                 }
+                if element.to_raw_inline_xml() != source.xml {
+                    continue;
+                }
                 let anchors = self.raw_block_anchors.entry(source.story).or_default();
                 if anchors.len() <= source.index {
                     anchors.resize(source.index + 1, None);
