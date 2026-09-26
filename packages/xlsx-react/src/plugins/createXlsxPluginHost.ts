@@ -302,7 +302,7 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
       command.execute(context)
     );
     if (outcome.ok) return checkedResult(outcome.value);
-    const code = outcome.reason === 'failed' ? 'execution-failed' : outcome.reason;
+    const code = outcome.reason === 'failed' ? 'command-failed' : outcome.reason;
     return { ok: false, failure: commandReason(code, { translate: access.translate }) };
   };
 

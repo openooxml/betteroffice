@@ -172,7 +172,7 @@ function disabledCode(code: XlsxCommandFailureCode): XlsxCommandDisabledCode {
     case 'gesture-active':
     case 'proposal-stale':
     case 'render-failed':
-    case 'execution-failed':
+    case 'command-failed':
       return 'editor-unavailable';
     case 'document-replaced':
     case 'aborted':
