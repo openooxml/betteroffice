@@ -1,17 +1,30 @@
 import { isPluginChord, normalizeChord } from '../commands/descriptors';
-import type { XlsxPlugin, XlsxPluginDefinition } from './types';
+import type { XlsxPlugin, XlsxPluginCommand, XlsxPluginDefinition } from './types';
 
 const definitions = new WeakMap<object, XlsxPluginDefinition<unknown>>();
 
 const LOCAL_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/;
 const PLACEMENTS: ReadonlySet<string> = new Set(['left', 'right', 'bottom']);
 
+const frozenCopy = <T>(value: T): T =>
+  value !== null && typeof value === 'object' ? Object.freeze({ ...value }) : value;
+
+function frozenCommand<S>(command: XlsxPluginCommand<S>): XlsxPluginCommand<S> {
+  if (!Array.isArray(command?.shortcuts)) return frozenCopy(command);
+  return Object.freeze({ ...command, shortcuts: Object.freeze([...command.shortcuts]) });
+}
+
 /**
  * Wraps a plugin for `XlsxEditor`'s `plugins` prop. The definition is checked when the editor
- * installs it; a problem is reported through `onPluginError` and disables only this plugin.
+ * installs it; a problem is reported through `onPluginError` and disables only this plugin. Its
+ * panel, commands and toolbar are copied and frozen, so changing them takes a new definition.
  */
 export function defineXlsxPlugin<S>(definition: XlsxPluginDefinition<S>): XlsxPlugin {
-  const frozen = Object.freeze({ ...definition });
+  const copy = { ...definition };
+  if (copy.panel !== undefined) copy.panel = frozenCopy(copy.panel);
+  if (Array.isArray(copy.commands)) copy.commands = Object.freeze(copy.commands.map(frozenCommand));
+  if (Array.isArray(copy.toolbar)) copy.toolbar = Object.freeze([...copy.toolbar]);
+  const frozen = Object.freeze(copy);
   const plugin = Object.freeze(
     frozen.revision === undefined ? { id: frozen.id } : { id: frozen.id, revision: frozen.revision }
   );

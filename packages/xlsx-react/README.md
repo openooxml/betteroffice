@@ -273,19 +273,21 @@ const review = defineXlsxPlugin<State>({
 
 - **Lifecycle.** Once a workbook is open, each plugin gets fresh state,
   `initialize`, then one `load` event (`loaded`, `replaced`, or `attached` for a
-  plugin added to an open workbook), and its contributions appear. It then
-  receives `document-change` (the committed version after recalculation, for
-  typing, pastes, commands, batches, undo, redo and remote updates, never for
-  refusals or no-ops), `selection-change`, `mode-change` (with `readOnly`),
-  `layout-change` and `grants-change`. Events describe current state: several
-  changes may arrive as one, and a newer one aborts the hook still handling the
-  previous (`context.signal`). Replacing the workbook, removing the plugin,
-  changing its `revision`, unmounting, or a failure ends the activation: its
-  signals abort, its clients refuse, and every `onCleanup` disposer runs once
-  with the reason. Plugins are matched by `id` and `revision`, so new array or
-  callback identities and reordering keep their state. `context.run(action)`
-  gives event handlers a fresh context and isolates their failures. `onReady` is
-  unaffected by plugins.
+  plugin added to an open workbook), and its contributions appear. A workbook
+  change before that hook finishes, its own batches included, aborts it and
+  delivers `load` again. It then receives `document-change` (the committed
+  version after recalculation, for typing, pastes, commands, batches, undo, redo
+  and remote updates, never for refusals or no-ops), `selection-change`,
+  `mode-change` (with `readOnly`), `layout-change` and `grants-change`. Events
+  describe current state: several changes may arrive as one, and a newer one
+  aborts the hook still handling the previous (`context.signal`). Replacing the
+  workbook, removing the plugin, changing its `revision`, unmounting, or a
+  failure ends the activation: its signals abort, its clients refuse, and every
+  `onCleanup` disposer runs once with the reason. Plugins are matched by `id`
+  and `revision`, so new array or callback identities and reordering keep their
+  state. `defineXlsxPlugin` copies the panel, commands and toolbar, so changing
+  them takes a new definition. `context.run(action)` gives event handlers a
+  fresh context and isolates their failures. `onReady` is unaffected by plugins.
 - **Stale results.** `setState` returns false once the context is superseded or
   ended, or when the workbook is no longer at `atVersion` (by default the
   version the context was created at).

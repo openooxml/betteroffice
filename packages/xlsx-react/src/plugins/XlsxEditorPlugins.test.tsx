@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { StrictMode } from 'react';
+import { StrictMode, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -16,6 +16,7 @@ import {
   type XlsxEditRequest,
 } from '@betteroffice/xlsx';
 import { xlsxCommandController } from '../commands/createXlsxCommandStore';
+import { pluginDefinition } from './defineXlsxPlugin';
 import * as publicApi from '../index';
 import {
   EditorToolbar,
@@ -472,6 +473,22 @@ describe('XlsxEditor plugins', () => {
         ok: false,
         failure: { code: 'permission-denied' },
       });
+
+      const grant: { document: 'write'; editBatches?: true } = {
+        document: 'write',
+        editBatches: true,
+      };
+      const grants = { 'acme.review': grant };
+      const changes = () => log.filter((entry) => entry === 'grants-change').length;
+      rerender({ plugins: [plugin], pluginGrants: grants });
+      await until(() => changes() === 2);
+      delete grant.editBatches;
+      rerender({ plugins: [plugin], pluginGrants: grants });
+      await until(() => changes() === 3);
+      expect(await edits.applyEdits(setCell(version, 'B4', 'Revoked in place'))).toMatchObject({
+        ok: false,
+        failure: { code: 'permission-denied' },
+      });
       expect(api().handle.version()).toBe(version);
     } finally {
       clipboard.restore();
@@ -647,6 +664,33 @@ describe('XlsxEditor plugins', () => {
     const fresh = last(contexts);
     expect(fresh.snapshot.generation).not.toBe(first.snapshot.generation);
     expect(await fresh.read.version()).toMatchObject({ ok: true });
+  });
+
+  test('a workbook replaced from onReady never reaches plugins; its successor loads once', async () => {
+    const { plugin, log, contexts } = recorder();
+    const plugins = [plugin];
+    const ready: XlsxEditorApi[] = [];
+    function Host() {
+      const [file, setFile] = useState(fixture);
+      return (
+        <XlsxEditor
+          file={file}
+          plugins={plugins}
+          onReady={(api) => {
+            ready.push(api);
+            if (ready.length === 1) setFile(charted);
+          }}
+        />
+      );
+    }
+    render(<Host />);
+    await until(() => ready.length === 2 && log.includes('load:loaded'));
+    await settle(50);
+    expect(log).toEqual(['initialize', 'load:loaded']);
+    expect(await last(contexts).read.version()).toMatchObject({
+      ok: true,
+      version: last(ready).handle.version(),
+    });
   });
 
   test('StrictMode setup, cleanup and setup leaves one live activation', async () => {
@@ -1090,6 +1134,53 @@ describe('XlsxEditor plugin boundaries and races', () => {
     }
   });
 
+  test('pointer movement over plugin chrome drives no grid gesture or hover', async () => {
+    const opened = openWorkbook(charted.slice());
+    const painted = opened.displayList({ x: 0, y: 0, ...VIEWPORT });
+    const [chart] = painted.charts!;
+    const cell = (row: number, col: number) => {
+      const rect = cellRect(painted.grid!, row, col)!;
+      return { clientX: rect.x + rect.w / 2, clientY: rect.y + rect.h / 2 };
+    };
+    const center = {
+      clientX: chart.clip.x + chart.clip.w / 2,
+      clientY: chart.clip.y + chart.clip.h / 2,
+    };
+    const { plugin } = recorder('acme.review', {
+      overlay: () => (
+        <input data-testid="overlay-input" aria-label="Note" style={{ pointerEvents: 'auto' }} />
+      ),
+    });
+    const { view } = await mount({ plugins: [plugin], file: charted });
+    await until(() => view.queryByTestId('overlay-input') !== null);
+    const surface = view.getByTestId('xlsx-scroll');
+    const overlay = view.getByTestId('overlay-input');
+    const nameBox = view.getByTestId('xlsx-name-box') as HTMLInputElement;
+
+    fireEvent.mouseMove(surface, center);
+    expect(surface.style.cursor).toBe('move');
+    fireEvent.mouseMove(overlay, center);
+    expect(surface.style.cursor).toBe('default');
+
+    fireEvent.mouseDown(surface, cell(0, 0));
+    fireEvent.mouseMove(overlay, { ...cell(10, 0), buttons: 1 });
+    fireEvent.mouseUp(window, cell(10, 0));
+    await settle();
+    expect(nameBox.value).toBe('A1');
+
+    fireEvent.mouseDown(surface, center);
+    await until(() => view.queryByTestId('xlsx-chart-selection') !== null);
+    const left = view.getByTestId('xlsx-chart-selection').style.left;
+    fireEvent.mouseMove(overlay, {
+      clientX: center.clientX + 40,
+      clientY: center.clientY + 24,
+      buttons: 1,
+    });
+    expect(view.getByTestId('xlsx-chart-selection').style.left).toBe(left);
+    fireEvent.mouseUp(window, center);
+    opened.dispose();
+  });
+
   test('built-in shortcuts act on the editor from plugin chrome; contributed ones run for their owner', async () => {
     const marks: string[] = [];
     const { api, view } = await mountKeyboardProbe(marks);
@@ -1388,23 +1479,63 @@ describe('XlsxEditor plugin adapters', () => {
     expect(input(api(), 2, 1)).toBe('Typed');
   });
 
-  test('a batch applied by a lifecycle hook keeps its committed receipt', async () => {
+  test('a batch applied by the load hook keeps its receipt; load repeats at that version', async () => {
     const receipts: unknown[] = [];
+    const loads: string[] = [];
     const { plugin, log } = recorder('acme.review', {
       async onEvent(context, event) {
-        if (event.type === 'document-change') log.push(`document-change:${event.version}`);
+        if (event.type === 'document-change') log.push('document-change');
         if (event.type !== 'load' || !context.edits) return;
+        loads.push(event.version);
         receipts.push(await context.edits.applyEdits(setCell(event.version, 'B3', 'From load')));
       },
     });
     const { api } = await mount({ plugins: [plugin], pluginGrants: WRITE });
-    await until(() => receipts.length === 1);
-    expect(receipts[0]).toMatchObject({ ok: true, applied: true, version: api().handle.version() });
+    await until(() => receipts.length === 2);
+    const version = api().handle.version();
+    expect(receipts).toMatchObject([
+      { ok: true, applied: true, version },
+      { ok: true, applied: false, version },
+    ]);
     expect(input(api(), 2, 1)).toBe('From load');
     await settle(50);
-    expect(log.filter((entry) => entry.startsWith('document-change'))).toEqual([
-      `document-change:${api().handle.version()}`,
+    expect(loads).toHaveLength(2);
+    expect(loads[0]).not.toBe(version);
+    expect(loads[1]).toBe(version);
+    expect(log).toEqual(['initialize']);
+  });
+
+  test('defineXlsxPlugin keeps the contributions it was given when they change in place', () => {
+    const shortcuts = ['Mod+Shift+R'];
+    const commands = [
+      {
+        id: 'run',
+        label: 'Run',
+        mutatesDocument: false,
+        shortcuts,
+        execute: () => ({ ok: true, status: 'executed' }) as const,
+      },
+    ];
+    const toolbar = ['run'];
+    const panel = { title: 'Review', placement: 'left' as const, render: () => null };
+    const plugin = defineXlsxPlugin<null>({
+      id: 'acme.keys',
+      createState: () => null,
+      commands,
+      toolbar,
+      panel,
+    });
+    shortcuts.push('Mod+Shift+B');
+    commands.push({ ...commands[0], id: 'late' });
+    toolbar.length = 0;
+    panel.title = 'Changed';
+    const definition = pluginDefinition(plugin)!;
+    expect(definition.commands!.map((command) => [command.id, command.shortcuts])).toEqual([
+      ['run', ['Mod+Shift+R']],
     ]);
+    expect(definition.toolbar).toEqual(['run']);
+    expect(definition.panel!.title).toBe('Review');
+    expect(Object.isFrozen(definition.commands![0].shortcuts)).toBe(true);
   });
 
   test('a workbook whose onReady throws never reaches plugins', async () => {

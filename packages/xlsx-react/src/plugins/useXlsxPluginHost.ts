@@ -26,7 +26,7 @@ export interface UseXlsxPluginHostOptions extends XlsxEditorPluginProps {
   access: XlsxPluginEditorAccess;
   commands: XlsxCommandController;
   readOnly: boolean;
-  /** The workbook once it is open, else null. */
+  /** The workbook once it is open, else null. Plugins open it while the editor still holds it. */
   handle: WorkbookHandle | null;
   selection: XlsxPluginSelection;
   /** The canvas the grid paints into. */
@@ -103,7 +103,7 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
 
   useLayoutEffect(() => {
     host.setGrants(options.pluginGrants);
-  }, [host, options.pluginGrants]);
+  });
 
   useLayoutEffect(() => {
     host.setPlugins(options.plugins);
@@ -112,11 +112,11 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   useEffect(() => () => host.close('unmounted'), [host]);
 
   useEffect(() => {
-    if (!options.handle) return;
+    if (!options.handle || options.access.handle() !== options.handle) return;
     host.open(options.handle);
     publish();
     return () => host.close('document-replaced');
-  }, [host, options.handle, publish]);
+  }, [host, options.access, options.handle, publish]);
 
   useEffect(() => {
     host.syncCommands();

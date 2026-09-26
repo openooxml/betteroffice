@@ -10,6 +10,7 @@ import {
   gridOwnsChord,
   isPluginChord,
   isPluginCommandId,
+  matchesChord,
   normalizeChord,
 } from './descriptors';
 import { testBinding } from './testing';
@@ -182,6 +183,12 @@ describe('contributed commands', () => {
     expect(normalizeChord('Shift+Mod+b')).toBe('Mod+Shift+b');
     expect(normalizeChord('Ctrl+B')).toBeNull();
     expect(normalizeChord('Mod++')).toBe('Mod++');
+    const plus = { key: '+', ctrlKey: true, metaKey: false, shiftKey: false, altKey: false };
+    expect(matchesChord('Mod+=', plus, false)).toBe(false);
+    expect(matchesChord('Mod++', plus, false)).toBe(true);
+    for (const chord of ['Mod++', 'Mod+=']) {
+      expect(BUILT_IN_CHORDS.has(chord) || gridOwnsChord(chord)).toBe(false);
+    }
     expect(BUILT_IN_CHORDS.has('Mod+b')).toBe(true);
     expect(BUILT_IN_CHORDS.has('Mod+Shift+z')).toBe(true);
     expect(BUILT_IN_CHORDS.has(normalizeChord('Mod+Shift+M')!)).toBe(false);

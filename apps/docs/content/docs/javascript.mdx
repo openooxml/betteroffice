@@ -323,8 +323,8 @@ const review = defineXlsxPlugin<{ sheets: number }>({
 ```
 
 **Lifecycle and grants** follow the DOCX editor: fresh state,
-`initialize` and one `load` event per workbook, then coalesced
-`document-change`, `selection-change`, `mode-change` (with `readOnly`),
+`initialize` and one `load` event per workbook (repeated when it changes before
+that hook finishes), then coalesced `document-change`, `selection-change`, `mode-change` (with `readOnly`),
 `layout-change` and `grants-change` events. `document-change` comes from the
 workbook's committed versions after recalculation, so typing, commands,
 batches, undo, redo and remote updates each produce one, and refusals or no-ops

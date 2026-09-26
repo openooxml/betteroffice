@@ -2000,6 +2000,14 @@ function XlsxEditorContent({
   const onMouseMove = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const chartDrag = chartDragRef.current;
+      // plugin chrome owns the pointer: no grid gesture, and no hover of what lies beneath.
+      if (fromPlugin(e)) {
+        if (!chartDrag) {
+          e.currentTarget.style.cursor = 'default';
+          e.currentTarget.title = '';
+        }
+        return;
+      }
       if (chartDrag) {
         // the button came back up somewhere this window never heard about, so
         // the gesture is over; do not keep accumulating it.
