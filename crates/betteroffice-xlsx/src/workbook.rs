@@ -909,6 +909,7 @@ impl Workbook {
             created: &self.preserved.created,
             edited: self.edited_since_open,
             part_hashes: &self.source_part_hashes,
+            sheet_ids: self.sheet_keys(),
         }
     }
 

@@ -157,9 +157,12 @@ const fromBytes = await exportXlsxStructured(bytes); // no session, no clock
   display text, number format and merge membership, plus merges, tables,
   hyperlinks, hidden row and column spans, and charts, pictures and shapes as
   placeholders with alt text. Defined names are listed read-only.
-- Anchors are `{ sheet: { index, name }, a1 }` positions in the exported version
-  (`anchorScope: "session"`) or bytes snapshot (`"snapshot"`); neither follows
-  later row, column or sheet edits. Retained drawings carry a `sourcePart`
+- Anchors are `{ sheet: { sheetId, index, name }, a1 }` positions in the
+  exported version (`anchorScope: "session"`) or bytes snapshot (`"snapshot"`);
+  neither follows later row, column or sheet edits. `sheetId` is the id edit
+  batches take in that session (`sheet:{index}` for bytes), so a cell or range
+  anchor's `{ sheetId: anchor.sheet.sheetId, range: { kind: "a1", a1: anchor.a1 } }`
+  is its batch target at the exported version. Retained drawings carry a `sourcePart`
   provenance with the part's SHA-256.
 - Formula results are the stored values (`calculation.policy: "asStored"`,
   `freshness: "unverified"`); cells mark results the file did not store as

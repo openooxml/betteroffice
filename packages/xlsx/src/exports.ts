@@ -3,7 +3,7 @@
  * here is plain JSON; the walker, limits and Markdown renderer live in Rust.
  *
  * Export never recalculates: formula results are the stored values (`calculation.policy:
- * 'asStored'`, `freshness: 'unverified'`). Anchors name positions by sheet index, sheet name
+ * 'asStored'`, `freshness: 'unverified'`). Anchors name positions by sheet id, index and name
  * and A1 in the exported version or snapshot; none follows later row, column or sheet edits.
  */
 
@@ -56,11 +56,18 @@ export interface XlsxMarkdownOptions {
   maxBytes?: number;
 }
 
+/** A sheet by the id edit batches take and, descriptively, its current position and name. */
 export interface XlsxSheetIdentity {
+  /** The exporting session's catalog id; `sheet:{index}` for bytes. */
+  sheetId: string;
   index: number;
   name: string;
 }
 
+/**
+ * A `cell` or `range` anchor's `{ sheetId: sheet.sheetId, range: { kind: 'a1', a1 } }` is its
+ * `XlsxRangeTarget` at the exported version.
+ */
 export type XlsxAnchor =
   | { kind: 'sheet'; sheet: XlsxSheetIdentity }
   | { kind: 'cell'; sheet: XlsxSheetIdentity; a1: string }

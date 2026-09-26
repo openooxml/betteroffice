@@ -49,11 +49,14 @@ pub(crate) struct ExportSource<'a> {
     pub(crate) edited: bool,
     /// SHA-256 of retained parts, which never change.
     pub(crate) part_hashes: &'a Mutex<BTreeMap<String, String>>,
+    /// The ids edit batches take, in sheet order.
+    pub(crate) sheet_ids: Vec<String>,
 }
 
 impl ExportSource<'_> {
     fn identity(&self, index: usize) -> XlsxSheetIdentity {
         XlsxSheetIdentity {
+            sheet_id: self.sheet_ids[index].clone(),
             index: index as u32,
             name: self.model.sheets[index].name.clone(),
         }

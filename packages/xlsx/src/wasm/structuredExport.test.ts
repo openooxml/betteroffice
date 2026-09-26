@@ -9,7 +9,7 @@ import {
   openWorkbook,
   renderXlsxMarkdown,
 } from '../index';
-import type { XlsxExportOptions, XlsxStructuredContent } from '../index';
+import type { XlsxExportOptions, XlsxRangeTarget, XlsxStructuredContent } from '../index';
 
 const FIXTURE = resolve(import.meta.dir, '../../test-fixtures/sample.xlsx');
 const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
@@ -51,9 +51,9 @@ describe('xlsx structured export', () => {
       expect(content.anchorScope).toBe('session');
       expect(content.calculation).toEqual({ policy: 'asStored', freshness: 'unverified' });
       expect(content.sheets.map((sheet) => sheet.anchor)).toEqual([
-        { kind: 'sheet', sheet: { index: 0, name: 'Budget' } },
-        { kind: 'sheet', sheet: { index: 1, name: 'Summary' } },
-        { kind: 'sheet', sheet: { index: 2, name: 'Styled' } },
+        { kind: 'sheet', sheet: { sheetId: 'sheet:0', index: 0, name: 'Budget' } },
+        { kind: 'sheet', sheet: { sheetId: 'sheet:1', index: 1, name: 'Summary' } },
+        { kind: 'sheet', sheet: { sheetId: 'sheet:2', index: 2, name: 'Styled' } },
       ]);
       expect(cell(content, 0, 'D3')).toMatchObject({
         id: 's0!D3',
@@ -107,7 +107,7 @@ describe('xlsx structured export', () => {
       if (!reversed.ok) {
         expect(reversed.failure.target).toEqual({
           kind: 'sheet',
-          sheet: { index: 1, name: 'Summary' },
+          sheet: { sheetId: 'sheet:1', index: 1, name: 'Summary' },
         });
       }
       const markdown = handle.exportMarkdown({}, { maxRows: 0 });
@@ -118,6 +118,37 @@ describe('xlsx structured export', () => {
       ).toThrow('malformed request');
     } finally {
       handle.dispose();
+    }
+  });
+
+  it('exports cell anchors that address the same cells as batch targets', () => {
+    for (const handle of [
+      openWorkbook(sampleBytes()),
+      openWorkbook(sampleBytes(), { collaborative: true, clientId: 7201 }),
+    ]) {
+      try {
+        const exported = handle.exportStructured({ scope: [{ sheet: 1 }] });
+        if (!exported.ok) throw new Error(exported.failure.message);
+        const { anchor } = exported.content.sheets[0].cells[0];
+        if (anchor.kind !== 'cell') throw new Error('not a cell anchor');
+        const target: XlsxRangeTarget = {
+          sheetId: anchor.sheet.sheetId,
+          range: { kind: 'a1', a1: anchor.a1 },
+        };
+        const catalog = handle.readCells({ ranges: [] });
+        if (!catalog.ok) throw new Error(catalog.failure.message);
+        expect(target.sheetId).toBe(catalog.sheets[1].sheetId);
+        const applied = handle.applyEdits({
+          expectVersion: exported.version,
+          steps: [{ op: 'setCellInputs', target, inputs: [['edited']] }],
+        });
+        expect(applied.ok).toBe(true);
+        const read = handle.readCells({ ranges: [target] });
+        if (!read.ok) throw new Error(read.failure.message);
+        expect(read.ranges[0].cells[0][0].value).toEqual({ kind: 'text', value: 'edited' });
+      } finally {
+        handle.dispose();
+      }
     }
   });
 
@@ -168,6 +199,10 @@ describe('xlsx structured export', () => {
     expect(first.diagnostics[first.diagnostics.length - 1].code).toBe('truncated');
 
     const full = await exportXlsxStructured(bytes);
+    expect(full.sheets[1].anchor).toEqual({
+      kind: 'sheet',
+      sheet: { sheetId: 'sheet:1', index: 1, name: 'Summary' },
+    });
     const rendered = await renderXlsxMarkdown(full, { maxRows: 5 });
     expect(await exportXlsxMarkdown(bytes, {}, { maxRows: 5 })).toEqual(rendered);
     expect(rendered.markdown.startsWith('<!-- xlsx-export:0 -->\n## Budget')).toBe(true);

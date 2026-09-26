@@ -53,7 +53,8 @@ carries no update for peers.
 `export_structured` reads the committed workbook, with the version it was read
 at, as sparse cells (value, formula, display text, number format, merge
 membership), merges, tables, hyperlinks, hidden spans, drawing placeholders and
-defined names, anchored by sheet index, sheet name and A1. It never
+defined names, anchored by sheet id, index and name and A1; a cell or range
+anchor's sheet id and A1 are its edit-batch `RangeTarget`. It never
 recalculates: formula results are the stored values, flagged `missing`,
 `uncertain`, `cycle` or `limited` where the workbook knows, and one version
 with one set of options always exports the same content. Hidden sheets, rows,

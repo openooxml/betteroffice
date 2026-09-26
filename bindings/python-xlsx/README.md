@@ -182,7 +182,10 @@ from betteroffice_xlsx import export_xlsx_markdown
 print(export_xlsx_markdown(data, markdown_options={"maxRows": 50})["markdown"])
 ```
 
-Hidden sheets, rows, columns and names are excluded unless asked for
+Anchors carry `sheet: {"sheetId", "index", "name"}`: a cell or range anchor's
+`{"sheetId": anchor["sheet"]["sheetId"], "range": {"kind": "a1", "a1": anchor["a1"]}}`
+is its `apply_edits` target at the exported version (`sheet:{index}` ids for
+bytes). Hidden sheets, rows, columns and names are excluded unless asked for
 (`include_hidden_sheets=True`, ...). Comments, rich-text runs, charts and
 pictures are diagnosed or exported as placeholders. `max_cells` and `max_bytes`
 stop at a complete record with `truncated`. Unusable scopes come back as

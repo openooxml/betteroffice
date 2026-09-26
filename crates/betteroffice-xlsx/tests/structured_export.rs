@@ -1,12 +1,13 @@
 use std::sync::{Arc, Mutex};
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellRange, CellRef, CellState, CellValue, Error, Op, ProposalEditInput,
-    ProposalRequest, SheetId, Workbook, XlsxAnchor, XlsxExportCell, XlsxExportDiagnosticCode,
-    XlsxExportFailureCode, XlsxExportOptions, XlsxExportScope, XlsxExportValue, XlsxFormulaResult,
-    XlsxMarkdownOptions, XlsxObjectKind, XlsxStructuredContent, export_xlsx_markdown,
-    export_xlsx_structured, export_xlsx_structured_json, render_xlsx_markdown,
-    render_xlsx_markdown_json,
+    CalculationOptions, CalculationRequest, CellRange, CellRef, CellState, CellValue, EditHistory,
+    EditOperation, EditRequest, EditSource, EditStep, Error, Op, ProposalEditInput,
+    ProposalRequest, RangeAddress, RangeTarget, ReadRequest, SheetId, Workbook, XlsxAnchor,
+    XlsxExportCell, XlsxExportDiagnosticCode, XlsxExportFailureCode, XlsxExportOptions,
+    XlsxExportScope, XlsxExportValue, XlsxFormulaResult, XlsxMarkdownOptions, XlsxObjectKind,
+    XlsxStructuredContent, export_xlsx_markdown, export_xlsx_structured,
+    export_xlsx_structured_json, render_xlsx_markdown, render_xlsx_markdown_json,
 };
 use serde_json::{Value, json};
 
@@ -468,7 +469,7 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
         to_json(cell(&content, 0, "D2")),
         json!({
             "id": "s0!D2",
-            "anchor": {"kind": "cell", "sheet": {"index": 0, "name": "Data"}, "a1": "D2"},
+            "anchor": {"kind": "cell", "sheet": {"sheetId": "sheet:0", "index": 0, "name": "Data"}, "a1": "D2"},
             "value": {"kind": "number", "value": 4.5},
             "formula": "B2*C2",
             "displayText": "4.5",
@@ -509,7 +510,7 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
 
     assert_eq!(
         data["merges"],
-        json!([{"id": "s0:m0", "anchor": {"kind": "range", "sheet": {"index": 0, "name": "Data"}, "a1": "A6:B6"}, "clipped": false}])
+        json!([{"id": "s0:m0", "anchor": {"kind": "range", "sheet": {"sheetId": "sheet:0", "index": 0, "name": "Data"}, "a1": "A6:B6"}, "clipped": false}])
     );
     assert_eq!(data["tables"][0]["name"], "Sales");
     assert_eq!(data["tables"][0]["anchor"]["a1"], "A1:D3");
@@ -532,7 +533,7 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
     assert_eq!(objects[0].part.as_deref(), Some("xl/media/image1.png"));
     assert_eq!(
         to_json(&objects[0].anchor),
-        json!({"kind": "range", "sheet": {"index": 0, "name": "Data"}, "a1": "H2:J6"})
+        json!({"kind": "range", "sheet": {"sheetId": "sheet:0", "index": 0, "name": "Data"}, "a1": "H2:J6"})
     );
     let provenance = objects[0].source.as_ref().unwrap();
     assert_eq!(provenance.part, "xl/drawings/drawing1.xml");
@@ -562,7 +563,7 @@ fn exports_sparse_cells_with_values_formulas_and_display_text() {
     assert_eq!(names, ["Total", "Local"]);
     assert_eq!(
         to_json(&content.defined_names[1].anchor),
-        json!({"kind": "definedName", "name": "Local", "localSheet": {"index": 1, "name": "Summary"}, "ordinal": 2})
+        json!({"kind": "definedName", "name": "Local", "localSheet": {"sheetId": "sheet:1", "index": 1, "name": "Summary"}, "ordinal": 2})
     );
 
     let found = codes(&content);
@@ -1042,6 +1043,80 @@ fn live_export_reads_committed_state_read_only() {
             .iter()
             .all(|cell| !matches!(&cell.anchor, XlsxAnchor::Cell { a1, .. } if a1 == "C3"))
     );
+}
+
+fn batch_target(anchor: &XlsxAnchor) -> RangeTarget {
+    let XlsxAnchor::Cell { sheet, a1 } = anchor else {
+        panic!("cell anchor");
+    };
+    RangeTarget {
+        sheet_id: sheet.sheet_id.clone(),
+        range: RangeAddress::A1 { a1: a1.clone() },
+    }
+}
+
+#[test]
+fn export_anchors_are_batch_targets() {
+    let bytes = fixture();
+    let snapshot = export(&bytes, json!({}));
+    assert_eq!(
+        batch_target(&cell(&snapshot, 1, "A3").anchor).sheet_id,
+        "sheet:1"
+    );
+    let mut shifted = Workbook::open(&bytes).unwrap();
+    shifted
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 0,
+                name: "Front".into(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for (mut workbook, summary) in [
+        (shifted, 2),
+        (Workbook::open_collaborative(&bytes, 31).unwrap(), 1),
+    ] {
+        let before = workbook
+            .export_structured(&XlsxExportOptions::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(sheet_names(&before.content)[summary], "Summary");
+        let target = batch_target(&cell(&before.content, summary, "A3").anchor);
+        let catalog = workbook
+            .read_cells(&ReadRequest::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.sheet_id, catalog.sheets[summary].sheet_id);
+        let applied = workbook
+            .apply_edits(&EditRequest {
+                expect_version: before.version,
+                source: EditSource::Host,
+                history: EditHistory::Separate,
+                calculation: CalculationRequest::default(),
+                steps: vec![EditStep::new(EditOperation::SetCellInputs {
+                    target,
+                    inputs: vec![vec!["edited".to_owned()]],
+                })],
+            })
+            .unwrap()
+            .unwrap();
+        assert!(applied.applied);
+        let after = workbook
+            .export_structured(&XlsxExportOptions::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cell(&after.content, summary, "A3").value,
+            XlsxExportValue::Text {
+                value: "edited".to_owned()
+            }
+        );
+        assert_eq!(
+            cell(&after.content, summary - 1, "A3").value,
+            cell(&before.content, summary - 1, "A3").value
+        );
+    }
 }
 
 #[test]
@@ -1544,7 +1619,7 @@ fn markdown_renders_bounded_labelled_grids() {
     }
     assert_eq!(
         to_json(&rendered.anchors[1].anchor),
-        json!({"kind": "range", "sheet": {"index": 0, "name": "Data"}, "a1": "A1:Z201"})
+        json!({"kind": "range", "sheet": {"sheetId": "sheet:0", "index": 0, "name": "Data"}, "a1": "A1:Z201"})
     );
     let lossy = rendered
         .diagnostics
@@ -1631,6 +1706,7 @@ fn render_validates_content_and_options() {
     let mut ranged = content.clone();
     ranged.sheets[0].cells[0].anchor = XlsxAnchor::Range {
         sheet: betteroffice_xlsx::XlsxSheetIdentity {
+            sheet_id: "sheet:0".to_owned(),
             index: 0,
             name: "Data".to_owned(),
         },
@@ -1653,6 +1729,7 @@ fn render_validates_content_and_options() {
         |content| {
             content.sheets[0].objects[0].anchor = Some(XlsxAnchor::Sheet {
                 sheet: betteroffice_xlsx::XlsxSheetIdentity {
+                    sheet_id: "sheet:0".to_owned(),
                     index: 0,
                     name: "Data".to_owned(),
                 },
@@ -1671,6 +1748,7 @@ fn render_validates_content_and_options() {
     let mut foreign = content.clone();
     foreign.sheets[0].cells[0].anchor = XlsxAnchor::Cell {
         sheet: betteroffice_xlsx::XlsxSheetIdentity {
+            sheet_id: "sheet:1".to_owned(),
             index: 1,
             name: "Summary".to_owned(),
         },

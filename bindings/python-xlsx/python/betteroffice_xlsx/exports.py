@@ -2,8 +2,10 @@
 
 Fields keep the camelCase wire names every binding shares. Export never recalculates: formula
 results are the stored values (``calculation.policy == "asStored"``, freshness
-``"unverified"``). Anchors name positions by sheet index, sheet name and A1 in the exported
-version or snapshot; none follows later row, column or sheet edits.
+``"unverified"``). Anchors name positions by sheet id, index and name and A1 in the exported
+version or snapshot; none follows later row, column or sheet edits. A cell or range anchor's
+``{"sheetId": anchor["sheet"]["sheetId"], "range": {"kind": "a1", "a1": anchor["a1"]}}`` is its
+edit-batch target at the exported version.
 """
 
 from __future__ import annotations
@@ -44,6 +46,9 @@ class MarkdownOptions(TypedDict, total=False):
 
 
 class SheetIdentity(TypedDict):
+    """``sheetId`` is the exporting session's catalog id, ``sheet:{index}`` for bytes."""
+
+    sheetId: str
     index: int
     name: str
 

@@ -162,16 +162,20 @@ pub struct XlsxExportIncluded {
     pub hidden_names: bool,
 }
 
-/// A sheet by its current position and name. Neither is a durable identity.
+/// A sheet by the id edit batches take and, descriptively, its current position and name.
+/// None is a durable identity.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct XlsxSheetIdentity {
+    /// The exporting session's catalog id; `sheet:{index}` for bytes.
+    pub sheet_id: String,
     pub index: u32,
     pub name: String,
 }
 
 /// Where exported content sits. A1 anchors name positions in the exported version or
-/// snapshot, not cells that follow later row or column edits.
+/// snapshot, not cells that follow later row or column edits. A cell or range anchor's
+/// `sheet.sheet_id` and `a1` are its batch [`RangeTarget`](crate::RangeTarget) at that version.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     tag = "kind",

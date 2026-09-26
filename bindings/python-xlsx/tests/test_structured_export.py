@@ -36,7 +36,11 @@ def test_live_export_carries_the_version_and_changes_nothing(sample_bytes):
     ]
     assert cell(content, 0, "D3") == {
         "id": "s0!D3",
-        "anchor": {"kind": "cell", "sheet": {"index": 0, "name": "Budget"}, "a1": "D3"},
+        "anchor": {
+            "kind": "cell",
+            "sheet": {"sheetId": "sheet:0", "index": 0, "name": "Budget"},
+            "a1": "D3",
+        },
         "value": {"kind": "number", "value": 157.0},
         "formula": "B3+C3",
         "displayText": "157",
@@ -57,6 +61,33 @@ def test_live_export_carries_the_version_and_changes_nothing(sample_bytes):
     assert rendered["truncated"] is True
     assert workbook.version() == version
     assert workbook.save() == saved
+
+
+@pytest.mark.parametrize("collaborative", [False, True])
+def test_cell_anchors_are_batch_targets(sample_bytes, collaborative):
+    workbook = (
+        Workbook.open_collaborative(sample_bytes, client_id=301)
+        if collaborative
+        else Workbook.open(sample_bytes)
+    )
+    exported = workbook.export_structured(scope=[{"sheet": 1}])
+    anchor = exported["content"]["sheets"][0]["cells"][0]["anchor"]
+    target = {
+        "sheetId": anchor["sheet"]["sheetId"],
+        "range": {"kind": "a1", "a1": anchor["a1"]},
+    }
+    catalog = workbook.read_cells({"ranges": []})
+    assert target["sheetId"] == catalog["sheets"][1]["sheetId"]
+    step = {"op": "setCellInputs", "target": target, "inputs": [["edited"]]}
+    request = {"expectVersion": exported["version"], "steps": [step]}
+    assert workbook.apply_edits(request)["ok"] is True
+    cells = workbook.read_cells({"ranges": [target]})["ranges"][0]["cells"]
+    assert cells[0][0]["value"] == {"kind": "text", "value": "edited"}
+    assert export_xlsx_structured(sample_bytes)["sheets"][1]["anchor"]["sheet"] == {
+        "sheetId": "sheet:1",
+        "index": 1,
+        "name": "Summary",
+    }
 
 
 def test_refusals_are_data_and_malformed_options_raise(sample_bytes):
