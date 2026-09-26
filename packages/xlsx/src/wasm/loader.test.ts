@@ -466,6 +466,36 @@ describe('wasm loader', () => {
       handle.dispose();
     }
   });
+
+  it('syncs a freeze pane through the public collaborative workbook handle', () => {
+    const bytes = sampleBytes();
+    const author = openWorkbook(bytes, { collaborative: true, clientId: 5040 });
+    const peer = openWorkbook(bytes, { collaborative: true, clientId: 5041 });
+    try {
+      expect(author.sheetInfo().frozenRows).toBe(0);
+      expect(author.applyOps([{ type: 'setFreezePane', sheet: 0,
+        pane: { rows: 1, cols: 0, top_left: { row: 1, col: 0 } } }]).applied).toBe(true);
+      expect(author.sheetInfo().frozenRows).toBe(1);
+      peer.applyUpdate(author.encodeStateAsUpdate());
+      expect(peer.sheetInfo().frozenRows).toBe(1);
+      const reopened = openWorkbook(peer.save());
+      try { expect(reopened.sheetInfo().frozenRows).toBe(1); }
+      finally { reopened.dispose(); }
+
+      expect(() => author.applyOps([{ type: 'insertRows', sheet: 0, at: 0, count: 1 }])).toThrow();
+      expect(author.sheetInfo().frozenRows).toBe(1);
+      author.undo();
+      expect(author.sheetInfo().frozenRows).toBe(0);
+      peer.applyUpdate(author.encodeStateAsUpdate());
+      expect(peer.sheetInfo().frozenRows).toBe(0);
+      author.redo();
+      peer.applyUpdate(author.encodeStateAsUpdate());
+      expect(peer.sheetInfo().frozenRows).toBe(1);
+    } finally {
+      author.dispose();
+      peer.dispose();
+    }
+  });
 });
 
 // the two paths are gated on `isProposalsAvailable()` so this file passes
