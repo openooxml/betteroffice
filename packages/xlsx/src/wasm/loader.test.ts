@@ -520,6 +520,41 @@ describe('wasm loader', () => {
       peer.dispose();
     }
   });
+
+  it('moves a formula range with one collaborative undo and an XLSX round trip', () => {
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5032 });
+    const peer = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5033 });
+    try {
+      handle.editCells(0, [
+        { row: 40, col: 0, input: '19' },
+        { row: 40, col: 1, input: '=A41*2' },
+        { row: 40, col: 2, input: '=SUM(A41:B41)' },
+      ]);
+      peer.applyUpdate(handle.encodeStateAsUpdate());
+      const before = handle.historyState().undoDepth;
+      expect(handle.moveRange(0, 'A41:B41', 'D43').applied).toBe(true);
+      expect(handle.historyState().undoDepth).toBe(before + 1);
+      expect(handle.cell(0, 40, 0).input).toBe('');
+      expect(handle.cell(0, 42, 3).input).toBe('19');
+      expect(handle.cell(0, 42, 4).input).toBe('=D43*2');
+      expect(handle.cell(0, 40, 2).input).toBe('=SUM(D43:E43)');
+      peer.applyUpdate(handle.encodeStateAsUpdate());
+      expect(peer.cell(0, 42, 4).input).toBe('=D43*2');
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect(reopened.cell(0, 42, 4).input).toBe('=D43*2');
+        expect(reopened.cell(0, 40, 2).input).toBe('=SUM(D43:E43)');
+      } finally {
+        reopened.dispose();
+      }
+      handle.undo();
+      expect(handle.cell(0, 40, 0).input).toBe('19');
+      expect(handle.cell(0, 40, 2).input).toBe('=SUM(A41:B41)');
+    } finally {
+      handle.dispose();
+      peer.dispose();
+    }
+  });
 });
 
 // the two paths are gated on `isProposalsAvailable()` so this file passes

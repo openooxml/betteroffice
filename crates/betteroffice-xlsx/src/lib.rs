@@ -2,6 +2,7 @@
 
 mod authority;
 mod error;
+mod move_range;
 mod sheet_json;
 mod types;
 mod workbook;

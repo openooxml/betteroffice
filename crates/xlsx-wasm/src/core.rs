@@ -42,6 +42,13 @@ struct EditBatchArgs {
 }
 
 #[derive(Deserialize)]
+struct MoveRangeArgs {
+    sheet: u32,
+    source: String,
+    destination: String,
+}
+
+#[derive(Deserialize)]
 struct CellEditInput {
     row: u32,
     col: u32,
@@ -536,6 +543,28 @@ impl Session {
         let result = self
             .workbook
             .edit_workbook_cells(&edits, &formats, calculation_options(now_serial))
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn move_range_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: MoveRangeArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad move range args: {error}"))?;
+        let source = parse_range(&args.source)?;
+        let destination = CellRef::parse_a1(&args.destination)
+            .map_err(|error| format!("bad move destination: {error}"))?;
+        let result = self
+            .workbook
+            .move_range(
+                SheetId(args.sheet),
+                source,
+                destination,
+                calculation_options(now_serial),
+            )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }
@@ -1062,6 +1091,43 @@ mod tests {
                 .unwrap()
                 .contains(r#""isFormula":true"#)
         );
+    }
+
+    #[test]
+    fn move_range_json_commits_one_formula_aware_edit() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":40,"col":0,"input":"19"}"#, None)
+            .unwrap();
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":40,"col":1,"input":"=A41*2"}"#, None)
+            .unwrap();
+        let before = session.workbook.history_state().undo_depth;
+        let result = session
+            .move_range_json(
+                r#"{"sheet":0,"source":"A41:B41","destination":"D43"}"#,
+                None,
+            )
+            .unwrap();
+        assert!(result.contains(r#""applied":true"#));
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(42, 4))
+                .unwrap()
+                .input,
+            "=D43*2"
+        );
+        assert!(
+            session
+                .move_range_json(
+                    r#"{"sheet":0,"source":"D43:E43","destination":"XFE1"}"#,
+                    None,
+                )
+                .is_err()
+        );
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
     }
 
     #[test]

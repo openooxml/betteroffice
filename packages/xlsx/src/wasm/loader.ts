@@ -379,6 +379,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
   /** Apply raw inputs and captured formats across sheets as one native undo step. */
   editWorkbookCells(edits: WorkbookCellInputEdit[], formats: WorkbookFormatEdit[]): EditResult;
+  /** Move a range within one sheet and rewrite references in one native undo step. */
+  moveRange(sheet: number, source: string, destination: string): EditResult;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -694,6 +696,9 @@ export function openWorkbook(
     },
     editWorkbookCells(edits: WorkbookCellInputEdit[], formats: WorkbookFormatEdit[]): EditResult {
       return parseJson(() => doc.editWorkbookCellsJson(JSON.stringify({ edits, formats })), true);
+    },
+    moveRange(sheet: number, source: string, destination: string): EditResult {
+      return parseJson(() => doc.moveRangeJson(JSON.stringify({ sheet, source, destination })), true);
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);

@@ -56,6 +56,18 @@ workbook.editWorkbookCells(
 );
 ```
 
+`moveRange(sheet, source, destination)` moves a same-sheet A1 range to a new
+top-left cell in one collaborative transaction. Direct references to moved
+cells follow them, and one Undo restores the whole move. The method refuses
+partial formula ranges and imported workbook features whose references or
+anchored content it cannot update safely, including defined names, validation,
+conditional formatting, drawings, and protection. Callers should show the
+returned error and keep the source workbook available when a move is refused.
+
+```ts
+workbook.moveRange(0, "A1:B2", "D5");
+```
+
 ## Print a range
 
 `workbook.printDisplayList(sheet, range, metrics, gridlines)` renders a range

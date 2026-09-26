@@ -2237,6 +2237,205 @@ fn workbook_input_batch_rejects_bad_format_after_valid_input() {
 }
 
 #[test]
+fn range_move_rewrites_formulas_and_converges_as_one_undoable_edit() {
+    let mut data = Sheet::new("Data");
+    data.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 10.0 },
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("B1"),
+        Cell {
+            formula: Some("A1*2".into()),
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("C1"),
+        Cell {
+            formula: Some("SUM(A1:B1)".into()),
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("D3"),
+        Cell {
+            value: CellValue::Number { value: 99.0 },
+            ..Cell::default()
+        },
+    );
+    let mut other = Sheet::new("Other");
+    other.set_cell(
+        cell("A1"),
+        Cell {
+            formula: Some("Data!$A$1".into()),
+            ..Cell::default()
+        },
+    );
+    let original = Workbook::from_model(WorkbookModel {
+        sheets: vec![data, other],
+        ..Default::default()
+    })
+    .unwrap()
+    .save()
+    .unwrap();
+    let mut left = Workbook::open_collaborative(&original, 801).unwrap();
+    let mut right = Workbook::open_collaborative(&original, 802).unwrap();
+    assert!(
+        left.move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B1")),
+            cell("D3"),
+            CalculationOptions::default(),
+        )
+        .unwrap()
+        .applied
+    );
+    assert_eq!(left.history_state().undo_depth, 1);
+    assert_eq!(left.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(left.cell(SheetId(0), cell("B1")).unwrap().input, "");
+    assert_eq!(left.cell(SheetId(0), cell("D3")).unwrap().input, "10");
+    assert_eq!(left.cell(SheetId(0), cell("E3")).unwrap().input, "=D3*2");
+    assert_eq!(
+        left.cell(SheetId(0), cell("C1")).unwrap().input,
+        "=SUM(D3:E3)"
+    );
+    assert_eq!(
+        left.cell(SheetId(1), cell("A1")).unwrap().input,
+        "=Data!$D$3"
+    );
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(right.model(), left.model());
+    let reopened = Workbook::open(&right.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.cell(SheetId(0), cell("E3")).unwrap().input,
+        "=D3*2"
+    );
+    assert_eq!(
+        reopened.cell(SheetId(1), cell("A1")).unwrap().input,
+        "=Data!$D$3"
+    );
+    assert!(left.undo(CalculationOptions::default()).unwrap().applied);
+    assert_eq!(left.cell(SheetId(0), cell("A1")).unwrap().input, "10");
+    assert_eq!(left.cell(SheetId(0), cell("D3")).unwrap().input, "99");
+    assert_eq!(
+        left.cell(SheetId(0), cell("C1")).unwrap().input,
+        "=SUM(A1:B1)"
+    );
+    let undo = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&undo, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(right.model(), left.model());
+}
+
+#[test]
+fn range_move_rejects_partial_formula_span_without_mutation() {
+    let mut data = Sheet::new("Data");
+    data.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 10.0 },
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        cell("C1"),
+        Cell {
+            formula: Some("SUM(A1:B1)".into()),
+            ..Cell::default()
+        },
+    );
+    let bytes = Workbook::from_model(WorkbookModel {
+        sheets: vec![data],
+        ..Default::default()
+    })
+    .unwrap()
+    .save()
+    .unwrap();
+    let mut workbook = Workbook::open_collaborative(&bytes, 803).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let result = workbook.move_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        cell("D3"),
+        CalculationOptions::default(),
+    );
+    assert!(matches!(result, Err(Error::InvalidOperation(_))));
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+    assert!(!workbook.can_undo());
+}
+
+#[test]
+fn range_move_refuses_preserved_validation_even_outside_source() {
+    let mut parts = sample_parts();
+    let worksheet = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    let xml = String::from_utf8(worksheet.1.clone()).unwrap();
+    worksheet.1 = xml
+        .replace(
+            "</worksheet>",
+            r#"<dataValidations count="1"><dataValidation type="whole" sqref="D9"><formula1>1</formula1></dataValidation></dataValidations></worksheet>"#,
+        )
+        .into_bytes();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open_collaborative(&bytes, 804).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let result = workbook.move_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        cell("D3"),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(result, Err(Error::InvalidOperation(reason)) if reason.contains("worksheet features"))
+    );
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+}
+
+#[test]
+fn range_move_handles_overlapping_source_and_destination() {
+    let mut data = Sheet::new("Data");
+    for (address, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0)] {
+        data.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![data],
+        ..Default::default()
+    })
+    .unwrap();
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A2")),
+            cell("A2"),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "");
+    assert_eq!(workbook.cell(SheetId(0), cell("A2")).unwrap().input, "1");
+    assert_eq!(workbook.cell(SheetId(0), cell("A3")).unwrap().input, "2");
+}
+
+#[test]
 fn rejects_insertions_that_discard_boundary_content() {
     let mut sheet = Sheet::new("Data");
     let last_row = CellRef::new(betteroffice_xlsx::MAX_ROWS - 1, 0);

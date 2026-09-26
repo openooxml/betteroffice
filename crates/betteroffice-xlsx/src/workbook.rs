@@ -31,6 +31,7 @@ use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
     StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
 };
+use crate::move_range::move_range_ops;
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
@@ -1329,6 +1330,51 @@ impl Workbook {
                 format: item.format.clone(),
             });
         }
+        self.apply_ops(ops, options)
+    }
+
+    /// Moves a bounded range within one worksheet in one undoable transaction.
+    /// Formulas that refer to the moved cells follow them; partially moved
+    /// ranges and package features that cannot be rewritten are refused.
+    pub fn move_range(
+        &mut self,
+        sheet: SheetId,
+        source: CellRange,
+        destination: CellRef,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        let (rows, cols) = self.validate_bounded_range(sheet, source)?;
+        self.validate_target(sheet, destination)?;
+        let end_row = destination
+            .row
+            .checked_add(rows as u32 - 1)
+            .ok_or(Error::CellOutOfRange(destination))?;
+        let end_col = destination
+            .col
+            .checked_add(cols as u32 - 1)
+            .ok_or(Error::CellOutOfRange(destination))?;
+        let target = CellRange::new(destination, CellRef::new(end_row, end_col));
+        self.validate_bounded_range(sheet, target)?;
+        if source.start.row == destination.row && source.start.col == destination.col {
+            return Ok(MutationResult::default());
+        }
+        if let Some(package) = self.source_package.as_ref() {
+            if let Some(part) = package.range_move_unsupported_part() {
+                return Err(Error::InvalidOperation(format!(
+                    "{part} contains worksheet features a cell move cannot safely preserve"
+                )));
+            }
+            let name = &self.sheet(sheet)?.name;
+            let stranded = package
+                .reference_moved_by_rows(name, source.start.row)
+                .or_else(|| package.reference_moved_by_cols(name, source.start.col));
+            if let Some(part) = stranded {
+                return Err(Error::InvalidOperation(format!(
+                    "{part} references cells this move would relocate, and it cannot be rewritten"
+                )));
+            }
+        }
+        let ops = move_range_ops(&self.model, sheet, source, target)?;
         self.apply_ops(ops, options)
     }
 

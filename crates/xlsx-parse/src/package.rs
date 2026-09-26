@@ -223,6 +223,48 @@ impl PreservedPackage {
         self.stranded(|reference| reference.moved_by_cols(sheet, at))
     }
 
+    /// A worksheet part whose preserved features cannot follow a cell move.
+    #[doc(hidden)]
+    pub fn range_move_unsupported_part(&self) -> Option<&str> {
+        for sheet in &self.sheets {
+            let Some(bytes) = find_part(&self.parts, &sheet.path) else {
+                return Some(&sheet.path);
+            };
+            let mut xml = Reader::from_reader(bytes);
+            let mut buffer = Vec::new();
+            loop {
+                match xml.read_event_into(&mut buffer) {
+                    Ok(Event::Start(start) | Event::Empty(start)) => {
+                        let name = local_name(&start);
+                        if matches!(
+                            name.as_slice(),
+                            b"conditionalFormatting"
+                                | b"dataValidations"
+                                | b"sheetProtection"
+                                | b"protectedRanges"
+                                | b"autoFilter"
+                                | b"sortState"
+                                | b"drawing"
+                                | b"legacyDrawing"
+                                | b"picture"
+                                | b"extLst"
+                                | b"pivotTableParts"
+                                | b"controls"
+                                | b"oleObjects"
+                        ) {
+                            return Some(&sheet.path);
+                        }
+                    }
+                    Ok(Event::Eof) => break,
+                    Err(_) => return Some(&sheet.path),
+                    _ => {}
+                }
+                buffer.clear();
+            }
+        }
+        None
+    }
+
     fn stranded(&self, disturbed: impl Fn(&UnpatchableReference) -> bool) -> Option<&str> {
         self.unpatchable_references
             .iter()

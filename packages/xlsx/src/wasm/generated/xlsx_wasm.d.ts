@@ -67,6 +67,7 @@ export class XlsxDocument {
      * slide a chart by a pixel delta as one undo step.
      */
     moveChartJson(args: string): string;
+    moveRangeJson(args: string): string;
     /**
      * open a workbook from raw `.xlsx` bytes.
      */
@@ -162,6 +163,7 @@ export interface InitOutput {
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
