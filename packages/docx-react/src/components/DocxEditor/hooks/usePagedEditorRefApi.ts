@@ -3,13 +3,62 @@ import { useEffect, useImperativeHandle, useRef } from 'react';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ScrollToParaIdOptions } from '@betteroffice/docx/utils';
-import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
+import type {
+  YrsInputPositionMap,
+  YrsLoc,
+  YrsSession,
+  YrsStickyPosition,
+} from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import type { PagedEditorRef } from '../PagedEditor';
-import type { FormattingAction } from '../../Toolbar';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 import { performYrsHistoryAction, type YrsEditorCommand } from '../yrsCommands';
+import {
+  currentYrsToolbarSelection,
+  withStoredYrsFormatting,
+  type FormattingAction,
+  type YrsToolbarSelection,
+} from '../yrsToolbar';
+import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
+
+/** The image under a one-unit selection. */
+export interface PagedEditorSelectedImage {
+  pos: number;
+  attrs: Readonly<Record<string, unknown>>;
+}
+
+/** Sticky positions before and after one image, which follow it through later edits. */
+export type PagedEditorImageHandle = readonly [YrsStickyPosition, YrsStickyPosition];
+
+/**
+ * Ordered command entry points for editor chrome. Immediate methods act on
+ * the current selection without moving focus; callers admit them through
+ * {@link PagedEditorCommandBridge.runAfterPendingInput} first.
+ */
+export interface PagedEditorCommandBridge {
+  runAfterPendingInput<T>(operation: () => T | Promise<T>): Promise<T>;
+  hasPendingInput(): boolean;
+  /** Notified after each published selection, document or pending-input change. */
+  subscribe(listener: () => void): () => void;
+  session(): YrsSession | null;
+  rootStory(): string;
+  hasSelection(): boolean;
+  /** Selection read model with stored caret formatting; `live` recomputes it. */
+  toolbarSelection(live: boolean): YrsToolbarSelection | null;
+  selectedImage(): PagedEditorSelectedImage | null;
+  /** A handle on the image at display position `pos`. */
+  imageHandle(pos: number): PagedEditorImageHandle | null;
+  /** Current display position of the image `handle` holds, or null once it is gone. */
+  imagePosition(handle: PagedEditorImageHandle): number | null;
+  /** Applies formatting; throws when the engine refuses it. */
+  format(action: FormattingAction): boolean;
+  /** Applies a structural command; throws when the engine refuses it. */
+  command(command: YrsEditorCommand): boolean;
+  history(redo: boolean): boolean;
+  /** Selects a story range, publishes it and scrolls it into view. */
+  select(start: YrsLoc, end: YrsLoc): boolean;
+}
 
 interface RefApiInputs {
   yrsInputRef: React.RefObject<YrsInputRef | null>;
@@ -277,4 +326,122 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   useEffect(() => {
     if (onReadyRef.current && yrsSession) onReadyRef.current(buildRefApi(inputs));
   }, [layout, runLayoutPipeline, scrollToParaIdImpl, scrollToPageImpl, yrsSession]);
+}
+
+export interface UsePagedEditorCommandBridgeOptions {
+  bridgeRef: React.MutableRefObject<PagedEditorCommandBridge | null> | undefined;
+  yrsInputRef: React.RefObject<YrsInputRef | null>;
+  session: YrsSession | null;
+  rootStory: string;
+  inputPositionMap: (story: string) => YrsInputPositionMap | null;
+  latestSelectionRef: React.RefObject<YrsToolbarSelection | null>;
+  listenersRef: React.RefObject<Set<() => void>>;
+  getPositionProjection: () => YrsPositionProjection | null;
+  displayPositionToLoc: (position: number) => YrsLoc | null;
+  format: (action: FormattingAction) => boolean;
+  command: (command: YrsEditorCommand) => boolean;
+  syncYrsInputState: (docChanged: boolean, dirtyStory?: string) => boolean;
+  yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
+  scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
+}
+
+/** Publishes {@link PagedEditorCommandBridge} for the owning editor's chrome. */
+export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridgeOptions): void {
+  const latest = useRef(options);
+  latest.current = options;
+  const bridge = useRef<PagedEditorCommandBridge | null>(null);
+  if (!bridge.current) {
+    bridge.current = {
+      runAfterPendingInput(operation) {
+        const input = latest.current.yrsInputRef.current;
+        if (!input) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));
+        return input.runAfterPendingInput(operation);
+      },
+      hasPendingInput: () => latest.current.yrsInputRef.current?.hasPendingInput() ?? false,
+      subscribe(listener) {
+        const listeners = latest.current.listenersRef.current;
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      session: () => latest.current.session,
+      rootStory: () => latest.current.rootStory,
+      hasSelection: () => latest.current.session?.selection() != null,
+      toolbarSelection(live) {
+        const current = latest.current;
+        if (!live) return current.latestSelectionRef.current;
+        const session = current.session;
+        if (!session) return null;
+        const story = session.selection()?.head.story ?? current.rootStory;
+        const map = current.inputPositionMap(story);
+        const selection = map ? currentYrsToolbarSelection(session, map) : null;
+        return selection
+          ? withStoredYrsFormatting(
+              selection,
+              current.yrsInputRef.current?.storedFormatting() ?? null
+            )
+          : null;
+      },
+      selectedImage() {
+        const current = latest.current;
+        const selection = current.yrsInputRef.current?.displaySelection();
+        if (!selection || Math.abs(selection.anchor - selection.head) !== 1) return null;
+        const pos = Math.min(selection.anchor, selection.head);
+        const node = current.getPositionProjection()?.nodeAt(pos);
+        return node?.kind === 'image' ? { pos, attrs: node.attrs } : null;
+      },
+      imageHandle(pos) {
+        const current = latest.current;
+        const session = current.session;
+        if (!session || current.getPositionProjection()?.nodeAt(pos)?.kind !== 'image') return null;
+        const at = current.displayPositionToLoc(pos);
+        return at
+          ? [
+              session.encodeStickyPosition(at),
+              session.encodeStickyPosition({ ...at, offset: at.offset + 1 }),
+            ]
+          : null;
+      },
+      imagePosition([before, after]) {
+        const current = latest.current;
+        const start = current.session?.resolveStickyPosition(before);
+        const end = current.session?.resolveStickyPosition(after);
+        if (!start || !end || start.paraId !== end.paraId || end.offset !== start.offset + 1) {
+          return null;
+        }
+        const pos = current.yrsLocToDisplayPosition(start);
+        const node = pos == null ? null : current.getPositionProjection()?.nodeAt(pos);
+        return node?.kind === 'image' ? node.start : null;
+      },
+      format: (action) => latest.current.format(action),
+      command: (command) => latest.current.command(command),
+      history(redo) {
+        const current = latest.current;
+        const session = current.session;
+        if (!session) return false;
+        const result = performYrsHistoryAction(session, redo);
+        if (result.changed) current.syncYrsInputState(true, result.story ?? undefined);
+        return result.changed;
+      },
+      select(start, end) {
+        const current = latest.current;
+        const session = current.session;
+        if (!session || start.story !== end.story) return false;
+        session.setSelection(start, end);
+        current.syncYrsInputState(false);
+        const position = current.yrsLocToDisplayPosition(start);
+        if (position != null) current.scrollToPositionImpl(position, true);
+        return true;
+      },
+    };
+  }
+  const { bridgeRef } = options;
+  useEffect(() => {
+    if (!bridgeRef) return;
+    bridgeRef.current = bridge.current;
+    return () => {
+      if (bridgeRef.current === bridge.current) bridgeRef.current = null;
+    };
+  }, [bridgeRef]);
 }

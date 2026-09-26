@@ -72,6 +72,8 @@ pub struct SelectionContextInfo {
     pub italic: TriState,
     pub underline: TriState,
     pub strike: TriState,
+    pub superscript: TriState,
+    pub subscript: TriState,
     // -- uniform-or-null value marks --
     /// The uniform `fontFamily.ascii`, or `None` when mixed/absent.
     pub font_family: Option<String>,
@@ -80,6 +82,8 @@ pub struct SelectionContextInfo {
     /// The uniform text color: the `rgb` hex when set, else the theme color
     /// name; `None` when mixed/absent.
     pub color: Option<String>,
+    /// The uniform highlight color name, or `None` when mixed/absent.
+    pub highlight: Option<String>,
     // Paragraph state at the range start.
     pub para_id: ParagraphId,
     /// The paragraph's `pStyle`, extracted from `paragraph_properties`.
@@ -241,11 +245,14 @@ impl EditingDoc {
         let mut italic = None;
         let mut underline = None;
         let mut strike = None;
+        let mut superscript = None;
+        let mut subscript = None;
         let mut ins = None;
         let mut del = None;
         let mut font_family = ValueAgg::Empty;
         let mut font_size = ValueAgg::Empty;
         let mut color = ValueAgg::Empty;
+        let mut highlight = ValueAgg::Empty;
         for chunk in chunks.iter() {
             if chunk.start >= mark_to {
                 break;
@@ -257,11 +264,14 @@ impl EditingDoc {
             italic = TriState::fold(italic, chunk.attr_active("italic"));
             underline = TriState::fold(underline, chunk.attr_active("underline"));
             strike = TriState::fold(strike, chunk.attr_active("strike"));
+            superscript = TriState::fold(superscript, chunk.attr_active("superscript"));
+            subscript = TriState::fold(subscript, chunk.attr_active("subscript"));
             ins = TriState::fold(ins, chunk.attr_active(crate::INS));
             del = TriState::fold(del, chunk.attr_active(crate::DEL));
             font_family.fold(chunk.attrs.get("fontFamily"));
             font_size.fold(chunk.attrs.get("fontSize"));
             color.fold(chunk.attrs.get("textColor"));
+            highlight.fold(chunk.attrs.get("highlight"));
         }
 
         let map_field = |value: Option<&Any>, key: &str| match value {
@@ -293,6 +303,10 @@ impl EditingDoc {
             (_, Some(Any::String(theme))) => Some(theme.to_string()),
             _ => None,
         };
+        let highlight = match map_field(highlight.uniform(), "color") {
+            Some(Any::String(name)) => Some(name.to_string()),
+            _ => None,
+        };
 
         let embed_kind = if range.end == range.start + 1 {
             chunks
@@ -314,9 +328,12 @@ impl EditingDoc {
             italic: italic.unwrap_or(TriState::Off),
             underline: underline.unwrap_or(TriState::Off),
             strike: strike.unwrap_or(TriState::Off),
+            superscript: superscript.unwrap_or(TriState::Off),
+            subscript: subscript.unwrap_or(TriState::Off),
             font_family,
             font_size,
             color,
+            highlight,
             para_id,
             style_id: prop_string("pStyle"),
             alignment: prop_string("alignment"),
@@ -462,6 +479,48 @@ mod tests {
         let plain = context(&doc, 6, 11);
         assert_eq!(plain.font_family, None);
         assert_eq!(plain.font_size, None);
+    }
+
+    #[test]
+    fn script_marks_are_tri_state_and_mutually_exclusive() {
+        let doc = seed("hello world");
+        doc.toggle_format(
+            &local(),
+            StoryRange::new("body", 0, 5),
+            SimpleFormat::Superscript,
+        )
+        .unwrap();
+
+        let raised = context(&doc, 0, 5);
+        assert_eq!(raised.superscript, TriState::On);
+        assert_eq!(raised.subscript, TriState::Off);
+        assert_eq!(context(&doc, 0, 11).superscript, TriState::Mixed);
+        assert_eq!(context(&doc, 3, 3).superscript, TriState::On);
+
+        doc.toggle_format(
+            &local(),
+            StoryRange::new("body", 0, 5),
+            SimpleFormat::Subscript,
+        )
+        .unwrap();
+        let lowered = context(&doc, 0, 5);
+        assert_eq!(lowered.superscript, TriState::Off);
+        assert_eq!(lowered.subscript, TriState::On);
+    }
+
+    #[test]
+    fn highlight_reports_the_uniform_palette_name() {
+        let doc = seed("hello world");
+        let delta = InlineFormatDelta {
+            highlight: Patch::Set("FFFF00".into()),
+            ..Default::default()
+        };
+        doc.format_range(&local(), StoryRange::new("body", 0, 5), &delta)
+            .unwrap();
+
+        assert_eq!(context(&doc, 0, 5).highlight.as_deref(), Some("yellow"));
+        assert_eq!(context(&doc, 0, 11).highlight, None);
+        assert_eq!(context(&doc, 6, 11).highlight, None);
     }
 
     #[test]

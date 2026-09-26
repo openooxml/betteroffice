@@ -14,6 +14,7 @@ import { isWithinPageArea } from '../internals/pageAreaRouting';
 import { formatKeys } from '../../dialogs/KeyboardShortcutsDialog/ShortcutItem';
 import type { PagedEditorRef } from '../PagedEditor';
 import { currentYrsTableTarget, yrsSelectedText } from '../yrsCommands';
+import type { DocxTableAction } from '../../../commands/types';
 
 interface TableContextInfo {
   hasMultiCellSelection?: boolean;
@@ -48,7 +49,7 @@ interface ContextMenuState {
 export function useContextMenus({
   pagedEditorRef,
   focusActiveEditor,
-  openSplitCellDialog,
+  runTableAction,
   editorContentRef,
   displayListQueries,
   interactionPageHostRef,
@@ -58,7 +59,7 @@ export function useContextMenus({
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   focusActiveEditor: () => void;
-  openSplitCellDialog: () => void;
+  runTableAction: (action: DocxTableAction) => void;
   editorContentRef: React.RefObject<HTMLDivElement | null>;
   displayListQueries: DisplayListQueries | null;
   interactionPageHostRef: React.RefObject<HTMLDivElement | null>;
@@ -349,34 +350,16 @@ export function useContextMenus({
           paged.selectAll();
           break;
         case 'addRowAbove':
-          paged.applyYrsCommand({ type: 'tableInsertRow', side: 'above' });
-          break;
         case 'addRowBelow':
-          paged.applyYrsCommand({ type: 'tableInsertRow', side: 'below' });
-          break;
         case 'deleteRow':
-          paged.applyYrsCommand({ type: 'tableDeleteRow' });
-          break;
         case 'addColumnLeft':
-          paged.applyYrsCommand({ type: 'tableInsertColumn', side: 'left' });
-          break;
         case 'addColumnRight':
-          paged.applyYrsCommand({ type: 'tableInsertColumn', side: 'right' });
-          break;
         case 'deleteColumn':
-          paged.applyYrsCommand({ type: 'tableDeleteColumn' });
-          break;
         case 'mergeCells':
-          paged.applyYrsCommand({ type: 'tableMergeCells' });
-          break;
         case 'splitCell':
-          openSplitCellDialog();
-          break;
         case 'selectTable':
-          paged.applyYrsCommand({ type: 'tableSelect', target: 'table' });
-          break;
         case 'deleteTable':
-          paged.applyYrsCommand({ type: 'tableDelete' });
+          runTableAction(action);
           break;
         case 'addComment': {
           if (partEditOpen) break;
@@ -408,7 +391,7 @@ export function useContextMenus({
     [
       focusActiveEditor,
       pagedEditorRef,
-      openSplitCellDialog,
+      runTableAction,
       editorContentRef,
       displayListQueries,
       interactionPageHostRef,

@@ -57,10 +57,14 @@ export interface FindReplaceDialogProps {
   onFindNext: () => FindMatch | null;
   /** Callback when navigating to previous match */
   onFindPrevious: () => FindMatch | null;
-  /** Callback when replacing current match */
-  onReplace: (replaceText: string) => boolean;
-  /** Callback when replacing all matches */
-  onReplaceAll: (searchText: string, replaceText: string, options: FindOptions) => number;
+  /** Callback when replacing current match; resolves whether it replaced */
+  onReplace: (replaceText: string) => boolean | Promise<boolean>;
+  /** Callback when replacing all matches; resolves the number replaced */
+  onReplaceAll: (
+    searchText: string,
+    replaceText: string,
+    options: FindOptions
+  ) => number | Promise<number>;
   /** Callback to highlight matches in document */
   onHighlightMatches?: (matches: FindMatch[]) => void;
   /** Callback to clear highlights */
@@ -473,14 +477,14 @@ export function FindReplaceDialog({
   const handleReplace = useCallback(() => {
     if (!result || result.totalCount === 0) return;
 
-    const success = onReplace(replaceText);
-    if (success) {
+    void Promise.resolve(onReplace(replaceText)).then((success) => {
+      if (!success) return;
       const newResult = onFind(searchText, { matchCase, matchWholeWord });
       setResult(newResult);
       if (newResult?.matches && onHighlightMatches) {
         onHighlightMatches(newResult.matches);
       }
-    }
+    });
   }, [
     result,
     replaceText,
@@ -507,11 +511,14 @@ export function FindReplaceDialog({
   const handleReplaceAll = useCallback(() => {
     if (!searchText.trim()) return;
 
-    const count = onReplaceAll(searchText, replaceText, { matchCase, matchWholeWord });
-    if (count > 0) {
-      setResult(null);
-      onClearHighlightsRef.current?.();
-    }
+    void Promise.resolve(
+      onReplaceAll(searchText, replaceText, { matchCase, matchWholeWord })
+    ).then((count) => {
+      if (count > 0) {
+        setResult(null);
+        onClearHighlightsRef.current?.();
+      }
+    });
   }, [searchText, replaceText, matchCase, matchWholeWord, onReplaceAll]);
 
   const toggleReplaceMode = useCallback(() => {

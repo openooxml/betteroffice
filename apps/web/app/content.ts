@@ -86,7 +86,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The DOCX editor as a drop-in React component, with host-controlled saving and awaited input flushing.",
+    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, and composable toolbar controls.",
   },
   {
     name: "@betteroffice/xlsx",

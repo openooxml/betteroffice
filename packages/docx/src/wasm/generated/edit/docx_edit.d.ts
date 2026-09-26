@@ -605,7 +605,9 @@ export class EditSession {
      * ```json
      * {
      *   "bold": true | false | "mixed", "italic": …, "underline": …, "strike": …,
+     *   "superscript": …, "subscript": …,
      *   "fontFamily": string|null, "fontSize": number|null, "color": string|null,
+     *   "highlight": string|null,
      *   "paraId": string, "styleId": string|null, "alignment": string|null,
      *   "paragraphProperties": {…},
      *   "hasSelection": bool, "isMultiParagraph": bool, "inTable": bool,
@@ -688,6 +690,13 @@ export class EditSession {
      * has that id.
      */
     set_image_geometry(embed_id: string, geometry_json: string): void;
+    /**
+     * [`EditSession::set_image_geometry`] for the image embed at
+     * `(story, para_id, offset)` — the way to reach one of several images
+     * sharing a relationship id, which the id variant resolves to the first.
+     * Errors when that position holds no image.
+     */
+    set_image_geometry_at(story: string, para_id: string, offset: number, geometry_json: string): void;
     /**
      * Sets one paragraph property to any JSON value on `para_id`'s pilcrow,
      * searching every story. Unlike
@@ -1149,6 +1158,7 @@ export interface InitOutput {
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];

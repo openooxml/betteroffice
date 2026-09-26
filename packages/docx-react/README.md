@@ -57,10 +57,10 @@ export function App() {
 Without `onSave`, File > Save downloads the edited bytes.
 
 Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onChange`,
-`author`, `mode` (`editing` / `suggesting` / `viewing`), `showToolbar`,
+`author`, `mode` (`editing` / `suggesting` / `viewing`), `showToolbar`, `toolbar`,
 `showRuler`, `showZoomControl`, `showHiddenText`, `i18n`, `measurementFontProvider`. The `ref`
 exposes the full editor API (selection, formatting, find/replace, comments,
-revisions).
+revisions) and the editor's command store, `commands`.
 
 Vanished (hidden) text stays out of the layout by default; pass
 `showHiddenText` to reveal it with normal wrapping.
@@ -72,6 +72,8 @@ Vanished (hidden) text stays out of the layout by default; pass
 - Comment threads with replies and resolution, controllable from the host
 - Find and replace, headers and footers, footnotes, images, tables
 - Zoom control and ruler
+- Composable chrome: arrange built-in controls with their state, shortcuts and
+  restrictions, add host actions, or drive a toolbar outside the editor
 - Localized UI via the `i18n` prop
   ([`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n))
 - Real-time collaboration with people or agents; the document is a CRDT
@@ -148,6 +150,94 @@ is loaded. The promise does not wait for browser painting.
 does not invoke that callback again. `onSave(buffer)` remains the notification
 after export. Before direct session reads or mutations, await `flushPendingInput()`;
 after a mutation, use `syncYrsInputState(true)` to refresh the editor.
+
+## Compose the toolbar
+
+Every built-in control runs through one command store, `ref.commands`, which
+hosts can use for their own chrome. This command and toolbar composition API is
+experimental and may change in minor releases. Pass `toolbar` to replace the
+default chrome with an arrangement of public parts; the children of
+`EditorToolbar.Toolbar` are the complete row, in your order:
+
+```tsx
+import {
+  DocxEditor,
+  EditorToolbar,
+  ToolbarButton,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  ToolbarGroup,
+} from '@betteroffice/docx-react';
+
+function CompactToolbar({ onShare }: { onShare(): void }) {
+  return (
+    <EditorToolbar>
+      <EditorToolbar.Toolbar>
+        <ToolbarGroup label="Formatting">
+          <ToolbarCommandSelect id="paragraphStyle" />
+          <ToolbarCommandButton id="bold" />
+        </ToolbarGroup>
+        <ToolbarCommandButton id="undo" />
+        <EditorToolbar.Review />
+        <ToolbarButton title="Share" onClick={onShare}>Share</ToolbarButton>
+      </EditorToolbar.Toolbar>
+    </EditorToolbar>
+  );
+}
+
+<DocxEditor documentBuffer={file} toolbar={<CompactToolbar onShare={share} />} />;
+```
+
+`toolbar` omitted renders the default chrome, `null` renders none, and
+`showToolbar={false}` hides either. The default chrome is hidden for `readOnly`;
+chrome you supply still renders, with its writing controls disabled.
+
+To place the toolbar outside the editor, capture the ref in state and provide it.
+Until the editor attaches, `commands={null}` reports every command unavailable:
+
+```tsx
+const [commands, setCommands] = useState<DocxCommandStore | null>(null);
+
+<DocxCommandProvider commands={commands}>
+  <CompactToolbar onShare={share} />
+</DocxCommandProvider>
+<DocxEditor ref={(editor) => setCommands(editor?.commands ?? null)} toolbar={null} />
+```
+
+Outside the editor, `EditorToolbar` supplies its own styling root and the
+editor's locale, and its keyboard shortcuts reach that editor only.
+
+- **Parts.** `ToolbarCommandButton` binds a command (parameterized ones need
+  `args`, such as `{ value: 'center' }` for `alignment`), `ToolbarCommandSelect`
+  renders a selector's built-in picker, `ToolbarCommand` renders any command's
+  default control, and `ToolbarButton`, `ToolbarGroup` and `ToolbarSeparator`
+  hold host actions. `useDocxCommand(id)` and `useDocxCommandState(id)` bind
+  custom controls.
+- **State.** `getState(id, args?)` returns `{ enabled, active, value, options }`;
+  a disabled command always carries `disabledReason: { code, message }`, and
+  controls expose that message as their accessible description. Marks report
+  `'mixed'` for mixed selections.
+- **Results.** `execute(id, args)` resolves to `executed`, `noop`, `opened` (a
+  dialog or picker), `requested` (handed to the host, such as a controlled mode
+  or `onSaveRequest`), or `{ ok: false, failure }`. Commands run after input
+  accepted before the call and check availability again first, so a stale
+  enabled state never authorizes a change. A dialog or picker a command opens
+  applies to the document and selection it opened with, or fails with
+  `document-replaced` or `target-changed`; print waits until accepted input is
+  rendered.
+- **Modes.** `readOnly` and viewing mode refuse writes (`read-only`,
+  `viewing-mode`); navigation, find, zoom, print and save remain available.
+  Suggesting mode keeps direct character formatting untracked, tracks paragraph
+  styles and row edits, and refuses operations it cannot record as suggestions
+  (`suggesting-unsupported`), such as inserting tables or breaks.
+- **Focus and overflow.** Pointer clicks keep the document focused; keyboard
+  activation keeps focus in the toolbar, and dialogs take focus. At narrow
+  widths trailing groups move into a More menu with arrow, Home/End, typeahead
+  and submenu navigation, keeping every choice of the built-in controls; custom
+  colors and sizes are asked for in a dialog. Wrap host content in
+  `ToolbarOverflow` to give it a menu entry; content without one, and any group
+  holding it, stays in the row, which scrolls horizontally when that content
+  does not fit.
 
 ## Framework notes
 

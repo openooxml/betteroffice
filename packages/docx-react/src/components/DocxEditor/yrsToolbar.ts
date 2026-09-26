@@ -1,3 +1,4 @@
+import type { ColorValue, ParagraphAlignment } from '@betteroffice/docx/types/document';
 import type {
   YrsInputPositionMap,
   YrsAuthor,
@@ -7,10 +8,33 @@ import type {
   YrsStoryRange,
 } from '@betteroffice/docx/yrs';
 import { compareYrsLocs } from '@betteroffice/docx/yrs';
-import type { FormattingAction } from '../Toolbar';
 import type { YrsStoredFormatting, YrsStoredFormattingAction } from './YrsInput';
 import type { TableContextInfo } from './types';
 import { currentYrsTableContext } from './yrsCommands';
+
+/** A formatting operation over the current selection. */
+export type FormattingAction =
+  | 'bold'
+  | 'italic'
+  | 'underline'
+  | 'strikethrough'
+  | 'superscript'
+  | 'subscript'
+  | 'clearFormatting'
+  | 'bulletList'
+  | 'numberedList'
+  | 'indent'
+  | 'outdent'
+  | 'insertLink'
+  | 'setRtl'
+  | 'setLtr'
+  | { type: 'fontFamily'; value: string }
+  | { type: 'fontSize'; value: number }
+  | { type: 'textColor'; value: ColorValue | string }
+  | { type: 'highlightColor'; value: string }
+  | { type: 'alignment'; value: ParagraphAlignment }
+  | { type: 'lineSpacing'; value: number }
+  | { type: 'applyStyle'; value: string };
 
 export interface YrsToolbarSelection {
   context: YrsSelectionContext;
@@ -199,6 +223,9 @@ export function storedYrsToolbarFormatting(
   if (action === 'strikethrough') {
     return { type: 'toggle', mark: 'strike', active: context.strike === true };
   }
+  if (action === 'superscript' || action === 'subscript') {
+    return { type: 'toggle', mark: action, active: context[action] === true };
+  }
   if (action === 'clearFormatting') return { type: 'clear' };
   if (typeof action !== 'object') return null;
   switch (action.type) {
@@ -235,13 +262,17 @@ export function withStoredYrsFormatting(
         italic: false as const,
         underline: false as const,
         strike: false as const,
+        superscript: false as const,
+        subscript: false as const,
         fontFamily: null,
         fontSize: null,
         color: null,
+        highlight: null,
       }
     : selection.context;
   const fontFamily = delta.fontFamily;
   const color = delta.color;
+  const script = delta.other ?? {};
   return {
     ...selection,
     context: {
@@ -254,6 +285,9 @@ export function withStoredYrsFormatting(
           : delta.underline !== false && delta.underline !== null,
       strike:
         delta.strike === undefined ? base.strike : delta.strike !== false && delta.strike !== null,
+      superscript:
+        script.superscript === undefined ? base.superscript : script.superscript === true,
+      subscript: script.subscript === undefined ? base.subscript : script.subscript === true,
       fontFamily:
         fontFamily === undefined
           ? base.fontFamily
@@ -266,6 +300,7 @@ export function withStoredYrsFormatting(
             : delta.fontSize * 2,
       color:
         color === undefined ? base.color : color?.rgb ?? color?.themeColor ?? null,
+      highlight: delta.highlight === undefined ? base.highlight : delta.highlight,
     },
   };
 }
@@ -295,6 +330,11 @@ export function applyYrsToolbarFormatting(
   if (action === 'strikethrough') {
     if (isCollapsed(range)) return false;
     session.formatRange(range, { strike: context.strike === true ? false : true });
+    return true;
+  }
+  if (action === 'superscript' || action === 'subscript') {
+    if (isCollapsed(range)) return false;
+    session.toggleMark(range, { type: action });
     return true;
   }
   if (action === 'clearFormatting') {
