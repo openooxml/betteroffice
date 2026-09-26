@@ -1140,13 +1140,9 @@ fn check_opaque_order<T: ReadTxn>(
         return Ok(());
     };
     let ownership = views.ownership();
-    let owners = ownership.chain(story).map_err(|message| {
-        failure(
-            EditFailureCode::LimitExceeded,
-            message,
-            Some(target.clone()),
-        )
-    })?;
+    let owners = ownership
+        .chain(story)
+        .map_err(|(code, message)| failure(code, message, Some(target.clone())))?;
     for story in std::iter::once(story).chain(owners.iter().map(|owner| owner.parent.as_str())) {
         if views
             .story(story, EditTextView::Accepted)
