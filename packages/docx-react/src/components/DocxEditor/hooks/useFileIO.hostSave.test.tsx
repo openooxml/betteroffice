@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocx } from '@betteroffice/docx/docx';
 import type { Document } from '@betteroffice/docx/types/document';
+import { isMacPlatform } from '../../../commands/descriptors';
 import type { PagedEditorRef } from '../PagedEditor';
 import { useFileIO } from './useFileIO';
 import { useKeyboardShortcuts } from './useKeyboardShortcuts';
@@ -20,6 +21,8 @@ beforeAll(async () => {
     { preloadFonts: false }
   );
 });
+const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
+
 afterEach(cleanup);
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -76,7 +79,7 @@ function commandInputs(
     hyperlinkDialog: {} as never,
     findReplace: {} as never,
     save,
-    reservePrint: () => ({ finish: async () => true, cancel: noop }),
+    reservePrint: () => ({ prepare: async () => {}, print: () => true, cancel: noop }),
     renderedDisplayList: () => Promise.reject(new Error('Not rendered')),
     openDocument: noop,
     pickImage: noop,
@@ -255,8 +258,7 @@ test('the save shortcut invokes only the focused editor and ignores repeat event
   });
   const event = new KeyboardEvent('keydown', {
     key: 's',
-    ctrlKey: true,
-    metaKey: true,
+    ...MOD,
     bubbles: true,
     cancelable: true,
   });
@@ -270,8 +272,7 @@ test('the save shortcut invokes only the focused editor and ignores repeat event
     document.dispatchEvent(
       new KeyboardEvent('keydown', {
         key: 's',
-        ctrlKey: true,
-        metaKey: true,
+        ...MOD,
         repeat: true,
         bubbles: true,
         cancelable: true,

@@ -46,6 +46,7 @@ import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import { commandOutcome, useDocxCommandBinding } from './DocxEditor/hooks/useDocxCommands';
 import type {
   PagedEditorCommandBridge,
+  PagedEditorImageHandle,
   PagedEditorSelectedImage,
 } from './DocxEditor/hooks/usePagedEditorRefApi';
 import { DocxCommandAdmissionError } from '../commands/createDocxCommandStore';
@@ -518,7 +519,7 @@ interface EditorState {
 /** The image an image dialog edits, captured when it opened. */
 interface ImageDialogTarget {
   pos: number;
-  embedId: string | null;
+  handle: PagedEditorImageHandle | null;
   wrapType: string;
   displayMode: string;
   cssFloat: string | null;
@@ -531,14 +532,17 @@ interface ImageDialogTarget {
   height: number | null;
 }
 
-function imageDialogTarget(image: PagedEditorSelectedImage): ImageDialogTarget {
+function imageDialogTarget(
+  image: PagedEditorSelectedImage,
+  handle: PagedEditorImageHandle | null
+): ImageDialogTarget {
   const { attrs } = image;
   const text = (value: unknown) => (typeof value === 'string' ? value : null);
   const number = (value: unknown) =>
     typeof value === 'number' && Number.isFinite(value) ? value : null;
   return {
     pos: image.pos,
-    embedId: image.embedId,
+    handle,
     wrapType: text(attrs.wrapType) ?? 'inline',
     displayMode: text(attrs.displayMode) ?? 'inline',
     cssFloat: text(attrs.cssFloat),
@@ -975,7 +979,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pickImage: handleInsertImageClick,
     tableAction: (action) => handleTableAction(action),
     openImageProperties: (image) => {
-      setImageTarget(imageDialogTarget(image));
+      setImageTarget(
+        imageDialogTarget(image, commandBridgeRef.current?.imageHandle(image.pos) ?? null)
+      );
       setImagePropsOpen(true);
     },
     openPageSetup: () => handleOpenPageSetup(),
@@ -1183,10 +1189,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     document: history.state,
     pmImageContext: imageTarget,
     applyGeometry: (patch) => {
-      const embedId = imageTarget?.embedId ?? null;
+      const handle = imageTarget?.handle ?? null;
       void commands
         .complete('imageProperties', () => {
-          const pos = embedId ? commandBridgeRef.current?.imagePosition(embedId) : null;
+          const pos = handle ? commandBridgeRef.current?.imagePosition(handle) : null;
           if (pos == null) throw new DocxCommandAdmissionError('target-changed');
           return runBridgeCommand({ type: 'imageGeometry', pmPos: pos, patch });
         })
