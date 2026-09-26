@@ -15,7 +15,11 @@ import {
 } from '../commands/createXlsxCommandStore';
 import { BUILT_IN_CHORDS, gridOwnsChord, normalizeChord } from '../commands/descriptors';
 import { commandReason } from '../commands/evaluate';
-import type { XlsxCommandResult, XlsxCommandStore, XlsxPluginCommandId } from '../commands/types';
+import type {
+  XlsxCommandStore,
+  XlsxPluginCommandId,
+  XlsxPluginCommandResult,
+} from '../commands/types';
 import {
   createPluginClients,
   pluginCommandScope,
@@ -104,10 +108,10 @@ function checkedState(value: unknown) {
   return value as ReturnType<NonNullable<XlsxPluginCommand<unknown>['getState']>>;
 }
 
-function checkedResult(value: unknown): XlsxCommandResult {
+function checkedResult(value: unknown): XlsxPluginCommandResult {
   const result = value as { ok?: unknown } | null | undefined;
   return result && typeof result.ok === 'boolean'
-    ? (value as XlsxCommandResult)
+    ? (value as XlsxPluginCommandResult)
     : { ok: true, status: 'executed' };
 }
 
@@ -293,7 +297,7 @@ export function createXlsxPluginHost(access: XlsxPluginHostAccess): XlsxPluginHo
   const executeCommand = async (
     pluginId: string,
     command: XlsxPluginCommand<unknown>
-  ): Promise<XlsxCommandResult> => {
+  ): Promise<XlsxPluginCommandResult> => {
     const outcome = await runtime.invoke(pluginId, 'command', (context) =>
       command.execute(context)
     );

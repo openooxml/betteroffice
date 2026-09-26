@@ -293,9 +293,11 @@ const review = defineXlsxPlugin<{ sheets: number }>({
       label: "Mark reviewed",
       mutatesDocument: true,
       async execute(context) {
+        if (!context.edits) return { ok: false, failure: { code: "not-granted", message: "Needs write access" } };
         const selection = context.snapshot.selection;
         const version = await context.read.version();
-        if (!selection?.cells || !version.ok || !context.edits) return { ok: true, status: "noop" };
+        if (!version.ok) return version;
+        if (!selection?.cells) return { ok: true, status: "noop" };
         const { anchor, focus } = selection.cells;
         const start = { row: Math.min(anchor.row, focus.row), col: Math.min(anchor.col, focus.col) };
         const end = { row: Math.max(anchor.row, focus.row), col: Math.max(anchor.col, focus.col) };
@@ -309,7 +311,7 @@ const review = defineXlsxPlugin<{ sheets: number }>({
             },
           ],
         });
-        return result.ok ? { ok: true, status: "executed" } : { ok: true, status: "noop" };
+        return result.ok ? { ok: true, status: "executed" } : result;
       },
     },
   ],
@@ -338,7 +340,9 @@ a grant a plugin reads (`read.version`, `readCells`, `findText`,
 mutating ones refuse with `unsupported-policy`, and `applyEdits` needs
 `document: "write"` and `editBatches`. Grants and `readOnly` are checked again
 right before each change. Each client call waits for pending input in order
-with it; plugin handlers run outside that queue.
+with it; plugin handlers run outside that queue. A contributed command's failure
+uses the plugin's own code, and a refused edit batch returned as-is reaches the
+caller unchanged.
 
 **Selection and navigation.** `snapshot.selection` names the active sheet
 (session `sheetId` and zero-based `sheetIndex`), the selected cells with their

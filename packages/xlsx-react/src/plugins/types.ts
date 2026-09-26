@@ -29,6 +29,7 @@ import type {
   XlsxCommandState,
   XlsxPluginCommandDescriptor,
   XlsxPluginCommandId,
+  XlsxPluginCommandResult,
   XlsxPluginCommandState,
 } from '../commands/types';
 
@@ -81,7 +82,10 @@ export interface XlsxPluginCommandClient {
     args: XlsxCommandArgs[K]
   ): Promise<XlsxCommandResult | XlsxPluginRefusal>;
   /** Only this plugin's own contributed commands. */
-  execute(id: XlsxPluginCommandId, args: null): Promise<XlsxCommandResult | XlsxPluginRefusal>;
+  execute(
+    id: XlsxPluginCommandId,
+    args: null
+  ): Promise<XlsxPluginCommandResult | XlsxPluginRefusal>;
 }
 
 /** A rectangle in overlay pixels. */
@@ -248,7 +252,7 @@ export interface XlsxPluginCommand<S> {
    */
   shortcuts?: readonly string[];
   getState?(context: XlsxPluginContext<S>): CommandState;
-  execute(context: XlsxPluginContext<S>): MaybePromise<XlsxCommandResult>;
+  execute(context: XlsxPluginContext<S>): MaybePromise<XlsxPluginCommandResult>;
 }
 
 /**

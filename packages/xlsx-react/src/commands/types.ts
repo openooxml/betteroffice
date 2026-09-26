@@ -1,8 +1,10 @@
+import type { XlsxEditRefusal } from '@betteroffice/xlsx';
 import type { TranslationKey } from '@betteroffice/xlsx-i18n';
 import type {
   CommandReason,
   CommandState,
 } from '../../../../shared/host-contracts/commands';
+import type { PluginCommandResult } from '../../../../shared/host-contracts/plugins';
 import type {
   BorderPreset,
   BorderStyle,
@@ -213,6 +215,9 @@ export interface XlsxPluginCommandDescriptor {
 /** State of a contributed command; the plugin chooses its own disabled codes. */
 export type XlsxPluginCommandState = CommandState;
 
+/** Outcome of a contributed command: a plugin-defined failure, or a refused edit batch as-is. */
+export type XlsxPluginCommandResult = PluginCommandResult<XlsxCommandStatus, XlsxEditRefusal>;
+
 /** The command authority of one editor, shared by built-in and host chrome. */
 export interface XlsxCommandStore {
   getDescriptor<K extends XlsxCommandId>(id: K): XlsxCommandDescriptor<K>;
@@ -225,5 +230,5 @@ export interface XlsxCommandStore {
   /** Runs after input accepted before the call; availability is checked again first. */
   execute<K extends XlsxCommandId>(id: K, args: XlsxCommandArgs[K]): Promise<XlsxCommandResult>;
   /** Runs a contributed command with its plugin's own clients, outside the input queue. */
-  execute(id: XlsxPluginCommandId, args: null): Promise<XlsxCommandResult>;
+  execute(id: XlsxPluginCommandId, args: null): Promise<XlsxPluginCommandResult>;
 }

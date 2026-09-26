@@ -78,6 +78,7 @@ export type {
   XlsxNumberFormatValue,
   XlsxPluginCommandDescriptor,
   XlsxPluginCommandId,
+  XlsxPluginCommandResult,
   XlsxPluginCommandState,
   XlsxSelectCommandId,
 } from './commands/types';

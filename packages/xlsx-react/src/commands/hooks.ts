@@ -12,6 +12,7 @@ import type {
   XlsxCommandStore,
   XlsxPluginCommandDescriptor,
   XlsxPluginCommandId,
+  XlsxPluginCommandResult,
   XlsxPluginCommandState,
 } from './types';
 
@@ -80,7 +81,7 @@ export interface XlsxBoundPluginCommand {
   /** The contributed label, or the id while no plugin contributes it. */
   label: string;
   shortcut: string | null;
-  execute(): Promise<XlsxCommandResult>;
+  execute(): Promise<XlsxPluginCommandResult>;
 }
 
 /** Binds one command for a custom control. */

@@ -16,6 +16,7 @@ import type {
   XlsxCommandStore,
   XlsxPluginCommandDescriptor,
   XlsxPluginCommandId,
+  XlsxPluginCommandResult,
   XlsxPluginCommandState,
 } from './types';
 
@@ -90,7 +91,7 @@ export interface XlsxPluginCommandBinding {
   /** The plugin's own state; the editor's gate applies on top. */
   state(): XlsxPluginCommandState;
   /** Runs the plugin's handler with that plugin's clients. */
-  execute(): Promise<XlsxCommandResult>;
+  execute(): Promise<XlsxPluginCommandResult>;
 }
 
 /** Who a scoped store acts for; asked again inside every operation boundary. */
@@ -306,19 +307,31 @@ export function createXlsxCommandController(): XlsxCommandController {
       ? pluginCommands.get(id)!.execute()
       : binding!.perform(id, args as never, env);
 
-  const run = async (
+  function run(
+    id: XlsxCommandId,
+    args: unknown,
+    prepared?: XlsxCommandOrigin | null,
+    scope?: XlsxCommandScope
+  ): Promise<XlsxCommandResult>;
+  function run(
     id: AnyCommandId,
     args: unknown,
     prepared?: XlsxCommandOrigin | null,
     scope?: XlsxCommandScope
-  ): Promise<XlsxCommandResult> => {
+  ): Promise<XlsxPluginCommandResult>;
+  async function run(
+    id: AnyCommandId,
+    args: unknown,
+    prepared?: XlsxCommandOrigin | null,
+    scope?: XlsxCommandScope
+  ): Promise<XlsxPluginCommandResult> {
     const current = binding;
     if (!current) return failure('editor-unavailable', null);
     const builtIn = isPluginCommandId(id) ? null : id;
     const ordered = builtIn !== null && current.ordered(builtIn);
     const origin =
       prepared !== undefined ? prepared : ordered && builtIn ? capture(current, builtIn) : null;
-    const attempt = () => {
+    const attempt = (): XlsxPluginCommandResult | Promise<XlsxPluginCommandResult> => {
       if (binding !== current) return failure('editor-unavailable', null);
       if (origin && builtIn) {
         const stale = current.resume(origin, builtIn);
@@ -330,7 +343,7 @@ export function createXlsxCommandController(): XlsxCommandController {
       if (denied) return failure(denied, environment(true));
       const env = environment(true);
       const state = compute(id, args, env);
-      if (!state.enabled) return { ok: false, failure: state.disabledReason } as XlsxCommandResult;
+      if (!state.enabled) return { ok: false, failure: state.disabledReason };
       if (scope && mutatingBuiltIn(id)) return failure('unsupported-policy', env);
       return perform(id, args, env!);
     };
@@ -345,13 +358,13 @@ export function createXlsxCommandController(): XlsxCommandController {
     } finally {
       refresh();
     }
-  };
+  }
 
   const dispatch = (
     id: unknown,
     args: unknown,
     scope?: XlsxCommandScope
-  ): Promise<XlsxCommandResult> => {
+  ): Promise<XlsxPluginCommandResult> => {
     if (!knownCommand(id)) {
       return Promise.resolve(failure('unsupported-command', environment(false)));
     }

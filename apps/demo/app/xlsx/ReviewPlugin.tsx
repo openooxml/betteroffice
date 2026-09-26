@@ -2,7 +2,7 @@
 
 import {
   defineXlsxPlugin,
-  type XlsxCommandResult,
+  type XlsxPluginCommandResult,
   type XlsxPluginContext,
   type XlsxPluginGeometry,
 } from "@betteroffice/xlsx-react";
@@ -11,6 +11,10 @@ const REVIEW_PLUGIN_ID = "demo.review";
 const REVIEWED_FILL = "#d9ead3";
 /** Larger selections are summarized without reading their cells. */
 const MAX_READ_CELLS = 400;
+const WRITE_NOT_GRANTED = {
+  code: "write-not-granted",
+  message: "Write access is not granted.",
+};
 
 interface ReviewSheet {
   sheetId: string;
@@ -100,17 +104,22 @@ async function refresh(context: ReviewContext): Promise<void> {
 
 async function markReviewed(
   context: ReviewContext,
-): Promise<XlsxCommandResult> {
+): Promise<XlsxPluginCommandResult> {
+  if (!context.edits) {
+    context.setState((previous) => ({
+      ...previous,
+      message: WRITE_NOT_GRANTED.message,
+    }));
+    return { ok: false, failure: WRITE_NOT_GRANTED };
+  }
   const range = selectedRange(context);
   const version = await context.read.version();
-  if (!range || !version.ok || !context.edits) {
-    const message = !version.ok
-      ? version.failure.message
-      : range
-      ? "Write access is not granted."
-      : "Select cells first.";
+  if (!range || !version.ok) {
+    const message = version.ok
+      ? "Select cells first."
+      : version.failure.message;
     context.setState((previous) => ({ ...previous, message }));
-    return { ok: true, status: "noop" };
+    return version.ok ? { ok: true, status: "noop" } : version;
   }
   const result = await context.edits.applyEdits({
     expectVersion: version.version,
@@ -130,9 +139,7 @@ async function markReviewed(
     (previous) => ({ ...previous, message }),
     "version" in result ? result.version : undefined,
   );
-  return result.ok
-    ? { ok: true, status: "executed" }
-    : { ok: true, status: "noop" };
+  return result.ok ? { ok: true, status: "executed" } : result;
 }
 
 function ReviewPanel({ context }: { context: ReviewContext }) {
@@ -271,13 +278,7 @@ export const reviewPlugin = defineXlsxPlugin<ReviewState>({
       getState: (context) =>
         context.edits
           ? { enabled: true }
-          : {
-              enabled: false,
-              disabledReason: {
-                code: "write-not-granted",
-                message: "Write access is not granted.",
-              },
-            },
+          : { enabled: false, disabledReason: WRITE_NOT_GRANTED },
       execute: markReviewed,
     },
   ],

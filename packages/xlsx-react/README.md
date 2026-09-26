@@ -308,7 +308,9 @@ const review = defineXlsxPlugin<State>({
   edit batches. Grants are not spreadsheet protection.
 - **Contributed commands** register as `plugin:<pluginId>/<id>` on
   `api.commands`. They always run with their own plugin's clients, even when the
-  toolbar, a shortcut or the host invokes them. `mutatesDocument` disables a
+  toolbar, a shortcut or the host invokes them. `execute` returns
+  `{ ok: true, status }` or a failure with the plugin's own code, or a refused
+  edit batch as-is; callers receive it unchanged. `mutatesDocument` disables a
   command while read-only but grants nothing. Plugin shortcuts must use Mod or
   Alt, or a function key; built-in shortcuts win and a clashing plugin shortcut
   is reported. `toolbar` lists local ids in
