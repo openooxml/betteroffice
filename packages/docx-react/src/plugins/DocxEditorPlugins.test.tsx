@@ -737,6 +737,16 @@ describe('DocxEditor plugins', () => {
     expect(live.size).toBe(1);
   });
 
+  test('unmounting the editor cleans up with reason unmounted', async () => {
+    const { plugin, log, contexts } = recorder();
+    const { view } = await mount({ plugins: [plugin] });
+    await until(() => log.includes('load:loaded'));
+    view.unmount();
+    await settle();
+    expect(log.filter((entry) => entry.startsWith('cleanup'))).toEqual(['cleanup:unmounted']);
+    expect(contexts[0].lifetimeSignal.aborted).toBe(true);
+  });
+
   test('overlays follow the rendered layout version; navigation reports missing geometry', async () => {
     const layouts: (string | null)[] = [];
     const contexts: DocxPluginContext<null>[] = [];

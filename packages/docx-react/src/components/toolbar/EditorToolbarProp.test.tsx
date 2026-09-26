@@ -10,16 +10,19 @@ if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession } from '@betteroffice/docx/yrs';
-import {
-  DocxEditor,
-  EditorToolbar,
-  ToolbarCommandButton,
-  useDocxCommandState,
-  type DocxEditorProps,
-  type DocxEditorRef,
-} from '../../index';
+import type { DocxEditorProps, DocxEditorRef } from '../../index';
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
+// Loaded after the DOM exists: Radix picks its layout-effect hook at import time.
+const {
+  DocxEditor,
+  EditorToolbar,
+  ToolbarButton,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  ToolbarGroup,
+  useDocxCommandState,
+} = await import('../../index');
 
 const FIXTURE = resolve(import.meta.dir, '../DocxEditor/hooks/__fixtures__/probe-linked-header.docx');
 const quiet = { error: console.error, warn: console.warn };
@@ -53,14 +56,25 @@ function documentBytes(): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-const COMPACT: ReactNode = (
-  <EditorToolbar>
-    <EditorToolbar.Toolbar>
-      <ToolbarCommandButton id="bold" />
-      <ToolbarCommandButton id="undo" />
-    </EditorToolbar.Toolbar>
-  </EditorToolbar>
-);
+function CompactToolbar({ onShare }: { onShare(): void }) {
+  return (
+    <EditorToolbar>
+      <EditorToolbar.Toolbar>
+        <ToolbarGroup label="Formatting">
+          <ToolbarCommandSelect id="paragraphStyle" />
+          <ToolbarCommandButton id="bold" />
+        </ToolbarGroup>
+        <ToolbarCommandButton id="undo" />
+        <EditorToolbar.Review />
+        <ToolbarButton title="Copy link" onClick={onShare}>
+          Copy link
+        </ToolbarButton>
+      </EditorToolbar.Toolbar>
+    </EditorToolbar>
+  );
+}
+
+const COMPACT: ReactNode = <CompactToolbar onShare={() => {}} />;
 
 async function mount(props: Partial<DocxEditorProps> = {}) {
   const ref = createRef<DocxEditorRef>();
@@ -89,6 +103,10 @@ async function selectFirstWord(ref: React.RefObject<DocxEditorRef | null>) {
   });
 }
 
+function precedes(a: Element, b: Element): boolean {
+  return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+}
+
 async function settle() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -114,6 +132,100 @@ describe('DocxEditor toolbar prop', () => {
     fireEvent.click(undo);
     await settle();
     expect(bold.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  test('the compact host toolbar keeps its order and each control acts on the editor', async () => {
+    let shares = 0;
+    const { ref, view } = await mount({
+      toolbar: <CompactToolbar onShare={() => (shares += 1)} />,
+    });
+    const toolbar = within(view.container).getByRole('toolbar');
+    const style = within(toolbar).getByLabelText('Select paragraph style');
+    const bold = within(toolbar).getByRole('button', { name: 'Bold' });
+    const undo = within(toolbar).getByRole('button', { name: 'Undo' });
+    const review = within(toolbar).getByRole('group', { name: 'Review' });
+    const share = within(toolbar).getByRole('button', { name: 'Copy link' });
+    const order = [style, bold, undo, review, share];
+    expect(order.slice(1).every((control, index) => precedes(order[index], control))).toBe(true);
+
+    fireEvent.click(share);
+    expect(shares).toBe(1);
+
+    await selectFirstWord(ref);
+    fireEvent.click(bold);
+    await settle();
+    expect(bold.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(undo);
+    await settle();
+    expect(bold.getAttribute('aria-pressed')).toBe('false');
+
+    await act(async () => {
+      style.focus();
+      fireEvent.keyDown(style, { key: 'Enter' });
+    });
+    fireEvent.click(within(document.body).getByRole('option', { name: 'Heading 1' }));
+    await settle();
+    expect(ref.current!.commands.getState('paragraphStyle').value).toBe('Heading1');
+    expect(style.textContent).toContain('Heading 1');
+
+    const session = ref.current!.getEditorRef()!.getYrsSession()!;
+    const original = session.paragraphs('body').at(-1)!;
+    const replica = await createYrsSession({ clientId: 4343 });
+    try {
+      replica.applyUpdate(session.encodeStateAsUpdate());
+      replica.insertText(
+        { story: 'body', paraId: original.paraId, offset: original.text.length },
+        ' suggested',
+        { name: 'Reviewer', date: '2026-01-01T00:00:00Z' }
+      );
+      const update = replica.encodeStateAsUpdate(session.encodeStateVector());
+      await act(async () => {
+        session.applyUpdate(update);
+      });
+    } finally {
+      replica.destroy();
+    }
+    await settle();
+    const next = within(review).getByRole('button', { name: 'Next change' });
+    const reject = within(review).getByRole('button', { name: 'Reject change' });
+    expect(reject.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(next);
+    await settle();
+    expect(reject.hasAttribute('aria-disabled')).toBe(false);
+    fireEvent.click(reject);
+    await settle();
+    expect(session.paragraphs('body').at(-1)!.text).toBe(original.text);
+    expect(next.getAttribute('aria-disabled')).toBe('true');
+  });
+
+  test('a pointer choice returns focus to the document; a keyboard choice does not', async () => {
+    const { ref, view } = await mount({ toolbar: COMPACT });
+    const style = within(view.container).getByLabelText('Select paragraph style');
+    const input = within(document.body).getByLabelText('Document input');
+    const choose = async (name: string, pointer: boolean) => {
+      await act(async () => {
+        style.focus();
+        fireEvent.keyDown(style, { key: 'Enter' });
+      });
+      const option = within(document.body).getByRole('option', { name });
+      if (pointer) {
+        fireEvent.mouseDown(option);
+        fireEvent.click(option);
+      } else {
+        fireEvent.keyDown(option, { key: 'Enter' });
+      }
+      await settle();
+      await act(() => new Promise((resolve) => requestAnimationFrame(() => resolve(null))));
+    };
+    await selectFirstWord(ref);
+
+    await choose('Heading 1', false);
+    expect(ref.current!.commands.getState('paragraphStyle').value).toBe('Heading1');
+    expect(document.activeElement === input).toBe(false);
+
+    await choose('Heading 2', true);
+    expect(ref.current!.commands.getState('paragraphStyle').value).toBe('Heading2');
+    expect(document.activeElement === input).toBe(true);
   });
 
   test('a command right after scrollToParaId acts on the paragraph it moved to', async () => {
