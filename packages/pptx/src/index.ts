@@ -70,6 +70,7 @@ export type {
   Profiled,
   ProfiledLayout,
   PptxFontFace,
+  PptxCaretAnchor,
   PptxTextMatch,
   PptxTextSearchOptions,
   PrimitiveTransform,

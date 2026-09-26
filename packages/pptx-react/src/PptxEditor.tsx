@@ -14,6 +14,7 @@ import type {
   DeckSnapshot,
   HitTestResult,
   ParagraphAlignment,
+  PptxCaretAnchor,
   PptxPresence,
   PptxPresencePeer,
   PptxFontFace,
@@ -40,19 +41,34 @@ import type {
   CSSProperties,
   KeyboardEvent,
   PointerEvent,
+  ReactNode,
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
+import { EditorChromeContext } from './components/EditorToolbarContext';
 import { PresentationOverlay } from './components/PresentationOverlay';
 import type {
-  FormattingAction,
   PptxEditorTool,
   PptxShapePreset,
   PptxZoom,
-  SelectionFormatting,
   ShapeFormattingAction,
-  SlideLayoutOption,
-} from './components/Toolbar';
-import { SHAPE_PRESETS } from './components/Toolbar';
+} from './components/toolbarTypes';
+import { SHAPE_PRESETS, shapePresetFromTool } from './components/toolbarTypes';
+import { createPptxCommandController } from './commands/createPptxCommandStore';
+import { usePptxCommands, usePptxCommandState } from './commands/hooks';
+import { useDisabledDescription } from './components/ui/ToolbarPrimitives';
+import {
+  createInputCoordinator,
+  PptxInputFailure,
+  PptxInputStale,
+} from './commands/inputCoordinator';
+import { PptxCommandContext } from './commands/PptxCommandProvider';
+import type { PptxCommandStore } from './commands/types';
+import { useCommandShortcuts } from './commands/useCommandShortcuts';
+import {
+  usePptxCommandBinding,
+  type PptxExportOutcome,
+  type PptxSaveOutcome,
+} from './commands/usePptxCommands';
 import {
   RESIZE_HANDLES,
   canResizeShape,
@@ -82,14 +98,9 @@ import {
   limitPresence,
   type BoundedPresence,
 } from './presence-rendering';
-import {
-  effectiveStyleFromSelection,
-  paragraphAlignmentFromSelection,
-  selectionFormattingFromStory,
-  storyFormattingFromStory,
-} from './textFormatting';
+import { effectiveStyleFromSelection } from './textFormatting';
+import { useSyncedState } from './useSyncedState';
 import type { EffectiveTextStyle } from './textFormatting';
-import { shapeFormattingFromShape } from './shapeFormatting';
 import {
   caretGoalX,
   caretLineIndex,
@@ -131,6 +142,11 @@ export interface PptxEditorApi {
   /** Accepts a 1-based slide number. */
   goToSlide: (slide: number) => boolean;
   handle: PresentationHandle;
+  /**
+   * The editor's commands, shared by built-in and host chrome; `api.handle` edits bypass them.
+   * @experimental
+   */
+  readonly commands: PptxCommandStore;
   refresh: () => void;
   refreshProposals: () => void;
   /** Serialize the presentation back to .pptx bytes, edits included. */
@@ -167,6 +183,21 @@ export interface PptxEditorProps {
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  /**
+   * Replaces the toolbar: omit it for the default controls, pass `null` for
+   * none, or pass chrome composed from the toolbar parts, which also renders
+   * while `readOnly`. `showToolbar={false}` hides the whole region.
+   * @experimental
+   */
+  toolbar?: ReactNode;
+  /** Shows the toolbar region; defaults to true. */
+  showToolbar?: boolean;
+}
+
+interface PictureOrigin {
+  handle: PresentationHandle;
+  generation: number;
+  slideId: string | null;
 }
 
 interface EditorModel {
@@ -322,7 +353,7 @@ export function PptxEditor({
 }: PptxEditorProps) {
   return (
     <LocaleProvider i18n={i18n}>
-      <PptxEditorContent {...props} />
+      <PptxEditorContent {...props} i18n={i18n} />
     </LocaleProvider>
   );
 }
@@ -341,7 +372,10 @@ function PptxEditorContent({
   onSave,
   onSaveRequest,
   readOnly = false,
-}: Omit<PptxEditorProps, 'i18n'>) {
+  toolbar,
+  showToolbar = true,
+  i18n,
+}: PptxEditorProps) {
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const collaborationClientId = collaboration?.clientId ?? clientId;
@@ -350,23 +384,39 @@ function PptxEditorContent({
   const collaborationPresence = collaboration?.presence;
   const handleRef = useRef<PresentationHandle | null>(null);
   const modelRef = useRef<EditorModel | null>(null);
-  const pendingInputRef = useRef(new Set<Promise<void>>());
-  const pendingSaveRef = useRef<Promise<void> | null>(null);
+  const generationRef = useRef(0);
+  const [commands] = useState(createPptxCommandController);
+  const commandStore = commands.store;
+  const typingRef = useRef<TypingTarget | null>(null);
+  const [coordinator] = useState(() => {
+    const created = createInputCoordinator(() => {
+      if (!created.busy()) typingRef.current = null;
+      commands.refresh();
+    });
+    return created;
+  });
+  const pendingSaveRef = useRef<Promise<PptxSaveOutcome> | null>(null);
+  const pickerOriginRef = useRef<PictureOrigin | null>(null);
   const hostPointRef = useRef<(x: number, y: number) => PptxPointPosition | null>(() => null);
   const flushPendingInput = useCallback(async (opened: PresentationHandle) => {
     if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
-    while (pendingInputRef.current.size) {
-      await Promise.all([...pendingInputRef.current]);
-      if (handleRef.current !== opened) throw new Error('Presentation changed while flushing input');
+    try {
+      await coordinator.run(() => {
+        if (handleRef.current !== opened) throw new Error('Presentation changed while flushing input');
+        if (pointerGestureRef.current || resizeRef.current) {
+          throw new Error('Finish the pointer gesture before flushing input');
+        }
+      });
+    } catch (value) {
+      if (value instanceof PptxInputStale) throw new Error('Presentation changed while flushing input');
+      throw value instanceof PptxInputFailure ? value.cause : value;
     }
-    if (pointerGestureRef.current || resizeRef.current) {
-      throw new Error('Finish the pointer gesture before flushing input');
-    }
-  }, []);
+  }, [coordinator]);
   const initialSlideRef = useRef(initialSlide);
   const onReadyRef = useRef(onReady);
   const onChangeRef = useRef(onChange);
   const onErrorRef = useRef(onError);
+  const rootRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -392,14 +442,14 @@ function PptxEditorContent({
   const imageCacheRef = useRef(new Map<string, Promise<CanvasImageSource | null>>());
   const stableFonts = useStableFontFaces(fonts);
   const [model, setModel] = useState<EditorModel | null>(null);
-  const [selection, setSelection] = useState<PptxTextSelection | null>(null);
-  const [shapeSelection, setShapeSelection] = useState<PptxShapeSelection | null>(null);
+  const [selection, setSelection, selectionRef] = useSyncedState<PptxTextSelection | null>(null);
+  const [shapeSelection, setShapeSelection, shapeSelectionRef] =
+    useSyncedState<PptxShapeSelection | null>(null);
   const [dragPreview, setDragPreview] = useState<ShapeDragPreview | null>(null);
   const [textBoxPreview, setTextBoxPreview] = useState<TextBoxPreview | null>(null);
-  const [textStyle, setTextStyle] = useState(initialStyle);
-  const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
-  const [zoom, setZoom] = useState<PptxZoom>('fit');
-  const [activeTool, setActiveTool] = useState<PptxEditorTool>('select');
+  const [textStyle, setTextStyle, textStyleRef] = useSyncedState(initialStyle);
+  const [zoom, setZoom, zoomRef] = useSyncedState<PptxZoom>('fit');
+  const [activeTool, setActiveTool, activeToolRef] = useSyncedState<PptxEditorTool>('select');
   const [hoverTarget, setHoverTarget] = useState<HoverTarget | null>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const [error, setError] = useState<string | null>(null);
@@ -408,8 +458,8 @@ function PptxEditorContent({
     useState<CollaborationReplica | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
   const [presenting, setPresenting] = useState(false);
-  const [proposals, setProposals] = useState<Proposal[]>([]);
-  const [proposalsOpen, setProposalsOpen] = useState(false);
+  const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
+  const [proposalsOpen, setProposalsOpen, proposalsOpenRef] = useSyncedState(false);
   const proposalButtonRef = useRef<HTMLButtonElement>(null);
   const canvasReview = useProposalCanvas(
     handleRef.current,
@@ -449,8 +499,10 @@ function PptxEditorContent({
   onChangeRef.current = onChange;
   onErrorRef.current = onError;
   modelRef.current = model;
-  const imageInsertAllowedRef = useRef(false);
-  imageInsertAllowedRef.current = !readOnly && !canvasReview.reviewing;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const reviewingRef = useRef(canvasReview.reviewing);
+  reviewingRef.current = canvasReview.reviewing;
 
   const reportError = useCallback((value: unknown) => {
     const next = value instanceof Error ? value : new Error(String(value));
@@ -511,7 +563,6 @@ function PptxEditorContent({
         }
         modelRef.current = next;
         setModel(next);
-        setHistoryState({ canUndo: handle.canUndo(), canRedo: handle.canRedo() });
         setProposals(handle.listProposals());
         setError(null);
         if (notify) onChangeRef.current?.(snapshot);
@@ -529,6 +580,7 @@ function PptxEditorContent({
   }, [refreshAt]);
 
   const clearSelection = useCallback(() => {
+    typingRef.current = null;
     caretGoalRef.current = null;
     resizeRef.current = null;
     pointerGestureRef.current = null;
@@ -616,26 +668,25 @@ function PptxEditorContent({
     }
   }, [reportError]);
 
-  const acceptProposal = useCallback((id: string, force = false) => {
-    if (readOnly) return;
+  const acceptProposal = useCallback((id: string, force: boolean): 'accepted' | 'stale' => {
+    const handle = handleRef.current;
+    if (!handle) throw new Error('Presentation is no longer open');
     try {
-      handleRef.current?.acceptProposal(id, { force });
+      handle.acceptProposal(id, { force });
       refreshAt(undefined, true, true);
+      return 'accepted';
     } catch (value) {
       refreshProposals();
-      if (!(value instanceof StaleProposalError)) reportError(value);
+      if (value instanceof StaleProposalError) return 'stale';
+      throw value;
     }
-  }, [readOnly, refreshAt, refreshProposals, reportError]);
+  }, [refreshAt, refreshProposals]);
 
-  const rejectProposal = useCallback((id: string) => {
-    if (readOnly) return;
-    try {
-      handleRef.current?.rejectProposal(id);
-      refreshProposals();
-    } catch (value) {
-      reportError(value);
-    }
-  }, [readOnly, refreshProposals, reportError]);
+  const rejectProposal = useCallback((id: string): boolean => {
+    const rejected = handleRef.current?.rejectProposal(id) ?? false;
+    refreshProposals();
+    return rejected;
+  }, [refreshProposals]);
 
   useEffect(() => {
     let disposed = false;
@@ -644,6 +695,9 @@ function PptxEditorContent({
     let unsubscribeUpdates = () => {};
     handleRef.current?.dispose();
     handleRef.current = null;
+    generationRef.current += 1;
+    coordinator.reset();
+    typingRef.current = null;
     setCollaborationReplica(null);
     modelRef.current = null;
     setModel(null);
@@ -652,7 +706,6 @@ function PptxEditorContent({
     setDragPreview(null);
     setTextBoxPreview(null);
     setResizeDelta(null);
-    setHistoryState({ canUndo: false, canRedo: false });
     setActiveTool('select');
     setPresenting(false);
     setProposals([]);
@@ -662,7 +715,6 @@ function PptxEditorContent({
     caretGoalRef.current = null;
     recentClickRef.current = null;
     setError(null);
-    pendingInputRef.current = new Set();
     pendingSaveRef.current = null;
     imageCacheRef.current.clear();
     if (!file) return;
@@ -695,6 +747,7 @@ function PptxEditorContent({
           const opened = handle;
           onReadyRef.current?.({
             clearSelection,
+            commands: commandStore,
             goToSlide,
             handle: opened,
             refresh,
@@ -703,7 +756,7 @@ function PptxEditorContent({
             getPositionAtPoint: (x, y) => handleRef.current === opened ? hostPointRef.current(x, y) : null,
             save: () => {
               if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
-              if (pendingInputRef.current.size || pointerGestureRef.current || resizeRef.current) {
+              if (coordinator.busy() || pointerGestureRef.current || resizeRef.current) {
                 throw new Error('Await flushPendingInput before saving pending input');
               }
               return opened.save();
@@ -733,13 +786,19 @@ function PptxEditorContent({
     collaborationClientId,
     collaborationInitialUpdate,
     clearSelection,
+    commandStore,
+    coordinator,
     file,
+    flushPendingInput,
     goToSlide,
     stableFonts,
     refresh,
     refreshAt,
     reportError,
     selectText,
+    setActiveTool,
+    setSelection,
+    setShapeSelection,
   ]);
 
   useEffect(() => {
@@ -807,11 +866,6 @@ function PptxEditorContent({
     if (!slide || slide.id !== shapeSelection.slideId) return null;
     return findShape(slide.shapes, shapeSelection.shapeId);
   }, [model, shapeSelection]);
-  const selectedShapeStoryId = selectedShape?.textStories[0]?.id ?? null;
-  const selectedShapeFormatting = useMemo(
-    () => shapeFormattingFromShape(selectedShape),
-    [selectedShape]
-  );
 
   const selectedShapeBounds = useMemo<FrameBounds | null>(
     () =>
@@ -905,53 +959,6 @@ function PptxEditorContent({
     }
   }, [model, reportError, selection]);
 
-  const selectionFormatting = useMemo<SelectionFormatting>(() => {
-    if (selection && selection.anchor === selection.focus) {
-      return selectionFormattingFromStyle(textStyle);
-    }
-    const handle = handleRef.current;
-    if (!handle) return selectionFormattingFromStyle(textStyle);
-    try {
-      if (!selection) {
-        return selectedShapeStoryId
-          ? storyFormattingFromStory(handle.story(selectedShapeStoryId), initialStyle)
-          : selectionFormattingFromStyle(textStyle);
-      }
-      return selectionFormattingFromStory(
-        handle.story(selection.storyId),
-        selection.anchor,
-        selection.focus,
-        initialStyle
-      );
-    } catch {
-      return selectionFormattingFromStyle(textStyle);
-    }
-  }, [model, selectedShapeStoryId, selection, textStyle]);
-
-  const selectionAlignment = useMemo<ParagraphAlignment | undefined>(() => {
-    const handle = handleRef.current;
-    const storyId = selection?.storyId ?? selectedShapeStoryId;
-    if (!handle || !storyId) return undefined;
-    try {
-      const story = handle.story(storyId);
-      const textBox = model?.frame?.primitives.find(
-        (primitive): primitive is TextBoxPrimitive =>
-          primitive.kind === 'textBox' && primitive.storyId === storyId
-      );
-      return selection
-        ? paragraphAlignmentFromSelection(story, textBox, selection.anchor, selection.focus)
-        : paragraphAlignmentFromSelection(story, textBox, 0, story.length);
-    } catch {
-      return undefined;
-    }
-  }, [model, selectedShapeStoryId, selection]);
-
-  const slideLayouts = useMemo<SlideLayoutOption[]>(() => {
-    const unique = new Set<string | null>();
-    for (const slide of model?.snapshot.slides ?? []) unique.add(slide.layoutPartPath);
-    return [...unique].map((partPath) => ({ partPath }));
-  }, [model?.snapshot]);
-
   const selectSlide = (index: number) => {
     goToSlide(index + 1);
   };
@@ -959,7 +966,7 @@ function PptxEditorContent({
   const createTextBox = (start: SlidePoint, end: SlidePoint) => {
     const handle = handleRef.current;
     const current = modelRef.current;
-    if (!handle || !current?.frame || readOnly) return;
+    if (!handle || !current?.frame || readOnlyRef.current) return;
     const slide = current.snapshot.slides[current.slideIndex];
     if (!slide) return;
     const dragged = Math.abs(end.x - start.x) >= 6 || Math.abs(end.y - start.y) >= 6;
@@ -993,7 +1000,7 @@ function PptxEditorContent({
           ),
         },
         text: '',
-        style: textStyle,
+        style: textStyleRef.current,
       });
       const next = refreshAt(undefined, true);
       setActiveTool('select');
@@ -1018,6 +1025,7 @@ function PptxEditorContent({
       }
     } catch (value) {
       reportError(value);
+      throw value;
     }
   };
 
@@ -1028,7 +1036,7 @@ function PptxEditorContent({
   ) => {
     const handle = handleRef.current;
     const current = modelRef.current;
-    if (!handle || !current?.frame || readOnly) return;
+    if (!handle || !current?.frame || readOnlyRef.current) return;
     const slide = current.snapshot.slides[current.slideIndex];
     const preset = SHAPE_PRESETS.find((candidate) => candidate.geometry === geometry);
     if (!slide || !preset) return;
@@ -1076,12 +1084,17 @@ function PptxEditorContent({
       if (next) stageRef.current?.focus();
     } catch (value) {
       reportError(value);
+      throw value;
     }
   };
 
-  const insertPicture = async (file: File) => {
-    const handle = handleRef.current;
-    if (!handle || !imageInsertAllowedRef.current) return;
+  /** Inserts a chosen picture on the slide it was chosen for, once decoded, if the gate still passes. */
+  const insertPicture = async (file: File, origin: PictureOrigin) => {
+    const { handle } = origin;
+    const allowed = () =>
+      handleRef.current === handle &&
+      generationRef.current === origin.generation &&
+      liveGate('insertImage').enabled;
     try {
       if (file.size > MAX_INSERT_IMAGE_BYTES) {
         throw new Error(
@@ -1102,9 +1115,10 @@ function PptxEditorContent({
       }
       const natural = await loadImageSize(previewUrl);
       const current = modelRef.current;
-      if (handleRef.current !== handle || !imageInsertAllowedRef.current || !current?.frame) return;
+      if (!allowed() || !current?.frame) return;
       if (natural.width <= 0 || natural.height <= 0) throw new Error('image dimensions must be positive');
-      const slide = current.snapshot.slides[current.slideIndex];
+      const slideIndex = current.snapshot.slides.findIndex((slide) => slide.id === origin.slideId);
+      const slide = current.snapshot.slides[slideIndex];
       if (!slide) return;
       const maxWidth = current.frame.width * 0.5;
       const maxHeight = current.frame.height * 0.5;
@@ -1126,23 +1140,56 @@ function PptxEditorContent({
       });
       const next = refreshAt(undefined, true);
       setActiveTool('select');
-      setSelection(null);
-      setShapeSelection({ slideId: slide.id, shapeId: receipt.shapeId });
       setDragPreview(null);
       setTextBoxPreview(null);
       pointerGestureRef.current = null;
       recentClickRef.current = null;
-      if (next) stageRef.current?.focus();
-    } catch (value) {
-      if (handleRef.current === handle && imageInsertAllowedRef.current) {
-        reportError(value);
+      if (next && slideIndex === next.slideIndex) {
+        setSelection(null);
+        setShapeSelection({ slideId: slide.id, shapeId: receipt.shapeId });
+        const focused = document.activeElement;
+        if (!focused || focused === document.body || stageRef.current?.contains(focused)) {
+          stageRef.current?.focus();
+        }
       }
+    } catch (value) {
+      if (allowed()) reportError(value);
       throw value;
     }
   };
 
+  /** The presentation and slide a picture chosen now is for. */
+  const pictureOrigin = (): PictureOrigin | null => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    if (!handle) return null;
+    return {
+      handle,
+      generation: generationRef.current,
+      slideId: current?.snapshot.slides[current.slideIndex]?.id ?? null,
+    };
+  };
+
+  /**
+   * Accepts a chosen picture as input, ordered with the edits and commands
+   * around it, for the presentation and slide the picker opened on.
+   */
+  const admitPicture = (file: File) => {
+    const origin = pickerOriginRef.current ?? pictureOrigin();
+    pickerOriginRef.current = null;
+    if (
+      !origin ||
+      origin.handle !== handleRef.current ||
+      origin.generation !== generationRef.current
+    ) {
+      return;
+    }
+    void coordinator.input(() => insertPicture(file, origin)).catch(() => {});
+  };
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     if (!event.isPrimary || event.button !== 0) return;
+    typingRef.current = null;
     const handle = handleRef.current;
     const current = modelRef.current;
     if (!handle || !current?.frame) return;
@@ -1439,13 +1486,15 @@ function PptxEditorContent({
     }
     if (gesture.kind === 'textBox') {
       setTextBoxPreview(null);
-      createTextBox(gesture.start, gesture.last);
+      void coordinator.input(() => createTextBox(gesture.start, gesture.last)).catch(() => {});
       event.preventDefault();
       return;
     }
     if (gesture.kind === 'shapeInsert') {
       setTextBoxPreview(null);
-      createShape(gesture.geometry, gesture.start, gesture.last);
+      void coordinator
+        .input(() => createShape(gesture.geometry, gesture.start, gesture.last))
+        .catch(() => {});
       event.preventDefault();
       return;
     }
@@ -1475,10 +1524,15 @@ function PptxEditorContent({
       return;
     }
     recentClickRef.current = null;
+    event.preventDefault();
+    void coordinator.input(() => moveShape(gesture)).catch(() => {});
+  };
+
+  const moveShape = (gesture: Extract<PointerGesture, { kind: 'shape' }>) => {
     const handle = handleRef.current;
     const current = modelRef.current;
     const slide = current?.snapshot.slides[current.slideIndex];
-    if (!handle || !current?.frame || slide?.id !== gesture.slideId || readOnly) return;
+    if (!handle || !current?.frame || slide?.id !== gesture.slideId || readOnlyRef.current) return;
     const shape = findShape(slide.shapes, gesture.shapeId);
     if (!shape) return;
     try {
@@ -1492,9 +1546,9 @@ function PptxEditorContent({
         refreshAt(undefined, true);
       }
       setShapeSelection({ slideId: slide.id, shapeId: shape.id });
-      event.preventDefault();
     } catch (value) {
       reportError(value);
+      throw value;
     }
   };
 
@@ -1506,18 +1560,18 @@ function PptxEditorContent({
     recentClickRef.current = null;
   };
 
-  const commit = (nextSelection: PptxTextSelection | null) => {
-    if (readOnly) return;
-    setSelection(nextSelection ? { ...nextSelection, focusLine: undefined } : null);
+  const commit = (nextSelection: PptxTextSelection | null): PptxTextSelection | null => {
+    if (readOnlyRef.current) return selectionRef.current;
+    const committed = nextSelection ? { ...nextSelection, focusLine: undefined } : null;
+    setSelection(committed);
     setShapeSelection(null);
     recentClickRef.current = null;
     refreshAt(undefined, true);
+    return committed;
   };
 
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const handle = handleRef.current;
-    if (!handle) return;
-    const modifier = event.metaKey || event.ctrlKey;
+    if (!handleRef.current) return;
     if (event.key === 'Escape') {
       canvasReview.setEnabled(false);
       setActiveTool('select');
@@ -1528,145 +1582,178 @@ function PptxEditorContent({
       event.preventDefault();
       return;
     }
-    if (!readOnly && modifier && (event.key === 'z' || event.key === 'Z')) {
+    const input: KeyInput = {
+      key: event.key,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+    };
+    const busy = coordinator.busy();
+    const typing = busy ? typingRef.current : null;
+    const hasTarget = typing ? typing.selection !== null : selectionRef.current !== null;
+    if (!hasTarget || reviewingRef.current || !isEditingKey(input)) return;
+    if (busy) {
       event.preventDefault();
-      history(event.shiftKey ? 'redo' : 'undo');
+      if (!typingRef.current) {
+        const selection = selectionRef.current;
+        typingRef.current = { selection: selection ? anchorSelection(selection) : null };
+      }
+      const queued = typingRef.current;
+      void coordinator.input(() => typeQueued(input, queued), 'keyboard').catch(() => {});
       return;
     }
-    if (modifier && (event.key === 's' || event.key === 'S')) {
-      event.preventDefault();
-      if (!event.repeat) void save();
-      return;
+    if (applyKey(input, selectionRef.current!).handled) event.preventDefault();
+  };
+
+  /** The selection as positions that later edits, undo and remote updates move along. */
+  const anchorSelection = (selection: PptxTextSelection): AnchoredSelection | null => {
+    const handle = handleRef.current;
+    if (!handle) return null;
+    try {
+      return {
+        shapeId: selection.shapeId,
+        storyId: selection.storyId,
+        anchor: handle.anchorCaret(selection.storyId, selection.anchor),
+        focus: handle.anchorCaret(selection.storyId, selection.focus),
+      };
+    } catch {
+      return null;
     }
-    if (canvasReview.reviewing) return;
-    if (!selection && !selectedShapeStoryId) return;
-    if (!readOnly && modifier && (event.key === 'b' || event.key === 'B')) {
-      event.preventDefault();
-      applyFormatting({
-        bold: selection ? !textStyle.bold : !selectionFormatting.bold,
-      });
-      return;
+  };
+
+  /**
+   * Applies a keystroke accepted while earlier work was pending, at the text it
+   * was typed into, wherever that text moved meanwhile. Later keystrokes of the
+   * same run follow its result.
+   */
+  const typeQueued = (input: KeyInput, typing: TypingTarget) => {
+    const anchored = typing.selection;
+    if (!anchored) return;
+    const handle = handleRef.current;
+    if (!handle) throw new Error('Presentation is no longer open');
+    let target: PptxTextSelection;
+    try {
+      const anchor = handle.resolveCaretAnchor(anchored.anchor);
+      const focus = handle.resolveCaretAnchor(anchored.focus);
+      if (anchor === null || focus === null) {
+        throw new Error('The text changed before the typed input was applied');
+      }
+      target = { shapeId: anchored.shapeId, storyId: anchored.storyId, anchor, focus };
+    } catch (value) {
+      reportError(value);
+      throw value;
     }
-    if (!readOnly && modifier && (event.key === 'i' || event.key === 'I')) {
-      event.preventDefault();
-      applyFormatting({
-        italic: selection ? !textStyle.italic : !selectionFormatting.italic,
-      });
-      return;
-    }
-    if (!readOnly && modifier && (event.key === 'u' || event.key === 'U')) {
-      event.preventDefault();
-      applyFormatting({
-        underline: selection
-          ? textStyle.underline === 'none'
-            ? 'sng'
-            : 'none'
-          : selectionFormatting.underline
-            ? 'none'
-            : 'sng',
-      });
-      return;
-    }
-    if (!selection) return;
+    const selection = applyKey(input, target, true).selection;
+    typing.selection = selection ? anchorSelection(selection) : null;
+  };
+
+  /**
+   * Moves the caret or edits text at `selection`. Returns whether the key was
+   * used and the selection after it; `strict` rethrows engine refusals after
+   * reporting them.
+   */
+  const applyKey = (
+    input: KeyInput,
+    selection: PptxTextSelection,
+    strict = false
+  ): { handled: boolean; selection: PptxTextSelection | null } => {
+    const handle = handleRef.current;
+    const unhandled = { handled: false, selection };
+    if (!handle || reviewingRef.current) return unhandled;
     const start = Math.min(selection.anchor, selection.focus);
     const end = Math.max(selection.anchor, selection.focus);
+    const edited = (next: PptxTextSelection | null) => ({ handled: true, selection: commit(next) });
     try {
-      const moved = caretDestination(event, selection);
+      const moved = caretDestination(input, selection);
       if (moved !== null) {
-        event.preventDefault();
-        setSelection({
+        const next = {
           ...selection,
-          anchor: event.shiftKey ? selection.anchor : moved.position,
+          anchor: input.shiftKey ? selection.anchor : moved.position,
           focus: moved.position,
           focusLine: moved.lineIndex,
-        });
-        return;
+        };
+        setSelection(next);
+        return { handled: true, selection: next };
       }
-      if (readOnly) return;
-      if (event.key === 'Backspace') {
-        event.preventDefault();
+      if (readOnlyRef.current) return unhandled;
+      if (input.key === 'Backspace') {
         if (start !== end) {
           handle.deleteText(selection.storyId, start, end);
-          commit({ ...selection, anchor: start, focus: start });
-          return;
+          return edited({ ...selection, anchor: start, focus: start });
         }
         const previous = previousTextIndex(handle.story(selection.storyId), start);
         if (previous < start) {
           handle.deleteText(selection.storyId, previous, start);
-          commit({ ...selection, anchor: previous, focus: previous });
+          return edited({ ...selection, anchor: previous, focus: previous });
         }
-        return;
+        return { handled: true, selection };
       }
-      if (event.key === 'Delete') {
-        event.preventDefault();
+      if (input.key === 'Delete') {
         if (start !== end) {
           handle.deleteText(selection.storyId, start, end);
-          commit({ ...selection, anchor: start, focus: start });
-          return;
+          return edited({ ...selection, anchor: start, focus: start });
         }
         const next = nextTextIndex(handle.story(selection.storyId), end);
         if (next > end) {
           handle.deleteText(selection.storyId, end, next);
-          commit({ ...selection, anchor: end, focus: end });
+          return edited({ ...selection, anchor: end, focus: end });
         }
-        return;
+        return { handled: true, selection };
       }
-      if (event.key === 'Enter') {
-        event.preventDefault();
+      if (input.key === 'Enter') {
         if (start !== end) handle.deleteText(selection.storyId, start, end);
         handle.insertParagraphBreak(selection.storyId, start);
-        commit({ ...selection, anchor: start + 1, focus: start + 1 });
-        return;
+        return edited({ ...selection, anchor: start + 1, focus: start + 1 });
       }
-      if (
-        event.key.length > 0 &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        Array.from(event.key).length === 1
-      ) {
-        event.preventDefault();
+      if (isCharacter(input)) {
         if (start !== end) handle.deleteText(selection.storyId, start, end);
-        handle.insertText(selection.storyId, start, event.key, textStyle);
-        const next = start + event.key.length;
-        commit({ ...selection, anchor: next, focus: next });
+        handle.insertText(selection.storyId, start, input.key, textStyleRef.current);
+        const next = start + input.key.length;
+        return edited({ ...selection, anchor: next, focus: next });
       }
+      return unhandled;
     } catch (value) {
       reportError(value);
+      if (strict) throw value;
+      return { handled: true, selection };
     }
   };
 
-  const applyFormatting = (patch: TextStylePatch) => {
-    if (readOnly) return;
-    setTextStyle((current) => ({ ...current, ...patch }));
+  const selectedShapeNow = () => {
+    const current = modelRef.current;
+    const target = shapeSelectionRef.current;
+    const slide = current?.snapshot.slides[current.slideIndex];
+    return slide && target && slide.id === target.slideId ? findShape(slide.shapes, target.shapeId) : null;
+  };
+
+  /** Formats the selected range, the whole story of a selected shape, or the caret's stored style. */
+  const applyFormatting = (patch: TextStylePatch): boolean => {
     const handle = handleRef.current;
-    if (!handle) return;
-    try {
-      if (selection) {
-        if (selection.anchor === selection.focus) return;
-        handle.formatText(
-          selection.storyId,
-          Math.min(selection.anchor, selection.focus),
-          Math.max(selection.anchor, selection.focus),
-          patch
-        );
-      } else if (selectedShapeStoryId) {
-        const story = handle.story(selectedShapeStoryId);
-        formatStory(handle, story, patch);
-      } else {
-        return;
-      }
-      refreshAt(undefined, true);
-    } catch (value) {
-      reportError(value);
+    const selection = selectionRef.current;
+    const shapeStoryId = selection ? null : (selectedShapeNow()?.textStories[0]?.id ?? null);
+    if (!handle || (!selection && !shapeStoryId)) return false;
+    setTextStyle((current) => ({ ...current, ...patch }));
+    if (selection) {
+      if (selection.anchor === selection.focus) return true;
+      handle.formatText(
+        selection.storyId,
+        Math.min(selection.anchor, selection.focus),
+        Math.max(selection.anchor, selection.focus),
+        patch
+      );
+    } else {
+      formatStory(handle, handle.story(shapeStoryId!), patch);
     }
+    refreshAt(undefined, true);
+    return true;
   };
 
   /** Where a caret-movement key lands, or `null` when the key moves nothing.
    *  Vertical steps hold the column they started from; the goal is tied to the
    *  position it produced, so a click or a keystroke in between drops it. */
   const caretDestination = (
-    event: KeyboardEvent<HTMLDivElement>,
+    input: KeyInput,
     selection: PptxTextSelection
   ): { position: number; lineIndex?: number } | null => {
     const handle = handleRef.current;
@@ -1674,20 +1761,20 @@ function PptxEditorContent({
     const story = handle.story(selection.storyId);
     const last = Math.max(0, story.length - 1);
     const clamp = (position: number) => Math.max(0, Math.min(last, position));
-    const lines = caretLinesFor(model?.frame, selection);
+    const lines = caretLinesFor(modelRef.current?.frame, selection);
     const current = { position: selection.focus, lineIndex: selection.focusLine };
     // macOS reads Option as word-wise and Command as line-edge; Control is the
     // Windows word-wise modifier.
-    const wordWise = event.altKey || (event.ctrlKey && !event.metaKey);
-    const toEdge = event.metaKey;
+    const wordWise = input.altKey || (input.ctrlKey && !input.metaKey);
+    const toEdge = input.metaKey;
 
-    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+    if (input.key === 'ArrowUp' || input.key === 'ArrowDown') {
       const goalKey = { shapeId: selection.shapeId, ...current };
       const goal =
         caretGoalRef.current && sameCaretGoalKey(caretGoalRef.current, goalKey)
           ? caretGoalRef.current.goalX
           : caretGoalX(lines, current);
-      const direction = event.key === 'ArrowUp' ? 'up' : 'down';
+      const direction = input.key === 'ArrowUp' ? 'up' : 'down';
       const moved = verticalCaretMove(lines, current, direction, goal);
       const destination = { ...moved, position: clamp(moved.position) };
       caretGoalRef.current =
@@ -1702,8 +1789,8 @@ function PptxEditorContent({
       return destination;
     }
     caretGoalRef.current = null;
-    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+    if (input.key === 'ArrowLeft' || input.key === 'ArrowRight') {
+      const direction = input.key === 'ArrowLeft' ? -1 : 1;
       if (toEdge) {
         const destination = lineEdge(lines, current, direction < 0 ? 'start' : 'end');
         return { ...destination, position: clamp(destination.position) };
@@ -1713,13 +1800,13 @@ function PptxEditorContent({
         : selection.focus + direction;
       return { position: clamp(position), lineIndex: selection.focusLine };
     }
-    if (event.key === 'Home') {
-      if (toEdge || event.ctrlKey) return { position: 0, lineIndex: 0 };
+    if (input.key === 'Home') {
+      if (toEdge || input.ctrlKey) return { position: 0, lineIndex: 0 };
       const destination = lineEdge(lines, current, 'start');
       return { ...destination, position: clamp(destination.position) };
     }
-    if (event.key === 'End') {
-      if (toEdge || event.ctrlKey) {
+    if (input.key === 'End') {
+      if (toEdge || input.ctrlKey) {
         return { position: last, lineIndex: Math.max(0, lines.length - 1) };
       }
       const destination = lineEdge(lines, current, 'end');
@@ -1728,146 +1815,145 @@ function PptxEditorContent({
     return null;
   };
 
-  const applyAlignment = (alignment: ParagraphAlignment) => {
+  const applyAlignment = (alignment: ParagraphAlignment): boolean => {
     const handle = handleRef.current;
-    const storyId = selection?.storyId ?? selectedShapeStoryId;
-    if (!handle || !storyId || readOnly) return;
-    try {
-      if (selection) {
-        handle.setParagraphAlignment(
-          storyId,
-          Math.min(selection.anchor, selection.focus),
-          Math.max(selection.anchor, selection.focus),
-          alignment
-        );
-      } else {
-        handle.setParagraphAlignment(storyId, 0, handle.story(storyId).length, alignment);
-      }
-      refreshAt(undefined, true);
-    } catch (value) {
-      reportError(value);
+    const selection = selectionRef.current;
+    const storyId = selection?.storyId ?? selectedShapeNow()?.textStories[0]?.id;
+    if (!handle || !storyId) return false;
+    if (selection) {
+      handle.setParagraphAlignment(
+        storyId,
+        Math.min(selection.anchor, selection.focus),
+        Math.max(selection.anchor, selection.focus),
+        alignment
+      );
+    } else {
+      handle.setParagraphAlignment(storyId, 0, handle.story(storyId).length, alignment);
     }
+    refreshAt(undefined, true);
+    return true;
   };
 
-  const formatSelection = (action: FormattingAction) => {
-    if (action === 'bold') {
-      applyFormatting({ bold: !selectionFormatting.bold });
-    } else if (action === 'italic') {
-      applyFormatting({ italic: !selectionFormatting.italic });
-    } else if (action === 'underline') {
-      applyFormatting({ underline: selectionFormatting.underline ? 'none' : 'sng' });
-    } else if (action.type === 'fontFamily') {
-      applyFormatting({ fontFamily: action.value });
-    } else if (action.type === 'fontSize') {
-      applyFormatting({ fontSizePt: action.value });
-    } else if (action.type === 'textColor') {
-      applyFormatting({ color: action.value });
-    } else if (action.type === 'align') {
-      applyAlignment(action.value);
-    }
-  };
-
-  const formatShape = (action: ShapeFormattingAction) => {
+  const formatShape = (action: ShapeFormattingAction): boolean => {
     const handle = handleRef.current;
-    if (!handle || !shapeSelection || !selectedShape || readOnly) return;
-    try {
-      if (action.type === 'fillColor') {
-        handle.setShapeFill(shapeSelection.slideId, shapeSelection.shapeId, action.value);
-      } else if (action.type === 'strokeColor') {
-        handle.setShapeStroke(
-          shapeSelection.slideId,
-          shapeSelection.shapeId,
-          action.value ? { color: action.value } : {}
-        );
-      } else if (action.type === 'strokeWidth') {
-        handle.setShapeStroke(
-          shapeSelection.slideId,
-          shapeSelection.shapeId,
-          action.value === null ? {} : { widthPt: action.value }
-        );
-      } else if (action.type === 'adjust') {
-        handle.setShapeAdjust(shapeSelection.slideId, shapeSelection.shapeId, {
-          ...selectedShape.adjustValues,
-          [action.name]: action.value,
-        });
-      } else if (action.type === 'zOrder') {
-        const zOrder = {
-          front: handle.bringShapeToFront,
-          back: handle.sendShapeToBack,
-          forward: handle.bringShapeForward,
-          backward: handle.sendShapeBackward,
-        }[action.value];
-        zOrder(shapeSelection.slideId, shapeSelection.shapeId);
-      }
-      refreshAt(undefined, true);
-    } catch (value) {
-      reportError(value);
+    const target = shapeSelectionRef.current;
+    const shape = selectedShapeNow();
+    if (!handle || !target || !shape) return false;
+    if (action.type === 'fillColor') {
+      handle.setShapeFill(target.slideId, target.shapeId, action.value);
+    } else if (action.type === 'strokeColor') {
+      handle.setShapeStroke(target.slideId, target.shapeId, action.value ? { color: action.value } : {});
+    } else if (action.type === 'strokeWidth') {
+      handle.setShapeStroke(
+        target.slideId,
+        target.shapeId,
+        action.value === null ? {} : { widthPt: action.value }
+      );
+    } else if (action.type === 'adjust') {
+      handle.setShapeAdjust(target.slideId, target.shapeId, {
+        ...shape.adjustValues,
+        [action.name]: action.value,
+      });
+    } else {
+      const zOrder = {
+        front: handle.bringShapeToFront,
+        back: handle.sendShapeToBack,
+        forward: handle.bringShapeForward,
+        backward: handle.sendShapeBackward,
+      }[action.value];
+      zOrder(target.slideId, target.shapeId);
     }
+    refreshAt(undefined, true);
+    return true;
   };
 
-  const addSlide = (layoutPartPath?: string | null) => {
+  const addSlide = (layoutPartPath?: string | null): boolean => {
     const handle = handleRef.current;
     const current = modelRef.current;
-    if (!handle || !current || readOnly) return;
-    try {
-      const index = current.slideIndex + 1;
-      const layout =
-        layoutPartPath === undefined
-          ? current.snapshot.slides[current.slideIndex]?.layoutPartPath ?? undefined
-          : layoutPartPath ?? undefined;
-      handle.insertSlide(index, layout);
+    if (!handle || !current) return false;
+    const index = current.slideIndex + 1;
+    const layout =
+      layoutPartPath === undefined
+        ? current.snapshot.slides[current.slideIndex]?.layoutPartPath ?? undefined
+        : layoutPartPath ?? undefined;
+    handle.insertSlide(index, layout);
+    setSelection(null);
+    setShapeSelection(null);
+    setDragPreview(null);
+    setTextBoxPreview(null);
+    setActiveTool('select');
+    pointerGestureRef.current = null;
+    recentClickRef.current = null;
+    resizeRef.current = null;
+    setResizeDelta(null);
+    refreshAt(index, true, true);
+    return true;
+  };
+
+  const history = (direction: 'undo' | 'redo'): boolean => {
+    const handle = handleRef.current;
+    if (!handle) return false;
+    if (direction === 'undo') handle.undo();
+    else handle.redo();
+    setSelection(null);
+    setDragPreview(null);
+    setTextBoxPreview(null);
+    setActiveTool('select');
+    pointerGestureRef.current = null;
+    recentClickRef.current = null;
+    resizeRef.current = null;
+    setResizeDelta(null);
+    refreshAt(undefined, true);
+    return true;
+  };
+
+  const changeTool = (tool: PptxEditorTool): boolean => {
+    const changed = activeToolRef.current !== tool;
+    canvasReview.setEnabled(false);
+    setActiveTool(tool);
+    if (tool !== 'select') {
       setSelection(null);
       setShapeSelection(null);
-      setDragPreview(null);
-      setTextBoxPreview(null);
-      setActiveTool('select');
-      pointerGestureRef.current = null;
-      recentClickRef.current = null;
-      resizeRef.current = null;
-      setResizeDelta(null);
-      refreshAt(index, true, true);
-    } catch (value) {
-      reportError(value);
     }
+    setTextBoxPreview(null);
+    pointerGestureRef.current = null;
+    resizeRef.current = null;
+    setResizeDelta(null);
+    return changed;
   };
 
-  const history = (direction: 'undo' | 'redo') => {
-    const handle = handleRef.current;
-    if (!handle || readOnly) return;
-    try {
-      if (direction === 'undo') handle.undo();
-      else handle.redo();
-      setSelection(null);
-      setDragPreview(null);
-      setTextBoxPreview(null);
-      setActiveTool('select');
-      pointerGestureRef.current = null;
-      recentClickRef.current = null;
-      resizeRef.current = null;
-      setResizeDelta(null);
-      refreshAt(undefined, true);
-    } catch (value) {
-      reportError(value);
-    }
-  };
-
-  const save = (): Promise<void> => {
+  /**
+   * Runs the host's save request outside the input queue, which it may flush,
+   * then serializes after everything accepted by then.
+   */
+  const save = (): Promise<PptxSaveOutcome> => {
     if (pendingSaveRef.current) return pendingSaveRef.current;
     const handle = handleRef.current;
-    if (!handle) return Promise.resolve();
-    const pending = Promise.resolve().then(async () => {
-      if (onSaveRequest && await onSaveRequest() !== true) return;
-      if (handleRef.current !== handle) return;
-      await flushPendingInput(handle);
-      if (handleRef.current !== handle) return;
-      const bytes = handle.save();
-      if (onSave) onSave(bytes);
-      else downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME);
-    }).catch((value: unknown) => {
-      if (handleRef.current === handle) reportError(value);
-    }).finally(() => {
-      if (pendingSaveRef.current === pending) pendingSaveRef.current = null;
-    });
+    if (!handle) return Promise.resolve('replaced');
+    const generation = generationRef.current;
+    const current = () => handleRef.current === handle && generationRef.current === generation;
+    const pending = Promise.resolve()
+      .then(async (): Promise<PptxSaveOutcome> => {
+        if (onSaveRequest && (await onSaveRequest()) !== true) return 'requested';
+        if (!current()) return 'replaced';
+        return coordinator.run((): PptxSaveOutcome => {
+          if (!current()) return 'replaced';
+          if (pointerGestureRef.current || resizeRef.current) return 'gesture';
+          const bytes = handle.save();
+          if (onSave) onSave(bytes);
+          else downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME);
+          return 'saved';
+        });
+      })
+      .catch((value: unknown): PptxSaveOutcome => {
+        if (value instanceof PptxInputFailure) return 'input-failed';
+        if (value instanceof PptxInputStale || !current()) return 'replaced';
+        reportError(value);
+        return 'failed';
+      })
+      .finally(() => {
+        if (pendingSaveRef.current === pending) pendingSaveRef.current = null;
+      });
     pendingSaveRef.current = pending;
     return pending;
   };
@@ -1952,22 +2038,21 @@ function PptxEditorContent({
   const resizePointerUp = (event: PointerEvent<HTMLSpanElement>) => {
     const delta = resizeDeltaFrom(event);
     const gesture = endResizeGesture(event);
+    if (!gesture || !delta || (delta.x === 0 && delta.y === 0)) return;
+    void coordinator.input(() => resizeShape(gesture, delta)).catch(() => {});
+  };
+
+  const resizeShape = (
+    gesture: NonNullable<typeof resizeRef.current>,
+    delta: SlidePoint
+  ) => {
     const api = handleRef.current;
     const current = modelRef.current;
     const slide = current?.snapshot.slides[current.slideIndex];
-    const shape = slide && gesture ? findShape(slide.shapes, gesture.shapeId) : null;
-    if (
-      readOnly ||
-      !gesture ||
-      !delta ||
-      !api ||
-      !current?.frame ||
-      slide?.id !== gesture.slideId ||
-      !shape
-    ) {
+    const shape = slide ? findShape(slide.shapes, gesture.shapeId) : null;
+    if (readOnlyRef.current || !api || !current?.frame || slide?.id !== gesture.slideId || !shape) {
       return;
     }
-    if (delta.x === 0 && delta.y === 0) return;
     try {
       const box = resizedShapeBox(
         current.snapshot,
@@ -1990,6 +2075,7 @@ function PptxEditorContent({
       }
     } catch (value) {
       reportError(value);
+      throw value;
     }
   };
 
@@ -1997,34 +2083,46 @@ function PptxEditorContent({
   const currentSlide = model?.slideIndex ?? 0;
 
   const startPresenting = () => {
-    if (slideCount === 0) return;
+    if (!modelRef.current?.snapshot.slides.length) return;
     setPresenting(true);
   };
 
   // Export the current slide through the same canvas painter the editor draws
-  // with, so the png matches what is on screen.
-  const exportPng = () => {
-    const frame = model?.frame;
-    const handle = handleRef.current;
-    if (!frame || !handle) return;
+  // with, so the png matches what is on screen. Only capturing the slide waits
+  // for accepted input; painting runs outside the input queue.
+  const exportPng = async (): Promise<PptxExportOutcome> => {
+    let captured: { frame: SlideDisplayList; slideIndex: number; handle: PresentationHandle };
+    try {
+      captured = await coordinator.run(() => {
+        const current = modelRef.current;
+        const handle = handleRef.current;
+        if (!current?.frame || !handle) throw new PptxInputStale();
+        return { frame: current.frame, slideIndex: current.slideIndex, handle };
+      });
+    } catch (value) {
+      return value instanceof PptxInputFailure ? 'input-failed' : 'replaced';
+    }
+    const { frame, slideIndex, handle } = captured;
     // Painting is async, so the deck can be replaced or disposed mid-export.
     // Pin the handle the frame came from, behind its own decode cache, rather
     // than reading whichever deck `handleRef` holds by the time an asset
     // resolves.
     const pinned = { current: handle };
     const cache = { current: new Map<string, Promise<CanvasImageSource | null>>() };
-    void slideToPng(frame, {
-      scale: window.devicePixelRatio || 1,
-      resolveImage: (assetId) => resolveImage(assetId, pinned, cache, decodeImageError),
-    })
-      .then(async (blob) => {
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        if (handleRef.current !== handle) return;
-        downloadBytes(bytes, pngName(fileName, currentSlide), 'image/png');
-      })
-      .catch((value: unknown) => {
-        if (handleRef.current === handle) reportError(value);
+    try {
+      const blob = await slideToPng(frame, {
+        scale: window.devicePixelRatio || 1,
+        resolveImage: (assetId) => resolveImage(assetId, pinned, cache, decodeImageError),
       });
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      if (handleRef.current !== handle) return 'replaced';
+      downloadBytes(bytes, pngName(fileName, slideIndex), 'image/png');
+      return 'exported';
+    } catch (value) {
+      if (handleRef.current !== handle) return 'replaced';
+      reportError(value);
+      return 'failed';
+    }
   };
   const shapeDragDelta =
     dragPreview && dragPreview.shapeId === shapeSelection?.shapeId ? dragPreview.delta : null;
@@ -2049,65 +2147,107 @@ function PptxEditorContent({
         }
     : null;
 
-  return (
-    <div className={className} style={styles.root}
-      onKeyDownCapture={(event) => {
-        if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
-          event.preventDefault();
-          event.stopPropagation();
-          if (!event.repeat) void save();
-        }
-      }}
-    >
+  const status: 'ready' | 'loading' | 'empty' = !file
+    ? 'empty'
+    : model && handleRef.current
+      ? 'ready'
+      : loading || !error
+        ? 'loading'
+        : 'empty';
+  const proposalsAvailable = Boolean(handleRef.current?.isProposalsAvailable());
+  const liveGate = usePptxCommandBinding(commands, {
+    handle: handleRef.current,
+    handleRef,
+    modelRef,
+    selectionRef,
+    shapeSelectionRef,
+    textStyleRef,
+    activeToolRef,
+    generationRef,
+    coordinator,
+    status,
+    readOnlyRef,
+    zoomRef,
+    proposalsRef,
+    proposalsOpenRef,
+    reviewEnabledRef: canvasReview.enabledRef,
+    reviewSelectedIdRef: canvasReview.selectedIdRef,
+    proposalsAvailable,
+    gestureActive: () => Boolean(pointerGestureRef.current || resizeRef.current),
+    baseStyle: initialStyle,
+    i18n,
+    t,
+    actions: {
+      format: applyFormatting,
+      align: applyAlignment,
+      formatShape,
+      insertSlide: addSlide,
+      history,
+      setTool: changeTool,
+      setZoom: (next) => {
+        const changed = next !== zoomRef.current;
+        setZoom(next);
+        return changed;
+      },
+      openPicker: () => {
+        pickerOriginRef.current = pictureOrigin();
+        pictureInputRef.current?.click();
+      },
+      save,
+      exportPng,
+      present: startPresenting,
+      setProposalsOpen: (open) => {
+        if (open) refreshProposals();
+        setProposalsOpen(open);
+      },
+      selectProposal: (proposalId) => {
+        canvasReview.select(proposalId);
+        canvasReview.setEnabled(true);
+      },
+      showProposalDiff: (enabled) => canvasReview.setEnabled(enabled),
+      acceptProposal,
+      rejectProposal,
+      reportError,
+      focusEditor: () => stageRef.current?.focus(),
+    },
+    stamp: [
+      model,
+      selection,
+      shapeSelection,
+      textStyle,
+      activeTool,
+      zoom,
+      readOnly,
+      status,
+      canvasReview.enabled,
+      canvasReview.selected,
+      canvasReview.available,
+      proposals,
+      proposalsOpen,
+      proposalsAvailable,
+      t,
+      i18n,
+    ],
+  });
+  const presentingRef = useRef(presenting);
+  presentingRef.current = presenting;
+  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => presentingRef.current });
+
+  const toolbarRegion =
+    !showToolbar || toolbar === null ? null : (
       <div style={styles.toolbarShell}>
-        {!readOnly && (
-        <EditorToolbar
-          currentFormatting={{ ...selectionFormatting, align: selectionAlignment }}
-          textSelectionActive={!canvasReview.reviewing && (selection !== null || selectedShapeStoryId !== null)}
-          onFormat={formatSelection}
-          currentShapeFormatting={selectedShapeFormatting}
-          shapeSelectionActive={!canvasReview.reviewing && selectedShape?.kind === 'shape'}
-          shapeArrangeActive={!canvasReview.reviewing && Boolean(selectedShape)}
-          onShapeFormat={formatShape}
-          onInsertSlide={addSlide}
-          onInsertImage={canvasReview.reviewing ? undefined : () => pictureInputRef.current?.click()}
-          slideLayouts={slideLayouts}
-          currentLayoutPartPath={model?.snapshot.slides[currentSlide]?.layoutPartPath}
-          onSave={save}
-          onExportPng={exportPng}
-          onUndo={() => history('undo')}
-          onRedo={() => history('redo')}
-          canUndo={historyState.canUndo}
-          canRedo={historyState.canRedo}
-          zoom={zoom}
-          onZoomChange={setZoom}
-          activeTool={activeTool}
-          onToolChange={(tool) => {
-            canvasReview.setEnabled(false);
-            setActiveTool(tool);
-            if (tool !== 'select') {
-              setSelection(null);
-              setShapeSelection(null);
-            }
-            setTextBoxPreview(null);
-            pointerGestureRef.current = null;
-            resizeRef.current = null;
-            setResizeDelta(null);
-            stageRef.current?.focus();
-          }}
-          disabled={!model || slideCount === 0}
-          style={styles.toolbar}
-        >
-          <EditorToolbar.Toolbar />
-        </EditorToolbar>
-        )}
-        {!readOnly && handleRef.current?.isProposalsAvailable() && (
-          <button ref={proposalButtonRef} type="button" data-testid="pptx-proposals-button"
-            aria-expanded={proposalsOpen} style={styles.presentButton}
-            onClick={() => { refreshProposals(); setProposalsOpen((open) => !open); }}>
-            {t('proposals.title')} <span data-testid="pptx-proposals-count">{proposals.length}</span>
-          </button>
-        )}
+        <EditorChromeContext.Provider value>
+          {toolbar !== undefined ? (
+            <div style={styles.toolbar}>{toolbar}</div>
+          ) : !readOnly ? (
+            <>
+              <EditorToolbar mode="commands" style={styles.toolbar} />
+              {proposalsAvailable && (
+                <ProposalsButton buttonRef={proposalButtonRef} count={proposals.length} />
+              )}
+            </>
+          ) : null}
+        </EditorChromeContext.Provider>
         {remotePeers.length > 0 ? (
           <div style={styles.presenceStrip} role="list" aria-label="Collaborators">
             {toolbarPresence.visible.map((peer) => {
@@ -2136,39 +2276,28 @@ function PptxEditorContent({
             ) : null}
           </div>
         ) : null}
-        <input
-          ref={pictureInputRef}
-          type="file"
-          accept={Object.values(INSERT_IMAGE_TYPES).join(',')}
-          disabled={readOnly || canvasReview.reviewing}
-          tabIndex={-1}
-          aria-hidden="true"
-          data-testid="pptx-insert-image-input"
-          style={styles.hiddenFileInput}
-          onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            event.currentTarget.value = '';
-            if (file) {
-              const pending = pendingInputRef.current;
-              const operation = insertPicture(file);
-              pending.add(operation);
-              void operation.catch(() => {}).finally(() => pending.delete(operation));
-            }
-          }}
-        />
-        <button
-          type="button"
-          onClick={startPresenting}
-          disabled={slideCount === 0}
-          data-testid="pptx-present"
-          style={styles.presentButton}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M6 4.5v15l13-7.5Z" />
-          </svg>
-          {t('toolbar.present')}
-        </button>
+        {toolbar === undefined && <PresentButton />}
       </div>
+    );
+
+  const editor = (
+    <div ref={rootRef} className={className} style={styles.root}>
+      {toolbarRegion}
+      <input
+        ref={pictureInputRef}
+        type="file"
+        accept={Object.values(INSERT_IMAGE_TYPES).join(',')}
+        disabled={readOnly || canvasReview.reviewing}
+        tabIndex={-1}
+        aria-hidden="true"
+        data-testid="pptx-insert-image-input"
+        style={styles.hiddenFileInput}
+        onChange={(event) => {
+          const chosen = event.currentTarget.files?.[0];
+          event.currentTarget.value = '';
+          if (chosen) admitPicture(chosen);
+        }}
+      />
       <div style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
           {model?.snapshot.slides.map((slide, index) => {
@@ -2232,8 +2361,7 @@ function PptxEditorContent({
           onBlur={() => setStageFocused(false)}
         >
           {!readOnly && (
-            <ProposalCanvasToolbar review={canvasReview} ready={paintedReview === canvasReview.diff} onAccept={acceptProposal} onReject={rejectProposal}
-              onDetails={() => setProposalsOpen(true)} />
+            <ProposalCanvasToolbar review={canvasReview} ready={paintedReview === canvasReview.diff} />
           )}
           <div ref={canvasHostRef} style={styles.canvasHost}>
             {model?.frame ? (
@@ -2392,9 +2520,8 @@ function PptxEditorContent({
         {!readOnly && proposalsOpen && model && handleRef.current && (
           <ProposalsPanel handle={handleRef.current} proposals={proposals} snapshot={model.snapshot}
             resolveImage={(assetId) => resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)}
-            onAccept={acceptProposal} onReject={rejectProposal}
             onNavigate={navigateProposalTarget}
-            onClose={() => { setProposalsOpen(false); proposalButtonRef.current?.focus(); }} />
+            onClose={() => proposalButtonRef.current?.focus()} />
         )}
       </div>
       {activeSlide && canvasReview.diff?.proposal.changes.some((change) => change.slideId === activeSlide.id && !change.shapeId && change.oldText !== change.newText) ? (
@@ -2437,6 +2564,70 @@ function PptxEditorContent({
       ) : null}
     </div>
   );
+  return <PptxCommandContext.Provider value={commandStore}>{editor}</PptxCommandContext.Provider>;
+}
+
+function ProposalsButton({
+  buttonRef,
+  count,
+}: {
+  buttonRef: React.RefObject<HTMLButtonElement | null>;
+  count: number;
+}) {
+  const store = usePptxCommands();
+  const state = usePptxCommandState('proposalsPanel');
+  const { t } = useTranslation();
+  const described = useDisabledDescription(!state.enabled, reasonOf(state));
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        data-testid="pptx-proposals-button"
+        {...described.props}
+        aria-expanded={state.value ?? false}
+        title={described.reason}
+        style={styles.presentButton}
+        onClick={() => {
+          if (state.enabled) void store.execute('proposalsPanel', null);
+        }}
+      >
+        {t('proposals.title')} <span data-testid="pptx-proposals-count">{count}</span>
+      </button>
+      {described.node}
+    </>
+  );
+}
+
+function PresentButton() {
+  const store = usePptxCommands();
+  const state = usePptxCommandState('slideshow');
+  const { t } = useTranslation();
+  const described = useDisabledDescription(!state.enabled, reasonOf(state));
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          if (state.enabled) void store.execute('slideshow', null);
+        }}
+        {...described.props}
+        title={described.reason}
+        data-testid="pptx-present"
+        style={{ ...styles.presentButton, opacity: state.enabled ? 1 : 0.6 }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M6 4.5v15l13-7.5Z" />
+        </svg>
+        {t('toolbar.present')}
+      </button>
+      {described.node}
+    </>
+  );
+}
+
+function reasonOf(state: { enabled: boolean; disabledReason?: { message: string } }): string | undefined {
+  return state.enabled ? undefined : state.disabledReason?.message;
 }
 
 function RemoteShapeOutline({
@@ -2604,14 +2795,6 @@ function clampSlideIndex(index: number, count: number): number {
   return Math.max(0, Math.min(count - 1, index));
 }
 
-function shapePresetFromTool(tool: PptxEditorTool): PptxShapePreset | null {
-  if (!tool.startsWith('shape:')) return null;
-  const geometry = tool.slice('shape:'.length);
-  return SHAPE_PRESETS.some((preset) => preset.geometry === geometry)
-    ? (geometry as PptxShapePreset)
-    : null;
-}
-
 function useStableFontFaces(fonts: ReadonlyArray<PptxFontFace>): ReadonlyArray<PptxFontFace> {
   const stable = useRef(fonts);
   if (!fontFacesEqual(stable.current, fonts)) stable.current = fonts;
@@ -2666,17 +2849,6 @@ function previousTextIndex(story: StorySnapshot, index: number): number {
 function nextTextIndex(story: StorySnapshot, index: number): number {
   const character = Array.from(storyText(story).slice(index))[0];
   return character ? index + character.length : index;
-}
-
-function selectionFormattingFromStyle(style: EffectiveTextStyle): SelectionFormatting {
-  return {
-    bold: style.bold,
-    italic: style.italic,
-    underline: style.underline !== 'none',
-    fontSize: style.fontSizePt,
-    textColor: style.color,
-    fontFamily: style.fontFamily,
-  };
 }
 
 async function installBrowserFonts(fonts: ReadonlyArray<PptxFontFace>): Promise<FontFace[]> {
@@ -3079,4 +3251,51 @@ function slideButton(active: boolean): CSSProperties {
     background: 'transparent',
     cursor: 'pointer',
   };
+}
+
+
+interface AnchoredSelection {
+  shapeId: string;
+  storyId: string;
+  anchor: PptxCaretAnchor;
+  focus: PptxCaretAnchor;
+}
+
+/** Where keystrokes queued behind pending work type. */
+interface TypingTarget {
+  selection: AnchoredSelection | null;
+}
+
+interface KeyInput {
+  key: string;
+  shiftKey: boolean;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+}
+
+const EDITING_KEYS = new Set([
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'Home',
+  'End',
+  'Backspace',
+  'Delete',
+  'Enter',
+]);
+
+function isCharacter(input: KeyInput): boolean {
+  return (
+    input.key.length > 0 &&
+    !input.metaKey &&
+    !input.ctrlKey &&
+    !input.altKey &&
+    Array.from(input.key).length === 1
+  );
+}
+
+function isEditingKey(input: KeyInput): boolean {
+  return EDITING_KEYS.has(input.key) || isCharacter(input);
 }
