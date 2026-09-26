@@ -7,6 +7,7 @@ import type { BlockContent, Document } from '../types/document';
 import type { YrsSession } from './index';
 import type {
   DocxParagraphIdentitySnapshot,
+  DocxParagraphSavePlan,
   DocxPersistedParagraphAnchor,
   DocxSessionParagraphAnchor,
 } from './paragraphIdentity';
@@ -147,53 +148,44 @@ function savedParagraphs(
   return saved;
 }
 
+/** The identities and paragraph ID plan a session save applies. @internal */
+export interface DocxSessionSave {
+  identities: DocxParagraphIdentitySnapshot;
+  plan: DocxParagraphSavePlan;
+}
+
+/** Captures a save of `session`, in the task that projects the saved document. @internal */
+export function captureSessionSave(session: YrsSession): DocxSessionSave {
+  return { identities: session.paragraphIdentities(), plan: session.paragraphSavePlan() };
+}
+
 /**
- * Saves a session opened from DOCX bytes and reports each saved paragraph's
- * persisted anchor, read from the same projection the bytes are written
- * from and kept only where the written part holds its Word paragraph ID.
- * Parts whose stories are unchanged since the session opened keep
- * their source bytes, paragraph IDs aside. The comments the session holds
- * are saved with their anchors, those added to it included; replies and
- * resolution are saved as the source package has them. A source paragraph without a
- * Word paragraph ID saves without one unless the host called
- * `persistParagraphIds()` first; the IDs a save writes are recorded as
- * saved, so they keep them against unsaved claims from other replicas, once
- * reconciled with the live session.
+ * Writes `document`, projected from `session` when `capture` was taken, and
+ * records the Word paragraph IDs the bytes hold as saved. `patches` selects
+ * the planned parts written as `originalBuffer`'s bytes with IDs patched in;
+ * it selects none unless `originalBuffer` is the session's source package.
+ * @internal
  */
-export async function saveYrsDocx(
+export async function writeSessionSave(
   session: YrsSession,
-  options: RepackOptions = {}
+  document: Document,
+  capture: DocxSessionSave,
+  originalBuffer: ArrayBuffer,
+  options: RepackOptions = {},
+  patches: (part: string) => boolean = () => true
 ): Promise<DocxSavedDocument> {
-  const base = session.materializeDocx();
-  if (!base?.originalBuffer) {
-    throw new Error('saveYrsDocx requires a session opened from DOCX bytes');
-  }
-  const identities = session.paragraphIdentities();
-  const plan = session.paragraphSavePlan();
-  const comments = savedComments(session, base);
-  const document = yrsToDocument(
-    session,
-    comments.changed
-      ? {
-          ...base,
-          package: {
-            ...base.package,
-            document: { ...base.package.document, comments: comments.comments },
-          },
-        }
-      : base,
-    { commentIds: comments.sessionIds }
-  );
-  const paragraphs = savedParagraphs(document, identities);
+  const plan = {
+    ...capture.plan,
+    patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part)),
+  };
+  const paragraphs = savedParagraphs(document, capture.identities);
   const { buffer } = await writeDocumentWithRust(
     document,
-    base.originalBuffer,
+    originalBuffer,
     options,
     undefined,
     undefined,
-    comments.changed
-      ? { ...plan, patchedParts: plan.patchedParts.filter(({ part }) => part !== COMMENTS_PART) }
-      : plan
+    plan
   );
   const bytes = new Uint8Array(buffer);
   const held = session.writtenParagraphIds(bytes);
@@ -221,4 +213,50 @@ export async function saveYrsDocx(
     paragraphs: written.filter((paragraph) => !isStale(paragraph)),
     conflicts: written.filter(isStale),
   };
+}
+
+/**
+ * Saves a session opened from DOCX bytes and reports each saved paragraph's
+ * persisted anchor, read from the same projection the bytes are written
+ * from and kept only where the written part holds its Word paragraph ID.
+ * Parts whose stories are unchanged since the session opened keep
+ * their source bytes, paragraph IDs aside. The comments the session holds
+ * are saved with their anchors, those added to it included; replies and
+ * resolution are saved as the source package has them. A source paragraph without a
+ * Word paragraph ID saves without one unless the host called
+ * `persistParagraphIds()` first; the IDs a save writes are recorded as
+ * saved, so they keep them against unsaved claims from other replicas, once
+ * reconciled with the live session.
+ */
+export async function saveYrsDocx(
+  session: YrsSession,
+  options: RepackOptions = {}
+): Promise<DocxSavedDocument> {
+  const base = session.materializeDocx();
+  if (!base?.originalBuffer) {
+    throw new Error('saveYrsDocx requires a session opened from DOCX bytes');
+  }
+  const capture = captureSessionSave(session);
+  const comments = savedComments(session, base);
+  const document = yrsToDocument(
+    session,
+    comments.changed
+      ? {
+          ...base,
+          package: {
+            ...base.package,
+            document: { ...base.package.document, comments: comments.comments },
+          },
+        }
+      : base,
+    { commentIds: comments.sessionIds }
+  );
+  return writeSessionSave(
+    session,
+    document,
+    capture,
+    base.originalBuffer,
+    options,
+    (part) => !comments.changed || part !== COMMENTS_PART
+  );
 }

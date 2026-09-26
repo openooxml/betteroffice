@@ -61,7 +61,14 @@ export {
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 export * from './paragraphIdentity';
-export { saveYrsDocx, type DocxSavedDocument, type DocxSavedParagraph } from './saveYrsDocx';
+export {
+  captureSessionSave,
+  saveYrsDocx,
+  writeSessionSave,
+  type DocxSavedDocument,
+  type DocxSavedParagraph,
+  type DocxSessionSave,
+} from './saveYrsDocx';
 
 export interface YrsDocxHost {
   document: Document;

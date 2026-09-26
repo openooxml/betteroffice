@@ -1,5 +1,6 @@
 import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
+import type { Document } from '@betteroffice/docx/types/document';
 import {
   createDocx,
   injectReplyRangeMarkers,
@@ -7,6 +8,12 @@ import {
   repackDocx,
 } from '@betteroffice/docx/docx';
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
+import {
+  captureSessionSave,
+  writeSessionSave,
+  type DocxSessionSave,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import { openPrintWindow } from '@betteroffice/docx';
 import {
   rasterizeDisplayListPages,
@@ -93,6 +100,20 @@ function printDisplayListPages(
   );
 }
 
+/** Writes the editor's document, through the session save when it has one. */
+async function writeEditorDocument(
+  document: Document,
+  session: YrsSession | null,
+  capture: DocxSessionSave | null
+): Promise<ArrayBuffer> {
+  const original = document.originalBuffer;
+  if (!original) return createDocx(document);
+  if (!session || !capture) return repackDocx(document);
+  // The original buffer can be the last save rather than the session source, so none is patched.
+  const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
+  return bytes.buffer as ArrayBuffer;
+}
+
 /**
  * File-IO surface of the editor: save (to buffer), download, print, open
  * a DOCX from disk, insert an image from disk. The two file <input> refs
@@ -151,6 +172,7 @@ export function useFileIO({
         assertCurrent();
         const document = editor.getDocument();
         if (!document) return null;
+        const capture = session && document.originalBuffer ? captureSessionSave(session) : null;
 
         // Sync React comments state (including new replies) back to the document model
         document.package.document.comments = comments;
@@ -161,9 +183,7 @@ export function useFileIO({
         // Also inject range markers for comments that reply to tracked changes.
         injectTCReplyRangeMarkers(document.package.document.content, comments);
 
-        const buffer = document.originalBuffer
-          ? await repackDocx(document)
-          : await createDocx(document);
+        const buffer = await writeEditorDocument(document, session, capture);
         assertCurrent();
         document.originalBuffer = buffer;
 

@@ -127,8 +127,9 @@ reopened.resolveParagraphAnchor(anchor); // { status: 'found', anchor: { kind: '
 
 `saved.conflicts` lists saved paragraphs whose ID the live session reassigned while the
 save ran, such as by a duplicate repair after a remote update; their anchors find them in
-the saved bytes only. Source paragraphs without an ID save without one and have no
-persisted anchor.
+the saved bytes only. The React editor's Save writes the same IDs and records them as
+saved; only `saveYrsDocx` returns the anchors and keeps unchanged parts as source bytes.
+Source paragraphs without an ID save without one and have no persisted anchor.
 `session.persistParagraphIds()` assigns them IDs across every story part, comments,
 note separators and retained XML included, and repairs duplicates: source IDs and
 saved IDs keep theirs over copies. It refuses, changing nothing, rather than guess at
