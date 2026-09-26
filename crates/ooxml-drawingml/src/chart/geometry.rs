@@ -85,6 +85,8 @@ const LEGEND_EDGE: f64 = 13.0;
 /// ems of the legend text.
 const LEGEND_ROW_EM: f64 = 1.4;
 const LEGEND_ENTRY_GAP_EM: f64 = 0.65;
+/// The smallest plot an automatic layout leaves room for.
+const MIN_PLOT: f64 = 24.0;
 /// Room past a legend label's measured width, so a sink that clips to the box
 /// and can only estimate the width keeps glyphs wider than its estimate; a
 /// right legend's label box then ends at the chart's edge.
@@ -972,11 +974,15 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     }
 
     let title_h = if let Some(title) = chart.title.filter(|s| !s.is_empty()) {
-        let style = chart
+        let mut style = chart
             .text
             .title
             .over(chart_text)
             .resolve(CHART_TITLE_SIZE_PX, 600);
+        // A title never takes more than half the chart: past that its type
+        // shrinks to the band.
+        let fits = (height / 2.0 - CHART_PAD - BAND_GAP) / TITLE_LINE_EM;
+        style.font.size_px = style.font.size_px.min(fits.max(1.0));
         let size = style.font.size_px;
         push_text_aligned(
             ops,
@@ -987,7 +993,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             &style,
             PlotTextAlign::Center,
         );
-        (CHART_PAD + TITLE_LINE_EM * size + BAND_GAP).min(height / 2.0)
+        CHART_PAD + TITLE_LINE_EM * size + BAND_GAP
     } else {
         CHART_PAD
     };
@@ -1113,10 +1119,10 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             PlotArea {
                 x: plot_x,
                 y: plot_y,
-                w: (region_w - gutter - right_margin - secondary_w).max(24.0),
+                w: (region_w - gutter - right_margin - secondary_w).max(MIN_PLOT),
                 h: (y + height - bottom - bands.bottom - plot_y)
-                    .max(24.0)
-                    .min(y + height - plot_y),
+                    .max(MIN_PLOT)
+                    .min((y + height - bottom - plot_y).max(0.0)),
                 gutter,
             }
         }
@@ -1990,8 +1996,8 @@ fn legend_band<S: PlotSink + ?Sized>(
     }
     let w = (width - 2.0 * CHART_PAD).max(0.0);
     let mut rows = legend_rows(chart, w, style, ops);
-    // Rows that would run past the chart are left out, as a side legend's are.
-    let room = (height - title_h - CHART_PAD).max(0.0);
+    // Rows that would crowd out the plot are left out, as a side legend's are.
+    let room = (height - title_h - CHART_PAD - BAND_GAP - MIN_PLOT).max(0.0);
     let mut used = 0.0;
     rows.retain(|row| {
         used += row.height;
@@ -2159,11 +2165,39 @@ fn text_width<S: PlotSink + ?Sized>(
         .unwrap_or_else(|| fallback_label_width(label, &style.font))
 }
 
-/// A label's width when the sink cannot measure text: n - 1 tracked gaps, as a
-/// measured line has, and never below zero.
+/// A label's width when the sink cannot measure text: each character at the
+/// chart default's advance, plus n - 1 tracked gaps as a measured line has.
 pub fn fallback_label_width(label: &str, font: &PlotFont) -> f64 {
     let count = label.chars().count() as f64;
-    (count * font.size_px * 0.5 + (count - 1.0).max(0.0) * font.letter_spacing_px).max(0.0)
+    let ems: f64 = label.chars().map(fallback_advance).sum();
+    (ems * font.size_px + (count - 1.0).max(0.0) * font.letter_spacing_px).max(0.0)
+}
+
+/// Carlito's advances for `U+0020..=U+007E` in thousandths of an em: Calibri's
+/// widths, which the chart default font falls back on.
+const FALLBACK_ADVANCES: [u16; 95] = [
+    226, 326, 401, 498, 507, 715, 682, 220, 303, 303, 498, 498, 250, 306, 252, 386, 507, 507, 507,
+    507, 507, 507, 507, 507, 507, 507, 268, 268, 498, 498, 498, 464, 894, 578, 544, 533, 615, 488,
+    460, 631, 623, 252, 319, 520, 420, 855, 646, 662, 516, 673, 543, 460, 488, 642, 568, 890, 519,
+    488, 468, 306, 386, 306, 498, 498, 291, 479, 526, 423, 526, 498, 305, 470, 526, 230, 240, 454,
+    230, 799, 526, 528, 526, 526, 348, 391, 335, 526, 452, 715, 433, 452, 395, 314, 460, 314, 498,
+];
+
+/// One character's estimated advance in ems: a full em for East Asian wide
+/// characters, a little over half an em for any other character outside ASCII.
+fn fallback_advance(character: char) -> f64 {
+    match character as u32 {
+        code @ 0x20..=0x7E => f64::from(FALLBACK_ADVANCES[(code - 0x20) as usize]) / 1000.0,
+        0x1100..=0x115F
+        | 0x2E80..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD => 1.0,
+        _ => 0.55,
+    }
 }
 
 fn wrap_legend_label<S: PlotSink + ?Sized>(
@@ -6954,9 +6988,12 @@ mod tests {
                 if let PlotOp::Path { y, h, .. } = op {
                     assert!(*y >= frame.y && y + h <= frame.y + frame.h, "{position}");
                     if position == "bottom" {
+                        let band_top =
+                            key - (LEGEND_ROW_EM - LEGEND_KEY_EM) * CHART_LABEL_SIZE_PX / 2.0;
                         assert!(
-                            y + h <= key - BAND_GAP / 2.0,
-                            "the pie runs into its legend"
+                            y + h + BAND_GAP <= band_top + 1e-9,
+                            "the pie keeps a full gap from its legend: {} vs {band_top}",
+                            y + h
                         );
                     } else {
                         assert!(*y >= key + SWATCH, "the pie runs into its legend");
@@ -7361,7 +7398,7 @@ mod tests {
             let upper_tick = text_at(&ops, "8");
             let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
             assert!(upper_tick.2 - CHART_LABEL_SIZE_PX >= title_bottom);
-            assert_eq!(upper_tick.1 + upper_tick.3 / 2.0, 241.0);
+            assert_eq!(upper_tick.1 + upper_tick.3 / 2.0, 242.135);
             assert_eq!(text_at(&ops, "4").2, 188.0);
         }
     }
