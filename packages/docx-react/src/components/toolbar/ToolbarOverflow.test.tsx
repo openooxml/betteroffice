@@ -207,6 +207,9 @@ describe('toolbar overflow', () => {
     act(() => share.focus());
     expect(document.activeElement).toBe(share);
     expect(row.scrollLeft).toBe(30);
+    row.scrollLeft = 0;
+    resize(9);
+    expect(row.scrollLeft).toBe(30);
     expect(group('History').getAttribute('aria-hidden')).toBe('true');
     expect(menuItems(openWithKeyboard()).map((item) => item.dataset.label)).toEqual([
       'Undo',
