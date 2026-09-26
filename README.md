@@ -54,6 +54,10 @@
   to host actions, inside or outside the editor. Controls keep their state,
   shortcuts, disabled reasons, and read-only rules through one command store.
 
+- **Composable PPTX toolbars.** Arrange built-in slide controls in your own order
+  next to host actions, inside or outside the editor, through one command store
+  with disabled reasons, platform-aware shortcuts, and ordered execution.
+
 - **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
   paragraphs with a session version, then apply atomic text and paragraph
   batches that commit as one undo step or return a typed refusal with nothing
@@ -64,10 +68,6 @@
   panels, overlays, sidebar items, lifecycle events, and explicitly granted
   commands and edit batches. Plugins read and navigate by default; every write
   is checked against its grant, the editor mode and document policy when it runs.
-
-- **Composable PPTX toolbars.** Arrange built-in slide controls in your own order
-  next to host actions, inside or outside the editor, through one command store
-  with disabled reasons, platform-aware shortcuts, and ordered execution.
 
 - **Version-checked PPTX edit batches.** PPTX JavaScript, React, Rust and
   Python hosts read slides and story text with a session version, then apply
