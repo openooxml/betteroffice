@@ -174,6 +174,7 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
     for (const unit of hiddenRef.current) if (!units.includes(unit)) setHidden(unit, false);
     const active = document.activeElement;
     if (active && next.some((unit) => unit.contains(active))) onFocusHidden?.();
+    else if (overflows && active && row.contains(active)) reveal(row, active);
     if (!sameUnits(next, hiddenRef.current)) {
       hiddenRef.current = next;
       setHiddenUnits(next);
