@@ -4,7 +4,7 @@ import type {
   TextBoxPrimitive,
   TextStyleSnapshot,
 } from '@betteroffice/pptx';
-import type { SelectionFormatting } from './components/Toolbar';
+import type { SelectionFormatting } from './components/toolbarTypes';
 
 export interface EffectiveTextStyle {
   bold: boolean;

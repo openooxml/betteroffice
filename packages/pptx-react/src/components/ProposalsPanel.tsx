@@ -10,17 +10,59 @@ import type {
   ProposalPreview,
   SlideDisplayList,
 } from '@betteroffice/pptx';
+import { pptxCommandController } from '../commands/createPptxCommandStore';
+import { commandReason } from '../commands/evaluate';
+import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
 import { useTranslation } from '../i18n';
+import { useDisabledDescription } from './ui/ToolbarPrimitives';
 
 interface Props {
   handle: PresentationHandle;
   proposals: Proposal[];
   snapshot: DeckSnapshot;
   resolveImage: CanvasImageResolver;
-  onAccept: (id: string, force?: boolean) => void;
-  onReject: (id: string) => void;
   onNavigate: (slideId: string, shapeId: string | null, proposalId?: string) => void;
+  /** Called after the panel closed itself, to restore focus. */
   onClose: () => void;
+}
+
+function ProposalAction({
+  command,
+  proposalId,
+  label,
+  style,
+  testId,
+}: {
+  command: 'proposalAccept' | 'proposalReject';
+  proposalId: string;
+  label: string;
+  style: CSSProperties;
+  testId?: string;
+}) {
+  const store = usePptxCommands();
+  const args = { proposalId };
+  const state = usePptxCommandState(command, args);
+  const described = useDisabledDescription(
+    !state.enabled,
+    state.enabled ? undefined : state.disabledReason.message
+  );
+  return (
+    <>
+      <button
+        type="button"
+        data-testid={testId}
+        {...described.props}
+        title={described.reason}
+        style={{ ...style, opacity: state.enabled ? 1 : 0.45 }}
+        onClick={() => {
+          if (state.enabled) void store.execute(command, args);
+        }}
+      >
+        {label}
+      </button>
+      {described.node}
+    </>
+  );
 }
 
 export function ProposalsPanel({
@@ -28,17 +70,18 @@ export function ProposalsPanel({
   proposals,
   snapshot,
   resolveImage,
-  onAccept,
-  onReject,
   onNavigate,
   onClose,
 }: Props) {
   const { t } = useTranslation();
+  const store = usePptxCommands();
   const titleId = useId();
   const [selected, setSelected] = useState<{
     id: string;
     index: number;
   } | null>(null);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [preview, setPreview] = useState<{
     data: ProposalPreview;
     before: SlideDisplayList;
@@ -100,31 +143,58 @@ export function ProposalsPanel({
     setSelected({ id: proposal.id, index });
   };
 
-  const acceptPreview = (force: boolean) => {
-    if (!selected || !preview) return;
+  /**
+   * Whether `reviewed` still shows the proposal of `target`. Otherwise the dialog shows the latest
+   * preview of `target`, unless the reviewer has selected something else since.
+   */
+  const stillReviewed = (
+    target: { id: string; index: number },
+    reviewed: ProposalPreview
+  ) => {
+    const shown = () =>
+      selectedRef.current?.id === target.id &&
+      selectedRef.current.index === target.index;
     try {
-      const latest = handle.previewProposal(selected.id);
+      const latest = handle.previewProposal(target.id);
       if (
-        JSON.stringify(latest.proposal.changes) !==
-        JSON.stringify(preview.data.proposal.changes)
+        JSON.stringify(latest.proposal.changes) ===
+        JSON.stringify(reviewed.proposal.changes)
       ) {
-        const change = latest.proposal.changes[selected.index];
-        const index = latest.snapshot.slides.findIndex(
-          (slide) => slide.id === change.slideId
-        );
-        setPreview({
-          data: latest,
-          before: handle.layoutSlide(index),
-          after: handle.layoutProposalSlide(selected.id, index),
-        });
-        setError(t('proposals.changedAgain'));
-        return;
+        return true;
       }
-      onAccept(selected.id, force);
+      if (!shown()) return false;
+      const change = latest.proposal.changes[target.index];
+      const index = latest.snapshot.slides.findIndex(
+        (slide) => slide.id === change.slideId
+      );
+      setPreview({
+        data: latest,
+        before: handle.layoutSlide(index),
+        after: handle.layoutProposalSlide(target.id, index),
+      });
+      setError(t('proposals.changedAgain'));
     } catch (value) {
+      if (!shown()) return false;
       setPreview(null);
       setError(value instanceof Error ? value.message : String(value));
     }
+    return false;
+  };
+
+  const acceptPreview = (force: boolean) => {
+    if (!selected || !preview) return;
+    const target = selected;
+    const reviewed = preview.data;
+    if (!stillReviewed(target, reviewed)) return;
+    const accept = pptxCommandController(store)?.defer('proposalAccept', {
+      proposalId: target.id,
+      force,
+    });
+    void accept?.complete((perform) =>
+      stillReviewed(target, reviewed)
+        ? perform()
+        : { ok: false, failure: commandReason('target-changed', { translate: t }) }
+    );
   };
 
   return (
@@ -140,7 +210,9 @@ export function ProposalsPanel({
         </strong>
         <button
           type="button"
-          onClick={onClose}
+          onClick={() =>
+            void store.execute('proposalsPanel', { open: false }).then(() => onClose())
+          }
           aria-label={t('proposals.close')}
           style={styles.button}
         >
@@ -204,22 +276,20 @@ export function ProposalsPanel({
             </p>
           )}
           <div style={styles.actions}>
-            <button
-              type="button"
-              data-testid="pptx-proposal-accept"
+            <ProposalAction
+              command="proposalAccept"
+              proposalId={proposal.id}
+              label={t('proposals.accept')}
               style={styles.primary}
-              onClick={() => onAccept(proposal.id)}
-            >
-              {t('proposals.accept')}
-            </button>
-            <button
-              type="button"
-              data-testid="pptx-proposal-reject"
+              testId="pptx-proposal-accept"
+            />
+            <ProposalAction
+              command="proposalReject"
+              proposalId={proposal.id}
+              label={t('proposals.reject')}
               style={styles.button}
-              onClick={() => onReject(proposal.id)}
-            >
-              {t('proposals.reject')}
-            </button>
+              testId="pptx-proposal-reject"
+            />
           </div>
         </section>
       ))}
@@ -325,13 +395,12 @@ export function ProposalsPanel({
                   {t('proposals.accept')}
                 </button>
               )}
-              <button
-                type="button"
+              <ProposalAction
+                command="proposalReject"
+                proposalId={selected.id}
+                label={t('proposals.reject')}
                 style={styles.button}
-                onClick={() => onReject(selected.id)}
-              >
-                {t('proposals.reject')}
-              </button>
+              />
             </div>
           </>
         )}
