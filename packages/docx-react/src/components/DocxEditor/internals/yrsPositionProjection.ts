@@ -83,12 +83,6 @@ export class YrsPositionProjection {
     return this.nodes.get(position) ?? null;
   }
 
-  /** The first projected node `match` accepts. */
-  findNode(match: (node: YrsProjectedNode) => boolean): YrsProjectedNode | null {
-    for (const node of this.nodes.values()) if (match(node)) return node;
-    return null;
-  }
-
   tableAtPosition(position: number): YrsProjectedTable | null {
     let result: YrsProjectedTable | null = null;
     for (const table of this.tables) {

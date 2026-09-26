@@ -9,6 +9,7 @@ import {
   MIN_SHAPE_SIZE_EMU,
   canResizeShape,
   canMoveShape,
+  effectiveShapeRect,
   findShape,
   findTopLevelShape,
   frameBoundsForShape,
@@ -17,7 +18,7 @@ import {
   hoverTargetAtPoint,
   indexShapes,
   pointerTargetAtPoint,
-  movedShapePosition,
+  movedShapeRect,
   passedDragThreshold,
   resizeCommitDelta,
   resizeCursor,
@@ -33,6 +34,19 @@ import {
 const child = shape('child', 20, 30, 40, 50);
 const group = { ...shape('group', 10, 20, 100, 100), kind: 'group' as const, children: [child] };
 const picture = { ...shape('picture', 100, 200, 300, 400), kind: 'picture' as const };
+const inherited: ShapeSnapshot = {
+  ...shape('inherited', 0, 0, 0, 0),
+  placeholder: { type: 'ctrTitle' },
+  inherited: {
+    x: 838_200,
+    y: 365_125,
+    width: 10_515_600,
+    height: 1_325_563,
+    rotationDeg: 0,
+    flipH: false,
+    flipV: false,
+  },
+};
 const deck: DeckSnapshot = {
   widthEmu: 12_192_000,
   heightEmu: 6_858_000,
@@ -133,9 +147,30 @@ describe('pptx interactions', () => {
     expect(gestureOwnsPointer(null, 7)).toBe(false);
   });
 
-  it('only moves shapes with a local transform', () => {
+  it('moves a shape from the rectangle it draws at, local or inherited', () => {
     expect(canMoveShape(picture)).toBe(true);
     expect(canMoveShape({ ...picture, width: 0, height: 0 })).toBe(false);
+    expect(canMoveShape(inherited)).toBe(true);
+    expect(canResizeShape(inherited)).toBe(true);
+    expect(effectiveShapeRect(inherited)).toEqual({
+      x: 838_200,
+      y: 365_125,
+      width: 10_515_600,
+      height: 1_325_563,
+    });
+  });
+
+  it('refuses a rotated inherited frame the same way it refuses a rotated local one', () => {
+    const rotated = { ...inherited, inherited: { ...inherited.inherited!, rotationDeg: 90 } };
+    expect(canResizeShape(rotated)).toBe(false);
+    expect(canMoveShape(rotated)).toBe(true);
+    expect(resizedShapeBox(deck, frame, rotated, 'se', { x: 10, y: 10 })).toBeNull();
+    expect(movedShapeRect(deck, frame, rotated, { x: 0, y: 200 })).toEqual({
+      x: 838_200,
+      y: 365_125 + 1_905_000,
+      width: 10_515_600,
+      height: 1_325_563,
+    });
   });
 
   it('uses descendant primitive bounds for a group', () => {
@@ -151,9 +186,30 @@ describe('pptx interactions', () => {
   });
 
   it('converts one final frame delta to absolute EMU coordinates', () => {
-    expect(movedShapePosition(deck, frame, picture, { x: 0, y: 200 })).toEqual({
+    expect(movedShapeRect(deck, frame, picture, { x: 0, y: 200 })).toEqual({
       x: 100,
       y: 1_905_200,
+      width: picture.width,
+      height: picture.height,
+    });
+  });
+
+  it('carries the inherited extent into the rectangle a drag commits', () => {
+    expect(movedShapeRect(deck, frame, inherited, { x: 0, y: 200 })).toEqual({
+      x: 838_200,
+      y: 365_125 + 1_905_000,
+      width: 10_515_600,
+      height: 1_325_563,
+    });
+  });
+
+  it('resizes an inherited frame from the rectangle it draws at', () => {
+    const box = resizedShapeBox(deck, frame, inherited, 'se', { x: 128, y: 72 });
+    expect(box).toEqual({
+      x: 838_200,
+      y: 365_125,
+      width: 10_515_600 + 1_219_200,
+      height: 1_325_563 + 685_800,
     });
   });
 

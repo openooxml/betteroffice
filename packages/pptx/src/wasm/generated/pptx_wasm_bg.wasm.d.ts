@@ -11,6 +11,7 @@ export const pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: num
 export const pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_layoutSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_new: () => number;
+export const pptxrenderer_registerFallbackFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
 export const pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
 export const rendererVersion: () => [number, number];
 export const __wbg_pptxdocument_free: (a: number, b: number) => void;

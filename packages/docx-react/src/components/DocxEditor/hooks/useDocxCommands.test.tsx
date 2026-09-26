@@ -7,11 +7,13 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsInputPositionMap,
   createYrsSession,
+  displayPositionToYrsLoc,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
 import type { DocxCommandResult } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
+import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
 import { currentYrsToolbarSelection } from '../yrsToolbar';
 import {
   useDocxCommandBinding,
@@ -20,7 +22,7 @@ import {
 } from './useDocxCommands';
 import { useFindReplaceBridge } from './useFindReplaceBridge';
 import type { DocxPrintJob } from './useFileIO';
-import type { PagedEditorCommandBridge } from './usePagedEditorRefApi';
+import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -144,7 +146,7 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
       goToMatch: noop,
     } as never,
     save: async () => 'saved',
-    reservePrint: () => ({ finish: async () => true, cancel: noop }),
+    reservePrint: () => ({ prepare: async () => {}, print: () => true, cancel: noop }),
     renderedDisplayList: () => Promise.reject(new Error('Not rendered')),
     openDocument: noop,
     pickImage: noop,
@@ -294,8 +296,11 @@ describe('editor command binding', () => {
     let rendered!: (displayList: DisplayList) => void;
     const displayList = { pages: [] } as unknown as DisplayList;
     const job: DocxPrintJob = {
-      finish: async (list) => {
-        events.push(list === displayList ? 'printed' : 'wrong list');
+      prepare: async (list) => {
+        events.push(list === displayList ? 'prepared' : 'wrong list');
+      },
+      print: () => {
+        events.push('printed');
         return true;
       },
       cancel: () => events.push('cancelled'),
@@ -320,7 +325,37 @@ describe('editor command binding', () => {
     expect(events).toEqual(['reserved', 'rendering']);
     rendered(displayList);
     expect(code(await printing)).toBe('executed');
-    expect(events).toEqual(['reserved', 'rendering', 'printed']);
+    expect(events).toEqual(['reserved', 'rendering', 'prepared', 'printed']);
+  });
+
+  test('print closes its window instead of printing a document replaced while its pages render', async () => {
+    const { session } = await newSession();
+    const { session: replacement } = await newSession('Another document');
+    const events: string[] = [];
+    let prepared!: () => void;
+    const editor = mount(session, {
+      reservePrint: () => ({
+        prepare: () => {
+          events.push('preparing');
+          return new Promise<void>((resolve) => {
+            prepared = resolve;
+          });
+        },
+        print: () => {
+          events.push('printed');
+          return true;
+        },
+        cancel: () => events.push('cancelled'),
+      }),
+      renderedDisplayList: async () => ({ pages: [] }) as unknown as DisplayList,
+    });
+    const printing = editor.store.execute('print', null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual(['preparing']);
+    editor.replaceDocument(replacement);
+    prepared();
+    expect(code(await printing)).toBe('document-replaced');
+    expect(events).toEqual(['preparing', 'cancelled']);
   });
 
   test('print reports rendering and input failures and closes its window', async () => {
@@ -328,7 +363,11 @@ describe('editor command binding', () => {
     console.error = () => {};
     const events: string[] = [];
     const editor = mount(session, {
-      reservePrint: () => ({ finish: async () => true, cancel: () => events.push('cancelled') }),
+      reservePrint: () => ({
+        prepare: async () => {},
+        print: () => true,
+        cancel: () => events.push('cancelled'),
+      }),
       renderedDisplayList: () => Promise.reject(new Error('The document did not finish rendering')),
     });
     expect(code(await editor.store.execute('print', null))).toBe('command-failed');
@@ -365,5 +404,58 @@ describe('editor command binding', () => {
     expect(session.paragraphs('hf:rId8')[0].text).toBe('Footer');
     const gone = await editor.store.execute('reviewAccept', { revisionId: inHeader.revisionId });
     expect(code(gone)).toBe('revision-not-found');
+  });
+});
+
+describe('editor command bridge', () => {
+  test('an image handle follows its own image among images sharing a relationship id', async () => {
+    const { session, paraId } = await newSession('ABCDE');
+    const image = { src: 'data:image/png;base64,', rId: 'rIdShared' };
+    session.insertImage({ story: 'body', paraId, offset: 2 }, image);
+    session.insertImage({ story: 'body', paraId, offset: 1 }, image);
+    const projection = () => createYrsPositionProjection(session, 'body');
+    const toLoc = (position: number) => {
+      const target = projection()!.targetAt(position);
+      const map = createYrsInputPositionMap(target.story, session.paragraphSpans(target.story));
+      return displayPositionToYrsLoc(map, target.displayPosition);
+    };
+    const bridgeRef: { current: PagedEditorCommandBridge | null } = { current: null };
+    renderHook(() =>
+      usePagedEditorCommandBridge({
+        bridgeRef,
+        yrsInputRef: { current: null },
+        session,
+        rootStory: 'body',
+        inputPositionMap: () => null,
+        latestSelectionRef: { current: null },
+        listenersRef: { current: new Set() },
+        getPositionProjection: projection,
+        displayPositionToLoc: toLoc,
+        format: () => false,
+        command: () => false,
+        syncYrsInputState: () => true,
+        yrsLocToDisplayPosition: (loc) => projection()?.positionForLoc(loc) ?? null,
+        scrollToPositionImpl: () => {},
+      })
+    );
+    const bridge = bridgeRef.current!;
+    const second = bridge.imageHandle(4)!;
+    session.insertText({ story: 'body', paraId, offset: 0 }, '>> ');
+    const pos = bridge.imagePosition(second)!;
+    expect(pos).toBe(7);
+
+    session.setImageGeometryAt(toLoc(pos)!, {
+      widthEmu: 1,
+      heightEmu: 1,
+      other: { alt: 'second' },
+    });
+    const alts = session
+      .storySegments('body')
+      .flatMap((segment) => (segment.kind === 'embed' ? [segment.payload.alt ?? null] : []));
+    expect(alts).toEqual([null, 'second']);
+
+    const removed = { story: 'body', start: { paraId, offset: 6 }, end: { paraId, offset: 7 } };
+    session.deleteRange(removed);
+    expect(bridge.imagePosition(second)).toBeNull();
   });
 });

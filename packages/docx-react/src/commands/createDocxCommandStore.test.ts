@@ -254,6 +254,8 @@ describe('command descriptors', () => {
       matchesChord('Mod+Shift+=', event({ key: '+', code: 'Equal', ctrlKey: true, shiftKey: true }), false)
     ).toBe(true);
     expect(matchesChord('Mod+E', event({ key: 'e', ctrlKey: true, altKey: true }), false)).toBe(false);
+    expect(matchesChord('Mod+B', event({ key: 'b', metaKey: true, ctrlKey: true }), true)).toBe(false);
+    expect(matchesChord('Mod+B', event({ key: 'b', ctrlKey: true, metaKey: true }), false)).toBe(false);
     expect(formatChord('Mod+Shift+Z', false)).toBe('Ctrl+Shift+Z');
     expect(formatChord('Mod+B', true)).toBe('⌘B');
   });

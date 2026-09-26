@@ -994,29 +994,33 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             ? { name: author, date: new Date().toISOString() }
             : undefined;
           let docChanged = true;
+          const imageAt = (start: number) => {
+            const target = positionProjection.targetAt(start);
+            return yrsCore.displayPositionToLoc(target.displayPosition, target.story);
+          };
           if (command.type === 'imageGeometry') {
             const node = positionProjection.nodeAt(command.pmPos);
             if (!node || node.kind !== 'image') return false;
-            const embedId = yrsEmbedIdForProjectedNode(node);
+            const at = imageAt(node.start);
             const geometry = yrsImageGeometryForProjectedNode(node, command.patch);
-            if (!embedId || !geometry) return false;
-            session.setImageGeometry(embedId, geometry);
+            if (!at || !geometry) return false;
+            session.setImageGeometryAt(at, geometry);
           } else if (command.type === 'imageWrap') {
             const node = positionProjection.nodeAt(command.pmPos);
             if (!node || node.kind !== 'image') return false;
-            const embedId = yrsEmbedIdForProjectedNode(node);
+            const at = imageAt(node.start);
             const patch = resolveImageLayoutAttrs(command.target, node.attrs, command.options);
             const geometry = yrsImageGeometryForProjectedNode(node, patch);
-            if (!embedId || !geometry) return false;
-            session.setImageGeometry(embedId, geometry);
+            if (!at || !geometry) return false;
+            session.setImageGeometryAt(at, geometry);
           } else if (command.type === 'imageTransform') {
             const node = positionProjection.nodeAt(command.pmPos);
             if (!node || node.kind !== 'image') return false;
-            const embedId = yrsEmbedIdForProjectedNode(node);
+            const at = imageAt(node.start);
             const transform = yrsImageTransformForProjectedNode(node, command.action);
             const geometry = yrsImageGeometryForProjectedNode(node, { transform });
-            if (!embedId || !geometry) return false;
-            session.setImageGeometry(embedId, geometry);
+            if (!at || !geometry) return false;
+            session.setImageGeometryAt(at, geometry);
           } else if (command.type === 'insertImage') {
             const at = session.selection()?.head;
             if (!at) return false;
@@ -1725,6 +1729,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       latestSelectionRef: latestYrsToolbarSelectionRef,
       listenersRef: stateListenersRef,
       getPositionProjection: () => getYrsPositionProjection('body'),
+      displayPositionToLoc: displayPositionToViewportLoc,
       format: executeYrsFormatting,
       command: executeYrsCommand,
       syncYrsInputState: (docChanged, dirtyStory) =>

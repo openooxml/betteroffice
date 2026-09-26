@@ -83,6 +83,15 @@ impl EditingDoc {
         embed_by_id(&self.yrs_doc().transact(), embed_id).map(|(story, _)| story)
     }
 
+    /// The `_kind` of the map-backed embed at `at`. Errors when `at` does not
+    /// hold a map-backed embed.
+    pub fn embed_kind(&self, at: &Position) -> OpResult<Option<String>> {
+        let txn = self.yrs_doc().transact();
+        let story = story_ref(&txn, &at.story)?;
+        let map = embed_map_at(&story, &txn, at.index)?;
+        Ok(crate::map_string(&map, &txn, KIND_KEY))
+    }
+
     /// Sets (or, with [`Any::Null`], removes) payload entries on the map-backed
     /// embed at `at` in ONE transaction — the mutation behind image geometry
     /// commits and content-control state changes. The `_kind` discriminator is
@@ -291,6 +300,16 @@ mod tests {
         // Index 0 holds text, not an embed.
         let text = doc.set_embed_attrs(&ctx(), Position::new("body", 0), vec![]);
         assert!(matches!(text, Err(OpError::OutOfBounds { .. })));
+    }
+
+    #[test]
+    fn embed_kind_reads_the_embed_at_a_position() {
+        let doc = EditingDoc::new(7);
+        let index = seed_sdt(&doc);
+        let kind = |index| doc.embed_kind(&Position::new("body", index));
+        assert_eq!(kind(index).unwrap().as_deref(), Some("sdt"));
+        assert_eq!(kind(3).unwrap().as_deref(), Some(PILCROW_KIND));
+        assert!(matches!(kind(0), Err(OpError::OutOfBounds { .. })));
     }
 
     #[test]

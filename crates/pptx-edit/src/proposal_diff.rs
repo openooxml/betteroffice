@@ -10,6 +10,7 @@ use crate::deck::{
     live_shape_order, map_string, map_string_array, required_map, required_order, slide_notes,
     slide_ref, slide_shape_order, snapshot_shape, string_array_ref,
 };
+use crate::inherit::{SlideContext, record_inherited};
 use crate::proposals::{apply_edit, shape_text};
 use crate::{
     DeckSession, DeckSnapshot, DeckUndoManager, EditError, EditResult, Proposal, ProposalChange,
@@ -251,12 +252,14 @@ fn scoped_capture<T: ReadTxn>(
             if !shape_in_tree(txn, &slide_shape_order(&slide, txn)?, shape_id)? {
                 return Err(EditError::ShapeNotFound(shape_id.to_owned()));
             }
+            let source_part_path = map_string(&slide, txn, "sourcePartPath");
+            let layout_part_path = map_string(&slide, txn, "layoutPartPath");
             let theme = pptx_parse::slide_theme(
                 package,
-                map_string(&slide, txn, "sourcePartPath").as_deref(),
-                map_string(&slide, txn, "layoutPartPath").as_deref(),
+                source_part_path.as_deref(),
+                layout_part_path.as_deref(),
             );
-            let shape = snapshot_shape(
+            let mut shape = snapshot_shape(
                 &required_map(txn, SHAPES)?,
                 &required_map(txn, crate::STORIES)?,
                 txn,
@@ -264,6 +267,14 @@ fn scoped_capture<T: ReadTxn>(
                 &mut HashSet::new(),
                 Some(&theme),
             )?;
+            record_inherited(
+                std::slice::from_mut(&mut shape),
+                &SlideContext::new(
+                    package,
+                    source_part_path.as_deref(),
+                    layout_part_path.as_deref(),
+                ),
+            );
             let text = shape_text(&shape);
             Ok((Some(shape), text))
         }

@@ -73,13 +73,14 @@ import {
   RESIZE_HANDLES,
   canResizeShape,
   canMoveShape,
+  effectiveShapeRect,
   findShape,
   findTopLevelShape,
   frameBoundsForShape,
   gestureOwnsPointer,
   pointerTargetAtPoint,
   indexShapes,
-  movedShapePosition,
+  movedShapeRect,
   passedDragThreshold,
   handleAnchor,
   resizeCommitDelta,
@@ -1531,12 +1532,13 @@ function PptxEditorContent({
     const shape = findShape(slide.shapes, gesture.shapeId);
     if (!shape) return;
     try {
-      const position = movedShapePosition(current.snapshot, current.frame, shape, {
+      const before = effectiveShapeRect(shape);
+      const rect = movedShapeRect(current.snapshot, current.frame, shape, {
         x: gesture.last.x - gesture.start.x,
         y: gesture.last.y - gesture.start.y,
       });
-      if (position.x !== shape.x || position.y !== shape.y) {
-        handle.moveShape(slide.id, shape.id, position.x, position.y);
+      if (before && rect && (rect.x !== before.x || rect.y !== before.y)) {
+        handle.moveShape(slide.id, shape.id, rect.x, rect.y);
         refreshAt(undefined, true);
       }
       setShapeSelection({ slideId: slide.id, shapeId: shape.id });
@@ -2055,12 +2057,14 @@ function PptxEditorContent({
         gesture.handle,
         delta
       );
+      const before = effectiveShapeRect(shape);
       if (
         box &&
-        (box.x !== shape.x ||
-          box.y !== shape.y ||
-          box.width !== shape.width ||
-          box.height !== shape.height)
+        before &&
+        (box.x !== before.x ||
+          box.y !== before.y ||
+          box.width !== before.width ||
+          box.height !== before.height)
       ) {
         api.setShapeRect(gesture.slideId, gesture.shapeId, box);
         refreshAt(undefined, true);

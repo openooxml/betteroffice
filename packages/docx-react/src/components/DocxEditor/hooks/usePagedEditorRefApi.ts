@@ -3,16 +3,17 @@ import { useEffect, useImperativeHandle, useRef } from 'react';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ScrollToParaIdOptions } from '@betteroffice/docx/utils';
-import type { YrsInputPositionMap, YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
+import type {
+  YrsInputPositionMap,
+  YrsLoc,
+  YrsSession,
+  YrsStickyPosition,
+} from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
-import {
-  performYrsHistoryAction,
-  yrsEmbedIdForProjectedNode,
-  type YrsEditorCommand,
-} from '../yrsCommands';
+import { performYrsHistoryAction, type YrsEditorCommand } from '../yrsCommands';
 import {
   currentYrsToolbarSelection,
   withStoredYrsFormatting,
@@ -25,9 +26,10 @@ import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandSt
 export interface PagedEditorSelectedImage {
   pos: number;
   attrs: Readonly<Record<string, unknown>>;
-  /** Stable identity of the image embed, when it has one. */
-  embedId: string | null;
 }
+
+/** Sticky positions before and after one image, which follow it through later edits. */
+export type PagedEditorImageHandle = readonly [YrsStickyPosition, YrsStickyPosition];
 
 /**
  * Ordered command entry points for editor chrome. Immediate methods act on
@@ -45,8 +47,10 @@ export interface PagedEditorCommandBridge {
   /** Selection read model with stored caret formatting; `live` recomputes it. */
   toolbarSelection(live: boolean): YrsToolbarSelection | null;
   selectedImage(): PagedEditorSelectedImage | null;
-  /** Current display position of the image embed `embedId`. */
-  imagePosition(embedId: string): number | null;
+  /** A handle on the image at display position `pos`. */
+  imageHandle(pos: number): PagedEditorImageHandle | null;
+  /** Current display position of the image `handle` holds, or null once it is gone. */
+  imagePosition(handle: PagedEditorImageHandle): number | null;
   /** Applies formatting; throws when the engine refuses it. */
   format(action: FormattingAction): boolean;
   /** Applies a structural command; throws when the engine refuses it. */
@@ -333,6 +337,7 @@ export interface UsePagedEditorCommandBridgeOptions {
   latestSelectionRef: React.RefObject<YrsToolbarSelection | null>;
   listenersRef: React.RefObject<Set<() => void>>;
   getPositionProjection: () => YrsPositionProjection | null;
+  displayPositionToLoc: (position: number) => YrsLoc | null;
   format: (action: FormattingAction) => boolean;
   command: (command: YrsEditorCommand) => boolean;
   syncYrsInputState: (docChanged: boolean, dirtyStory?: string) => boolean;
@@ -384,18 +389,30 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
         if (!selection || Math.abs(selection.anchor - selection.head) !== 1) return null;
         const pos = Math.min(selection.anchor, selection.head);
         const node = current.getPositionProjection()?.nodeAt(pos);
-        return node?.kind === 'image'
-          ? { pos, attrs: node.attrs, embedId: yrsEmbedIdForProjectedNode(node) }
+        return node?.kind === 'image' ? { pos, attrs: node.attrs } : null;
+      },
+      imageHandle(pos) {
+        const current = latest.current;
+        const session = current.session;
+        if (!session || current.getPositionProjection()?.nodeAt(pos)?.kind !== 'image') return null;
+        const at = current.displayPositionToLoc(pos);
+        return at
+          ? [
+              session.encodeStickyPosition(at),
+              session.encodeStickyPosition({ ...at, offset: at.offset + 1 }),
+            ]
           : null;
       },
-      imagePosition(embedId) {
-        const node = latest.current
-          .getPositionProjection()
-          ?.findNode(
-            (candidate) =>
-              candidate.kind === 'image' && yrsEmbedIdForProjectedNode(candidate) === embedId
-          );
-        return node?.start ?? null;
+      imagePosition([before, after]) {
+        const current = latest.current;
+        const start = current.session?.resolveStickyPosition(before);
+        const end = current.session?.resolveStickyPosition(after);
+        if (!start || !end || start.paraId !== end.paraId || end.offset !== start.offset + 1) {
+          return null;
+        }
+        const pos = current.yrsLocToDisplayPosition(start);
+        const node = pos == null ? null : current.getPositionProjection()?.nodeAt(pos);
+        return node?.kind === 'image' ? node.start : null;
       },
       format: (action) => latest.current.format(action),
       command: (command) => latest.current.command(command),
