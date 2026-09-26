@@ -1,10 +1,12 @@
 //! Edit policy read from actual owner references: which block control or table cell owns a
 //! story, whether a control locks its content, and whether tracked structure owns it.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 use yrs::{Any, Map, Out, ReadTxn};
 
+use crate::batch::EditFailureCode;
 use crate::ops::ChunkKind;
 use crate::{DEL, EditingDoc, INS, KIND_KEY, map_string};
 
@@ -31,6 +33,8 @@ impl Owner {
 
 pub(crate) struct Ownership {
     owners: HashMap<String, Owner>,
+    /// Child stories that more than one container references.
+    shared: HashSet<String>,
 }
 
 fn active(value: Option<&Any>) -> bool {
@@ -39,9 +43,12 @@ fn active(value: Option<&Any>) -> bool {
 
 impl Ownership {
     pub fn build<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> Self {
-        let mut owners = HashMap::new();
+        let mut ownership = Self {
+            owners: HashMap::new(),
+            shared: HashSet::new(),
+        };
         let Some(stories) = txn.get_map(crate::STORIES) else {
-            return Self { owners };
+            return ownership;
         };
         for (story_id, value) in stories.iter(txn) {
             let Out::YText(story) = value else {
@@ -72,7 +79,7 @@ impl Ownership {
                             for cell in cells.iter() {
                                 let Any::Map(cell) = cell else { continue };
                                 if let Some(Any::String(child)) = cell.get("story") {
-                                    owners.insert(
+                                    ownership.record(
                                         child.to_string(),
                                         Owner {
                                             parent: story_id.to_owned(),
@@ -86,7 +93,7 @@ impl Ownership {
                     }
                     Some("blockSdt") => {
                         if let Some(child) = map_string(map, txn, "story") {
-                            owners.insert(
+                            ownership.record(
                                 child,
                                 Owner {
                                     parent: story_id.to_owned(),
@@ -100,7 +107,18 @@ impl Ownership {
                 }
             }
         }
-        Self { owners }
+        ownership
+    }
+
+    fn record(&mut self, child: String, owner: Owner) {
+        match self.owners.entry(child) {
+            Entry::Occupied(entry) => {
+                self.shared.insert(entry.key().clone());
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(owner);
+            }
+        }
     }
 
     /// Whether an embed of another story owns `story`.
@@ -108,15 +126,27 @@ impl Ownership {
         self.owners.contains_key(story)
     }
 
-    /// The owners of `story`, nearest first; errors on a cycle or excessive nesting.
-    pub fn chain(&self, story: &str) -> Result<Vec<&Owner>, String> {
+    /// The owners of `story`, nearest first; errors on a cycle, excessive nesting, or when
+    /// more than one container references `story` or a story owning it.
+    pub fn chain(&self, story: &str) -> Result<Vec<&Owner>, (EditFailureCode, String)> {
         let mut chain = Vec::new();
         let mut seen = HashSet::new();
         let mut current = story;
         while let Some(owner) = self.owners.get(current) {
+            if self.shared.contains(current) {
+                return Err((
+                    EditFailureCode::Unsupported,
+                    format!(
+                        "story {current:?} is referenced by more than one table cell or content control"
+                    ),
+                ));
+            }
             if chain.len() == MAX_OWNERSHIP_DEPTH || !seen.insert(current) {
-                return Err(format!(
-                    "story {story:?} is nested more than {MAX_OWNERSHIP_DEPTH} levels deep"
+                return Err((
+                    EditFailureCode::LimitExceeded,
+                    format!(
+                        "story {story:?} is nested more than {MAX_OWNERSHIP_DEPTH} levels deep"
+                    ),
                 ));
             }
             chain.push(owner);
