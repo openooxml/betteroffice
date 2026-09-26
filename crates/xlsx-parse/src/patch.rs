@@ -87,7 +87,7 @@ struct DirtyFormulas {
 
 struct WidthPiece {
     range: Range<u32>,
-    changed: Option<Option<f64>>,
+    changed: Option<(Option<f64>, Option<f64>)>,
 }
 
 impl SheetPatch<'_> {
@@ -176,8 +176,8 @@ impl SheetPatch<'_> {
                         (piece.range.start + 1).to_string(),
                     );
                     set_attribute(&mut attributes, "max", "max", piece.range.end.to_string());
-                    if let Some(width) = piece.changed {
-                        set_col_width(&mut attributes, width);
+                    if let Some((width, hidden_width)) = piece.changed {
+                        set_col_width(&mut attributes, width, hidden_width);
                     }
                     write_start_tag(&mut bytes, &name, &attributes, col.empty)?;
                     if !col.empty {
@@ -193,7 +193,13 @@ impl SheetPatch<'_> {
                 continue;
             }
             let mut writer = Writer::new(Vec::new());
-            write_col(&mut writer, col, width).map_err(xml_err)?;
+            write_col(
+                &mut writer,
+                col,
+                width,
+                self.sheet.hidden_col_widths.get(&col).copied(),
+            )
+            .map_err(xml_err)?;
             let at = entries
                 .iter()
                 .position(|(min, _, generated)| !generated && *min > col)
@@ -226,12 +232,19 @@ impl SheetPatch<'_> {
         let mut pieces: Vec<WidthPiece> = Vec::new();
         for col in range {
             let model = self.sheet.col_widths.get(&col).copied();
+            let model_hidden = self.sheet.hidden_col_widths.get(&col).copied();
             let original = self
                 .axes
                 .cols
                 .source(col)
                 .and_then(|source| self.original.col_widths.get(&source).copied());
-            let changed = (model != original).then_some(model);
+            let original_hidden = self
+                .axes
+                .cols
+                .source(col)
+                .and_then(|source| self.original.hidden_col_widths.get(&source).copied());
+            let changed = ((model, model_hidden) != (original, original_hidden))
+                .then_some((model, model_hidden));
             match pieces.last_mut() {
                 Some(piece) if piece.changed == changed => piece.range.end = col + 1,
                 _ => pieces.push(WidthPiece {
@@ -327,14 +340,19 @@ impl SheetPatch<'_> {
 
         let moved = source.index != row;
         let height = self.sheet.row_heights.get(&row).copied();
-        let height_changed = height != self.original.row_heights.get(&source.index).copied();
+        let hidden_height = self.sheet.hidden_row_heights.get(&row).copied();
+        let height_changed = (height, hidden_height)
+            != (
+                self.original.row_heights.get(&source.index).copied(),
+                self.original.hidden_row_heights.get(&source.index).copied(),
+            );
         let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
         let mut rewrite = moved || height_changed;
         if moved {
             set_attribute(&mut attributes, "r", "r", (u64::from(row) + 1).to_string());
         }
         if height_changed {
-            set_row_height(&mut attributes, height);
+            set_row_height(&mut attributes, height, hidden_height);
         }
         if let Some((min, max)) = columns
             && spans_exclude(&attributes, min, max)
@@ -552,13 +570,21 @@ fn range_changed(reference: CellRange, changed: &BTreeSet<(u32, u32)>) -> bool {
         .any(|&(_, col)| col >= reference.start.col && col <= reference.end.col)
 }
 
-fn set_row_height(attributes: &mut Vec<XmlAttribute>, height: Option<f64>) {
+fn set_row_height(
+    attributes: &mut Vec<XmlAttribute>,
+    height: Option<f64>,
+    hidden_height: Option<f64>,
+) {
     remove_attribute(attributes, "ht");
     remove_attribute(attributes, "customHeight");
     remove_attribute(attributes, "hidden");
     if let Some(height) = height {
-        let value = fmt_num(height);
-        let hidden = value == "0";
+        let hidden = height == 0.0;
+        let value = fmt_num(if hidden {
+            hidden_height.unwrap_or(height)
+        } else {
+            height
+        });
         set_attribute(attributes, "ht", "ht", value);
         set_attribute(attributes, "customHeight", "customHeight", "1".to_owned());
         if hidden {
@@ -567,14 +593,22 @@ fn set_row_height(attributes: &mut Vec<XmlAttribute>, height: Option<f64>) {
     }
 }
 
-fn set_col_width(attributes: &mut Vec<XmlAttribute>, width: Option<f64>) {
+fn set_col_width(
+    attributes: &mut Vec<XmlAttribute>,
+    width: Option<f64>,
+    hidden_width: Option<f64>,
+) {
     remove_attribute(attributes, "width");
     remove_attribute(attributes, "customWidth");
     remove_attribute(attributes, "hidden");
     remove_attribute(attributes, "bestFit");
     if let Some(width) = width {
-        let value = fmt_num(width);
-        let hidden = value == "0";
+        let hidden = width == 0.0;
+        let value = fmt_num(if hidden {
+            hidden_width.unwrap_or(width)
+        } else {
+            width
+        });
         set_attribute(attributes, "width", "width", value);
         set_attribute(attributes, "customWidth", "customWidth", "1".to_owned());
         if hidden {

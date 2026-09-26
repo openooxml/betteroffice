@@ -6369,6 +6369,123 @@ fn collapsing_columns_under_a_chart_does_not_block_a_peer_moving_it() {
     }
 }
 
+#[test]
+fn native_visibility_preserves_custom_sizes_through_peers_undo_and_xlsx_save() {
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(0, 24.0);
+    sheet.row_heights.insert(0, 30.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut author = Workbook::open_collaborative(&source, 880).unwrap();
+    let mut peer = Workbook::open_collaborative(&source, 881).unwrap();
+    author
+        .apply_ops(
+            vec![
+                Op::SetColVisibility {
+                    sheet: SheetId(0),
+                    col: 0,
+                    hidden: true,
+                },
+                Op::SetRowVisibility {
+                    sheet: SheetId(0),
+                    row: 0,
+                    hidden: true,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let update = author
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
+    peer.apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(author.model(), peer.model());
+    let hidden = &author.model().sheets[0];
+    assert_eq!(hidden.col_widths.get(&0), Some(&0.0));
+    assert_eq!(hidden.row_heights.get(&0), Some(&0.0));
+    assert_eq!(hidden.hidden_col_widths.get(&0), Some(&24.0));
+    assert_eq!(hidden.hidden_row_heights.get(&0), Some(&30.0));
+    let saved = author.save().unwrap();
+    let xml = String::from_utf8(package_map(&saved)["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(
+        xml.contains(r#"width="24" customWidth="1" hidden="1""#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"ht="30" customHeight="1" hidden="1""#),
+        "{xml}"
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].hidden_col_widths.get(&0),
+        Some(&24.0)
+    );
+    assert_eq!(
+        reopened.model().sheets[0].hidden_row_heights.get(&0),
+        Some(&30.0)
+    );
+    author.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(author.model().sheets[0].col_widths.get(&0), Some(&24.0));
+    assert_eq!(author.model().sheets[0].row_heights.get(&0), Some(&30.0));
+    assert!(author.model().sheets[0].hidden_col_widths.is_empty());
+    assert!(author.model().sheets[0].hidden_row_heights.is_empty());
+}
+
+#[test]
+fn concurrent_visibility_and_resize_converge_to_a_valid_dimension() {
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(0, 20.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut hider = Workbook::open_collaborative(&source, 882).unwrap();
+    let mut resizer = Workbook::open_collaborative(&source, 883).unwrap();
+    hider
+        .apply_ops(
+            vec![Op::SetColVisibility {
+                sheet: SheetId(0),
+                col: 0,
+                hidden: true,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    resizer
+        .apply_ops(
+            vec![Op::SetColWidth {
+                sheet: SheetId(0),
+                col: 0,
+                width: Some(30.0),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let to_hider = resizer
+        .encode_diff_v1(&hider.encode_state_vector_v1())
+        .unwrap();
+    let to_resizer = hider
+        .encode_diff_v1(&resizer.encode_state_vector_v1())
+        .unwrap();
+    hider
+        .apply_update_v1(&to_hider, CalculationOptions::default())
+        .unwrap();
+    resizer
+        .apply_update_v1(&to_resizer, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(hider.model(), resizer.model());
+    let column = &hider.model().sheets[0];
+    assert!(column.col_widths.get(&0) == Some(&0.0) || column.col_widths.get(&0) == Some(&30.0));
+    assert!(column.hidden_col_widths.is_empty() || column.col_widths.get(&0) == Some(&0.0));
+    assert!(hider.save().is_ok());
+    assert!(resizer.save().is_ok());
+}
+
 /// A local batch that repins only one of two sheets sharing an anchor is
 /// refused: it is this replica's own edit and it can simply be told no. The
 /// same disagreement arriving as an update cannot be refused — a peer may hold

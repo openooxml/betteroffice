@@ -515,6 +515,9 @@ fn parse_worksheet(
                     }
                     if attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value)) {
                         sheet.row_heights.insert(row, 0.0);
+                        if let Some(height) = height.filter(|height| *height > 0.0) {
+                            sheet.hidden_row_heights.insert(row, height);
+                        }
                     } else if let Some(height) = height {
                         sheet.row_heights.insert(row, height);
                     }
@@ -766,6 +769,9 @@ fn parse_col(
     };
     for col in min..=max {
         sheet.col_widths.insert(col - 1, width);
+        if hidden && let Some(authored) = authored.filter(|authored| *authored > 0.0) {
+            sheet.hidden_col_widths.insert(col - 1, authored);
+        }
         if let Some(authored) = authored {
             legacy.col_widths.insert(col - 1, authored);
         }
