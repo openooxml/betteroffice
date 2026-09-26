@@ -998,43 +998,6 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         CHART_PAD
     };
 
-    let legend_position = chart
-        .legend
-        .as_ref()
-        .and_then(|legend| legend.position)
-        .unwrap_or("right");
-    let legend = legend_band(
-        chart,
-        legend_position,
-        PlotRect {
-            x,
-            y,
-            w: width,
-            h: height,
-        },
-        title_h,
-        legend_style,
-        ops,
-    );
-    // A legend `c:overlay` puts on the plot takes no band of its own: the plot
-    // keeps the whole frame and the legend is drawn over it.
-    let legend_reserves = chart.legend.as_ref().is_none_or(|legend| !legend.overlay);
-    // A side legend keeps an em of its text between itself and the plot.
-    let legend_gap = legend_style.font.size_px * LEGEND_PLOT_GAP_EM;
-    let (reserve_left, reserve_right) = match &legend {
-        Some(band) if !band.horizontal && legend_reserves && !band.rows.is_empty() => {
-            if legend_position == "left" {
-                (band.x + band.w + legend_gap - x, 0.0)
-            } else {
-                (0.0, x + width - band.x + legend_gap)
-            }
-        }
-        _ => (0.0, 0.0),
-    };
-    let legend_h = match &legend {
-        Some(band) if band.horizontal && legend_reserves => band.h,
-        _ => 0.0,
-    };
     let views: Vec<Vec<SeriesView<'_>>> = if chart.plot_groups.is_empty() {
         vec![series_views(&chart.series, scan)]
     } else {
@@ -1061,6 +1024,59 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             overhang: a.overhang.max(b.overhang),
         })
         .unwrap_or_else(|| axis_bands(ops, None, width));
+    let axis_header =
+        if has_transposed_category_title(chart) || secondary_value_axis(chart, true).is_some() {
+            AXIS_HEADER
+        } else {
+            0.0
+        };
+    // A legend `c:overlay` puts on the plot takes no band of its own: the plot
+    // keeps the whole frame and the legend is drawn over it.
+    let legend_reserves = chart.legend.as_ref().is_none_or(|legend| !legend.overlay);
+    // The least height the plot and the labels hung off it take beside a
+    // legend that reserves its band.
+    let plot_floor = legend_reserves.then(|| {
+        if families.iter().any(|family| has_axes(family.chart_type)) {
+            MIN_PLOT + axis_header + bands.top + bands.bottom
+        } else {
+            MIN_PLOT + CHART_PAD
+        }
+    });
+    let legend_position = chart
+        .legend
+        .as_ref()
+        .and_then(|legend| legend.position)
+        .unwrap_or("right");
+    let legend = legend_band(
+        chart,
+        legend_position,
+        PlotRect {
+            x,
+            y,
+            w: width,
+            h: height,
+        },
+        title_h,
+        plot_floor,
+        legend_style,
+        ops,
+    );
+    // A side legend keeps an em of its text between itself and the plot.
+    let legend_gap = legend_style.font.size_px * LEGEND_PLOT_GAP_EM;
+    let (reserve_left, reserve_right) = match &legend {
+        Some(band) if !band.horizontal && legend_reserves && !band.rows.is_empty() => {
+            if legend_position == "left" {
+                (band.x + band.w + legend_gap - x, 0.0)
+            } else {
+                (0.0, x + width - band.x + legend_gap)
+            }
+        }
+        _ => (0.0, 0.0),
+    };
+    let legend_h = match &legend {
+        Some(band) if band.horizontal && legend_reserves => band.h,
+        _ => 0.0,
+    };
     let gutter = bands.left;
     let plot_x = x + reserve_left + gutter;
     let secondary_w = if secondary_value_axis(chart, false).is_some() {
@@ -1068,12 +1084,6 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     } else {
         0.0
     };
-    let axis_header =
-        if has_transposed_category_title(chart) || secondary_value_axis(chart, true).is_some() {
-            AXIS_HEADER
-        } else {
-            0.0
-        };
     let band_top = if legend_position == "top" && legend_h > 0.0 {
         legend_h + BAND_GAP
     } else {
@@ -1978,6 +1988,7 @@ fn legend_band<S: PlotSink + ?Sized>(
     position: &str,
     rect: PlotRect,
     title_h: f64,
+    plot_floor: Option<f64>,
     style: &ResolvedText,
     ops: &mut Emitter<'_, S>,
 ) -> Option<LegendBand> {
@@ -1996,8 +2007,13 @@ fn legend_band<S: PlotSink + ?Sized>(
     }
     let w = (width - 2.0 * CHART_PAD).max(0.0);
     let mut rows = legend_rows(chart, w, style, ops);
-    // Rows that would crowd out the plot are left out, as a side legend's are.
-    let room = (height - title_h - CHART_PAD - BAND_GAP - MIN_PLOT).max(0.0);
+    // Rows that would crowd out the plot are left out, as a side legend's are;
+    // an overlay legend only has to stay inside the frame.
+    let room = match plot_floor {
+        Some(floor) => height - title_h - BAND_GAP - floor,
+        None => height - title_h - CHART_PAD,
+    }
+    .max(0.0);
     let mut used = 0.0;
     rows.retain(|row| {
         used += row.height;
@@ -7036,11 +7052,50 @@ mod tests {
     }
 
     #[test]
-    fn a_row_legend_leaves_out_rows_the_chart_cannot_hold() {
+    fn a_row_legend_keeps_only_the_rows_the_plot_and_its_labels_leave_room_for() {
         let data = source(&[10.0, 20.0]);
-        let names = ["A", "B", "C", "D"];
+        let names = ["North America", "South America", "Europe", "Asia Pacific"];
         let mut chart = legend_chart(Some("bottom"), &names, &data);
         chart.title = None;
+        chart.text.legend.size_pt = Some(14.0);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 180.0,
+            h: 140.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        let drawn = texts(&ops);
+        let kept: Vec<&str> = names
+            .into_iter()
+            .filter(|name| drawn.iter().any(|text| text == name))
+            .collect();
+        assert_eq!(kept, ["North America", "South America"]);
+
+        let ticks = tick_labels(&ops);
+        let span = ticks.iter().map(|tick| tick.2).fold(f64::MIN, f64::max)
+            - ticks.iter().map(|tick| tick.2).fold(f64::MAX, f64::min);
+        assert!(span >= MIN_PLOT - 1e-9, "the plot keeps {span}px");
+        let legend_px = 14.0 * 4.0 / 3.0;
+        let legend_top = text_at(&ops, "North America").2 - TITLE_ASCENT_EM * legend_px;
+        let category = text_at(&ops, "Q1");
+        assert!(
+            category.2 + 0.25 * CHART_LABEL_SIZE_PX < legend_top,
+            "{category:?} runs into the legend at {legend_top}"
+        );
+    }
+
+    #[test]
+    fn an_overlay_row_legend_only_has_to_fit_the_frame() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["A"];
+        let mut chart = legend_chart(Some("bottom"), &names, &data);
+        chart.title = None;
+        chart.legend = Some(PlotLegend {
+            overlay: true,
+            position: Some("bottom"),
+            visible: Some(true),
+        });
         chart.text.legend.size_pt = Some(30.0);
         let frame = PlotRect {
             x: 0.0,
@@ -7048,17 +7103,15 @@ mod tests {
             w: 260.0,
             h: 80.0,
         };
+        let ops = plot_chart(&chart, frame);
         let key = 40.0 * LEGEND_KEY_EM;
-        let keys: Vec<f64> = rects(&plot_chart(&chart, frame))
+        let keys: Vec<f64> = rects(&ops)
             .into_iter()
             .filter(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01)
             .map(|(_, y, _, _)| y)
             .collect();
-        assert!(
-            keys.iter()
-                .all(|y| *y >= frame.y && y + key <= frame.y + frame.h),
-            "{keys:?}"
-        );
+        assert_eq!(keys.len(), 1, "{keys:?}");
+        assert!(keys[0] >= frame.y && keys[0] + key <= frame.y + frame.h);
     }
 
     #[test]
