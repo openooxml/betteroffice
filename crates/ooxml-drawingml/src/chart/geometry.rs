@@ -1130,9 +1130,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                 x: plot_x,
                 y: plot_y,
                 w: (region_w - gutter - right_margin - secondary_w).max(MIN_PLOT),
-                h: (y + height - bottom - bands.bottom - plot_y)
-                    .max(MIN_PLOT)
-                    .min((y + height - bottom - plot_y).max(0.0)),
+                // The plot gives up its minimum before its labels leave the frame.
+                h: (y + height - bottom - bands.bottom - plot_y).max(0.0),
                 gutter,
             }
         }
@@ -7082,6 +7081,25 @@ mod tests {
         assert!(
             category.2 + 0.25 * CHART_LABEL_SIZE_PX < legend_top,
             "{category:?} runs into the legend at {legend_top}"
+        );
+    }
+
+    #[test]
+    fn a_short_frame_shrinks_the_plot_before_its_labels_leave_it() {
+        let data = source(&[10.0, 20.0]);
+        let mut chart = legend_chart(None, &["North"], &data);
+        chart.legend = None;
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 80.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        let label = text_at(&ops, "Q1");
+        assert!(
+            label.2 <= frame.y + frame.h - CHART_PAD,
+            "{label:?} leaves the frame"
         );
     }
 
