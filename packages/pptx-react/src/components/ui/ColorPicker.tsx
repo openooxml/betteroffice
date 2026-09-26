@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
 import type { ToolbarIconName } from './ToolbarIcon';
-import { toolbarColors } from './ToolbarPrimitives';
+import { toolbarColors, tooltipText, useDisabledDescription } from './ToolbarPrimitives';
 
 export interface ColorPickerProps {
   value: string;
@@ -12,6 +12,8 @@ export interface ColorPickerProps {
   none?: boolean;
   clearLabel?: string;
   disabled?: boolean;
+  /** Why the picker is disabled; announced and shown on hover. */
+  description?: string;
   testId?: string;
 }
 
@@ -24,9 +26,11 @@ export function ColorPicker({
   none = false,
   clearLabel,
   disabled = false,
+  description,
   testId,
 }: ColorPickerProps) {
   const [hovered, setHovered] = useState(false);
+  const described = useDisabledDescription(disabled, description);
   return (
     <span
       style={{
@@ -36,7 +40,7 @@ export function ColorPicker({
       }}
     >
       <label
-        title={label}
+        title={tooltipText(label, null, described.reason)}
         aria-label={label}
         style={{
           display: 'inline-grid',
@@ -83,13 +87,22 @@ export function ColorPicker({
             }}
           />
         ) : null}
+        {described.node}
         <input
           data-testid={testId}
           type="color"
           value={value}
-          disabled={disabled}
+          {...described.props}
           aria-label={label}
-          onChange={(event) => onChange?.(event.target.value)}
+          onClick={(event) => {
+            if (disabled) event.preventDefault();
+          }}
+          onKeyDown={(event) => {
+            if (disabled && (event.key === 'Enter' || event.key === ' ')) event.preventDefault();
+          }}
+          onChange={(event) => {
+            if (!disabled) onChange?.(event.target.value);
+          }}
           style={{
             position: 'absolute',
             inset: 0,
