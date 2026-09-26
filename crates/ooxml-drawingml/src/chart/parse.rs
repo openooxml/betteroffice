@@ -797,24 +797,30 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
 }
 
 /// The fill declared directly on a `c:spPr`, ignoring the one its `a:ln` carries.
+/// A fill whose colours do not all resolve is `Unsupported`, never absent.
 fn parse_fill<E: ChartXml>(properties: Option<&E>) -> Option<ChartFill> {
     let properties = properties?;
     if child(properties, "noFill").is_some() {
         return Some(ChartFill::None);
     }
     if let Some(solid) = child(properties, "solidFill") {
-        return solid
-            .solid_fill_hex()
-            .map(|color| ChartFill::Solid { color });
+        return Some(
+            solid
+                .solid_fill_hex()
+                .map_or(ChartFill::Unsupported, |color| ChartFill::Solid { color }),
+        );
     }
     if let Some(gradient) = child(properties, "gradFill") {
-        let colors = child(gradient, "gsLst")
+        let colors: Option<Vec<String>> = child(gradient, "gsLst")
             .into_iter()
             .flat_map(|stops| children(stops, "gs"))
             .take(MAX_GRADIENT_STOPS)
-            .filter_map(E::solid_fill_hex)
+            .map(E::solid_fill_hex)
             .collect();
-        return Some(ChartFill::Gradient { colors });
+        return Some(match colors {
+            Some(colors) if !colors.is_empty() => ChartFill::Gradient { colors },
+            _ => ChartFill::Unsupported,
+        });
     }
     if let Some(pattern) = child(properties, "pattFill") {
         return Some(ChartFill::Pattern {
@@ -1383,6 +1389,52 @@ mod tests {
             space(Node::el("a:blipFill", Vec::new())),
             Some(ChartFill::Unsupported)
         );
+    }
+
+    #[test]
+    fn a_chart_area_fill_that_does_not_resolve_is_unsupported_not_absent() {
+        let space = |fill: Node| {
+            parse_chart_space(&Node::el(
+                "c:chartSpace",
+                vec![
+                    Node::el(
+                        "c:chart",
+                        vec![Node::el(
+                            "c:plotArea",
+                            vec![Node::el("c:barChart", Vec::new())],
+                        )],
+                    ),
+                    Node::el("c:spPr", vec![fill]),
+                ],
+            ))
+            .expect("chart space parses")
+            .fill
+        };
+        let unresolved = || Node::el("a:scrgbClr", Vec::new());
+        let gradient = |stops: Vec<Node>| {
+            Node::el(
+                "a:gradFill",
+                vec![Node::el(
+                    "a:gsLst",
+                    stops
+                        .into_iter()
+                        .map(|stop| Node::el("a:gs", vec![stop]))
+                        .collect(),
+                )],
+            )
+        };
+        assert_eq!(
+            space(Node::el("a:solidFill", vec![unresolved()])),
+            Some(ChartFill::Unsupported)
+        );
+        assert_eq!(
+            space(gradient(vec![
+                Node::val("a:srgbClr", "00000000"),
+                unresolved()
+            ])),
+            Some(ChartFill::Unsupported)
+        );
+        assert_eq!(space(gradient(Vec::new())), Some(ChartFill::Unsupported));
     }
 
     #[test]
