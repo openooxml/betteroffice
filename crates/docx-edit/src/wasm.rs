@@ -3649,44 +3649,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn image_geometry_at_a_position_reaches_one_of_several_images_sharing_an_id() {
-        let session = EditSession::new(22.0).unwrap();
-        session
-            .engine
-            .doc()
-            .create_story_with_paragraph_id("body", "p0", "AB", "Normal", "left")
-            .unwrap();
-        for offset in [2, 1] {
-            session
-                .insert_image("body", "p0", offset, r#"{"rId":"rIdShared"}"#, None, None)
-                .unwrap();
-        }
-        session
-            .set_image_geometry_at("body", "p0", 3, r#"{"alt":"second"}"#)
-            .unwrap();
-        session
-            .set_image_geometry("rIdShared", r#"{"title":"first"}"#)
-            .unwrap();
-
-        let images: Vec<_> = session
-            .engine
-            .doc()
-            .story_segments("body")
-            .unwrap()
-            .into_iter()
-            .filter_map(|segment| match segment.content {
-                SegmentContent::OtherEmbed { payload, .. } => Some(payload),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(images.len(), 2);
-        assert_eq!(images[0].get("alt"), None);
-        assert_eq!(images[0].get("title"), Some(&Any::from("first")));
-        assert_eq!(images[1].get("alt"), Some(&Any::from("second")));
-        assert_eq!(images[1].get("title"), None);
-    }
-
     fn batch_docx() -> Vec<u8> {
         ooxml_opc::rezip_parts(&[
             ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#.to_vec()),
@@ -3868,6 +3830,44 @@ mod tests {
         assert_eq!(selection["selectedText"], "ha\u{FFFC}beta\nGa");
         assert_eq!(selection["before"], "Alp");
         assert_eq!(selection["after"], "mma");
+    }
+
+    #[test]
+    fn image_geometry_at_a_position_reaches_one_of_several_images_sharing_an_id() {
+        let session = EditSession::new(22.0).unwrap();
+        session
+            .engine
+            .doc()
+            .create_story_with_paragraph_id("body", "p0", "AB", "Normal", "left")
+            .unwrap();
+        for offset in [2, 1] {
+            session
+                .insert_image("body", "p0", offset, r#"{"rId":"rIdShared"}"#, None, None)
+                .unwrap();
+        }
+        session
+            .set_image_geometry_at("body", "p0", 3, r#"{"alt":"second"}"#)
+            .unwrap();
+        session
+            .set_image_geometry("rIdShared", r#"{"title":"first"}"#)
+            .unwrap();
+
+        let images: Vec<_> = session
+            .engine
+            .doc()
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                SegmentContent::OtherEmbed { payload, .. } => Some(payload),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].get("alt"), None);
+        assert_eq!(images[0].get("title"), Some(&Any::from("first")));
+        assert_eq!(images[1].get("alt"), Some(&Any::from("second")));
+        assert_eq!(images[1].get("title"), None);
     }
 
     fn seed_paragraph_after_embeds(doc: &EditingDoc, embeds: &[&str], text: &str) {
