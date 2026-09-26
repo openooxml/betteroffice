@@ -11,6 +11,8 @@ const NONE: readonly XlsxPluginCommandId[] = Object.freeze([]);
 /**
  * The toolbar commands installed plugins contribute, in plugin and declaration order. The
  * default toolbar includes it; place it in replacement chrome to keep those commands reachable.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export function XlsxPluginToolbar(): React.ReactElement | null {
   const store = useXlsxCommands();

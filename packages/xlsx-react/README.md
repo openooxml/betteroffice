@@ -230,6 +230,8 @@ the step vocabulary and its limits.
 
 ## Host plugins
 
+The plugin API is experimental and may change in minor releases.
+
 Host-owned tools (review aids, checks, templates) install through the `plugins`
 prop. A plugin contributes a docked panel, an overlay on the grid and commands,
 and works through restricted clients rather than the editor API or the workbook

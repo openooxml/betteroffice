@@ -45,15 +45,25 @@ export type {
  * Built-in commands need their id listed and, when they mutate, `document: 'write'`; edit
  * batches need `document: 'write'` and `editBatches`, and `history: 'none'` also needs
  * `untrackedHistory`. `readOnly` refuses every write regardless.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export type XlsxPluginGrant = PluginGrant<XlsxCommandId>;
 
 export type XlsxPluginFailureCode = PluginFailureCode;
 
-/** A client call refused before it reached the workbook. */
+/**
+ * A client call refused before it reached the workbook.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export type XlsxPluginRefusal = PluginRefusal<XlsxPluginFailureCode>;
 
-/** Versioned workbook reads. Each runs after pending input. */
+/**
+ * Versioned workbook reads. Each runs after pending input.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface XlsxPluginReadClient {
   version(): Promise<{ ok: true; version: string } | XlsxPluginRefusal>;
   readCells(request: XlsxReadRequest): Promise<XlsxReadResult | XlsxPluginRefusal>;
@@ -62,12 +72,20 @@ export interface XlsxPluginReadClient {
   validateEdits(request: XlsxEditRequest): Promise<XlsxValidationResult | XlsxPluginRefusal>;
 }
 
-/** Granted edit batches; the grant and `readOnly` are checked when the batch applies. */
+/**
+ * Granted edit batches; the grant and `readOnly` are checked when the batch applies.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface XlsxPluginEditClient {
   applyEdits(request: XlsxEditRequest): Promise<XlsxEditResult | XlsxPluginRefusal>;
 }
 
-/** The editor's commands as this plugin may use them. */
+/**
+ * The editor's commands as this plugin may use them.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface XlsxPluginCommandClient {
   getDescriptor<K extends XlsxCommandId>(id: K): XlsxCommandDescriptor<K>;
   getDescriptor(id: XlsxPluginCommandId): XlsxPluginCommandDescriptor | null;
@@ -160,6 +178,7 @@ export type XlsxPluginNavigationFailureCode =
   | 'layout-unavailable'
   | 'unsupported';
 
+/** @experimental The plugin API may change in minor releases. */
 export type XlsxPluginNavigationResult =
   | { ok: true }
   | XlsxPluginRefusal
@@ -170,7 +189,11 @@ export interface XlsxPluginNavigationOptions {
   expectVersion: string;
 }
 
-/** Navigation after pending input, against the current workbook. It never writes. */
+/**
+ * Navigation after pending input, against the current workbook. It never writes.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface XlsxPluginNavigation {
   /**
    * Activates the sheet, selects `selection` in its direction and reveals the focus cell.
@@ -204,7 +227,11 @@ export type XlsxPluginEvent =
   | { type: 'layout-change'; generation: string; layout: XlsxPluginLayout | null }
   | { type: 'grants-change'; generation: string; grant: XlsxPluginGrant };
 
-/** What a hook, renderer or action receives. Clients refuse once it is superseded or ended. */
+/**
+ * What a hook, renderer or action receives. Clients refuse once it is superseded or ended.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface XlsxPluginContext<S> {
   pluginId: string;
   snapshot: XlsxPluginSnapshot;
@@ -258,6 +285,8 @@ export interface XlsxPluginCommand<S> {
 /**
  * A plugin. `createState`, renderers and command `getState` must be pure; `initialize`,
  * `onEvent`, command `execute` and `context.run` are managed effects.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export interface XlsxPluginDefinition<S> {
   id: string;
@@ -275,7 +304,11 @@ export interface XlsxPluginDefinition<S> {
 
 declare const xlsxPluginBrand: unique symbol;
 
-/** An installable plugin, created by `defineXlsxPlugin`. */
+/**
+ * An installable plugin, created by `defineXlsxPlugin`.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface XlsxPlugin {
   readonly id: string;
   readonly revision?: string | number;
@@ -284,12 +317,23 @@ export interface XlsxPlugin {
 
 export type XlsxPluginErrorPhase = PluginErrorPhase;
 
-/** A plugin failure; the failing activation has already been stopped and cleaned up. */
+/**
+ * A plugin failure; the failing activation has already been stopped and cleaned up.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export type XlsxPluginError = PluginError<XlsxPluginErrorPhase>;
 
+/** @experimental The plugin API may change in minor releases. */
 export interface XlsxEditorPluginProps {
+  /** @experimental The plugin API may change in minor releases. */
   plugins?: readonly XlsxPlugin[];
-  /** Keyed by plugin id; omitted plugins read, validate and navigate only. */
+  /**
+   * Keyed by plugin id; omitted plugins read, validate and navigate only.
+   *
+   * @experimental The plugin API may change in minor releases.
+   */
   pluginGrants?: Readonly<Record<string, XlsxPluginGrant>>;
+  /** @experimental The plugin API may change in minor releases. */
   onPluginError?(error: XlsxPluginError): void;
 }

@@ -215,7 +215,11 @@ export interface XlsxPluginCommandDescriptor {
 /** State of a contributed command; the plugin chooses its own disabled codes. */
 export type XlsxPluginCommandState = CommandState;
 
-/** Outcome of a contributed command: a plugin-defined failure, or a refused edit batch as-is. */
+/**
+ * Outcome of a contributed command: a plugin-defined failure, or a refused edit batch as-is.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export type XlsxPluginCommandResult = PluginCommandResult<XlsxCommandStatus, XlsxEditRefusal>;
 
 /** The command authority of one editor, shared by built-in and host chrome. */

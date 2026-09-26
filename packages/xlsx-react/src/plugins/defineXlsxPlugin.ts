@@ -18,6 +18,8 @@ function frozenCommand<S>(command: XlsxPluginCommand<S>): XlsxPluginCommand<S> {
  * Wraps a plugin for `XlsxEditor`'s `plugins` prop. The definition is checked when the editor
  * installs it; a problem is reported through `onPluginError` and disables only this plugin. Its
  * panel, commands and toolbar are copied and frozen, so changing them takes a new definition.
+ *
+ * @experimental The plugin API may change in minor releases.
  */
 export function defineXlsxPlugin<S>(definition: XlsxPluginDefinition<S>): XlsxPlugin {
   const copy = { ...definition };
