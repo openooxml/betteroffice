@@ -26,6 +26,9 @@ import {
   type DocxPluginError,
   type DocxPluginEvent,
 } from '../index';
+import { isMacPlatform } from '../commands/descriptors';
+
+const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
 
@@ -476,7 +479,7 @@ describe('DocxEditor plugins', () => {
 
     expect(await act(() => ref.current!.commands.execute(id, null))).toMatchObject({ ok: true });
     const editor = view.container.querySelector('[data-testid="docx-editor"]')!;
-    fireEvent.keyDown(editor, { key: 'M', shiftKey: true, ctrlKey: true, metaKey: true });
+    fireEvent.keyDown(editor, { key: 'M', shiftKey: true, ...MOD });
     await settle();
     expect(calls).toEqual(['acme.review', 'acme.review', 'acme.review']);
 
