@@ -590,7 +590,15 @@ impl WorkbookAuthority {
     /// written at, and where the bootstraps do agree the two are the same
     /// document, so adopting is never worse than merging.
     pub(crate) fn snapshot_replacement(&self, update: &[u8]) -> SnapshotAdoption {
-        if !self.is_pristine() {
+        let pristine = self.is_pristine();
+        if !pristine
+            && (!update
+                .windows(BASE_FINGERPRINT.len())
+                .any(|part| part == BASE_FINGERPRINT.as_bytes())
+                || !update
+                    .windows(b"schemaVersion".len())
+                    .any(|part| part == b"schemaVersion"))
+        {
             return SnapshotAdoption::NotApplicable;
         }
         let doc = Doc::with_client_id(self.client_id());
@@ -606,6 +614,27 @@ impl WorkbookAuthority {
             redo_stack: Vec::new(),
         };
         if !candidate.is_whole_document() {
+            return SnapshotAdoption::NotApplicable;
+        }
+        if !pristine {
+            let version = candidate.schema_version().unwrap_or_default();
+            let txn = candidate.doc.transact();
+            let fingerprint = txn
+                .get_map(META)
+                .and_then(|meta| meta.get(&txn, BASE_FINGERPRINT))
+                .and_then(|value| value.cast::<String>().ok());
+            let same_bootstrap = txn
+                .state_vector()
+                .iter()
+                .any(|(client, _)| client.get() == self.base.bootstrap_client_id);
+            if version != SCHEMA_VERSION
+                || fingerprint.as_deref() != Some(self.base.fingerprint.as_str())
+                || !same_bootstrap
+            {
+                return SnapshotAdoption::Incompatible(
+                    "cannot merge a foreign workbook snapshot after local edits".to_string(),
+                );
+            }
             return SnapshotAdoption::NotApplicable;
         }
         if let Err(error) = candidate.upgrade_schema() {
