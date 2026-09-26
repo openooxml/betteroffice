@@ -28,9 +28,7 @@ describe('useImageActions', () => {
       useImageActions({
         document: probe,
         pmImageContext: null,
-        displayListQueries: null,
-        pagedEditorRef: { current: null },
-        focusActiveEditor: () => {},
+        applyGeometry: () => {},
         pushDocument: (doc) => {
           pushed.push(doc);
         },

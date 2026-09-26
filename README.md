@@ -49,6 +49,10 @@
 - **Host-controlled DOCX saving.** Intercept Save before export and await pending
   editor input before reading, changing, or persisting the document.
 
+- **Composable DOCX toolbars.** Arrange built-in controls in your own order next
+  to host actions, inside or outside the editor. Controls keep their state,
+  shortcuts, disabled reasons, and read-only rules through one command store.
+
 - **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
   paragraphs with a session version, then apply atomic text and paragraph
   batches that commit as one undo step or return a typed refusal with nothing

@@ -17,6 +17,7 @@ import {
   residentWorkerFactory,
   type InProcessResidentWorker,
 } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
+import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
@@ -110,7 +111,6 @@ function Harness({ session, layout, overrides, pagedRef, docxRef, display }: Har
     historyStateRef: { current: null },
     pagedEditorRef: pagedRef,
     handleSave: async () => null,
-    handleDirectPrint: () => {},
     zoom: 1,
     setZoom: () => {},
     scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
@@ -125,6 +125,7 @@ function Harness({ session, layout, overrides, pagedRef, docxRef, display }: Har
       throw new Error('unused');
     }) as never,
     commentIdAllocator: createCommentIdAllocator(),
+    commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef: { current: 'editing' },
   });
   // Position callbacks are rebuilt on every render, as the editor's are after each new frame,
