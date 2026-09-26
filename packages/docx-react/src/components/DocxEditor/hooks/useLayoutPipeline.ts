@@ -97,6 +97,11 @@ export interface UseLayoutPipelineReturn {
   runLayoutPipeline: () => void;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
   cancelPendingScrollRestore: () => void;
+  /**
+   * The region layout request the pipeline would lay the current document out with now, or
+   * `null` while it has no session or the fonts the document needs are not ready.
+   */
+  getLayoutRequest: () => string | null;
 }
 
 export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipelineReturn {
@@ -502,11 +507,24 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     };
   }, []);
 
+  const getLayoutRequest = useCallback((): string | null => {
+    if (!session) return null;
+    const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
+    const requirements = JSON.parse(
+      session.layoutFontRequirementsJson(JSON.stringify(request))
+    ) as ResidentFontRequirement[];
+    const measurement = residentMeasurementConfig(requirements);
+    if (!measurement) return null;
+    request.measurement = measurement;
+    return JSON.stringify(request);
+  }, [document, pageGap, renderEnv, residentMeasurementConfig, session]);
+
   return {
     layout,
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
     scheduleLayout,
     cancelPendingScrollRestore,
+    getLayoutRequest,
   };
 }

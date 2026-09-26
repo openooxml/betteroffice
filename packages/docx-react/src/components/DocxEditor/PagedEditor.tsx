@@ -385,6 +385,11 @@ export interface PagedEditorRef {
   applyYrsCommand(command: YrsEditorCommand): boolean;
   /** Get current layout. */
   getLayout(): Layout | null;
+  /**
+   * The region layout request the editor would lay the current document out with now, or
+   * `null` while the fonts it needs are not ready. @internal
+   */
+  getLayoutRequest(): string | null;
   /** Force re-layout. */
   relayout(): void;
   /** Scroll the visible pages to bring a display position into view. */
@@ -660,6 +665,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       runLayoutPipeline,
       scheduleLayout,
       cancelPendingScrollRestore,
+      getLayoutRequest,
     } = useLayoutPipeline({
       onError,
       document,
@@ -1659,6 +1665,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsInputRef,
       layout,
       runLayoutPipeline,
+      getLayoutRequest,
       scrollToPositionImpl,
       scrollToParaIdImpl,
       scrollToPageImpl,

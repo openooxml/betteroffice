@@ -37,15 +37,23 @@ import type {
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
 import type {
+  DocxExportFailure,
   DocxExportOptions,
   DocxExportResult,
   DocxMarkdownContent,
   DocxStructuredContent,
 } from './structuredExport';
+import type {
+  DocxLayoutMap,
+  DocxPageExportOptions,
+  DocxPagedStructuredContent,
+  DocxSnapshotLayoutMap,
+} from './pagedExport';
 
 export * from './edits';
 export * from './readTypes';
 export * from './structuredExport';
+export * from './pagedExport';
 export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
@@ -1021,6 +1029,39 @@ export interface YrsSession extends CollaborationReplica {
   /** {@link exportStructured} rendered as Markdown from the same read. */
   exportMarkdown(options: DocxExportOptions): DocxExportResult<DocxMarkdownContent>;
   /**
+   * {@link exportStructured} with the page map of the region layout this session retains. The
+   * layout must have lowered the current version from this session's stories with section,
+   * settings and note metadata that describe it, and measured every font the document uses
+   * with the fonts registered now; this call lays nothing out, flushes nothing and loads no
+   * font, and refuses a stale or incomplete layout.
+   */
+  exportStructuredWithPages(
+    options: DocxPageExportOptions
+  ): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
+  /**
+   * {@link exportStructuredWithPages} for an editor: `currentRequest` is the region layout
+   * request it would lay the document out with now, and the retained layout must have used the
+   * same fonts, measurement defaults, render environment and pagination options. @internal
+   */
+  exportStructuredWithPagesFor(
+    options: DocxPageExportOptions,
+    currentRequest: string
+  ): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
+  /**
+   * Lays this private session out with `fonts` alone, in a measurement font store of its own,
+   * and exports it with snapshot anchors and a snapshot map. `fonts` holds the font files back
+   * to back and `fontLengths` their lengths; `request`'s font chains name them by index. Throws
+   * for a font the engine rejects. @internal
+   */
+  exportSnapshotWithPrivateFonts(
+    fonts: Uint8Array,
+    fontLengths: Uint32Array,
+    request: string,
+    options: DocxPageExportOptions
+  ):
+    | { ok: true; content: DocxPagedStructuredContent<DocxSnapshotLayoutMap> }
+    | { ok: false; failure: DocxExportFailure };
+  /**
    * The heading paragraphs of `story` in document order, classified as the structured export
    * classifies them. Throws for an unknown story.
    */
@@ -1952,6 +1993,25 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       JSON.parse(
         session.export_markdown_json(JSON.stringify(options))
       ) as DocxExportResult<DocxMarkdownContent>,
+    exportStructuredWithPages: (options) =>
+      JSON.parse(
+        session.export_structured_with_pages_json(JSON.stringify(options), undefined)
+      ) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>,
+    exportStructuredWithPagesFor: (options, currentRequest) =>
+      JSON.parse(
+        session.export_structured_with_pages_json(JSON.stringify(options), currentRequest)
+      ) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>,
+    exportSnapshotWithPrivateFonts: (fonts, fontLengths, request, options) =>
+      JSON.parse(
+        session.export_snapshot_with_private_fonts_json(
+          fonts,
+          fontLengths,
+          request,
+          JSON.stringify(options)
+        )
+      ) as
+        | { ok: true; content: DocxPagedStructuredContent<DocxSnapshotLayoutMap> }
+        | { ok: false; failure: DocxExportFailure },
     headings: (story) => JSON.parse(session.headings_json(story)) as DocxParagraphHeading[],
 
     version: () => session.version(),

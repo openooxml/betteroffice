@@ -15,8 +15,12 @@ import type { Document, Theme } from '@betteroffice/docx/types/document';
 import type {
   DocxEditRequest,
   DocxEditResult,
+  DocxExportResult,
   DocxFindTextRequest,
   DocxFindTextResult,
+  DocxLayoutMap,
+  DocxPageExportOptions,
+  DocxPagedStructuredContent,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
   DocxValidationResult,
@@ -349,6 +353,20 @@ export interface DocxEditorRef {
    * is replaced while input is flushing.
    */
   applyEdits: (request: DocxEditRequest) => Promise<DocxEditResult>;
+  /**
+   * Flushes pending input, then exports the document as structured content with the page map
+   * of the editor's authoritative layout of that version: the physical page, displayed page
+   * label and body, header, footer or note occurrence showing each block and inline. The layout
+   * must have been computed from the editor's current fonts, measurement defaults, render
+   * environment and pagination options; the editor lays the document out, or waits for its
+   * fonts, when it was not. The references describe that layout, which a later edit may
+   * supersede before it is painted. Refuses as data when no such layout is ready in time, and
+   * never lays out again when `expectLayoutVersion` names a layout. Throws when the document is
+   * replaced meanwhile.
+   */
+  exportStructuredWithPages: (
+    options: DocxPageExportOptions
+  ) => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */

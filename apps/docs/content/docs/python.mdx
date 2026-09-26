@@ -93,7 +93,8 @@ markdown = document.export_markdown(revision_view="markup")["markdown"]
 ```
 
 Omitted and unsupported content is listed in `diagnostics`; unusable limits raise
-`ExportError`. Page fragments are not included yet.
+`ExportError`. Python exports do not yet generate page maps; the JavaScript
+packages attach them from a layout of the current document.
 
 ## PPTX
 

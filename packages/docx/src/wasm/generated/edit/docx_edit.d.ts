@@ -330,12 +330,30 @@ export class EditSession {
      */
     export_markdown_json(options: string): string;
     /**
+     * Lays this private session out with its own fonts and exports it with pages as a
+     * snapshot. `fonts` holds the font files back to back, `font_lengths` their byte lengths;
+     * `request` is a region layout request whose font chains name fonts by their index. The
+     * reply is `{"ok":true,"content"}` or `{"ok":false,"failure"}`; a rejected font or an
+     * unusable request throws. The module's shared measurement fonts are left untouched.
+     */
+    export_snapshot_with_private_fonts_json(fonts: Uint8Array, font_lengths: Uint32Array, request: string, options: string): string;
+    /**
      * Structured export of the committed document state:
      * `{"revisionView","stories"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
      * `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Anchors are scoped
      * to the returned version. Reads only: nothing is committed, minted or published.
      */
     export_structured_json(options: string): string;
+    /**
+     * [`EditSession::export_structured_json`] with the page map of the retained region
+     * layout. `options` adds `"includeGeometry"?`, `"expectLayoutVersion"?`,
+     * `"maxFragments"?` and `"maxLayoutBytes"?`; the reply is
+     * `{"ok":true,"version","content":{"structured","layout"}}` or a refusal. An editor passes
+     * the region layout request it would lay the document out with now as `current_request`,
+     * and the layout must have been computed from the same inputs. Lays nothing out and changes
+     * nothing.
+     */
+    export_structured_with_pages_json(options: string, current_request?: string | null): string;
     /**
      * Exact, case-sensitive, paragraph-local search:
      * `{"text","within","view","limit"?}` ->
@@ -1107,6 +1125,12 @@ export function register_substitute_measure_font(base: number, requested_family:
 export function render_docx_markdown_json(content: string, options: string): string;
 
 /**
+ * Renders a paged export as Markdown: `content` is `{"structured","layout"}` from a paged
+ * export and `options` is `{"maxBytes"?,"pageMarkers"?}`.
+ */
+export function render_docx_markdown_with_pages_json(content: string, options: string): string;
+
+/**
  * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -1187,7 +1211,9 @@ export interface InitOutput {
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_export_structured_with_pages_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_find_text_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1267,6 +1293,7 @@ export interface InitOutput {
     readonly export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

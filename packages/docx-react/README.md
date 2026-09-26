@@ -180,6 +180,33 @@ content); in suggesting mode every step must carry `suggest`. The promise reject
 flushes. `proposeChange`, `addComment` and `applyFormatting` resolve their
 `{ paraId, search }` targets through the same Rust resolver in the accepted view.
 
+## Page-referenced export
+
+`DocxEditorRef.exportStructuredWithPages(options)` flushes pending input and exports
+structured content with the page map of the editor's authoritative layout of that
+version, the same map `@betteroffice/docx` documents. The layout must have been
+computed from the editor's current fonts, measurement defaults, render environment
+and pagination options; when it was not, the editor lays the document out again or
+waits up to two seconds for its fonts. Page references describe that layout, which
+a later edit may supersede before it is painted:
+
+```tsx
+const result = await editorRef.current!.exportStructuredWithPages({
+  revisionView: 'markup',
+  stories: ['body', 'headers', 'footers'],
+  includeGeometry: true,
+});
+if (result.ok) {
+  const { structured, layout } = result.content;
+  // layout.pages, layout.occurrences, layout.fragments; result.version
+}
+```
+
+Geometry is in unzoomed CSS pixels from each page's top-left corner, so zoom and
+scrolling do not change it. With `expectLayoutVersion` the editor never lays out
+again and a newer document is refused as `stale-document`. The promise rejects when
+the document is replaced meanwhile.
+
 ## Framework notes
 
 Import `@betteroffice/docx-react/styles.css` once (in a bundler entry or, under
