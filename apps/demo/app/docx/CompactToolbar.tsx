@@ -8,7 +8,6 @@ import {
   ToolbarGroup,
 } from "@betteroffice/docx-react";
 
-/** A task-focused toolbar composed only from public parts, in the host's order. */
 export function CompactToolbar({ onShare }: { onShare(): void }) {
   return (
     <EditorToolbar>
