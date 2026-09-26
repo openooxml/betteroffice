@@ -88,7 +88,8 @@ impl EditingDoc {
     /// or re-key is a new paragraph, never the one whose identity it carries:
     /// in the same transaction it takes a fresh key for a key any paragraph,
     /// present or deleted, held before, and a fresh Word paragraph ID for an
-    /// ID another paragraph owns or a deleted one reserves.
+    /// ID another paragraph owns or a deleted one reserves. Ops that author
+    /// into an editor-only paragraph promote it, as typed edits do.
     pub fn apply_raw_ops(&self, story_id: &str, ops: Vec<RawOp>, ctx: &EditCtx) -> OpResult<()> {
         let rekeys = ops.iter().any(|op| match op {
             RawOp::InsertEmbed { kind, .. } => kind == PILCROW_KIND,
@@ -100,8 +101,13 @@ impl EditingDoc {
         if rekeys {
             self.with_seen(&txn, |_| ());
         }
+        let authors_last = story_ref(&txn, story_id)
+            .is_ok_and(|story| authors_last_paragraph(&ops, story.len(&txn)));
         let mut rekeyed = Vec::new();
         apply_raw_ops_to_story(&mut txn, story_id, ops, false, &mut rekeyed)?;
+        if authors_last {
+            crate::identity::promote_story(self, &mut txn, story_id);
+        }
         if rekeys {
             self.repair_copies(&mut txn, since, &rekeyed);
         }
@@ -332,6 +338,33 @@ impl InsertRun {
             story.apply_delta(txn, deltas);
         }
     }
+}
+
+/// Whether an op inserts content before, or sets a property of, the mark
+/// that ends a story `len` units long as the preceding ops leave it.
+fn authors_last_paragraph(ops: &[RawOp], mut len: u32) -> bool {
+    for op in ops {
+        let (index, grows) = match op {
+            RawOp::Insert { index, text, .. } => (
+                (!text.is_empty()).then_some(*index),
+                text.encode_utf16().count() as u32,
+            ),
+            RawOp::InsertEmbed { index, .. } => (Some(*index), 1),
+            RawOp::SetEmbedAttr { index, key, .. } => ((key != PARA_ID).then_some(*index), 0),
+            RawOp::Delete { len: removed, .. } => {
+                len = len.saturating_sub(*removed);
+                continue;
+            }
+            RawOp::Format { .. } | RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {
+                continue;
+            }
+        };
+        if index.is_some_and(|index| index + 1 == len) {
+            return true;
+        }
+        len += grows;
+    }
+    false
 }
 
 /// Applies `ops` to one story, collecting into `rekeyed` the pilcrows whose

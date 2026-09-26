@@ -1017,9 +1017,13 @@ pub(crate) fn promote_at(
     story: &TextRef,
     index: u32,
 ) {
-    if index + 1 != story.len(txn) {
-        return;
+    if index + 1 == story.len(txn) {
+        promote_story(doc, txn, story_id);
     }
+}
+
+/// [`promote`] for an edit that authored into the paragraph ending `story_id`.
+pub(crate) fn promote_story(doc: &EditingDoc, txn: &mut TransactionMut<'_>, story_id: &str) {
     let seeded: Vec<MapRef> = doc.with_seen(&*txn, |seen| {
         seen.synthetic
             .iter()
@@ -1037,6 +1041,8 @@ pub(crate) fn promote_at(
 enum Standing {
     /// Neither the seeded paragraph nor holding its own claim: a copy.
     Unowned,
+    /// An unsaved claim no paragraph holds any more: it keeps its ID from copies.
+    Reserved,
     /// Claimed by its own key, not yet saved.
     Unpublished,
     Published,
@@ -1048,7 +1054,7 @@ enum Standing {
 enum Holder {
     Pilcrow(usize),
     Occurrence(usize, u32),
-    /// A source ID or saved claim no paragraph holds any more: it stays reserved.
+    /// A source ID or claim no paragraph holds any more: it stays reserved.
     Retired,
 }
 
@@ -1091,8 +1097,8 @@ fn pilcrow_standing(
 
 /// Groups the holders of each shared ID in package order: seeded paragraphs
 /// and source occurrences by part and ordinal, then other paragraphs by story,
-/// then the source IDs and saved claims no paragraph holds any more, which
-/// stay reserved. Views of one source paragraph in stories sharing its part
+/// then the source IDs and claims no paragraph holds any more, which stay
+/// reserved. Views of one source paragraph in stories sharing its part
 /// are one holder. A `copies` pilcrow holds no identity it carries, and a
 /// `renamed` one gives up its key. Only groups a live holder shares are
 /// returned.
@@ -1209,8 +1215,13 @@ fn collisions(
         }
     };
     for (id, owners) in claims {
-        for claim in owners.iter().filter(|claim| claim.published) {
-            retire(*id, &claim.owner, Standing::Published);
+        for claim in owners {
+            let standing = if claim.published {
+                Standing::Published
+            } else {
+                Standing::Reserved
+            };
+            retire(*id, &claim.owner, standing);
         }
     }
     if let Some(source) = source {
@@ -1242,7 +1253,8 @@ fn collisions(
 /// Every claimant below the strongest standing loses. Among the strongest,
 /// source duplicates are repaired only when `persist` asks, the first in
 /// package order keeping the ID; unpublished claims and copies keep it for
-/// the smallest owner; published claims all keep it and conflict.
+/// the smallest owner; reserved and published claims all keep it, and
+/// published ones conflict.
 fn losers(group: &[Claimant], persist: bool) -> (Vec<usize>, bool) {
     let best = group
         .iter()
@@ -1261,7 +1273,7 @@ fn losers(group: &[Claimant], persist: bool) -> (Vec<usize>, bool) {
             .iter()
             .copied()
             .min_by(|left, right| group[*left].owner.cmp(&group[*right].owner)),
-        Standing::Source | Standing::Published => None,
+        Standing::Reserved | Standing::Published | Standing::Source => None,
     };
     if let Some(keeper) = keeper {
         losers.extend(top.iter().copied().filter(|index| *index != keeper));

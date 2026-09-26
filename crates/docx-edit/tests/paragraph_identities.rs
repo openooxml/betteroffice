@@ -1009,6 +1009,63 @@ fn editor_only_paragraphs_are_not_persisted_until_authored() {
     );
 }
 
+#[test]
+fn raw_ops_authoring_into_an_editor_only_paragraph_promote_it() {
+    let bytes = fixture_with(|parts| {
+        replace(
+            parts,
+            "word/document.xml",
+            r#"<w:p w14:paraId="0A0B0C0D" w:rsidR="00A1B2C3"><w:r><w:t>Tail</w:t></w:r></w:p>"#,
+            r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0A0B0C0D"/></w:tc></w:tr></w:tbl>"#,
+        );
+    });
+    let authoring: [fn(u32) -> RawOp; 3] = [
+        |index| RawOp::Insert {
+            index,
+            text: "typed".into(),
+            attrs: Default::default(),
+        },
+        |index| RawOp::InsertEmbed {
+            index,
+            kind: "break".into(),
+            payload: Vec::new(),
+            attrs: Default::default(),
+        },
+        |index| RawOp::SetEmbedAttr {
+            index,
+            key: "alignment".into(),
+            value: Any::from("center"),
+        },
+    ];
+    for author in authoring {
+        let doc = seeded(&bytes);
+        let tail = doc
+            .paragraphs("body")
+            .unwrap()
+            .last()
+            .unwrap()
+            .para_id
+            .clone();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::Insert {
+                index: 0,
+                text: "early".into(),
+                attrs: Default::default(),
+            }],
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(identity(&doc, &tail).origin, ParagraphOrigin::Synthetic);
+        let at = doc.paragraph_mark_position(&tail).unwrap().index;
+        doc.apply_raw_ops("body", vec![author(at)], &ctx()).unwrap();
+        let promoted = identity(&doc, &tail);
+        assert_eq!(promoted.origin, ParagraphOrigin::Authored);
+        assert_eq!(promoted.id_origin, Some(ParagraphIdOrigin::Authored));
+        assert!(promoted.ooxml_para_id.is_some());
+    }
+}
+
 /// Writes the session's save plan over a model parsed from the source, as a
 /// save of stories that project exactly as seeded does.
 fn save_unchanged(doc: &EditingDoc, bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
@@ -1336,7 +1393,13 @@ fn a_deleted_source_identity_stays_reserved_against_copies() {
 }
 
 #[test]
-fn a_saved_raw_identity_stays_reserved_after_its_paragraph_is_deleted() {
+fn a_raw_identity_stays_reserved_after_its_paragraph_is_deleted() {
+    for save in [false, true] {
+        a_raw_identity_stays_reserved(save);
+    }
+}
+
+fn a_raw_identity_stays_reserved(save: bool) {
     let doc = seeded(&fixture());
     let insert = || {
         doc.apply_raw_ops(
@@ -1366,10 +1429,12 @@ fn a_saved_raw_identity_stays_reserved_after_its_paragraph_is_deleted() {
     let saved = persisted(body(), "12345678");
     assert_eq!(doc.resolve_paragraph_anchor(&stale), found("body", "raw"));
     assert_eq!(doc.resolve_paragraph_anchor(&saved), found("body", "raw"));
-    assert!(
-        doc.record_saved_paragraph_ids(&[("raw".into(), "12345678".into())])
-            .is_empty()
-    );
+    if save {
+        assert!(
+            doc.record_saved_paragraph_ids(&[("raw".into(), "12345678".into())])
+                .is_empty()
+        );
+    }
 
     doc.apply_raw_ops("body", vec![RawOp::Delete { index: 0, len: 1 }], &ctx())
         .unwrap();

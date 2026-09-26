@@ -943,7 +943,8 @@ export interface YrsSession extends CollaborationReplica {
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
   /**
    * Applies raw story operations in one transaction, then repairs any
-   * paragraph identity a pilcrow they insert or re-key duplicates.
+   * paragraph identity a pilcrow they insert or re-key duplicates and
+   * promotes an editor-only paragraph they author into.
    */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Applies seed raw operations with deterministic item ordering. */
