@@ -213,6 +213,7 @@ pub struct SlideTarget {
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
+#[non_exhaustive]
 pub enum EditStep {
     InsertText {
         target: TextTarget,
@@ -305,6 +306,7 @@ pub struct EditRequest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum EditFailureCode {
     StaleVersion,
     MissingTarget,
