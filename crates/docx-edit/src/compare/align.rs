@@ -90,11 +90,15 @@ pub(crate) fn align(
         .collect();
     anchors.sort_unstable();
     let kept = increasing_by_revised(&anchors);
+    let mut is_kept = vec![false; anchors.len()];
+    for &index in &kept {
+        is_kept[index] = true;
+    }
     let mut alignment = Alignment::default();
     let mut moved_a = vec![false; original.len()];
     let mut moved_b = vec![false; revised.len()];
     for (index, &(i, j)) in anchors.iter().enumerate() {
-        if !kept.contains(&index) {
+        if !is_kept[index] {
             alignment.issues.push(Issue::Moved {
                 original: i,
                 revised: j,
@@ -343,6 +347,25 @@ mod tests {
 
     fn run(original: &[&str], revised: &[&str]) -> Alignment {
         align(original, revised, &mut budget()).unwrap()
+    }
+
+    #[test]
+    fn anchors_at_the_paragraph_limit_align_in_one_pass() {
+        let original: Vec<String> = (0..10_000).map(|index| format!("clause {index}")).collect();
+        let mut revised = original.clone();
+        revised.rotate_left(1);
+        let alignment = run(
+            &original.iter().map(String::as_str).collect::<Vec<_>>(),
+            &revised.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        assert_eq!(alignment.pairs.len(), 9_999);
+        assert_eq!(
+            alignment.issues,
+            vec![Issue::Moved {
+                original: 0,
+                revised: 9_999
+            }]
+        );
     }
 
     #[test]

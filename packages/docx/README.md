@@ -303,9 +303,10 @@ hyperlinks, bookmarks, objects, page breaks, patterned shading or `w:lang`),
 `metadata-difference` (informational: modified dates, revision-session ids and
 document statistics, kept from the original) and `ambiguous-identity` (a
 warning: repeated paragraph ids, so changes are addressed by position) accompany
-a result. Parts are found by their content types, and wrappers such as custom
-XML elements, body-level markers and every part must match exactly; a part that
-cannot be read refuses the comparison.
+a result. Every part whose content type or content is XML is scanned for
+revisions, and wrappers such as custom XML elements, body-level markers and
+every part must match exactly; an XML-typed part that cannot be read refuses the
+comparison.
 
 Paragraphs are aligned conservatively: text unique to one paragraph on each side
 anchors the alignment, crossing anchors are moves, one paragraph against one
@@ -333,6 +334,7 @@ Defaults, which are also the ceilings: 32 MiB per input, 128 MiB inflated,
 10,000 paragraphs per input and 1,048,576 UTF-16 units of text in both inputs,
 counted across every story while the parts are read, 250,000 alignment cells,
 4,000,000 diff cells, 128 changes, 256 diagnostics, 64 MiB of staged state,
-8 MiB of result data and a 64 MiB output, the no-op included.
+8 MiB of result JSON without the output package (at least 1 KiB) and a 64 MiB
+output, the no-op included.
 Review in BetterOffice is tested; Word validation is reported separately.
 Native Rust and Python comparison is not available yet.

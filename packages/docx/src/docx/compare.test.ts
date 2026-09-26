@@ -604,6 +604,7 @@ describe('compareDocx', () => {
       { ...OPTIONS, author: '  ' },
       { ...OPTIONS, date: '2024-05-06' },
       { ...OPTIONS, limits: { maxChanges: 1000 } },
+      { ...OPTIONS, limits: { maxResultBytes: 1023 } },
     ]) {
       expect(await compareDocx(base, base, options)).toMatchObject({
         ok: false,

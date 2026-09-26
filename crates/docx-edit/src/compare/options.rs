@@ -86,6 +86,9 @@ pub(crate) const CEILINGS: CompareLimits = CompareLimits {
     max_output_bytes: 64 * MIB,
 };
 
+/// The smallest `maxResultBytes`, which leaves room for the refusal that reports the limit.
+const MIN_RESULT_BYTES: usize = 1024;
+
 /// Paragraphs either side of an unresolved alignment gap may hold.
 pub(crate) const MAX_GAP_PARAGRAPHS: usize = 64;
 /// UTF-16 units an author name may hold.
@@ -181,6 +184,11 @@ impl CompareOptions {
                 CEILINGS.max_output_bytes,
             )?,
         };
+        if limits.max_result_bytes < MIN_RESULT_BYTES {
+            return Err(format!(
+                "limits.maxResultBytes must be at least {MIN_RESULT_BYTES}"
+            ));
+        }
         Ok(Self {
             author,
             date,

@@ -23,7 +23,7 @@ export interface DocxCompareLimits {
   maxDiagnostics: number;
   /** Bytes of the encoded editing state staged for the batch. Default 64 MiB. */
   maxStagedBytes: number;
-  /** Bytes of the serialized changes and diagnostics. Default 8 MiB. */
+  /** Bytes of the result as JSON, without the output package; at least 1,024. Default 8 MiB. */
   maxResultBytes: number;
   /** Bytes of the output package, the unchanged original included. Default 64 MiB. */
   maxOutputBytes: number;

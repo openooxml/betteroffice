@@ -172,16 +172,23 @@ pub(crate) enum CompareOutcome {
     Applied(Box<CompareApplied>),
 }
 
-/// A final result as bridge JSON: refused when it would exceed `max_bytes`.
+/// A final result as bridge JSON, `noop` marking a successful one that changed nothing: refused
+/// when the complete response would exceed `max_bytes`.
 fn result_json(
     ok: bool,
+    noop: bool,
     changes: &[ComparedChange],
     diagnostics: &[CompareDiagnostic],
     max_bytes: usize,
 ) -> Result<String, serde_json::Error> {
-    let changes = serde_json::to_value(changes)?;
-    let diagnostics = serde_json::to_value(diagnostics)?;
-    let size = serde_json::to_string(&changes)?.len() + serde_json::to_string(&diagnostics)?.len();
+    let json = serde_json::to_string(&match (ok, noop) {
+        (true, true) => {
+            json!({ "ok": true, "noop": true, "changes": changes, "diagnostics": diagnostics })
+        }
+        (true, false) => json!({ "ok": true, "changes": changes, "diagnostics": diagnostics }),
+        (false, _) => json!({ "ok": false, "diagnostics": diagnostics }),
+    })?;
+    let size = json.len();
     if size > max_bytes {
         return serde_json::to_string(&json!({
             "ok": false,
@@ -195,11 +202,7 @@ fn result_json(
             }],
         }));
     }
-    serde_json::to_string(&if ok {
-        json!({ "ok": true, "changes": changes, "diagnostics": diagnostics })
-    } else {
-        json!({ "ok": false, "diagnostics": diagnostics })
-    })
+    Ok(json)
 }
 
 impl CompareOutcome {
@@ -207,16 +210,15 @@ impl CompareOutcome {
     /// changes, whose result [`CompareApplied::finish`] returns.
     pub(crate) fn to_json(&self, limits: &CompareLimits) -> Result<String, serde_json::Error> {
         match self {
-            Self::Refused(diagnostics) => {
-                result_json(false, &[], &diagnostics.items, limits.max_result_bytes)
-            }
+            Self::Refused(diagnostics) => result_json(
+                false,
+                false,
+                &[],
+                &diagnostics.items,
+                limits.max_result_bytes,
+            ),
             Self::Unchanged(diagnostics) => {
-                let json = result_json(true, &[], &diagnostics.items, limits.max_result_bytes)?;
-                let mut value: serde_json::Value = serde_json::from_str(&json)?;
-                if value["ok"] == true {
-                    value["noop"] = json!(true);
-                }
-                serde_json::to_string(&value)
+                result_json(true, true, &[], &diagnostics.items, limits.max_result_bytes)
             }
             Self::Applied(applied) => serde_json::to_string(&json!({
                 "ok": true,
@@ -1147,6 +1149,7 @@ impl CompareApplied {
         }
         result_json(
             !self.diagnostics.blocked,
+            false,
             &self.changes,
             &self.diagnostics.items,
             limits.max_result_bytes,
@@ -1165,7 +1168,13 @@ impl CompareApplied {
             Vec::new(),
         );
         self.diagnostics.blocked = true;
-        result_json(false, &[], &self.diagnostics.items, limits.max_result_bytes)
+        result_json(
+            false,
+            false,
+            &[],
+            &self.diagnostics.items,
+            limits.max_result_bytes,
+        )
     }
 }
 
@@ -1391,6 +1400,7 @@ pub(crate) fn parse_options(
 /// The refusal JSON for unusable options.
 pub(crate) fn refused_json(diagnostic: CompareDiagnostic) -> Result<String, serde_json::Error> {
     result_json(
+        false,
         false,
         &[],
         &[diagnostic],

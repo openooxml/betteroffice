@@ -853,6 +853,7 @@ fn limits_and_diagnostics_are_bounded() {
     );
     let json = result_json(
         true,
+        false,
         &[],
         &[CompareDiagnostic {
             code: CompareDiagnosticCode::MetadataDifference,
@@ -879,6 +880,10 @@ fn options_are_refused_as_diagnostics_and_malformed_ones_throw() {
     );
     assert_eq!(
         refusal(r#"{"author":"A","date":"2024-01-01T00:00:00Z","limits":{"maxChanges":1000}}"#),
+        CompareDiagnosticCode::InvalidOptions
+    );
+    assert_eq!(
+        refusal(r#"{"author":"A","date":"2024-01-01T00:00:00Z","limits":{"maxResultBytes":1023}}"#),
         CompareDiagnosticCode::InvalidOptions
     );
     assert!(parse_options(r#"{"author":"A"}"#).is_err());
@@ -1261,6 +1266,28 @@ fn parts_are_found_by_content_type_and_must_be_readable() {
             vec![CompareDiagnosticCode::ExistingRevisions]
         );
     }
+    let retyped = |name: &str, content: &str| {
+        let mut parts = parts(content);
+        let types = String::from_utf8(parts["[Content_Types].xml"].clone())
+            .unwrap()
+            .replace(
+                &format!(r#"PartName="/{name}" ContentType="#),
+                &format!(r#"PartName="/{name}" ContentType="application/octet-stream" Ignored="#),
+            );
+        parts.insert("[Content_Types].xml".to_owned(), types.into_bytes());
+        parts
+    };
+    let tracked_body = r#"<w:p><w:ins w:id="1" w:author="A"><w:r><w:t>x</w:t></w:r></w:ins></w:p>"#;
+    let mut tracked_header = retyped("word/header1.xml", &p("Body"));
+    tracked_header.insert("word/header1.xml".to_owned(), tracked.as_bytes().to_vec());
+    for parts in [retyped("word/document.xml", tracked_body), tracked_header] {
+        let bytes = zip(&parts);
+        let (_, outcome) = compare(&bytes, &bytes, &options(""));
+        assert_eq!(
+            refused(&outcome),
+            vec![CompareDiagnosticCode::ExistingRevisions]
+        );
+    }
     let broken = with("word/extra.bin", "application/xml", "<unclosed>");
     let (_, outcome) = compare(&broken, &broken, &options(""));
     assert_eq!(refused(&outcome), vec![CompareDiagnosticCode::InvalidDocx]);
@@ -1324,17 +1351,37 @@ fn every_outcome_respects_the_result_limits() {
         serde_json::from_str(&applied.finish(&original, &limited.limits).unwrap()).unwrap();
     assert_eq!(result["ok"], false);
     assert_eq!(result["diagnostics"][0]["code"], "diagnostics-truncated");
-    let (_, outcome) = compare(&original, &revised, &options(""));
-    let CompareOutcome::Applied(applied) = outcome else {
-        panic!("expected changes");
-    };
-    let tiny = CompareLimits {
-        max_result_bytes: 16,
+    let within = |max_result_bytes: usize| CompareLimits {
+        max_result_bytes,
         ..options("").limits
     };
-    let result: serde_json::Value =
-        serde_json::from_str(&applied.fail("no space", &tiny).unwrap()).unwrap();
+    let source = parts(&[p("Alpha beta."), p("Gamma.")].concat());
+    let target = docx(&[p("Alpha gamma."), p("Gamma!")].concat());
+    let finish = |limits: &CompareLimits| {
+        let (_, outcome) = compare(&zip(&source), &target, &options(""));
+        let good = saved(&source, &outcome, faithful, plain);
+        let CompareOutcome::Applied(applied) = outcome else {
+            panic!("expected changes");
+        };
+        applied.finish(&good, limits).unwrap()
+    };
+    let full = finish(&within(usize::MAX));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&full).unwrap()["ok"],
+        true
+    );
+    let short = within(full.len() - 1);
+    let limited = finish(&short);
+    assert!(limited.len() <= short.max_result_bytes, "{limited}");
+    let result: serde_json::Value = serde_json::from_str(&limited).unwrap();
     assert_eq!(result["diagnostics"][0]["code"], "limit-exceeded");
+    let unchanged = CompareOutcome::Unchanged(Diagnostics::new(1, UnsupportedPolicy::Fail));
+    let full = unchanged.to_json(&within(usize::MAX)).unwrap();
+    let limited = unchanged.to_json(&within(full.len() - 1)).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&limited).unwrap()["diagnostics"][0]["code"],
+        "limit-exceeded"
+    );
 }
 
 fn styled(body: &str, styles: &str) -> BTreeMap<String, Vec<u8>> {

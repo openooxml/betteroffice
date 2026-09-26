@@ -72,8 +72,15 @@ pub(crate) struct InspectionBudget {
     pub text_units: usize,
 }
 
-/// Parses every XML part of `package`, refusing tracked changes and unreadable parts and charging
-/// paragraphs (per input) and text (combined) to `budget` as it reads.
+/// Whether `bytes` open like an XML document.
+fn looks_like_xml(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    bytes.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'<')
+}
+
+/// Parses every part of `package` that its content type or its content says is XML, refusing
+/// tracked changes and unreadable XML-typed parts and charging paragraphs (per input) and text
+/// (combined) to `budget` as it reads.
 pub(crate) fn scan(
     package: &Package,
     budget: &mut InspectionBudget,
@@ -82,13 +89,17 @@ pub(crate) fn scan(
     budget.paragraphs = budget.max_paragraphs;
     let name = package.name();
     for (path, bytes) in &package.parts {
-        let Some(content_type) = package.content_types.get(path) else {
-            continue;
-        };
-        if !is_xml(content_type) {
+        let typed = package
+            .content_types
+            .get(path)
+            .is_some_and(|content_type| is_xml(content_type));
+        if !typed && !looks_like_xml(bytes) {
             continue;
         }
         let Some(document) = parse(bytes, path) else {
+            if !typed {
+                continue;
+            }
             diagnostics.block(
                 CompareDiagnosticCode::InvalidDocx,
                 format!("{path} in the {name} document is not readable XML"),
