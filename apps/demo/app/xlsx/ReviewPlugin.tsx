@@ -58,7 +58,6 @@ function target(range: NonNullable<ReturnType<typeof selectedRange>>) {
   };
 }
 
-/** Reads the sheet catalog and a bounded selection with the version they were read at. */
 async function refresh(context: ReviewContext): Promise<void> {
   const range = selectedRange(context);
   const count = range
@@ -99,7 +98,6 @@ async function refresh(context: ReviewContext): Promise<void> {
   );
 }
 
-/** Fills the selected cells as one guarded batch. */
 async function markReviewed(
   context: ReviewContext,
 ): Promise<XlsxCommandResult> {
@@ -231,7 +229,6 @@ function SelectionOverlay({
   );
 }
 
-/** A small review aid built only from `@betteroffice/xlsx-react` exports. */
 export const reviewPlugin = defineXlsxPlugin<ReviewState>({
   id: REVIEW_PLUGIN_ID,
   createState: () => ({
