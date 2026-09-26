@@ -10295,7 +10295,14 @@ mod tests {
         let renderer = renderer();
         let theme = Theme::default();
         let resolved = |style: &TextStyle, fallback: RunProperties| {
-            let style = resolve_style(&renderer, &theme, style, Some(&fallback)).unwrap();
+            let style = resolve_style(
+                &renderer,
+                &theme,
+                style,
+                Some(&fallback),
+                &mut SubstitutionLog::default(),
+            )
+            .unwrap();
             kerned(style.kern_pt, style.font_size_pt)
         };
         let inherited = |size: f64, kern: Option<f64>| {
