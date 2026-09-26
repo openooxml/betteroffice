@@ -40,6 +40,18 @@ fn swatches(parts: &[Primitive]) -> Vec<(f32, f32, &str)> {
         .collect()
 }
 
+/// The value axis line: the leftmost vertical rule, as `(x, y, h)`.
+fn axis(parts: &[Primitive]) -> (f32, f32, f32) {
+    parts
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::Shape { x, y, w, h, .. } if *w == 0.0 && *h > 8.0 => Some((*x, *y, *h)),
+            _ => None,
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .unwrap()
+}
+
 fn text<'a>(parts: &'a [Primitive], value: &str) -> &'a PositionedTextLine {
     parts
         .iter()
@@ -54,7 +66,7 @@ fn text<'a>(parts: &'a [Primitive], value: &str) -> &'a PositionedTextLine {
 
 #[test]
 fn top_and_bottom_legends_reserve_their_own_rows() {
-    for (slide, y, plot_y) in [(0, 417.0, 124.0), (1, 131.0, 146.0)] {
+    for (slide, y, plot_y) in [(0, 417.0, 128.6), (1, 131.0, 150.6)] {
         let parts = chart(slide);
         let swatches = swatches(&parts);
         assert_eq!(swatches.len(), 2);
@@ -63,10 +75,10 @@ fn top_and_bottom_legends_reserve_their_own_rows() {
         assert!(swatches[0].0 < swatches[1].0);
         assert_eq!(swatches[0].2, "#6254E7");
         assert_eq!(swatches[1].2, "#1FA97A");
-        assert!(parts.iter().any(|primitive| matches!(primitive,
-            Primitive::Shape { x, y, w, h, .. }
-            if *x == 138.0 && *y == plot_y && *w == 0.0 && *h == 252.0
-        )));
+        let (x, top, h) = axis(&parts);
+        assert!((x - 143.62305).abs() < 0.001, "{x}");
+        assert!((top - plot_y).abs() < 0.001, "{top}");
+        assert!((h - 234.9).abs() < 0.001, "{h}");
         let title = text(&parts, "Revenue");
         assert!((title.x + title.width / 2.0 - 384.0).abs() < 0.001);
     }
@@ -95,13 +107,7 @@ fn a_large_legend_font_stays_between_the_title_and_plot() {
     let legend = text(&parts, "North");
     assert_eq!(legend.runs[0].font_size_px, 40.0);
     assert!(legend.y >= title.y + title.height);
-    let plot_top = parts
-        .iter()
-        .find_map(|primitive| match primitive {
-            Primitive::Shape { x, y, w, h, .. } if *x == 138.0 && *w == 0.0 && *h > 8.0 => Some(*y),
-            _ => None,
-        })
-        .unwrap();
+    let plot_top = axis(&parts).1;
     assert!(legend.y + legend.height <= plot_top);
 }
 
@@ -127,9 +133,10 @@ fn the_composed_chart_title_preserves_its_alignment() {
         } = primitive
         {
             let is_title = paragraphs[0].runs[0].text == "Revenue";
+            let centred = is_title || paragraphs[0].runs[0].text == "Q1";
             assert_eq!(
                 paragraphs[0].align,
-                Some(if is_title {
+                Some(if centred {
                     TextAlign::Center
                 } else {
                     TextAlign::Left

@@ -47,6 +47,19 @@ impl PptxRenderer {
             .map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = registerFallbackFont)]
+    pub fn register_fallback_font(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        bytes: &[u8],
+    ) -> Result<u32, JsValue> {
+        self.renderer
+            .register_fallback_font(family, bold, italic, bytes)
+            .map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = layoutSlideJson)]
     pub fn layout_slide_json(
         &mut self,
