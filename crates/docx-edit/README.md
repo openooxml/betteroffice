@@ -22,7 +22,8 @@ session version it was read at, and `apply_edits` resolves every step against
 that version, stages the whole batch on a private clone, and adopts it as one
 transaction (one undo step by default) or returns an `EditRefusal` with the
 document, history and id allocation untouched. `validate_edits` runs the same
-checks without changing anything.
+checks without changing anything. The operation, target, failure-code and atom
+enums are `#[non_exhaustive]`, so later releases can add variants.
 
 `structured` exports read-only structured content and Markdown in schema
 version 1: `EditingDoc::export_structured` and `export_markdown` read a live

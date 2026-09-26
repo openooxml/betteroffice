@@ -75,6 +75,7 @@ pub struct TextRange {
 /// Where a search looks.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum SearchScope {
     Story { story: String },
     Paragraph(ParagraphTarget),
@@ -83,6 +84,7 @@ pub enum SearchScope {
 /// The text a step addresses.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum TextTarget {
     /// The paragraph's whole accepted-view text.
     Paragraph(ParagraphTarget),
@@ -99,6 +101,7 @@ pub enum TextTarget {
 /// What an inline atom in projected text stands for.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum AtomKind {
     LineBreak,
     Image,
