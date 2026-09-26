@@ -1,5 +1,50 @@
 # @betteroffice/pptx-react
 
+## 0.2.0
+
+### Minor Changes
+
+- 2eb2c55: Expose host save interception, awaited input flushing, and pointer position queries. Add manual undo capture, explicit boundaries, and undoable comment repositioning.
+- 3d77b4f: Add host-controlled viewing mode, initial slide selection, and imperative slide and text navigation APIs.
+- 911a294: Insert a picture onto a slide from the editor. The image mints its own media part, content-type default and relationship on save; `PptxEditor` gains a small "Insert image" icon button next to the text-box tool, and `PresentationHandle` gains `addPicture`. Unsupported MIME types and images over 8 MiB are rejected before the picture reaches the deck, keeping oversized bytes out of collaboration updates.
+- 911a294: Reorder a shape's paint order on its slide: bring to front, send to back, and step it forward or backward. `PresentationHandle` gains `bringShapeToFront`, `sendShapeToBack`, `bringShapeForward` and `sendShapeBackward`, and `PptxEditor`'s shape-formatting toolbar gains an "Arrange" menu for them.
+- 8a5e6b8: Render PPTX pictures stored as SVG in both backends. The browser packages decode them with the browser's own SVG support, and the Rust and Python `render_png` paths rasterize them natively: shapes, paths, fills, strokes, gradients, clip paths, `<use>` and class-based stylesheets draw, under a sandbox that budgets the cost of expanding and painting a document before any of it runs. A tiled SVG repeats at its intrinsic size.
+
+### Patch Changes
+
+- 5114756: Drag and resize placeholders that take their geometry from the layout or master, from the frame they are drawn in, and draw them with the rotation and flips they inherit. The snapshot carries that geometry as `inherited`; the first `moveShape`, `resizeShape` or `setShapeRect` makes the whole transform the placeholder's own, so it keeps its size and orientation live and after a save. The Rust crates add `Placeholder::matches`, the placeholder matching that rendering and editing share, and the facade re-exports `InheritedGeometry`.
+- Updated dependencies [80341ac]
+- Updated dependencies [6963a67]
+- Updated dependencies [3fb2bf7]
+- Updated dependencies [c02a145]
+- Updated dependencies [030505a]
+- Updated dependencies [8e8f97a]
+- Updated dependencies [030505a]
+- Updated dependencies [9e2c648]
+- Updated dependencies [3e0c311]
+- Updated dependencies [2eb2c55]
+- Updated dependencies [5114756]
+- Updated dependencies [911a294]
+- Updated dependencies [030505a]
+- Updated dependencies [6963a67]
+- Updated dependencies [58f9bfb]
+- Updated dependencies [60c79dd]
+- Updated dependencies [7f158c7]
+- Updated dependencies [911a294]
+- Updated dependencies [6963a67]
+- Updated dependencies [27bf1fc]
+- Updated dependencies [e0d12f3]
+- Updated dependencies [18e1f32]
+- Updated dependencies [d76b4db]
+- Updated dependencies [8a5e6b8]
+- Updated dependencies [c5f1467]
+- Updated dependencies [ab3d722]
+- Updated dependencies [030505a]
+- Updated dependencies [af6292e]
+- Updated dependencies [1f84618]
+  - @betteroffice/pptx@0.2.0
+  - @betteroffice/pptx-i18n@0.2.0
+
 ## 0.1.1
 
 ### Patch Changes

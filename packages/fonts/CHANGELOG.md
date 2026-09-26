@@ -1,5 +1,11 @@
 # @betteroffice/fonts
 
+## 0.3.0
+
+### Minor Changes
+
+- 2e47c0a: fonts: ship Inter, Roboto, Source Sans 3, DM Sans, Open Sans, Montserrat, Poppins, Oswald, Heebo and DM Serif Display, plus Gelasio for Georgia and Comic Relief for Comic Sans MS, so decks written in them draw in their own faces.
+
 ## 0.2.0
 
 ### Minor Changes

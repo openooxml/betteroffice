@@ -1,5 +1,81 @@
 # @betteroffice/pptx
 
+## 0.2.0
+
+### Minor Changes
+
+- 80341ac: Expose opt-in operation profiles for XLSX edits and display lists, and PPTX layout, edits, and history operations.
+- 2eb2c55: Expose host save interception, awaited input flushing, and pointer position queries. Add manual undo capture, explicit boundaries, and undoable comment repositioning.
+- 911a294: Insert a picture onto a slide from the editor. The image mints its own media part, content-type default and relationship on save; `PptxEditor` gains a small "Insert image" icon button next to the text-box tool, and `PresentationHandle` gains `addPicture`. Unsupported MIME types and images over 8 MiB are rejected before the picture reaches the deck, keeping oversized bytes out of collaboration updates.
+- 911a294: Reorder a shape's paint order on its slide: bring to front, send to back, and step it forward or backward. `PresentationHandle` gains `bringShapeToFront`, `sendShapeToBack`, `bringShapeForward` and `sendShapeBackward`, and `PptxEditor`'s shape-formatting toolbar gains an "Arrange" menu for them.
+- 8a5e6b8: Render PPTX pictures stored as SVG in both backends. The browser packages decode them with the browser's own SVG support, and the Rust and Python `render_png` paths rasterize them natively: shapes, paths, fills, strokes, gradients, clip paths, `<use>` and class-based stylesheets draw, under a sandbox that budgets the cost of expanding and painting a document before any of it runs. A tiled SVG repeats at its intrinsic size.
+- ab3d722: Add a format-owned text search API to presentation handles.
+
+### Patch Changes
+
+- 6963a67: Honour `a:normAutofit` the way PowerPoint renders it: the stored `fontScale` is applied verbatim and `lnSpcReduction` is subtracted from percentage line spacing — including the implicit single-spaced default — so shrink-to-fit bodies keep PowerPoint's font size and line pitch instead of being re-fitted at render time.
+- 3fb2bf7: Number `a:buAutoNum` paragraphs as one list when they repeat the same `startAt`: PowerPoint writes a list's start on every one of its paragraphs, so a four-item list marked `startAt="4"` now draws 4, 5, 6, 7 and one marked `startAt="1"` draws a), b), c). A paragraph that declares a different start still opens a new list.
+- c02a145: Paint slide background pictures and honour `p:sld/@showMasterSp` on the layout. A `p:bg` declaring a `a:blipFill`, or a `p:bgRef` resolving to one through the theme's `a:bgFillStyleLst`, now paints as a full-slide image instead of a flat grey, and `p:bgRef` resolves the referenced fill style rather than only its colour override. A slide that turns off master shapes also drops the layout's own decoration, which is what PowerPoint draws, since the master reaches the slide through the layout.
+- 030505a: pptx: resolve PowerPoint's built-in table styles, and stop dressing a table in
+  the one `tableStyles.xml` only nominates. `ppt/tableStyles.xml` carries the
+  styles a deck edited, so a table naming a style PowerPoint has never had to
+  write out — `{5C22544A…}` "Medium Style 2 - Accent 1" above all, the default
+  every new table and every python-pptx table takes — found nothing and rendered
+  as bare text on the slide background: no header fill, no banding, no borders,
+  no white bold header. 17 of the 59 tables in the 103-deck corpus, across 11
+  decks, name a style their own package never defines. Three of those styles are
+  now resolved from a built-in catalogue, transcribed from the definitions
+  PowerPoint itself serialises when a deck does edit them. Separately, the
+  `def` attribute names the style the authoring UI hands a _new_ table, not a
+  fallback for one that names none, so a table with an empty `a:tblPr` no longer
+  picks it up: `pptarena-010` was painting ten converted forms in `accent1`
+  tint 20% where PowerPoint leaves them white.
+
+  On the 103-deck fidelity corpus (101 scored, 1,033 pages) the mean rises
+  0.89784 to 0.89900, +0.00116; 9 decks improve, led by `pptarena-061` +0.04292,
+  `pptarena-071` +0.03352 and `pptarena-025` +0.02781, with no deck regressing,
+  92 of 101 decks byte-identical, and page counts exact in both arms.
+
+- 8e8f97a: Render EMF pictures that wrap a bitmap: `presentationImageBlob` unwraps an enhanced metafile whose only ink is one unscaled `EMR_STRETCHDIBITS` covering its bounds into the BMP it carries, alongside the bitmap-only WMF wrappers already handled. The blit must be an unrotated, uncropped `SRCCOPY` of a `BI_RGB` DIB that fills the metafile frame; metafiles carrying vector ink, a second blit or a scaled source stay untouched.
+- 030505a: pptx: an empty paragraph now takes the height its own `a:endParaRPr` asks for. Empty paragraphs are how authors write vertical spacers, and PowerPoint sizes each one from the run properties it carries; the renderer read the size the shape's list style would have given a run instead, so on `pptarena-042` a 40pt spacer was drawn at the 211.2pt title default — 5.28 times too tall — and the error accumulated down the body until text left its placeholder and crossed the footer. The property was parsed and never read. It is now resolved through the same slide/layout/master cascade the rest of the paragraph properties already use, so it reaches text that arrives as a collaborative story as well as text read straight from the package, and a paragraph without one keeps the size it inherits today. On the 103-deck fidelity corpus (101 scored, 1,033 pages) the mean rises 0.89198 to 0.89765, +0.00568; 42 decks improve, led by `pptarena-052` +0.1101, `pptarena-055` +0.0736 and `pptarena-042` +0.0625, and one deck moves -0.000042 while its text lands 4px closer to PowerPoint.
+- 9e2c648: Expose when an unsupported PowerPoint preset geometry is rendered with a rectangular fallback.
+- 3e0c311: Measure the `hexagon`, `parallelogram`, `trapezoid` and `octagon` adjust against the shortest side, and pin it at the spec's aspect-scaled maximum, so wide shapes no longer draw their slant or corner at a fraction of the width. The trapezoid defaults to the spec's 25000, and the hexagon honours its `vf` height factor, pinned so the corners stay on the frame.
+- 5114756: Drag and resize placeholders that take their geometry from the layout or master, from the frame they are drawn in, and draw them with the rotation and flips they inherit. The snapshot carries that geometry as `inherited`; the first `moveShape`, `resizeShape` or `setShapeRect` makes the whole transform the placeholder's own, so it keeps its size and orientation live and after a save. The Rust crates add `Placeholder::matches`, the placeholder matching that rendering and editing share, and the facade re-exports `InheritedGeometry`.
+- 030505a: pptx: a picture stored as an EMF metafile now draws when the file sets a clip. The metafile player treated any unlisted record as fatal and abandoned the whole drawing, so a single `EXTSELECTCLIPRGN` — record 12 of a typical file, and a no-op where every corpus occurrence resets to the default region — silently blanked the picture. Rectangular clips are now tracked on the device context, survive `SAVEDC`/`RESTOREDC`, and narrow the shape they draw into; a clip the player cannot represent still refuses the drawing, so nothing paints unclipped. 18 of 69 corpus metafiles decode where 10 did before, and on the 103-deck fidelity corpus `pptarena-042` moves 0.7229 to 0.8451 with no deck regressing.
+- 6963a67: Open `spcBef` and `spcAft` percentages over a single line rather than the bare text size, the base PowerPoint measures them against, so the stock Office master's 20% gap sits where PowerPoint puts it between bulleted paragraphs.
+- 58f9bfb: Render arc, cube, leftBrace, rightBrace, wedgeRectCallout, ribbon2, swooshArrow, and circularArrow with their PowerPoint geometry. Preserve separate fills, shaded faces, and open outlines; complete cloud callout details and folded-corner shading, use circular rounded-rectangle corners, and honor stroke joins in browser and native rendering.
+
+  Expose `geometryFallback: true` when unsupported geometry is replaced by a rectangle, including picture fills and masks.
+
+- 60c79dd: Draw eleven more PowerPoint preset shapes. `donut`, `noSmoking`, `corner`, `foldedCorner`, `mathMultiply`, `bentArrow`, `ribbon`, `ellipseRibbon`, `cloudCallout`, `wedgeEllipseCallout` and `wedgeRoundRectCallout` fell back to a plain rectangle; they now follow their ECMA-376 definitions, including the elliptical arcs `arcTo` measures by polar angle rather than by ellipse parameter.
+- 7f158c7: Support `a:rPr/@cap`, so a run that asks for all caps or small caps is drawn that way. `all` uppercases the run for drawing and `small` also draws the lowercase stretches at Word's 0.8× small-cap size; `none` turns off an inherited setting. The value cascades from a slide master's and layout's `a:defRPr` the way the other run properties do, and the uppercasing itself is now shared with DOCX rather than reimplemented. Casing is a display property: the stored run text keeps the author's casing, so the editor's story, the caret offsets it reports and the saved package are all unchanged — an untouched deck still saves byte-identically. Measured against the PPTArena corpus tail, where `cap="all"` reaches titles in `pptarena-051`, `pptarena-052`, `pptarena-054` and body runs in `pptarena-034`.
+- 6963a67: Measure a single-spaced PowerPoint line as 1.2 em of the line's largest font, the pitch PowerPoint 16.113 uses for every face, so percentage line spacing no longer inherits the substituted face's own ascent, descent and line gap and multi-line bodies stop drifting away from PowerPoint down the shape. Super- and subscript ink still pushes the line box out past that pitch.
+- 27bf1fc: Resolve `tx1`/`bg1`/`tx2`/`bg2` scheme colours through the slide's colour map: the master's `p:clrMap` and any `p:clrMapOvr/a:overrideClrMapping` on its layout or the slide itself now decide which `a:clrScheme` slot each name reaches, so dark-master decks paint their backgrounds, shape fills and text the way PowerPoint does. One shared resolver feeds the render, snapshot and save projections, so they cannot disagree about a slot.
+- e0d12f3: Render a slide at the page extent PowerPoint exports. A slide's page box is a whole number of points, so `p:sldSz` snaps there before the pixel scale, and the canvas backing store now covers a fractional extent by rounding up, matching what the raster path already does. An A4 deck whose `p:sldSz` is 10691813×7559675 EMU renders 1755×1240 px at 150 DPI, the size of PowerPoint's own PDF page, instead of coming up a pixel short.
+- 18e1f32: Draw star presets with the spec's inner radius, per-preset default adjustment, and frame-filling radius factors.
+- d76b4db: Resolve pictures stored only as SVG: a blip with no `r:embed` of its own takes its media from the Office SVG extension (`asvg:svgBlip`), for pictures and shape picture fills alike. A blip that carries both keeps its raster image.
+- c5f1467: Draw the shape a Wingdings, Wingdings 2, Wingdings 3 or Webdings `a:buChar` addresses. Those faces reach their glyphs by font position, through a private-use cmap at `U+F0xx` or the raw byte, so the character a deck stores for one of them names a slot rather than the character to draw. Each slot now resolves to the nearest Unicode character the bundled faces cover — circles, squares, hollow boxes, diamonds, and the solid triangles and arrowheads — with a plain bullet standing in for a slot that has no covered equivalent. The shapes come from the faces' own glyph names and the sizes from matching each glyph's ink width against the candidates', confirmed against PowerPoint's own render of the corpus decks. An `a:buChar` under a text face, or one that is already a real Unicode character, is drawn exactly as authored.
+- 030505a: pptx: a tab in slide text now advances to a tab stop. Text layout had no notion
+  of tabs at all, so a `U+0009` went to the shaper like any other character and
+  came back as the fallback face's `.notdef` — a box where that face draws one,
+  nothing where it does not, and in both cases an advance that owed nothing to the
+  stops the file declares. Tabbed columns collapsed into the run before them, and
+  the wrong width moved the wrap point and grew the table row around it.
+  `a:pPr/@defTabSz` and `a:pPr/a:tabLst` are now read and inherited through the
+  same slide/layout/master cascade the other paragraph properties use, and a tab
+  takes the first declared stop past the pen or, failing that, the next multiple
+  of the default pitch — one inch when nothing declares one — measured from the
+  text area's left edge, painting no glyph and never reaching past the line. A
+  hanging indent adds the implicit stop at the paragraph margin that its first tab
+  lands on; a marker already owns that space here, so only an unmarked hanging
+  indent has any. 20 of the 103 corpus decks carry tab characters, 17 of them on
+  slides. On the 103-deck fidelity corpus (101 scored, 1,033 pages) the mean rises
+  0.89765 to 0.89784, +0.00019; 16 decks improve, led by `pptarena-033` +0.00695,
+  `pptarena-050` +0.00325, `pptarena-043` +0.00282 and `pptarena-010` +0.00181,
+  with no deck regressing and page counts exact in both arms.
+- af6292e: pptx: a slide whose background fill is fully transparent now renders on white paper instead of leaving the page unpainted. A master declaring `solidFill` at `alpha="0"` produced a paint rather than no paint, so the existing white fallback never fired and the slide came out as a hole onto whatever sat behind the canvas — which a PNG export then flattened to black. PowerPoint paints those slides white.
+- 1f84618: Render slides that carry a picture the browser cannot decode: `paintSlide` treats a rejected `resolveImage` as an unresolved picture, so the remaining primitives on that slide, and every later slide, still paint. A resolver that rejects — `createImageBitmap` raises `InvalidStateError: The source image could not be decoded` for EMF, vector WMF and other media no browser decodes — previously rejected the whole `paintSlide` call, blanking the slide. The picture's own outline still strokes, matching an unresolved asset.
+
 ## 0.1.1
 
 ## 0.1.0
