@@ -90,11 +90,11 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with opt-in operation timings.",
+    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with version-checked atomic cell batches and opt-in operation timings.",
   },
   {
     name: "@betteroffice/xlsx-react",
-    desc: "The spreadsheet editor as a drop-in React component.",
+    desc: "The spreadsheet editor as a drop-in React component, with version-checked edit batches that flush pending input first.",
   },
   {
     name: "@betteroffice/pptx",

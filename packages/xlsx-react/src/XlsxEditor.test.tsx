@@ -1090,3 +1090,290 @@ describe('XlsxEditor pending host edits', () => {
     expect(api!.handle.cell(0, target.row, target.col).input).toBe('Second draft');
   });
 });
+
+describe('XlsxEditor edit batches', () => {
+  async function mountApi(props: { readOnly?: boolean; onChange?: () => void } = {}) {
+    let api: XlsxEditorApi | undefined;
+    const file = plain.bytes.slice();
+    const onReady = (ready: XlsxEditorApi) => {
+      api = ready;
+    };
+    const view = render(<XlsxEditor file={file} onReady={onReady} {...props} />);
+    await waitFor(() => expect(api).toBeDefined());
+    return { view, api: api!, file, onReady };
+  }
+
+  async function settled<T>(call: () => Promise<T>): Promise<T> {
+    let value!: T;
+    await act(async () => {
+      value = await call();
+    });
+    return value;
+  }
+
+  const failed = (call: () => Promise<unknown>) =>
+    settled(() => call().then(() => null, (error: unknown) => error));
+
+  const setB3 = (expectVersion: string, value: string) => ({
+    expectVersion,
+    steps: [
+      {
+        op: 'setCellInputs' as const,
+        target: { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'B3' } },
+        inputs: [[value]],
+      },
+    ],
+  });
+
+  function deferredClipboard() {
+    let resolve!: (text: string) => void;
+    const text = new Promise<string>((done) => {
+      resolve = done;
+    });
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: () => text },
+    });
+    return {
+      resolve,
+      restore: () => {
+        if (original) Object.defineProperty(navigator, 'clipboard', original);
+        else Reflect.deleteProperty(navigator, 'clipboard');
+      },
+    };
+  }
+
+  it('commits drafts first, applies against the caller version and notifies once', async () => {
+    let changes = 0;
+    const { view, api } = await mountApi({ onChange: () => changes++ });
+    const target = { row: 2, col: 1 };
+    await act(async () => {
+      api.selectCells(0, selectionAt(target));
+    });
+    fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
+    fireEvent.change(await waitFor(() => view.getByTestId('xlsx-cell-editor')), {
+      target: { value: '321' },
+    });
+    const beforeDraft = api.handle.version();
+
+    const version = await settled(() => api.version());
+    expect(api.handle.cell(0, 2, 1).input).toBe('321');
+    expect(version).not.toBe(beforeDraft);
+    expect(changes).toBe(1);
+
+    const stale = await settled(() => api.applyEdits(setB3(beforeDraft, '999')));
+    expect(stale.ok).toBe(false);
+    if (!stale.ok) expect(stale.failure.code).toBe('stale-version');
+    expect(changes).toBe(1);
+
+    const result = await settled(() => api.applyEdits(setB3(version, '4242')));
+    expect(result.ok && result.applied).toBe(true);
+    expect(changes).toBe(2);
+    await waitFor(() =>
+      expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('4242')
+    );
+    const read = await settled(() =>
+      api.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'D3' } }] })
+    );
+    expect(read.ok && read.ranges[0].cells[0][0].displayText).toBe('4299');
+  });
+
+  it('waits for a paste in flight before applying', async () => {
+    const clipboard = deferredClipboard();
+    try {
+      const { view, api } = await mountApi();
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 2, col: 1 }));
+      });
+      const version = await settled(() => api.version());
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      const result = await settled(async () => {
+        const pending = api.applyEdits(setB3(version, 'batch'));
+        clipboard.resolve('pasted');
+        return pending;
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.failure.code).toBe('stale-version');
+      expect(api.handle.cell(0, 2, 1).input).toBe('pasted');
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('rejects when the workbook is replaced while input is flushing', async () => {
+    const clipboard = deferredClipboard();
+    try {
+      const { view, api, onReady } = await mountApi();
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 2, col: 1 }));
+      });
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      const outcome = api.applyEdits(setB3(api.handle.version(), 'batch')).then(
+        () => null,
+        (error: unknown) => error
+      );
+      view.rerender(<XlsxEditor file={plain.bytes.slice()} onReady={onReady} />);
+      await act(async () => clipboard.resolve('late'));
+      expect(String(await settled(() => outcome))).toMatch(/changed while flushing/);
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('keeps an unsettled paste on the workbook it was accepted for', async () => {
+    const clipboard = deferredClipboard();
+    try {
+      const { view, api } = await mountApi();
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 2, col: 1 }));
+      });
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      const outcome = api.version().then(
+        () => null,
+        (error: unknown) => error
+      );
+      let current = api;
+      view.rerender(
+        <XlsxEditor
+          file={plain.bytes.slice()}
+          onReady={(ready) => {
+            current = ready;
+          }}
+        />
+      );
+      await waitFor(() => expect(current).not.toBe(api));
+      expect(await settled(() => current.version())).toBe(current.handle.version());
+      expect(String(await settled(() => outcome))).toMatch(/changed while flushing/);
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  function deferredClipboardWrite() {
+    let settle!: () => void;
+    const written = new Promise<void>((done) => {
+      settle = done;
+    });
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: () => written },
+    });
+    return {
+      settle,
+      restore: () => {
+        if (original) Object.defineProperty(navigator, 'clipboard', original);
+        else Reflect.deleteProperty(navigator, 'clipboard');
+      },
+    };
+  }
+
+  it('clears the accepted cut target once the clipboard write settles', async () => {
+    const clipboard = deferredClipboardWrite();
+    try {
+      const { view, api } = await mountApi();
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 2, col: 1 }));
+      });
+      const version = await settled(() => api.version());
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 3, col: 1 }));
+      });
+      const result = await settled(async () => {
+        const pending = api.applyEdits(setB3(version, 'batch'));
+        clipboard.settle();
+        return pending;
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.failure.code).toBe('stale-version');
+      expect(api.handle.cell(0, 2, 1).input).toBe('');
+      expect(api.handle.cell(0, 3, 1).input).toBe('200');
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('drops a deferred cut when the workbook is replaced or turns read-only', async () => {
+    for (const change of ['replace', 'readOnly'] as const) {
+      const clipboard = deferredClipboardWrite();
+      try {
+        const { view, api, file, onReady } = await mountApi();
+        await act(async () => {
+          api.selectCells(0, selectionAt({ row: 2, col: 1 }));
+        });
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
+        let current = api;
+        const swap = (ready: XlsxEditorApi) => {
+          current = ready;
+        };
+        if (change === 'replace') {
+          view.rerender(<XlsxEditor file={plain.bytes.slice()} onReady={swap} />);
+          await waitFor(() => expect(current).not.toBe(api));
+        } else {
+          view.rerender(<XlsxEditor file={file} onReady={onReady} readOnly />);
+        }
+        await act(async () => clipboard.settle());
+        expect(current.handle.cell(0, 2, 1).input).toBe('100');
+      } finally {
+        clipboard.restore();
+        cleanup();
+      }
+    }
+  });
+
+  it('refuses a write when the editor turns read-only while input flushes', async () => {
+    const clipboard = deferredClipboard();
+    try {
+      const { view, api, file, onReady } = await mountApi();
+      await act(async () => {
+        api.selectCells(0, selectionAt({ row: 2, col: 1 }));
+      });
+      const version = await settled(() => api.version());
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      const outcome = api.applyEdits(setB3(version, 'batch'));
+      view.rerender(<XlsxEditor file={file} onReady={onReady} readOnly />);
+      await act(async () => clipboard.resolve('late'));
+      const result = await settled(() => outcome);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.failure.code).toBe('read-only');
+      expect(api.handle.cell(0, 2, 1).input).toBe('100');
+    } finally {
+      clipboard.restore();
+    }
+  });
+
+  it('refuses writes while read-only and waits out text composition', async () => {
+    const readOnly = await mountApi({ readOnly: true });
+    const readVersion = await settled(() => readOnly.api.version());
+    const refusals = [
+      await settled(() => readOnly.api.validateEdits(setB3(readVersion, '1'))),
+      await settled(() => readOnly.api.applyEdits(setB3(readVersion, '1'))),
+    ];
+    for (const refused of refusals) {
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.failure.code).toBe('read-only');
+    }
+    const found = await settled(() => readOnly.api.findText({ text: 'Quarterly' }));
+    expect(found.ok).toBe(true);
+    cleanup();
+
+    const { view, api } = await mountApi();
+    const target = { row: 2, col: 1 };
+    await act(async () => {
+      api.selectCells(0, selectionAt(target));
+    });
+    fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
+    const editor = await waitFor(() => view.getByTestId('xlsx-cell-editor'));
+    fireEvent.compositionStart(editor);
+    const composing = await failed(() => api.applyEdits(setB3(api.handle.version(), '1')));
+    expect(String(composing)).toMatch(/composition/);
+    fireEvent.compositionEnd(editor);
+    fireEvent.change(editor, { target: { value: '55' } });
+    const version = await settled(() => api.version());
+    expect(api.handle.cell(0, 2, 1).input).toBe('55');
+    const validated = await settled(() => api.validateEdits(setB3(version, '66')));
+    expect(validated.ok && validated.wouldApply).toBe(true);
+  });
+});

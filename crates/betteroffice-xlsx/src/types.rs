@@ -10,6 +10,9 @@ use xlsx_ops::{
 pub enum UpdateOrigin {
     Local,
     Remote,
+    /// Recalculation alone changed values; the shared document did not change, so `update`
+    /// is empty and is not for peers.
+    Recalculation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

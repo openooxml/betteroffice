@@ -35,6 +35,28 @@ unmodified row, column, and cell markup. Worksheets with missing or out-of-order
 row or cell addresses, and worksheets reconstructed from collaboration updates,
 are serialized from the model instead.
 
+`Workbook::read_cells`, `find_text`, `validate_edits` and `apply_edits` take the
+same serializable requests as JavaScript and Python. A batch commits every step
+as one recalculated change, or returns an `EditRefusal` with the workbook
+untouched:
+
+```rust
+use betteroffice_xlsx::{EditRequest, Workbook};
+
+let request: EditRequest = serde_json::from_value(serde_json::json!({
+    "expectVersion": workbook.version(),
+    "steps": [{
+        "op": "setCellInputs",
+        "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "B3" } },
+        "inputs": [["120"]],
+    }],
+}))?;
+match workbook.apply_edits(&request)? {
+    Ok(applied) => println!("now at {}", applied.version),
+    Err(refused) => println!("refused: {:?}", refused.failure.code),
+}
+```
+
 `Workbook::edit_cell_profiled` and `apply_ops_profiled` return the usual edit
 outcome with an `EditProfile`. Supply a monotonic clock reporting milliseconds
 to collect validate, apply, recalculation, and result-building durations. Normal
@@ -114,7 +136,7 @@ XML. The ZIP container is rebuilt, so the complete file may differ byte for byte
 | Crate | What it is |
 | --- | --- |
 | `betteroffice-docx` | Typed native API for opening, editing, laying out, and saving DOCX documents. |
-| `betteroffice-xlsx` | Typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks. |
+| `betteroffice-xlsx` | Typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks, including version-checked atomic cell batches. |
 | `betteroffice-pptx` | Typed native API for opening, editing, collaborating on, and rendering PPTX presentations. |
 
 ## The layers

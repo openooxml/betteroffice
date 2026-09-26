@@ -63,6 +63,7 @@ edits), `collaboration`, `i18n`, and `className`.
 - Cell editing with formula recalculation of dependents on every edit
 - Editing toolbar: number formats, fonts, colors, borders, alignment, merges
 - Agent proposals: in-cell tracked-change ghosts plus an accept/reject panel
+- Version-checked edit batches through `onReady`, after pending input commits
 - TSV clipboard copy/paste
 - Accessible grid mirroring the painted canvas for screen readers
 - Localized UI via the `i18n` prop
@@ -92,6 +93,42 @@ import type { XlsxEditorApi } from "@betteroffice/xlsx-react";
   }}
 />;
 ```
+
+## Edit batches
+
+The `onReady` API's `version`, `readCells`, `findText`, `validateEdits` and
+`applyEdits` first commit pending input — cell and formula drafts, chart nudges
+and clipboard pastes in flight — and reject while text composition or a chart
+drag is unfinished or the workbook is replaced meanwhile. `applyEdits` keeps the
+caller's `expectVersion`, so input that lands first refuses the batch with
+`stale-version`; read the version through the API to include it. While
+`readOnly`, writes refuse with `read-only`. An applied batch repaints once and
+calls `onChange` once.
+
+```tsx
+<XlsxEditor
+  file={file}
+  onReady={(api: XlsxEditorApi) => {
+    void (async () => {
+      const version = await api.version();
+      const result = await api.applyEdits({
+        expectVersion: version,
+        steps: [
+          {
+            op: "setCellInputs",
+            target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } },
+            inputs: [["120"]],
+          },
+        ],
+      });
+      if (!result.ok) console.warn(result.failure.code);
+    })();
+  }}
+/>;
+```
+
+See [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) for
+the step vocabulary and its limits.
 
 ## Collaboration
 
