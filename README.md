@@ -49,6 +49,11 @@
 - **Host-controlled DOCX saving.** Intercept Save before export and await pending
   editor input before reading, changing, or persisting the document.
 
+- **DOCX paragraph anchors that survive saving.** Paragraphs authored in a session
+  save with valid Word paragraph IDs, and each saved paragraph's anchor, qualified by
+  its package part, resolves again after reopening. Source paragraphs without an ID
+  gain one only when the host opts in.
+
 - **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
   paragraphs with a session version, then apply atomic text and paragraph
   batches that commit as one undo step or return a typed refusal with nothing

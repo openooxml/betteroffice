@@ -7,11 +7,12 @@ use docx_edit::{
     AtomKind, ChangeTarget, DocumentVersion, EditApplication, EditCtx, EditFailureCode, EditGuard,
     EditHistory, EditOperation, EditRefusal, EditRequest, EditSource, EditStep, EditSuggestion,
     EditTarget, EditTextView, EditingDoc, FindTextRequest, FormatPolicy, ParaAttrDelta,
-    ParaSelector, ParagraphInput, ParagraphTarget, Position, RawOp, ReadParagraphsRequest,
-    SearchScope, SegmentContent, StoryRange, TargetEdge, TextPosition, TextRange, TextTarget,
-    UndoCaptureMode, UndoSession, seed_from_docx,
+    ParaSelector, ParagraphIdOrigin, ParagraphIdentity, ParagraphInput, ParagraphOrigin,
+    ParagraphRef, ParagraphTarget, Position, RawOp, ReadParagraphsRequest, SearchScope,
+    SegmentContent, StoryRange, TargetEdge, TextPosition, TextRange, TextTarget, UndoCaptureMode,
+    UndoSession, seed_from_docx,
 };
-use yrs::Any;
+use yrs::{Any, Map, MapPrelim, ReadTxn, Text, TextRef, Transact};
 
 const NS: &str = concat!(
     r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
@@ -28,6 +29,11 @@ const STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Nor
 const DATE: &str = "2026-09-24T12:00:00Z";
 
 fn docx(body: &str) -> Vec<u8> {
+    with_comment(body, "<w:p><w:r><w:t>Remark</w:t></w:r></w:p>")
+}
+
+/// A package whose one comment holds `comment`, retained outside every story.
+fn with_comment(body: &str, comment: &str) -> Vec<u8> {
     let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/><Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>"#;
     let root_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
     let rel = |id: &str, kind: &str, target: &str| {
@@ -53,7 +59,7 @@ fn docx(body: &str) -> Vec<u8> {
         r#"<w:footnotes {NS}><w:footnote w:id="1"><w:p><w:r><w:t>Note text</w:t></w:r></w:p></w:footnote></w:footnotes>"#
     );
     let comments = format!(
-        r#"<w:comments {NS}><w:comment w:id="9" w:author="Ann" w:date="{DATE}"><w:p><w:r><w:t>Remark</w:t></w:r></w:p></w:comment></w:comments>"#
+        r#"<w:comments {NS}><w:comment w:id="9" w:author="Ann" w:date="{DATE}">{comment}</w:comment></w:comments>"#
     );
     let styles = format!(r#"<w:styles {NS}>{STYLES}</w:styles>"#);
     ooxml_opc::rezip_parts(&[
@@ -96,8 +102,12 @@ const RAW: &str = r#"<bofx:block bofx:value="opaque"/>"#;
 const TAB: &str = "<w:r><w:tab/></w:r>";
 
 fn open(body: &str) -> EditingDoc {
+    open_package(&docx(body))
+}
+
+fn open_package(bytes: &[u8]) -> EditingDoc {
     let doc = EditingDoc::new(7001);
-    seed_from_docx(&doc, &docx(body)).unwrap();
+    seed_from_docx(&doc, bytes).unwrap();
     doc
 }
 
@@ -344,6 +354,20 @@ fn type_text(doc: &EditingDoc, undo: &UndoSession, id: &str, text: &str) {
 /// The next id a document mints, observed through a throwaway story.
 fn next_minted_id(doc: &EditingDoc, story: &str) -> String {
     doc.create_story(story, "", "Normal", "left").unwrap()
+}
+
+/// Inserts a body paragraph keyed `key`, bypassing the duplicate repair every editing path runs.
+fn duplicate_key(doc: &EditingDoc, key: &str) {
+    let mut txn = doc.yrs_doc().transact_mut();
+    let body: TextRef = txn
+        .get_map("stories")
+        .and_then(|stories| stories.get(&txn, "body"))
+        .unwrap()
+        .cast()
+        .unwrap();
+    let pilcrow = body.insert_embed(&mut txn, 0, MapPrelim::default());
+    pilcrow.insert(&mut txn, "_kind", "pilcrow");
+    pilcrow.insert(&mut txn, "paraId", key);
 }
 
 #[test]
@@ -743,17 +767,7 @@ fn targets_fail_as_typed_data() {
         p("000000DD", &r("first")),
         p("00000003", &r("plain text"))
     ));
-    doc.apply_raw_ops(
-        "body",
-        vec![RawOp::InsertEmbed {
-            index: 0,
-            kind: "pilcrow".to_owned(),
-            payload: vec![("paraId".to_owned(), Any::from("000000DD"))],
-            attrs: Default::default(),
-        }],
-        &EditCtx::local("", ""),
-    )
-    .unwrap();
+    duplicate_key(&doc, "000000DD");
     assert_eq!(
         code(&doc, vec![replace(search("x", "missing"), "y")]),
         EditFailureCode::MissingTarget
@@ -1879,17 +1893,7 @@ fn story_searches_refuse_matches_in_duplicated_paragraph_ids() {
         p("000000DD", &r("unique words")),
         p("00000003", &r("other"))
     ));
-    doc.apply_raw_ops(
-        "body",
-        vec![RawOp::InsertEmbed {
-            index: 0,
-            kind: "pilcrow".to_owned(),
-            payload: vec![("paraId".to_owned(), Any::from("000000DD"))],
-            attrs: Default::default(),
-        }],
-        &EditCtx::local("", ""),
-    )
-    .unwrap();
+    duplicate_key(&doc, "000000DD");
     let story = TextTarget::Search {
         text: "unique".to_owned(),
         within: SearchScope::Story {
@@ -1903,32 +1907,143 @@ fn story_searches_refuse_matches_in_duplicated_paragraph_ids() {
     );
 }
 
-#[test]
-fn validation_runs_the_staged_checks_application_runs() {
-    let doc = basic();
-    let minted = next_minted_id(&doc, "probe");
-    let (client, counter) = minted.split_once(':').unwrap();
-    let collision = format!("{client}:{}", counter.parse::<u64>().unwrap() + 1);
-    doc.apply_raw_ops(
-        "body",
-        vec![RawOp::InsertEmbed {
-            index: 0,
-            kind: "pilcrow".to_owned(),
-            payload: vec![("paraId".to_owned(), Any::from(collision.as_str()))],
-            attrs: Default::default(),
-        }],
-        &EditCtx::local("", ""),
-    )
-    .unwrap();
-    let steps = vec![insert_paragraphs(
-        "00000004",
-        TargetEdge::End,
-        vec![new_paragraph("collides", None)],
-    )];
-    let validated = doc
-        .validate_edits(&request(&doc, steps.clone()))
+fn identities(doc: &EditingDoc) -> Vec<ParagraphIdentity> {
+    doc.paragraph_identities().paragraphs
+}
+
+fn identity(doc: &EditingDoc, key: &str) -> ParagraphIdentity {
+    identities(doc)
+        .into_iter()
+        .find(|identity| {
+            identity.paragraph
+                == ParagraphRef::Session {
+                    story: "body".to_owned(),
+                    para_id: key.to_owned(),
+                }
+        })
         .unwrap()
-        .unwrap_err();
-    assert_eq!(validated.failure.code, EditFailureCode::Unsupported);
-    assert_eq!(code(&doc, steps), EditFailureCode::Unsupported);
+}
+
+fn new_key(applied: &EditApplication) -> String {
+    applied.receipts[0].new_paragraphs[0].para_id.clone()
+}
+
+fn after_first() -> Vec<EditStep> {
+    vec![insert_paragraphs(
+        "00000001",
+        TargetEdge::End,
+        vec![new_paragraph("New", None)],
+    )]
+}
+
+/// Types what `after_first` inserts: a split at the end of the first paragraph, then its text.
+fn type_after_first(doc: &EditingDoc) {
+    let ctx = EditCtx::local("", "");
+    let mark = doc.paragraph_mark_position("00000001").unwrap();
+    let split = doc.split_paragraph(&ctx, mark, None).unwrap();
+    let at = doc.paragraph_mark_position(&split.second_para_id).unwrap();
+    doc.insert_text(&ctx, at, "New", FormatPolicy::Inherit)
+        .unwrap();
+}
+
+#[test]
+fn batch_paragraphs_never_take_an_id_retained_content_holds() {
+    let body = p("00000001", &r("One"));
+    let probe = open(&body);
+    let key = new_key(&apply(&probe, &UndoSession::new(), after_first()));
+    let natural = identity(&probe, &key)
+        .ooxml_para_id
+        .expect("a batch paragraph saves with a Word paragraph ID");
+    let doc = open_package(&with_comment(&body, &p(&natural, &r("Remark"))));
+    assert_eq!(
+        new_key(&apply(&doc, &UndoSession::new(), after_first())),
+        key
+    );
+    let id = identity(&doc, &key).ooxml_para_id.unwrap();
+    assert_ne!(id, natural, "the comment paragraph keeps its ID");
+}
+
+#[test]
+fn batch_paragraphs_take_the_identities_typed_paragraphs_take() {
+    let body = format!(
+        r#"{}<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+        p("00000001", &r("One")),
+        p("00000002", &r("cell"))
+    );
+    let (batched, typed) = (open(&body), open(&body));
+    let tail = para_ids(&batched).pop().unwrap();
+    assert_eq!(identity(&batched, &tail).origin, ParagraphOrigin::Synthetic);
+    let key = new_key(&apply(
+        &batched,
+        &UndoSession::new(),
+        vec![insert_paragraphs(
+            &tail,
+            TargetEdge::End,
+            vec![new_paragraph("New", None)],
+        )],
+    ));
+    let ctx = EditCtx::local("", "");
+    let mark = typed.paragraph_mark_position(&tail).unwrap();
+    let split = typed.split_paragraph(&ctx, mark, None).unwrap();
+    let at = typed
+        .paragraph_mark_position(&split.second_para_id)
+        .unwrap();
+    typed
+        .insert_text(&ctx, at, "New", FormatPolicy::Inherit)
+        .unwrap();
+
+    assert_eq!(identities(&batched), identities(&typed));
+    for key in [&tail, &key] {
+        let identity = identity(&batched, key);
+        assert_eq!(identity.origin, ParagraphOrigin::Authored);
+        assert!(identity.ooxml_para_id.is_some());
+        assert_eq!(identity.id_origin, Some(ParagraphIdOrigin::Authored));
+    }
+}
+
+#[test]
+fn staged_batches_allocate_and_adopt_as_direct_edits_do() {
+    let (batched, typed) = (basic(), basic());
+    let mut reserved = String::new();
+    for doc in [&batched, &typed] {
+        let minted = next_minted_id(doc, "probe");
+        let (client, counter) = minted.split_once(':').unwrap();
+        reserved = format!("{client}:{}", counter.parse::<u64>().unwrap() + 1);
+        let ops = [
+            RawOp::InsertEmbed {
+                index: 0,
+                kind: "pilcrow".to_owned(),
+                payload: vec![("paraId".to_owned(), Any::from(reserved.as_str()))],
+                attrs: Default::default(),
+            },
+            RawOp::Delete { index: 0, len: 1 },
+        ];
+        for op in ops {
+            doc.apply_raw_ops("body", vec![op], &EditCtx::local("", ""))
+                .unwrap();
+        }
+    }
+    let request = request(&batched, after_first());
+    assert!(
+        batched
+            .validate_edits(&request)
+            .unwrap()
+            .unwrap()
+            .would_apply
+    );
+    let key = new_key(&apply_request(&batched, &UndoSession::new(), &request));
+    assert_ne!(key, reserved, "a deleted paragraph's key stays reserved");
+    type_after_first(&typed);
+    assert_eq!(identities(&batched), identities(&typed));
+
+    for doc in [&batched, &typed] {
+        let at = doc.paragraph_mark_position(&key).unwrap();
+        doc.split_paragraph(
+            &EditCtx::local("", ""),
+            Position::new("body", at.index - 1),
+            None,
+        )
+        .unwrap();
+    }
+    assert_eq!(identities(&batched), identities(&typed));
 }

@@ -208,8 +208,10 @@ impl EditingDoc {
                 story: range.story.clone(),
                 index: start_para.pilcrow,
             })?;
-        let paragraph_properties: std::collections::BTreeMap<String, Any> =
-            para_props.into_iter().collect();
+        let paragraph_properties: std::collections::BTreeMap<String, Any> = para_props
+            .into_iter()
+            .filter(|(key, _)| !crate::is_identity_key(key))
+            .collect();
         let prop_string = |key: &str| match paragraph_properties.get(key) {
             Some(Any::String(value)) => Some(value.to_string()),
             _ => None,

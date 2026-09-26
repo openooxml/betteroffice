@@ -89,6 +89,7 @@ pub struct ParseBudget<'a> {
     table_cells: usize,
     notes: usize,
     comments: usize,
+    source_ordinals: bool,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -107,7 +108,18 @@ impl<'a> ParseBudget<'a> {
             table_cells: 0,
             notes: 0,
             comments: 0,
+            source_ordinals: false,
         }
+    }
+
+    /// Records each parsed paragraph's `w:p` occurrence in its part; see
+    /// [`XmlElement::paragraph_ordinal`].
+    pub fn record_source_ordinals(&mut self) {
+        self.source_ordinals = true;
+    }
+
+    pub(crate) fn records_source_ordinals(&self) -> bool {
+        self.source_ordinals
     }
 
     pub(crate) fn charge_xml_bytes(&mut self, amount: usize, part: &str) -> Result<(), ParseError> {
@@ -302,6 +314,13 @@ pub struct XmlElement {
     pub name: String,
     pub attributes: IndexMap<String, String>,
     pub children: Vec<XmlNode>,
+    /// For a `w:p` element, its zero-based index among the part's `w:p`
+    /// elements in document order.
+    pub paragraph_ordinal: Option<u32>,
+    /// For a `w:p` element, the name of its attribute that resolves to the
+    /// Word 2010 `paraId` under the namespace bindings in scope; see
+    /// [`crate::paragraph_identity::word_para_id_name`].
+    pub para_id_attribute: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -467,6 +486,14 @@ impl XmlElement {
     }
 
     /// Serializes raw inline XML, escaping only double quotes in attributes.
+    /// The occurrence of the first `w:p` in this subtree; see [`Self::paragraph_ordinal`].
+    pub fn first_paragraph_ordinal(&self) -> Option<u32> {
+        self.paragraph_ordinal.or_else(|| {
+            self.child_elements()
+                .find_map(Self::first_paragraph_ordinal)
+        })
+    }
+
     pub fn to_raw_inline_xml(&self) -> String {
         let mut output = String::new();
         self.write_raw_inline_xml(&mut output);
@@ -568,6 +595,25 @@ pub(crate) fn parse_xml_strict(
 
     let mut roots = Vec::new();
     let mut stack: Vec<XmlElement> = Vec::new();
+    let mut paragraphs = 0u32;
+    let mut number = |mut element: XmlElement, ancestors: &[XmlElement]| {
+        if element.name == "w:p" {
+            element.paragraph_ordinal = Some(paragraphs);
+            paragraphs += 1;
+            element.para_id_attribute = crate::paragraph_identity::word_para_id_name(
+                element.attributes.keys().map(String::as_str),
+                |prefix| {
+                    let declaration = format!("xmlns:{prefix}");
+                    std::iter::once(&element)
+                        .chain(ancestors.iter().rev())
+                        .find_map(|scope| scope.attributes.get(&declaration))
+                        .map(String::as_str)
+                },
+            )
+            .map(str::to_owned);
+        }
+        element
+    };
     loop {
         let event = reader
             .read_event()
@@ -581,7 +627,9 @@ pub(crate) fn parse_xml_strict(
                         part: part.to_owned(),
                     });
                 }
-                stack.push(decode_element(&reader, start, part, budget)?);
+                let element = decode_element(&reader, start, part, budget)?;
+                let element = number(element, &stack);
+                stack.push(element);
             }
             Event::Empty(start) => {
                 if stack.len() + 1 > budget.limits.max_xml_depth {
@@ -590,7 +638,8 @@ pub(crate) fn parse_xml_strict(
                         part: part.to_owned(),
                     });
                 }
-                let mut element = decode_element(&reader, start, part, budget)?;
+                let element = decode_element(&reader, start, part, budget)?;
+                let mut element = number(element, &stack);
                 retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
@@ -860,6 +909,8 @@ fn decode_element(
         name,
         attributes,
         children: Vec::new(),
+        paragraph_ordinal: None,
+        para_id_attribute: None,
     })
 }
 

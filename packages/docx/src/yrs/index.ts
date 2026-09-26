@@ -17,6 +17,13 @@
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
 import { noteYrsStoriesDirty } from './yrsToDocument';
+import type {
+  DocxParagraphAnchor,
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentityReceipt,
+  DocxParagraphIdentitySnapshot,
+  DocxParagraphSavePlan,
+} from './paragraphIdentity';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type {
   CollaborationCursor,
@@ -53,6 +60,15 @@ export {
 } from './residentCaret';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
+export * from './paragraphIdentity';
+export {
+  captureSessionSave,
+  saveYrsDocx,
+  writeSessionSave,
+  type DocxSavedDocument,
+  type DocxSavedParagraph,
+  type DocxSessionSave,
+} from './saveYrsDocx';
 
 export interface YrsDocxHost {
   document: Document;
@@ -154,8 +170,18 @@ export interface YrsStorySeed {
   paragraphs: readonly YrsParagraphSeed[];
 }
 
+/** How a seeding entry point starts its opening; see {@link YrsSession.beginOpening}. */
+export interface YrsOpeningOptions {
+  /**
+   * A fixed opening generation, for a deterministic seed every replica loads
+   * as one session. Each opening mints a fresh one by default.
+   */
+  generation?: string;
+}
+
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
 export interface YrsParagraph {
+  /** Session key; not the paragraph's Word `w14:paraId`. */
   paraId: string;
   text: string;
   /** pStyle / alignment plus any op-set extras. */
@@ -356,6 +382,10 @@ export type YrsRawOp =
   | { op: 'delete'; index: number; len: number }
   | { op: 'format'; index: number; len: number; attrs?: Record<string, unknown> }
   | {
+      /**
+       * A pilcrow's `ooxmlParaId` binds its Word paragraph ID and is dropped
+       * when it is not one; `sourceParaId` and `paraOrigin` are seeding's to set.
+       */
       op: 'insertEmbed';
       index: number;
       kind: string;
@@ -400,6 +430,17 @@ export interface YrsRenderEnv {
 /** Receipt of {@link YrsSession.addComment}. */
 export interface YrsCommentReceipt {
   commentId: string;
+}
+
+/** A comment the session holds; see {@link YrsSession.listComments}. @internal */
+export interface YrsCommentInfo {
+  id: string;
+  author: string;
+  date: string;
+  done: boolean;
+  parentId: string | null;
+  /** The body as it was given to {@link YrsSession.addComment} or `setComment`. */
+  body: unknown;
 }
 
 /**
@@ -763,13 +804,26 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
   loadState(update: Uint8Array): void;
-  /** Parses a DOCX, seeds its stories, and returns thin host metadata. */
-  seedFromDocx(bytes: Uint8Array): YrsDocxHost;
-  /** Parses a DOCX and optionally seeds its stories. */
-  openDocx(bytes: Uint8Array, seedStories: boolean): YrsDocxHost;
+  /** Parses a DOCX, seeds its stories, and returns thin host metadata; see {@link openDocx}. */
+  seedFromDocx(bytes: Uint8Array, options?: YrsOpeningOptions): YrsDocxHost;
+  /**
+   * Parses a DOCX and optionally seeds its stories. Seeding starts a new
+   * opening, so its session anchors never resolve in another opening, even
+   * one seeded alike by the same client; see {@link beginOpening}.
+   */
+  openDocx(bytes: Uint8Array, seedStories: boolean, options?: YrsOpeningOptions): YrsDocxHost;
+  /**
+   * Starts a new opening of the document: its generation, replicated to
+   * every replica, becomes part of every session anchor. Every seeding entry
+   * point calls it; call it after building a document another way.
+   */
+  beginOpening(generation?: string): void;
   /** Materializes the retained canonical package for compatibility APIs. */
   materializeDocx(): Document | null;
-  /** Seeds stories and returns paragraph IDs in document order. */
+  /**
+   * Seeds stories and returns paragraph IDs in document order. Seeding a
+   * document that has no opening yet starts one; see {@link beginOpening}.
+   */
   loadStories(stories: readonly YrsStorySeed[]): Record<string, string[]>;
   /** Full document state as one yrs v1 update (Yjs wire format). */
   encodeState(): Uint8Array;
@@ -918,7 +972,11 @@ export interface YrsSession extends CollaborationReplica {
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
-  /** Applies raw story operations in one transaction. */
+  /**
+   * Applies raw story operations in one transaction, then repairs any
+   * paragraph identity a pilcrow they insert or re-key duplicates and
+   * promotes an editor-only paragraph they author into.
+   */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Applies seed raw operations with deterministic item ordering. */
   applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
@@ -954,6 +1012,8 @@ export interface YrsSession extends CollaborationReplica {
   listRevisions(): YrsRevisionInfo[];
   /** Current offsets of a comment's sticky anchors. Throws when an anchor no longer resolves. */
   resolveComment(commentId: string): YrsResolvedCommentAnchor[];
+  /** Every comment the session holds, sorted by id. @internal */
+  listComments(): YrsCommentInfo[];
   /** Story ids in the document, sorted. */
   storyIds(): string[];
   /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
@@ -972,6 +1032,41 @@ export interface YrsSession extends CollaborationReplica {
   storySegments(story: string): YrsStorySegment[];
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
+
+  // -- paragraph identity --
+
+  /**
+   * Session, persisted and source anchors of every paragraph, including the
+   * source package's paragraphs outside the stories, and the Word paragraph ID
+   * each saves with. Reads only.
+   */
+  paragraphIdentities(): DocxParagraphIdentitySnapshot;
+  /**
+   * Gives every paragraph that saves without a Word paragraph ID a fresh one,
+   * editor-only paragraphs excepted, and repairs duplicates, so persisted
+   * anchors survive save and reopen. Source IDs and saved claims keep their
+   * IDs over unsaved claims and copies. A replicated change outside undo
+   * history that later saves keep; a refusal changes nothing.
+   */
+  persistParagraphIds(): DocxParagraphIdentityReceipt;
+  /** Resolves an anchor to the paragraph that currently holds it. Reads only. */
+  resolveParagraphAnchor(anchor: DocxParagraphAnchor): DocxParagraphAnchorResult;
+  /** The Word paragraph ID each paragraph of a story saves with, in pilcrow order. @internal */
+  storyParagraphIds(story: string): Array<string | null>;
+  /** The paragraph IDs a save of the session applies. @internal */
+  paragraphSavePlan(): DocxParagraphSavePlan;
+  /**
+   * Publishes the `[owner, paraId]` pairs a save captured and returns those
+   * whose binding changed since. @internal
+   */
+  recordSavedParagraphIds(
+    saved: ReadonlyArray<readonly [string, string]>
+  ): Array<[string, string]>;
+  /**
+   * The Word paragraph IDs a DOCX package holds, by part URI, in document
+   * order and upper case. Reads only. @internal
+   */
+  writtenParagraphIds(bytes: Uint8Array): Record<string, string[]>;
 
   // -- version-checked host edits --
 
@@ -1207,10 +1302,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     observing = false;
   };
 
-  const openDocx = (bytes: Uint8Array, seedStories: boolean): YrsDocxHost => {
+  const openDocx = (
+    bytes: Uint8Array,
+    seedStories: boolean,
+    options: YrsOpeningOptions = {}
+  ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    const json = mutate(() => session.open_docx(source, seedStories));
+    const json = mutate(() => session.open_docx(source, seedStories, options.generation));
     const host = decodeDocxHost(json, source);
     docxSource = source;
     return host;
@@ -1362,8 +1461,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty('all');
       mutate(() => session.load(update));
     },
-    seedFromDocx: (bytes) => openDocx(bytes, true),
+    seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
     openDocx,
+    beginOpening: (generation) => mutate(() => session.begin_opening(generation)),
     materializeDocx: () => {
       const source = docxSource;
       const json = session.materialize_docx();
@@ -1833,7 +1933,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     applyRawOps: (story, ops) => {
-      markDirty(story);
+      const rekeys = ops.some(
+        (op) =>
+          (op.op === 'insertEmbed' && op.kind === 'pilcrow') ||
+          (op.op === 'setEmbedAttr' && op.key === 'paraId')
+      );
+      markDirty(rekeys ? 'all' : story);
       mutate(() => session.apply_raw_ops(story, JSON.stringify(ops)));
     },
     applySeedRawOps: (story, ops) => {
@@ -1890,6 +1995,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
+    listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
     storyIds: () => session.story_ids(),
     storyLength: (story) => session.story_len(story),
     storyChecksum: (story) => BigInt(session.story_checksum(story)),
@@ -1918,6 +2024,31 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
+
+    paragraphIdentities: () =>
+      JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
+    persistParagraphIds: () => {
+      markDirty('all');
+      return mutate(
+        () => JSON.parse(session.persist_paragraph_ids()) as DocxParagraphIdentityReceipt
+      );
+    },
+    resolveParagraphAnchor: (anchor) =>
+      JSON.parse(
+        session.resolve_paragraph_anchor(JSON.stringify(anchor))
+      ) as DocxParagraphAnchorResult,
+    storyParagraphIds: (story) =>
+      JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
+    paragraphSavePlan: () => JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan,
+    recordSavedParagraphIds: (saved) =>
+      mutate(
+        () =>
+          JSON.parse(session.record_saved_paragraph_ids(JSON.stringify(saved))) as Array<
+            [string, string]
+          >
+      ),
+    writtenParagraphIds: (bytes) =>
+      JSON.parse(session.written_paragraph_ids(bytes)) as Record<string, string[]>,
 
     version: () => session.version(),
     readParagraphs: (request) =>

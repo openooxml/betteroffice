@@ -137,9 +137,7 @@ pub(crate) fn apply_update_with_typing_inference(
         None
     };
 
-    doc.yrs_doc()
-        .transact_mut()
-        .apply_update(update)
+    doc.integrate_update(update, false)
         .map_err(|error| error.to_string())?;
     drop(subscription);
     let Some(client_id) = client_id else {

@@ -24,6 +24,16 @@ export interface RustSaveResult {
   determinism: RustSaveDeterminism;
 }
 
+/**
+ * Paragraph IDs a session save applies: IDs for source paragraphs outside
+ * the edited stories by part and `w:p` occurrence, and parts written as their
+ * source bytes with only these IDs patched in.
+ */
+export interface RustParagraphIds {
+  assignments: Array<{ part: string; ordinal: number; paraId: string }>;
+  patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
+}
+
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -35,7 +45,8 @@ export async function writeDocumentWithRust(
   originalBuffer: ArrayBuffer,
   options: RustSaveOptions = {},
   selective?: RustSelectiveSave,
-  determinism?: RustSaveDeterminism
+  determinism?: RustSaveDeterminism,
+  paragraphIds?: RustParagraphIds
 ): Promise<RustSaveResult> {
   await preloadOpcWasm();
   await preloadParseWasm();
@@ -66,6 +77,7 @@ export async function writeDocumentWithRust(
     ...(selective === undefined
       ? {}
       : { selective: { changedParaIds: [...selective.changedParaIds] } }),
+    ...(paragraphIds === undefined ? {} : { paragraphIds }),
   };
   assertSafeSaveTree(request, 'save');
   const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));

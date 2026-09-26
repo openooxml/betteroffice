@@ -19,6 +19,7 @@ use crate::inline::{Hyperlink, InlineNode, Run, RunContent};
 use crate::notes::Note;
 use crate::numbering::NumberingDefinitions;
 use crate::paragraph::{Paragraph, ParagraphContent};
+use crate::paragraph_identity::parse_paragraph_id;
 use crate::relationships::{
     Relationship, TargetMode, relationship_part_path, relationship_types, resolve_relative_path,
 };
@@ -29,6 +30,10 @@ use crate::xml::ParseError;
 use super::context::SerializerContext;
 use super::numbering::serialize_numbering_xml;
 use super::paragraph::serialize_paragraph;
+use super::paragraph_ids::{
+    COMMENTS_PART, S13ParagraphIds, apply_assignments, comment_companions, model_paragraph_ids,
+    patch_comment_parts, patch_part,
+};
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_with_info, serialize_document_part,
@@ -103,6 +108,8 @@ pub struct S13SaveRequest {
     pub options: S13SaveOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selective: Option<S13SelectiveSave>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paragraph_ids: Option<S13ParagraphIds>,
 }
 
 fn default_true() -> bool {
@@ -134,6 +141,22 @@ pub fn write_docx_s13_parts(
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
+    let paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
+    paragraph_ids.validate()?;
+    apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
+    let patched: HashMap<&str, &[(u32, String)]> = paragraph_ids
+        .patched_parts
+        .iter()
+        .map(|part| (part.part.as_str(), part.para_ids.as_slice()))
+        .collect();
+    let patched_part = |package: &Package, path: &str| {
+        let path = package.resolve_path(path);
+        patched.get(path).and_then(|ids| {
+            package
+                .original_bytes(path)
+                .and_then(|bytes| patch_part(bytes, ids))
+        })
+    };
 
     if request.selective.is_some() {
         validate_selective_header_footer_parts(&package, &relationships)?;
@@ -144,7 +167,9 @@ pub fn write_docx_s13_parts(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    let document_xml = if let Some(selective) = request.selective.as_ref() {
+    let document_xml = if let Some(patched) = patched_part(&package, "word/document.xml") {
+        String::from_utf8(patched).map_err(|error| save_error(error.to_string()))?
+    } else if let Some(selective) = request.selective.as_ref() {
         let original = package
             .text("word/document.xml")
             .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
@@ -173,18 +198,62 @@ pub fn write_docx_s13_parts(
         &mut package,
         &mut context,
     )?;
+    let story_parts: Vec<String> = relationships
+        .values()
+        .filter(|relationship| {
+            matches!(
+                relationship.relationship_type.as_str(),
+                relationship_types::HEADER | relationship_types::FOOTER
+            ) && relationship.target_mode != Some(TargetMode::External)
+        })
+        .filter_map(|relationship| {
+            resolve_relative_path(&package.document_path, &relationship.target).ok()
+        })
+        .collect();
+    for path in story_parts {
+        if let Some(bytes) = patched_part(&package, &path) {
+            package.set(path, bytes);
+        }
+    }
 
     if request.selective.is_none() {
         ensure_header_footer_parts(&relationships, &mut package)?;
         ensure_numbering_part(request.numbering.as_ref(), &mut package);
     }
 
-    serialize_comment_parts(&request.document, &mut package, &mut context);
+    let patched_comments = patched.get(COMMENTS_PART).and_then(|ids| {
+        let companions = comment_companions().map(|path| (path, package.original_bytes(path)));
+        patch_comment_parts(package.original_bytes(COMMENTS_PART)?, &companions, ids)
+    });
+    if let Some(parts) = patched_comments {
+        for (path, bytes) in parts {
+            package.set(path, bytes);
+        }
+    } else {
+        if comments_need_paragraph_ids(&request.document) {
+            let mut reserved = crate::paragraph_identity::package_paragraph_ids(original_parts);
+            model_paragraph_ids(&request.document, &mut reserved);
+            model_paragraph_ids(&request.header_entries, &mut reserved);
+            model_paragraph_ids(&request.footer_entries, &mut reserved);
+            for notes in [
+                &request.footnotes,
+                &request.endnotes,
+                &request.footnote_separators,
+                &request.endnote_separators,
+            ] {
+                model_paragraph_ids(notes, &mut reserved);
+            }
+            context.reserve_paragraph_ids(reserved);
+        }
+        serialize_comment_parts(&request.document, &mut package, &mut context);
+    }
 
     if request.selective.is_none() {
         let mut footnotes = request.footnote_separators;
         footnotes.extend(request.footnotes);
-        if !footnotes.is_empty() {
+        if let Some(bytes) = patched_part(&package, "word/footnotes.xml") {
+            package.set("word/footnotes.xml", bytes);
+        } else if !footnotes.is_empty() {
             package.set_text(
                 "word/footnotes.xml",
                 serialize_footnotes_part(&footnotes, &mut context)?,
@@ -192,7 +261,9 @@ pub fn write_docx_s13_parts(
         }
         let mut endnotes = request.endnote_separators;
         endnotes.extend(request.endnotes);
-        if !endnotes.is_empty() {
+        if let Some(bytes) = patched_part(&package, "word/endnotes.xml") {
+            package.set("word/endnotes.xml", bytes);
+        } else if !endnotes.is_empty() {
             package.set_text(
                 "word/endnotes.xml",
                 serialize_endnotes_part(&endnotes, &mut context)?,
@@ -278,6 +349,12 @@ impl<'a> Package<'a> {
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
     }
 
+    /// The part as the source package holds it, ignoring this save's edits.
+    fn original_bytes(&self, path: &str) -> Option<&'a [u8]> {
+        let index = *self.positions.get(self.resolve_path(path))?;
+        self.original.get(index).map(|(_, bytes)| bytes.as_slice())
+    }
+
     fn set(&mut self, path: impl Into<String>, bytes: Vec<u8>) {
         let path = path.into();
         let path = self.resolve_path(&path).to_owned();
@@ -327,6 +404,61 @@ impl<'a> Package<'a> {
 
 fn save_error(message: impl Into<String>) -> ParseError {
     ParseError::Canonical(format!("S13 package save: {}", message.into()))
+}
+
+fn comments_need_paragraph_ids(document: &DocumentBody) -> bool {
+    let valid = |id: Option<&str>| id.is_some_and(|id| parse_paragraph_id(id).is_some());
+    document.comments.iter().flatten().any(|comment| {
+        !valid(comment.content.last().and_then(|p| p.para_id.as_deref()))
+            && !valid(comment.para_id.as_deref())
+    })
+}
+
+/// Applies the plan's source-paragraph IDs to every serialized part's model.
+fn apply_paragraph_id_assignments(
+    request: &mut S13SaveRequest,
+    paragraph_ids: &S13ParagraphIds,
+    relationships: &IndexMap<String, Relationship>,
+    package: &Package,
+) -> Result<(), ParseError> {
+    let parts = paragraph_ids.assignments_by_part();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    if let Some(ids) = parts.get(package.document_path.as_str()) {
+        let comments = request.document.comments.take();
+        apply_assignments(&mut request.document, ids)?;
+        request.document.comments = comments;
+    }
+    if let (Some(ids), Some(comments)) =
+        (parts.get(COMMENTS_PART), request.document.comments.as_mut())
+    {
+        apply_assignments(comments, ids)?;
+    }
+    for entries in [&mut request.header_entries, &mut request.footer_entries] {
+        for (relationship_id, story) in entries.iter_mut() {
+            let path = relationships
+                .get(relationship_id)
+                .filter(|relationship| relationship.target_mode != Some(TargetMode::External))
+                .and_then(|relationship| {
+                    resolve_relative_path(&package.document_path, &relationship.target).ok()
+                });
+            if let Some(ids) = path.as_deref().and_then(|path| parts.get(path)) {
+                apply_assignments(story, ids)?;
+            }
+        }
+    }
+    for (path, notes) in [
+        ("word/footnotes.xml", &mut request.footnotes),
+        ("word/footnotes.xml", &mut request.footnote_separators),
+        ("word/endnotes.xml", &mut request.endnotes),
+        ("word/endnotes.xml", &mut request.endnote_separators),
+    ] {
+        if let Some(ids) = parts.get(path) {
+            apply_assignments(notes, ids)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_selective_header_footer_parts(

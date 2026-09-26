@@ -109,6 +109,30 @@ mutation/history methods such as `insertTextProfiled` and `undoProfiled`, return
 milliseconds and describe engine stages; measure the surrounding browser
 interaction separately when investigating input-to-paint latency.
 
+## DOCX paragraph anchors
+
+A DOCX `YrsSession` addresses paragraphs by session keys, which are never saved as Word
+paragraph IDs (`w14:paraId`); a session anchor resolves on every replica of one
+collaborative session, and each seeding open (`openDocx`, `seedFromDocx`) starts a new
+session. `saveYrsDocx(session)` from `@betteroffice/docx/yrs` returns the
+saved bytes and a persisted anchor for each saved paragraph that has a Word paragraph ID,
+qualified by its package part. Resolve it after reopening:
+
+```ts
+import { createYrsSession, saveYrsDocx } from "@betteroffice/docx/yrs";
+
+const saved = await saveYrsDocx(session);
+const reopened = await createYrsSession();
+reopened.openDocx(saved.bytes, true);
+const result = reopened.resolveParagraphAnchor(saved.paragraphs[0].persisted);
+```
+
+Paragraphs authored in the session always receive an ID. Source paragraphs without one
+keep none until the host calls `session.persistParagraphIds()`, which covers every story
+part, comments and note separators included, and refuses rather than guess at an
+ambiguous comment reference. Results are `found`, `missing`, `ambiguous`, or
+`unsupported`; table, cell, and content-control identities are not persisted.
+
 ## Package reference
 
 | Package | What it is |

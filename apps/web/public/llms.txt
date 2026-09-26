@@ -35,6 +35,16 @@ VSDX support is available from source and is not yet published. Batch shape-data
 DOCX hosts can call `YrsSession.addUndoBoundary()` to separate actions, and use
 `setUndoCaptureMode('auto' | 'manual')` for typing coalescence or explicit grouping.
 
+DOCX session keys (`YrsLoc.paraId`) are not Word paragraph IDs and are never saved as
+`w14:paraId`; a session anchor resolves on every replica of one collaborative session,
+and each seeding open (`openDocx`, `seedFromDocx`) starts a new session.
+`saveYrsDocx(session)` returns the saved bytes and, per saved paragraph with a Word
+paragraph ID, a persisted anchor `{ story: { partUri, kind, itemId? }, paraId }` that
+`YrsSession.resolveParagraphAnchor()` resolves after reopening. Source paragraphs without
+an ID have no persisted anchor until `persistParagraphIds()` assigns one, across every
+story part, comments and note separators included. Repeated source IDs resolve as
+`ambiguous`; table, cell and content-control identities are not persisted.
+
 ## Rust crates
 
 DOCX, XLSX and PPTX crates are published to crates.io, Apache-2.0. Use a format facade unless you need a single layer of the pipeline.

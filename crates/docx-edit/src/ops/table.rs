@@ -17,11 +17,12 @@ use yrs::{
     Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact, TransactionMut,
 };
 
+use crate::identity::IdAllocator;
 use crate::op::{OpError, OpResult};
 use crate::seed::border_side_sources;
 use crate::{
-    EditCtx, EditingDoc, KIND_KEY, Position, STORIES, check_position, insertion_attrs, map_string,
-    out_len, revision_value, story_ref, write_pilcrow_properties,
+    EditCtx, EditingDoc, KIND_KEY, ParagraphIdOrigin, Position, STORIES, check_position,
+    insertion_attrs, map_string, out_len, revision_value, story_ref, write_pilcrow_properties,
 };
 
 const TR_INS: &str = "trIns";
@@ -643,6 +644,7 @@ fn fresh_cell_story(
 fn create_cell_story(
     doc: &EditingDoc,
     txn: &mut TransactionMut<'_>,
+    ids: &mut IdAllocator,
     story_id: &str,
 ) -> OpResult<String> {
     let stories = txn
@@ -651,7 +653,7 @@ fn create_cell_story(
     if stories.contains_key(txn, story_id) {
         return Err(OpError::StoryExists(story_id.to_owned()));
     }
-    let para_id = doc.next_id();
+    let para_id = ids.session_key(doc);
     let story = stories.insert(txn, story_id, TextPrelim::new(""));
     let pilcrow = story.insert_embed_with_attributes(
         txn,
@@ -660,6 +662,7 @@ fn create_cell_story(
         insertion_attrs(None, None),
     );
     write_pilcrow_properties(&pilcrow, txn, &para_id, "Normal", "left");
+    ids.bind(txn, &pilcrow, &para_id, ParagraphIdOrigin::Authored);
     Ok(para_id)
 }
 
@@ -1113,6 +1116,7 @@ impl EditingDoc {
         }
         let locator = TableLocator::new(at.story.clone(), ordinal);
         let mut used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let table_slot = fresh_table_slot(&used, &at.story, ordinal as usize);
         let base = format!("{}:t{table_slot}", at.story);
         let mut created_story_ids = Vec::with_capacity((rows * columns) as usize);
@@ -1126,7 +1130,7 @@ impl EditingDoc {
             let mut cells = Vec::with_capacity(columns as usize);
             for column in 0..columns as usize {
                 let story_id = fresh_cell_story(&mut used, &base, row, column);
-                let para_id = create_cell_story(self, &mut txn, &story_id)?;
+                let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 cells.push(CellData {
                     tc_pr: HashMap::from([
                         ("rowspan".to_owned(), Any::Number(1.0)),
@@ -1200,6 +1204,7 @@ impl EditingDoc {
             );
         }
         let used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let base = table_base(&locator);
         let row_slot = fresh_row_slot(&used, &base, data.rows.len(), columns);
         let mut used = used;
@@ -1232,7 +1237,7 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row_slot, column);
-            let para_id = create_cell_story(self, &mut txn, &story_id)?;
+            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted_anchors.push(CellAnchor {
@@ -1285,6 +1290,7 @@ impl EditingDoc {
             target.column
         };
         let used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let base = table_base(&locator);
         let column_slot = fresh_column_slot(&used, &base, data.rows.len(), columns);
         let mut used = used;
@@ -1322,7 +1328,7 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row, column_slot);
-            let para_id = create_cell_story(self, &mut txn, &story_id)?;
+            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted.push(CellAnchor {
@@ -1602,6 +1608,7 @@ impl EditingDoc {
 
         let base = table_base(&locator);
         let mut used = story_ids(&txn);
+        let mut ids = IdAllocator::new(self, &txn);
         let mut created = Vec::new();
         let mut new_para_ids = Vec::new();
         for row in target.row..target.row + requested_rows {
@@ -1619,7 +1626,7 @@ impl EditingDoc {
                     continue;
                 }
                 let story_id = fresh_cell_story(&mut used, &base, row, column);
-                let para_id = create_cell_story(self, &mut txn, &story_id)?;
+                let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 let mut cell = reset_cell_spans(target.cell.clone());
                 cell.story = story_id.clone();
                 next_anchors.push(CellAnchor {

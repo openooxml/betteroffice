@@ -6,8 +6,8 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, snapshot_range};
 use crate::{
-    EditCtx, EditingDoc, INS, KIND_KEY, PARA_ID, PILCROW_KIND, Position, check_position,
-    insertion_attrs, is_pilcrow, out_len, revision_value, story_ref,
+    EditCtx, EditingDoc, INS, KIND_KEY, PILCROW_KIND, Position, check_position, insertion_attrs,
+    is_pilcrow, out_len, revision_value, story_ref,
 };
 
 /// Finds the map-backed embed sitting exactly at story `index` (any kind,
@@ -101,7 +101,7 @@ impl EditingDoc {
         let map = embed_map_at(&story, &txn, at.index)?;
         let pilcrow = is_pilcrow(&map, &txn);
         for (key, _) in &entries {
-            if key == KIND_KEY || (pilcrow && key == PARA_ID) {
+            if key == KIND_KEY || (pilcrow && crate::is_identity_key(key)) {
                 return Err(OpError::ReservedKey(key.clone()));
             }
         }
@@ -125,7 +125,7 @@ impl EditingDoc {
         entries: Vec<(String, Any)>,
     ) -> OpResult<Receipt> {
         for (key, _) in &entries {
-            if key == KIND_KEY || key == PARA_ID {
+            if crate::is_identity_key(key) {
                 return Err(OpError::ReservedKey(key.clone()));
             }
         }
@@ -155,13 +155,14 @@ impl EditingDoc {
             return Err(OpError::ReservedKey(kind.to_owned()));
         }
         for (key, _) in &payload {
-            if key == KIND_KEY || key == PARA_ID {
+            if crate::is_identity_key(key) {
                 return Err(OpError::ReservedKey(key.clone()));
             }
         }
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
         let chunks = snapshot_range(
             &story,
             &txn,

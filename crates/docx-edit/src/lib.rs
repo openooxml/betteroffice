@@ -46,7 +46,8 @@
 //!   `comments` Y.Map. Starts use [`Assoc::After`], ends use [`Assoc::Before`].
 //!
 //! Internal IDs are `{clientID}:{counter}`. Dense integer `w:id` values are an export concern and
-//! must be minted only while serializing OOXML.
+//! must be minted only while serializing OOXML. A paragraph's Word `w14:paraId` is a separate
+//! binding on its pilcrow, never derived from its internal ID; see [`ParagraphIdentity`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -67,6 +68,7 @@ mod batch;
 mod ctx;
 mod deterministic;
 mod format;
+mod identity;
 mod op;
 mod ops;
 mod policy;
@@ -96,6 +98,12 @@ pub use format::{
     ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, Patch, SimpleFormat,
     StrikePatch, UnderlinePatch, highlight_color_name,
 };
+pub use identity::{
+    AnchorResolution, AnchorUnsupported, ParagraphAnchor, ParagraphIdAssignment,
+    ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal, ParagraphIdentities,
+    ParagraphIdentity, ParagraphOrigin, ParagraphRef, ParagraphSavePlan, PersistedParagraphIds,
+    SourceParagraphRef, SourceStory, SourceStoryKind,
+};
 pub use op::{Loc, LocRange, OpError, OpResult, Receipt, SplitReceipt};
 pub use ops::paragraph::{
     INDENT_STEP_TWIPS, MergeDirection, ParaAttrDelta, ParaSelector, ResolvedStyleProjection,
@@ -111,7 +119,7 @@ pub use queries::{
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
-pub use seed::seed_from_docx;
+pub use seed::{seed_from_docx, seed_from_docx_with_generation};
 use segments::SegmentIndex;
 pub use target::{
     AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
@@ -318,10 +326,13 @@ pub struct EditingDoc {
     instance: u64,
     /// Rotated whenever the replica's content or retained source is replaced.
     version_nonce: AtomicU64,
-    source: Mutex<Option<Arc<seed::SourceMetadata>>>,
+    metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
     chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
+    source: Mutex<Option<identity::SourcePackage>>,
+    seen: identity::SeenCell,
     _update_sub: Subscription,
+    _seen_subs: Vec<Subscription>,
 }
 
 impl EditingDoc {
@@ -334,6 +345,9 @@ impl EditingDoc {
         // explicit transactions below.
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(COMMENTS);
+        doc.get_or_insert_map(identity::PARAGRAPH_IDS);
+        doc.get_or_insert_map(identity::SOURCE_PARAGRAPH_IDS);
+        doc.get_or_insert_map(identity::SESSION);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
         // after_transaction: bumps on any store-changing commit without encoding an update.
@@ -344,6 +358,8 @@ impl EditingDoc {
                 }
             })
             .expect("a fresh doc accepts an update observer");
+        let seen = identity::SeenCell::default();
+        let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
             doc,
             client_id,
@@ -351,10 +367,13 @@ impl EditingDoc {
             epoch,
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
-            source: Mutex::new(None),
+            metadata: Mutex::new(None),
             segment_indexes: Mutex::new(HashMap::new()),
             chunk_snapshots: Mutex::new(HashMap::new()),
+            source: Mutex::new(None),
+            seen,
             _update_sub: update_sub,
+            _seen_subs: seen_subs,
         }
     }
 
@@ -380,12 +399,12 @@ impl EditingDoc {
 
     /// Retains the opened package's style and structure context and rotates the version.
     pub(crate) fn install_source(&self, source: seed::SourceMetadata, entropy: u64) {
-        *self.source.lock().unwrap() = Some(Arc::new(source));
+        *self.metadata.lock().unwrap() = Some(Arc::new(source));
         self.rotate_version(entropy);
     }
 
     pub(crate) fn source_metadata(&self) -> Option<Arc<seed::SourceMetadata>> {
-        self.source.lock().unwrap().clone()
+        self.metadata.lock().unwrap().clone()
     }
 
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
@@ -440,6 +459,52 @@ impl EditingDoc {
 
     pub fn client_id(&self) -> u64 {
         self.client_id
+    }
+
+    /// Retains the package the stories were, or will be, seeded from.
+    pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
+        *self.source.lock().unwrap() = Some(source);
+    }
+
+    /// Retains the DOCX package another replica seeded this document from, so
+    /// a replica hydrated from state resolves source and persisted anchors and
+    /// reserves the package's paragraph IDs. Indexed on first identity use.
+    pub fn retain_source_docx(&self, bytes: impl Into<Arc<[u8]>>) {
+        self.retain_source(identity::SourcePackage::Pending(bytes.into()));
+    }
+
+    /// Runs `f` over the identities this replica has seen, building them from
+    /// `txn` on first use. `f` must not commit a transaction.
+    pub(crate) fn with_seen<T: ReadTxn, R>(
+        &self,
+        txn: &T,
+        f: impl FnOnce(&mut identity::Seen) -> R,
+    ) -> R {
+        let mut seen = self.seen.lock().unwrap();
+        f(seen.get_or_insert_with(|| identity::Seen::scan(txn)))
+    }
+
+    pub(crate) fn seen_cell(&self) -> identity::SeenCell {
+        Arc::clone(&self.seen)
+    }
+
+    /// Drops the seen identities after seeding wrote stories wholesale, so
+    /// the next use rebuilds them from the seeded state.
+    pub(crate) fn forget_seen(&self) {
+        *self.seen.lock().unwrap() = None;
+    }
+
+    /// The retained package's identity index, built on first use.
+    pub(crate) fn source_index(&self) -> Option<Arc<identity::SourceIndex>> {
+        let mut source = self.source.lock().unwrap();
+        let index = match source.as_ref()? {
+            identity::SourcePackage::Ready(index) => return Some(Arc::clone(index)),
+            identity::SourcePackage::Pending(bytes) => {
+                seed::source_index(Arc::clone(bytes)).ok().map(Arc::new)
+            }
+        };
+        *source = index.clone().map(identity::SourcePackage::Ready);
+        index
     }
 
     /// Low-level access for the transport, awareness, and undo bridges.
@@ -584,7 +649,8 @@ impl EditingDoc {
     /// Updates one independently-convergent property on the pilcrow identified by `para_id`.
     ///
     /// Arbitrary values leave room for `pPrIns`, `pPrDel`, `pPrChange`, and passive OOXML property
-    /// bags. `paraId` and the embed discriminator are immutable schema identity.
+    /// bags. `paraId`, the paragraph's identity bindings and the embed discriminator are schema
+    /// identity.
     pub fn set_paragraph_attr(
         &self,
         para_id: &str,
@@ -592,7 +658,7 @@ impl EditingDoc {
         value: Any,
     ) -> EditResult<()> {
         let key = key.into();
-        if key == PARA_ID || key == KIND_KEY {
+        if is_identity_key(&key) {
             return Err(EditError::ReservedParagraphKey(key));
         }
         let mut txn = self.doc.transact_mut_with(self.client_id);
@@ -605,6 +671,7 @@ impl EditingDoc {
             };
             for (_, pilcrow) in pilcrows(&story, &txn) {
                 if map_string(&pilcrow, &txn, PARA_ID).as_deref() == Some(para_id) {
+                    identity::promote(self, &mut txn, &pilcrow);
                     pilcrow.insert(&mut txn, key, value);
                     return Ok(());
                 }
@@ -778,10 +845,56 @@ impl EditingDoc {
     pub fn apply_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        self.integrate_update(update, false)
+    }
+
+    /// Applies an update, then repairs any paragraph identities it duplicated.
+    pub(crate) fn integrate_update(&self, update: Update, local: bool) -> EditResult<()> {
+        let watch = identity::IdentityWatch::new(self);
+        let result = if local {
+            self.doc
+                .transact_mut_with(self.client_id)
+                .apply_update(update)
+        } else {
+            self.doc.transact_mut().apply_update(update)
+        };
+        result.map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        if watch.changed() {
+            drop(watch);
+            self.repair_paragraph_identities();
+        }
+        Ok(())
+    }
+
+    /// Applies an update as it is, without the identity repair [`Self::apply_update_v1`] runs.
+    pub(crate) fn apply_verbatim_v1(&self, bytes: &[u8]) -> EditResult<()> {
+        let update = Update::decode_v1(bytes)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         self.doc
             .transact_mut()
             .apply_update(update)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+    }
+
+    /// A private replica of `state`, this document's committed state, that allocates identities
+    /// as this document would: the same client id and key counter, the retained source index,
+    /// and every key and Word paragraph ID this replica has seen, deleted ones included. What
+    /// the fork allocates stays its own until its update is adopted.
+    pub(crate) fn fork(&self, state: &[u8]) -> EditResult<Self> {
+        let fork = Self::new(self.client_id);
+        fork.apply_verbatim_v1(state)?;
+        fork.id_counter
+            .store(self.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
+        if let Some(index) = self.source_index() {
+            fork.retain_source(identity::SourcePackage::Ready(index));
+        }
+        {
+            let (txn, forked) = (self.doc.transact(), fork.doc.transact());
+            self.with_seen(&txn, |seen| {
+                fork.with_seen(&forked, |copy| copy.inherit(seen));
+            });
+        }
+        Ok(fork)
     }
 
     /// Applies a v1 update using this replica's local transaction origin.
@@ -792,10 +905,7 @@ impl EditingDoc {
     pub fn apply_local_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        self.doc
-            .transact_mut_with(self.client_id)
-            .apply_update(update)
-            .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+        self.integrate_update(update, true)
     }
 
     fn next_id(&self) -> String {
@@ -858,6 +968,18 @@ fn write_pilcrow_properties(
     pilcrow.insert(txn, PARA_ID, para_id);
     pilcrow.insert(txn, "pStyle", p_style);
     pilcrow.insert(txn, "alignment", alignment);
+}
+
+/// Pilcrow keys the schema manages: identity and the embed discriminator.
+fn is_identity_key(key: &str) -> bool {
+    matches!(
+        key,
+        PARA_ID
+            | KIND_KEY
+            | identity::OOXML_PARA_ID
+            | identity::SOURCE_PARA_ID
+            | identity::PARA_ORIGIN
+    )
 }
 
 fn map_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<String> {
@@ -924,7 +1046,7 @@ fn segment_content<T: ReadTxn>(value: Out, txn: &T) -> SegmentContent {
             let values = map
                 .iter(txn)
                 .filter_map(|(key, value)| {
-                    if matches!(key, KIND_KEY | PARA_ID) {
+                    if is_identity_key(key) {
                         return None;
                     }
                     let Out::Any(value) = value else {

@@ -8,9 +8,16 @@ use serde_json::{Map, Value, json};
 use yrs::Any;
 use yrs::types::Attrs;
 
+use crate::identity::{
+    PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC, SeededParagraph, SourceIndex, SourcePackage,
+    SourcePartInput, SourceStoryKind,
+};
 use crate::{EditCtx, EditingDoc, RawOp};
 
 type JsonObject = BTreeMap<String, Value>;
+
+/// A parsed node's `w:p` occurrence in its part: read for identity, never seeded.
+const SOURCE_ORDINAL: &str = "sourceOrdinal";
 
 #[derive(Clone)]
 struct Mark {
@@ -68,6 +75,10 @@ struct LoweringContext {
     source_json: Arc<BTreeMap<String, String>>,
     plans: Vec<StoryPlan>,
     compatibility_mode: u8,
+    /// The root story being lowered, for [`Self::paragraphs`].
+    root: String,
+    /// Every lowered paragraph in document order, nested stories in place.
+    paragraphs: Vec<SeededParagraph>,
     source: SourceStructure,
 }
 
@@ -307,8 +318,10 @@ impl<'de> Visitor<'de> for OrderedValueVisitor {
         A: MapAccess<'de>,
     {
         let mut entries = Vec::new();
-        while let Some(entry) = object.next_entry()? {
-            entries.push(entry);
+        while let Some(entry) = object.next_entry::<String, OrderedValue>()? {
+            if entry.0 != SOURCE_ORDINAL {
+                entries.push(entry);
+            }
         }
         Ok(OrderedValue::Object(entries))
     }
@@ -570,10 +583,23 @@ fn needs_source_json(value: &Value) -> bool {
 }
 
 fn source_json(value: &Value, values: &BTreeMap<String, String>) -> String {
-    serde_json::to_string(value)
+    let mut value = value.clone();
+    strip_source_ordinals(&mut value);
+    serde_json::to_string(&value)
         .ok()
         .and_then(|key| values.get(&key).cloned())
-        .unwrap_or_else(|| js_json(value))
+        .unwrap_or_else(|| js_json(&value))
+}
+
+fn strip_source_ordinals(value: &mut Value) {
+    match value {
+        Value::Array(values) => values.iter_mut().for_each(strip_source_ordinals),
+        Value::Object(values) => {
+            values.remove(SOURCE_ORDINAL);
+            values.values_mut().for_each(strip_source_ordinals);
+        }
+        _ => {}
+    }
 }
 
 fn drop_nulls(value: Value) -> Value {
@@ -3187,7 +3213,9 @@ impl BlockCursor {
             "rawXml" => None,
             "paragraph" => {
                 let id = string(field(Some(block), "paraId"))
-                    .filter(|value| !value.is_empty())
+                    .filter(|value| {
+                        !value.is_empty() && !truthy(field(Some(block), "repeatedParaId"))
+                    })
                     .map_or_else(|| format!("{story_id}:p{}", self.paragraph), str::to_owned);
                 self.paragraph += 1;
                 Some(id)
@@ -3318,6 +3346,7 @@ fn visit_story(
         comment_coverage: Vec::new(),
     });
     let empty_story;
+    let source = !source_blocks.is_empty();
     let blocks = if source_blocks.is_empty() {
         empty_story = [json!({ "type": "paragraph", "content": [] })];
         &empty_story[..]
@@ -3366,7 +3395,24 @@ fn visit_story(
                 }
                 let (mut units, mut ppr) =
                     paragraph_units(block, &context.styles, None, &context.source_json);
-                ppr.insert("paraId".to_owned(), Value::String(block_id));
+                let source_para_id = string(field(Some(block), "paraId"))
+                    .filter(|value| source && !value.is_empty())
+                    .map(str::to_owned);
+                if let Some(id) = &source_para_id {
+                    ppr.insert(SOURCE_PARA_ID.to_owned(), Value::String(id.clone()));
+                }
+                if !source {
+                    ppr.insert(PARA_ORIGIN.to_owned(), Value::String(SYNTHETIC.to_owned()));
+                }
+                ppr.insert("paraId".to_owned(), Value::String(block_id.clone()));
+                context.paragraphs.push(SeededParagraph {
+                    root: context.root.clone(),
+                    key: block_id,
+                    source_para_id,
+                    ordinal: number(field(Some(block), SOURCE_ORDINAL))
+                        .map(|ordinal| ordinal as u32),
+                    source,
+                });
                 bind_field_result_blocks(
                     &mut units,
                     &story_id,
@@ -3496,16 +3542,25 @@ fn visit_story(
         context.source.blocks.insert(story_id.clone(), block_order);
     }
     if options.append_body_tail && matches!(last_kind, Some("table" | "blockSdt")) {
+        let key = format!("{story_id}:p{}", cursor.paragraph);
         context.plans[plan_index].units.push(embed_unit(
             "pilcrow",
             map_from_value(json!({
                 "hangingIndent": false,
-                "paraId": format!("{story_id}:p{}", cursor.paragraph)
+                "paraId": key,
+                (PARA_ORIGIN): SYNTHETIC
             })),
             &[],
             None,
             1,
         ));
+        context.paragraphs.push(SeededParagraph {
+            root: context.root.clone(),
+            key,
+            source_para_id: None,
+            ordinal: None,
+            source: false,
+        });
     }
     if options.seed_comments {
         add_comment_coverage(&mut context.plans[plan_index]);
@@ -3664,9 +3719,25 @@ fn entry_parts(entry: &Value) -> Option<(&str, &Value)> {
     Some((entry.first()?.as_str()?, entry.get(1)?))
 }
 
+/// Parses a DOCX for editing, each paragraph carrying its source occurrence.
+#[cfg(any(feature = "wasm", test))]
 pub(crate) fn parse_docx_for_edit(bytes: &[u8]) -> Result<docx_parse::S9WireEnvelope, String> {
-    docx_parse::parse_docx_s9_wire(bytes, docx_parse::S9ParseOptions::default())
-        .map_err(|error| error.to_string())
+    parse_docx_package(bytes).map(|(envelope, _)| envelope)
+}
+
+/// [`parse_docx_for_edit`], with the inflated parts the identity index reads.
+pub(crate) fn parse_docx_package(
+    bytes: &[u8],
+) -> Result<(docx_parse::S9WireEnvelope, Vec<(String, Vec<u8>)>), String> {
+    docx_parse::parse_docx_s9_wire_parts_with_limits(
+        bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..docx_parse::S9ParseOptions::default()
+        },
+        &docx_parse::xml::ParseLimits::default(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "wasm")]
@@ -3680,11 +3751,19 @@ pub(crate) fn referenced_fonts(
     Ok(fonts.into_iter().collect())
 }
 
-pub(crate) fn seed_parsed_docx(
-    document: &EditingDoc,
-    mut envelope: docx_parse::S9WireEnvelope,
-) -> Result<Vec<String>, String> {
+type SourceRoot = (String, SourceStoryKind, Option<String>);
+
+/// One package lowered into story plans, with what its identity index needs.
+struct LoweredDocx {
+    context: LoweringContext,
+    referenced_fonts: BTreeSet<String>,
+    roots: Vec<SourceRoot>,
+    relationships: Vec<(String, docx_parse::Relationship)>,
+}
+
+fn lower_docx(mut envelope: docx_parse::S9WireEnvelope) -> Result<LoweredDocx, String> {
     envelope.document.package.media_entries.clear();
+    let relationships = envelope.document.package.relationship_entries.clone();
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
@@ -3703,8 +3782,218 @@ pub(crate) fn seed_parsed_docx(
     drop(envelope);
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
-    let context = lower_package(package, source_json);
-    drop(parsed);
+    let (context, roots) = lower_package(package, source_json);
+    Ok(LoweredDocx {
+        context,
+        referenced_fonts,
+        roots,
+        relationships,
+    })
+}
+
+/// Source metadata for a package whose stories arrive another way, such as shared state.
+#[cfg(feature = "wasm")]
+pub(crate) fn source_metadata(
+    envelope: &docx_parse::S9WireEnvelope,
+) -> Result<SourceMetadata, String> {
+    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let package =
+        field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
+    let (context, _) = lower_package(package, BTreeMap::new());
+    Ok(SourceMetadata {
+        styles: context.styles,
+        structure: context.source,
+    })
+}
+
+fn lower_package(
+    package: &Value,
+    source_json: BTreeMap<String, String>,
+) -> (LoweringContext, Vec<SourceRoot>) {
+    let compatibility_mode = compatibility_mode_from_package(Some(package));
+    let mut context = LoweringContext {
+        styles: StyleResolver::new(field(Some(package), "styles")),
+        theme: field(Some(package), "theme").cloned(),
+        source_json: Arc::new(source_json),
+        plans: Vec::new(),
+        compatibility_mode,
+        root: "body".to_owned(),
+        paragraphs: Vec::new(),
+        source: SourceStructure::default(),
+    };
+    let mut roots = vec![("body".to_owned(), SourceStoryKind::Body, None)];
+    visit_story(
+        &mut context,
+        "body".to_owned(),
+        array(field(field(Some(package), "document"), "content")),
+        StoryOptions {
+            include_page_breaks: true,
+            append_body_tail: true,
+            seed_comments: true,
+        },
+    );
+    for (key, kind) in [
+        ("headerEntries", SourceStoryKind::Header),
+        ("footerEntries", SourceStoryKind::Footer),
+    ] {
+        for entry in array(field(Some(package), key)) {
+            let Some((relationship_id, part)) = entry_parts(entry) else {
+                continue;
+            };
+            let story_id = format!("hf:{relationship_id}");
+            if context.plans.iter().any(|plan| plan.story_id == story_id) {
+                continue;
+            }
+            context.root = story_id.clone();
+            roots.push((story_id.clone(), kind, Some(relationship_id.to_owned())));
+            visit_story(
+                &mut context,
+                story_id,
+                array(field(Some(part), "content")),
+                StoryOptions {
+                    include_page_breaks: false,
+                    append_body_tail: false,
+                    seed_comments: true,
+                },
+            );
+        }
+    }
+    for (key, prefix, kind) in [
+        ("footnotes", "fn", SourceStoryKind::Footnote),
+        ("endnotes", "en", SourceStoryKind::Endnote),
+    ] {
+        for note in array(field(Some(package), key)) {
+            let Some(id) = field(Some(note), "id") else {
+                continue;
+            };
+            let story_id = format!("{prefix}:{}", js_string(id));
+            context.root = story_id.clone();
+            roots.push((story_id.clone(), kind, Some(js_string(id))));
+            visit_story(
+                &mut context,
+                story_id,
+                array(field(Some(note), "content")),
+                StoryOptions {
+                    include_page_breaks: false,
+                    append_body_tail: false,
+                    seed_comments: true,
+                },
+            );
+        }
+    }
+    (context, roots)
+}
+
+const FOOTNOTES_PART: &str = "word/footnotes.xml";
+const ENDNOTES_PART: &str = "word/endnotes.xml";
+const COMMENTS_PART: &str = "word/comments.xml";
+const COMMENT_COMPANIONS: [&str; 2] = ["word/commentsExtended.xml", "word/commentsIds.xml"];
+
+/// Indexes the package's paragraph identities: every story part with the
+/// root stories seeded from it, every paragraph ID it uses, and the IDs the
+/// comment companion parts reference.
+fn build_source_index(
+    bytes: Arc<[u8]>,
+    parts: &[(String, Vec<u8>)],
+    roots: Vec<SourceRoot>,
+    relationships: &[(String, docx_parse::Relationship)],
+    paragraphs: Vec<SeededParagraph>,
+) -> SourceIndex {
+    use sha2::{Digest, Sha256};
+    let limits = docx_parse::xml::ParseLimits::default();
+    let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+    let document_path = docx_parse::relationships::office_document_path(parts, &mut budget)
+        .unwrap_or_else(|_| "word/document.xml".to_owned());
+    let find = |path: &str| {
+        parts
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(path))
+    };
+    let mut inputs: Vec<SourcePartInput> = Vec::new();
+    let mut add = |path: &str, kind: SourceStoryKind, root: Option<(String, Option<String>)>| {
+        let Some((path, xml)) = find(path) else {
+            return;
+        };
+        if let Some(input) = inputs.iter_mut().find(|input| input.path == *path) {
+            input.roots.extend(root);
+            return;
+        }
+        let Ok(xml) = std::str::from_utf8(xml) else {
+            return;
+        };
+        inputs.push(SourcePartInput {
+            path: path.clone(),
+            kind,
+            xml: xml.to_owned(),
+            roots: root.into_iter().collect(),
+        });
+    };
+    for (story_id, kind, item) in roots {
+        let path = match kind {
+            SourceStoryKind::Body => Some(document_path.clone()),
+            SourceStoryKind::Footnote => Some(FOOTNOTES_PART.to_owned()),
+            SourceStoryKind::Endnote => Some(ENDNOTES_PART.to_owned()),
+            SourceStoryKind::Comment => Some(COMMENTS_PART.to_owned()),
+            SourceStoryKind::Header | SourceStoryKind::Footer => relationships
+                .iter()
+                .find(|(id, _)| Some(id) == item.as_ref())
+                .and_then(|(_, relationship)| {
+                    match docx_parse::resolve_relationship_target(&document_path, relationship) {
+                        Ok(docx_parse::RelationshipTarget::Internal(path)) => Some(path),
+                        _ => None,
+                    }
+                }),
+        };
+        let item =
+            item.filter(|_| matches!(kind, SourceStoryKind::Footnote | SourceStoryKind::Endnote));
+        if let Some(path) = path {
+            add(&path, kind, Some((story_id, item)));
+        }
+    }
+    add(FOOTNOTES_PART, SourceStoryKind::Footnote, None);
+    add(ENDNOTES_PART, SourceStoryKind::Endnote, None);
+    add(COMMENTS_PART, SourceStoryKind::Comment, None);
+    let comment_references = COMMENT_COMPANIONS
+        .iter()
+        .filter_map(|path| find(path))
+        .flat_map(|(_, xml)| docx_parse::paragraph_identity::paragraph_id_attributes(xml))
+        .collect();
+    SourceIndex::new(
+        format!("{:x}", Sha256::digest(&bytes)),
+        bytes,
+        docx_parse::paragraph_identity::package_paragraph_ids(parts),
+        inputs,
+        comment_references,
+        paragraphs,
+    )
+}
+
+/// The identity index of a package, lowered without seeding.
+pub(crate) fn source_index(bytes: Arc<[u8]>) -> Result<SourceIndex, String> {
+    let (envelope, parts) = parse_docx_package(&bytes)?;
+    let lowered = lower_docx(envelope)?;
+    Ok(build_source_index(
+        bytes,
+        &parts,
+        lowered.roots,
+        &lowered.relationships,
+        lowered.context.paragraphs,
+    ))
+}
+
+/// Seeds every story of the parsed package and retains its identity index.
+pub(crate) fn seed_parsed_docx(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+    parts: &[(String, Vec<u8>)],
+    bytes: Arc<[u8]>,
+) -> Result<Vec<String>, String> {
+    let LoweredDocx {
+        context,
+        mut referenced_fonts,
+        roots,
+        relationships,
+    } = lower_docx(envelope)?;
     document
         .create_empty_stories(
             &context
@@ -3723,6 +4012,8 @@ pub(crate) fn seed_parsed_docx(
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
+    let index = build_source_index(bytes, parts, roots, &relationships, context.paragraphs);
+    document.retain_source(SourcePackage::Ready(Arc::new(index)));
     document.install_source(
         SourceMetadata {
             styles: context.styles,
@@ -3733,98 +4024,31 @@ pub(crate) fn seed_parsed_docx(
     Ok(referenced_fonts.into_iter().collect())
 }
 
-/// Source metadata for a package whose stories arrive another way, such as shared state.
-#[cfg(feature = "wasm")]
-pub(crate) fn source_metadata(
-    envelope: &docx_parse::S9WireEnvelope,
-) -> Result<SourceMetadata, String> {
-    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
-    let package =
-        field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
-    let context = lower_package(package, BTreeMap::new());
-    Ok(SourceMetadata {
-        styles: context.styles,
-        structure: context.source,
-    })
-}
-
-fn lower_package(package: &Value, source_json: BTreeMap<String, String>) -> LoweringContext {
-    let compatibility_mode = compatibility_mode_from_package(Some(package));
-    let mut context = LoweringContext {
-        styles: StyleResolver::new(field(Some(package), "styles")),
-        theme: field(Some(package), "theme").cloned(),
-        source_json: Arc::new(source_json),
-        plans: Vec::new(),
-        compatibility_mode,
-        source: SourceStructure::default(),
-    };
-    visit_story(
-        &mut context,
-        "body".to_owned(),
-        array(field(field(Some(package), "document"), "content")),
-        StoryOptions {
-            include_page_breaks: true,
-            append_body_tail: true,
-            seed_comments: true,
-        },
-    );
-    for entry in array(field(Some(package), "headerEntries")) {
-        let Some((relationship_id, part)) = entry_parts(entry) else {
-            continue;
-        };
-        visit_story(
-            &mut context,
-            format!("hf:{relationship_id}"),
-            array(field(Some(part), "content")),
-            StoryOptions {
-                include_page_breaks: false,
-                append_body_tail: false,
-                seed_comments: true,
-            },
-        );
-    }
-    for entry in array(field(Some(package), "footerEntries")) {
-        let Some((relationship_id, part)) = entry_parts(entry) else {
-            continue;
-        };
-        let story_id = format!("hf:{relationship_id}");
-        if context.plans.iter().any(|plan| plan.story_id == story_id) {
-            continue;
-        }
-        visit_story(
-            &mut context,
-            story_id,
-            array(field(Some(part), "content")),
-            StoryOptions {
-                include_page_breaks: false,
-                append_body_tail: false,
-                seed_comments: true,
-            },
-        );
-    }
-    for (key, prefix) in [("footnotes", "fn"), ("endnotes", "en")] {
-        for note in array(field(Some(package), key)) {
-            let Some(id) = field(Some(note), "id") else {
-                continue;
-            };
-            visit_story(
-                &mut context,
-                format!("{prefix}:{}", js_string(id)),
-                array(field(Some(note), "content")),
-                StoryOptions {
-                    include_page_breaks: false,
-                    append_body_tail: false,
-                    seed_comments: true,
-                },
-            );
-        }
-    }
-    context
-}
-
+/// Opens a DOCX: seeds every story and starts a new opening with a fresh
+/// generation, so its session anchors are its own; see
+/// [`EditingDoc::begin_opening`].
 pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
-    let envelope = parse_docx_for_edit(bytes)?;
-    seed_parsed_docx(document, envelope).map(|_| ())
+    seed_stories(document, bytes)?;
+    document.begin_opening(None);
+    Ok(())
+}
+
+/// [`seed_from_docx`] with a fixed opening generation, for a deterministic
+/// seed every replica loads as one session.
+pub fn seed_from_docx_with_generation(
+    document: &EditingDoc,
+    bytes: &[u8],
+    generation: &str,
+) -> Result<(), String> {
+    seed_stories(document, bytes)?;
+    document.begin_opening(Some(generation));
+    Ok(())
+}
+
+/// Seeds every story of a DOCX without starting an opening.
+pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let (envelope, parts) = parse_docx_package(bytes)?;
+    seed_parsed_docx(document, envelope, &parts, Arc::from(bytes)).map(|_| ())
 }
 
 #[cfg(test)]
@@ -3836,6 +4060,8 @@ mod tests {
             source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
             compatibility_mode: 12,
+            root: "body".to_owned(),
+            paragraphs: Vec::new(),
             source: SourceStructure::default(),
         };
         visit_story(
@@ -4079,6 +4305,8 @@ mod tests {
             source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
             compatibility_mode: 12,
+            root: "body".to_owned(),
+            paragraphs: Vec::new(),
             source: SourceStructure::default(),
         };
         visit_story(
@@ -4404,10 +4632,10 @@ mod tests {
             without_media.document.package.media_entries.clear();
             let with_media_doc = EditingDoc::new(7);
             let without_media_doc = EditingDoc::new(7);
-            let fonts = seed_parsed_docx(&with_media_doc, envelope).unwrap();
+            let fonts = seed_parsed_docx(&with_media_doc, envelope, &[], Arc::from([])).unwrap();
             assert_eq!(
                 fonts,
-                seed_parsed_docx(&without_media_doc, without_media).unwrap()
+                seed_parsed_docx(&without_media_doc, without_media, &[], Arc::from([])).unwrap()
             );
             assert!(fonts.iter().any(|font| font == "Image Caption"));
             assert_eq!(
@@ -4441,6 +4669,24 @@ mod tests {
         assert_eq!(
             source_json(&value, &source),
             r#"{"type":"shape","z":1,"nested":{"b":2,"a":3}}"#
+        );
+    }
+
+    #[test]
+    fn source_json_never_carries_source_ordinals() {
+        let wire = r#"{"type":"shape","textBody":{"content":[{"type":"paragraph","sourceOrdinal":4}]},"z":1.0}"#;
+        let ordered: OrderedValue = serde_json::from_str(wire).unwrap();
+        let parsed: Value = serde_json::from_str(wire).unwrap();
+        let mut source = BTreeMap::new();
+        ordered.collect_source_json(&mut source);
+
+        assert_eq!(
+            source_json(&parsed, &source),
+            r#"{"type":"shape","textBody":{"content":[{"type":"paragraph"}]},"z":1}"#
+        );
+        assert_eq!(
+            source_json(&parsed, &BTreeMap::new()),
+            r#"{"textBody":{"content":[{"type":"paragraph"}]},"type":"shape","z":1}"#
         );
     }
 

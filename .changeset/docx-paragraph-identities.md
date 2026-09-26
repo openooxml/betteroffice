@@ -1,0 +1,8 @@
+---
+'@betteroffice/docx': minor
+'@betteroffice/docx-react': patch
+'@betteroffice/rust-crates': minor
+'@betteroffice/python-docx': patch
+---
+
+Keep DOCX paragraph identities across saves. Session keys and Word paragraph IDs (`w14:paraId`) are now separate: a session key is never saved, source IDs are kept as authored, and paragraphs authored in a session, edit batches included, get fresh, valid IDs that avoid every ID the package already uses. `saveYrsDocx()` returns the saved bytes plus a part-qualified persisted anchor for each saved paragraph, which `YrsSession.resolveParagraphAnchor()` resolves after reopening; session anchors resolve on every replica of one collaborative session, and each seeding open (`openDocx()`, `seedFromDocx()`, `documentToYrs()`) starts a new session so a stale anchor never resolves after reopening; a fixed `generation` option keeps shared seeds deterministic. Paragraphs whose ID the live session reassigned while a save ran are reported as `conflicts`. The React editor's Save writes and records the same IDs. `persistParagraphIds()` gives source paragraphs without an ID one on request across every story part, comments and note separators included, and refuses rather than guess at an ambiguous comment reference; a save whose stories are otherwise unchanged patches the IDs into the source bytes. `paragraphIdentities()` lists every paragraph's session, persisted and source anchors. Duplicate identities from concurrent edits or copies are repaired identically on every replica, source and saved IDs keeping theirs, and duplicate or malformed source IDs are no longer rewritten on parse; they save as authored until persisted. The Rust anchor-resolution, diagnostic and refusal enums are `#[non_exhaustive]`.

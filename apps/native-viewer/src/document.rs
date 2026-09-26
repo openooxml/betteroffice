@@ -7,7 +7,9 @@ use anyhow::{Context, Result, bail};
 #[cfg(feature = "xlsx")]
 use betteroffice_xlsx::CellRef;
 #[cfg(feature = "docx")]
-use docx_edit::{EditingDoc, EngineSession, SimpleFormat, seed_from_docx};
+use docx_edit::{
+    EditingDoc, EngineSession, SimpleFormat, seed_from_docx, seed_from_docx_with_generation,
+};
 #[cfg(feature = "docx")]
 use docx_layout::display_list::DisplayList;
 #[cfg(feature = "docx")]
@@ -20,7 +22,7 @@ use vello::kurbo::Affine;
 use crate::chrome::Alignment;
 use crate::chrome::EditingState;
 #[cfg(feature = "docx")]
-use crate::collaboration::BROWSER_SEED_CLIENT_ID;
+use crate::collaboration::{BROWSER_SEED_CLIENT_ID, BROWSER_SEED_GENERATION};
 #[cfg(feature = "docx")]
 use crate::docx_scene::translate_document;
 #[cfg(feature = "docx")]
@@ -1060,6 +1062,16 @@ fn load_pptx(
     })
 }
 
+/// The collaboration seed of a DOCX, as the browser seeds every room: the
+/// same client and opening generation, so native and browser seeds converge.
+#[cfg(feature = "docx")]
+fn shared_docx_seed(bytes: &[u8]) -> Result<EditingDoc> {
+    let seed = EditingDoc::new(BROWSER_SEED_CLIENT_ID);
+    seed_from_docx_with_generation(&seed, bytes, BROWSER_SEED_GENERATION)
+        .map_err(anyhow::Error::msg)?;
+    Ok(seed)
+}
+
 #[cfg(feature = "docx")]
 fn load_docx(
     path: &Path,
@@ -1071,11 +1083,9 @@ fn load_docx(
     let package = parsed.document.package;
     let engine = EngineSession::new(collaboration_client_id.unwrap_or(0x0056_454c_4c4f));
     if collaboration_client_id.is_some() {
-        let seed = EditingDoc::new(BROWSER_SEED_CLIENT_ID);
-        seed_from_docx(&seed, &bytes).map_err(anyhow::Error::msg)?;
         engine
             .doc()
-            .apply_update_v1(&seed.encode_state_as_update_v1())
+            .apply_update_v1(&shared_docx_seed(&bytes)?.encode_state_as_update_v1())
             .map_err(anyhow::Error::msg)?;
     } else {
         seed_from_docx(engine.doc(), &bytes).map_err(anyhow::Error::msg)?;
@@ -1434,6 +1444,18 @@ mod tests {
             };
             receiver.collaboration_apply_remote_update(update).unwrap();
         }
+    }
+
+    #[test]
+    fn the_shared_docx_seed_matches_the_committed_browser_seed() {
+        let document = include_bytes!("../../demo/public/betteroffice-demo.docx");
+        let browser = include_bytes!("../../demo/public/seeds/docx.bin");
+        assert!(
+            shared_docx_seed(document)
+                .unwrap()
+                .encode_state_as_update_v1()
+                == browser.as_slice()
+        );
     }
 
     #[test]

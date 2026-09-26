@@ -34,7 +34,12 @@ function setup(
   const errors: Error[] = [];
   const saved: ArrayBuffer[] = [];
   const document = structuredClone(fixture);
-  const session = {};
+  const session = {
+    paragraphIdentities: () => ({ sessionId: '', packageSha256: null, paragraphs: [] }),
+    paragraphSavePlan: () => ({ assignments: [], patchedParts: [] }),
+    writtenParagraphIds: () => ({}),
+    recordSavedParagraphIds: () => [],
+  };
   const editor = {
     getYrsSession: () => session,
     isFocused: () => options.focused ?? true,

@@ -41,8 +41,8 @@ use crate::ops::table::resolve_table_row_revisions;
 use crate::ops::{ChunkKind, last_pilcrow, snapshot, snapshot_range};
 use crate::queries::revision_parts;
 use crate::{
-    DEL, EditCtx, EditingDoc, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId,
-    StoryRange, check_range, story_ref,
+    DEL, EditCtx, EditingDoc, INS, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId, StoryRange,
+    check_range, story_ref,
 };
 
 /// What a resolve op targets.
@@ -123,10 +123,8 @@ fn restore_paragraph_properties(txn: &mut TransactionMut<'_>, map: &MapRef, chan
     if let Some(current) = current {
         for key in current.keys() {
             if previous.is_none_or(|prior| !prior.contains_key(key))
-                && !matches!(
-                    key.as_str(),
-                    KIND_KEY | PARA_ID | PPR_INS | PPR_DEL | PPR_CHANGE
-                )
+                && !crate::is_identity_key(key)
+                && !matches!(key.as_str(), PPR_INS | PPR_DEL | PPR_CHANGE)
             {
                 map.remove(txn, key);
             }
@@ -148,10 +146,9 @@ fn restore_paragraph_properties(txn: &mut TransactionMut<'_>, map: &MapRef, chan
     }
     if let Some(previous) = previous {
         for (key, value) in previous {
-            if !matches!(
-                key.as_str(),
-                KIND_KEY | PARA_ID | PPR_INS | PPR_DEL | PPR_CHANGE
-            ) {
+            if !crate::is_identity_key(key)
+                && !matches!(key.as_str(), PPR_INS | PPR_DEL | PPR_CHANGE)
+            {
                 map.insert(txn, key.clone(), value.clone());
             }
         }

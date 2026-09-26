@@ -149,6 +149,11 @@ does not invoke that callback again. `onSave(buffer)` remains the notification
 after export. Before direct session reads or mutations, await `flushPendingInput()`;
 after a mutation, use `syncYrsInputState(true)` to refresh the editor.
 
+For a document opened from DOCX bytes, Save writes the session's Word paragraph
+IDs, including those `persistParagraphIds()` gave comments, note separators and
+retained XML, and records them as saved, as `saveYrsDocx` does. Use `saveYrsDocx`
+for the persisted anchors of the saved paragraphs.
+
 ## Host edit batches
 
 `DocxEditorRef.readParagraphs()`, `findText()`, `validateEdits()` and `applyEdits()`
