@@ -3,7 +3,10 @@ import type { Translations } from '@betteroffice/xlsx-i18n';
 import type { ToolbarMode, ToolbarProps } from './Toolbar';
 
 export interface EditorToolbarProps extends ToolbarProps {
-  /** Locale of a command-mode toolbar rendered outside the editor; defaults to the editor's. */
+  /**
+   * Locale of a command-mode toolbar rendered outside the editor; defaults to the editor's.
+   * @experimental
+   */
   i18n?: Translations;
 }
 

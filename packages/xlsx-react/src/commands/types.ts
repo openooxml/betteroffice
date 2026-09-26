@@ -19,7 +19,10 @@ export type {
   JsonValue,
 } from '../../../../shared/host-contracts/commands';
 
-/** Arguments of every XLSX editor command, keyed by command id. */
+/**
+ * Arguments of every XLSX editor command, keyed by command id.
+ * @experimental
+ */
 export interface XlsxCommandArgs {
   bold: null;
   italic: null;
@@ -61,9 +64,13 @@ export interface XlsxCommandArgs {
   proposalReject: { proposalId: string };
 }
 
+/** @experimental */
 export type XlsxCommandId = keyof XlsxCommandArgs;
 
-/** Commands presented as a choice between options. */
+/**
+ * Commands presented as a choice between options.
+ * @experimental
+ */
 export type XlsxSelectCommandId =
   | 'fontFamily'
   | 'fontSize'
@@ -76,13 +83,19 @@ export type XlsxSelectCommandId =
   | 'textWrapping'
   | 'zoom';
 
-/** Number format of the selection; `kind` is `null` when the cells disagree. */
+/**
+ * Number format of the selection; `kind` is `null` when the cells disagree.
+ * @experimental
+ */
 export type XlsxNumberFormatValue = {
   kind: NumberFormat | null;
   pattern: string | null;
 };
 
-/** Current values reported in {@link XlsxCommandState.value}, keyed by command id. */
+/**
+ * Current values reported in {@link XlsxCommandState.value}, keyed by command id.
+ * @experimental
+ */
 export interface XlsxCommandValues {
   bold: null;
   italic: null;
@@ -120,7 +133,10 @@ export interface XlsxCommandValues {
   proposalReject: null;
 }
 
-/** Why a command is unavailable. */
+/**
+ * Why a command is unavailable.
+ * @experimental
+ */
 export type XlsxCommandDisabledCode =
   | 'editor-unavailable'
   | 'document-loading'
@@ -142,7 +158,10 @@ export type XlsxCommandDisabledCode =
   | 'unsupported-command'
   | 'invalid-arguments';
 
-/** Why an executed command did not complete. */
+/**
+ * Why an executed command did not complete.
+ * @experimental
+ */
 export type XlsxCommandFailureCode =
   | XlsxCommandDisabledCode
   | 'input-failed'
@@ -153,7 +172,10 @@ export type XlsxCommandFailureCode =
   | 'render-failed'
   | 'execution-failed';
 
-/** One choice of a selector command. */
+/**
+ * One choice of a selector command.
+ * @experimental
+ */
 export interface XlsxCommandOption<K extends XlsxCommandId = XlsxCommandId> {
   args: XlsxCommandArgs[K];
   label: string;
@@ -161,7 +183,10 @@ export interface XlsxCommandOption<K extends XlsxCommandId = XlsxCommandId> {
   state: CommandState<XlsxCommandValues[K], XlsxCommandDisabledCode>;
 }
 
-/** Serializable state of one XLSX command, optionally for specific arguments. */
+/**
+ * Serializable state of one XLSX command, optionally for specific arguments.
+ * @experimental
+ */
 export type XlsxCommandState<K extends XlsxCommandId = XlsxCommandId> = CommandState<
   XlsxCommandValues[K],
   XlsxCommandDisabledCode
@@ -170,13 +195,19 @@ export type XlsxCommandState<K extends XlsxCommandId = XlsxCommandId> = CommandS
   options?: readonly XlsxCommandOption<K>[];
 };
 
-/** A keyboard binding; `Mod` is Cmd on macOS and Ctrl elsewhere. */
+/**
+ * A keyboard binding; `Mod` is Cmd on macOS and Ctrl elsewhere.
+ * @experimental
+ */
 export interface XlsxCommandShortcut<K extends XlsxCommandId = XlsxCommandId> {
   chord: string;
   args: XlsxCommandArgs[K];
 }
 
-/** Static, serializable description of a command. */
+/**
+ * Static, serializable description of a command.
+ * @experimental
+ */
 export interface XlsxCommandDescriptor<K extends XlsxCommandId = XlsxCommandId> {
   id: K;
   labelKey: TranslationKey;
@@ -184,18 +215,23 @@ export interface XlsxCommandDescriptor<K extends XlsxCommandId = XlsxCommandId> 
   shortcuts: readonly XlsxCommandShortcut<K>[];
 }
 
+/** @experimental */
 export type XlsxCommandStatus = 'executed' | 'noop' | 'opened' | 'requested';
 
 /**
  * Outcome of {@link XlsxCommandStore.execute}: `executed` changed something,
  * `noop` was valid but changed nothing, `opened` showed a picker, and
  * `requested` handed the change to the host.
+ * @experimental
  */
 export type XlsxCommandResult =
   | { ok: true; status: XlsxCommandStatus }
   | { ok: false; failure: CommandReason<XlsxCommandFailureCode> };
 
-/** The command authority of one editor, shared by built-in and host chrome. */
+/**
+ * The command authority of one editor, shared by built-in and host chrome.
+ * @experimental
+ */
 export interface XlsxCommandStore {
   getDescriptor<K extends XlsxCommandId>(id: K): XlsxCommandDescriptor<K>;
   /** Snapshots are stable until the state changes; pass `args` to evaluate one option. */

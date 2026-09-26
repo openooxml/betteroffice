@@ -12,6 +12,7 @@ import { ToolbarButtonBase, ToolbarGroup, ToolbarSeparator } from './ui/ToolbarP
 /**
  * How a toolbar gets its state: `'legacy'` from props and callbacks,
  * `'commands'` from the editor's command store.
+ * @experimental
  */
 export type ToolbarMode = 'legacy' | 'commands';
 
@@ -114,6 +115,7 @@ export interface ToolbarProps {
    * `'commands'` binds the built-in controls to the editor's commands, and
    * rejects the state and callback props above. Defaults to the mode of the
    * surrounding `EditorToolbar`, else `'legacy'`.
+   * @experimental
    */
   mode?: ToolbarMode;
 }
