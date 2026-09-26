@@ -52,6 +52,16 @@ def test_export_reads_edits_made_through_the_document(minimal_bytes: bytes) -> N
     assert all(inline["marks"] is None for inline in first["paragraph"]["inlines"])
 
 
+def test_content_without_a_location_is_anchored_unlocated(principal: Document) -> None:
+    content = principal.export_structured(revision_view="accepted")
+    unlocated = {"kind": "unlocated", "story": "body", "reason": "duplicate-paragraph-id"}
+    content["stories"][0]["blocks"][0]["anchor"] = unlocated
+
+    markdown = render_docx_markdown(content)
+
+    assert markdown["anchors"][0]["anchor"] == unlocated
+
+
 def test_unusable_options_raise(principal: Document) -> None:
     with pytest.raises(ExportError, match="invalid-options") as refused:
         principal.export_structured(revision_view="accepted", max_bytes=16)

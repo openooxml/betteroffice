@@ -10,14 +10,26 @@ import type { DocxTextRange } from './edits';
  * against the version or snapshot they were read at; table indices and control ids are not stable
  * across saves. A `sourcePart` anchor addresses retained source XML (the part, its SHA-256 and
  * zero-based element-child ordinals from the part's root); it is provenance, not an edit target.
- * A paragraph anchor with an empty `paraId` marks content with no location of its own.
+ * An `unlocated` anchor marks content of `story` with no location of its own, and says why.
  */
 export type DocxAnchor =
   | { kind: 'paragraph'; story: string; paraId: string }
   | ({ kind: 'range' } & DocxTextRange)
   | { kind: 'table'; story: string; tableIndex: number }
   | { kind: 'control'; story: string; controlId: string }
-  | { kind: 'sourcePart'; part: string; partSha256: string; path: number[] };
+  | { kind: 'sourcePart'; part: string; partSha256: string; path: number[] }
+  | { kind: 'unlocated'; story: string; reason: DocxUnlocatedReason };
+
+/**
+ * Why content has no location: another paragraph of the story carries the same id, the story is
+ * too large to read within `maxBytes` or does not exist, or content the editing stream leaves out
+ * can no longer be found in its source XML.
+ */
+export type DocxUnlocatedReason =
+  | 'duplicate-paragraph-id'
+  | 'story-too-large'
+  | 'missing-story'
+  | 'provenance-unavailable';
 
 /** A category of stories a read covers. */
 export type DocxStorySelection =

@@ -20,7 +20,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::EditingDoc;
 use crate::batch::DocumentVersion;
 
-pub use crate::read_types::{Anchor, ControlMetadata, HeadingInfo, OutlineSource, StorySelection};
+pub use crate::read_types::{
+    Anchor, ControlMetadata, HeadingInfo, OutlineSource, StorySelection, UnlocatedReason,
+};
 pub use markdown::{PageAnnotations, render_docx_markdown, render_docx_markdown_with_pages};
 pub use pages::{
     AtomCoverage, DEFAULT_MAX_FRAGMENTS, DocxLayoutMap, DocxPagedStructuredContent,

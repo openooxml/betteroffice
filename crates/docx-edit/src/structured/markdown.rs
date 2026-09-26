@@ -1192,7 +1192,7 @@ mod tests {
     fn anchor() -> Anchor {
         Anchor::Paragraph {
             story: "body".to_owned(),
-            para_id: String::new(),
+            para_id: "00000001".to_owned(),
         }
     }
 

@@ -8,8 +8,8 @@ mod fixture;
 use docx_edit::structured::{
     Anchor, Block, BlockKind, CachedResult, DiagnosticCode, DocxStructuredContent, ExportOptions,
     FormattingMark, Inline, InlineKind, MarkdownOptions, RevisionKind, RevisionView, StoryKind,
-    StorySelection, VerticalMerge, export_docx_markdown, export_docx_structured,
-    render_docx_markdown,
+    StorySelection, UnlocatedReason, VerticalMerge, export_docx_markdown, export_docx_structured,
+    export_package_structured, render_docx_markdown,
 };
 use docx_edit::{EditCtx, EditingDoc, RawOp, seed_from_docx};
 use fixture::{Package, image, para, run};
@@ -573,10 +573,14 @@ fn shared_paragraph_ids_never_look_like_edit_targets() {
         .export_structured(&options(RevisionView::Accepted))
         .unwrap()
         .content;
-    let unlocated = Anchor::Paragraph {
+    let unlocated = Anchor::Unlocated {
         story: "body".to_owned(),
-        para_id: String::new(),
+        reason: UnlocatedReason::DuplicateParagraphId,
     };
+    assert_eq!(
+        serde_json::to_value(&unlocated).unwrap(),
+        serde_json::json!({"kind": "unlocated", "story": "body", "reason": "duplicate-paragraph-id"})
+    );
     for block in &body(&content)[..2] {
         assert_eq!(block.anchor, unlocated);
         assert!(
@@ -589,6 +593,129 @@ fn shared_paragraph_ids_never_look_like_edit_targets() {
         matches!(&body(&content)[2].anchor, Anchor::Paragraph { para_id, .. } if para_id == "70000002")
     );
     assert_eq!(count(&content, DiagnosticCode::AmbiguousIdentity), 2);
+    let markdown = render_docx_markdown(&content, &MarkdownOptions::default()).unwrap();
+    let cited: Vec<&Anchor> = markdown.anchors.iter().map(|entry| &entry.anchor).collect();
+    assert_eq!(cited[..2], [&unlocated, &unlocated]);
+    assert!(
+        cited.iter().all(
+            |anchor| !matches!(anchor, Anchor::Paragraph { para_id, .. } if para_id.is_empty())
+        )
+    );
+}
+
+#[test]
+fn content_without_a_location_says_why() {
+    let body_xml = [
+        para(
+            "71000001",
+            &format!(
+                r#"<w:commentRangeStart w:id="1"/>{}<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r>"#,
+                run("Annotated")
+            ),
+        ),
+        para("71000002", &run(&"x".repeat(2_000_000))),
+    ]
+    .concat();
+    let comments = format!(
+        r#"<w:comments {}><w:comment w:id="1" w:author="Ann">{}</w:comment></w:comments>"#,
+        fixture::namespaces(),
+        para("71000003", &run("Check"))
+    );
+    let bytes = Package::new(&body_xml)
+        .part("comments.xml", "rIdComments", COMMENTS, COMMENTS, &comments)
+        .bytes();
+    let content = export(
+        &bytes,
+        &ExportOptions {
+            max_bytes: Some(65_536),
+            ..with_stories(RevisionView::Accepted, &[StorySelection::Comments])
+        },
+    );
+    assert_eq!(
+        comment_metadata(&content).anchors,
+        [Anchor::Unlocated {
+            story: "body".to_owned(),
+            reason: UnlocatedReason::StoryTooLarge,
+        }]
+    );
+
+    let control = format!(
+        r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+        para("71000011", &run("Inside"))
+    );
+    let xml = [
+        para("71000010", &run("Before")),
+        control,
+        para("71000012", &run("After")),
+    ]
+    .concat();
+    let doc = open(&Package::new(&xml).bytes());
+    let before = doc.paragraph_mark_position("71000010").unwrap();
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::SetEmbedAttr {
+            index: before.index + 1,
+            key: "story".to_owned(),
+            value: yrs::Any::from("gone"),
+        }],
+        &EditCtx::local("", ""),
+    )
+    .unwrap();
+    let content = doc
+        .export_structured(&options(RevisionView::Accepted))
+        .unwrap()
+        .content;
+    let BlockKind::ContentControl { blocks, .. } = &body(&content)[1].content else {
+        panic!("{:?}", body(&content)[1]);
+    };
+    assert_eq!(
+        blocks[0].anchor,
+        Anchor::Unlocated {
+            story: "gone".to_owned(),
+            reason: UnlocatedReason::MissingStory,
+        }
+    );
+
+    let xml = [
+        para("71000020", &run("Before")),
+        r#"<bofx:block bofx:value="opaque"/>"#.to_owned(),
+        para("71000021", &run("After")),
+    ]
+    .concat();
+    let bytes = Package::new(&xml).bytes();
+    let (envelope, parts) = docx_parse::parse_docx_s9_wire_parts_with_limits(
+        &bytes,
+        docx_parse::S9ParseOptions::default(),
+        &docx_parse::ParseLimits::default(),
+    )
+    .unwrap();
+    let parts: Vec<(String, Vec<u8>)> = parts
+        .into_iter()
+        .map(|(name, data)| {
+            let data = if name == "word/document.xml" {
+                String::from_utf8(data)
+                    .unwrap()
+                    .replace(r#"bofx:value="opaque""#, r#"bofx:value="edited""#)
+                    .into_bytes()
+            } else {
+                data
+            };
+            (name, data)
+        })
+        .collect();
+    let content =
+        export_package_structured(envelope, &parts, &options(RevisionView::Accepted)).unwrap();
+    let raw = body(&content)
+        .iter()
+        .find(|block| matches!(&block.content, BlockKind::Unsupported { element } if element == "bofx:block"))
+        .unwrap();
+    assert_eq!(
+        raw.anchor,
+        Anchor::Unlocated {
+            story: "body".to_owned(),
+            reason: UnlocatedReason::ProvenanceUnavailable,
+        }
+    );
 }
 
 /// A package whose comment body holds a cross-reference with two differently formatted
@@ -1879,7 +2006,10 @@ fn shared_ids_leave_cell_and_comment_anchors_without_a_location() {
     let comment = comment_metadata(&content);
     assert!(matches!(
         comment.anchors.as_slice(),
-        [Anchor::Paragraph { para_id, .. }] if para_id.is_empty()
+        [Anchor::Unlocated {
+            reason: UnlocatedReason::DuplicateParagraphId,
+            ..
+        }]
     ));
     assert!(count(&content, DiagnosticCode::AmbiguousIdentity) >= 3);
 }

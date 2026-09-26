@@ -28,7 +28,8 @@ checks without changing anything.
 version 1: `EditingDoc::export_structured` and `export_markdown` read a live
 session with its version, and `export_docx_structured` reads DOCX bytes through
 the same walker. Blocks and inlines carry anchors (paragraph ids, batch-offset
-ranges, table and control ids, or `sourcePart` locations in retained XML), and
+ranges, table and control ids, `sourcePart` locations in retained XML, or
+`unlocated` with the reason there is no location), and
 everything omitted or not represented is diagnosed. `read_types` holds the
 anchor, story-selection and content-control types shared by the read APIs.
 `EngineSession::export_structured_with_pages` attaches a page map read from the
