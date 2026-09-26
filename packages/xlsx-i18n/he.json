@@ -50,7 +50,7 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null,
+      "commandFailed": null,
       "permissionDenied": "היישום המארח לא התיר לתוסף זה להשתמש בפקודה זו.",
       "unsupportedPolicy": "תוספים עדיין לא יכולים להריץ פקודה זו. השתמש במקום זאת באצוות עריכה.",
       "pluginUnavailable": "התוסף אינו פעיל עוד.",

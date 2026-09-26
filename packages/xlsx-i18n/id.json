@@ -50,7 +50,7 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null,
+      "commandFailed": null,
       "permissionDenied": "Aplikasi host tidak mengizinkan plugin ini menggunakan perintah ini.",
       "unsupportedPolicy": "Plugin belum dapat menjalankan perintah ini. Gunakan batch edit sebagai gantinya.",
       "pluginUnavailable": "Plugin tidak lagi aktif.",

@@ -169,7 +169,7 @@ describe('xlsx command execution', () => {
     expect(harness.calls).toEqual([]);
   });
 
-  test('turns unexpected errors into execution-failed', async () => {
+  test('turns unexpected errors into command-failed', async () => {
     const { store, harness } = setup();
     const originalError = console.error;
     console.error = () => {};
@@ -179,8 +179,8 @@ describe('xlsx command execution', () => {
       };
       const result = await store.execute('bold', null);
       expect(result.ok ? null : result.failure).toEqual({
-        code: 'execution-failed',
-        message: 'commands.reasons.executionFailed',
+        code: 'command-failed',
+        message: 'commands.reasons.commandFailed',
       });
     } finally {
       console.error = originalError;

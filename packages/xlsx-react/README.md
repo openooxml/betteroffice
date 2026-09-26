@@ -134,7 +134,8 @@ import {
   `{ ok: true, status }` (`executed`, `noop`, `opened`, `requested`) or
   `{ ok: false, failure }`, for example `input-failed`, `document-replaced`,
   `target-changed` when the selection moved while it waited, `gesture-active`
-  during a chart drag, or `proposal-stale`. A cell entry the workbook refuses
+  during a chart drag, `proposal-stale`, or `command-failed` when the change
+  could not be applied. A cell entry the workbook refuses
   stays open at its own cell for correction; until it is corrected or discarded
   with Escape, every command fails with `input-failed`. Print waits until the
   canvas has painted the written text, and fails with `render-failed` when it

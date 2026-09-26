@@ -50,7 +50,7 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null,
+      "commandFailed": null,
       "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
       "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
       "pluginUnavailable": "O plugin não está mais ativo.",

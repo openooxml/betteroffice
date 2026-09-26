@@ -175,7 +175,7 @@ export type XlsxCommandFailureCode =
   | 'gesture-active'
   | 'proposal-stale'
   | 'render-failed'
-  | 'execution-failed'
+  | 'command-failed'
   | 'aborted';
 
 /**

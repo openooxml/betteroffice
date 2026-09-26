@@ -50,7 +50,7 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null,
+      "commandFailed": null,
       "permissionDenied": "होस्ट एप्लिकेशन ने इस प्लगइन को यह कमांड उपयोग करने की अनुमति नहीं दी है।",
       "unsupportedPolicy": "प्लगइन अभी यह कमांड नहीं चला सकते। इसके बजाय संपादन बैच का उपयोग करें।",
       "pluginUnavailable": "प्लगइन अब सक्रिय नहीं है।",

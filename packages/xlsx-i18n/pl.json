@@ -50,7 +50,7 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null,
+      "commandFailed": null,
       "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
       "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
       "pluginUnavailable": "Wtyczka nie jest już aktywna.",
