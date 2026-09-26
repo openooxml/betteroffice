@@ -1082,8 +1082,6 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         Some(band) if band.horizontal && legend_reserves => band.h,
         _ => 0.0,
     };
-    let gutter = bands.left;
-    let plot_x = x + reserve_left + gutter;
     let secondary_w = if secondary_value_axis(chart, false).is_some() {
         38.0
     } else {
@@ -1102,6 +1100,12 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     let top = title_h;
     let region_x = x + reserve_left.min(width);
     let region_w = (width - reserve_left - reserve_right).max(0.0);
+    // Axis labels give way before the plot: the gutter never takes the width
+    // the plot needs.
+    let gutter = bands
+        .left
+        .min((region_w - right_margin - secondary_w - MIN_PLOT).max(0.0));
+    let plot_x = x + reserve_left + gutter;
     let region_y = y + top + band_top;
     // A row legend keeps its gap from the region on either edge, and the far
     // edge keeps the chart margin, so the pie is the same size above or below.
@@ -7207,9 +7211,9 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_category_gutter_shrinks_the_plot_before_it_reaches_a_side_legend() {
+    fn a_wide_category_gutter_gives_way_before_the_plot_reaches_a_side_legend() {
         let data = Source {
-            categories: vec!["Worldwide Customer Management".to_owned()],
+            categories: vec!["Worldwide Customer Management and Operations Support".to_owned()],
             values: vec![10.0],
         };
         let mut chart = legend_chart(Some("right"), &["North"], &data);
@@ -7236,6 +7240,8 @@ mod tests {
                 "{bar:?} reaches {swatches:?}"
             );
         }
+        let widest = bars.iter().map(|bar| bar.2).fold(0.0, f64::max);
+        assert!(widest > MIN_PLOT / 2.0, "the bar keeps only {widest}px");
     }
 
     #[test]
