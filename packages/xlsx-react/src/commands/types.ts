@@ -234,10 +234,16 @@ export type XlsxCommandResult =
   | { ok: true; status: XlsxCommandStatus }
   | { ok: false; failure: CommandReason<XlsxCommandFailureCode> };
 
-/** A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`. */
+/**
+ * A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`.
+ * @experimental
+ */
 export type XlsxPluginCommandId = `plugin:${string}/${string}`;
 
-/** Static description of a contributed command. */
+/**
+ * Static description of a contributed command.
+ * @experimental
+ */
 export interface XlsxPluginCommandDescriptor {
   id: XlsxPluginCommandId;
   label: string;
@@ -245,7 +251,10 @@ export interface XlsxPluginCommandDescriptor {
   shortcuts: readonly { chord: string; args: null }[];
 }
 
-/** State of a contributed command; the plugin chooses its own disabled codes. */
+/**
+ * State of a contributed command; the plugin chooses its own disabled codes.
+ * @experimental
+ */
 export type XlsxPluginCommandState = CommandState;
 
 /**

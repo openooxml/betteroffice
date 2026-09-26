@@ -81,7 +81,10 @@ export interface XlsxBoundCommand<K extends XlsxCommandId> {
   execute(args?: XlsxCommandArgs[K]): Promise<XlsxCommandResult>;
 }
 
-/** A contributed command bound to this component. */
+/**
+ * A contributed command bound to this component.
+ * @experimental
+ */
 export interface XlsxBoundPluginCommand {
   id: XlsxPluginCommandId;
   /** Null while no active plugin contributes the command. */
