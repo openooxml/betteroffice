@@ -1465,7 +1465,7 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
         kern_pt: element
             .attribute("kern")
             .and_then(|value| value.parse::<i32>().ok())
-            .filter(|value| *value >= 0)
+            .filter(|value| (0..=400_000).contains(value))
             .map(|value| f64::from(value) / 100.0),
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
@@ -1554,7 +1554,7 @@ mod tests {
     use ooxml_drawingml::GeometryPathCommand;
 
     #[test]
-    fn a_kern_threshold_reads_in_points_and_rejects_negatives() {
+    fn a_kern_threshold_reads_in_points_within_the_schema_range() {
         let limits = ParseLimits::default();
         let kern = |attribute: &str| {
             let xml = format!(r#"<a:rPr {attribute}/>"#);
@@ -1569,6 +1569,8 @@ mod tests {
         assert_eq!(kern(r#"kern="1200""#), Some(12.0));
         assert_eq!(kern(r#"kern="0""#), Some(0.0));
         assert_eq!(kern(r#"kern="-100""#), None);
+        assert_eq!(kern(r#"kern="400000""#), Some(4_000.0));
+        assert_eq!(kern(r#"kern="400001""#), None);
         assert_eq!(kern(r#"sz="1100""#), None);
     }
 

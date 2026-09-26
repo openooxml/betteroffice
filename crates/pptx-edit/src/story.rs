@@ -508,6 +508,13 @@ pub(crate) fn validate_story<T: ReadTxn>(
     let mut offset = 0;
     let mut pilcrows = Vec::new();
     for diff in story.diff(txn, YChange::identity) {
+        if let Some(kern) = diff.attributes.as_ref().and_then(|attrs| attrs.get("kern"))
+            && !valid_kern(kern)
+        {
+            return Err(EditError::InvalidState(format!(
+                "story {story_id} has a kern threshold outside 0-4000pt"
+            )));
+        }
         let length = out_len(&diff.insert);
         if let Out::YMap(map) = diff.insert {
             if map_string(&map, txn, KIND).as_deref() != Some(PILCROW_KIND) {
@@ -525,6 +532,16 @@ pub(crate) fn validate_story<T: ReadTxn>(
         )));
     }
     Ok(())
+}
+
+/// A remote `kern` lands in a schema-typed attribute, so it must be a size.
+fn valid_kern(value: &Any) -> bool {
+    match value {
+        Any::Null => true,
+        Any::Number(kern) => (0.0..=4_000.0).contains(kern),
+        Any::BigInt(kern) => (0..=4_000).contains(kern),
+        _ => false,
+    }
 }
 
 /// The snapshot `snapshot_story` reads back from a story `seed_story` wrote,

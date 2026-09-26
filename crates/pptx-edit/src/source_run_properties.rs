@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 use yrs::types::Attrs;
-use yrs::{Any, Map, Out, ReadTxn, Text, TextRef, Transact};
+use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, Transact, TransactionMut};
 
 use crate::deck::SourceImport;
 use crate::{
@@ -13,13 +13,18 @@ use crate::{
 pub(crate) enum SourceProperty {
     Baseline,
     Spacing,
+    Kern,
 }
+
+/// Marks a doc seeded with run kern thresholds; one without it predates them.
+pub(crate) const KERN_SEEDED: &str = "kernSeeded";
 
 impl SourceProperty {
     fn keys(self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::Baseline => ("baselinesPendingSource", "baselinePct", "baseline"),
             Self::Spacing => ("spacingPendingSource", "spacingPt", "spacing"),
+            Self::Kern => (KERN_SEEDED, "kernPt", "kern"),
         }
     }
 
@@ -27,6 +32,28 @@ impl SourceProperty {
         match self {
             Self::Baseline => style.baseline_pct,
             Self::Spacing => style.spacing_pt,
+            Self::Kern => style.kern_pt,
+        }
+    }
+
+    /// Migrations flag the older properties as pending; kern flags the docs
+    /// that already carry it, so no schema bump locks older clients out.
+    fn pending<T: ReadTxn>(self, meta: &MapRef, txn: &T) -> bool {
+        let flagged = meta.get(txn, self.keys().0) == Some(Out::Any(Any::Bool(true)));
+        match self {
+            Self::Kern => !flagged,
+            Self::Baseline | Self::Spacing => flagged,
+        }
+    }
+
+    fn settle(self, meta: &MapRef, txn: &mut TransactionMut<'_>) {
+        match self {
+            Self::Kern => {
+                meta.insert(txn, KERN_SEEDED, true);
+            }
+            Self::Baseline | Self::Spacing => {
+                meta.remove(txn, self.keys().0);
+            }
         }
     }
 }
@@ -36,11 +63,11 @@ pub(crate) fn import_source(
     import: &mut SourceImport<'_>,
     property: SourceProperty,
 ) -> EditResult<()> {
-    let (pending_key, json_key, attribute) = property.keys();
+    let (_, json_key, attribute) = property.keys();
     let pending = {
         let txn = session.doc.transact();
         txn.get_map(META)
-            .is_some_and(|meta| meta.get(&txn, pending_key) == Some(Out::Any(Any::Bool(true))))
+            .is_some_and(|meta| property.pending(&meta, &txn))
     };
     if !pending {
         return Ok(());
@@ -115,7 +142,7 @@ pub(crate) fn import_source(
     let meta = txn
         .get_map(META)
         .ok_or_else(|| EditError::InvalidState("missing metadata".into()))?;
-    meta.remove(&mut txn, pending_key);
+    property.settle(&meta, &mut txn);
     Ok(())
 }
 

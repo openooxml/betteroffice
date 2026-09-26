@@ -44,6 +44,7 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
     let mut txn = doc.transact_mut_with("pptx:bootstrap");
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    meta.insert(&mut txn, crate::source_run_properties::KERN_SEEDED, true);
     meta.insert(&mut txn, "fingerprint", fingerprint);
     meta.insert(&mut txn, "widthEmu", package.presentation.width_emu as f64);
     meta.insert(
