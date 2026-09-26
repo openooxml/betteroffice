@@ -732,6 +732,81 @@ fn images_resolve_against_the_part_that_owns_them() {
     }));
 }
 
+#[test]
+fn story_parts_resolve_wherever_the_package_keeps_them() {
+    let header = |id: &str| {
+        format!(
+            r#"<w:hdr {}><bofx:block bofx:value="opaque"/>{}</w:hdr>"#,
+            fixture::namespaces(),
+            para(id, &image("rIdLogo", "Header logo"))
+        )
+    };
+    let rels = |target: &str| {
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{target}"/></Relationships>"#
+        )
+    };
+    let xml = format!(
+        r#"{}<w:sectPr><w:headerReference w:type="default" r:id="rIdOutside"/><w:headerReference w:type="even" r:id="rIdCased"/></w:sectPr>"#,
+        para("91000001", &run("Body"))
+    );
+    let mut parts = Package::new(&xml)
+        .rel("rIdOutside", "header", "../custom/header1.xml")
+        .rel("rIdCased", "header", "Header2.xml")
+        .parts();
+    for (name, xml) in [
+        ("custom/header1.xml", header("91000002")),
+        (
+            "custom/_rels/header1.xml.rels",
+            rels("../word/media/image1.png"),
+        ),
+        ("word/header2.xml", header("91000003")),
+        ("word/_rels/header2.xml.rels", rels("media/image1.png")),
+    ] {
+        parts.push((name.to_owned(), xml.into_bytes()));
+    }
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let options = with_stories(RevisionView::Accepted, &[StorySelection::Headers]);
+    for content in [
+        export(&bytes, &options),
+        open(&bytes).export_structured(&options).unwrap().content,
+    ] {
+        let located: Vec<(&str, Option<&str>, Option<&str>)> = content
+            .stories
+            .iter()
+            .map(|story| {
+                let source = match &story.blocks[0].anchor {
+                    Anchor::SourcePart { part, .. } => Some(part.as_str()),
+                    _ => None,
+                };
+                let image =
+                    inlines(&story.blocks[1])
+                        .iter()
+                        .find_map(|inline| match &inline.content {
+                            InlineKind::Image { part, .. } => part.as_deref(),
+                            _ => None,
+                        });
+                (story.story.as_str(), source, image)
+            })
+            .collect();
+        assert_eq!(
+            located,
+            [
+                (
+                    "hf:rIdOutside",
+                    Some("custom/header1.xml"),
+                    Some("word/media/image1.png")
+                ),
+                (
+                    "hf:rIdCased",
+                    Some("word/Header2.xml"),
+                    Some("word/media/image1.png")
+                ),
+            ]
+        );
+    }
+}
+
 fn page_break() -> &'static str {
     r#"<w:r><w:br w:type="page"/></w:r>"#
 }
