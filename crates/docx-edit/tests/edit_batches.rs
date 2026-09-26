@@ -960,6 +960,48 @@ fn locks_follow_actual_control_ownership() {
 }
 
 #[test]
+fn stories_several_containers_reference_refuse_edits() {
+    let doc = open(&format!(
+        r#"{}<w:sdt><w:sdtPr><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent>{}<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>{}</w:sdtContent></w:sdt><w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+        p("00000001", &r("outside")),
+        p("0000A001", &r("locked text")),
+        p("0000C001", &r("cell text")),
+        p("0000A002", &r("after table")),
+        p("0000B001", &r("open")),
+        p("00000009", &r("tail")),
+    ));
+    let edit = |story: &str, id: &str| replace(TextTarget::Paragraph(para(story, id)), "changed");
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![edit("body:sdt1", "0000B001")],
+    );
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::SetEmbedAttr {
+            index: 9,
+            key: "story".to_owned(),
+            value: Any::from("body:sdt0"),
+        }],
+        &EditCtx::local("", ""),
+    )
+    .unwrap();
+    for step in [
+        edit("body:sdt0", "0000A001"),
+        edit("body:sdt0:t0:r0c0", "0000C001"),
+    ] {
+        assert_eq!(code(&doc, vec![step]), EditFailureCode::Unsupported);
+    }
+    let read = doc.read_paragraphs(&ReadParagraphsRequest {
+        story: Some("body:sdt0".to_owned()),
+        para_ids: None,
+        view: EditTextView::Accepted,
+    });
+    assert_eq!(read.unwrap_err().failure.code, EditFailureCode::Unsupported);
+    apply(&doc, &UndoSession::new(), vec![edit("body", "00000001")]);
+}
+
+#[test]
 fn existing_revisions_conflict_only_where_touched() {
     let doc = open(&format!(
         "{}{}",
