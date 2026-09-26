@@ -10,10 +10,16 @@ export type {
   JsonValue,
 } from '../../../../shared/host-contracts/commands';
 
-/** A paint-order move of the selected object among its siblings. */
+/**
+ * A paint-order move of the selected object among its siblings.
+ * @experimental
+ */
 export type PptxZOrderMove = 'front' | 'forward' | 'backward' | 'back';
 
-/** Arguments of every PPTX editor command, keyed by command id. */
+/**
+ * Arguments of every PPTX editor command, keyed by command id.
+ * @experimental
+ */
 export interface PptxCommandArgs {
   bold: null;
   italic: null;
@@ -56,9 +62,13 @@ export interface PptxCommandArgs {
   proposalReject: { proposalId: string };
 }
 
+/** @experimental */
 export type PptxCommandId = keyof PptxCommandArgs;
 
-/** Commands presented as a choice between options. */
+/**
+ * Commands presented as a choice between options.
+ * @experimental
+ */
 export type PptxSelectCommandId =
   | 'fontFamily'
   | 'fontSize'
@@ -70,7 +80,10 @@ export type PptxSelectCommandId =
   | 'zoom'
   | 'proposalSelect';
 
-/** Current values reported in {@link PptxCommandState.value}, keyed by command id. */
+/**
+ * Current values reported in {@link PptxCommandState.value}, keyed by command id.
+ * @experimental
+ */
 export interface PptxCommandValues {
   bold: null;
   italic: null;
@@ -113,7 +126,10 @@ export interface PptxCommandValues {
   proposalReject: null;
 }
 
-/** Why a command is unavailable. */
+/**
+ * Why a command is unavailable.
+ * @experimental
+ */
 export type PptxCommandDisabledCode =
   | 'editor-unavailable'
   | 'document-loading'
@@ -143,7 +159,10 @@ export type PptxCommandDisabledCode =
   | 'unsupported-policy'
   | 'plugin-unavailable';
 
-/** Why an executed command did not complete. */
+/**
+ * Why an executed command did not complete.
+ * @experimental
+ */
 export type PptxCommandFailureCode =
   | PptxCommandDisabledCode
   | 'input-failed'
@@ -153,7 +172,10 @@ export type PptxCommandFailureCode =
   | 'command-failed'
   | 'aborted';
 
-/** One choice of a selector command. */
+/**
+ * One choice of a selector command.
+ * @experimental
+ */
 export interface PptxCommandOption<K extends PptxCommandId = PptxCommandId> {
   args: PptxCommandArgs[K];
   label: string;
@@ -164,6 +186,7 @@ export interface PptxCommandOption<K extends PptxCommandId = PptxCommandId> {
 /**
  * Serializable state of one PPTX command. Without arguments it describes the
  * control, including its choices; with arguments, that one choice.
+ * @experimental
  */
 export type PptxCommandState<K extends PptxCommandId = PptxCommandId> = CommandState<
   PptxCommandValues[K],
@@ -173,13 +196,19 @@ export type PptxCommandState<K extends PptxCommandId = PptxCommandId> = CommandS
   options?: readonly PptxCommandOption<K>[];
 };
 
-/** A keyboard binding; `Mod` is Cmd on macOS and Ctrl elsewhere. */
+/**
+ * A keyboard binding; `Mod` is Cmd on macOS and Ctrl elsewhere.
+ * @experimental
+ */
 export interface PptxCommandShortcut<K extends PptxCommandId = PptxCommandId> {
   chord: string;
   args: PptxCommandArgs[K];
 }
 
-/** Static, serializable description of a command. */
+/**
+ * Static, serializable description of a command.
+ * @experimental
+ */
 export interface PptxCommandDescriptor<K extends PptxCommandId = PptxCommandId> {
   id: K;
   labelKey: TranslationKey;
@@ -187,12 +216,14 @@ export interface PptxCommandDescriptor<K extends PptxCommandId = PptxCommandId> 
   shortcuts: readonly PptxCommandShortcut<K>[];
 }
 
+/** @experimental */
 export type PptxCommandStatus = 'executed' | 'noop' | 'opened' | 'requested';
 
 /**
  * Outcome of {@link PptxCommandStore.execute}: `executed` changed something,
  * `noop` was valid but changed nothing, `opened` showed a picker or panel,
  * and `requested` handed the change to the host.
+ * @experimental
  */
 export type PptxCommandResult =
   | { ok: true; status: PptxCommandStatus }
@@ -219,7 +250,10 @@ export type PptxPluginCommandState = CommandState;
  */
 export type PptxPluginCommandResult = PluginCommandResult<PptxCommandStatus, PptxEditRefusal>;
 
-/** The command authority of one editor, shared by built-in and host chrome. */
+/**
+ * The command authority of one editor, shared by built-in and host chrome.
+ * @experimental
+ */
 export interface PptxCommandStore {
   getDescriptor<K extends PptxCommandId>(id: K): PptxCommandDescriptor<K>;
   /** Null while no active plugin contributes `id`. */

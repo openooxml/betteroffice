@@ -13,7 +13,10 @@ import type { EditorToolbarProps } from './EditorToolbarContext';
 import { useLegacyProjection } from './toolbar/legacyCommands';
 import { rejectLegacyState, Toolbar, type CommandToolbarProps } from './Toolbar';
 
-/** A toolbar region bound to the nearest editor's or `PptxCommandProvider`'s commands. */
+/**
+ * A toolbar region bound to the nearest editor's or `PptxCommandProvider`'s commands.
+ * @experimental
+ */
 export type EditorToolbarCommandProps = Omit<CommandToolbarProps, 'children'> & {
   /** Compound parts; defaults to the formatting rail with the built-in controls. */
   children?: ReactNode;

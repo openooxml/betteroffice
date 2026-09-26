@@ -16,7 +16,10 @@ import type {
   PptxPluginCommandState,
 } from './types';
 
-/** The nearest editor's command store. */
+/**
+ * The nearest editor's command store.
+ * @experimental
+ */
 export function usePptxCommands(): PptxCommandStore {
   const store = useContext(PptxCommandContext);
   if (!store) {
@@ -31,7 +34,10 @@ function parse(argsKey: string | undefined) {
   return argsKey === undefined ? undefined : JSON.parse(argsKey);
 }
 
-/** Subscribes to one command's state, optionally for specific arguments. */
+/**
+ * Subscribes to one command's state, optionally for specific arguments.
+ * @experimental
+ */
 export function usePptxCommandState<K extends PptxCommandId>(
   id: K,
   args?: PptxCommandArgs[K]
@@ -62,7 +68,10 @@ export function usePptxCommandState(
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-/** A command bound to this component, with its localized label and shortcut. */
+/**
+ * A command bound to this component, with its localized label and shortcut.
+ * @experimental
+ */
 export interface PptxBoundCommand<K extends PptxCommandId> {
   id: K;
   descriptor: PptxCommandDescriptor<K>;
@@ -86,7 +95,10 @@ export interface PptxBoundPluginCommand {
   execute(): Promise<PptxPluginCommandResult>;
 }
 
-/** Binds one command for a custom control. */
+/**
+ * Binds one command for a custom control.
+ * @experimental
+ */
 export function usePptxCommand<K extends PptxCommandId>(
   id: K,
   args?: PptxCommandArgs[K]

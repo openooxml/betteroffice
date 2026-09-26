@@ -160,7 +160,10 @@ export interface PptxEditorApi {
   /** Accepts a 1-based slide number. */
   goToSlide: (slide: number) => boolean;
   handle: PresentationHandle;
-  /** The editor's commands, shared by built-in and host chrome; `api.handle` edits bypass them. */
+  /**
+   * The editor's commands, shared by built-in and host chrome; `api.handle` edits bypass them.
+   * @experimental
+   */
   readonly commands: PptxCommandStore;
   refresh: () => void;
   refreshProposals: () => void;
@@ -216,6 +219,7 @@ export interface PptxEditorProps extends PptxEditorPluginProps {
    * Replaces the toolbar: omit it for the default controls, pass `null` for
    * none, or pass chrome composed from the toolbar parts, which also renders
    * while `readOnly`. `showToolbar={false}` hides the whole region.
+   * @experimental
    */
   toolbar?: ReactNode;
   /** Shows the toolbar region; defaults to true. */

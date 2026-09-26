@@ -218,6 +218,7 @@ export function ToolbarRail({ children, className, style, testId }: ToolbarRailP
   );
 }
 
+/** @experimental */
 export interface ToolbarOverflowProps {
   /** Label of the menu entry that replaces the content at narrow widths. */
   label: string;
@@ -233,6 +234,7 @@ export interface ToolbarOverflowProps {
 /**
  * Gives arbitrary host content a menu entry, so it can move into the overflow
  * menu instead of staying clipped in a narrow toolbar.
+ * @experimental
  */
 export function ToolbarOverflow({
   label,
