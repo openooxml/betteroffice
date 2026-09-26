@@ -10148,11 +10148,15 @@ fn emit_cell_floating_images(
     }
 }
 
+/// Less of a line or block than this, in CSS pixels, is too thin a sliver to count as shown:
+/// clean row breaks on rounded row offsets leave slivers that thin.
+const MIN_SHOWN_PX: f64 = 1.0;
+
 /// What of one table cell block a table fragment shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ShownPart {
-    /// The window of a paragraph's lines.
-    Lines(std::ops::Range<usize>),
+    /// The window of a paragraph's lines, and whether its cell's clip box cuts through one.
+    Lines(std::ops::Range<usize>, bool),
     /// The rows of a nested table with some content shown.
     Rows(Vec<usize>),
     /// A drawing or text box, shown whole.
@@ -10161,7 +10165,8 @@ pub(crate) enum ShownPart {
 
 /// A block inside a table that a table fragment shows, by the painting rules: the fragment's
 /// cell paints and clip band, each cell's clip box and content stacking, rotated cells and nested
-/// tables. A line or block is shown where its vertical midpoint lies inside its cell's clip box.
+/// tables. A line or block is shown wherever more than a sliver of it lies inside its cell's clip
+/// box, as painting shows it, and is cut where part of it lies outside.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VisibleCellBlock {
     /// Row, cell and block steps from the fragment's table down to the block.
@@ -10237,9 +10242,9 @@ fn visit_table_fragment(
         } else {
             (top, bottom)
         };
-        let shows = |y: f64, height: f64| {
-            let middle = y + height / 2.0;
-            middle >= top && middle < bottom
+        let shown = |y: f64, height: f64| {
+            let inside = (y + height).min(bottom) - y.max(top);
+            (inside > MIN_SHOWN_PX.min(height / 2.0)).then_some(inside < height - MIN_SHOWN_PX)
         };
         let repeated_header = inherited.0 || (plan.carried && g.row_index < plan.header_row_count);
         let continuation =
@@ -10254,18 +10259,20 @@ fn visit_table_fragment(
                     let mut line_top = y;
                     let mut first = None;
                     let mut last = 0;
+                    let mut clipped = false;
                     for (line_index, line) in extent.lines.iter().enumerate() {
                         line_top += line.float_skip_before.unwrap_or(0.0);
-                        if shows(line_top, line.line_height) {
+                        if let Some(cut) = shown(line_top, line.line_height) {
                             first.get_or_insert(line_index);
                             last = line_index + 1;
+                            clipped |= cut;
                         }
                         line_top += line.line_height;
                     }
                     match first {
-                        Some(first) => Some(ShownPart::Lines(first..last)),
-                        None if extent.lines.is_empty() && shows(y, 0.0) => {
-                            Some(ShownPart::Lines(0..0))
+                        Some(first) => Some(ShownPart::Lines(first..last, clipped)),
+                        None if extent.lines.is_empty() && y >= top && y < bottom => {
+                            Some(ShownPart::Lines(0..0, false))
                         }
                         None => None,
                     }
@@ -10327,7 +10334,7 @@ fn visit_table_fragment(
                         MeasureIn::Shape(extent) | MeasureIn::Chart(extent) => extent.height,
                         MeasureIn::Unsupported => 0.0,
                     };
-                    shows(y, height).then_some(ShownPart::Whole)
+                    shown(y, height).map(|_| ShownPart::Whole)
                 }
             };
             if let Some(shown) = shown {

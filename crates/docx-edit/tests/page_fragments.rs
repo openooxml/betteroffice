@@ -1887,7 +1887,11 @@ fn text_a_header_table_clips_has_no_page_fragments() {
         .filter(|occurrence| occurrence.story == "hf:rIdHeader2")
         .collect();
     assert_eq!(occurrences.len(), 2);
-    let (shown, clipped) = (line("Clipped line 0"), line("Clipped line 3"));
+    let (shown, cut, clipped) = (
+        line("Clipped line 0"),
+        line("Clipped line 1"),
+        line("Clipped line 3"),
+    );
     for occurrence in occurrences {
         let on = |node: &str| {
             map.fragments
@@ -1895,7 +1899,13 @@ fn text_a_header_table_clips_has_no_page_fragments() {
                 .any(|fragment| fragment.occurrence_id == occurrence.id && fragment.node_id == node)
         };
         assert!(on(&shown), "the row shows its first line");
+        assert!(on(&cut), "the row shows the top of its second line");
         assert!(!on(&clipped), "the row clips its last line");
+        assert!(map.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == PageDiagnosticCode::ClippedContent
+                && diagnostic.node_id.as_deref() == Some(cut.as_str())
+                && diagnostic.page_index == Some(occurrence.page_index)
+        }));
     }
     assert!(map.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == PageDiagnosticCode::NotLaidOut
@@ -2005,4 +2015,48 @@ fn a_layout_with_a_section_the_document_no_longer_has_is_refused() {
     assert!(relaid.occurrences.iter().any(|occurrence| {
         occurrence.story == "hf:rIdHeader2" && occurrence.section_index == Some(2)
     }));
+}
+
+#[test]
+fn a_limited_map_stops_mapping_past_its_limits() {
+    let control = (0..140)
+        .map(|index| format!("word{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = format!(
+        r#"{}{}<w:p w14:paraId="00000002"><w:sdt><w:sdtPr><w:tag w:val="long"/><w:id w:val="9"/><w:text/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt></w:p><w:sectPr><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/></w:sectPr>"#,
+        (0..12)
+            .map(|index| fixture::p(
+                &format!("6000{index:04X}"),
+                &fixture::r(&"filler words ".repeat(60))
+            ))
+            .collect::<String>(),
+        fixture::p("00000001", &fixture::r(&"lead ".repeat(160))),
+        fixture::r(&control),
+    );
+    let (engine, _) = fixture::laid_out(&fixture::with_body(&body), 7);
+    let full = export(&engine, &PageExportOptions::new(RevisionView::Markup)).layout;
+    let partial = |map: &DocxLayoutMap| {
+        map.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == PageDiagnosticCode::AnchorOnly)
+            .count()
+    };
+    assert_eq!(
+        partial(&full),
+        2,
+        "the control splits across two late pages"
+    );
+    assert!(full.pages.len() > 4);
+    let mut limited = PageExportOptions::new(RevisionView::Markup);
+    limited.max_fragments = Some(1);
+    let map = export(&engine, &limited).layout;
+    assert!(map.truncated);
+    assert_eq!(map.pages, full.pages);
+    assert_eq!(map.fragments, full.fragments[..1]);
+    assert_eq!(
+        partial(&map),
+        0,
+        "the pages past the limit are never mapped"
+    );
 }

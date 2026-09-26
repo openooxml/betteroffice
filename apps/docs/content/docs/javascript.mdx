@@ -177,7 +177,8 @@ painted.
   sliced whole, and marked `partial` with an `anchor-only` diagnostic when only
   part of its content is on the page. Tables list their row window with
   continuation and repeated-header flags, and every cell paragraph has fragments
-  of its own.
+  of its own for the lines its cell shows; a line the cell cuts through is listed
+  with a `clipped-content` diagnostic.
 - Pages are laid out with revision markup. `accepted` and `original` are refused
   with `unsupported-revision-layout` while any laid-out story, exported or not,
   holds pending revisions.
@@ -191,7 +192,9 @@ painted.
   `unsupported-note-layout` instead of placed.
 - `includeGeometry` adds rectangles in unzoomed CSS pixels (96 per inch) from the
   physical page's top-left corner. `maxFragments` and `maxLayoutBytes` bound the
-  map separately from the content and mark it `truncated`.
+  map separately from the content and mark it `truncated`; mapping stops a page
+  past the limit, so a truncated map leaves out the diagnostics of later pages and
+  of paragraphs no page shows.
 - `renderDocxMarkdownWithPages` checks the map belongs to the content; with
   `pageMarkers`, each block marker is followed by
   `<!-- docx-pages: 0=i 1=ii -->` and no page break is written into the text.

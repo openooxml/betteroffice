@@ -316,7 +316,9 @@ offsets, split where the node, paragraph, view or page changes; atoms (fields,
 controls, images, note marks, breaks) are sliced whole and marked `partial` with
 an `anchor-only` diagnostic when only part of their content is on the page. Table
 fragments list their row window with `continuedFromPrevious`, `continuedOnNext`
-and `repeatedHeader`, and each cell paragraph has fragments of its own. Pages are
+and `repeatedHeader`, and each cell paragraph has fragments of its own for the lines
+its cell shows (a line the cell cuts through is listed with a `clipped-content`
+diagnostic). Pages are
 laid out with revision markup, so `accepted` and `original` are refused with
 `unsupported-revision-layout` while any laid-out story holds pending revisions.
 Refusals also cover `stale-document`, `stale-layout` (stale section, settings or
@@ -326,7 +328,9 @@ its reference in a split table row; a note too tall for its page's note area is
 diagnosed `unsupported-note-layout` rather than placed.
 Geometry is off by default; rectangles are unzoomed CSS pixels (96 per inch) from
 the physical page's top-left corner. `maxFragments` (100,000 by default) and
-`maxLayoutBytes` bound the map separately and mark it `truncated`. With
+`maxLayoutBytes` bound the map separately and mark it `truncated`; mapping stops a
+page past the limit, so a truncated map leaves out the diagnostics of later pages
+and of paragraphs no page shows. With
 `pageMarkers`, Markdown follows each block marker with
 `<!-- docx-pages: 0=i 1=ii -->` (labels percent-encoded) and writes no page break
 into the text; a map from other content is refused.

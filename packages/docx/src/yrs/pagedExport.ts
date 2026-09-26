@@ -156,6 +156,7 @@ export interface DocxPageDiagnostic {
     | 'not-laid-out'
     | 'unsupported-numbering'
     | 'unsupported-note-layout'
+    | 'clipped-content'
     | 'geometry-unavailable'
     | 'truncated';
   nodeId: string | null;

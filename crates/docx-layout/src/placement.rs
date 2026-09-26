@@ -79,6 +79,8 @@ pub struct PlacedParagraph<'a> {
     pub repeated_header: bool,
     /// Inside a table row whose earlier part is on another page.
     pub in_row_continuation: bool,
+    /// Some line of the window is only partly inside its table cell's clip box.
+    pub clipped: bool,
     /// The page fragment's box `[x, y, width, height]`, for body flow.
     pub frame: Option<[f64; 4]>,
 }
@@ -189,6 +191,7 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
                     continued_on_next: fragment.carried_to_next == Some(true),
                     repeated_header: false,
                     in_row_continuation: false,
+                    clipped: false,
                     frame: Some([fragment.x, fragment.y, fragment.width, fragment.height]),
                 })),
                 (
@@ -468,6 +471,7 @@ fn whole_items<'a>(
                     continued_on_next: false,
                     repeated_header: false,
                     in_row_continuation: false,
+                    clipped: false,
                     frame: None,
                 }));
             }
@@ -579,7 +583,7 @@ fn place_table_fragment<'a>(
         };
         match (visible.shown, block, measure) {
             (
-                ShownPart::Lines(lines),
+                ShownPart::Lines(lines, clipped),
                 LayoutBlock::Paragraph(block),
                 BlockExtent::Paragraph(measure),
             ) => {
@@ -591,6 +595,7 @@ fn place_table_fragment<'a>(
                     lines,
                     repeated_header: visible.repeated_header,
                     in_row_continuation: visible.continuation,
+                    clipped,
                     frame: None,
                 }));
             }
@@ -969,6 +974,28 @@ mod tests {
             [(0, 2..4, true), (200, 0..1, false)],
             "the merged cell's later lines are painted, and exported, on the next page"
         );
+    }
+
+    #[test]
+    fn a_line_its_cell_cuts_through_is_shown_and_marked_clipped() {
+        let (block, extent) = table("t", vec![(25.0, vec![(1, vec![paragraph(0, 4)])])]);
+        let block: TableBlock = serde_json::from_value(block).unwrap();
+        let extent: TableExtent = serde_json::from_value(extent).unwrap();
+        let mut items = Vec::new();
+        assert!(place_table_fragment(
+            &TableGeometry::new(&block, &extent),
+            &fragment(0..1, 100.0, 25.0, (false, false), (None, None)),
+            &mut items
+        ));
+        let Some(PlacedItem::Paragraph(paragraph)) = items.get(1) else {
+            panic!("a paragraph is placed");
+        };
+        assert_eq!(
+            paragraph.lines,
+            0..3,
+            "a line cut in half still shows its top"
+        );
+        assert!(paragraph.clipped);
     }
 
     #[test]

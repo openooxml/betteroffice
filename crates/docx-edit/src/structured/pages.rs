@@ -381,6 +381,7 @@ pub enum PageDiagnosticCode {
     NotLaidOut,
     UnsupportedNumbering,
     UnsupportedNoteLayout,
+    ClippedContent,
     GeometryUnavailable,
     Truncated,
 }
@@ -716,7 +717,9 @@ pub(crate) struct MapIdentity {
 }
 
 /// Maps the content of one capture onto its pages. Refuses a layout that shows a footnote on
-/// another page than its reference, whatever the export selects.
+/// another page than its reference, whatever the export selects. Mapping stops one page past the
+/// page where the map outgrows its limits, so a truncated map costs about what it returns; the
+/// extra page settles the continuation flags of the last fragments kept.
 pub(crate) fn build_layout_map(
     doc: &EditingDoc,
     content: &DocxStructuredContent,
@@ -763,6 +766,7 @@ pub(crate) fn build_layout_map(
         },
         items: Vec::new(),
         fragment_count: 0,
+        mapped_bytes: 0,
         diagnostics: Diagnostics::default(),
         placed_nodes: HashSet::new(),
         wrapped: HashSet::new(),
@@ -770,7 +774,9 @@ pub(crate) fn build_layout_map(
     };
     let selected: HashSet<StorySelection> = content.included_stories.iter().copied().collect();
     let mut pages = Vec::with_capacity(placements.pages.len());
+    let mut last_mapped: Option<usize> = None;
     for placed in &placements.pages {
+        let mapping = last_mapped.is_none_or(|last| placed.page_index <= last);
         let page_index = placed.page_index as u32;
         let (record, unsupported) = export_page(placed.page_index, placed.page);
         if let Some(format) = unsupported {
@@ -896,7 +902,15 @@ pub(crate) fn build_layout_map(
                     }
                 }
             };
-            mapper.region(&occurrence, &region.items);
+            if mapping {
+                mapper.region(&occurrence, &region.items);
+            }
+        }
+        if last_mapped.is_none()
+            && (mapper.fragment_count > limits.max_fragments
+                || mapper.mapped_bytes > limits.max_bytes)
+        {
+            last_mapped = Some(placed.page_index + 1);
         }
     }
     for issue in &placements.issues {
@@ -939,7 +953,7 @@ pub(crate) fn build_layout_map(
             message,
         });
     }
-    mapper.unplaced(&selected);
+    mapper.unplaced(&selected, last_mapped.is_none());
     let mut items = std::mem::take(&mut mapper.items);
     link_continuations(&mut items);
     if limits.include_geometry {
@@ -1359,6 +1373,8 @@ struct Mapper<'a, 't, T: ReadTxn> {
     export_views: &'static [EditTextView],
     items: Vec<MapItem>,
     fragment_count: usize,
+    /// The JSON size of the occurrences and fragments mapped so far, geometry left out.
+    mapped_bytes: usize,
     diagnostics: Diagnostics,
     /// Exported paragraph ids with a block fragment.
     placed_nodes: HashSet<String>,
@@ -1370,6 +1386,7 @@ struct Mapper<'a, 't, T: ReadTxn> {
 
 impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
     fn region(&mut self, occurrence: &Occurrence, items: &[PlacedItem<'_>]) {
+        self.mapped_bytes += json_len(&occurrence.record) + 1;
         self.items
             .push(MapItem::Occurrence(occurrence.record.clone()));
         let Some(map) = self.maps.get(&occurrence.root).cloned() else {
@@ -1413,20 +1430,22 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         let (from, next) = flags.unwrap_or((false, false));
         let id = format!("f{}", self.fragment_count);
         self.fragment_count += 1;
+        let fragment = PageFragment {
+            id,
+            page_index: occurrence.record.page_index,
+            occurrence_id: occurrence.record.id.clone(),
+            node_id,
+            block_id,
+            anchor,
+            slice,
+            continued_from_previous: from,
+            continued_on_next: next,
+            repeated_table_header: repeated,
+            geometry: None,
+        };
+        self.mapped_bytes += json_len(&fragment) + 1;
         self.items.push(MapItem::Fragment(Box::new(DraftFragment {
-            fragment: PageFragment {
-                id,
-                page_index: occurrence.record.page_index,
-                occurrence_id: occurrence.record.id.clone(),
-                node_id,
-                block_id,
-                anchor,
-                slice,
-                continued_from_previous: from,
-                continued_on_next: next,
-                repeated_table_header: repeated,
-                geometry: None,
-            },
+            fragment,
             flow: occurrence.flow.clone(),
             placed_flags: flags.is_some(),
             geometry,
@@ -1765,6 +1784,14 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 geometry,
             );
         }
+        if placed.clipped {
+            self.diagnostics.push(PageDiagnostic {
+                code: PageDiagnosticCode::ClippedContent,
+                node_id: Some(node.id.clone()),
+                page_index: Some(occurrence.record.page_index),
+                message: "Its table cell cuts through a line of this paragraph on this page; the line's text is listed, though only part of it shows.".to_owned(),
+            });
+        }
     }
 
     fn table(&mut self, occurrence: &Occurrence, map: &LoweringMap, placed: &PlacedTable<'_>) {
@@ -1897,8 +1924,8 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         );
     }
 
-    /// Diagnoses exported content no page shows.
-    fn unplaced(&mut self, selected: &HashSet<StorySelection>) {
+    /// Diagnoses exported content no page shows; paragraphs only when every page was mapped.
+    fn unplaced(&mut self, selected: &HashSet<StorySelection>, mapped_every_page: bool) {
         for story in &self.content.stories {
             if story.kind == StoryKind::Comment {
                 continue;
@@ -1919,6 +1946,9 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 page_index: None,
                 message: "Comments are not laid out on pages.".to_owned(),
             });
+        }
+        if !mapped_every_page {
+            return;
         }
         let mut missing: Vec<&str> = self
             .index
