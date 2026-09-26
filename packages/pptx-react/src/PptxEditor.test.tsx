@@ -15,6 +15,9 @@ import type { PptxFontFace, PptxPresenceCursor, SlideDisplayList } from '@better
 import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
+import { isMacPlatform, matchesChord } from './commands/descriptors';
+
+const mod = () => (isMacPlatform() ? { metaKey: true } : { ctrlKey: true });
 
 const root = resolve(import.meta.dir, '../../..');
 
@@ -49,6 +52,16 @@ afterAll(async () => {
 function isDisabled(element: HTMLElement): boolean {
   return element.getAttribute('aria-disabled') === 'true' || (element as HTMLButtonElement).disabled;
 }
+
+describe('shortcut matching', () => {
+  it('needs exactly the chord\'s modifiers', () => {
+    const press = (init: KeyboardEventInit) => new KeyboardEvent('keydown', { key: 'b', ...init });
+    expect(matchesChord('Mod+B', press({ ctrlKey: true }), false)).toBe(true);
+    expect(matchesChord('Mod+B', press({ ctrlKey: true, metaKey: true }), false)).toBe(false);
+    expect(matchesChord('Mod+B', press({ metaKey: true, ctrlKey: true }), true)).toBe(false);
+    expect(matchesChord('Mod+B', press({ ctrlKey: true, altKey: true }), false)).toBe(false);
+  });
+});
 
 describe('PptxEditor PNG export', () => {
   const cases = [
@@ -710,7 +723,7 @@ describe('PptxEditor proposal review', () => {
     fireEvent.click(view.getByTestId('pptx-proposal-accept'));
     await waitFor(() => expect(handle.listProposals()).toHaveLength(0));
     expect(JSON.stringify(handle.snapshot())).toContain('A reviewed title');
-    fireEvent.keyDown(view.getByRole('application'), { key: 'z', ctrlKey: true, metaKey: true });
+    fireEvent.keyDown(view.getByRole('application'), { key: 'z', ...mod() });
     await waitFor(() => expect(handle.snapshot()).toEqual(original));
     await act(async () => {
       handle.propose('Review agent', null, [{ type: 'setSlideNotes', slideId: slide.id, text: 'Reject this' }]);

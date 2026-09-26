@@ -93,8 +93,10 @@ export function isMacPlatform(): boolean {
 export function matchesChord(chord: string, event: KeyboardEvent, mac = isMacPlatform()): boolean {
   const parsed = parseChord(chord);
   const mod = mac ? event.metaKey : event.ctrlKey;
+  const other = mac ? event.ctrlKey : event.metaKey;
   return (
     parsed.mod === mod &&
+    !other &&
     parsed.shift === event.shiftKey &&
     parsed.alt === event.altKey &&
     event.key.toLowerCase() === parsed.key
