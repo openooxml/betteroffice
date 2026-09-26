@@ -89,7 +89,8 @@ in `ToolbarOverflow` to give it an entry there.
 
 Host-owned tools install through the `plugins` prop. A plugin created with
 `defineDocxPlugin` can contribute a docked panel, an overlay, sidebar cards and
-commands; it reads and edits through restricted clients, never the session:
+commands; it reads and edits through restricted clients, never the session. The
+plugin API is experimental and may change in minor releases:
 
 ```tsx
 import { DocxEditor, defineDocxPlugin } from "@betteroffice/docx-react";
@@ -113,14 +114,15 @@ const review = defineDocxPlugin<{ count: number }>({
       label: "Mark reviewed",
       mutatesDocument: true,
       async execute(context) {
+        if (!context.edits) return { ok: false, failure: { code: "not-granted", message: "Needs write access" } };
         const read = await context.read.readParagraphs({ view: "accepted" });
-        if (!read.ok || !context.edits) return { ok: true, status: "noop" };
+        if (!read.ok) return read;
         const first = read.paragraphs[0];
         const result = await context.edits.applyEdits({
           expectVersion: read.version,
           steps: [{ op: "insertText", target: { kind: "paragraph", story: "body", paraId: first.paraId }, at: "end", text: " ✓" }],
         });
-        return result.ok ? { ok: true, status: "executed" } : { ok: true, status: "noop" };
+        return result.ok ? { ok: true, status: "executed" } : result;
       },
     },
   ],
@@ -171,9 +173,10 @@ batches refuse locked content in Rust. In suggesting mode each batch step needs
 **Commands and toolbar.** Contributed commands register as
 `plugin:<pluginId>/<id>` on `ref.commands` and always run with their own
 plugin's clients, whether the default toolbar, a shortcut or the host invokes
-them. Plugin shortcuts must use Mod or Alt, or a function key; built-in and
-clipboard shortcuts take precedence, and a clashing plugin shortcut is reported
-and not bound. Keys
+them. A command's failure uses the plugin's own code, and a refused edit batch
+returned as-is reaches the caller unchanged. Plugin shortcuts must use Mod or
+Alt, or a function key; built-in and clipboard shortcuts take precedence, and a
+clashing plugin shortcut is reported and not bound. Keys
 pressed in plugin chrome are the user's: built-in shortcuts act on the editor
 there, and a plugin's text fields keep their own editing keys. Replacement chrome
 shows toolbar contributions with
@@ -183,7 +186,9 @@ shows toolbar contributions with
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
 the current version. `geometry.dom` (a `RenderedDomContext`) answers in
 pages-container units divided by zoom, and `geometry.toOverlayRect(rect)`
-converts such a rectangle into pixels of the unscaled overlay layer. Overlays
+converts such a rectangle into pixels of the unscaled overlay layer, or returns
+`null` once that layout is no longer rendered. `geometry.dom` is experimental
+and may be replaced by a data-only facade. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
 anchor to `{ version, story, paraId }` and appear only while that version is
 current and the body paragraph is unique; a card's `render` receives its `item`,

@@ -5,6 +5,7 @@ import { Tooltip } from '../ui/Tooltip';
 import { cn } from '../../lib/utils';
 import { useOverflowSource } from './overflowRegistry';
 
+/** @experimental */
 export interface ToolbarButtonProps {
   /** Pressed state; omit for buttons that are not toggles. */
   active?: boolean | 'mixed';
@@ -23,6 +24,7 @@ export interface ToolbarButtonProps {
   overflowLabel?: string;
 }
 
+/** @experimental */
 export interface ToolbarGroupProps {
   /** Accessible group name, also the heading of its overflow-menu section. */
   label?: string;
@@ -43,7 +45,10 @@ function testIdFor(ariaLabel: string | undefined, title: string | undefined): st
   return source ? `toolbar-${source}` : undefined;
 }
 
-/** A toolbar button for host actions; it moves into the overflow menu at narrow widths. */
+/**
+ * A toolbar button for host actions; it moves into the overflow menu at narrow widths.
+ * @experimental
+ */
 export function ToolbarButton({
   active,
   disabled = false,
@@ -119,7 +124,10 @@ export function ToolbarButton({
   );
 }
 
-/** A labelled cluster of controls; groups move into the overflow menu whole. */
+/**
+ * A labelled cluster of controls; it overflows whole, and only when each control has a menu entry.
+ * @experimental
+ */
 export function ToolbarGroup({ label, children, className }: ToolbarGroupProps) {
   return (
     <div
@@ -135,6 +143,7 @@ export function ToolbarGroup({ label, children, className }: ToolbarGroupProps) 
   );
 }
 
+/** @experimental */
 export function ToolbarSeparator() {
   return (
     <div

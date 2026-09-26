@@ -17,6 +17,7 @@ import type {
   DocxCommandStore,
   DocxPluginCommandDescriptor,
   DocxPluginCommandId,
+  DocxPluginCommandResult,
   DocxPluginCommandState,
 } from './types';
 
@@ -91,7 +92,7 @@ export interface DocxPluginCommandBinding {
   /** The plugin's own state; the editor's gate applies on top. */
   state(): DocxPluginCommandState;
   /** Runs the plugin's handler with that plugin's clients. */
-  execute(): Promise<DocxCommandResult>;
+  execute(): Promise<DocxPluginCommandResult>;
 }
 
 /** Who a scoped store acts for; asked again inside every operation boundary. */
@@ -306,17 +307,33 @@ export function createDocxCommandController(): DocxCommandController {
     if (changed) notify();
   };
 
-  const run = async (
-    id: AnyCommandId,
+  type Perform<R> = (env: DocxCommandEnvironment) => R | Promise<R>;
+
+  function run(
+    id: DocxCommandId,
     args: unknown,
-    perform: (env: DocxCommandEnvironment) => DocxCommandResult | Promise<DocxCommandResult>,
+    perform: Perform<DocxCommandResult>,
     origin?: DocxCommandOrigin | null,
     scope?: DocxCommandScope
-  ): Promise<DocxCommandResult> => {
+  ): Promise<DocxCommandResult>;
+  function run(
+    id: AnyCommandId,
+    args: unknown,
+    perform: Perform<DocxPluginCommandResult>,
+    origin?: DocxCommandOrigin | null,
+    scope?: DocxCommandScope
+  ): Promise<DocxPluginCommandResult>;
+  async function run(
+    id: AnyCommandId,
+    args: unknown,
+    perform: Perform<DocxPluginCommandResult>,
+    origin?: DocxCommandOrigin | null,
+    scope?: DocxCommandScope
+  ): Promise<DocxPluginCommandResult> {
     const current = binding;
     if (!current) return failure('editor-unavailable', null);
     const deferred = origin !== undefined;
-    const attempt = () => {
+    const attempt = (): DocxPluginCommandResult | Promise<DocxPluginCommandResult> => {
       if (deferred) {
         const stale = origin ? current.resume(origin) : 'editor-unavailable';
         if (stale) return failure(stale, environment(true));
@@ -325,7 +342,7 @@ export function createDocxCommandController(): DocxCommandController {
       if (denied) return failure(denied, environment(true));
       const env = environment(true);
       const state = compute(id, args, env);
-      if (!state.enabled) return { ok: false, failure: state.disabledReason } as DocxCommandResult;
+      if (!state.enabled) return { ok: false, failure: state.disabledReason };
       if (scope && mutatingBuiltIn(id)) return failure('unsupported-policy', env);
       return perform(env!);
     };
@@ -339,7 +356,7 @@ export function createDocxCommandController(): DocxCommandController {
     } finally {
       refresh();
     }
-  };
+  }
 
   const perform = (id: AnyCommandId, args: unknown, env: DocxCommandEnvironment) =>
     isPluginCommandId(id)
@@ -350,7 +367,7 @@ export function createDocxCommandController(): DocxCommandController {
     id: unknown,
     args: unknown,
     scope?: DocxCommandScope
-  ): Promise<DocxCommandResult> => {
+  ): Promise<DocxPluginCommandResult> => {
     if (!isDocxCommandId(id) && !isPluginCommandId(id)) {
       return Promise.resolve(failure('unsupported-command', environment(false)));
     }
@@ -422,7 +439,7 @@ export function createDocxCommandController(): DocxCommandController {
       prepare(id, target) {
         const origin = capture(target);
         return {
-          execute: (args) => run(id, args, (env) => perform(id, args, env), origin, scope),
+          execute: (args) => run(id, args, (env) => binding!.perform(id, args, env), origin, scope),
         };
       },
     });

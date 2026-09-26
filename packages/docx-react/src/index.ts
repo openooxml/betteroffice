@@ -117,6 +117,7 @@ export type {
 export type {
   DocxPluginCommandDescriptor,
   DocxPluginCommandId,
+  DocxPluginCommandResult,
   DocxPluginCommandState,
 } from './commands/types';
 export type { SelectionState } from './components/DocxEditor/types';

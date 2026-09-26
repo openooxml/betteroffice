@@ -156,9 +156,10 @@ after a mutation, use `syncYrsInputState(true)` to refresh the editor.
 ## Compose the toolbar
 
 Every built-in control runs through one command store, `ref.commands`, which
-hosts can use for their own chrome. Pass `toolbar` to replace the default chrome
-with an arrangement of public parts; the children of `EditorToolbar.Toolbar`
-are the complete row, in your order:
+hosts can use for their own chrome. This command and toolbar composition API is
+experimental and may change in minor releases. Pass `toolbar` to replace the
+default chrome with an arrangement of public parts; the children of
+`EditorToolbar.Toolbar` are the complete row, in your order:
 
 ```tsx
 import {
@@ -236,8 +237,8 @@ editor's locale, and its keyboard shortcuts reach that editor only.
   widths trailing groups move into a More menu with arrow, Home/End, typeahead
   and submenu navigation, keeping every choice of the built-in controls; custom
   colors and sizes are asked for in a dialog. Wrap host content in
-  `ToolbarOverflow` to give it a menu entry; content without one stays in the
-  row.
+  `ToolbarOverflow` to give it a menu entry; content without one, and any group
+  holding it, stays in the row.
 
 ## Host edit batches
 
@@ -271,6 +272,8 @@ flushes. `proposeChange`, `addComment` and `applyFormatting` resolve their
 `{ paraId, search }` targets through the same Rust resolver in the accepted view.
 
 ## Host plugins
+
+The plugin API is experimental and may change in minor releases.
 
 Host-owned tools (review aids, templates, checks) install through the `plugins`
 prop. A plugin contributes a panel, an overlay, sidebar cards, and commands, and
@@ -342,7 +345,9 @@ const review = defineDocxPlugin<State>({
 - **Contributed commands** register as `plugin:<pluginId>/<id>` on
   `ref.commands`. They always run with their own plugin's clients, even when the
   host's toolbar, shortcuts or `ref.commands` invoke them, and outside the input
-  queue, so a handler can await its own batches. `mutatesDocument` disables a
+  queue, so a handler can await its own batches. `execute` returns
+  `{ ok: true, status }` or a failure with the plugin's own code, or a refused
+  edit batch as-is; callers receive it unchanged. `mutatesDocument` disables a
   command in viewing and read-only modes but grants nothing. Plugin shortcuts
   must use Mod or Alt, or a function key; built-in and clipboard shortcuts win,
   and a clashing plugin shortcut is not bound and is reported. Keys pressed in
@@ -360,10 +365,12 @@ const review = defineDocxPlugin<State>({
 - **Geometry.** `context.geometry` is null until a rendered layout shows the
   current version, and whenever it falls behind. `geometry.dom` answers in
   pages-container units divided by zoom; `geometry.toOverlayRect(rect)` converts
-  one of those rectangles into pixels of the unscaled overlay layer, once. The
-  layer ignores the pointer; interactive overlay elements set
-  `pointer-events: auto`. `snapshot.selection.displayRange` belongs to one
-  layout and is never an edit target.
+  one of those rectangles into pixels of the unscaled overlay layer, once, or
+  returns null after that layout stops being rendered. `geometry.dom` is
+  experimental and may be replaced by a data-only facade. The layer ignores the
+  pointer; interactive overlay elements set `pointer-events: auto`.
+  `snapshot.selection.displayRange` belongs to one layout and is never an edit
+  target.
 - **Sidebar cards** anchor to `{ version, story, paraId }` and show only while
   the document is at that version and the body paragraph resolves uniquely.
   `render` receives the `item` it draws, so one component can draw every card;
