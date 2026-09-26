@@ -146,6 +146,38 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 hyperlinks: old,
             }]))
         }
+        Op::SetHyperlink { sheet, hyperlink } => {
+            let links = &mut sheet_mut(wb, *sheet)?.hyperlinks;
+            let replaced = links
+                .iter()
+                .filter(|existing| existing.range.overlaps(&hyperlink.range))
+                .cloned()
+                .collect::<Vec<_>>();
+            if replaced.len() == 1 && replaced[0] == *hyperlink {
+                return Ok(InvertedOp(vec![]));
+            }
+            links.retain(|existing| !existing.range.overlaps(&hyperlink.range));
+            links.push(hyperlink.clone());
+            let mut inverse = vec![Op::RemoveHyperlink {
+                sheet: *sheet,
+                range: hyperlink.range,
+            }];
+            inverse.extend(replaced.into_iter().map(|hyperlink| Op::SetHyperlink {
+                sheet: *sheet,
+                hyperlink,
+            }));
+            Ok(InvertedOp(inverse))
+        }
+        Op::RemoveHyperlink { sheet, range } => {
+            let links = &mut sheet_mut(wb, *sheet)?.hyperlinks;
+            match links.iter().position(|link| link.range == *range) {
+                Some(index) => Ok(InvertedOp(vec![Op::SetHyperlink {
+                    sheet: *sheet,
+                    hyperlink: links.remove(index),
+                }])),
+                None => Ok(InvertedOp(vec![])),
+            }
+        }
         Op::RestoreColStyles { sheet, styles } => {
             let s = sheet_mut(wb, *sheet)?;
             let old = std::mem::replace(&mut s.col_styles, styles.clone());

@@ -3771,7 +3771,6 @@ fn panicking_native_observers_do_not_split_authority_and_projection() {
 fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
     let bytes = sample_xlsx();
     let mut workbook = Workbook::open_collaborative(&bytes, 1001).unwrap();
-    let range = CellRange::new(cell("A1"), cell("A2"));
     let structural_ops = vec![
         Op::InsertRows {
             sheet: SheetId(0),
@@ -3792,14 +3791,6 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
             sheet: SheetId(0),
             at: 0,
             count: 1,
-        },
-        Op::MergeCells {
-            sheet: SheetId(0),
-            range,
-        },
-        Op::UnmergeCells {
-            sheet: SheetId(0),
-            range,
         },
         Op::AddSheet {
             index: 1,
@@ -3847,6 +3838,550 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
             )
             .unwrap()
             .applied
+    );
+}
+
+#[test]
+fn collaborative_freeze_panes_converge_undo_and_reopen_without_unfreezing_axes() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1002).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1003).unwrap();
+    let pane = Some(FreezePane::new(1, 0, cell("A2")));
+    assert!(
+        left.apply_ops(
+            vec![Op::SetFreezePane {
+                sheet: SheetId(0),
+                pane
+            }],
+            options
+        )
+        .unwrap()
+        .applied
+    );
+    assert_eq!(left.model().sheets[0].freeze_pane, pane);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].freeze_pane, pane);
+    assert_eq!(
+        Workbook::open(&right.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .freeze_pane,
+        pane
+    );
+
+    assert!(left.undo(options).unwrap().applied);
+    assert_eq!(left.model().sheets[0].freeze_pane, None);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].freeze_pane, None);
+    assert!(left.redo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].freeze_pane, pane);
+
+    let state = right.encode_state_as_update_v1();
+    let mut shifted = Workbook::open(&bytes).unwrap();
+    shifted
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            options,
+        )
+        .unwrap();
+    assert!(matches!(
+        right.apply_update_v1(
+            &shifted
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options
+        ),
+        Err(Error::CollaborativeStructureChanged)
+    ));
+    assert_eq!(right.encode_state_as_update_v1(), state);
+}
+
+#[test]
+fn collaborative_merges_converge_undo_and_reopen() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1101).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1102).unwrap();
+    let range = CellRange::parse_a1("A1:B2").unwrap();
+    assert!(
+        left.apply_ops(
+            vec![Op::MergeCells {
+                sheet: SheetId(0),
+                range
+            }],
+            options
+        )
+        .unwrap()
+        .applied
+    );
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(left.model().sheets[0].merges, vec![range]);
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        Workbook::open(&right.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .merges,
+        vec![range]
+    );
+
+    assert!(left.undo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert!(left.model().sheets[0].merges.is_empty());
+    assert_eq!(left.model(), right.model());
+    assert!(left.redo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(right.model().sheets[0].merges, vec![range]);
+}
+
+fn internal_link(range: &str, target: &str) -> Hyperlink {
+    Hyperlink {
+        range: CellRange::parse_a1(range).unwrap(),
+        external_target: None,
+        location: Some(target.into()),
+        tooltip: Some("Open destination".into()),
+        display: Some("Go".into()),
+    }
+}
+
+#[test]
+fn collaborative_hyperlinks_converge_undo_and_reopen() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1201).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1202).unwrap();
+    let first = internal_link("A1", "Empty!A1");
+    let second = internal_link("D4", "Data!B1");
+    let baseline = left.encode_state_vector_v1();
+    assert!(
+        left.set_hyperlink(SheetId(0), first.clone(), options)
+            .unwrap()
+            .applied
+    );
+    assert!(
+        right
+            .set_hyperlink(SheetId(0), second.clone(), options)
+            .unwrap()
+            .applied
+    );
+    let left_update = left.encode_diff_v1(&baseline).unwrap();
+    let right_update = right.encode_diff_v1(&baseline).unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        left.model().sheets[0].hyperlinks,
+        vec![first.clone(), second.clone()]
+    );
+
+    assert!(left.undo(options).unwrap().applied);
+    right
+        .apply_update_v1(
+            &left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap(),
+            options,
+        )
+        .unwrap();
+    assert_eq!(left.model().sheets[0].hyperlinks, vec![second.clone()]);
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        Workbook::open(&right.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .hyperlinks,
+        vec![second.clone()]
+    );
+
+    assert!(
+        right
+            .remove_hyperlink(SheetId(0), second.range, options)
+            .unwrap()
+            .applied
+    );
+    left.apply_update_v1(
+        &right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap(),
+        options,
+    )
+    .unwrap();
+    assert!(left.model().sheets[0].hyperlinks.is_empty());
+    assert_eq!(left.model(), right.model());
+}
+
+#[test]
+fn overlapping_concurrent_hyperlinks_project_identically() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1203).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1204).unwrap();
+    let first = internal_link("A1:B2", "Empty!A1");
+    let second = internal_link("B2:C3", "Data!B1");
+    let baseline = left.encode_state_vector_v1();
+    left.set_hyperlink(SheetId(0), first.clone(), options)
+        .unwrap();
+    right.set_hyperlink(SheetId(0), second, options).unwrap();
+    let left_update = left.encode_diff_v1(&baseline).unwrap();
+    let right_update = right.encode_diff_v1(&baseline).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].hyperlinks, vec![first]);
+}
+
+#[test]
+fn imported_external_hyperlink_can_be_replaced_removed_and_restored() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    let original = Hyperlink {
+        range: CellRange::parse_a1("A1").unwrap(),
+        external_target: Some("https://example.com/original".into()),
+        location: None,
+        tooltip: None,
+        display: Some("Original".into()),
+    };
+    sheet.hyperlinks.push(original.clone());
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let options = CalculationOptions::default();
+    let mut editor = Workbook::open_collaborative(&bytes, 1205).unwrap();
+    let replacement = Hyperlink {
+        external_target: Some("https://example.com/revised".into()),
+        display: Some("Revised".into()),
+        ..original.clone()
+    };
+    assert!(
+        editor
+            .set_hyperlink(SheetId(0), replacement.clone(), options)
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        Workbook::open(&editor.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .hyperlinks,
+        vec![replacement.clone()]
+    );
+    assert!(
+        editor
+            .remove_hyperlink(SheetId(0), original.range, options)
+            .unwrap()
+            .applied
+    );
+    assert!(
+        Workbook::open(&editor.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .hyperlinks
+            .is_empty()
+    );
+    assert!(editor.undo(options).unwrap().applied);
+    assert_eq!(editor.model().sheets[0].hyperlinks, vec![replacement]);
+}
+
+#[test]
+fn overlapping_imported_hyperlinks_block_authoring_without_loss() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.hyperlinks.push(internal_link("A1:B2", "Data!D1"));
+    sheet.hyperlinks.push(internal_link("B2:C3", "Data!D2"));
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut editor = Workbook::open_collaborative(&bytes, 1206).unwrap();
+    let before = editor.model().clone();
+
+    let error = editor
+        .set_hyperlink(
+            SheetId(0),
+            internal_link("E1", "Data!D3"),
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("overlapping imported hyperlinks")
+    );
+    assert_eq!(editor.model(), &before);
+    assert_eq!(
+        Workbook::open(&editor.save().unwrap()).unwrap().model(),
+        &before
+    );
+}
+
+#[test]
+fn concurrent_disjoint_merges_on_one_sheet_converge_without_loss() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1103).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1104).unwrap();
+    let first = CellRange::parse_a1("A1:B2").unwrap();
+    let second = CellRange::parse_a1("D4:E5").unwrap();
+    left.apply_ops(
+        vec![Op::MergeCells {
+            sheet: SheetId(0),
+            range: first,
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::MergeCells {
+                sheet: SheetId(0),
+                range: second,
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![first, second]);
+}
+
+#[test]
+fn concurrent_overlapping_merges_choose_the_same_range_and_survive_reopen() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1105).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1106).unwrap();
+    let first = CellRange::parse_a1("A1:B2").unwrap();
+    let second = CellRange::parse_a1("B2:C3").unwrap();
+    left.apply_ops(
+        vec![Op::MergeCells {
+            sheet: SheetId(0),
+            range: first,
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::MergeCells {
+                sheet: SheetId(0),
+                range: second,
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![first]);
+    assert_eq!(
+        Workbook::open(&left.save().unwrap())
+            .unwrap()
+            .model()
+            .sheets[0]
+            .merges,
+        vec![first]
+    );
+
+    right.undo(options).unwrap();
+    left.apply_update_v1(
+        &right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap(),
+        options,
+    )
+    .unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(left.model().sheets[0].merges, vec![first]);
+}
+
+#[test]
+fn concurrent_collaborative_freeze_panes_converge() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&bytes, 1004).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 1005).unwrap();
+    left.apply_ops(
+        vec![Op::SetFreezePane {
+            sheet: SheetId(0),
+            pane: Some(FreezePane::new(1, 0, cell("A2"))),
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::SetFreezePane {
+                sheet: SheetId(0),
+                pane: Some(FreezePane::new(2, 0, cell("A3"))),
+            }],
+            options,
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&right_update, options).unwrap();
+    right.apply_update_v1(&left_update, options).unwrap();
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        left.encode_state_as_update_v1(),
+        right.encode_state_as_update_v1()
+    );
+    assert_eq!(
+        Workbook::open(&left.save().unwrap()).unwrap().model(),
+        left.model()
+    );
+}
+
+#[test]
+fn concurrent_freeze_and_cell_edit_do_not_overwrite_each_other() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut pane_author = Workbook::open_collaborative(&bytes, 1006).unwrap();
+    let mut cell_author = Workbook::open_collaborative(&bytes, 1007).unwrap();
+    let pane = Some(FreezePane::new(1, 1, cell("B2")));
+    pane_author
+        .apply_ops(
+            vec![Op::SetFreezePane {
+                sheet: SheetId(0),
+                pane,
+            }],
+            options,
+        )
+        .unwrap();
+    cell_author
+        .edit_cell(SheetId(0), cell("A1"), "41", options)
+        .unwrap();
+    let pane_update = pane_author
+        .encode_diff_v1(&cell_author.encode_state_vector_v1())
+        .unwrap();
+    let cell_update = cell_author
+        .encode_diff_v1(&pane_author.encode_state_vector_v1())
+        .unwrap();
+    pane_author.apply_update_v1(&cell_update, options).unwrap();
+    cell_author.apply_update_v1(&pane_update, options).unwrap();
+    for workbook in [&pane_author, &cell_author] {
+        assert_eq!(workbook.model().sheets[0].freeze_pane, pane);
+        assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "41");
+    }
+    assert_eq!(pane_author.model(), cell_author.model());
+}
+
+#[test]
+fn freeze_pane_updates_recover_from_reversed_delivery_and_full_snapshot() {
+    let bytes = sample_xlsx();
+    let options = CalculationOptions::default();
+    let mut source = Workbook::open_collaborative(&bytes, 1008).unwrap();
+    let mut target = Workbook::open_collaborative(&bytes, 1009).unwrap();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&updates);
+    let _subscription = source
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    for rows in [1, 2] {
+        source
+            .apply_ops(
+                vec![Op::SetFreezePane {
+                    sheet: SheetId(0),
+                    pane: Some(FreezePane::new(rows, 0, CellRef::new(rows, 0))),
+                }],
+                options,
+            )
+            .unwrap();
+    }
+    let updates = updates.lock().unwrap().clone();
+    assert_eq!(updates.len(), 2);
+    assert!(
+        !target
+            .apply_update_v1(&updates[1], options)
+            .unwrap()
+            .applied
+    );
+    assert!(
+        target
+            .apply_update_v1(&updates[0], options)
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        target.model().sheets[0].freeze_pane,
+        source.model().sheets[0].freeze_pane
+    );
+
+    let mut recovered = Workbook::open_collaborative(&bytes, 1010).unwrap();
+    recovered
+        .apply_update_v1(&source.encode_state_as_update_v1(), options)
+        .unwrap();
+    assert_eq!(recovered.model(), source.model());
+    assert_eq!(
+        Workbook::open(&recovered.save().unwrap()).unwrap().model(),
+        source.model()
     );
 }
 

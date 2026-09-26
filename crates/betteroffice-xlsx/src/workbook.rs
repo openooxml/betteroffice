@@ -29,7 +29,8 @@ use xlsx_render::{
 
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
-    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
+    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
+    is_collaborative_local_layout_op, is_structural_op,
 };
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -87,7 +88,7 @@ struct UpdateObservers {
 
 enum WorkbookMode {
     Standalone,
-    Collaborative { structure: WorkbookStructure },
+    Collaborative { structure: Box<WorkbookStructure> },
 }
 
 /// Package identity the model does not carry: per current sheet, the source
@@ -440,7 +441,7 @@ impl Workbook {
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {
-                structure: authority.structure().map_err(authority_error)?,
+                structure: Box::new(authority.structure().map_err(authority_error)?),
             },
             None => WorkbookMode::Standalone,
         };
@@ -533,7 +534,7 @@ impl Workbook {
             return Ok(self.remote_mutation_result(&before, true));
         }
         let staged = self.stage_remote_updates(&[update], None)?;
-        if staged.structure != structure {
+        if !staged.structure.same_except_local_layout(&structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         if staged.pending {
@@ -574,7 +575,9 @@ impl Workbook {
             SnapshotAdoption::Replacement(candidate) => *candidate,
         };
         let structure = candidate.structure().map_err(authority_error)?;
-        if !structure.describes_same_workbook(&frozen) {
+        if !structure.describes_same_workbook(&frozen)
+            && !structure.snapshot_same_except_local_layout(&frozen)
+        {
             return Err(Error::CollaborativeStructureChanged);
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
@@ -592,7 +595,9 @@ impl Workbook {
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation;
-        self.mode = WorkbookMode::Collaborative { structure };
+        self.mode = WorkbookMode::Collaborative {
+            structure: Box::new(structure),
+        };
         self.pending_remote_updates.clear();
         self.undo.clear();
         self.preserved_undo.clear();
@@ -676,7 +681,7 @@ impl Workbook {
                 Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
             );
             match staged {
-                Ok(staged) if &staged.structure != structure => {
+                Ok(staged) if !staged.structure.same_except_local_layout(structure) => {
                     self.pending_remote_updates.remove(index);
                 }
                 Ok(staged) if staged.pending => {
@@ -735,6 +740,7 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
 
+        let new_structure = staged.structure;
         let commit_update = staged.commit_update;
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
@@ -746,6 +752,9 @@ impl Workbook {
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
+        self.mode = WorkbookMode::Collaborative {
+            structure: Box::new(new_structure),
+        };
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();
@@ -1157,6 +1166,24 @@ impl Workbook {
             .collect())
     }
 
+    pub fn set_hyperlink(
+        &mut self,
+        sheet: SheetId,
+        hyperlink: Hyperlink,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.apply_ops(vec![Op::SetHyperlink { sheet, hyperlink }], options)
+    }
+
+    pub fn remove_hyperlink(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.apply_ops(vec![Op::RemoveHyperlink { sheet, range }], options)
+    }
+
     pub fn edit_cell(
         &mut self,
         sheet: SheetId,
@@ -1316,7 +1343,11 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
-        if self.is_collaborative() && ops.iter().any(is_structural_op) {
+        if self.is_collaborative()
+            && ops
+                .iter()
+                .any(|op| is_structural_op(op) && !is_collaborative_local_layout_op(op))
+        {
             return Err(Error::CollaborativeStructureOperation);
         }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
@@ -1526,14 +1557,18 @@ impl Workbook {
             WorkbookMode::Collaborative { structure } => structure,
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
-        if &history.structure != structure {
+        if !history.structure.same_except_local_layout(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
+        let new_structure = history.structure;
         let active_name = self.active_sheet_name();
         let before = self.model.clone();
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
         self.install_model(restored)?;
+        self.mode = WorkbookMode::Collaborative {
+            structure: Box::new(new_structure),
+        };
         self.invalidate_sheet_info();
         self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
@@ -2136,6 +2171,7 @@ impl Workbook {
         let prior_styles = self.pre_edit_cell_styles(ops);
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
+            let new_structure = staged.structure.clone();
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
@@ -2143,6 +2179,9 @@ impl Workbook {
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
             self.install_model(model)?;
+            self.mode = WorkbookMode::Collaborative {
+                structure: Box::new(new_structure),
+            };
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
                 update: staged.update,
@@ -2191,6 +2230,7 @@ impl Workbook {
         let prior_styles = self.pre_edit_cell_styles(ops);
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
+            let new_structure = staged.structure.clone();
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
@@ -2198,6 +2238,9 @@ impl Workbook {
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
             self.install_model(model)?;
+            self.mode = WorkbookMode::Collaborative {
+                structure: Box::new(new_structure),
+            };
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
                 update: staged.update,
@@ -2239,7 +2282,7 @@ impl Workbook {
             .authority
             .stage_local_ops_v1(ops, origin)
             .map_err(authority_error)?;
-        if &staged.structure != structure {
+        if !staged.structure.same_except_local_layout(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         validate_collaboration_size(&staged.update)?;
@@ -2329,6 +2372,8 @@ impl Workbook {
                 | Op::SetRowHeight { sheet, .. }
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
+                | Op::SetHyperlink { sheet, .. }
+                | Op::RemoveHyperlink { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
                 | Op::MergeCells { sheet, .. }
                 | Op::UnmergeCells { sheet, .. }
@@ -2976,6 +3021,8 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetRowHeight { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
+        | Op::SetHyperlink { sheet, .. }
+        | Op::RemoveHyperlink { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
@@ -3064,6 +3111,14 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::SetHyperlinks { sheet, hyperlinks } => {
             require_sheet(model, *sheet)?;
             validate_hyperlinks(hyperlinks)?;
+        }
+        Op::SetHyperlink { sheet, hyperlink } => {
+            require_sheet(model, *sheet)?;
+            validate_hyperlinks(std::slice::from_ref(hyperlink))?;
+        }
+        Op::RemoveHyperlink { sheet, range } => {
+            require_sheet(model, *sheet)?;
+            validate_range(*range)?;
         }
         Op::SetChartAnchor {
             sheet,
