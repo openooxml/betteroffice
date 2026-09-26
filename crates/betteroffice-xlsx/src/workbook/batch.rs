@@ -138,6 +138,7 @@ pub struct StepGuard {
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
+#[non_exhaustive]
 pub enum EditOperation {
     /// What a user would type into each cell, parsed against the cell's current number format.
     SetCellInputs {
@@ -249,6 +250,7 @@ pub struct EditRequest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum EditFailureCode {
     StaleVersion,
     MissingTarget,
