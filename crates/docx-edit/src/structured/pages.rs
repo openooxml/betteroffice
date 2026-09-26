@@ -1227,9 +1227,6 @@ impl NodeIndex {
                     let Anchor::Paragraph { story, para_id } = &block.anchor else {
                         continue;
                     };
-                    if para_id.is_empty() {
-                        continue;
-                    }
                     let mut node = ParagraphNode {
                         id: block.id.clone(),
                         anchor: block.anchor.clone(),
