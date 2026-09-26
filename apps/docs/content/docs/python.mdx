@@ -92,6 +92,18 @@ Call `register_font` with at least one font face before rendering.
 
 A `Presentation` must be used and released on the thread that opened it.
 
+`read_content` returns slides and story text with the session version, and
+`apply_edits` applies a batch of text, speaker-notes and shape steps against
+that version as one undo step, or returns `{"ok": False, "failure": ...}` with
+nothing changed. Requests are the typed dictionaries `PptxEditRequest` and
+friends, shared with the JavaScript core.
+
+`export_structured` and `export_markdown` return the committed deck as
+structured content or Markdown with the version it was read at, and
+`export_pptx_structured(data)` reads bytes as a snapshot. Records carry anchors
+and source provenance, hidden slides and shapes, notes and comments are keyword
+options, and every omission is listed in `diagnostics`.
+
 `comments()` returns the deck's comments, and `comment_flavor` identifies the
 legacy or modern format. Modern comments support replies and resolved status in
 PowerPoint 365. Set the format with `set_comment_flavor` before adding comments.

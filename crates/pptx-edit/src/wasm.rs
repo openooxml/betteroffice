@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
+use crate::structured::{PptxExportOptions, export_outcome_json};
 use crate::{
-    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, PictureDraft, PresetShapeDraft, ShapeDraft,
-    ShapeReceipt, ShapeRect, ShapeStroke, SlideReceipt, TextReceipt, TextStyle, TextStylePatch,
-    TransformReceipt, UpdateEvent, UpdateOrigin,
+    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, EditRequest, FindRequest, MAX_REQUEST_BYTES,
+    PictureDraft, PresetShapeDraft, ReadRequest, ShapeDraft, ShapeReceipt, ShapeRect, ShapeStroke,
+    SlideReceipt, TextReceipt, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent,
+    UpdateOrigin, outcome_json, oversized_request,
 };
 
 #[wasm_bindgen]
@@ -329,10 +331,7 @@ impl PptxDocument {
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
         DeckSession::open(bytes, client_id)
-            .map(|session| Self {
-                session,
-                update_observer: None,
-            })
+            .map(Self::opened)
             .map_err(js_error)
     }
 
@@ -353,10 +352,7 @@ impl PptxDocument {
             })
             .map_or_else(|| DeckSession::open_from_update(update, client_id), Ok)
             .map_err(js_error)?;
-        Ok(Self {
-            session,
-            update_observer: None,
-        })
+        Ok(Self::opened(session))
     }
 
     #[wasm_bindgen(getter, js_name = clientId)]
@@ -367,6 +363,77 @@ impl PptxDocument {
     #[wasm_bindgen(js_name = snapshotJson)]
     pub fn snapshot_json(&self) -> Result<String, JsValue> {
         json(self.session.snapshot().map_err(js_error)?)
+    }
+
+    // Version-checked host edits. Requests and results are JSON; policy outcomes come back as
+    // `{"ok":true,...}` or `{"ok":false,"version","failure":{"code","message","stepIndex"?,
+    // "conflictingStepIndex"?,"target"?}}`, while malformed requests throw.
+
+    /// The session-scoped version token of the committed deck state.
+    #[wasm_bindgen(js_name = documentVersion)]
+    pub fn document_version(&self) -> String {
+        self.session.version().to_string()
+    }
+
+    /// `{"slideIds"?}` -> `{"ok":true,"version","slides","stories"}`.
+    #[wasm_bindgen(js_name = readContentJson)]
+    pub fn read_content_json(&self, request: &str) -> Result<String, JsValue> {
+        if request.len() > MAX_REQUEST_BYTES {
+            return self.oversized();
+        }
+        let request: ReadRequest = parse_args(request)?;
+        outcome_json(&self.session.read_content(&request).map_err(js_error)?).map_err(js_error)
+    }
+
+    /// `{"text","within"?,"limit"?}` -> `{"ok":true,"version","matches","truncated"}`.
+    #[wasm_bindgen(js_name = findTextJson)]
+    pub fn find_text_json(&self, request: &str) -> Result<String, JsValue> {
+        if request.len() > MAX_REQUEST_BYTES {
+            return self.oversized();
+        }
+        let request: FindRequest = parse_args(request)?;
+        outcome_json(&self.session.find_text(&request).map_err(js_error)?).map_err(js_error)
+    }
+
+    /// Runs every check of `applyEditsJson`, staging included, without changing anything:
+    /// `{"ok":true,"baseVersion","wouldApply","previews"}`.
+    #[wasm_bindgen(js_name = validateEditsJson)]
+    pub fn validate_edits_json(&self, request: &str) -> Result<String, JsValue> {
+        if request.len() > MAX_REQUEST_BYTES {
+            return self.oversized();
+        }
+        let request: EditRequest = parse_args(request)?;
+        outcome_json(&self.session.validate_edits(&request).map_err(js_error)?).map_err(js_error)
+    }
+
+    /// Applies a batch all-or-nothing: `{"ok":true,"baseVersion","version","applied","source",
+    /// "changedSlides","changedStories","receipts"}`.
+    #[wasm_bindgen(js_name = applyEditsJson)]
+    pub fn apply_edits_json(&self, request: &str) -> Result<String, JsValue> {
+        if request.len() > MAX_REQUEST_BYTES {
+            return self.oversized();
+        }
+        let request: EditRequest = parse_args(request)?;
+        outcome_json(&self.session.apply_edits(&request).map_err(js_error)?).map_err(js_error)
+    }
+
+    /// Structured export of the committed deck: `{"includeHiddenSlides"?,"includeHiddenShapes"?,
+    /// "includeNotes"?,"includeComments"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
+    /// `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Nothing changes.
+    #[wasm_bindgen(js_name = exportStructuredJson)]
+    pub fn export_structured_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: PptxExportOptions = parse_args(options)?;
+        export_outcome_json(&self.session.export_structured(&options).map_err(js_error)?)
+            .map_err(js_error)
+    }
+
+    /// `exportStructuredJson` rendered as Markdown from the same read:
+    /// `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
+    #[wasm_bindgen(js_name = exportMarkdownJson)]
+    pub fn export_markdown_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: PptxExportOptions = parse_args(options)?;
+        export_outcome_json(&self.session.export_markdown(&options).map_err(js_error)?)
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = searchTextJson)]
@@ -900,6 +967,18 @@ impl PptxDocument {
 }
 
 impl PptxDocument {
+    fn oversized(&self) -> Result<String, JsValue> {
+        outcome_json::<()>(&Err(oversized_request(self.session.version()))).map_err(js_error)
+    }
+
+    fn opened(session: DeckSession) -> Self {
+        session.rotate_version(js_entropy());
+        Self {
+            session,
+            update_observer: None,
+        }
+    }
+
     pub fn session(&self) -> &DeckSession {
         &self.session
     }
@@ -977,6 +1056,19 @@ fn local_context() -> EditCtx {
     EditCtx::local("wasm")
 }
 
+/// Host randomness for version nonces; the wasm target has no ambient entropy source.
+fn js_entropy() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ((js_sys::Math::random() * 9_007_199_254_740_992.0) as u64)
+            ^ (js_sys::Date::now() as u64).rotate_left(21)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
+
 fn parse_args<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, JsValue> {
     serde_json::from_str(args).map_err(js_error)
 }
@@ -1011,5 +1103,121 @@ fn proposal_error(error: crate::ProposalError) -> JsValue {
             .to_string(),
         ),
         other => js_error(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::PptxDocument;
+
+    const DECK: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+
+    fn envelope(json: &str) -> Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn batch_envelopes_default_and_refuse_as_data() {
+        let document = PptxDocument::open_collaborative(DECK, 91.0).unwrap();
+        let version = document.document_version();
+        let read = envelope(&document.read_content_json("{}").unwrap());
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["version"], version.as_str());
+        let story = &read["stories"][0];
+        let target = json!({
+            "kind": "range", "slideId": story["slideId"], "shapeId": story["shapeId"],
+            "storyId": story["storyId"], "start": 0, "end": 0,
+        });
+        let request = json!({
+            "expectVersion": version,
+            "steps": [{"op": "insertText", "target": target, "at": "start", "text": "Draft: "}],
+        })
+        .to_string();
+
+        let validated = envelope(&document.validate_edits_json(&request).unwrap());
+        assert_eq!(validated["ok"], true);
+        assert_eq!(validated["wouldApply"], true);
+        assert_eq!(document.document_version(), version);
+
+        let applied = envelope(&document.apply_edits_json(&request).unwrap());
+        assert_eq!(applied["ok"], true);
+        assert_eq!(applied["applied"], true);
+        assert_eq!(applied["source"], "host");
+        assert_eq!(applied["baseVersion"], version.as_str());
+        assert_eq!(applied["version"], document.document_version().as_str());
+        assert_eq!(applied["receipts"][0]["target"]["end"], 7);
+
+        let stale = envelope(&document.apply_edits_json(&request).unwrap());
+        assert_eq!(stale["ok"], false);
+        assert_eq!(stale["failure"]["code"], "stale-version");
+        assert_eq!(stale["version"], document.document_version().as_str());
+        assert!(document.can_undo());
+
+        let found = envelope(
+            &document
+                .find_text_json(r#"{"text":"Draft: ","limit":1}"#)
+                .unwrap(),
+        );
+        assert_eq!(found["ok"], true);
+        assert_eq!(found["matches"][0]["range"]["start"], 0);
+        let empty = envelope(&document.find_text_json(r#"{"text":""}"#).unwrap());
+        assert_eq!(empty["failure"]["code"], "invalid-step");
+        let oversized = " ".repeat(crate::MAX_REQUEST_BYTES + 1);
+        let refused = envelope(&document.apply_edits_json(&oversized).unwrap());
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["failure"]["code"], "limit-exceeded");
+        assert_eq!(refused["version"], document.document_version().as_str());
+    }
+
+    #[test]
+    fn export_envelopes_carry_the_version_or_a_refusal() {
+        let document = PptxDocument::open_collaborative(DECK, 94.0).unwrap();
+        let version = document.document_version();
+        let read = envelope(&document.export_structured_json("{}").unwrap());
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["version"], version.as_str());
+        assert_eq!(read["content"]["schemaVersion"], 1);
+        assert_eq!(read["content"]["anchorScope"], "session");
+        assert_eq!(read["content"]["readingOrder"], "shapeTree");
+        let markdown = envelope(&document.export_markdown_json("{}").unwrap());
+        assert_eq!(markdown["ok"], true);
+        assert!(
+            markdown["content"]["markdown"]
+                .as_str()
+                .unwrap()
+                .starts_with("<!-- pptx-export:0 -->")
+        );
+        let refused = envelope(
+            &document
+                .export_structured_json(r#"{"maxBytes":8}"#)
+                .unwrap(),
+        );
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["version"], version.as_str());
+        assert_eq!(refused["failure"]["code"], "invalid-options");
+        assert!(
+            refused["failure"]
+                .as_object()
+                .unwrap()
+                .get("target")
+                .is_some_and(Value::is_null)
+        );
+        assert_eq!(document.document_version(), version);
+    }
+
+    #[test]
+    fn documents_opened_from_the_same_bytes_never_share_versions() {
+        let first = PptxDocument::open_collaborative(DECK, 92.0).unwrap();
+        let second = PptxDocument::open_collaborative(DECK, 92.0).unwrap();
+        assert_ne!(first.document_version(), second.document_version());
+        let joined = PptxDocument::open_collaborative_from_update(
+            &first.encode_state_as_update(),
+            93.0,
+            None,
+        )
+        .unwrap();
+        assert_ne!(joined.document_version(), first.document_version());
     }
 }

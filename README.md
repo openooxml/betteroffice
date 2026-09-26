@@ -49,6 +49,22 @@
 - **Host-controlled DOCX saving.** Intercept Save before export and await pending
   editor input before reading, changing, or persisting the document.
 
+- **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
+  paragraphs with a session version, then apply atomic text and paragraph
+  batches that commit as one undo step or return a typed refusal with nothing
+  changed. Text steps stay within one paragraph and paragraph steps need a
+  document opened from DOCX bytes.
+
+- **Version-checked PPTX edit batches.** PPTX JavaScript, React, Rust and
+  Python hosts read slides and story text with a session version, then apply
+  atomic text, speaker-notes and shape batches that commit as one undo step or
+  return a typed refusal with nothing changed. Text steps stay within one
+  paragraph and leave fields and line breaks whole.
+
+- **Structured PPTX export.** PPTX JavaScript, Rust and Python hosts export
+  structured slide content and Markdown with session or snapshot anchors,
+  explicit hidden-content and notes/comment options, and omission diagnostics.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

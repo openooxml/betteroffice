@@ -74,3 +74,11 @@ character spacing) each combine two features in one deck. `schema_migration.rs` 
 them through synthetic 2.0 snapshots: it parses the deck, strips the fields a released
 2.0 writer never stored, stamps the seed 2.0, migrates it, and asserts the reattached
 source restores them.
+
+## Structured export
+
+`structured-export.golden.json` and `structured-export.golden.md` are the
+structured export and Markdown of the synthetic deck `../structured_export.rs`
+builds, with hidden slides, notes and comments included. Rewrite them with
+`PPTX_EXPORT_GOLDEN_UPDATE=1 cargo test -p betteroffice-pptx-edit --test
+structured_export golden` and review the diff.

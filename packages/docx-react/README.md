@@ -149,6 +149,37 @@ does not invoke that callback again. `onSave(buffer)` remains the notification
 after export. Before direct session reads or mutations, await `flushPendingInput()`;
 after a mutation, use `syncYrsInputState(true)` to refresh the editor.
 
+## Host edit batches
+
+`DocxEditorRef.readParagraphs()`, `findText()`, `validateEdits()` and `applyEdits()`
+flush pending input first, then run the version-checked batch API of
+[`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) on the
+open document. Build `expectVersion` and targets from a flushed read:
+
+```tsx
+const read = await editorRef.current!.readParagraphs({ view: 'accepted' });
+if (!read.ok) return;
+const result = await editorRef.current!.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    {
+      op: 'insertParagraphs',
+      target: { story: 'body', paraId: read.paragraphs[0].paraId },
+      at: 'end',
+      paragraphs: [{ text: 'Inserted by the host', styleId: 'Heading2' }],
+    },
+  ],
+});
+```
+
+A batch commits as one undo step and refreshes every story it changed, or returns
+a typed refusal. A refusal never rolls back typing that the flush committed, so
+typing that lands between the read and the batch refuses with `stale-version`.
+Read-only editors refuse with `read-only` (`locked-target` stays for locked
+content); in suggesting mode every step must carry `suggest`. The promise rejects when the document is replaced while input
+flushes. `proposeChange`, `addComment` and `applyFormatting` resolve their
+`{ paraId, search }` targets through the same Rust resolver in the accepted view.
+
 ## Framework notes
 
 Import `@betteroffice/docx-react/styles.css` once (in a bundler entry or, under
