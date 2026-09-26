@@ -953,7 +953,9 @@ pub(crate) fn plan_paragraph_style(
 
 impl EditingDoc {
     /// Inserts complete paragraph records at story index `at` in one transaction and returns
-    /// their fresh ids. Existing paragraphs keep their identity and properties.
+    /// their session keys. Each is authored: allocated a key and a claimed Word paragraph ID. An
+    /// insertion at or after the final paragraph mark authors into an editor-only final
+    /// paragraph, as a split there does. Existing paragraphs keep their identity and properties.
     pub(crate) fn insert_paragraph_records(
         &self,
         story_id: &str,
@@ -963,6 +965,10 @@ impl EditingDoc {
         let mut txn = self.transact_for(&EditCtx::local(String::new(), String::new()));
         let story = story_ref(&txn, story_id)?;
         check_position(&story, &txn, at)?;
+        if at + 1 >= story.len(&txn) {
+            identity::promote_story(self, &mut txn, story_id);
+        }
+        let mut allocator = IdAllocator::new(self, &txn);
         let mut index = at;
         let mut ids = Vec::with_capacity(records.len());
         for record in records {
@@ -977,7 +983,7 @@ impl EditingDoc {
                 story.insert_with_attributes(&mut txn, index, &record.text, attrs);
                 index += crate::ops::utf16_len(&record.text);
             }
-            let para_id = self.next_id();
+            let para_id = allocator.session_key(self);
             let pilcrow = story.insert_embed_with_attributes(
                 &mut txn,
                 index,
@@ -987,10 +993,11 @@ impl EditingDoc {
             pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
             pilcrow.insert(&mut txn, PARA_ID, para_id.as_str());
             for (key, value) in &record.properties {
-                if !matches!(key.as_str(), KIND_KEY | PARA_ID) {
+                if !crate::is_identity_key(key) {
                     pilcrow.insert(&mut txn, key.clone(), value.clone());
                 }
             }
+            allocator.bind(&mut txn, &pilcrow, &para_id, ParagraphIdOrigin::Authored);
             index += 1;
             ids.push(para_id);
         }

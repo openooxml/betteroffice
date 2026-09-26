@@ -217,4 +217,5 @@ controls, section breaks, opaque XML, fields' cached results, or comments and
 bookmarks crossing the span refuses, as does any step after which saving would
 move an opaque XML block, such as one that precedes a table. A batch holds at most 128 steps,
 1,048,576 inserted UTF-16 units and 1,024 new paragraphs. Paragraph ids are
-session anchors: they are not guaranteed to survive save and reopen.
+session keys; inserted paragraphs get Word paragraph IDs as typed ones do, so
+`saveYrsDocx` returns persisted anchors for them.

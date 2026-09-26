@@ -842,6 +842,12 @@ impl Seen {
         seen
     }
 
+    /// Adds the keys and Word paragraph IDs another replica has seen.
+    pub(crate) fn inherit(&mut self, other: &Self) {
+        self.ids.extend(&other.ids);
+        self.keys.extend(other.keys.iter().cloned());
+    }
+
     fn add(&mut self, pilcrow: &Pilcrow) {
         self.keys.insert(pilcrow.key.clone());
         for id in [&pilcrow.allocated, &pilcrow.source].into_iter().flatten() {

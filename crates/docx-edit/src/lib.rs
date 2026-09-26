@@ -866,6 +866,37 @@ impl EditingDoc {
         Ok(())
     }
 
+    /// Applies an update as it is, without the identity repair [`Self::apply_update_v1`] runs.
+    pub(crate) fn apply_verbatim_v1(&self, bytes: &[u8]) -> EditResult<()> {
+        let update = Update::decode_v1(bytes)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        self.doc
+            .transact_mut()
+            .apply_update(update)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+    }
+
+    /// A private replica of `state`, this document's committed state, that allocates identities
+    /// as this document would: the same client id and key counter, the retained source index,
+    /// and every key and Word paragraph ID this replica has seen, deleted ones included. What
+    /// the fork allocates stays its own until its update is adopted.
+    pub(crate) fn fork(&self, state: &[u8]) -> EditResult<Self> {
+        let fork = Self::new(self.client_id);
+        fork.apply_verbatim_v1(state)?;
+        fork.id_counter
+            .store(self.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
+        if let Some(index) = self.source_index() {
+            fork.retain_source(identity::SourcePackage::Ready(index));
+        }
+        {
+            let (txn, forked) = (self.doc.transact(), fork.doc.transact());
+            self.with_seen(&txn, |seen| {
+                fork.with_seen(&forked, |copy| copy.inherit(seen));
+            });
+        }
+        Ok(fork)
+    }
+
     /// Applies a v1 update using this replica's local transaction origin.
     ///
     /// This is reserved for a local worker replica executing an edit on behalf

@@ -1,8 +1,9 @@
 //! Version-checked, all-or-nothing host edit batches.
 //!
 //! A batch resolves every step against one captured state, returns policy failures as data,
-//! executes the resulting plan on a private clone that shares this replica's client id, rehearses
-//! the clone's update against an untouched copy of the base, and adopts it as one transaction.
+//! executes the resulting plan on a private fork that allocates identities as this replica would,
+//! rehearses the fork's update against an untouched copy of the base, and adopts it as one
+//! transaction.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -1670,14 +1671,10 @@ impl EditingDoc {
         }))
     }
 
-    /// Executes a plan on a private clone that shares this replica's client id and id counter,
-    /// validates the staged stories, and rehearses the resulting update against the base.
+    /// Executes a plan on a private [`EditingDoc::fork`], validates the staged stories, and
+    /// rehearses the resulting update against the base.
     fn stage(&self, plan: &Plan, base: Base) -> EditResult<Result<Staged, EditRefusal>> {
-        let stage = EditingDoc::new(self.client_id);
-        stage.apply_update_v1(&base.update)?;
-        stage
-            .id_counter
-            .store(self.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
+        let stage = self.fork(&base.update)?;
         let executed = execute(&stage, &plan.steps)?;
         let changed_stories: Vec<String> = plan
             .steps
@@ -1794,8 +1791,8 @@ fn rehearse(
     changed_stories: &[String],
 ) -> EditResult<()> {
     let rehearsal = EditingDoc::new(client_id);
-    rehearsal.apply_update_v1(base)?;
-    rehearsal.apply_update_v1(update)?;
+    rehearsal.apply_verbatim_v1(base)?;
+    rehearsal.apply_verbatim_v1(update)?;
     let pending = {
         let txn = rehearsal.yrs_doc().transact();
         txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
