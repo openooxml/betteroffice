@@ -141,7 +141,7 @@
       "gestureActive": "Finish moving the chart first.",
       "proposalStale": "Cells changed since this was proposed.",
       "renderFailed": "The sheet could not be drawn for printing.",
-      "executionFailed": "The change could not be applied."
+      "commandFailed": "The change could not be applied."
     }
   },
   "editor": {

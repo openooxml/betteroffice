@@ -92,7 +92,7 @@ const REASON_KEYS: Record<XlsxCommandFailureCode, TranslationKey> = {
   'gesture-active': 'commands.reasons.gestureActive',
   'proposal-stale': 'commands.reasons.proposalStale',
   'render-failed': 'commands.reasons.renderFailed',
-  'execution-failed': 'commands.reasons.executionFailed',
+  'command-failed': 'commands.reasons.commandFailed',
 };
 
 const ENGLISH_REASONS: Partial<Record<XlsxCommandFailureCode, string>> = {

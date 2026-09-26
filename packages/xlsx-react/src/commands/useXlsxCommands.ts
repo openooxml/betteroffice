@@ -242,7 +242,7 @@ export function useXlsxCommandBinding(
           return work();
         } catch (error) {
           current.fail(error);
-          return fail('execution-failed');
+          return fail('command-failed');
         }
       };
       const edit = (work: () => EditResult) =>
@@ -390,7 +390,7 @@ export function useXlsxCommandBinding(
               return fail('proposal-stale');
             }
             current.fail(error);
-            return fail('execution-failed');
+            return fail('command-failed');
           }
         case 'proposalReject':
           return attempt(() => {

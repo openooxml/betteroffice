@@ -230,7 +230,7 @@ export function createXlsxCommandController(): XlsxCommandController {
         return failure(error.code, environment(false));
       }
       console.error(`[xlsx commands] ${id} failed`, error);
-      return failure('execution-failed', environment(false));
+      return failure('command-failed', environment(false));
     } finally {
       refresh();
     }
