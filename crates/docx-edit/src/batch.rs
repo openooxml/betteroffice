@@ -1718,6 +1718,10 @@ fn plan_control<T: ReadTxn>(
             unchanged,
             text: text.clone(),
             patch,
+            drop_value: target
+                .payload
+                .get("value")
+                .is_some_and(|value| !matches!(value, yrs::Any::Null | yrs::Any::Undefined)),
         };
         let mut step = match &target.site {
             Site::Inline { raw, para_id } => plan_inline_fill(views, fill, *raw, para_id),
@@ -1743,6 +1747,7 @@ struct Fill<'a> {
     text: String,
     patch: Vec<(String, yrs::Any)>,
     unchanged: bool,
+    drop_value: bool,
 }
 
 impl Fill<'_> {
@@ -1833,10 +1838,11 @@ fn plan_inline_fill<T: ReadTxn>(
         Some(inline_content(&fill.text, &attrs))
     };
     let control = fill.resolved_control();
-    let effect = (content.is_some() || !fill.patch.is_empty()).then(|| {
+    let effect = (content.is_some() || !fill.patch.is_empty() || fill.drop_value).then(|| {
         Effect::Control(ControlFill::Inline {
             raw,
             content,
+            drop_value: fill.drop_value,
             patch: fill.patch,
         })
     });
@@ -1996,10 +2002,11 @@ fn plan_block_fill<T: ReadTxn>(
     let control = fill.resolved_control();
     let parent = fill.record.story.clone();
     let changes_content = !paragraphs.is_empty() || remove.is_some() || insert.is_some();
-    let effect = (changes_content || !fill.patch.is_empty()).then(|| {
+    let effect = (changes_content || !fill.patch.is_empty() || fill.drop_value).then(|| {
         Effect::Control(ControlFill::Block {
             parent: parent.clone(),
             raw,
+            drop_value: fill.drop_value,
             patch: fill.patch,
             child: child.to_owned(),
             paragraphs,
@@ -2451,27 +2458,29 @@ impl EditingDoc {
         if let Err(refusal) = self.check_commit(&plan) {
             return Ok(Err(refusal));
         }
-        let epoch = self.drop_filled_values(&plan.steps)?;
         match request.history {
             EditHistory::Separate => history.track(self),
             EditHistory::None => {}
         }
         history.add_undo_barrier();
-        {
+        let valued = {
             let mut txn = match request.history {
                 EditHistory::Separate => self.yrs_doc().transact_mut_with(self.client_id),
                 EditHistory::None => self.yrs_doc().transact_mut_with(HOST_ORIGIN),
             };
-            if self.epoch.load(Ordering::Relaxed) != epoch
+            if self.epoch.load(Ordering::Relaxed) != plan.epoch
                 || self.version_nonce.load(Ordering::Relaxed) != plan.nonce
             {
                 drop(txn);
                 return Ok(Err(stale(self.version())));
             }
+            let valued = valued_embeds(&txn, &plan.steps)?;
             txn.apply_update(adoption)
                 .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        }
+            valued
+        };
         history.add_undo_barrier();
+        self.drop_values(&valued);
         self.id_counter.store(
             staged.stage.id_counter.load(Ordering::Relaxed),
             Ordering::Relaxed,
@@ -2525,38 +2534,18 @@ impl EditingDoc {
         }))
     }
 
-    /// Drops the authored values of the text controls a batch fills, outside undo history and
-    /// just before the batch commits, so undoing the fill never brings them back. Returns the
-    /// epoch the batch then commits on.
-    fn drop_filled_values(&self, steps: &[Planned]) -> EditResult<u64> {
-        let valued: Vec<(&str, u32)> = steps
-            .iter()
-            .filter_map(|planned| {
-                let Some(Effect::Control(fill)) = &planned.effect else {
-                    return None;
-                };
-                let (story, raw, patch) = match fill {
-                    ControlFill::Inline { raw, patch, .. } => (planned.story.as_str(), *raw, patch),
-                    ControlFill::Block {
-                        parent, raw, patch, ..
-                    } => (parent.as_str(), *raw, patch),
-                };
-                patch
-                    .iter()
-                    .any(|(key, value)| key == "value" && *value == yrs::Any::Null)
-                    .then_some((story, raw))
-            })
-            .collect();
-        if !valued.is_empty() {
-            let mut txn = self.yrs_doc().transact_mut_with(HOST_ORIGIN);
-            for (story, raw) in valued {
-                let text = story_ref(&txn, story)?;
-                let map = crate::ops::embed::embed_map_at(&text, &txn, raw)
-                    .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-                yrs::Map::remove(&map, &mut txn, "value");
+    /// Drops the authored values of the text controls a committed batch filled, in a transaction
+    /// of its own so undoing the fill never brings them back.
+    fn drop_values(&self, valued: &[yrs::MapRef]) {
+        if valued.is_empty() {
+            return;
+        }
+        let mut txn = self.yrs_doc().transact_mut_with(HOST_ORIGIN);
+        for map in valued {
+            if !AsRef::<yrs::branch::Branch>::as_ref(map).is_deleted() {
+                yrs::Map::remove(map, &mut txn, "value");
             }
         }
-        Ok(self.epoch.load(Ordering::Relaxed))
     }
 
     fn check_commit(&self, plan: &Plan) -> Result<(), EditRefusal> {
@@ -2579,6 +2568,33 @@ impl EditingDoc {
         }
         Ok(())
     }
+}
+
+/// The embeds of the text controls `steps` fill that carry an authored value, read from the state
+/// they were planned on.
+fn valued_embeds<T: ReadTxn>(txn: &T, steps: &[Planned]) -> EditResult<Vec<yrs::MapRef>> {
+    steps
+        .iter()
+        .filter_map(|planned| match &planned.effect {
+            Some(Effect::Control(ControlFill::Inline {
+                raw,
+                drop_value: true,
+                ..
+            })) => Some((planned.story.as_str(), *raw)),
+            Some(Effect::Control(ControlFill::Block {
+                parent,
+                raw,
+                drop_value: true,
+                ..
+            })) => Some((parent.as_str(), *raw)),
+            _ => None,
+        })
+        .map(|(story, raw)| {
+            let text = story_ref(txn, story)?;
+            crate::ops::embed::embed_map_at(&text, txn, raw)
+                .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+        })
+        .collect()
 }
 
 fn stale(version: DocumentVersion) -> EditRefusal {

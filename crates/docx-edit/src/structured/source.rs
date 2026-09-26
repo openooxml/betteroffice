@@ -389,6 +389,11 @@ pub(crate) struct ReadSource {
     pub unrepresented_controls: usize,
     /// Where those controls sit, for the ones that can be told apart from represented controls.
     pub unrepresented_anchors: Vec<Anchor>,
+    /// The occurrences, in document order, of each story-part [`safety_key`] shared by controls
+    /// whose safety differs, with the paragraph each sits in.
+    pub ambiguous_safety: HashMap<(String, String), Vec<(Option<String>, ControlSafety)>>,
+    /// The safety of each seeded control embed whose occurrence seeding could pair with it.
+    pub embed_safety: std::sync::OnceLock<HashMap<yrs::branch::BranchID, ControlSafety>>,
 }
 
 /// How many controls with each [`safety_key`] seeding represents in each source part.
@@ -554,6 +559,8 @@ impl ReadSource {
             unlocated_controls: 0,
             unrepresented_controls: 0,
             unrepresented_anchors: Vec::new(),
+            ambiguous_safety: HashMap::new(),
+            embed_safety: std::sync::OnceLock::new(),
         }
     }
 
@@ -789,6 +796,8 @@ impl ReadSource {
         }
         let mut safety: HashMap<(String, String), ControlSafety> = HashMap::new();
         let mut occurrences: BTreeMap<(String, String), Vec<Anchor>> = BTreeMap::new();
+        let mut paired: HashMap<(String, String), Vec<(Option<String>, ControlSafety)>> =
+            HashMap::new();
         let mut parts_in_order: Vec<(String, Vec<RawSource>)> = by_part.into_iter().collect();
         parts_in_order.sort_by(|left, right| left.0.cmp(&right.0));
         for (part, items) in parts_in_order {
@@ -892,29 +901,40 @@ impl ReadSource {
             reads += containers.reads;
             if reconciled.contains(&part) {
                 let mut controls = Vec::new();
-                classify_controls(root, &mut Vec::new(), &mut Vec::new(), &mut controls);
-                for (control, path, classified) in controls {
-                    let key = safety_key(
-                        control
-                            .child_by_local_name("sdtPr")
-                            .map(docx_parse::XmlElement::to_raw_inline_xml)
-                            .as_deref(),
+                classify_controls(root, &mut Vec::new(), &mut Vec::new(), None, &mut controls);
+                for control in controls {
+                    let key = (
+                        part.clone(),
+                        safety_key(
+                            control
+                                .element
+                                .child_by_local_name("sdtPr")
+                                .map(docx_parse::XmlElement::to_raw_inline_xml)
+                                .as_deref(),
+                        ),
                     );
-                    if !(0..=path.len()).any(|depth| blocks.contains(&path[..depth])) {
+                    let path = &control.path;
+                    let held = !(0..=path.len()).any(|depth| blocks.contains(&path[..depth]));
+                    if held {
                         occurrences
-                            .entry((part.clone(), key.clone()))
+                            .entry(key.clone())
                             .or_default()
-                            .push(anchor(path));
+                            .push(anchor(control.path.clone()));
                     }
                     if story_parts.contains(&part) {
-                        safety
-                            .entry((part.clone(), key))
-                            .or_default()
-                            .merge(classified);
+                        if held {
+                            paired.entry(key.clone()).or_default().push((
+                                control.paragraph.map(str::to_owned),
+                                control.safety.clone(),
+                            ));
+                        }
+                        safety.entry(key).or_default().merge(control.safety);
                     }
                 }
             }
         }
+        paired.retain(|_, group| group.iter().any(|(_, safety)| *safety != group[0].1));
+        self.ambiguous_safety = paired;
         for (key, anchors) in occurrences {
             let held = represented.get(&key).copied().unwrap_or_default();
             if anchors.len() > held {

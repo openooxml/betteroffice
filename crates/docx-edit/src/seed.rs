@@ -5,8 +5,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
-use yrs::Any;
 use yrs::types::Attrs;
+use yrs::{Any, Transact};
 
 use crate::control_source::safety_key;
 use crate::structured::source::{
@@ -4507,6 +4507,17 @@ pub(crate) fn seed_parsed_docx_with(
         },
         0,
     );
+    if let Some(source) = document.source_metadata()
+        && !source.read().ambiguous_safety.is_empty()
+    {
+        let txn = document.yrs_doc().transact();
+        if let Ok(inventory) = crate::content_controls::Inventory::build(document, &txn) {
+            let _ = source
+                .read()
+                .embed_safety
+                .set(inventory.occurrence_safety(source.read()));
+        }
+    }
     Ok(referenced_fonts.into_iter().collect())
 }
 

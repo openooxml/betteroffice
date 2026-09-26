@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use yrs::branch::{Branch, BranchID};
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
 
 use crate::control_source::{ControlSafety, SourceControl, may_hold_controls, safety_key};
@@ -187,6 +188,10 @@ pub(crate) struct ControlRecord {
     /// The control is a copy another story holds because it reads the same part; writes
     /// address the first story's control.
     pub alias: bool,
+    /// The control's embed, for a control that is one.
+    pub embed: Option<BranchID>,
+    /// The paragraph holding the control, or a block control's first paragraph.
+    pub paragraph: Option<String>,
 }
 
 impl ControlRecord {
@@ -337,6 +342,7 @@ fn inline_text(items: &[Any]) -> Result<String, ValueUnavailable> {
 #[derive(Default)]
 struct StorySummary {
     paragraphs: Vec<String>,
+    first_paragraph: Option<String>,
     non_text: bool,
     revisions: bool,
     controls: bool,
@@ -409,8 +415,19 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
         self.read?.story_part(story)
     }
 
-    fn safety(&self, story: &str, payload: &HashMap<String, Any>) -> Option<ControlSafety> {
-        let table = self.read?.control_safety.as_ref()?;
+    /// The safety of the control's own source occurrence when seeding paired its embed with it,
+    /// or else of every occurrence with its captured properties in its part.
+    fn safety(
+        &self,
+        story: &str,
+        payload: &HashMap<String, Any>,
+        embed: Option<&BranchID>,
+    ) -> Option<ControlSafety> {
+        let read = self.read?;
+        if let Some(safety) = embed.and_then(|embed| read.embed_safety.get()?.get(embed)) {
+            return Some(safety.clone());
+        }
+        let table = read.control_safety.as_ref()?;
         let key = safety_key(any_str(payload.get("rawPropertiesXml")));
         table.get(&(self.part(story)?, key)).cloned()
     }
@@ -428,6 +445,7 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
         stamped: bool,
         payload: HashMap<String, Any>,
         ancestors: &[Ancestor],
+        embed: Option<BranchID>,
     ) -> usize {
         let anchor = Anchor::Control {
             story: story.to_owned(),
@@ -436,7 +454,7 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
         let multi_line = multi_line(&payload, &metadata.control_type);
         let safety = match site {
             Site::Source => None,
-            _ => self.safety(story, &payload),
+            _ => self.safety(story, &payload, embed.as_ref()),
         };
         self.records.push(ControlRecord {
             control: ContentControl {
@@ -459,6 +477,8 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
             payload,
             safety,
             alias: false,
+            embed,
+            paragraph: None,
         });
         self.records.len() - 1
     }
@@ -566,6 +586,8 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
                 payload: HashMap::new(),
                 safety: None,
                 alias: false,
+                embed: None,
+                paragraph: None,
             });
             let mut inner = chain;
             inner.push(Ancestor {
@@ -626,6 +648,9 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
                             ancestors, depth,
                         )?;
                     }
+                    summary
+                        .first_paragraph
+                        .get_or_insert_with(|| para_id.clone());
                     summary.paragraphs.push(std::mem::take(&mut paragraph));
                     node_start = chunk.end();
                 }
@@ -763,6 +788,7 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
             stamped,
             payload,
             ancestors,
+            Some(AsRef::<Branch>::as_ref(map).id()),
         );
         let mut inner = ancestors.to_vec();
         inner.push(Ancestor {
@@ -770,6 +796,7 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
             lock,
         });
         let summary = self.story(&child, category, listed, &inner, depth + 1)?;
+        self.records[index].paragraph = summary.first_paragraph;
         let text = if summary.revisions {
             Err(ValueUnavailable::TrackedRevisions)
         } else if summary.non_text {
@@ -809,6 +836,7 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
             listed,
             ancestors,
             depth,
+            (Some(AsRef::<Branch>::as_ref(map).id()), para_id),
         )
     }
 
@@ -824,6 +852,7 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
         listed: bool,
         ancestors: &[Ancestor],
         depth: usize,
+        (embed, paragraph): (Option<BranchID>, &str),
     ) -> Result<(), ExportFailure> {
         Self::deep(depth)?;
         let mut metadata = control_metadata(control_id, |key| payload.get(key));
@@ -841,7 +870,9 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
             stamped,
             payload,
             ancestors,
+            embed,
         );
+        self.records[index].paragraph = Some(paragraph.to_owned());
         let mut inner = ancestors.to_vec();
         inner.push(Ancestor {
             control_id: self.records[index].id().to_owned(),
@@ -871,6 +902,7 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
                 listed,
                 &inner,
                 depth + 1,
+                (None, paragraph),
             )?;
         }
         self.settle(index, text, nested > 0);
@@ -927,6 +959,48 @@ fn category_of(kind: StoryKind) -> StorySelection {
 }
 
 impl Inventory {
+    /// Pairs the controls of each properties key whose occurrences differ in safety with those
+    /// occurrences in document order, where the counts match and every pair sits in the same
+    /// paragraph. Read on the state seeding left, the pairs follow each embed through later edits.
+    pub(crate) fn occurrence_safety(&self, read: &ReadSource) -> HashMap<BranchID, ControlSafety> {
+        let mut ordered: HashMap<(String, String), Vec<&ControlRecord>> = HashMap::new();
+        for record in &self.records {
+            if record.alias || matches!(record.site, Site::Source) {
+                continue;
+            }
+            let Some(part) = read.story_part(&record.story) else {
+                continue;
+            };
+            let key = (
+                part,
+                safety_key(any_str(record.payload.get("rawPropertiesXml"))),
+            );
+            if read.ambiguous_safety.contains_key(&key) {
+                ordered.entry(key).or_default().push(record);
+            }
+        }
+        let mut paired = HashMap::new();
+        for (key, occurrences) in &read.ambiguous_safety {
+            let records = ordered.get(key).map_or(&[][..], Vec::as_slice);
+            let agree = records.len() == occurrences.len()
+                && records
+                    .iter()
+                    .zip(occurrences)
+                    .all(|(record, (paragraph, _))| {
+                        paragraph.is_some() && record.paragraph == *paragraph
+                    });
+            if !agree {
+                continue;
+            }
+            for (record, (_, safety)) in records.iter().zip(occurrences) {
+                if let Some(embed) = &record.embed {
+                    paired.insert(embed.clone(), safety.clone());
+                }
+            }
+        }
+        paired
+    }
+
     /// Reads every control of `doc`'s committed state.
     pub(crate) fn build<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> Result<Self, ExportFailure> {
         let source = doc.source_metadata();

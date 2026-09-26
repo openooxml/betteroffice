@@ -1622,3 +1622,27 @@ fn a_duplicate_tag_in_a_later_note_is_ambiguous() {
         )
     );
 }
+
+#[test]
+fn controls_with_identical_properties_keep_their_own_safety() {
+    let properties = r#"<w:tag w:val="twin"/><w:text/>"#;
+    let marked = format!(
+        r#"<w:bookmarkStart w:id="1" w:name="kept"/>{}<w:bookmarkEnd w:id="1"/>"#,
+        run("marked")
+    );
+    let bytes = package(&format!(
+        "{}{}",
+        para("0F000030", &inline_sdt(properties, &run("plain"))),
+        para("0F000031", &inline_sdt(properties, &marked))
+    ));
+    let doc = open(&bytes);
+    let undo = UndoSession::new();
+    apply(&doc, &undo, vec![by_id("body|0F000030|0", "filled")]);
+    assert_eq!(
+        reason(&doc, vec![by_id("body|0F000031|0", "x")]),
+        (
+            EditFailureCode::Unsupported,
+            Some(EditFailureReason::UnsupportedChildren)
+        )
+    );
+}

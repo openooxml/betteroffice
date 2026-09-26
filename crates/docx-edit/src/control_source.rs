@@ -130,27 +130,50 @@ fn policy_agrees<'a>(sdt: &'a XmlElement, scope: &mut Scope<'a>) -> bool {
     parsed.lock == lock && parsed.data_binding.is_some() == bound
 }
 
-/// A WordprocessingML `w:sdt` of a part: the element, its element-child ordinals from the part's
-/// root, and what its content holds.
-pub(crate) type Classified<'a> = (&'a XmlElement, Vec<u32>, ControlSafety);
+/// A WordprocessingML `w:sdt` of a part.
+pub(crate) struct Classified<'a> {
+    pub element: &'a XmlElement,
+    /// Element-child ordinals from the part's root.
+    pub path: Vec<u32>,
+    /// The `w14:paraId` of the paragraph holding it, or of a block control's first paragraph.
+    pub paragraph: Option<&'a str>,
+    pub safety: ControlSafety,
+}
 
-/// Classifies every WordprocessingML `w:sdt` at or below `element`, which sits at `path`,
-/// resolving namespaces the way a consumer of the part would.
+/// Classifies every WordprocessingML `w:sdt` at or below `element`, which sits at `path` inside
+/// `paragraph`, resolving namespaces the way a consumer of the part would.
 pub(crate) fn classify_controls<'a>(
     element: &'a XmlElement,
     scope: &mut Scope<'a>,
     path: &mut Vec<u32>,
+    paragraph: Option<&'a str>,
     output: &mut Vec<Classified<'a>>,
 ) {
     let mark = declare(element, scope);
+    let paragraph = if is_w(element, scope, "p") {
+        element.attribute(Some("w14"), "paraId")
+    } else {
+        paragraph
+    };
     if is_w(element, scope, "sdt") {
         let mut safety = classify(element);
         safety.uncertain = !policy_agrees(element, &mut scope.clone());
-        output.push((element, path.clone(), safety));
+        output.push(Classified {
+            element,
+            path: path.clone(),
+            paragraph: paragraph.or_else(|| {
+                element
+                    .child_by_local_name("sdtContent")?
+                    .child_elements()
+                    .find(|child| child.local_name() == "p")?
+                    .attribute(Some("w14"), "paraId")
+            }),
+            safety,
+        });
     }
     for (index, child) in element.child_elements().enumerate() {
         path.push(index as u32);
-        classify_controls(child, scope, path, output);
+        classify_controls(child, scope, path, paragraph, output);
         path.pop();
     }
     scope.truncate(mark);
@@ -415,9 +438,9 @@ mod tests {
         let classified = |xml: &str| {
             let root = parse(xml);
             let mut out = Vec::new();
-            classify_controls(&root, &mut Vec::new(), &mut Vec::new(), &mut out);
+            classify_controls(&root, &mut Vec::new(), &mut Vec::new(), None, &mut out);
             out.into_iter()
-                .map(|(_, _, safety)| safety.uncertain)
+                .map(|classified| classified.safety.uncertain)
                 .collect::<Vec<_>>()
         };
         let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";

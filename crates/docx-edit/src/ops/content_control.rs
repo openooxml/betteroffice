@@ -158,12 +158,6 @@ pub(crate) fn property_patch(payload: &HashMap<String, Any>) -> Result<Vec<(Stri
             ));
         }
     }
-    if payload
-        .get("value")
-        .is_some_and(|value| !matches!(value, Any::Null | Any::Undefined))
-    {
-        patch.push(("value".to_owned(), Any::Null));
-    }
     Ok(patch)
 }
 
@@ -181,11 +175,15 @@ pub(crate) enum ControlFill {
         raw: u32,
         content: Option<Any>,
         patch: Vec<(String, Any)>,
+        /// The control carries an authored value, which the commit drops once the fill is in,
+        /// outside undo history.
+        drop_value: bool,
     },
     Block {
         parent: String,
         raw: u32,
         patch: Vec<(String, Any)>,
+        drop_value: bool,
         child: String,
         /// Surviving paragraphs whose text changes, in story order.
         paragraphs: Vec<ParagraphFill>,
@@ -234,6 +232,7 @@ impl EditingDoc {
                 raw,
                 content,
                 patch,
+                ..
             } => {
                 let mut entries = patch.clone();
                 if let Some(content) = content {
@@ -250,6 +249,7 @@ impl EditingDoc {
                 paragraphs,
                 remove,
                 insert,
+                ..
             } => {
                 if !patch.is_empty() {
                     self.patch_embed(parent, *raw, "blockSdt", patch)?;
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(json.get("showingPlaceholder"), None);
         assert_eq!(json["controlState"]["placeholder"], Value::Bool(false));
         assert_eq!(json["rawPropertiesXml"], Value::String(cleared.to_owned()));
-        assert_eq!(patch.get("value"), Some(&Any::Null));
+        assert_eq!(patch.get("value"), None);
         let settled = HashMap::from([("rawPropertiesXml".to_owned(), Any::from(cleared))]);
         assert!(property_patch(&settled).unwrap().is_empty());
     }

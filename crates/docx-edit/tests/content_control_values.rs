@@ -557,3 +557,36 @@ fn legacy_state_fixture_loads_as_it_is() {
     );
     assert_eq!(text_of(&doc, "account.reference"), "REF-000");
 }
+
+#[test]
+fn a_fill_drops_a_value_only_after_it_commits() {
+    let doc = seeded(19);
+    legacy(&doc, "account.reference", "REF-LEGACY");
+    let origins = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&origins);
+    let _subscription = doc
+        .yrs_doc()
+        .observe_update_v1(move |txn, _| seen.lock().unwrap().push(txn.origin().cloned()))
+        .unwrap();
+    let undo = UndoSession::new();
+    assert!(fill(&doc, &undo, "body|10000003|0", "REF-1"));
+    assert_eq!(
+        *origins.lock().unwrap(),
+        [
+            Some(yrs::Origin::from(19u64)),
+            Some(yrs::Origin::from("host"))
+        ]
+    );
+    assert_eq!(value(&doc, "account.reference"), None);
+    let request: EditRequest = serde_json::from_value(json!({
+        "expectVersion": doc.version().as_str(),
+        "steps": [{"op": "setContentControlText", "target": {"kind": "id", "controlId": "body|10000003|0"}, "text": "REF-2"}]
+    }))
+    .unwrap();
+    legacy(&doc, "account.reference", "REF-LEGACY");
+    assert!(doc.apply_edits(&request, &undo).unwrap().is_err());
+    assert_eq!(
+        value(&doc, "account.reference"),
+        Some(Any::from("REF-LEGACY"))
+    );
+}
