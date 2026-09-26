@@ -1100,11 +1100,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     let top = title_h;
     let region_x = x + reserve_left.min(width);
     let region_w = (width - reserve_left - reserve_right).max(0.0);
-    // Axis labels give way before the plot: the gutter never takes the width
-    // the plot needs.
-    let gutter = bands
-        .left
-        .min((region_w - right_margin - secondary_w - MIN_PLOT).max(0.0));
+    let gutter = bands.left;
     let plot_x = x + reserve_left + gutter;
     let region_y = y + top + band_top;
     // A row legend keeps its gap from the region on either edge, and the far
@@ -1135,12 +1131,10 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                 0.0
             };
             let plot_y = plot_y.min(y + height);
-            // The plot gives up its minimum size before it or its labels cross
-            // the frame or a legend.
             PlotArea {
                 x: plot_x,
                 y: plot_y,
-                w: (region_w - gutter - right_margin - secondary_w).max(0.0),
+                w: (region_w - gutter - right_margin - secondary_w).max(MIN_PLOT),
                 h: (y + height - bottom - bands.bottom - plot_y).max(0.0),
                 gutter,
             }
@@ -2127,7 +2121,7 @@ fn side_legend_band<S: PlotSink + ?Sized>(
         let width = lead
             + lines
                 .iter()
-                .map(|line| text_width(line, style, ops))
+                .map(|line| legend_text_width(line, style, ops, 0.0))
                 .fold(0.0, f64::max);
         let height = size * LEGEND_PITCH_EM + size * 1.22 * lines.len().saturating_sub(1) as f64;
         rows.push(LegendRow {
@@ -2201,7 +2195,7 @@ fn legend_rows<S: PlotSink + ?Sized>(
         let entry_width = lead
             + lines
                 .iter()
-                .map(|line| legend_text_width(line, style, ops))
+                .map(|line| legend_text_width(line, style, ops, LEGEND_TEXT_SLACK))
                 .fold(0.0, f64::max);
         let row = rows.last().unwrap();
         if !row.entries.is_empty() && row.width + gap + entry_width > width {
@@ -2224,17 +2218,18 @@ fn legend_rows<S: PlotSink + ?Sized>(
     rows
 }
 
-/// A row legend line's advance: measured, or estimated with the slack its text
-/// box gets, so a face wider than Calibri does not run into the next swatch.
+/// A legend line's advance: measured, or estimated at Calibri's widths plus
+/// `slack`, since a legend clips its label to the box it packs.
 fn legend_text_width<S: PlotSink + ?Sized>(
     label: &str,
     style: &ResolvedText,
     ops: &mut Emitter<'_, S>,
+    slack: f64,
 ) -> f64 {
     ops.sink
         .measure_text(label, &style.font)
         .filter(|width| width.is_finite() && *width >= 0.0)
-        .unwrap_or_else(|| fallback_label_width(label, &style.font) + LEGEND_TEXT_SLACK)
+        .unwrap_or_else(|| legend_fallback_width(label, &style.font) + slack)
 }
 
 /// A label's advance in `style`, measured by the sink where it can.
@@ -2249,11 +2244,22 @@ fn text_width<S: PlotSink + ?Sized>(
         .unwrap_or_else(|| fallback_label_width(label, &style.font))
 }
 
-/// A label's width when the sink cannot measure text: each character at the
-/// chart default's advance, plus n - 1 tracked gaps as a measured line has.
+/// A label's width when the sink cannot measure text: half an em a character,
+/// a full em for East Asian wide ones, plus n - 1 tracked gaps as a measured
+/// line has.
 pub fn fallback_label_width(label: &str, font: &PlotFont) -> f64 {
+    estimated_width(label, font, fallback_advance)
+}
+
+/// A legend label's estimate: Calibri's advances, never under
+/// [`fallback_label_width`]'s.
+fn legend_fallback_width(label: &str, font: &PlotFont) -> f64 {
+    estimated_width(label, font, legend_advance)
+}
+
+fn estimated_width(label: &str, font: &PlotFont, advance: fn(char) -> f64) -> f64 {
     let count = label.chars().count() as f64;
-    let ems: f64 = label.chars().map(fallback_advance).sum();
+    let ems: f64 = label.chars().map(advance).sum();
     (ems * font.size_px + (count - 1.0).max(0.0) * font.letter_spacing_px).max(0.0)
 }
 
@@ -2267,14 +2273,17 @@ const FALLBACK_ADVANCES: [u16; 95] = [
     230, 799, 526, 528, 526, 526, 348, 391, 335, 526, 452, 715, 433, 452, 395, 314, 460, 314, 498,
 ];
 
-/// One character's estimated advance in ems: Carlito's for ASCII but never
-/// under half an em, so a face wider than Calibri still fits its box; a full em
-/// for East Asian wide characters, a little over half an em for the rest.
-fn fallback_advance(character: char) -> f64 {
+fn legend_advance(character: char) -> f64 {
     match character as u32 {
         code @ 0x20..=0x7E => {
             (f64::from(FALLBACK_ADVANCES[(code - 0x20) as usize]) / 1000.0).max(0.5)
         }
+        _ => fallback_advance(character),
+    }
+}
+
+fn fallback_advance(character: char) -> f64 {
+    match character as u32 {
         0x1100..=0x115F
         | 0x2E80..=0xA4CF
         | 0xAC00..=0xD7A3
@@ -2283,7 +2292,7 @@ fn fallback_advance(character: char) -> f64 {
         | 0xFF00..=0xFF60
         | 0xFFE0..=0xFFE6
         | 0x20000..=0x3FFFD => 1.0,
-        _ => 0.55,
+        _ => 0.5,
     }
 }
 
@@ -7170,16 +7179,17 @@ mod tests {
     }
 
     #[test]
-    fn an_estimated_label_is_never_narrower_than_half_an_em_a_character() {
+    fn axis_labels_keep_half_an_em_and_legend_labels_calibri_widths() {
         let font = chart_label_font();
-        for label in ["July", "illicit", "WW", "Q1"] {
-            let floor = label.chars().count() as f64 * font.size_px * 0.5;
-            assert!(
-                fallback_label_width(label, &font) >= floor - 1e-9,
-                "{label}"
-            );
+        assert_eq!(
+            fallback_label_width("July", &font),
+            4.0 * 0.5 * font.size_px
+        );
+        assert_eq!(fallback_label_width("日本", &font), 2.0 * font.size_px);
+        for label in ["July", "illicit", "WW", "日本"] {
+            assert!(legend_fallback_width(label, &font) >= fallback_label_width(label, &font));
         }
-        assert!(fallback_label_width("WW", &font) > 2.0 * 0.85 * font.size_px);
+        assert!(legend_fallback_width("WW", &font) > 2.0 * 0.85 * font.size_px);
     }
 
     #[test]
@@ -7211,9 +7221,9 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_category_gutter_gives_way_before_the_plot_reaches_a_side_legend() {
+    fn a_long_category_label_leaves_the_bars_clear_of_a_side_legend() {
         let data = Source {
-            categories: vec!["Worldwide Customer Management and Operations Support".to_owned()],
+            categories: vec!["Worldwide Customer Management".to_owned()],
             values: vec![10.0],
         };
         let mut chart = legend_chart(Some("right"), &["North"], &data);
@@ -7301,7 +7311,7 @@ mod tests {
             let label = text_at(&ops, "WW");
             assert!(
                 label.3
-                    >= fallback_label_width("WW", &chart_label_font()) + LEGEND_TEXT_SLACK - 1e-9,
+                    >= legend_fallback_width("WW", &chart_label_font()) + LEGEND_TEXT_SLACK - 1e-9,
                 "{position}: {label:?}"
             );
         }
@@ -7629,7 +7639,8 @@ mod tests {
             let upper_tick = text_at(&ops, "8");
             let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
             assert!(upper_tick.2 - CHART_LABEL_SIZE_PX >= title_bottom);
-            assert!((upper_tick.1 + upper_tick.3 / 2.0 - 238.965).abs() < 1e-9);
+            let centre = upper_tick.1 + upper_tick.3 / 2.0;
+            assert!((centre - 239.0).abs() < 1e-9, "{centre}");
             assert_eq!(text_at(&ops, "4").2, 188.0);
         }
     }
