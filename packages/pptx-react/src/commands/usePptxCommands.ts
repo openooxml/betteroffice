@@ -84,6 +84,7 @@ export interface PptxCommandActions {
 
 /** Everything the command binding reads from the editor, refreshed every render. */
 export interface PptxCommandInputs {
+  /** The presentation this render shows; observed only while it is still the open one. */
   handle: PresentationHandle | null;
   handleRef: RefObject<PresentationHandle | null>;
   modelRef: RefObject<{

@@ -10,6 +10,8 @@ import type {
   ProposalPreview,
   SlideDisplayList,
 } from '@betteroffice/pptx';
+import { pptxCommandController } from '../commands/createPptxCommandStore';
+import { commandReason } from '../commands/evaluate';
 import { usePptxCommands, usePptxCommandState } from '../commands/hooks';
 import { useTranslation } from '../i18n';
 import { useDisabledDescription } from './ui/ToolbarPrimitives';
@@ -78,6 +80,8 @@ export function ProposalsPanel({
     id: string;
     index: number;
   } | null>(null);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [preview, setPreview] = useState<{
     data: ProposalPreview;
     before: SlideDisplayList;
@@ -139,31 +143,58 @@ export function ProposalsPanel({
     setSelected({ id: proposal.id, index });
   };
 
-  const acceptPreview = (force: boolean) => {
-    if (!selected || !preview) return;
+  /**
+   * Whether `reviewed` still shows the proposal of `target`. Otherwise the dialog shows the latest
+   * preview of `target`, unless the reviewer has selected something else since.
+   */
+  const stillReviewed = (
+    target: { id: string; index: number },
+    reviewed: ProposalPreview
+  ) => {
+    const shown = () =>
+      selectedRef.current?.id === target.id &&
+      selectedRef.current.index === target.index;
     try {
-      const latest = handle.previewProposal(selected.id);
+      const latest = handle.previewProposal(target.id);
       if (
-        JSON.stringify(latest.proposal.changes) !==
-        JSON.stringify(preview.data.proposal.changes)
+        JSON.stringify(latest.proposal.changes) ===
+        JSON.stringify(reviewed.proposal.changes)
       ) {
-        const change = latest.proposal.changes[selected.index];
-        const index = latest.snapshot.slides.findIndex(
-          (slide) => slide.id === change.slideId
-        );
-        setPreview({
-          data: latest,
-          before: handle.layoutSlide(index),
-          after: handle.layoutProposalSlide(selected.id, index),
-        });
-        setError(t('proposals.changedAgain'));
-        return;
+        return true;
       }
-      void store.execute('proposalAccept', { proposalId: selected.id, force });
+      if (!shown()) return false;
+      const change = latest.proposal.changes[target.index];
+      const index = latest.snapshot.slides.findIndex(
+        (slide) => slide.id === change.slideId
+      );
+      setPreview({
+        data: latest,
+        before: handle.layoutSlide(index),
+        after: handle.layoutProposalSlide(target.id, index),
+      });
+      setError(t('proposals.changedAgain'));
     } catch (value) {
+      if (!shown()) return false;
       setPreview(null);
       setError(value instanceof Error ? value.message : String(value));
     }
+    return false;
+  };
+
+  const acceptPreview = (force: boolean) => {
+    if (!selected || !preview) return;
+    const target = selected;
+    const reviewed = preview.data;
+    if (!stillReviewed(target, reviewed)) return;
+    const accept = pptxCommandController(store)?.defer('proposalAccept', {
+      proposalId: target.id,
+      force,
+    });
+    void accept?.complete((perform) =>
+      stillReviewed(target, reviewed)
+        ? perform()
+        : { ok: false, failure: commandReason('target-changed', { translate: t }) }
+    );
   };
 
   return (

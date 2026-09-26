@@ -15,6 +15,7 @@ import {
   type PptxEditResult,
 } from '@betteroffice/pptx';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
+import { isMacPlatform } from '../commands/descriptors';
 import * as publicApi from '../index';
 import {
   EditorToolbar,
@@ -39,6 +40,8 @@ import {
 } from '../index';
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
+
+const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
 const root = resolve(import.meta.dir, '../../../..');
 const quiet = { error: console.error, warn: console.warn };
@@ -579,12 +582,7 @@ describe('PptxEditor plugins', () => {
     expect(api().commands.getState(id).active).toBe(true);
 
     expect(await act(() => api().commands.execute(id, null))).toMatchObject({ ok: true });
-    fireEvent.keyDown(view.getByRole('application'), {
-      key: 'M',
-      shiftKey: true,
-      ctrlKey: true,
-      metaKey: true,
-    });
+    fireEvent.keyDown(view.getByRole('application'), { key: 'M', shiftKey: true, ...MOD });
     await settle();
     expect(calls).toEqual(['acme.review', 'acme.review', 'acme.review']);
 
@@ -1263,7 +1261,7 @@ describe('PptxEditor plugin boundaries and races', () => {
     return { ...mounted, story, original, typed };
   }
 
-  const chord = { ctrlKey: true, metaKey: true };
+  const chord = MOD;
 
   test('text fields in plugin chrome keep their editing keys and never edit the slide', async () => {
     const canvases = fakeContexts();
