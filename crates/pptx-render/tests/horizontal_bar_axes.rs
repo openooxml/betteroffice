@@ -63,19 +63,19 @@ fn horizontal_bar_fixture_transposes_axes_without_losing_series_or_labels() {
             close(line.baseline, 406.0);
             assert!(line.runs.iter().all(|run| run.color == "#222222"));
         }
-        close(label(primitives, "Quarter").baseline, 141.6);
+        close(label(primitives, "Quarter").baseline, 150.96);
         close(label(primitives, "Millions").baseline, 418.5);
         for (category, baseline) in [
-            ("Category 1", 348.18332),
-            ("Category 2", 268.55),
-            ("Category 3", 188.91667),
+            ("Category 1", 349.74335),
+            ("Category 2", 273.23),
+            ("Category 3", 196.71666),
         ] {
             let line = label(primitives, category);
             close(line.x + line.width, 168.41602);
             close(
                 line.baseline,
                 if index == 1 {
-                    537.1 - baseline
+                    546.46 - baseline
                 } else {
                     baseline
                 },
@@ -103,19 +103,19 @@ fn horizontal_bar_fixture_transposes_axes_without_losing_series_or_labels() {
             assert_eq!(bars.len(), 3);
             for (bar, width) in bars.iter().zip(widths) {
                 close(bar.2, width);
-                close(bar.3, 31.853333);
+                close(bar.3, 30.605333);
             }
             assert_eq!(bars[0].1 > bars[2].1, index != 1);
         }
         if index == 3 {
             let top = label(primitives, "80");
             close(top.x + top.width / 2.0, 608.80566);
-            close(top.baseline, 131.1);
+            close(top.baseline, 140.46);
             assert!(primitives.iter().any(|primitive| matches!(primitive,
                 Primitive::Shape { x, y, w, h, stroke: Some(stroke), .. }
                     if stroke.color == "#D9D9D9" && stroke.width == 0.25
-                        && *x > 182.0 && (*y - 146.6).abs() < 0.001 && *w == 0.0
-                        && (*h - 238.9).abs() < 0.001
+                        && *x > 182.0 && (*y - 155.96).abs() < 0.001 && *w == 0.0
+                        && (*h - 229.54).abs() < 0.001
             )));
         }
     }

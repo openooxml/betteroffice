@@ -64,6 +64,11 @@ export class XlsxDocument {
     encodeDiff(remote_state_vector: Uint8Array): Uint8Array;
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
+    exportMarkdownJson(options: string, markdown_options: string): string;
+    /**
+     * Export the committed workbook with the version it was read at; nothing recalculates.
+     */
+    exportStructuredJson(options: string): string;
     findTextJson(request: string): string;
     historyStateJson(): string;
     /**
@@ -141,11 +146,23 @@ export class XlsxDocument {
     readonly clientId: number;
 }
 
+export function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markdown_options: string): string;
+
+/**
+ * Export `.xlsx` bytes as read: stored formula results, no clock.
+ */
+export function exportXlsxStructuredJson(bytes: Uint8Array, options: string): string;
+
+export function renderXlsxMarkdownJson(content: string, options: string): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_xlsxdocument_free: (a: number, b: number) => void;
+    readonly exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly renderXlsxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -169,6 +186,8 @@ export interface InitOutput {
     readonly xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly xlsxdocument_encodeStateVector: (a: number) => [number, number];
+    readonly xlsxdocument_exportMarkdownJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly xlsxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];

@@ -315,11 +315,15 @@ impl GridGeometry {
         let mut col_x = Vec::with_capacity(n_cols as usize + 1);
         col_x.push(0.0);
         for c in 0..n_cols {
-            let w = sheet
-                .col_widths
-                .get(&c)
-                .map(|&w| column_pixels(w))
-                .unwrap_or(default_col_px);
+            let w = if sheet.col_hidden(c) {
+                0.0
+            } else {
+                sheet
+                    .col_widths
+                    .get(&c)
+                    .map(|&w| column_pixels(w))
+                    .unwrap_or(default_col_px)
+            };
             let start = col_x.last().copied().unwrap_or(0.0);
             col_x.push(start + w);
         }
@@ -327,23 +331,16 @@ impl GridGeometry {
         let mut row_y = Vec::with_capacity(n_rows as usize + 1);
         row_y.push(0.0);
         for r in 0..n_rows {
-            // `zeroHeight` hides every row that does not carry its own `ht`
-            let unsized_px = if sheet.format.zero_height {
+            let h = if sheet.row_hidden(r) {
                 0.0
             } else {
-                default_row_px
+                sheet
+                    .row_heights
+                    .get(&r)
+                    .map(|&h| row_pt_to_px(scale.map_or(h, |s| floor_pt(h * s))))
+                    .or_else(|| fitted.get(&r).map(|&h| row_pt_to_px(h)))
+                    .unwrap_or(default_row_px)
             };
-            let h = sheet
-                .row_heights
-                .get(&r)
-                .map(|&h| row_pt_to_px(scale.map_or(h, |s| floor_pt(h * s))))
-                .or_else(|| {
-                    fitted
-                        .get(&r)
-                        .map(|&h| row_pt_to_px(h))
-                        .filter(|_| !sheet.format.zero_height)
-                })
-                .unwrap_or(unsized_px);
             let start = row_y.last().copied().unwrap_or(0.0);
             row_y.push(start + h);
         }

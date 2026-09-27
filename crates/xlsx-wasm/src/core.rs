@@ -821,6 +821,23 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// `{"ok":true,"version","content"}` or a refusal; nothing is recalculated.
+    pub fn export_structured_json(&self, options: &str) -> Result<String, String> {
+        self.workbook
+            .export_structured_json(options)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn export_markdown_json(
+        &self,
+        options: &str,
+        markdown_options: &str,
+    ) -> Result<String, String> {
+        self.workbook
+            .export_markdown_json(options, markdown_options)
+            .map_err(|error| error.to_string())
+    }
+
     fn proposal_error(&self, error: Error) -> String {
         let message = error.to_string();
         let Error::StaleProposal(cells) = error else {
@@ -903,6 +920,26 @@ impl Session {
             .map(|address| self.workbook.format_address(*address))
             .collect()
     }
+}
+
+/// Exports `.xlsx` bytes without the recalculation and clock [`Session::open`] applies.
+pub fn export_xlsx_structured_json(bytes: &[u8], options: &str) -> Result<String, String> {
+    betteroffice_xlsx::export_xlsx_structured_json(bytes, options)
+        .map_err(|error| error.to_string())
+}
+
+pub fn export_xlsx_markdown_json(
+    bytes: &[u8],
+    options: &str,
+    markdown_options: &str,
+) -> Result<String, String> {
+    betteroffice_xlsx::export_xlsx_markdown_json(bytes, options, markdown_options)
+        .map_err(|error| error.to_string())
+}
+
+pub fn render_xlsx_markdown_json(content: &str, options: &str) -> Result<String, String> {
+    betteroffice_xlsx::render_xlsx_markdown_json(content, options)
+        .map_err(|error| error.to_string())
 }
 
 fn calculation_options(now_serial: Option<f64>) -> CalculationOptions {
@@ -1523,6 +1560,55 @@ mod tests {
         assert!(session.apply_edits_json("{}").is_err());
         assert!(session.read_cells_json(r#"{"ranges":[{}]}"#).is_err());
         assert!(session.find_text_json("not json").is_err());
+    }
+
+    #[test]
+    fn exports_carry_the_version_live_and_skip_recalculation_from_bytes() {
+        let bytes = formula_xlsx();
+        let session = Session::open(&bytes, None).unwrap();
+        let version = session.document_version();
+        let live = json(&session.export_structured_json("{}").unwrap());
+        assert_eq!(live["ok"], true);
+        assert_eq!(live["version"], version.as_str());
+        assert_eq!(live["content"]["anchorScope"], "session");
+        let refused = json(
+            &session
+                .export_structured_json(r#"{"scope":[{"sheet":5}]}"#)
+                .unwrap(),
+        );
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["failure"]["code"], "invalid-scope");
+        assert_eq!(refused["failure"]["target"], serde_json::Value::Null);
+        let markdown = json(&session.export_markdown_json("{}", "{}").unwrap());
+        assert_eq!(markdown["ok"], true);
+        assert!(
+            markdown["content"]["markdown"]
+                .as_str()
+                .unwrap()
+                .contains("<!-- xlsx-export:0 -->")
+        );
+        assert!(
+            session
+                .export_structured_json(r#"{"maxCells":"many"}"#)
+                .is_err()
+        );
+        assert_eq!(session.document_version(), version);
+
+        let wire = export_xlsx_structured_json(&bytes, "{}").unwrap();
+        assert_eq!(export_xlsx_structured_json(&bytes, "{}").unwrap(), wire);
+        let snapshot = json(&wire);
+        assert_eq!(snapshot["anchorScope"], "snapshot");
+        assert!(snapshot.get("version").is_none());
+        assert_eq!(snapshot["sheets"][0]["cells"][1]["value"]["value"], 999.0);
+        assert_eq!(
+            live["content"]["sheets"][0]["cells"][1]["value"]["value"],
+            15.0
+        );
+        let rendered = json(&render_xlsx_markdown_json(&wire, "{}").unwrap());
+        let markdown = json(&export_xlsx_markdown_json(&bytes, "{}", "{}").unwrap());
+        assert_eq!(rendered, markdown);
+        assert!(export_xlsx_structured_json(&bytes, r#"{"maxCells":0}"#).is_err());
+        assert!(render_xlsx_markdown_json("{}", "{}").is_err());
     }
 
     #[test]

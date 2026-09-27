@@ -90,7 +90,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with version-checked atomic cell batches and opt-in operation timings.",
+    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with version-checked atomic cell batches, anchored JSON and Markdown export, and opt-in operation timings.",
   },
   {
     name: "@betteroffice/xlsx-react",
@@ -102,7 +102,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, composable toolbar controls, and version-checked edit batches.",
+    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, composable toolbar controls, version-checked edit batches, and host-owned plugins with explicitly granted access.",
   },
 ];
 

@@ -188,7 +188,17 @@
       "documentReplaced": "The presentation was replaced.",
       "targetChanged": "The selection changed before the command ran.",
       "gestureActive": "Finish the pointer gesture first.",
-      "commandFailed": "The command failed."
+      "commandFailed": "The command failed.",
+      "permissionDenied": "The host application has not allowed this plugin to use this command.",
+      "unsupportedPolicy": "Plugins can't run this command yet. Use an edit batch instead.",
+      "pluginUnavailable": "The plugin is no longer active.",
+      "aborted": "The plugin action was cancelled before the command ran."
     }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Plugin panels",
+    "collapsePanel": "Collapse {title}",
+    "expandPanel": "Expand {title}"
   }
 }

@@ -2,6 +2,9 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_xlsxdocument_free: (a: number, b: number) => void;
+export const exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const renderXlsxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -25,6 +28,8 @@ export const xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [n
 export const xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
 export const xlsxdocument_encodeStateVector: (a: number) => [number, number];
+export const xlsxdocument_exportMarkdownJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const xlsxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
