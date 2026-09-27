@@ -276,17 +276,11 @@ export class RetainedUpdateLog {
   responses(frame: Uint8Array): Uint8Array[] {
     const queries = decodeFrame(frame)?.queries ?? [];
     if (queries.length === 0) return [];
-    const state = this.merged();
-    const responses: Uint8Array[] = [];
-    let totalBytes = 0;
-    for (const vector of queries) {
-      decodeStateVector(vector);
-      const response = syncFrame(1, diffUpdate(state, vector));
-      totalBytes += response.length;
-      if (totalBytes > this.maxBytes) throw new RoomCapacityError("Sync response exceeds room capacity");
-      responses.push(response);
-    }
-    return responses;
+    if (queries.length > 1) throw new Error("Only one state-vector query is allowed per frame");
+    decodeStateVector(queries[0]);
+    const response = syncFrame(1, diffUpdate(this.merged(), queries[0]));
+    if (response.length > this.maxBytes) throw new RoomCapacityError("Sync response exceeds room capacity");
+    return [response];
   }
 
   replay(send: (update: Uint8Array) => void): void {

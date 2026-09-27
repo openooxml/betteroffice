@@ -28,15 +28,19 @@ function createRoom(seed: Iterable<[string, unknown]> = []) {
   const rows = new Map<string, unknown>(seed);
   const pending: Promise<unknown>[] = [];
   const alarms: number[] = [];
+  let unavailable = false;
   let failWrite = false;
   let failDelete = false;
   let beforeCommit: (() => Promise<void>) | undefined;
   let initialization = Promise.resolve();
   const storageFor = (data: Map<string, unknown>) => ({
-    get: async (key: string | string[]) => Array.isArray(key) ? new Map(key.filter(k => data.has(k)).map(k => [k, data.get(k)])) : data.get(key),
+    get: async (key: string | string[]) => {
+      if (unavailable) throw new Error('Storage unavailable');
+      return Array.isArray(key) ? new Map(key.filter(k => data.has(k)).map(k => [k, data.get(k)])) : data.get(key);
+    },
     list: async ({ prefix }: { prefix: string }) => new Map([...data].filter(([key]) => key.startsWith(prefix)).sort()),
     put: async (key: string | Record<string, unknown>, value?: unknown) => {
-      if (failWrite) throw new Error('Injected storage failure');
+      if (failWrite || unavailable) throw new Error('Injected storage failure');
       const entries = typeof key === 'string' ? [[key, value] as const] : Object.entries(key);
       expect(entries.length).toBeLessThanOrEqual(128);
       for (const [name, bytes] of entries) {
@@ -61,8 +65,8 @@ function createRoom(seed: Iterable<[string, unknown]> = []) {
       rows.clear();
       for (const [key, value] of staged) rows.set(key, value);
     },
-    getAlarm: async () => null,
-    setAlarm: async (time: number) => { alarms.push(time); },
+    getAlarm: async () => { if (unavailable) throw new Error('Storage unavailable'); return null; },
+    setAlarm: async (time: number) => { if (unavailable) throw new Error('Storage unavailable'); alarms.push(time); },
     deleteAll: async () => { rows.clear(); },
   };
   const state = {
@@ -74,7 +78,8 @@ function createRoom(seed: Iterable<[string, unknown]> = []) {
   };
   const room = new CollaborationRoom(state as never, {} as never);
   return { room, sender, peer, sockets, rows, pending, initialization, storage, alarms,
-    fail: (operation: 'put' | 'delete' = 'put') => { if (operation === 'put') failWrite = true; else failDelete = true; },
+    fail: (operation: 'put' | 'delete' | 'all' = 'put') => { if (operation === 'put') failWrite = true; else if (operation === 'all') unavailable = true; else failDelete = true; },
+    recover: () => { unavailable = false; failWrite = false; failDelete = false; },
     onCommit: (callback?: () => Promise<void>) => { beforeCommit = callback; },
   };
 }
@@ -258,14 +263,72 @@ describe('CollaborationRoom', () => {
     await expect(h.room.checkpoint()).rejects.toThrow('Room storage unavailable');
     expect(h.rows).toEqual(before);
     expect(h.sender.close).toHaveBeenCalledWith(1011, 'Room storage unavailable; reconnect');
+    h.fail('all');
     send(h, documentFrame('unsaved', 2));
     await flush(h);
     expect(frames(h.peer)).toHaveLength(1);
     expect((await h.room.fetch(UPGRADE)).status).toBe(503);
+    h.recover();
+    expect(rehydrate(frames(await join(h))).getText('body').toString()).toBe('hello');
+    await h.room.checkpoint();
+    expect(h.rows.has('checkpoint')).toBe(true);
+    expect(log).toHaveBeenCalled();
+  });
+
+  test('repairs malformed old keys while rehydrating valid retained updates', async () => {
+    const h = createRoom([
+      ['update:nope', Uint8Array.of(1)],
+      [updateKey(1), 'invalid value'],
+      [updateKey(2), documentFrame('valid')],
+    ]);
+    await h.initialization;
+    expect(h.rows.has('update:nope')).toBe(false);
+    expect(h.rows.has(updateKey(1))).toBe(false);
+    expect(rehydrate(frames(await join(h))).getText('body').toString()).toBe('valid');
+  });
+
+  test('recovers on reconnect after a temporary alarm failure', async () => {
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame('saved'));
+    await flush(h);
+    h.fail('all');
+    spyOn(console, 'error').mockImplementation(() => {});
+    await expect(h.room.alarm()).rejects.toThrow('Room storage unavailable');
+    h.recover();
+    expect(rehydrate(frames(await join(h))).getText('body').toString()).toBe('saved');
+  });
+
+  test('rejects multiple sync queries in one frame before computing responses', async () => {
+    const h = createRoom();
+    await h.initialization;
+    const query = encodeSyncStep1(Uint8Array.of(0));
+    send(h, new Uint8Array([...query, ...query]));
+    await flush(h);
+    expect(h.sender.close).toHaveBeenCalledWith(1002, 'Invalid document update');
+    expect(h.sender.send).not.toHaveBeenCalled();
+    expect(h.peer.send).not.toHaveBeenCalled();
+  });
+
+  test('releases queued work when rehydration fails so recovered clients can write', async () => {
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame('saved'));
+    await flush(h);
+    h.fail('all');
+    spyOn(console, 'error').mockImplementation(() => {});
+    await expect(h.room.checkpoint()).rejects.toThrow();
+    for (let i = 0; i < 1024; i++) send(h, encodeSyncStep1(Uint8Array.of(0)));
+    await flush(h);
+    h.recover();
+    const joined = await join(h);
+    const update = documentFrame('tail', 18);
+    h.room.webSocketMessage(joined as never, update.buffer as ArrayBuffer);
+    await flush(h);
+    expect(joined.close).not.toHaveBeenCalled();
     const restart = createRoom(h.rows);
     await restart.initialization;
-    expect(rehydrate(frames(await join(restart))).getText('body').toString()).toBe('hello');
-    expect(log).toHaveBeenCalled();
+    expect(rehydrate(frames(await join(restart))).getText('body').toString()).toBe('savedtail');
   });
 
   test('migrates the retained and legacy logs without dropping their updates', async () => {

@@ -44,8 +44,12 @@ export async function readRoom(storage: DurableObjectStorage) {
   }
   const stored = await storage.list<Uint8Array>({ prefix: UPDATE_PREFIX });
   const entries: RetainedEntry[] = [];
+  const unusable: string[] = [];
   for (const [key, bytes] of stored) {
-    if (!/^update:\d{16}$/.test(key) || !(bytes instanceof Uint8Array)) throw new Error('Invalid retained update');
+    if (!/^update:\d{16}$/.test(key) || !Number.isSafeInteger(Number(key.slice(UPDATE_PREFIX.length))) || !(bytes instanceof Uint8Array)) {
+      unusable.push(key);
+      continue;
+    }
     entries.push({ seq: Number(key.slice(UPDATE_PREFIX.length)), bytes });
   }
   const legacy = await storage.get<unknown>('updates');
@@ -54,12 +58,12 @@ export async function readRoom(storage: DurableObjectStorage) {
     let seq = Math.max(checkpoint?.seq ?? -1, ...entries.map(entry => entry.seq)) + 1;
     for (const bytes of legacy) entries.push({ seq: seq++, bytes });
   }
-  return { checkpoint, entries, legacy: legacy !== undefined };
+  return { checkpoint, entries, unusable, legacy: legacy !== undefined };
 }
 
-export async function persistMutation(storage: DurableObjectStorage, mutation: LogMutation, removeLegacy = false) {
+export async function persistMutation(storage: DurableObjectStorage, mutation: LogMutation, removeLegacy = false, removeKeys: readonly string[] = []) {
   await storage.transaction(async transaction => {
-    const deletes = mutation.deletes.map(updateKey);
+    const deletes = [...removeKeys, ...mutation.deletes.map(updateKey)];
     if (mutation.checkpoint) {
       const { bytes, seq } = mutation.checkpoint;
       const previous = await transaction.get<Manifest>(CHECKPOINT_KEY);

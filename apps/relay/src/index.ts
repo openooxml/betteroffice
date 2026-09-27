@@ -50,16 +50,22 @@ export class CollaborationRoom extends DurableObject<Env> {
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
-    state.blockConcurrencyWhile(async () => {
-      this.expiresAt = await state.storage.getAlarm();
-      const stored = await readRoom(state.storage);
-      const repair = this.updates.restore(stored.entries, stored.checkpoint);
-      const compacted = stored.legacy ? this.updates.checkpoint() : null;
-      const mutation = compacted ? { ...compacted, deletes: [...(repair?.deletes ?? []), ...compacted.deletes] } : repair;
-      if (mutation || stored.legacy) {
-        await persistMutation(state.storage, mutation ?? { puts: [], deletes: [] }, stored.legacy);
-      }
-    });
+    state.blockConcurrencyWhile(() => this.rehydrate());
+  }
+
+  private async rehydrate(): Promise<void> {
+    const expiresAt = await this.ctx.storage.getAlarm();
+    const stored = await readRoom(this.ctx.storage);
+    const restored = new RetainedUpdateLog(MAX_RETAINED_COUNT, MAX_COLLABORATION_FRAME_BYTES);
+    const repair = restored.restore(stored.entries, stored.checkpoint);
+    const compacted = stored.legacy ? restored.checkpoint() : null;
+    const mutation = compacted ? { ...compacted, deletes: [...(repair?.deletes ?? []), ...compacted.deletes] } : repair;
+    if (mutation || stored.legacy || stored.unusable.length) {
+      await persistMutation(this.ctx.storage, mutation ?? { puts: [], deletes: [] }, stored.legacy, stored.unusable);
+    }
+    this.updates = restored;
+    this.expiresAt = expiresAt;
+    this.failed = false;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -114,23 +120,21 @@ export class CollaborationRoom extends DurableObject<Env> {
     this.pendingBytes += bytes.length;
     this.pendingCount++;
     this.enqueue(async () => {
+      let responses: Uint8Array[];
+      let mutation;
       try {
-        let responses: Uint8Array[];
-        let mutation;
-        try {
-          responses = this.updates.responses(bytes);
-          mutation = kind === "document" ? this.updates.retain(bytes) : null;
-        } catch (error) {
-          socket.close(error instanceof RoomCapacityError ? 1009 : 1002,
-            error instanceof RoomCapacityError ? "Room checkpoint limit reached" : "Invalid document update");
-          return;
-        }
-        if (mutation) await persistMutation(this.ctx.storage, mutation);
-        await this.refreshExpiry();
-        for (const response of responses) sendIfOpen(socket, response);
-        for (const peer of this.ctx.getWebSockets()) if (peer !== socket) sendIfOpen(peer, bytes.slice());
-      } finally { this.pendingBytes -= bytes.length; this.pendingCount--; }
-    });
+        responses = this.updates.responses(bytes);
+        mutation = kind === "document" ? this.updates.retain(bytes) : null;
+      } catch (error) {
+        closeSocket(socket, error instanceof RoomCapacityError ? 1009 : 1002,
+          error instanceof RoomCapacityError ? "Room checkpoint limit reached" : "Invalid document update");
+        return;
+      }
+      if (mutation) await persistMutation(this.ctx.storage, mutation);
+      await this.refreshExpiry();
+      for (const response of responses) sendIfOpen(socket, response);
+      for (const peer of this.ctx.getWebSockets()) if (peer !== socket) sendIfOpen(peer, bytes.slice());
+    }).finally(() => { this.pendingBytes -= bytes.length; this.pendingCount--; });
   }
 
   webSocketClose(
@@ -150,7 +154,7 @@ export class CollaborationRoom extends DurableObject<Env> {
 
   /** Wipes the room once it has been idle for a full TTL. */
   async alarm(): Promise<void> {
-    await this.enqueue(async () => {
+    const committed = await this.enqueue(async () => {
       if (this.ctx.getWebSockets().some(socket => socket.readyState === WebSocket.OPEN)) {
         this.expiresAt = Date.now() + ROOM_TTL_MS;
         await this.ctx.storage.setAlarm(this.expiresAt);
@@ -160,15 +164,15 @@ export class CollaborationRoom extends DurableObject<Env> {
       this.updates.clear();
       this.expiresAt = null;
     });
-    if (this.failed) throw new Error("Room storage unavailable");
+    if (!committed) throw new Error("Room storage unavailable");
   }
 
   async checkpoint(): Promise<void> {
-    await this.enqueue(async () => {
+    const committed = await this.enqueue(async () => {
       const mutation = this.updates.checkpoint();
       if (mutation) await persistMutation(this.ctx.storage, mutation);
     });
-    if (this.failed) throw new Error("Room storage unavailable");
+    if (!committed) throw new Error("Room storage unavailable");
   }
 
   private async refreshExpiry(): Promise<void> {
@@ -178,18 +182,20 @@ export class CollaborationRoom extends DurableObject<Env> {
     this.expiresAt = deadline;
   }
 
-  private enqueue(action: () => Promise<void>): Promise<void> {
-    const task = this.persist.then(async () => {
-      if (this.failed) throw new Error("Room storage unavailable");
+  private enqueue(action: () => Promise<void>): Promise<boolean> {
+    const result = this.persist.then(async () => {
+      if (this.failed) await this.rehydrate();
       await action();
-    });
-    this.persist = task.catch(error => {
+      return true;
+    }).catch(error => {
       this.failed = true;
       for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1011, "Room storage unavailable; reconnect");
       console.error("Relay persistence failed", error);
+      return false;
     });
+    this.persist = result.then(() => {});
     this.ctx.waitUntil(this.persist);
-    return this.persist;
+    return result;
   }
 
   private broadcastPeerCount(): void {
