@@ -188,7 +188,17 @@
       "documentReplaced": "Presentasi telah diganti.",
       "targetChanged": "Pilihan berubah sebelum perintah dijalankan.",
       "gestureActive": "Selesaikan gerakan penunjuk terlebih dahulu.",
-      "commandFailed": "Perintah gagal."
+      "commandFailed": "Perintah gagal.",
+      "permissionDenied": "Aplikasi host tidak mengizinkan plugin ini menggunakan perintah ini.",
+      "unsupportedPolicy": "Plugin belum dapat menjalankan perintah ini. Gunakan batch edit sebagai gantinya.",
+      "pluginUnavailable": "Plugin tidak lagi aktif.",
+      "aborted": "Tindakan plugin dibatalkan sebelum perintah dijalankan."
     }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugin",
+    "panelTabs": "Panel plugin",
+    "collapsePanel": "Ciutkan {title}",
+    "expandPanel": "Luaskan {title}"
   }
 }

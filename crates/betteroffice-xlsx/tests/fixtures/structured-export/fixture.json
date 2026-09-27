@@ -1,0 +1,925 @@
+{
+  "schemaVersion": 1,
+  "anchorScope": "snapshot",
+  "dateSystem": "1900",
+  "calculation": {
+    "policy": "asStored",
+    "freshness": "unverified"
+  },
+  "included": {
+    "hiddenSheets": false,
+    "hiddenRows": false,
+    "hiddenColumns": false,
+    "definedNames": true,
+    "hiddenNames": false
+  },
+  "sheets": [
+    {
+      "id": "s0",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        }
+      },
+      "kind": "worksheet",
+      "visibility": "visible",
+      "usedRange": "A1:Z1000",
+      "selectedRange": "A1:Z1000",
+      "hiddenRows": [
+        "4:4"
+      ],
+      "hiddenColumns": [
+        "E:E"
+      ],
+      "merges": [
+        {
+          "id": "s0:m0",
+          "anchor": {
+            "kind": "range",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "A6:B6"
+          },
+          "clipped": false
+        }
+      ],
+      "tables": [
+        {
+          "id": "s0:t0",
+          "anchor": {
+            "kind": "range",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "A1:D3"
+          },
+          "name": "Sales",
+          "headerRows": 1,
+          "totalsRows": 0,
+          "columns": [
+            "Name",
+            "Qty",
+            "Price",
+            "Total"
+          ],
+          "clipped": false
+        }
+      ],
+      "hyperlinks": [
+        {
+          "id": "s0:h0",
+          "anchor": {
+            "kind": "range",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "A7"
+          },
+          "externalTarget": "https://example.com/?a=1&b=2",
+          "location": null,
+          "tooltip": null,
+          "display": null,
+          "clipped": false
+        }
+      ],
+      "objects": [
+        {
+          "id": "s0:o0",
+          "kind": "picture",
+          "anchor": {
+            "kind": "range",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "H2:J6"
+          },
+          "name": "Logo",
+          "altText": "Company <logo>",
+          "title": null,
+          "hidden": false,
+          "part": "xl/media/image1.png",
+          "source": {
+            "part": "xl/drawings/drawing1.xml",
+            "partSha256": "688b5a4a8d46e0d539bce79d9cbfd49d0e4f5d50e8fa2048cc7df205dfe020ef",
+            "path": [
+              0
+            ]
+          }
+        },
+        {
+          "id": "s0:o1",
+          "kind": "chart",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "K11"
+          },
+          "name": "Broken chart",
+          "altText": "Sales by month",
+          "title": null,
+          "hidden": false,
+          "part": "xl/charts/chart1.xml",
+          "source": {
+            "part": "xl/drawings/drawing1.xml",
+            "partSha256": "688b5a4a8d46e0d539bce79d9cbfd49d0e4f5d50e8fa2048cc7df205dfe020ef",
+            "path": [
+              1
+            ]
+          }
+        }
+      ],
+      "cells": [
+        {
+          "id": "s0!A1",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "A1"
+          },
+          "value": {
+            "kind": "text",
+            "value": "Name"
+          },
+          "formula": null,
+          "displayText": "Name",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!B1",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "B1"
+          },
+          "value": {
+            "kind": "text",
+            "value": "Qty"
+          },
+          "formula": null,
+          "displayText": "Qty",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!C1",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "C1"
+          },
+          "value": {
+            "kind": "text",
+            "value": "Price"
+          },
+          "formula": null,
+          "displayText": "Price",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!D1",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "D1"
+          },
+          "value": {
+            "kind": "text",
+            "value": "Total"
+          },
+          "formula": null,
+          "displayText": "Total",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!A2",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "A2"
+          },
+          "value": {
+            "kind": "text",
+            "value": "Apple"
+          },
+          "formula": null,
+          "displayText": "Apple",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!B2",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "B2"
+          },
+          "value": {
+            "kind": "number",
+            "value": 3.0
+          },
+          "formula": null,
+          "displayText": "3",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!C2",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "C2"
+          },
+          "value": {
+            "kind": "number",
+            "value": 1.5
+          },
+          "formula": null,
+          "displayText": "1.50",
+          "numberFormat": "0.00",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!D2",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "D2"
+          },
+          "value": {
+            "kind": "number",
+            "value": 4.5
+          },
+          "formula": "B2*C2",
+          "displayText": "4.5",
+          "numberFormat": "General",
+          "formulaResult": "unverified",
+          "merge": null
+        },
+        {
+          "id": "s0!F2",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "F2"
+          },
+          "value": {
+            "kind": "number",
+            "value": 0.5
+          },
+          "formula": null,
+          "displayText": "0.5",
+          "numberFormat": "# ?/?",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!G2",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "G2"
+          },
+          "value": {
+            "kind": "number",
+            "value": 45000.0
+          },
+          "formula": null,
+          "displayText": "3/15/23",
+          "numberFormat": "m/d/yy",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!A3",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "A3"
+          },
+          "value": {
+            "kind": "text",
+            "value": "Pear <script>|*x* & [y](z)"
+          },
+          "formula": null,
+          "displayText": "Pear <script>|*x* & [y](z)",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!B3",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "B3"
+          },
+          "value": {
+            "kind": "number",
+            "value": 2.0
+          },
+          "formula": null,
+          "displayText": "2",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!D3",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "D3"
+          },
+          "value": {
+            "kind": "empty"
+          },
+          "formula": "B3*C3",
+          "displayText": "",
+          "numberFormat": "General",
+          "formulaResult": "missing",
+          "merge": null
+        },
+        {
+          "id": "s0!H3",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "H3"
+          },
+          "value": {
+            "kind": "empty"
+          },
+          "formula": null,
+          "displayText": "",
+          "numberFormat": "0.00",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!A6",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "A6"
+          },
+          "value": {
+            "kind": "text",
+            "value": "merged"
+          },
+          "formula": null,
+          "displayText": "merged",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": {
+            "range": "A6:B6",
+            "origin": true
+          }
+        },
+        {
+          "id": "s0!B6",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "B6"
+          },
+          "value": {
+            "kind": "text",
+            "value": "covered"
+          },
+          "formula": null,
+          "displayText": "covered",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": {
+            "range": "A6:B6",
+            "origin": false
+          }
+        },
+        {
+          "id": "s0!A7",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "A7"
+          },
+          "value": {
+            "kind": "text",
+            "value": "link"
+          },
+          "formula": null,
+          "displayText": "link",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        },
+        {
+          "id": "s0!Z1000",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:0",
+              "index": 0,
+              "name": "Data"
+            },
+            "a1": "Z1000"
+          },
+          "value": {
+            "kind": "text",
+            "value": "far"
+          },
+          "formula": null,
+          "displayText": "far",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        }
+      ],
+      "source": {
+        "part": "xl/worksheets/sheet1.xml",
+        "partSha256": "4e9222675b55346b8d6f4300d906d5e3d8d36b3a17dc8a327417b19aff704d5b",
+        "path": []
+      },
+      "truncated": false
+    },
+    {
+      "id": "s1",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:1",
+          "index": 1,
+          "name": "Summary"
+        }
+      },
+      "kind": "worksheet",
+      "visibility": "visible",
+      "usedRange": "A1:A5",
+      "selectedRange": "A1:A5",
+      "hiddenRows": [
+        "4:5"
+      ],
+      "hiddenColumns": [],
+      "merges": [],
+      "tables": [],
+      "hyperlinks": [],
+      "objects": [],
+      "cells": [
+        {
+          "id": "s1!A1",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:1",
+              "index": 1,
+              "name": "Summary"
+            },
+            "a1": "A1"
+          },
+          "value": {
+            "kind": "number",
+            "value": 4.5
+          },
+          "formula": "SUM(Data!D2:D3)",
+          "displayText": "4.5",
+          "numberFormat": "General",
+          "formulaResult": "unverified",
+          "merge": null
+        },
+        {
+          "id": "s1!A2",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:1",
+              "index": 1,
+              "name": "Summary"
+            },
+            "a1": "A2"
+          },
+          "value": {
+            "kind": "number",
+            "value": 45000.5
+          },
+          "formula": "NOW()",
+          "displayText": "45000.5",
+          "numberFormat": "General",
+          "formulaResult": "unverified",
+          "merge": null
+        },
+        {
+          "id": "s1!A3",
+          "anchor": {
+            "kind": "cell",
+            "sheet": {
+              "sheetId": "sheet:1",
+              "index": 1,
+              "name": "Summary"
+            },
+            "a1": "A3"
+          },
+          "value": {
+            "kind": "text",
+            "value": "a|b <i>"
+          },
+          "formula": null,
+          "displayText": "a|b <i>",
+          "numberFormat": "General",
+          "formulaResult": null,
+          "merge": null
+        }
+      ],
+      "source": {
+        "part": "xl/worksheets/sheet2.xml",
+        "partSha256": "0a67ed24b161e75b06092342e3735df621f418cee98f2a1ea432986392a2dc8a",
+        "path": []
+      },
+      "truncated": false
+    },
+    {
+      "id": "s5",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:5",
+          "index": 5,
+          "name": "Dialog"
+        }
+      },
+      "kind": "dialogsheet",
+      "visibility": "visible",
+      "usedRange": null,
+      "selectedRange": null,
+      "hiddenRows": [],
+      "hiddenColumns": [],
+      "merges": [],
+      "tables": [],
+      "hyperlinks": [],
+      "objects": [],
+      "cells": [],
+      "source": {
+        "part": "xl/dialogsheets/sheet1.xml",
+        "partSha256": "1ae80823bcf6b9e20910850e86bde93681aa757f7717d3f1e4a2bd9ebef5feec",
+        "path": []
+      },
+      "truncated": false
+    }
+  ],
+  "definedNames": [
+    {
+      "id": "n1",
+      "anchor": {
+        "kind": "definedName",
+        "name": "Total",
+        "localSheet": null,
+        "ordinal": 1
+      },
+      "name": "Total",
+      "formula": "Data!$D$2:$D$3",
+      "hidden": false,
+      "localSheet": null
+    },
+    {
+      "id": "n2",
+      "anchor": {
+        "kind": "definedName",
+        "name": "Local",
+        "localSheet": {
+          "sheetId": "sheet:1",
+          "index": 1,
+          "name": "Summary"
+        },
+        "ordinal": 2
+      },
+      "name": "Local",
+      "formula": "Summary!$A$1",
+      "hidden": false,
+      "localSheet": {
+        "sheetId": "sheet:1",
+        "index": 1,
+        "name": "Summary"
+      }
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "hidden-content-excluded",
+      "severity": "info",
+      "anchor": null,
+      "message": "Hidden defined names are excluded (1); set includeHiddenNames to list them."
+    },
+    {
+      "code": "hidden-content-excluded",
+      "severity": "info",
+      "anchor": null,
+      "message": "Defined names scoped to excluded hidden sheets are excluded (1)."
+    },
+    {
+      "code": "comments-omitted",
+      "severity": "info",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        }
+      },
+      "message": "Comments on this sheet are not exported (2)."
+    },
+    {
+      "code": "unsupported-content",
+      "severity": "warning",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        }
+      },
+      "message": "This sheet carries content the export does not represent: conditional formatting."
+    },
+    {
+      "code": "hidden-content-excluded",
+      "severity": "info",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        }
+      },
+      "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them."
+    },
+    {
+      "code": "hidden-content-excluded",
+      "severity": "info",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        }
+      },
+      "message": "Cells in hidden columns, and links and tables wholly inside them, are excluded; set includeHiddenColumns to export them."
+    },
+    {
+      "code": "object-placeholder",
+      "severity": "info",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        }
+      },
+      "message": "Drawing objects on this sheet are exported as placeholders without chart data, image bytes or shape text."
+    },
+    {
+      "code": "unreadable-object",
+      "severity": "warning",
+      "anchor": {
+        "kind": "sourcePart",
+        "part": "xl/drawings/drawing1.xml",
+        "partSha256": "688b5a4a8d46e0d539bce79d9cbfd49d0e4f5d50e8fa2048cc7df205dfe020ef",
+        "path": [
+          1
+        ]
+      },
+      "message": "A chart in xl/drawings/drawing1.xml could not be read; it is exported as a placeholder only."
+    },
+    {
+      "code": "rich-text-omitted",
+      "severity": "info",
+      "anchor": {
+        "kind": "cell",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        },
+        "a1": "A2"
+      },
+      "message": "Text formatting runs inside cells on this sheet are not exported; the text is."
+    },
+    {
+      "code": "formula-cache-unverified",
+      "severity": "info",
+      "anchor": {
+        "kind": "cell",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        },
+        "a1": "D2"
+      },
+      "message": "Formula results on this sheet are the stored values; the export does not recalculate or verify them."
+    },
+    {
+      "code": "formatting-approximate",
+      "severity": "info",
+      "anchor": {
+        "kind": "cell",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        },
+        "a1": "F2"
+      },
+      "message": "The number format \"# ?/?\" is only approximated, so displayText falls back to General here and wherever this sheet uses it."
+    },
+    {
+      "code": "formula-result-missing",
+      "severity": "warning",
+      "anchor": {
+        "kind": "cell",
+        "sheet": {
+          "sheetId": "sheet:0",
+          "index": 0,
+          "name": "Data"
+        },
+        "a1": "D3"
+      },
+      "message": "This formula has no stored result, or none that can be confirmed; its value is what the engine holds, not a result the file stored. Each cell's formulaResult says which formulas this applies to."
+    },
+    {
+      "code": "hidden-content-excluded",
+      "severity": "info",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:1",
+          "index": 1,
+          "name": "Summary"
+        }
+      },
+      "message": "Cells in hidden rows, and links and tables wholly inside them, are excluded; set includeHiddenRows to export them."
+    },
+    {
+      "code": "formula-cache-unverified",
+      "severity": "info",
+      "anchor": {
+        "kind": "cell",
+        "sheet": {
+          "sheetId": "sheet:1",
+          "index": 1,
+          "name": "Summary"
+        },
+        "a1": "A1"
+      },
+      "message": "Formula results on this sheet are the stored values; the export does not recalculate or verify them."
+    },
+    {
+      "code": "hidden-content-excluded",
+      "severity": "info",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:2",
+          "index": 2,
+          "name": "Secret"
+        }
+      },
+      "message": "The sheet is hidden and excluded; set includeHiddenSheets to export it."
+    },
+    {
+      "code": "hidden-content-excluded",
+      "severity": "info",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:3",
+          "index": 3,
+          "name": "Ghost"
+        }
+      },
+      "message": "The sheet is hidden and excluded; set includeHiddenSheets to export it."
+    },
+    {
+      "code": "visibility-unknown",
+      "severity": "warning",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:4",
+          "index": 4,
+          "name": "Odd"
+        }
+      },
+      "message": "The sheet's visibility is unavailable or not a known state, so it is excluded as hidden; set includeHiddenSheets to export it."
+    },
+    {
+      "code": "unsupported-sheet",
+      "severity": "warning",
+      "anchor": {
+        "kind": "sheet",
+        "sheet": {
+          "sheetId": "sheet:5",
+          "index": 5,
+          "name": "Dialog"
+        }
+      },
+      "message": "This is not a worksheet; only its drawing objects are exported."
+    }
+  ],
+  "truncated": false
+}

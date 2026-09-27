@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::{SheetId, Workbook};
 
-use crate::read::SharedStringCells;
+use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
 use crate::{MAX_DEPTH, ParseError};
@@ -31,6 +31,7 @@ pub struct PreservedPackage {
     pub(crate) original_workbook: Workbook,
     pub(crate) active_sheet: SheetId,
     pub(crate) unpatchable_references: Vec<UnpatchableReference>,
+    pub(crate) rich_shared_strings: BTreeSet<usize>,
 }
 
 impl PreservedPackage {
@@ -42,7 +43,10 @@ impl PreservedPackage {
         active_sheet: SheetId,
         shared_string_cells: &[SharedStringCells],
         declined_parts: &[String],
+        rich_shared_strings: BTreeSet<usize>,
+        cell_facts: Vec<SourceCellFacts>,
     ) -> Result<Self, ParseError> {
+        let mut cell_facts = cell_facts.into_iter();
         let workbook_xml = find_part(&parts, "xl/workbook.xml")
             .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
         let workbook_template = XmlTemplate::capture(workbook_xml)?;
@@ -93,6 +97,7 @@ impl PreservedPackage {
                 attributes: entry.attributes,
                 template: XmlTemplate::capture(bytes)?,
                 shared_string_cells: shared_string_cells.get(index).cloned().unwrap_or_default(),
+                cell_facts: cell_facts.next().unwrap_or_default(),
             });
         }
 
@@ -175,6 +180,7 @@ impl PreservedPackage {
             original_workbook: workbook.clone(),
             active_sheet,
             unpatchable_references,
+            rich_shared_strings,
         })
     }
 
@@ -247,6 +253,56 @@ impl PreservedPackage {
             .is_none_or(PreservedSheet::is_worksheet)
     }
 
+    /// The part path of a source sheet.
+    pub fn source_sheet_part(&self, index: usize) -> Option<&str> {
+        self.sheets.get(index).map(|sheet| sheet.path.as_str())
+    }
+
+    /// The `state` a source sheet's `<sheet>` entry declares; absent reads as visible.
+    pub fn source_sheet_visibility(&self, index: usize) -> Option<SheetVisibility> {
+        let sheet = self.sheets.get(index)?;
+        let state = sheet
+            .attributes
+            .iter()
+            .find(|attribute| attribute.local_name() == "state")
+            .map(|attribute| attribute.value.as_str());
+        Some(match state {
+            None | Some("visible") => SheetVisibility::Visible,
+            Some("hidden") => SheetVisibility::Hidden,
+            Some("veryHidden") => SheetVisibility::VeryHidden,
+            Some(_) => SheetVisibility::Unknown,
+        })
+    }
+
+    /// What kind of sheet a source sheet's relationship names.
+    pub fn source_sheet_kind(&self, index: usize) -> Option<SourceSheetKind> {
+        let sheet = self.sheets.get(index)?;
+        Some(
+            match sheet
+                .relationship_type
+                .as_deref()
+                .and_then(|kind| kind.rsplit('/').next())
+            {
+                None | Some("worksheet") => SourceSheetKind::Worksheet,
+                Some("chartsheet") => SourceSheetKind::Chartsheet,
+                Some("dialogsheet") => SourceSheetKind::Dialogsheet,
+                Some("xlMacrosheet" | "xlIntlMacrosheet") => SourceSheetKind::Macrosheet,
+                Some(_) => SourceSheetKind::Other,
+            },
+        )
+    }
+
+    /// Cell facts of source sheet `index` the model does not keep.
+    pub fn source_cell_facts(&self, index: usize) -> Option<&SourceCellFacts> {
+        self.sheets.get(index).map(|sheet| &sheet.cell_facts)
+    }
+
+    /// Whether source shared string `index` carried formatted runs, which the model
+    /// reads as plain text.
+    pub fn shared_string_is_rich(&self, index: usize) -> bool {
+        self.rich_shared_strings.contains(&index)
+    }
+
     /// Whether a source sheet enables `sheetProtection`. A declaration that cannot be read
     /// counts as enabled.
     #[doc(hidden)]
@@ -265,6 +321,26 @@ impl PreservedPackage {
     }
 }
 
+/// A sheet's `state` in the workbook part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SheetVisibility {
+    Visible,
+    Hidden,
+    VeryHidden,
+    /// A value outside the schema.
+    Unknown,
+}
+
+/// What a workbook `<sheet>` entry's relationship names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceSheetKind {
+    Worksheet,
+    Chartsheet,
+    Dialogsheet,
+    Macrosheet,
+    Other,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PreservedSheet {
     pub(crate) path: String,
@@ -274,6 +350,7 @@ pub(crate) struct PreservedSheet {
     pub(crate) attributes: Vec<XmlAttribute>,
     pub(crate) template: XmlTemplate,
     pub(crate) shared_string_cells: SharedStringCells,
+    pub(crate) cell_facts: SourceCellFacts,
 }
 
 impl PreservedSheet {

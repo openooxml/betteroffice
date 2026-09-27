@@ -86,13 +86,25 @@
   commands and edit batches. Plugins read and navigate by default; every write
   is checked against its grant, the editor mode and document policy when it runs.
 
+- **Host-owned PPTX plugins.** PPTX React supports host-owned plugins with
+  panels, overlays, lifecycle events, and explicitly granted commands and edit
+  batches. Plugins read and navigate by default; every write is checked against
+  its grant and `readOnly` when it runs.
+
 - **Structured PPTX export.** PPTX JavaScript, Rust and Python hosts export
   structured slide content and Markdown with session or snapshot anchors,
   explicit hidden-content and notes/comment options, and omission diagnostics.
 
 - **Structured DOCX export.** DOCX exports read-only structured JSON and
   Markdown with source anchors, explicit story and revision options, and
-  omission diagnostics. Page fragments are not yet included.
+  omission diagnostics. JavaScript and React can attach version-checked page
+  fragments from configured layout, with optional page geometry. Native Rust
+  and Python structured exports do not yet generate page maps automatically.
+
+- **Structured XLSX export.** XLSX exports bounded sparse worksheet content and
+  Markdown with positional anchors, formulas, stored values, formatted text,
+  explicit hidden-content options, and omission diagnostics. Export does not
+  recalculate formulas.
 
 - **DOCX content controls.** List DOCX content controls in JavaScript, Rust, and
   Python. JavaScript and React hosts fill plain- and rich-text controls

@@ -18,6 +18,7 @@ import wasmInit, {
   find_docx_content_controls_json,
   list_docx_content_controls_json,
   render_docx_markdown_json,
+  render_docx_markdown_with_pages_json,
 } from './generated/edit/docx_edit.js';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 
@@ -76,6 +77,12 @@ export function findDocxContentControlsJson(
 ): string {
   state.ensure();
   return find_docx_content_controls_json(bytes, query, options);
+}
+
+/** Markdown rendering of a paged export's JSON, with optional page markers. */
+export function renderDocxMarkdownWithPagesJson(content: string, options: string): string {
+  state.ensure();
+  return render_docx_markdown_with_pages_json(content, options);
 }
 
 export type { EditSession };

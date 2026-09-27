@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use docx_layout::display_list::DisplayList;
@@ -32,9 +32,14 @@ use serde::Serialize;
 use yrs::Subscription;
 
 use crate::EditingDoc;
-use crate::bridge::{BridgeError, RenderEnv, yrs_doc_to_layout_blocks};
+use crate::bridge::{BridgeError, LoweringMap, RenderEnv, yrs_doc_to_mapped_layout_blocks};
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
+};
+use crate::structured::pages::{self, PageLimits};
+use crate::structured::{
+    AnchorScope, DocxLayoutMap, DocxPagedStructuredContent, DocxSnapshotLayoutMap, ExportFailure,
+    ExportFailureCode, ExportRead, ExportRefusal, PageExportOptions, RevisionView, StoryKind,
 };
 
 #[derive(Debug)]
@@ -44,6 +49,8 @@ struct LoweredStory {
     /// Shared so a reader can hold the lowering it asked for without the cache
     /// borrow, and without copying the story.
     blocks: Rc<Vec<LayoutBlock>>,
+    /// Where the blocks' positions came from, recorded by the same lowering.
+    map: Rc<LoweringMap>,
     /// Lazily serialized layout blocks.
     serialized_blocks: Option<String>,
 }
@@ -86,13 +93,39 @@ struct ResidentRegionState {
 struct RegionFastPathState {
     regions: Rc<DocumentRegions>,
     measurement: Rc<docx_layout::measure_blocks::MeasurementConfig>,
-    /// `measurement` hashed once so a later full pass can verify the retained
-    /// arena was measured under the same config without re-serializing.
+    /// `measurement` and the measurement fonts' generation hashed once, so a
+    /// later full pass can verify the retained arena was measured under the
+    /// same config and fonts without re-serializing.
     measurement_fingerprint: u64,
+    /// The measurement fonts' generation the fast path may keep measuring with.
+    fonts: (u64, usize),
+    /// The header and footer stories the retained bands were measured from, fingerprinted
+    /// by [`EngineSession::regional_fingerprint`]; the fast path keeps those bands only
+    /// while it is unchanged.
+    regional: u64,
     /// True when the last full pass had no normal footnote/endnote contents
     /// and no note references — the fast path skips note stabilization
     /// entirely, so it requires a note-free document.
     notes_clear: bool,
+}
+
+/// What a completed region layout of the session's own stories was computed from, published
+/// together with it so a paged export can tell whether the retained layout still describes the
+/// document. Only a pass that lowered the body, headers, footers and notes from the session
+/// publishes one.
+#[derive(Debug)]
+struct LayoutCapture {
+    /// The document version the layout lowered.
+    version: crate::batch::DocumentVersion,
+    /// The pagination serial of the layout.
+    serial: u64,
+    /// The generation of the measurement fonts the layout measured with.
+    fonts: (u64, usize),
+    notes_converged: bool,
+    /// The environment every story of the pass was lowered with.
+    render_env: RenderEnv,
+    headers_footers: Option<Rc<HeaderFooterPayload>>,
+    notes: Rc<Vec<docx_layout::footnotes::NoteContent>>,
 }
 
 #[derive(Debug)]
@@ -514,6 +547,84 @@ pub struct EngineSession {
     regions: RefCell<Option<ResidentRegionState>>,
     pagination: RefCell<PaginationState>,
     display: RefCell<DisplayState>,
+    capture: RefCell<Option<LayoutCapture>>,
+    /// Content fingerprints of measurement fonts, by font store and font id.
+    font_fingerprints: RefCell<HashMap<(u64, u32), String>>,
+}
+
+/// The font requirements of `blocks` that `measurement` gives no chain of registered fonts, so
+/// they were measured with synthetic metrics.
+fn missing_font_chains<'a>(
+    measurement: &serde_json::Value,
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+) -> Vec<String> {
+    let chains = measurement.get("fontChains");
+    let defaults = measurement.get("defaults").cloned().unwrap_or_default();
+    docx_layout::measure_blocks::collect_font_requirements(
+        blocks,
+        docx_layout::measure_blocks::default_font_family(&defaults),
+    )
+    .into_iter()
+    .filter(|requirement| {
+        !chains
+            .and_then(|chains| chains.get(&requirement.key))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|ids| {
+                !ids.is_empty()
+                    && ids.iter().all(|id| {
+                        id.as_u64()
+                            .and_then(|id| u32::try_from(id).ok())
+                            .and_then(|id| docx_layout::with_measure_face(id, |_, _| ()))
+                            .is_some()
+                    })
+            })
+    })
+    .map(|requirement| requirement.key)
+    .collect()
+}
+
+/// A fingerprint of everything in a region layout request that shapes pages: sections,
+/// settings, notes, the render environment and options, but not the fonts, which are
+/// fingerprinted by content, or the gap between pages.
+fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
+    if let Some(fields) = request.as_object_mut() {
+        fields.remove("measurement");
+        fields.remove("measured");
+        if let Some(options) = fields
+            .get_mut("options")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            options.remove("pageGap");
+        }
+    }
+    pages::sha256_hex(canonical_json(&request).as_bytes())
+}
+
+/// `value` as JSON with object keys sorted, whatever order they were read in.
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(fields) => {
+            let sorted: BTreeMap<&String, String> = fields
+                .iter()
+                .map(|(key, value)| (key, canonical_json(value)))
+                .collect();
+            let body = sorted
+                .into_iter()
+                .map(|(key, value)| format!("{}:{value}", serde_json::Value::from(key.as_str())))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{body}}}")
+        }
+        serde_json::Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        other => other.to_string(),
+    }
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -852,6 +963,8 @@ impl EngineSession {
             regions: RefCell::new(None),
             pagination: RefCell::new(PaginationState::default()),
             display: RefCell::new(DisplayState::default()),
+            capture: RefCell::new(None),
+            font_fingerprints: RefCell::new(HashMap::new()),
         }
     }
 
@@ -890,7 +1003,7 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
-        let blocks = yrs_doc_to_layout_blocks(&self.doc, story, env)?;
+        let (blocks, map) = yrs_doc_to_mapped_layout_blocks(&self.doc, story, env)?;
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(
@@ -899,6 +1012,7 @@ impl EngineSession {
                 doc_epoch: epoch,
                 env: env.clone(),
                 blocks: Rc::new(blocks),
+                map: Rc::new(map),
                 serialized_blocks: None,
             },
         );
@@ -1069,7 +1183,7 @@ impl EngineSession {
     pub fn layout_font_requirements_json(&self, input_json: &str) -> Result<String, String> {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-        let (input, regions, notes, _, render_env, body_story) = request.split();
+        let (input, regions, notes, measurement, render_env, body_story) = request.split();
         let mut blocks = input
             .measured
             .into_iter()
@@ -1113,6 +1227,7 @@ impl EngineSession {
         }
         serde_json::to_string(&docx_layout::measure_blocks::collect_font_requirements(
             &blocks,
+            docx_layout::measure_blocks::default_font_family(&measurement.defaults),
         ))
         .map_err(|error| format!("serialize: {error}"))
     }
@@ -1217,7 +1332,8 @@ impl EngineSession {
             env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
             env.doc_grid_pitch_px = regions.doc_grid_snap_pitch_px(0);
         }
-        let measurement_fingerprint = serde_json::to_vec(&measurement)
+        let fonts = docx_layout::measure_fonts_generation();
+        let measurement_fingerprint = serde_json::to_vec(&(&measurement, fonts))
             .map(|bytes| hash_bytes(&bytes))
             .map_err(|error| format!("fingerprint measurement config: {error}"))?;
         let resident_body = body_story.is_some();
@@ -1381,15 +1497,16 @@ impl EngineSession {
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
         attach_note_areas(layout, &page_note_map, &notes.contents, &regions);
-        let measured_headers_footers = measured_headers_footers
+        let measured_value = measured_headers_footers
             .as_mut()
             .map(|payload| {
                 resolve_header_footer_field_widths(payload, layout, &measurement)?;
-                serde_json::to_value(payload)
+                serde_json::to_value(&*payload)
                     .map_err(|error| format!("serialize headers/footers: {error}"))
             })
             .transpose()?;
-        let headers_footers = measured_headers_footers.or_else(|| regions.headers_footers.clone());
+        let serial = pagination.layout_epoch;
+        let headers_footers = measured_value.or_else(|| regions.headers_footers.clone());
         let notes_clear = notes.contents.is_empty() && refs.is_empty();
         // Multi-section documents are excluded: an edit can move a section
         // boundary without changing the total page count, which changes
@@ -1398,20 +1515,74 @@ impl EngineSession {
         // an unchanged page count implies unchanged labels.
         let single_section = regions.sections.len() <= 1;
         drop(pagination);
+        let regional = match (resident_body && single_section, parsed_render_env.as_ref()) {
+            (true, Some(env)) => Some(self.regional_fingerprint(&regions, env)),
+            _ => None,
+        };
         self.regions.replace(Some(ResidentRegionState {
             request_json: input_json.to_owned(),
             headers_footers,
-            fast_path: (resident_body && single_section).then(|| RegionFastPathState {
+            fast_path: regional.map(|regional| RegionFastPathState {
                 regions: Rc::new(regions),
                 measurement: Rc::new(measurement),
                 measurement_fingerprint,
+                fonts,
+                regional,
                 notes_clear,
             }),
         }));
         // Only the region-measured arena may seed the next pass's reuse walk.
         self.pagination.borrow_mut().measured_with =
             resident_body.then_some(measurement_fingerprint);
+        if let (true, Some(render_env)) = (resident_body, parsed_render_env) {
+            self.capture.replace(Some(LayoutCapture {
+                version: self.doc.version(),
+                serial,
+                fonts,
+                notes_converged,
+                render_env,
+                headers_footers: measured_headers_footers.map(Rc::new),
+                notes: Rc::new(notes.contents),
+            }));
+        }
         Ok(notes_converged)
+    }
+
+    /// A fingerprint of the header and footer stories `regions` reference, lowered in `env`,
+    /// cell and control content included; a story that cannot be lowered counts as absent.
+    fn regional_fingerprint(&self, regions: &DocumentRegions, env: &RenderEnv) -> u64 {
+        let mut stories = BTreeSet::new();
+        for section_index in 0..regions.sections.len() {
+            if let Some(refs) = effective_header_footer_refs(regions, section_index) {
+                stories.extend(
+                    [
+                        refs.header_default,
+                        refs.header_first,
+                        refs.header_even,
+                        refs.footer_default,
+                        refs.footer_first,
+                        refs.footer_even,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(|r_id| format!("hf:{r_id}")),
+                );
+            }
+        }
+        let mut bytes = Vec::new();
+        for story in stories {
+            let lowered = self
+                .with_lowered_story(&story, env, |blocks| serde_json::to_vec(blocks).ok())
+                .ok()
+                .flatten();
+            bytes.extend_from_slice(story.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(
+                &hash_bytes(lowered.as_deref().unwrap_or_default()).to_le_bytes(),
+            );
+            bytes.push(u8::from(lowered.is_some()));
+        }
+        hash_bytes(&bytes)
     }
 
     fn measure_resident_notes(
@@ -1623,6 +1794,7 @@ impl EngineSession {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
         }
+        self.capture.borrow_mut().take();
         let input_options_fingerprint = options_fingerprint(&input)?;
         let mut incremental = false;
         let mut deltas = HashMap::new();
@@ -2114,16 +2286,19 @@ impl EngineSession {
             let state = self.regions.borrow();
             state.as_ref().and_then(|state| {
                 let fast = state.fast_path.as_ref()?;
-                fast.notes_clear.then(|| {
-                    (
-                        Rc::clone(&fast.regions),
-                        Rc::clone(&fast.measurement),
-                        fast.measurement_fingerprint,
-                    )
-                })
+                (fast.notes_clear && fast.fonts == docx_layout::measure_fonts_generation()).then(
+                    || {
+                        (
+                            Rc::clone(&fast.regions),
+                            Rc::clone(&fast.measurement),
+                            fast.measurement_fingerprint,
+                            fast.regional,
+                        )
+                    },
+                )
             })
         };
-        let Some((regions, measurement, measurement_fingerprint)) = fast_config else {
+        let Some((regions, measurement, measurement_fingerprint, regional)) = fast_config else {
             return Ok(false);
         };
         let env = {
@@ -2133,6 +2308,9 @@ impl EngineSession {
             };
             lowered.env.clone()
         };
+        if self.regional_fingerprint(&regions, &env) != regional {
+            return Ok(false);
+        }
         let outcome = self
             .with_lowered_story_observed(
                 story,
@@ -2153,12 +2331,14 @@ impl EngineSession {
                         )
                     };
                     let default_width = widths.first().copied().unwrap_or(0.0);
-                    if docx_layout::measure_blocks::has_floating_zones(
-                        blocks,
-                        default_width,
-                        measurement.as_ref(),
-                        Some(&geometry),
-                    )? {
+                    if !collect_note_refs(blocks).is_empty()
+                        || docx_layout::measure_blocks::has_floating_zones(
+                            blocks,
+                            default_width,
+                            measurement.as_ref(),
+                            Some(&geometry),
+                        )?
+                    {
                         return Ok(None);
                     }
                     match self.resident_layout_input_from_blocks(
@@ -2188,17 +2368,28 @@ impl EngineSession {
             None => return Ok(false),
         };
         phase(RegionResidentPhase::Measured);
+        let previous_capture = self.capture.borrow_mut().take();
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
         let mut pagination = self.pagination.borrow_mut();
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
         pagination.measured_with = Some(measurement_fingerprint);
+        let serial = pagination.layout_epoch;
         let layout = pagination
             .layout
             .as_mut()
             .expect("layout retained after successful pagination");
         apply_document_regions(layout, &regions);
-        Ok(layout.pages.len() == previous_pages)
+        let unchanged = layout.pages.len() == previous_pages;
+        drop(pagination);
+        if unchanged && let Some(capture) = previous_capture {
+            self.capture.replace(Some(LayoutCapture {
+                version: self.doc.version(),
+                serial,
+                ..capture
+            }));
+        }
+        Ok(unchanged)
     }
 
     fn resident_region_display_extras(&self) -> Result<String, String> {
@@ -2562,6 +2753,410 @@ impl EngineSession {
         })
         .ok_or_else(|| "resident display list is not built".to_owned())
         .and_then(|rects| serde_json::to_string(&rects).map_err(|error| error.to_string()))
+    }
+
+    /// Exports the committed state with the page map of the retained region layout, as
+    /// [`EditingDoc::export_structured`] exports it. The layout must have lowered this document
+    /// version from the session's own stories with section, settings and note metadata that
+    /// describe it, measured every font requirement with a registered font in the current font
+    /// store, and settled its notes; nothing is laid out, flushed or changed.
+    pub fn export_structured_with_pages(
+        &self,
+        options: &PageExportOptions,
+    ) -> Result<ExportRead<DocxPagedStructuredContent<DocxLayoutMap>>, ExportRefusal> {
+        self.export_with_pages(options, AnchorScope::Session, None)
+    }
+
+    /// [`Self::export_structured_with_pages`] for an editor that owns the layout inputs:
+    /// `current_request_json` is the region layout request it would lay the document out with
+    /// now, and the retained layout must have used the same fonts, fallback order, measurement
+    /// defaults, render environment and pagination options. The editor owns the final section
+    /// and settings, so they are checked against this request rather than the source package.
+    pub fn export_structured_with_pages_for(
+        &self,
+        options: &PageExportOptions,
+        current_request_json: &str,
+    ) -> Result<ExportRead<DocxPagedStructuredContent<DocxLayoutMap>>, ExportRefusal> {
+        self.export_with_pages(options, AnchorScope::Session, Some(current_request_json))
+    }
+
+    /// [`Self::export_structured_with_pages`] for a private session opened from DOCX bytes:
+    /// anchors address the returned content and the map carries no session token.
+    pub fn export_snapshot_with_pages(
+        &self,
+        options: &PageExportOptions,
+    ) -> Result<DocxPagedStructuredContent<DocxSnapshotLayoutMap>, ExportFailure> {
+        let read = self
+            .export_with_pages(options, AnchorScope::Snapshot, None)
+            .map_err(|refusal| refusal.failure)?;
+        Ok(DocxPagedStructuredContent {
+            structured: read.content.structured,
+            layout: DocxSnapshotLayoutMap::from_session(read.content.layout),
+        })
+    }
+
+    /// Lays this private session out with `fonts` alone and exports it as
+    /// [`Self::export_snapshot_with_pages`] does. The fonts are registered, in order, in a
+    /// measurement font store of their own, so `request_json`'s font chains name them by their
+    /// index, and the module's shared store is left exactly as it was. The outer error is a font
+    /// the engine rejects or a request it cannot lay out.
+    pub fn export_snapshot_with_private_fonts(
+        &self,
+        fonts: &[&[u8]],
+        request_json: &str,
+        options: &PageExportOptions,
+    ) -> Result<Result<DocxPagedStructuredContent<DocxSnapshotLayoutMap>, ExportFailure>, String>
+    {
+        docx_layout::with_private_measure_fonts(|| {
+            for (index, bytes) in fonts.iter().enumerate() {
+                let id = docx_layout::register_measure_font_bytes(bytes)
+                    .map_err(|error| format!("font {index}: {error}"))?;
+                if id as usize != index {
+                    return Err(format!("font {index} was registered as font {id}"));
+                }
+            }
+            self.layout_document_with_regions_value(request_json)?;
+            Ok(self.export_snapshot_with_pages(options))
+        })
+    }
+
+    fn export_with_pages(
+        &self,
+        options: &PageExportOptions,
+        scope: AnchorScope,
+        current: Option<&str>,
+    ) -> Result<ExportRead<DocxPagedStructuredContent<DocxLayoutMap>>, ExportRefusal> {
+        let version = self.doc.version();
+        let refuse = |code, message: &str| ExportRefusal {
+            version: version.clone(),
+            failure: pages::failure(code, message),
+        };
+        let export_options = options.export_options();
+        let limits = PageLimits::new(options).map_err(|failure| ExportRefusal {
+            version: version.clone(),
+            failure,
+        })?;
+        crate::structured::validate_options(&export_options).map_err(|failure| ExportRefusal {
+            version: version.clone(),
+            failure,
+        })?;
+        let capture = self.capture.borrow();
+        let regions = self.regions.borrow();
+        let pagination = self.pagination.borrow();
+        let (Some(capture), Some(region_state), Some(input), Some(layout)) = (
+            capture.as_ref(),
+            regions.as_ref(),
+            pagination.input.as_ref(),
+            pagination.layout.as_ref(),
+        ) else {
+            return Err(refuse(
+                ExportFailureCode::LayoutUnavailable,
+                "No complete region layout of this document is retained; lay it out first.",
+            ));
+        };
+        if capture.version != version {
+            return Err(refuse(
+                ExportFailureCode::StaleDocument,
+                "The document changed after it was laid out; lay it out again.",
+            ));
+        }
+        if capture.fonts != docx_layout::measure_fonts_generation() {
+            return Err(refuse(
+                ExportFailureCode::StaleLayout,
+                "The measurement fonts changed after the layout; lay it out again.",
+            ));
+        }
+        let layout_version = format!("{version}:{}", capture.serial);
+        if options
+            .expect_layout_version
+            .as_ref()
+            .is_some_and(|expected| *expected != layout_version)
+        {
+            return Err(refuse(
+                ExportFailureCode::StaleLayout,
+                "The layout is not the one expectLayoutVersion names.",
+            ));
+        }
+        if !capture.notes_converged {
+            return Err(refuse(
+                ExportFailureCode::LayoutNotConverged,
+                "Note placement did not settle in the retained layout.",
+            ));
+        }
+        let env = &capture.render_env;
+        let request: serde_json::Value =
+            serde_json::from_str(&region_state.request_json).map_err(|error| {
+                refuse(
+                    ExportFailureCode::LayoutUnavailable,
+                    &format!("The retained layout request cannot be read: {error}"),
+                )
+            })?;
+        let current = current
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .map_err(|error| {
+                refuse(
+                    ExportFailureCode::LayoutUnavailable,
+                    &format!("The editor's layout request cannot be read: {error}"),
+                )
+            })?;
+        if let Some(message) = pages::metadata_mismatch(&self.doc, &request, current.is_some()) {
+            return Err(refuse(ExportFailureCode::StaleLayout, &message));
+        }
+        let laid_out: HashSet<i64> = capture
+            .notes
+            .iter()
+            .map(|content| content.map_id())
+            .collect();
+        if let Some(reference) = input
+            .measured
+            .iter()
+            .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
+            .find(|reference| !laid_out.contains(&reference.map_id()))
+        {
+            return Err(refuse(
+                ExportFailureCode::StaleLayout,
+                &format!(
+                    "The layout's note metadata has no {} {}, which the document references; lay it out with its current notes.",
+                    match reference.note_kind {
+                        docx_layout::footnotes::NoteKind::Footnote => "footnote",
+                        docx_layout::footnotes::NoteKind::Endnote => "endnote",
+                    },
+                    reference.note_id
+                ),
+            ));
+        }
+        let measurement = request.get("measurement").cloned().unwrap_or_default();
+        let blocks = input
+            .measured
+            .iter()
+            .map(|measured| &measured.block)
+            .chain(
+                capture
+                    .headers_footers
+                    .iter()
+                    .flat_map(|payload| &payload.variants)
+                    .flat_map(|variant| variant.measured.iter().map(|measured| &measured.block)),
+            )
+            .chain(capture.notes.iter().flat_map(|content| &content.blocks));
+        let missing = missing_font_chains(&measurement, blocks);
+        if !missing.is_empty() {
+            return Err(refuse(
+                ExportFailureCode::LayoutUnavailable,
+                &format!(
+                    "No registered font measures {}; lay the document out with a font for every font it uses.",
+                    missing
+                        .iter()
+                        .take(5)
+                        .map(|key| format!("{key:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+        let extents = input
+            .measured
+            .iter()
+            .map(|measured| &measured.measure)
+            .chain(
+                capture
+                    .headers_footers
+                    .iter()
+                    .flat_map(|payload| &payload.variants)
+                    .flat_map(|variant| variant.measured.iter().map(|measured| &measured.measure)),
+            )
+            .chain(capture.notes.iter().flat_map(|content| &content.measures));
+        if docx_layout::measure_blocks::measured_synthetically(extents) {
+            return Err(refuse(
+                ExportFailureCode::LayoutUnavailable,
+                "Some text was laid out with stand-in metrics because its fonts could not measure it; lay it out again with fonts that can.",
+            ));
+        }
+        let Some(font_set_fingerprint) = self.font_set_fingerprint(&request) else {
+            return Err(refuse(
+                ExportFailureCode::LayoutUnavailable,
+                "A font the layout measured with is no longer registered.",
+            ));
+        };
+        let options_fingerprint = layout_options_fingerprint(request.clone());
+        if let Some(current) = current
+            && (self.font_set_fingerprint(&current).as_ref() != Some(&font_set_fingerprint)
+                || layout_options_fingerprint(current) != options_fingerprint)
+        {
+            return Err(refuse(
+                ExportFailureCode::StaleLayout,
+                "The editor's fonts, measurement defaults, render environment or pagination options differ from the layout's; lay it out again.",
+            ));
+        }
+        let mut roots = vec!["body".to_owned()];
+        if let Some(payload) = capture.headers_footers.as_deref() {
+            roots.extend(
+                payload
+                    .variants
+                    .iter()
+                    .map(|variant| format!("hf:{}", variant.r_id)),
+            );
+        }
+        roots.extend(
+            capture
+                .notes
+                .iter()
+                .filter(|content| !content.blocks.is_empty())
+                .map(|content| {
+                    let prefix = match content.note_kind {
+                        docx_layout::footnotes::NoteKind::Footnote => "fn",
+                        docx_layout::footnotes::NoteKind::Endnote => "en",
+                    };
+                    format!("{prefix}:{}", content.id)
+                }),
+        );
+        let mut maps = HashMap::new();
+        for root in roots {
+            if maps.contains_key(&root) {
+                continue;
+            }
+            let map = self.lowering_map(&root, env).map_err(|error| {
+                refuse(
+                    ExportFailureCode::LayoutUnavailable,
+                    &format!("Story {root} can no longer be lowered: {error}"),
+                )
+            })?;
+            maps.insert(root, map);
+        }
+        if options.revision_view != RevisionView::Markup {
+            let stories: BTreeSet<String> = maps
+                .values()
+                .flat_map(|map| map.stories.iter().cloned())
+                .collect();
+            if let Some(story) = pages::revised_story(&self.doc, &stories) {
+                return Err(refuse(
+                    ExportFailureCode::UnsupportedRevisionLayout,
+                    &format!(
+                        "Story {story} has pending revisions, so the pages, laid out with revision markup, do not show the {} view; export the markup view.",
+                        match options.revision_view {
+                            RevisionView::Accepted => "accepted",
+                            _ => "original",
+                        }
+                    ),
+                ));
+            }
+        }
+        let read = self.doc.export_structured_scoped(&export_options, scope)?;
+        for story in &read.content.stories {
+            if matches!(story.kind, StoryKind::Header | StoryKind::Footer)
+                && !maps.contains_key(&story.story)
+                && let Ok(map) = self.lowering_map(&story.story, env)
+            {
+                maps.insert(story.story.clone(), map);
+            }
+        }
+        let display = limits
+            .include_geometry
+            .then(|| {
+                let extras = serde_json::json!({
+                    "contractVersion": input.options.contract_version,
+                    "headersFooters": region_state.headers_footers,
+                    "fontChains": request.get("measurement").and_then(|value| value.get("fontChains")),
+                });
+                docx_layout::build_display_list_value_from_resident(
+                    input,
+                    layout,
+                    &extras.to_string(),
+                )
+                .ok()
+            })
+            .flatten();
+        let map = pages::build_layout_map(
+            &self.doc,
+            &read.content,
+            &pages::CapturedLayout {
+                layout,
+                measured: &input.measured,
+                headers_footers: capture.headers_footers.as_deref(),
+                bands_composed: region_state.headers_footers.is_some(),
+                notes: &capture.notes,
+                maps: &maps,
+                display: display.as_ref(),
+            },
+            &limits,
+            pages::MapIdentity {
+                document_version: version.clone(),
+                layout_version,
+                layout_epoch: capture.serial.to_string(),
+                font_set_fingerprint,
+                options_fingerprint,
+            },
+        )
+        .map_err(|failure| ExportRefusal {
+            version: version.clone(),
+            failure,
+        })?;
+        Ok(ExportRead {
+            version: read.version,
+            content: DocxPagedStructuredContent {
+                structured: read.content,
+                layout: map,
+            },
+        })
+    }
+
+    /// The lowering map of `story` for this document epoch and environment.
+    fn lowering_map(&self, story: &str, env: &RenderEnv) -> Result<Rc<LoweringMap>, BridgeError> {
+        let epoch = self.doc_epoch();
+        if !self.story_is_resident(story, epoch, env) {
+            self.lower_story_into_cache(story, epoch, env)?;
+        }
+        Ok(Rc::clone(
+            &self
+                .render
+                .borrow()
+                .stories
+                .get(story)
+                .expect("resident story exists after lowering")
+                .map,
+        ))
+    }
+
+    /// A fingerprint of the fonts, fallback order and measurement defaults of `request`, by font
+    /// content rather than store ids. `None` when a font it names is not registered.
+    fn font_set_fingerprint(&self, request: &serde_json::Value) -> Option<String> {
+        let measurement = request.get("measurement").cloned().unwrap_or_default();
+        let store = docx_layout::measure_store_id();
+        let mut chains = BTreeMap::new();
+        if let Some(serde_json::Value::Object(font_chains)) = measurement.get("fontChains") {
+            for (key, ids) in font_chains {
+                let mut faces = Vec::new();
+                for id in ids.as_array().into_iter().flatten() {
+                    let id = u32::try_from(id.as_u64()?).ok()?;
+                    let cached = self.font_fingerprints.borrow().get(&(store, id)).cloned();
+                    let face = match cached {
+                        Some(face) => face,
+                        None => {
+                            let face = docx_layout::with_measure_face(id, |bytes, metrics| {
+                                pages::sha256_hex(
+                                    [pages::sha256_hex(bytes).as_bytes(), metrics.as_bytes()]
+                                        .concat()
+                                        .as_slice(),
+                                )
+                            })?;
+                            self.font_fingerprints
+                                .borrow_mut()
+                                .insert((store, id), face.clone());
+                            face
+                        }
+                    };
+                    faces.push(face);
+                }
+                chains.insert(key.clone(), faces);
+            }
+        }
+        let canonical = serde_json::json!({
+            "fontChains": chains,
+            "defaults": measurement.get("defaults"),
+            "compat": measurement.get("compat"),
+            "authoritativeShaping": measurement.get("authoritativeShaping"),
+        });
+        Some(pages::sha256_hex(canonical_json(&canonical).as_bytes()))
     }
 }
 

@@ -8854,6 +8854,184 @@ fn table_metadata(
     }
 }
 
+/// A row a table fragment shows, in fragment coordinates.
+struct VisibleRow {
+    row_index: usize,
+    frag_y: f64,
+    is_first_in_fragment: bool,
+}
+
+/// A cell a table fragment paints: a grid cell, its box in fragment coordinates, and whether it
+/// carries document positions (a vertical-merge continuation re-paint does not).
+struct CellPaint {
+    grid_index: usize,
+    cell_y: f64,
+    cell_h: f64,
+    is_first_row: bool,
+    selectable: bool,
+}
+
+/// What one table fragment paints: the repeated header band and row window, every cell painted
+/// in them and the band everything clips to. Painting and page export both read it, so a
+/// fragment's exported content is exactly what it paints.
+struct TablePaintPlan {
+    row_tops: Vec<f64>,
+    grid: Vec<GridCell>,
+    carried: bool,
+    header_row_count: usize,
+    semantic_header_count: usize,
+    header_height: f64,
+    visible_height: f64,
+    /// Clip band in page coordinates; every emitted rect and text clips to it,
+    /// so a row sliced by the page break cannot paint past the fragment.
+    clip_top_y: f64,
+    clip_bottom_y: f64,
+    visible: Vec<VisibleRow>,
+    paints: Vec<CellPaint>,
+}
+
+impl TablePaintPlan {
+    fn new(frag: &TableFragmentIn, block: &TableBlockIn, measure: &TableExtentIn) -> Self {
+        let row_tops = row_y_positions(&measure.rows);
+        let grid = compute_cell_grid(block, &measure.column_widths);
+
+        let carried = frag.carried_from_prev == Some(true);
+        let header_row_count = if carried {
+            frag.header_row_count.unwrap_or(0)
+        } else {
+            0
+        };
+        let authored_header_count = block
+            .rows
+            .iter()
+            .take_while(|row| row.is_header == Some(true))
+            .count();
+        let semantic_header_count = authored_header_count.max(header_row_count);
+        let mut header_height = 0.0;
+        for r in 0..header_row_count.min(measure.rows.len()) {
+            header_height += measure.rows[r].height;
+        }
+
+        let win_top =
+            row_tops.get(frag.row_start).copied().unwrap_or(0.0) + frag.clip_top.unwrap_or(0.0);
+        let to_frag_y = |full_y: f64| header_height + (full_y - win_top);
+        let visible_height = if frag.clip_bottom.is_some() {
+            frag.height.round()
+        } else {
+            to_frag_y(row_tops.get(frag.row_end).copied().unwrap_or(0.0))
+        };
+
+        // rows visible in this fragment: repeated header rows first (their own
+        // coordinate space above the windowed body), then the body window
+        let mut visible: Vec<VisibleRow> = Vec::new();
+        if header_row_count > 0 {
+            let mut hy = 0.0;
+            for r in 0..header_row_count.min(measure.rows.len()) {
+                visible.push(VisibleRow {
+                    row_index: r,
+                    frag_y: hy,
+                    is_first_in_fragment: r == 0,
+                });
+                hy += measure.rows[r].height;
+            }
+        }
+        for row_index in frag.row_start..frag.row_end.min(block.rows.len()) {
+            let is_first_in_fragment = if header_row_count > 0 {
+                false
+            } else {
+                carried && row_index == frag.row_start && frag.clip_top.unwrap_or(0.0) == 0.0
+            };
+            visible.push(VisibleRow {
+                row_index,
+                frag_y: to_frag_y(row_tops.get(row_index).copied().unwrap_or(0.0)),
+                is_first_in_fragment,
+            });
+        }
+
+        // vertically-merged cells whose restart row is on an earlier fragment but
+        // whose span reaches into this one re-paint clipped (not selectable — they
+        // carry no doc positions, matching data-vmerge-continuation)
+        let span_height = |g: &GridCell| {
+            let mut height = 0.0;
+            for r in g.row_index..(g.row_index + g.row_span).min(row_tops.len() - 1) {
+                height += row_tops[r + 1] - row_tops[r];
+            }
+            height
+        };
+        let mut paints: Vec<CellPaint> = Vec::new();
+        for (grid_index, g) in grid.iter().enumerate() {
+            if g.row_span <= 1 || g.row_index >= frag.row_start {
+                continue;
+            }
+            if g.row_index + g.row_span <= frag.row_start {
+                continue;
+            }
+            if header_row_count > 0 && g.row_index < header_row_count {
+                continue; // already drawn by the header pass
+            }
+            paints.push(CellPaint {
+                grid_index,
+                cell_y: to_frag_y(row_tops.get(g.row_index).copied().unwrap_or(0.0)),
+                cell_h: span_height(g),
+                is_first_row: false,
+                selectable: false,
+            });
+        }
+        for vr in &visible {
+            let row_h = row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
+                - row_tops.get(vr.row_index).copied().unwrap_or(0.0);
+            for (grid_index, g) in grid.iter().enumerate() {
+                if g.row_index != vr.row_index {
+                    continue;
+                }
+                paints.push(CellPaint {
+                    grid_index,
+                    cell_y: vr.frag_y,
+                    cell_h: if g.row_span > 1 {
+                        span_height(g)
+                    } else {
+                        row_h
+                    },
+                    is_first_row: g.row_index == 0 || vr.is_first_in_fragment,
+                    selectable: true,
+                });
+            }
+        }
+
+        Self {
+            row_tops,
+            grid,
+            carried,
+            header_row_count,
+            semantic_header_count,
+            header_height,
+            visible_height,
+            clip_top_y: frag.y,
+            clip_bottom_y: frag.y + visible_height,
+            visible,
+            paints,
+        }
+    }
+
+    /// The top of the band a cell clips to: header rows paint above the window.
+    fn cell_clip_top(&self, g: &GridCell) -> f64 {
+        if g.row_index < self.header_row_count {
+            self.clip_top_y
+        } else {
+            self.clip_top_y + self.header_height
+        }
+    }
+}
+
+/// Whether a grid cell is on the table's outer leading edge, whose border insets content.
+fn is_first_grid_column(g: &GridCell, block: &TableBlockIn, measure: &TableExtentIn) -> bool {
+    if block.bidi == Some(true) {
+        g.column_index + g.col_span >= measure.column_widths.len()
+    } else {
+        g.column_index == 0
+    }
+}
+
 /// Paints the row window this page shows of a table: the repeated header band,
 /// the visible rows, re-emitted vertical merges, collapsed shared borders, and
 /// the cut edges that close the fragment where a page break sliced it.
@@ -8866,39 +9044,33 @@ pub(crate) fn emit_table_fragment(
 ) {
     let stamp_from = prims.len();
     let table_id = block_key(&frag.block_id);
-    let row_tops = row_y_positions(&measure.rows);
-    let grid = compute_cell_grid(block, &measure.column_widths);
-
-    let carried = frag.carried_from_prev == Some(true);
-    let header_row_count = if carried {
-        frag.header_row_count.unwrap_or(0)
-    } else {
-        0
-    };
-    let authored_header_count = block
-        .rows
-        .iter()
-        .take_while(|row| row.is_header == Some(true))
-        .count();
-    let semantic_header_count = authored_header_count.max(header_row_count);
-    let mut header_height = 0.0;
-    for r in 0..header_row_count.min(measure.rows.len()) {
-        header_height += measure.rows[r].height;
+    let plan = TablePaintPlan::new(frag, block, measure);
+    let TablePaintPlan {
+        row_tops,
+        grid,
+        carried,
+        header_row_count,
+        semantic_header_count,
+        header_height,
+        visible_height,
+        clip_top_y,
+        clip_bottom_y,
+        ..
+    } = &plan;
+    let (carried, header_row_count, semantic_header_count, header_height, visible_height) = (
+        *carried,
+        *header_row_count,
+        *semantic_header_count,
+        *header_height,
+        *visible_height,
+    );
+    let (clip_top_y, clip_bottom_y) = (*clip_top_y, *clip_bottom_y);
+    struct PaintedCell<'a> {
+        g: &'a GridCell,
+        cell_h: f64,
+        is_first_row: bool,
+        selectable: bool,
     }
-
-    let win_top =
-        row_tops.get(frag.row_start).copied().unwrap_or(0.0) + frag.clip_top.unwrap_or(0.0);
-    let to_frag_y = |full_y: f64| header_height + (full_y - win_top);
-    let visible_height = if frag.clip_bottom.is_some() {
-        frag.height.round()
-    } else {
-        to_frag_y(row_tops.get(frag.row_end).copied().unwrap_or(0.0))
-    };
-
-    // Clip band in page coordinates; every emitted rect and text clips to it,
-    // so a row sliced by the page break cannot paint past the fragment.
-    let clip_top_y = frag.y;
-    let clip_bottom_y = frag.y + visible_height;
 
     let block_ref = BlockRef::of(&frag.block_id);
     let table_revision = whole_table_revision(block);
@@ -8915,40 +9087,8 @@ pub(crate) fn emit_table_fragment(
         }));
     }
 
-    // rows visible in this fragment: repeated header rows first (their own
-    // coordinate space above the windowed body), then the body window
-    struct VisibleRow {
-        row_index: usize,
-        frag_y: f64,
-        is_first_in_fragment: bool,
-    }
-    let mut visible: Vec<VisibleRow> = Vec::new();
-    if header_row_count > 0 {
-        let mut hy = 0.0;
-        for r in 0..header_row_count.min(measure.rows.len()) {
-            visible.push(VisibleRow {
-                row_index: r,
-                frag_y: hy,
-                is_first_in_fragment: r == 0,
-            });
-            hy += measure.rows[r].height;
-        }
-    }
-    for row_index in frag.row_start..frag.row_end.min(block.rows.len()) {
-        let is_first_in_fragment = if header_row_count > 0 {
-            false
-        } else {
-            carried && row_index == frag.row_start && frag.clip_top.unwrap_or(0.0) == 0.0
-        };
-        visible.push(VisibleRow {
-            row_index,
-            frag_y: to_frag_y(row_tops.get(row_index).copied().unwrap_or(0.0)),
-            is_first_in_fragment,
-        });
-    }
-
     if table_revision.is_none() {
-        for vr in &visible {
+        for vr in &plan.visible {
             let Some(row) = block.rows.get(vr.row_index) else {
                 continue;
             };
@@ -8976,82 +9116,22 @@ pub(crate) fn emit_table_fragment(
         }
     }
 
-    // vertically-merged cells whose restart row is on an earlier fragment but
-    // whose span reaches into this one re-paint clipped (not selectable — they
-    // carry no doc positions, matching data-vmerge-continuation)
-    struct CellPaint<'a> {
-        g: &'a GridCell,
-        cell_y: f64,
-        cell_h: f64,
-        is_first_row: bool,
-        selectable: bool,
-    }
-    let mut paints: Vec<CellPaint> = Vec::new();
-
-    for g in &grid {
-        if g.row_span <= 1 || g.row_index >= frag.row_start {
-            continue;
-        }
-        if g.row_index + g.row_span <= frag.row_start {
-            continue;
-        }
-        if header_row_count > 0 && g.row_index < header_row_count {
-            continue; // already drawn by the header pass
-        }
-        let mut span_height = 0.0;
-        for r in g.row_index..(g.row_index + g.row_span).min(row_tops.len() - 1) {
-            span_height += row_tops[r + 1] - row_tops[r];
-        }
-        paints.push(CellPaint {
-            g,
-            cell_y: to_frag_y(row_tops.get(g.row_index).copied().unwrap_or(0.0)),
-            cell_h: span_height,
-            is_first_row: false,
-            selectable: false,
-        });
-    }
-
-    for vr in &visible {
-        let row_h = row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
-            - row_tops.get(vr.row_index).copied().unwrap_or(0.0);
-        for g in grid.iter().filter(|g| g.row_index == vr.row_index) {
-            let mut cell_h = row_h;
-            if g.row_span > 1 {
-                cell_h = 0.0;
-                for r in g.row_index..(g.row_index + g.row_span).min(row_tops.len() - 1) {
-                    cell_h += row_tops[r + 1] - row_tops[r];
-                }
-            }
-            paints.push(CellPaint {
-                g,
-                cell_y: vr.frag_y,
-                cell_h,
-                is_first_row: g.row_index == 0 || vr.is_first_in_fragment,
-                selectable: true,
-            });
-        }
-    }
-
-    let col_count = measure.column_widths.len();
-    let bidi = block.bidi == Some(true);
-
     // per cell: background, collapsed borders, then content — clipped to the
     // fragment window
-    for p in &paints {
+    for paint in &plan.paints {
         let cell_stamp_from = prims.len();
-        let cell = &block.rows[p.g.row_index].cells[p.g.cell_index];
-        let cx = frag.x + p.g.x;
-        let cy = frag.y + p.cell_y;
-        let clip_top_y = if p.g.row_index < header_row_count {
-            clip_top_y
-        } else {
-            clip_top_y + header_height
-        };
+        let g = &grid[paint.grid_index];
+        let cell = &block.rows[g.row_index].cells[g.cell_index];
+        let cx = frag.x + g.x;
+        let cy = frag.y + paint.cell_y;
+        let clip_top_y = plan.cell_clip_top(g);
         // The outer left border insets cell content by its width.
-        let is_first_col = if bidi {
-            p.g.column_index + p.g.col_span >= col_count
-        } else {
-            p.g.column_index == 0
+        let is_first_col = is_first_grid_column(g, block, measure);
+        let p = PaintedCell {
+            g,
+            cell_h: paint.cell_h,
+            is_first_row: paint.is_first_row,
+            selectable: paint.selectable,
         };
         // Grid position stamped on every primitive inside this cell. A vertical
         // merge continuation keeps the anchor cell's row and column and flags
@@ -9252,7 +9332,7 @@ pub(crate) fn emit_table_fragment(
     // per-column styles / colSpans / borderless columns are respected;
     // `only_spanning` limits a clean row boundary to cells crossing the edge
     let mut draw_cut_edge = |cut_row: usize, bottom: bool, top_y: f64, only_spanning: bool| {
-        for g in &grid {
+        for g in grid {
             if g.row_index > cut_row || g.row_index + g.row_span - 1 < cut_row {
                 continue;
             }
@@ -9354,6 +9434,23 @@ pub(crate) fn emit_table_fragment(
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);
 }
 
+/// Where a painted cell's content goes: its content box origin and width, the
+/// stacked top of every block, and the band it clips to. A rotated cell lays
+/// its content out unrotated in a logical box at the origin, clipped only by
+/// the cell, and turns it afterwards.
+struct CellContentFrame {
+    rotation: f64,
+    /// The cell's physical box `(x, y, width, height)`.
+    physical: (f64, f64, f64, f64),
+    content_x: f64,
+    content_top: f64,
+    content_width: f64,
+    clip_top_y: f64,
+    clip_bottom_y: f64,
+    /// Index-aligned with the cell's blocks.
+    block_tops: Vec<f64>,
+}
+
 /// Stacks a cell's paragraphs and nested tables with Word's spacing collapse.
 ///
 /// Adjacent paragraphs collapse `spacing.after` against the next
@@ -9361,10 +9458,9 @@ pub(crate) fn emit_table_fragment(
 /// after-spacing, and a trailing after-spacing acts as the content box's bottom
 /// padding. Authored border insets remain stable across fragment cuts.
 #[allow(clippy::too_many_arguments)]
-fn emit_cell_content(
-    prims: &mut Vec<Primitive>,
+fn cell_content_frame<'m>(
     cell: &TableCellIn,
-    measure: &TableExtentIn,
+    measure: &'m TableExtentIn,
     p: &CellPaintRef,
     cx: f64,
     cy: f64,
@@ -9372,12 +9468,7 @@ fn emit_cell_content(
     is_first_col: bool,
     clip_top_y: f64,
     clip_bottom_y: f64,
-    ctx: &RenderCtx<'_>,
-    selectable: bool,
-    cell_ref: &TableCellRef,
-    block_ref: &BlockRef,
-) {
-    let stamp_from = prims.len();
+) -> Option<(CellContentFrame, &'m TableCellExtentIn)> {
     let rotation = match cell.text_direction.as_deref() {
         Some("btLr") => -90.0,
         Some("tbRl") => 90.0,
@@ -9391,12 +9482,7 @@ fn emit_cell_content(
     } else {
         (cx, cy, cell_h, clip_top_y, clip_bottom_y)
     };
-    let Some(row_measure) = measure.rows.get(p.row_index) else {
-        return;
-    };
-    let Some(cell_measure) = row_measure.cells.get(p.cell_index) else {
-        return;
-    };
+    let cell_measure = measure.rows.get(p.row_index)?.cells.get(p.cell_index)?;
     let left = cell.padding.and_then(|pd| pd.left).unwrap_or(7.0);
     let top = cell.padding.and_then(|pd| pd.top).unwrap_or(0.0);
     let right = cell.padding.and_then(|pd| pd.right).unwrap_or(7.0);
@@ -9508,8 +9594,64 @@ fn emit_cell_content(
         border_bottom + pad_bottom,
     );
 
-    let content_x = cx + border_left + pad_left;
-    let content_top = cy + border_top + pad_top + v_offset;
+    Some((
+        CellContentFrame {
+            rotation,
+            physical,
+            content_x: cx + border_left + pad_left,
+            content_top: cy + border_top + pad_top + v_offset,
+            content_width,
+            clip_top_y,
+            clip_bottom_y,
+            block_tops,
+        },
+        cell_measure,
+    ))
+}
+
+/// Paints a cell's content into its [`CellContentFrame`].
+#[allow(clippy::too_many_arguments)]
+fn emit_cell_content(
+    prims: &mut Vec<Primitive>,
+    cell: &TableCellIn,
+    measure: &TableExtentIn,
+    p: &CellPaintRef,
+    cx: f64,
+    cy: f64,
+    cell_h: f64,
+    is_first_col: bool,
+    clip_top_y: f64,
+    clip_bottom_y: f64,
+    ctx: &RenderCtx<'_>,
+    selectable: bool,
+    cell_ref: &TableCellRef,
+    block_ref: &BlockRef,
+) {
+    let stamp_from = prims.len();
+    let Some((frame, cell_measure)) = cell_content_frame(
+        cell,
+        measure,
+        p,
+        cx,
+        cy,
+        cell_h,
+        is_first_col,
+        clip_top_y,
+        clip_bottom_y,
+    ) else {
+        return;
+    };
+    let CellContentFrame {
+        rotation,
+        physical,
+        content_x,
+        content_top,
+        content_width,
+        clip_top_y,
+        clip_bottom_y,
+        block_tops,
+    } = frame;
+    let rotated = rotation != 0.0;
 
     // Behind-document floats paint below cell content.
     emit_cell_floating_images(
@@ -10004,6 +10146,215 @@ fn emit_cell_floating_images(
             paragraph_y += pm.total_height;
         }
     }
+}
+
+/// Less of a line or block than this, in CSS pixels, is too thin a sliver to count as shown:
+/// clean row breaks on rounded row offsets leave slivers that thin.
+const MIN_SHOWN_PX: f64 = 1.0;
+
+/// What of one table cell block a table fragment shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShownPart {
+    /// The window of a paragraph's lines, and whether its cell's clip box cuts through one.
+    Lines(std::ops::Range<usize>, bool),
+    /// The rows of a nested table with some content shown.
+    Rows(Vec<usize>),
+    /// A drawing or text box, shown whole.
+    Whole,
+}
+
+/// A block inside a table that a table fragment shows, by the painting rules: the fragment's
+/// cell paints and clip band, each cell's clip box and content stacking, rotated cells and nested
+/// tables. A line or block is shown wherever more than a sliver of it lies inside its cell's clip
+/// box, as painting shows it, and is cut where part of it lies outside.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VisibleCellBlock {
+    /// Row, cell and block steps from the fragment's table down to the block.
+    pub path: Vec<(usize, usize, usize)>,
+    pub shown: ShownPart,
+    /// Painted as part of a repeated header row.
+    pub repeated_header: bool,
+    /// Painted in a row or vertically merged cell whose earlier part is on another page.
+    pub continuation: bool,
+}
+
+/// The blocks a table fragment shows inside its cells, tables before their content.
+pub(crate) fn visible_table_content(
+    frag: &TableFragmentIn,
+    block: &TableBlockIn,
+    measure: &TableExtentIn,
+) -> Vec<VisibleCellBlock> {
+    let mut out = Vec::new();
+    visit_table_fragment(
+        frag,
+        block,
+        measure,
+        (f64::NEG_INFINITY, f64::INFINITY),
+        (false, false),
+        &mut Vec::new(),
+        &mut out,
+    );
+    out
+}
+
+fn visit_table_fragment(
+    frag: &TableFragmentIn,
+    block: &TableBlockIn,
+    measure: &TableExtentIn,
+    band: (f64, f64),
+    inherited: (bool, bool),
+    path: &mut Vec<(usize, usize, usize)>,
+    out: &mut Vec<VisibleCellBlock>,
+) {
+    let plan = TablePaintPlan::new(frag, block, measure);
+    let row_split = frag.clip_top.unwrap_or(0.0) > 0.0;
+    for paint in &plan.paints {
+        let g = &plan.grid[paint.grid_index];
+        let Some(cell) = block
+            .rows
+            .get(g.row_index)
+            .and_then(|row| row.cells.get(g.cell_index))
+        else {
+            continue;
+        };
+        let cy = frag.y + paint.cell_y;
+        let clip_top = plan.cell_clip_top(g).max(band.0);
+        let clip_bottom = plan.clip_bottom_y.min(band.1);
+        let (top, bottom) = (cy.max(clip_top), (cy + paint.cell_h).min(clip_bottom));
+        if bottom <= top {
+            continue;
+        }
+        let Some((frame, cell_measure)) = cell_content_frame(
+            cell,
+            measure,
+            &CellPaintRef::from(g),
+            frag.x + g.x,
+            cy,
+            paint.cell_h,
+            is_first_grid_column(g, block, measure),
+            clip_top,
+            clip_bottom,
+        ) else {
+            continue;
+        };
+        let (top, bottom) = if frame.rotation != 0.0 {
+            (f64::NEG_INFINITY, f64::INFINITY)
+        } else {
+            (top, bottom)
+        };
+        let shown = |y: f64, height: f64| {
+            let inside = (y + height).min(bottom) - y.max(top);
+            (inside > MIN_SHOWN_PX.min(height / 2.0)).then_some(inside < height - MIN_SHOWN_PX)
+        };
+        let repeated_header = inherited.0 || (plan.carried && g.row_index < plan.header_row_count);
+        let continuation =
+            inherited.1 || !paint.selectable || (row_split && g.row_index == frag.row_start);
+        for (index, (cell_block, cell_block_measure)) in
+            cell.blocks.iter().zip(&cell_measure.blocks).enumerate()
+        {
+            let y = frame.content_top + frame.block_tops.get(index).copied().unwrap_or(0.0);
+            path.push((g.row_index, g.cell_index, index));
+            let shown = match (cell_block, cell_block_measure) {
+                (BlockIn::Paragraph(_), MeasureIn::Paragraph(extent)) => {
+                    let mut line_top = y;
+                    let mut first = None;
+                    let mut last = 0;
+                    let mut clipped = false;
+                    for (line_index, line) in extent.lines.iter().enumerate() {
+                        line_top += line.float_skip_before.unwrap_or(0.0);
+                        if let Some(cut) = shown(line_top, line.line_height) {
+                            first.get_or_insert(line_index);
+                            last = line_index + 1;
+                            clipped |= cut;
+                        }
+                        line_top += line.line_height;
+                    }
+                    match first {
+                        Some(first) => Some(ShownPart::Lines(first..last, clipped)),
+                        None if extent.lines.is_empty() && y >= top && y < bottom => {
+                            Some(ShownPart::Lines(0..0, false))
+                        }
+                        None => None,
+                    }
+                }
+                (BlockIn::Table(nested), MeasureIn::Table(nested_measure)) => {
+                    let fragment = TableFragmentIn {
+                        block_id: nested.id.clone(),
+                        x: frame.content_x
+                            + nested_table_x_offset(nested, nested_measure, frame.content_width),
+                        y,
+                        width: table_total_width(nested_measure),
+                        height: nested_measure.total_height,
+                        row_start: 0,
+                        row_end: nested.rows.len(),
+                        clip_top: None,
+                        clip_bottom: None,
+                        header_row_count: None,
+                        carried_from_prev: None,
+                        carried_to_next: None,
+                    };
+                    let at = out.len();
+                    out.push(VisibleCellBlock {
+                        path: path.clone(),
+                        shown: ShownPart::Rows(Vec::new()),
+                        repeated_header,
+                        continuation,
+                    });
+                    visit_table_fragment(
+                        &fragment,
+                        nested,
+                        nested_measure,
+                        (top, bottom),
+                        (repeated_header, continuation),
+                        path,
+                        out,
+                    );
+                    let depth = path.len();
+                    let mut rows: Vec<usize> = out[at + 1..]
+                        .iter()
+                        .filter(|visible| visible.path.len() == depth + 1)
+                        .map(|visible| visible.path[depth].0)
+                        .collect();
+                    rows.sort_unstable();
+                    rows.dedup();
+                    if rows.is_empty() {
+                        out.truncate(at);
+                    } else {
+                        out[at].shown = ShownPart::Rows(rows);
+                    }
+                    path.pop();
+                    continue;
+                }
+                (_, extent) => {
+                    let height = match extent {
+                        MeasureIn::Paragraph(extent) => extent.total_height,
+                        MeasureIn::Table(extent) => extent.total_height,
+                        MeasureIn::Image(extent) => extent.height,
+                        MeasureIn::TextBox(extent) => extent.height,
+                        MeasureIn::Shape(extent) | MeasureIn::Chart(extent) => extent.height,
+                        MeasureIn::Unsupported => 0.0,
+                    };
+                    shown(y, height).map(|_| ShownPart::Whole)
+                }
+            };
+            if let Some(shown) = shown {
+                out.push(VisibleCellBlock {
+                    path: path.clone(),
+                    shown,
+                    repeated_header,
+                    continuation,
+                });
+            }
+            path.pop();
+        }
+    }
+}
+
+/// The display mirror of a resident layout value.
+pub(crate) fn display_mirror<T: DeserializeOwned>(value: &impl Serialize) -> Option<T> {
+    let mut wire = serde_json::to_value(value).ok()?;
+    normalize_integral_json_numbers(&mut wire);
+    serde_json::from_value(wire).ok()
 }
 
 /// narrow view of CellPaint the content pass needs (avoids borrowing GridCell)

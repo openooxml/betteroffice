@@ -818,6 +818,21 @@ impl PyWorkbook {
         py.detach(|| self.inner.apply_edits_json(request))
             .map_err(map_error)
     }
+
+    fn export_structured_json(&self, py: Python<'_>, options: &str) -> PyResult<String> {
+        py.detach(|| self.inner.export_structured_json(options))
+            .map_err(map_error)
+    }
+
+    fn export_markdown_json(
+        &self,
+        py: Python<'_>,
+        options: &str,
+        markdown_options: &str,
+    ) -> PyResult<String> {
+        py.detach(|| self.inner.export_markdown_json(options, markdown_options))
+            .map_err(map_error)
+    }
     fn reject_proposal(&mut self, proposal_id: &str) -> bool {
         self.inner.reject_proposal(proposal_id)
     }
@@ -980,6 +995,30 @@ impl PyWorkbook {
     }
 }
 
+/// Exports `.xlsx` bytes as read, without recalculating.
+#[pyfunction]
+fn export_xlsx_structured_json(py: Python<'_>, data: &[u8], options: &str) -> PyResult<String> {
+    py.detach(|| betteroffice_xlsx::export_xlsx_structured_json(data, options))
+        .map_err(map_error)
+}
+
+#[pyfunction]
+fn export_xlsx_markdown_json(
+    py: Python<'_>,
+    data: &[u8],
+    options: &str,
+    markdown_options: &str,
+) -> PyResult<String> {
+    py.detach(|| betteroffice_xlsx::export_xlsx_markdown_json(data, options, markdown_options))
+        .map_err(map_error)
+}
+
+#[pyfunction]
+fn render_xlsx_markdown_json(py: Python<'_>, content: &str, options: &str) -> PyResult<String> {
+    py.detach(|| betteroffice_xlsx::render_xlsx_markdown_json(content, options))
+        .map_err(map_error)
+}
+
 #[pymodule]
 fn _betteroffice_xlsx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
@@ -1007,5 +1046,8 @@ fn _betteroffice_xlsx(module: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<NotCollaborativeError>(),
     )?;
     module.add("MAX_COLLABORATION_BYTES", MAX_COLLABORATION_BYTES)?;
+    module.add_function(wrap_pyfunction!(export_xlsx_structured_json, module)?)?;
+    module.add_function(wrap_pyfunction!(export_xlsx_markdown_json, module)?)?;
+    module.add_function(wrap_pyfunction!(render_xlsx_markdown_json, module)?)?;
     Ok(())
 }

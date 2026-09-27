@@ -275,6 +275,12 @@ impl FontStore {
         self.id
     }
 
+    /// How many fonts the store holds. Fonts are only ever added, so a store with the same id
+    /// and count holds the same fonts.
+    pub fn font_count(&self) -> usize {
+        self.fonts.len()
+    }
+
     /// Parse and register a font from raw bytes, returning its handle.
     ///
     /// Metrics are extracted eagerly so later queries are infallible cheap
@@ -385,6 +391,17 @@ impl FontStore {
     /// cannot disagree about how wide a substituted run is.
     pub fn advance_scale(&self, id: FontId) -> Result<f32, FontError> {
         self.entry(id).map(|entry| entry.advance_scale)
+    }
+
+    /// What `id` measures with: the bytes it shapes, its metrics and its advance scale. Two
+    /// ids that answer the same measure identically.
+    pub fn measured_face(&self, id: FontId) -> Result<(&[u8], &FontMetrics, f32), FontError> {
+        let entry = self.entry(id)?;
+        Ok((
+            &self.byte_entry(id)?.data,
+            &entry.metrics,
+            entry.advance_scale,
+        ))
     }
 
     /// Per-font design-space metrics captured at registration.
