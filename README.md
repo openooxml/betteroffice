@@ -74,6 +74,13 @@
   return a typed refusal with nothing changed. Text steps stay within one
   paragraph and leave fields and line breaks whole.
 
+- **Version-checked XLSX edit batches.** XLSX hosts in JavaScript, React, Rust
+  and Python read cells with a session version, then apply atomic cell input,
+  formula, number-format and style batches that commit as one recalculated undo
+  step or return a typed refusal with nothing changed. Batches do not insert or
+  delete rows, columns or sheets, and refuse writes to merged-cell followers,
+  array-formula cells and protected sheets.
+
 - **Host-owned DOCX plugins.** DOCX React supports host-owned plugins with
   panels, overlays, sidebar items, lifecycle events, and explicitly granted
   commands and edit batches. Plugins read and navigate by default; every write

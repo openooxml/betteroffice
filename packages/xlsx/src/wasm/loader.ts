@@ -10,6 +10,16 @@ import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList } from '../display-list/types';
+import type {
+  XlsxCellAddress,
+  XlsxEditRequest,
+  XlsxEditResult,
+  XlsxFindRequest,
+  XlsxFindResult,
+  XlsxReadRequest,
+  XlsxReadResult,
+  XlsxValidationResult,
+} from '../edits';
 
 /**
  * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
@@ -288,32 +298,45 @@ export interface Proposal {
   cells: ProposalCell[];
 }
 
+/** A drifted proposal cell: its sheet index and catalog id beside the coordinates. */
+export interface StaleProposalTarget extends XlsxCellAddress {
+  sheet: number;
+}
+
 /**
  * Thrown by {@link WorkbookHandle.acceptProposal} when the workbook changed
  * under a proposal since it was staged (an edit touched one of its base cells)
  * and `force` was not set. `cells` are the a1 addresses that moved, so the UI
- * can name them and offer a force-apply.
+ * can name them and offer a force-apply; `targets` also carry each one's sheet.
  */
 export class StaleProposalError extends Error {
   readonly cells: string[];
-  constructor(cells: string[]) {
+  readonly targets: StaleProposalTarget[];
+  constructor(cells: string[], targets: StaleProposalTarget[] = []) {
     super(`stale: ${cells.join(', ')}`);
     this.name = 'StaleProposalError';
     this.cells = cells;
+    this.targets = targets;
   }
 }
 
-// the wasm signals a stale accept with a string starting `"stale: "` followed
-// by a comma-separated a1 list; parse it back into the typed error.
-const STALE_PREFIX = 'stale: ';
-
-function staleErrorFrom(message: string): StaleProposalError {
-  const cells = message
-    .slice(STALE_PREFIX.length)
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  return new StaleProposalError(cells);
+// the wasm reports a stale accept as a JSON error naming each drifted cell.
+function staleErrorFrom(message: string): StaleProposalError | null {
+  if (!message.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(message) as {
+      code?: unknown;
+      cells?: unknown;
+      targets?: unknown;
+    };
+    if (parsed.code !== 'staleProposal' || !Array.isArray(parsed.cells)) return null;
+    return new StaleProposalError(
+      parsed.cells as string[],
+      Array.isArray(parsed.targets) ? (parsed.targets as StaleProposalTarget[]) : []
+    );
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -420,6 +443,23 @@ export interface WorkbookHandle extends CollaborationReplica {
   rejectProposal(id: string): boolean;
   /** whether the embedded wasm core was built with the proposals api. */
   isProposalsAvailable(): boolean;
+  /**
+   * The session-scoped version of the committed workbook. Committed edits, peer updates, undo,
+   * redo and value-changing recalculation move it; selection, the active sheet and proposals
+   * do not.
+   */
+  version(): string;
+  /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
+  readCells(request: XlsxReadRequest): XlsxReadResult;
+  /** Exact, case-sensitive search over display text, one match per cell. */
+  findText(request: XlsxFindRequest): XlsxFindResult;
+  /** Resolves, stages and rehearses a batch like `applyEdits`, changing nothing. */
+  validateEdits(request: XlsxEditRequest): XlsxValidationResult;
+  /**
+   * Applies every step as one committed, recalculated change, or refuses with nothing changed.
+   * Update listeners run once, after the call returns. Malformed requests throw.
+   */
+  applyEdits(request: XlsxEditRequest): XlsxEditResult;
   dispose(): void;
 }
 
@@ -811,8 +851,7 @@ export function openWorkbook(
         });
       } catch (e) {
         const message = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
-        if (message.startsWith(STALE_PREFIX)) throw staleErrorFrom(message);
-        throw toError(e);
+        throw staleErrorFrom(message) ?? toError(e);
       }
     },
     rejectProposal(id: string): boolean {
@@ -824,6 +863,21 @@ export function openWorkbook(
     },
     isProposalsAvailable(): boolean {
       return wasmCall(() => typeof (doc as { proposeJson?: unknown }).proposeJson === 'function');
+    },
+    version(): string {
+      return wasmCall(() => doc.documentVersion());
+    },
+    readCells(request: XlsxReadRequest): XlsxReadResult {
+      return parseJson(() => doc.readCellsJson(JSON.stringify(request)));
+    },
+    findText(request: XlsxFindRequest): XlsxFindResult {
+      return parseJson(() => doc.findTextJson(JSON.stringify(request)));
+    },
+    validateEdits(request: XlsxEditRequest): XlsxValidationResult {
+      return parseJson(() => doc.validateEditsJson(JSON.stringify(request)));
+    },
+    applyEdits(request: XlsxEditRequest): XlsxEditResult {
+      return parseJson(() => doc.applyEditsJson(JSON.stringify(request)), true);
     },
     dispose(): void {
       if (disposed) return;
