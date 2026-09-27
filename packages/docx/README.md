@@ -140,6 +140,15 @@ persisted and exact-source anchors. A persisted anchor is scoped to the document
 host chose, repeated source IDs resolve as `ambiguous`, and table, cell and
 content-control identities are not persisted.
 
+### Selection state
+
+`session.selectionContext(range)` aggregates the range for toolbars and
+assistive technology. Toggle marks, including `superscript` and `subscript`,
+are `true`, `false` or `'mixed'`; value marks such as `fontFamily`, `color` and
+`highlight` are `null` when absent or not uniform. `highlight` reports Word's
+highlight name (`'yellow'`) or an unmapped hex value. `toggleMark` accepts
+`{ type: 'superscript' }` and `{ type: 'subscript' }`; adding one clears the other.
+
 ### Version-checked edit batches
 
 Read what you will target together with the session version, then apply a batch

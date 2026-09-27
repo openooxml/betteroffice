@@ -20,6 +20,67 @@ export {
   type EditorMode,
 } from './components/DocxEditor';
 
+// Commands: one authority for built-in and host chrome
+export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';
+export {
+  useDocxCommands,
+  useDocxCommandState,
+  useDocxCommand,
+  type DocxBoundCommand,
+} from './commands/hooks';
+export type {
+  CommandReason,
+  CommandState,
+  JsonValue,
+  DocxCommandArgs,
+  DocxCommandDescriptor,
+  DocxCommandDisabledCode,
+  DocxCommandFailureCode,
+  DocxCommandId,
+  DocxCommandOption,
+  DocxCommandOptionPreview,
+  DocxCommandResult,
+  DocxCommandShortcut,
+  DocxCommandState,
+  DocxCommandStatus,
+  DocxCommandStore,
+  DocxCommandValues,
+  DocxImageTransform,
+  DocxSelectCommandId,
+  DocxTableAction,
+  DocxTableValue,
+  DocxTextColor,
+} from './commands/types';
+
+// Composable chrome
+export {
+  EditorToolbar,
+  type EditorToolbarProps,
+  type TitleBarProps,
+  type LogoProps,
+  type DocumentNameProps,
+  type TitleBarRightProps,
+  type ToolbarProps,
+  type ToolbarReviewControlsProps,
+} from './components/EditorToolbar';
+export {
+  ToolbarButton,
+  ToolbarGroup,
+  ToolbarSeparator,
+  type ToolbarButtonProps,
+  type ToolbarGroupProps,
+} from './components/toolbar/ToolbarPrimitives';
+export { ToolbarOverflow, type ToolbarOverflowProps } from './components/toolbar/ToolbarOverflow';
+export {
+  ToolbarCommand,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  type ToolbarCommandArgs,
+  type ToolbarCommandButtonProps,
+  type ToolbarCommandProps,
+  type ToolbarCommandSelectProps,
+} from './components/toolbar/ToolbarCommand';
+
 export type { BundledFontProvider } from '@betteroffice/docx/layout';
 export {
   configureDefaultFonts,

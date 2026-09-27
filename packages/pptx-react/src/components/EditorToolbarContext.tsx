@@ -12,3 +12,9 @@ export function useEditorToolbar(): ToolbarProps {
   }
   return context;
 }
+
+/** The binding style of the surrounding `EditorToolbar`, inherited by `Toolbar`. */
+export const ToolbarModeContext = createContext<'legacy' | 'commands' | null>(null);
+
+/** Set by the editor around its toolbar region, whose locale and shortcuts it already owns. */
+export const EditorChromeContext = createContext(false);

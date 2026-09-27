@@ -7,6 +7,7 @@ import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from '@betteroffice/docx/yrs';
 import type { Comment } from '@betteroffice/docx/types/content';
+import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
@@ -89,7 +90,6 @@ async function setup(options: { flush?: () => Promise<void> | void; mode?: Edito
       historyStateRef: { current: null },
       pagedEditorRef,
       handleSave: async () => null,
-      handleDirectPrint: () => {},
       zoom: 1,
       setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
@@ -107,6 +107,7 @@ async function setup(options: { flush?: () => Promise<void> | void; mode?: Edito
         throw new Error('unused');
       }) as never,
       commentIdAllocator: createCommentIdAllocator(),
+      commands: UNAVAILABLE_DOCX_COMMANDS,
       modeRef,
     });
     return ref;

@@ -41,7 +41,8 @@
   processing and agent workflows.
 
 - **Host-controlled PPTX editing.** PPTX hosts can intercept saving, flush accepted input, query slide content
-  under the pointer, group undo with explicit boundaries, and reposition comments.
+  under the pointer, group undo with explicit boundaries, reposition comments, and anchor carets that
+  follow later edits.
 
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
@@ -53,6 +54,14 @@
   save with valid Word paragraph IDs, and each saved paragraph's anchor, qualified by
   its package part, resolves again after reopening. Source paragraphs without an ID
   gain one only when the host opts in.
+
+- **Composable DOCX toolbars.** Arrange built-in controls in your own order next
+  to host actions, inside or outside the editor. Controls keep their state,
+  shortcuts, disabled reasons, and read-only rules through one command store.
+
+- **Composable PPTX toolbars.** Arrange built-in slide controls in your own order
+  next to host actions, inside or outside the editor, through one command store
+  with disabled reasons, platform-aware shortcuts, and ordered execution.
 
 - **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
   paragraphs with a session version, then apply atomic text and paragraph
