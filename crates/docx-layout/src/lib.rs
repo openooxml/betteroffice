@@ -63,6 +63,7 @@ pub mod hooks;
 pub mod page_flow;
 pub mod paragraph_spacing;
 pub mod place;
+pub mod placement;
 pub mod prescan;
 pub mod regions;
 pub mod resolve_lines;
@@ -526,13 +527,7 @@ thread_local! {
 /// error at this boundary, mirroring `FontStore::register`.
 #[wasm_bindgen]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
-    MEASURE_FONTS.with(|store| {
-        store
-            .borrow_mut()
-            .register(bytes.to_vec())
-            .map(|id| id.to_u32())
-            .map_err(|e| JsValue::from_str(&e.to_string()))
-    })
+    register_measure_font_bytes(bytes).map_err(|e| JsValue::from_str(&e))
 }
 
 /// Register a measurement view of `base` carrying the vertical metrics and
@@ -567,8 +562,57 @@ pub fn clear_measure_fonts() {
 
 /// Unique id of the current measurement font store, for caches keyed by store
 /// contents. Changes whenever [`clear_measure_fonts`] installs a new store.
-pub(crate) fn measure_store_id() -> u64 {
+pub fn measure_store_id() -> u64 {
     MEASURE_FONTS.with(|store| store.borrow().id())
+}
+
+/// Which fonts measurement reads: the current store and how many fonts it holds. A cleared store
+/// is a new one and fonts are only ever added, so measurements taken under equal generations
+/// used the same fonts.
+pub fn measure_fonts_generation() -> (u64, usize) {
+    MEASURE_FONTS.with(|store| {
+        let store = store.borrow();
+        (store.id(), store.font_count())
+    })
+}
+
+/// Runs `run` against an empty measurement font store of its own, then puts the
+/// module's store back unchanged: fonts `run` registers never reach another
+/// session, and caches keyed by [`measure_store_id`] never mix the two.
+pub fn with_private_measure_fonts<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<ooxml_text::FontStore>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(store) = self.0.take() {
+                MEASURE_FONTS.with(|current| *current.borrow_mut() = store);
+            }
+        }
+    }
+    let _restore = Restore(Some(MEASURE_FONTS.with(|store| {
+        std::mem::replace(&mut *store.borrow_mut(), ooxml_text::FontStore::new())
+    })));
+    run()
+}
+
+/// Registers raw sfnt bytes in the current measurement font store.
+pub fn register_measure_font_bytes(bytes: &[u8]) -> Result<u32, String> {
+    MEASURE_FONTS.with(|store| {
+        store
+            .borrow_mut()
+            .register(bytes.to_vec())
+            .map(|id| id.to_u32())
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Reads what measurement font `id` measures with: the bytes it shapes and a descriptor of the
+/// metrics and advance scale layered over them. `None` for an id the store does not hold.
+pub fn with_measure_face<T>(id: u32, read: impl FnOnce(&[u8], &str) -> T) -> Option<T> {
+    MEASURE_FONTS.with(|store| {
+        let store = store.borrow();
+        let (bytes, metrics, scale) = store.measured_face(ooxml_text::FontId::from_u32(id)).ok()?;
+        Some(read(bytes, &format!("{metrics:?}/{scale}")))
+    })
 }
 
 /// Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON

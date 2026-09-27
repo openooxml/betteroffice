@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 import type { PptxCommandController } from './createPptxCommandStore';
 import { matchesChord, PPTX_COMMAND_DESCRIPTORS } from './descriptors';
+import { pluginEventStore } from './pluginEvents';
 import type { PptxCommandId, PptxCommandShortcut } from './types';
 
 const BINDINGS = Object.values(PPTX_COMMAND_DESCRIPTORS).flatMap((descriptor) =>
@@ -23,9 +24,10 @@ function isTextField(target: EventTarget | null): boolean {
 
 /**
  * The editor's keyboard shortcuts, dispatched from the command descriptors.
- * Only events inside this editor or chrome registered for it are handled, so
- * several editors on one page never answer the same keystroke. Composition,
- * prevented events and suspended periods, such as a slideshow, pass through.
+ * Only events inside this editor, its plugins' contributions (portals
+ * included) or chrome registered for it are handled, so several editors on one
+ * page never answer the same keystroke. Composition, prevented events and
+ * suspended periods, such as a slideshow, pass through.
  */
 export function useCommandShortcuts({
   commands,
@@ -40,15 +42,29 @@ export function useCommandShortcuts({
   suspendedRef.current = suspended;
 
   useEffect(() => {
-    const owns = (target: EventTarget | null): boolean =>
-      (target instanceof Node && (containerRef.current?.contains(target) ?? false)) ||
-      commands.ownsChrome(target);
+    const owns = (event: KeyboardEvent): boolean => {
+      const plugin = pluginEventStore(event);
+      if (plugin) return commands.ownsStore(plugin);
+      const target = event.target;
+      return (
+        (target instanceof Node && (containerRef.current?.contains(target) ?? false)) ||
+        commands.ownsChrome(target)
+      );
+    };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (!owns(event.target) || suspendedRef.current()) return;
+      if (!owns(event) || suspendedRef.current()) return;
       const binding = BINDINGS.find(({ shortcut }) => matchesChord(shortcut.chord, event));
-      if (!binding) return;
+      if (!binding) {
+        const contributed = commands
+          .pluginShortcuts()
+          .find(({ chord }) => matchesChord(chord, event));
+        if (!contributed || isTextField(event.target)) return;
+        event.preventDefault();
+        if (!event.repeat) void commands.store.execute(contributed.id, null);
+        return;
+      }
       const { id, shortcut } = binding;
       if (isTextField(event.target) && !FIELD_COMMANDS.has(id)) return;
       const state = commands.store.getState(id, shortcut.args as never);

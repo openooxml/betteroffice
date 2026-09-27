@@ -188,7 +188,17 @@
       "documentReplaced": "A apresentação foi substituída.",
       "targetChanged": "A seleção mudou antes da execução do comando.",
       "gestureActive": "Conclua primeiro o gesto do ponteiro.",
-      "commandFailed": "O comando falhou."
+      "commandFailed": "O comando falhou.",
+      "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
+      "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
+      "pluginUnavailable": "O plugin não está mais ativo.",
+      "aborted": "A ação do plugin foi cancelada antes de o comando ser executado."
     }
+  },
+  "plugins": {
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Painéis de plugins",
+    "collapsePanel": "Recolher {title}",
+    "expandPanel": "Expandir {title}"
   }
 }

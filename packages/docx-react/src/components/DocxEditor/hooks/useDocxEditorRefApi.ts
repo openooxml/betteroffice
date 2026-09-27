@@ -3,6 +3,10 @@ import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
 import type {
   DocxEditStep,
+  DocxExportResult,
+  DocxLayoutMap,
+  DocxPageExportOptions,
+  DocxPagedStructuredContent,
   DocxTextTarget,
   YrsInlineFormatDelta,
   YrsLoc,
@@ -47,6 +51,64 @@ function helperTarget(story: string, paraId: string, search?: string): DocxTextT
 
 function storyOffset(session: YrsSession, loc: YrsLoc): number {
   return session.locateParagraph(loc.story, loc.paraId).start + loc.offset;
+}
+
+/** How long a paged export waits for fonts and a layout of the flushed document. */
+const LAYOUT_WAIT_MS = 2_000;
+const LAYOUT_POLL_MS = 16;
+const LAYOUT_REFUSALS: ReadonlySet<string> = new Set([
+  'stale-document',
+  'stale-layout',
+  'layout-unavailable',
+]);
+
+/**
+ * Flushes input, then exports with pages when the session's retained layout is of the current
+ * version, lowered from its own stories, and computed from the inputs the editor would lay the
+ * document out with now. Lays the document out once when it is not, then waits for fonts or a
+ * pass the pipeline deferred. The session, document version and current inputs are checked again
+ * after every wait and by the export itself, which runs synchronously right before returning;
+ * waiting for a painted frame is not needed.
+ */
+async function exportWithPages(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  options: DocxPageExportOptions
+): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
+  const { session } = await flushedSession(pagedEditorRef);
+  const editor = (): PagedEditorRef => {
+    const current = pagedEditorRef.current;
+    if (!current || current.getYrsSession() !== session) {
+      throw new Error('The document changed while it was being laid out');
+    }
+    return current;
+  };
+  const attempt = (): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>> => {
+    const request = editor().getLayoutRequest();
+    if (request === null) {
+      return {
+        ok: false,
+        version: session.version(),
+        failure: {
+          code: 'layout-unavailable',
+          target: null,
+          message: 'The fonts this document uses are not loaded yet.',
+        },
+      };
+    }
+    return session.exportStructuredWithPagesFor(options, request);
+  };
+  let result = attempt();
+  if (options.expectLayoutVersion !== undefined) return result;
+  if (!result.ok && LAYOUT_REFUSALS.has(result.failure.code)) {
+    editor().relayout();
+    result = attempt();
+  }
+  const deadline = Date.now() + LAYOUT_WAIT_MS;
+  while (!result.ok && LAYOUT_REFUSALS.has(result.failure.code) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, LAYOUT_POLL_MS));
+    result = attempt();
+  }
+  return result;
 }
 
 function normalizeSelection(session: YrsSession): YrsStoryRange | null {
@@ -174,6 +236,8 @@ export function useDocxEditorRefApi({
         if ('flush' in outcome) throw outcome.flush.error;
         return outcome.result;
       },
+
+      exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options),
 
       addComment: (options) => {
         const editor = pagedEditorRef.current;

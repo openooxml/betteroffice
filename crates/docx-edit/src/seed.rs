@@ -292,6 +292,14 @@ impl SourceMetadata {
             .run_revisions
             .contains(&(story.to_owned(), para_id.to_owned()))
     }
+
+    /// The stories holding a paragraph whose source runs carry tracked formatting changes.
+    pub(crate) fn run_revision_stories(&self) -> impl Iterator<Item = &str> {
+        self.structure
+            .run_revisions
+            .iter()
+            .map(|(story, _)| story.as_str())
+    }
 }
 
 fn has_run_property_changes(value: &Value) -> bool {
