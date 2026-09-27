@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, open, readdir, realpath, stat, type FileHandle } from 'node:fs/promises';
+import { lstat, open, readdir, realpath, stat, unlink, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { openDocx, type DocxAgentDocument } from './document';
 import { DocumentToolError, type DocumentRenderer } from './types';
@@ -63,6 +63,13 @@ export class FileWorkspace {
     try {
       await this.validateHandle(file, handle);
       await handle.writeFile(bytes);
+    } catch (error) {
+      try {
+        const current = await lstat(file);
+        const created = await handle.stat();
+        if (current.isFile() && current.dev === created.dev && current.ino === created.ino) await unlink(file);
+      } catch {}
+      throw error;
     } finally { await handle.close(); }
     return { path: relative(this.root, file), bytes: bytes.length, ...(proposal ? { proposal, accepted: false } : {}) };
   }

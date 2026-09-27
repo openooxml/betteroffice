@@ -28,3 +28,22 @@ test('refuses an export directory replaced with an outside symlink during genera
     await rm(outside, { recursive: true, force: true });
   }
 });
+
+test('removes its own failed export and permits retrying the destination', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'betteroffice-export-'));
+  const workspace = await FileWorkspace.create(root);
+  try {
+    await writeFile(join(root, 'source.docx'), await fixture());
+    const opened = await workspace.open('source.docx');
+    const internal = workspace as unknown as { validateHandle: (...args: unknown[]) => Promise<unknown> };
+    const original = internal.validateHandle;
+    internal.validateHandle = async () => { throw new Error('Injected validation failure'); };
+    await expect(workspace.export(opened.document, 'result.docx')).rejects.toThrow('Injected validation failure');
+    expect(await readdir(root)).toEqual(['source.docx']);
+    internal.validateHandle = original;
+    expect((await workspace.export(opened.document, 'result.docx')).bytes).toBeGreaterThan(0);
+  } finally {
+    workspace.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
