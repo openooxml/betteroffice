@@ -1032,6 +1032,8 @@ export interface YrsSession extends CollaborationReplica {
     date: string,
     body: unknown
   ): YrsCommentReceipt;
+  /** Reanchors an existing comment with non-empty ranges; preserves metadata and joins local undo capture. */
+  setCommentRanges(commentId: string, ranges: readonly YrsStoryRange[]): void;
   /**
    * Accepts tracked changes: pending insertions become plain content,
    * pending deletions are carried out; a `pPrIns` paragraph mark clears (the
@@ -2075,6 +2077,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
             )
           ) as YrsCommentReceipt
       );
+    },
+    setCommentRanges: (commentId, ranges) => {
+      ensureUndo();
+      mutate(() => {
+        session.set_comment_ranges(commentId, wireRanges(ranges));
+        markDirty('all');
+      });
     },
     acceptChange: (target) => {
       markDirty('all');

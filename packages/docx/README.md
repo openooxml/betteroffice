@@ -552,6 +552,36 @@ lifecycle. Host plugins for the React editor use `defineDocxPlugin` and the
 which provide versioned reads, granted commands and edit batches, lifecycle
 events and cleanup.
 
+### Reanchor an existing comment
+
+`session.setCommentRanges(commentId, ranges)` replaces only the sticky anchors of
+an existing comment. The id, author, date, body, reply relationship and resolution
+state remain intact. Ranges use the same paragraph locations as `addComment`;
+one range may span paragraphs, and separate ranges may address different stories.
+
+Every range must be non-empty, ordered, and within existing paragraphs. An empty
+list, unknown comment/story/paragraph, or invalid offset throws before any content
+changes. The host must find the surviving text and supply its new range; the API
+does not infer text matches after replacement.
+
+If replacement removes all commented text, the host must explicitly choose a new
+non-empty range or handle the comment's removal. Rejected reanchoring leaves the
+comment unchanged and does not roll back a text replacement already performed.
+
+`saveYrsDocx()` writes the current ranges under the comment's own ID, with its
+author, date, body, replies and resolution. Reopening the saved file restores a
+range that stays within one paragraph and overlaps no other comment's range;
+opening reads comment ranges paragraph by paragraph, one comment per run.
+
+Reanchoring joins the current local undo capture, so an immediate replacement and
+reanchor can undo together. Comment edits participate in the session's history;
+undoing comment changes conservatively invalidates all stories for saved anchors.
+
+The undo manager retains comment item boundaries with their undo/redo entries so
+anchors inside replaced text survive repeated history traversal with Yrs 0.27.
+Discarding history releases its bookkeeping; undo/redo traverses a local snapshot
+when those boundaries need restoration.
+
 ### External drop positions
 
 `RenderedDomContext.getPositionAtPoint(clientX, clientY)` queries the same canvas
