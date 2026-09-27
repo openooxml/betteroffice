@@ -30,6 +30,25 @@ describe('InputOperationQueue', () => {
     await queue.flush();
   });
 
+  test('a flush reports the first input failure since its checkpoint', async () => {
+    const queue = new InputOperationQueue(() => {});
+    const since = queue.failureCheckpoint();
+    const first = new Error('first');
+    const second = new Error('second');
+    queue.enqueue(() => {
+      throw first;
+    });
+    queue.enqueue(() => {
+      throw second;
+    });
+    await expect(queue.flush(since)).rejects.toBe(first);
+    const later = queue.failureCheckpoint();
+    queue.enqueue(() => {
+      throw second;
+    });
+    await expect(queue.flush(later)).rejects.toBe(second);
+  });
+
   test('orders a horizontal goal reset after an in-flight vertical move', async () => {
     const failures: unknown[] = [];
     const queue = new InputOperationQueue((error) => failures.push(error));

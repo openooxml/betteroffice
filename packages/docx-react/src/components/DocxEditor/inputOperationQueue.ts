@@ -1,8 +1,10 @@
+const MAX_RECENT_FAILURES = 16;
+
 export class InputOperationQueue {
   private pending: Promise<void> = Promise.resolve();
   private interactionEpoch = 0;
   private failures = 0;
-  private lastFailure: unknown;
+  private recentFailures: Array<{ seq: number; error: unknown }> = [];
   private depth = 0;
 
   constructor(
@@ -39,7 +41,7 @@ export class InputOperationQueue {
   /** Waits for accepted operations and rejects if input failed after the `since` checkpoint. */
   flush(since = this.failures): Promise<void> {
     return this.pending.then(() => {
-      if (this.failures !== since) throw this.lastFailure;
+      if (this.failures !== since) throw this.firstFailureAfter(since);
     });
   }
 
@@ -64,13 +66,19 @@ export class InputOperationQueue {
       (error) => {
         if (input) {
           this.failures += 1;
-          this.lastFailure = error;
+          this.recentFailures.push({ seq: this.failures, error });
+          if (this.recentFailures.length > MAX_RECENT_FAILURES) this.recentFailures.shift();
           this.reportError(error);
         }
         this.settle();
       }
     );
     return result;
+  }
+
+  private firstFailureAfter(since: number): unknown {
+    const recent = this.recentFailures;
+    return (recent.find(({ seq }) => seq > since) ?? recent[recent.length - 1])?.error;
   }
 
   private settle(): void {
