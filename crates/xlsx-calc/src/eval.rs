@@ -28,6 +28,7 @@ const MAX_LAMBDA_DEPTH: usize = 64;
 #[cfg(test)]
 thread_local! {
     static DEFINED_NAME_EXPANSIONS: Cell<usize> = const { Cell::new(0) };
+    static LAMBDA_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) struct EvaluationBudget {
@@ -210,6 +211,16 @@ impl<'a> EvalContext<'a> {
         self.exhausted.get()
     }
 
+    /// `#NUM!`, recorded as a budget error, once this evaluation has been
+    /// refused budget, so a loop stops instead of repeating refused work.
+    pub(crate) fn within_budget(&self) -> Result<(), ErrorValue> {
+        if self.exhausted.get() {
+            self.record_budget_error();
+            return Err(ErrorValue::Num);
+        }
+        Ok(())
+    }
+
     pub(crate) fn budget_error_checkpoint(&self) -> u64 {
         self.unhandled_budget_errors.get()
     }
@@ -284,6 +295,8 @@ impl<'a> EvalContext<'a> {
         if depth >= MAX_LAMBDA_DEPTH {
             return false;
         }
+        #[cfg(test)]
+        LAMBDA_CALLS.with(|count| count.set(count.get() + 1));
         self.lambda_depth.set(depth + 1);
         true
     }
@@ -1441,6 +1454,116 @@ mod tests {
                 CellValue::Error {
                     value: ErrorValue::Value
                 }
+            );
+        }
+    }
+
+    fn lambda_calls(formula: &str) -> (CellValue, usize) {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        LAMBDA_CALLS.with(|count| count.set(0));
+        let context = EvalContext::new(&workbook, SheetId(0));
+        let value = evaluate(&parse_formula(formula).unwrap(), &context);
+        (value, LAMBDA_CALLS.with(|count| count.get()))
+    }
+
+    /// a callback whose body the budget refuses stops at that refusal instead
+    /// of running the refused work once per remaining element.
+    #[test]
+    fn a_callback_stops_once_the_budget_is_spent() {
+        let (value, calls) = lambda_calls(
+            "SUM(_xlfn.MAKEARRAY(50,1,_xlfn.LAMBDA(_xlpm.rr,_xlpm.cc,SUM(_xlfn.SEQUENCE(1000000)))))",
+        );
+        assert_eq!(value, err(ErrorValue::Num));
+        assert!(calls <= 2, "{calls} calls");
+    }
+
+    /// each call of a callback pays for the body it evaluates, so a long body
+    /// cannot run once per cell of a large block on one cell's budget.
+    #[test]
+    fn a_long_callback_body_pays_for_every_call() {
+        let body = vec!["_xlpm.r"; 1000].join(",");
+        let (value, calls) = lambda_calls(&format!(
+            "SUM(_xlfn.MAKEARRAY(2000,1,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,SUM({body}))))"
+        ));
+        assert_eq!(value, err(ErrorValue::Num));
+        assert!(calls < 2000, "{calls} calls");
+    }
+
+    /// `XLOOKUP` evaluates its fallback once however many keys miss.
+    #[test]
+    fn xlookup_evaluates_its_fallback_once() {
+        let (value, calls) = lambda_calls(
+            "SUM(_xlfn.XLOOKUP(_xlfn.SEQUENCE(100),A1:A2,A1:A2,_xlfn.REDUCE(1,{1},_xlfn.LAMBDA(_xlpm.a,_xlpm.v,_xlpm.a))))",
+        );
+        assert_eq!(value, num(100.0));
+        assert_eq!(calls, 1);
+    }
+
+    /// work that outgrows the cells it reads is charged before it is done:
+    /// broadcasting, a block of keys against a block, a matrix product, and
+    /// an argument evaluated again for every lifted element.
+    #[test]
+    fn superlinear_array_work_is_charged() {
+        let ones = vec!["1"; 2000].join(",");
+        for formula in [
+            "SUMPRODUCT(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(1,2000))".to_string(),
+            "SUM(MATCH(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000,1,-1),0))".to_string(),
+            "SUM(MMULT(_xlfn.SEQUENCE(200,500),_xlfn.SEQUENCE(500,200)))".to_string(),
+            format!("SUM(MATCH(_xlfn.SEQUENCE(1000),A1,SUM({ones})))"),
+        ] {
+            let (value, _) = lambda_calls(&formula);
+            assert_eq!(value, err(ErrorValue::Num), "{formula}");
+        }
+    }
+
+    /// an array builtin that falls back to its scalar form evaluates its
+    /// arguments again, so nesting one in another's arguments doubles the work
+    /// per level; the budget still bounds it.
+    #[test]
+    fn nested_scalar_fallbacks_stay_within_the_budget() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        for wrapper in ["SUM({})", "ABS(SUM({}))", "COUNTA({})", "LEN(CONCAT({}))"] {
+            let mut formula = "_xlfn.LET(_xlpm.x,1,_xlpm.x)".to_string();
+            for _ in 0..40 {
+                formula = wrapper.replace("{}", &formula);
+            }
+            let budget = Rc::new(EvaluationBudget::new(10_000));
+            let context = EvalContext::with_budget(&workbook, SheetId(0), budget);
+            evaluate(&parse_formula(&formula).unwrap(), &context);
+            assert!(context.has_unhandled_budget_error(), "{wrapper}");
+        }
+    }
+
+    /// every cell of a workbook built to exhaust the recalculation keeps its
+    /// cached value, and the callbacks it runs stay bounded by the budget.
+    #[test]
+    fn a_hostile_workbook_stays_within_the_recalculation_budget() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        for col in 0..12 {
+            sheet.set_cell(
+                CellRef::new(0, col),
+                Cell {
+                    value: CellValue::Number { value: 7.0 },
+                    formula: Some(
+                        "SUM(_xlfn.MAKEARRAY(1000000,1,_xlfn.LAMBDA(_xlpm.rr,_xlpm.cc,SUM(_xlfn.SEQUENCE(1000000)))))"
+                            .into(),
+                    ),
+                    style: None,
+                },
+            );
+        }
+        workbook.sheets.push(sheet);
+        LAMBDA_CALLS.with(|count| count.set(0));
+        let (_, result) = crate::rebuild_and_recalc_all(&mut workbook, None);
+        assert!(LAMBDA_CALLS.with(|count| count.get()) <= 12);
+        assert_eq!(result.limited_cells.len(), 12);
+        for col in 0..12 {
+            assert_eq!(
+                workbook.value(SheetId(0), CellRef::new(0, col)),
+                CellValue::Number { value: 7.0 }
             );
         }
     }
