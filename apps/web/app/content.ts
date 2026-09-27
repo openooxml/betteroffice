@@ -94,7 +94,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/xlsx-react",
-    desc: "The spreadsheet editor as a drop-in React component, with composable toolbar controls and version-checked edit batches that flush pending input first.",
+    desc: "The spreadsheet editor as a drop-in React component, with composable toolbar controls, version-checked edit batches that flush pending input first, and host-owned plugins with explicitly granted access.",
   },
   {
     name: "@betteroffice/pptx",
