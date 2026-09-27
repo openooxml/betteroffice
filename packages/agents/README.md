@@ -2,8 +2,9 @@
 
 Work with large documents the way a coding agent works with source files:
 discover, grep, read a small region, propose an exact edit, inspect the result,
-and export it. This first release supports **DOCX**. XLSX and PPTX adapters
-are future work.
+and export it. DOCX supports text proposals and page previews. The first
+**XLSX and PPTX prototypes** add cell input/formula proposals and slide text
+replacements through the same SDK and MCP server.
 
 The SDK works with existing BetterOffice document sessions and headless files.
 The local MCP server exposes the same operations to agents, including rendered
@@ -45,14 +46,16 @@ Start a new Codex session after registration. Try:
 
 | Tool | Purpose |
 | --- | --- |
-| `office_files` | List DOCX files, subdirectories, and open document IDs. |
+| `office_files` | List DOCX, XLSX, and PPTX files, subdirectories, and open document IDs. |
 | `office_open` | Open a file and discover its stories and capabilities. |
-| `office_outline` | Page through compact paragraph or heading summaries. |
+| `office_outline` | Page through paragraphs, slide paragraphs, or sheets. |
 | `office_grep` | Search literal text, with context and precise refs/offsets. |
-| `office_read` | Read bounded paragraph text and run formatting. |
-| `office_propose` | Stage exact replacements without changing the document. |
+| `office_read` | Read bounded paragraph or cell text; DOCX includes run formatting. |
+| `office_cells` | Read an XLSX A1 range with values, formulas, and cell handles. |
+| `office_propose` | Stage exact DOCX/PPTX text replacements. |
+| `office_propose_cells` | Stage XLSX whole-cell inputs or formulas. |
 | `office_review` | List proposals or inspect one proposal's before/after text. |
-| `office_render` | Return a PNG of a current or proposed page. |
+| `office_render` | DOCX only: return a PNG of a current or proposed page. |
 | `office_verify` | Save and reopen in memory; report which checks ran. |
 | `office_accept` | Apply a proposal as one undo step, optionally with Word tracked changes. |
 | `office_reject` | Reject a pending proposal, including one with stale targets. |
@@ -66,18 +69,18 @@ numbers are one-based; text offsets and pagination offsets are zero-based.
 Run formatting reports `fontSizePt` and `complexScriptFontSizePt` in points,
 converting Word's stored half-point values.
 
-Search is literal and case-insensitive by default. It stays within paragraphs,
+DOCX/PPTX search is literal and case-insensitive by default. DOCX search stays within paragraphs,
 never crosses an inline embed, and excludes existing tracked changes. Follow
 `nextCursor` for more search results, `nextOffset` for lists, and `nextStart`
 for long paragraph reads. A document update invalidates search cursors; repeat
 the query without the old cursor.
 
-MCP proposals accept only `{ match, newText }`. Search for the exact span you
+DOCX/PPTX MCP proposals accept only `{ match, newText }`. Search for the exact span you
 want to replace and choose its match ID. For a repeated word, use its context
 and occurrence order to select the right result. Explicit positional edits
-are available in the typed SDK.
+are available in the DOCX typed SDK.
 
-## SDK
+## DOCX SDK
 
 ```ts
 import { readFile, writeFile } from 'node:fs/promises';
@@ -121,8 +124,7 @@ Closing the adapter leaves a borrowed session alive. If the host replaces the
 entire document/session, create a new adapter. Pending proposals and attribution
 are local to this adapter; tracked acceptance persists authorship in Word.
 
-The core entry has no Node imports. Supply a custom `DocumentRenderer` in a
-browser host; `@betteroffice/agents/render` is the Node canvas adapter. A renderer
+The DOCX adapter supports a custom `DocumentRenderer` in a browser host; `@betteroffice/agents/render` is the Node canvas adapter. A renderer
 receives a disposable fork, so previews cannot alter the live editor's layout
 or font state.
 
@@ -130,7 +132,7 @@ or font state.
 `@betteroffice/agents/mcp` can be connected to an MCP transport by a host.
 Pass `renderDocxPage` to enable PNG previews. The CLI configures it automatically.
 
-## Edit contract and limits
+## DOCX edit contract and shared limits
 
 - Prefer `{ match, newText }`, copying `match` from grep. Each occurrence has
   its own ID, so repeated words can be targeted without computing offsets.
@@ -160,12 +162,71 @@ Pass `renderDocxPage` to enable PNG previews. The CLI configures it automaticall
 
 ## What verification means
 
-`verify` confirms that a generated DOCX can be reopened by BetterOffice. Its
+`verify` confirms that a generated Office file can be reopened by BetterOffice. Its
 response explicitly leaves visual fidelity and semantic correctness unchecked.
 Use targeted reads and before/after page renders to inspect the actual change.
 The PNG renderer uses BetterOffice's Rust layout and bundled fonts, with render
 warnings for unavailable images and missing glyphs. Its output is not a promise
 of pixel identity with Word. Install `@betteroffice/fonts-cjk` for CJK coverage.
+
+## XLSX and PPTX prototypes
+
+```ts
+import { openXlsx, openPptx } from '@betteroffice/agents';
+
+const workbook = await openXlsx(await readFile('budget.xlsx'));
+try {
+  const sheet = workbook.list().items[0].sheetId;
+  const { cells } = workbook.readCells({ sheet, range: 'B3:E3' });
+  const proposal = workbook.proposeCells({
+    author: 'budget-agent',
+    edits: [{ cell: cells[0].cell, input: '1000' }, { cell: cells[3].cell, input: '=D3*2' }],
+  });
+  console.log(workbook.review(proposal.id), await workbook.verify(proposal.id));
+  await writeFile('budget-revised.xlsx', await workbook.export(proposal.id), { flag: 'wx' });
+} finally { workbook.close(); }
+
+const deck = await openPptx(await readFile('slides.pptx'));
+try {
+  const [hit] = deck.grep({ query: '€4.2 million' }).matches;
+  if (!hit) throw new Error('Revenue text not found');
+  const proposal = deck.propose({
+    author: 'slide-agent', edits: [{ match: hit.match, newText: '€5.1 million' }],
+  });
+  console.log(deck.review(proposal.id), await deck.verify(proposal.id));
+  await writeFile('slides-revised.pptx', await deck.export(proposal.id), { flag: 'wx' });
+} finally { deck.close(); }
+```
+
+In MCP, use `office_outline` to discover XLSX `sheetId` values, `office_cells`
+with `{sheet, range: "B3:E3"}`, then `office_propose_cells` with `{cell, input}`.
+Input replaces the entire cell using Excel-style input parsing; `=` starts a
+formula, and empty input clears a cell. Formulas are recalculated by the engine;
+its supported functions and calculation limits still apply. Read dependent
+cells after acceptance, or reopen a proposed export to inspect results.
+Review includes the old stored value, formula, and display text alongside the
+proposed input. It does not promise that the formula calculates the intended result.
+
+XLSX grep searches **displayed values case-sensitively**. `story` selects a sheet
+ID. `office_cells` reads empty cells too, paginates in row-major order, and
+returns at most 100 cells per call. Cell summaries truncate long fields; use
+`office_read` with `field: "formula"`, `"value"`, or `"displayText"` and follow
+`nextStart` for their full text. XLSX/PPTX searches stop at 10,000 matches and
+report `truncated`; narrow the query or story when that cap is reached.
+
+PPTX outline and grep return one-based slide numbers and paragraph refs.
+Replacements stay within one paragraph; the engine refuses fields, line breaks,
+or unsupported text structures that it cannot safely edit. Layout, slide order,
+notes, charts, and media editing are outside this prototype.
+
+Both adapters own their sessions; live-session attachment, PNG rendering, and
+tracked changes are currently DOCX-only. `openXlsx` and `openPptx` initialize
+the installed WASM assets automatically in Node; a browser host can pass
+`{wasm: bytes}`. Any committed edit invalidates **all** outstanding XLSX/PPTX
+handles, cursors, and proposals. Re-read and propose again; rejection remains
+available for stale proposals. Accepting a batch is atomic and records one
+engine undo step. Proposal metadata remains local; export keeps the original
+format and does not persist proposal attribution.
 
 ## Development
 

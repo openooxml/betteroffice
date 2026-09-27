@@ -7,7 +7,7 @@ import { renderDocxPage } from './render';
 try {
   const { values } = parseArgs({ options: { root: { type: 'string' }, 'read-only': { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
   if (values.help) {
-    process.stdout.write('Usage: betteroffice-mcp --root <directory> [--read-only]\n\nA local stdio MCP server for DOCX search, proposals, page previews, and export.\n');
+    process.stdout.write('Usage: betteroffice-mcp --root <directory> [--read-only]\n\nA local stdio MCP server for DOCX, XLSX, and PPTX search, proposals, and export. Page previews are DOCX-only.\n');
   } else {
     if (!values.root) throw new Error('--root <directory> is required.');
     const server = await createOfficeMcpServer({ root: values.root, readOnly: values['read-only'], renderer: renderDocxPage });
