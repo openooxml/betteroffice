@@ -63,6 +63,17 @@ export type {
 } from './docx/compare';
 
 // ============================================================================
+// CONTENT CONTROLS
+// ============================================================================
+
+export {
+  DocxContentControlsError,
+  findDocxContentControls,
+  listDocxContentControls,
+} from './docx/contentControls';
+export type * from './yrs/contentControls';
+
+// ============================================================================
 // UTILITIES
 // ============================================================================
 

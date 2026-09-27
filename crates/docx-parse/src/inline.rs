@@ -1502,14 +1502,14 @@ pub fn parse_sdt_properties(
     for element in sdt_pr.child_elements() {
         match element.local_name() {
             "id" => {
-                properties.id = element.parse_numeric_attribute(Some("w"), "val", 1.0);
+                properties.id = sdt_attribute(element, "val")
+                    .and_then(crate::xml::parse_javascript_integer_prefix);
             }
-            "alias" => properties.alias = element.attribute(Some("w"), "val").map(str::to_owned),
-            "tag" => properties.tag = element.attribute(Some("w"), "val").map(str::to_owned),
+            "alias" => properties.alias = sdt_attribute(element, "val").map(str::to_owned),
+            "tag" => properties.tag = sdt_attribute(element, "val").map(str::to_owned),
             "lock" => {
                 properties.lock = Some(
-                    element
-                        .attribute(Some("w"), "val")
+                    sdt_attribute(element, "val")
                         .unwrap_or("unlocked")
                         .to_owned(),
                 )
@@ -1531,19 +1531,23 @@ pub fn parse_sdt_properties(
             "placeholder" => {
                 properties.placeholder = element
                     .child("w", "docPart")
-                    .and_then(|part| part.attribute(Some("w"), "val"))
+                    .and_then(|part| sdt_attribute(part, "val"))
                     .map(str::to_owned)
             }
             "showingPlcHdr" => {
                 properties.showing_placeholder = Some(
-                    element
-                        .attribute(Some("w"), "val")
+                    sdt_attribute(element, "val")
                         .is_none_or(|value| !matches_ci(value, &["0", "false", "off"])),
                 )
             }
             "date" => parse_sdt_date(element, &mut properties),
             "dropDownList" | "comboBox" => parse_sdt_list(element, &mut properties),
-            "text" => properties.multi_line = Some(element.parse_boolean("w")),
+            "text" => {
+                properties.multi_line = Some(
+                    sdt_attribute(element, "multiLine")
+                        .is_some_and(|value| matches_ci(value, &["1", "true", "on"])),
+                )
+            }
             "checkbox" => parse_sdt_checkbox(element, &mut properties),
             "docPartObj" | "docPartList" => parse_sdt_gallery(element, &mut properties),
             "appearance" => {
@@ -1575,19 +1579,26 @@ pub fn parse_sdt_properties(
             }
             "dataBinding" => {
                 properties.data_binding = Some(SdtDataBinding {
-                    xpath: element.attribute(Some("w"), "xpath").map(str::to_owned),
-                    store_item_id: element
-                        .attribute(Some("w"), "storeItemID")
-                        .map(str::to_owned),
-                    prefix_mappings: element
-                        .attribute(Some("w"), "prefixMappings")
-                        .map(str::to_owned),
+                    xpath: sdt_attribute(element, "xpath").map(str::to_owned),
+                    store_item_id: sdt_attribute(element, "storeItemID").map(str::to_owned),
+                    prefix_mappings: sdt_attribute(element, "prefixMappings").map(str::to_owned),
                 })
             }
             _ => {}
         }
     }
     properties
+}
+
+/// A `w:sdtPr` child's WordprocessingML attribute, also where the document binds that namespace
+/// to a prefix other than `w`: an attribute sharing its element's prefix shares its namespace.
+fn sdt_attribute<'a>(element: &'a XmlElement, name: &str) -> Option<&'a str> {
+    element.attribute(Some("w"), name).or_else(|| {
+        element
+            .namespace_prefix()
+            .filter(|prefix| *prefix != "w")
+            .and_then(|prefix| element.attribute(Some(prefix), name))
+    })
 }
 
 fn parse_sdt_control_type(element: Option<&XmlElement>) -> &'static str {
@@ -1783,7 +1794,11 @@ fn parse_hyperlink_inline_sdt(
     budget: &ParseBudget<'_>,
 ) -> Result<InlineSdt, ParseError> {
     // SDT run properties omit the theme.
-    let properties = parse_sdt_properties(element.child("w", "sdtPr"), None, None);
+    let properties = parse_sdt_properties(
+        element.child("w", "sdtPr"),
+        element.child("w", "sdtEndPr"),
+        None,
+    );
     let mut content = Vec::new();
     if let Some(container) = element.child("w", "sdtContent") {
         for child in container.child_elements().take(MAX_HYPERLINK_CHILDREN) {
@@ -2082,7 +2097,11 @@ pub fn parse_inline_container(
                         .collect();
                     output.push(InlineNode::InlineSdt(Box::new(InlineSdt {
                         node_type: InlineSdtType::InlineSdt,
-                        properties: parse_sdt_properties(child.child("w", "sdtPr"), None, theme),
+                        properties: parse_sdt_properties(
+                            child.child("w", "sdtPr"),
+                            child.child("w", "sdtEndPr"),
+                            theme,
+                        ),
                         content: allowed,
                     })));
                 }

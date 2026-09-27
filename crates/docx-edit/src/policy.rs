@@ -121,6 +121,11 @@ impl Ownership {
         }
     }
 
+    /// Whether an embed of another story owns `story`.
+    pub fn owns(&self, story: &str) -> bool {
+        self.owners.contains_key(story)
+    }
+
     /// The owners of `story`, nearest first; errors on a cycle, excessive nesting, or when
     /// more than one container references `story` or a story owning it.
     pub fn chain(&self, story: &str) -> Result<Vec<&Owner>, (EditFailureCode, String)> {

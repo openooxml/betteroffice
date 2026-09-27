@@ -32,6 +32,7 @@ pub mod borders;
 pub mod canonical;
 pub mod chart;
 pub mod comments;
+pub mod content_control;
 pub mod document;
 pub mod drawingml;
 pub mod fonts;
@@ -75,6 +76,7 @@ pub use borders::{
     BorderSpec, Borders, parse_border_spec, parse_paragraph_borders, parse_table_borders,
 };
 pub use comments::{Comment, parse_comments, remove_orphan_comment_ranges};
+pub use content_control::{clear_showing_placeholder_xml, parse_sdt_properties_xml};
 pub use document::{
     DocumentBody, Section, extract_all_template_variables, extract_template_variables,
     get_paragraph_text, is_empty_paragraph, parse_document_body,

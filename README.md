@@ -87,6 +87,9 @@
   is checked against its grant, the editor mode and document policy when it runs.
 
 - **Host-owned PPTX plugins.** PPTX React supports host-owned plugins with
+  panels, overlays, lifecycle events, and explicitly granted commands and edit
+  batches. Plugins read and navigate by default; every write is checked against
+  its grant and `readOnly` when it runs.
 
 - **Host-owned XLSX plugins.** XLSX React supports host-owned plugins with
   panels, overlays, lifecycle events, and explicitly granted commands and edit
@@ -107,6 +110,11 @@
   Markdown with positional anchors, formulas, stored values, formatted text,
   explicit hidden-content options, and omission diagnostics. Export does not
   recalculate formulas.
+
+- **DOCX content controls.** List DOCX content controls in JavaScript, Rust, and
+  Python. JavaScript and React hosts fill plain- and rich-text controls
+  atomically through version-checked edit batches. Native and Python filling and
+  explicit rich-text run input are not yet supported.
 
 - **DOCX comparison into tracked changes.** Compare body paragraph text in two
   DOCX files with unchanged paragraph structure and emit attributed tracked

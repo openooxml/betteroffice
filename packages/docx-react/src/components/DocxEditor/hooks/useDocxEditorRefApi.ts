@@ -226,6 +226,10 @@ export function useDocxEditorRefApi({
       loadDocumentBuffer: loadBuffer,
 
       readParagraphs: async (request) => (await flushedSession(pagedEditorRef)).session.readParagraphs(request),
+      listContentControls: async (options) =>
+        (await flushedSession(pagedEditorRef)).session.listContentControls(options),
+      findContentControls: async (query, options) =>
+        (await flushedSession(pagedEditorRef)).session.findContentControls(query, options),
       findText: async (request) => (await flushedSession(pagedEditorRef)).session.findText(request),
       validateEdits: async (request) => {
         const { session } = await flushedSession(pagedEditorRef);
