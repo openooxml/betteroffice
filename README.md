@@ -87,6 +87,8 @@
   is checked against its grant, the editor mode and document policy when it runs.
 
 - **Host-owned PPTX plugins.** PPTX React supports host-owned plugins with
+
+- **Host-owned XLSX plugins.** XLSX React supports host-owned plugins with
   panels, overlays, lifecycle events, and explicitly granted commands and edit
   batches. Plugins read and navigate by default; every write is checked against
   its grant and `readOnly` when it runs.

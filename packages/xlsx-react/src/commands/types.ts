@@ -1,8 +1,10 @@
+import type { XlsxEditRefusal } from '@betteroffice/xlsx';
 import type { TranslationKey } from '@betteroffice/xlsx-i18n';
 import type {
   CommandReason,
   CommandState,
 } from '../../../../shared/host-contracts/commands';
+import type { PluginCommandResult } from '../../../../shared/host-contracts/plugins';
 import type {
   BorderPreset,
   BorderStyle,
@@ -156,7 +158,10 @@ export type XlsxCommandDisabledCode =
   | 'proposal-not-found'
   | 'host-disabled'
   | 'unsupported-command'
-  | 'invalid-arguments';
+  | 'invalid-arguments'
+  | 'permission-denied'
+  | 'unsupported-policy'
+  | 'plugin-unavailable';
 
 /**
  * Why an executed command did not complete.
@@ -170,7 +175,8 @@ export type XlsxCommandFailureCode =
   | 'gesture-active'
   | 'proposal-stale'
   | 'render-failed'
-  | 'command-failed';
+  | 'command-failed'
+  | 'aborted';
 
 /**
  * One choice of a selector command.
@@ -229,14 +235,49 @@ export type XlsxCommandResult =
   | { ok: false; failure: CommandReason<XlsxCommandFailureCode> };
 
 /**
+ * A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`.
+ * @experimental
+ */
+export type XlsxPluginCommandId = `plugin:${string}/${string}`;
+
+/**
+ * Static description of a contributed command.
+ * @experimental
+ */
+export interface XlsxPluginCommandDescriptor {
+  id: XlsxPluginCommandId;
+  label: string;
+  mutatesDocument: boolean;
+  shortcuts: readonly { chord: string; args: null }[];
+}
+
+/**
+ * State of a contributed command; the plugin chooses its own disabled codes.
+ * @experimental
+ */
+export type XlsxPluginCommandState = CommandState;
+
+/**
+ * Outcome of a contributed command: a plugin-defined failure, or a refused edit batch as-is.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
+export type XlsxPluginCommandResult = PluginCommandResult<XlsxCommandStatus, XlsxEditRefusal>;
+
+/**
  * The command authority of one editor, shared by built-in and host chrome.
  * @experimental
  */
 export interface XlsxCommandStore {
   getDescriptor<K extends XlsxCommandId>(id: K): XlsxCommandDescriptor<K>;
+  /** Null while no active plugin contributes `id`. */
+  getDescriptor(id: XlsxPluginCommandId): XlsxPluginCommandDescriptor | null;
   /** Snapshots are stable until the state changes; pass `args` to evaluate one option. */
   getState<K extends XlsxCommandId>(id: K, args?: XlsxCommandArgs[K]): XlsxCommandState<K>;
+  getState(id: XlsxPluginCommandId, args?: null): XlsxPluginCommandState;
   subscribe(listener: () => void): () => void;
   /** Runs after input accepted before the call; availability is checked again first. */
   execute<K extends XlsxCommandId>(id: K, args: XlsxCommandArgs[K]): Promise<XlsxCommandResult>;
+  /** Runs a contributed command with its plugin's own clients, outside the input queue. */
+  execute(id: XlsxPluginCommandId, args: null): Promise<XlsxPluginCommandResult>;
 }
