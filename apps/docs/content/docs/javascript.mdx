@@ -39,6 +39,503 @@ import { PptxEditor } from "@betteroffice/pptx-react";
 
 `PptxEditor` requires at least one font face in `fonts` before it can lay out text.
 
+## Compose the DOCX toolbar
+
+The DOCX editor's built-in controls share one command store, `ref.commands`.
+Pass `toolbar` to replace the default chrome with public parts in your own order,
+next to your own actions:
+
+```tsx
+import {
+  DocxEditor,
+  EditorToolbar,
+  ToolbarButton,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  ToolbarGroup,
+} from "@betteroffice/docx-react";
+
+<DocxEditor
+  documentBuffer={bytes}
+  toolbar={
+    <EditorToolbar>
+      <EditorToolbar.Toolbar>
+        <ToolbarGroup label="Formatting">
+          <ToolbarCommandSelect id="paragraphStyle" />
+          <ToolbarCommandButton id="bold" />
+        </ToolbarGroup>
+        <ToolbarCommandButton id="undo" />
+        <EditorToolbar.Review />
+        <ToolbarButton title="Share" onClick={share}>Share</ToolbarButton>
+      </EditorToolbar.Toolbar>
+    </EditorToolbar>
+  }
+/>;
+```
+
+Omit `toolbar` for the default chrome, pass `null` for none, or render the same
+parts outside the editor inside `<DocxCommandProvider commands={commands}>`, with
+`commands` captured from the ref (it may be `null` until the editor mounts).
+Controls keep their active and `'mixed'` states, shortcuts, and read-only,
+viewing and suggesting restrictions. A disabled command always states why
+(`disabledReason.code` and a localized `message`), and `execute(id, args)` checks
+availability again after preceding input, resolving to `executed`, `noop`,
+`opened`, `requested` or a typed failure. Dialogs a command opens apply to the
+document and selection they opened with. At narrow widths, groups move into an
+accessible More menu that keeps every built-in choice; wrap other host content
+in `ToolbarOverflow` to give it an entry there.
+
+## Host DOCX editor plugins
+
+Host-owned tools install through the `plugins` prop. A plugin created with
+`defineDocxPlugin` can contribute a docked panel, an overlay, sidebar cards and
+commands; it reads and edits through restricted clients, never the session. The
+plugin API is experimental and may change in minor releases:
+
+```tsx
+import { DocxEditor, defineDocxPlugin } from "@betteroffice/docx-react";
+
+const review = defineDocxPlugin<{ count: number }>({
+  id: "acme.review",
+  createState: () => ({ count: 0 }),
+  async onEvent(context, event) {
+    if (event.type !== "load" && event.type !== "document-change") return;
+    const read = await context.read.readParagraphs({ view: "accepted" });
+    if (read.ok) context.setState({ count: read.paragraphs.length }, read.version);
+  },
+  panel: {
+    title: "Review",
+    placement: "right",
+    render: ({ context }) => <p>{context.state.count} paragraphs</p>,
+  },
+  commands: [
+    {
+      id: "mark",
+      label: "Mark reviewed",
+      mutatesDocument: true,
+      async execute(context) {
+        if (!context.edits) return { ok: false, failure: { code: "not-granted", message: "Needs write access" } };
+        const read = await context.read.readParagraphs({ view: "accepted" });
+        if (!read.ok) return read;
+        const first = read.paragraphs[0];
+        const result = await context.edits.applyEdits({
+          expectVersion: read.version,
+          steps: [{ op: "insertText", target: { kind: "paragraph", story: "body", paraId: first.paraId }, at: "end", text: " ✓" }],
+        });
+        return result.ok ? { ok: true, status: "executed" } : result;
+      },
+    },
+  ],
+  toolbar: ["mark"],
+});
+
+<DocxEditor
+  documentBuffer={bytes}
+  plugins={[review]}
+  pluginGrants={{ "acme.review": { document: "write", editBatches: true } }}
+  onPluginError={(error) => console.error(error.pluginId, error.phase, error.error)}
+/>;
+```
+
+**Lifecycle.** When a document is ready each plugin gets fresh state, runs
+`initialize`, receives one `load` event (`loaded`, `replaced` or `attached`), and
+then its contributions appear; a document change the hook did not make itself
+aborts it and delivers `load` again, and after ten such runs the plugin is
+stopped and reported. `document-change` carries only the committed version, for
+typing, remote edits, undo, commands and batches (a plugin's own included), and
+never for a refusal or no-op; `selection-change`, `mode-change` (with the
+effective `readOnly`), `layout-change` and `grants-change` follow. Notifications
+describe current state, so several changes can arrive as one, and a newer one
+aborts the hook still handling the last (`context.signal`), unless that hook's
+own edit batch made it. Replacing the document,
+removing the plugin, changing its `revision`, unmounting or a failure ends the
+activation: signals abort, clients refuse, and each `onCleanup` disposer runs
+once with the reason. Plugins are matched by `id` and `revision`, so new array
+identities and reordering keep their state; React StrictMode's double setup
+creates two distinct activations.
+
+**Stale results.** `setState(next, atVersion)` returns `false` for a superseded
+or ended context or when the document is no longer at `atVersion`, which
+defaults to the version the context was created at. Use `context.run(action)` in
+event handlers: it supplies a fresh context and isolates failures.
+
+**Grants.** Without a grant a plugin can read, validate and navigate only.
+Built-in commands need their id in `commands`, and mutating ones also
+`document: "write"`; `applyEdits` needs `document: "write"` and `editBatches`,
+and `history: "none"` also needs `untrackedHistory`. Grants, the editor mode and
+document policy are checked again immediately before each change, so revoking a
+grant, switching to viewing mode, `readOnly`, or replacing the document refuses
+through clients obtained earlier too. Mutating built-in commands refuse plugins
+with `unsupported-policy` until they have an authoritative lock policy; edit
+batches refuse locked content in Rust. In suggesting mode each batch step needs
+`suggest`.
+
+**Commands and toolbar.** Contributed commands register as
+`plugin:<pluginId>/<id>` on `ref.commands` and always run with their own
+plugin's clients, whether the default toolbar, a shortcut or the host invokes
+them. A command's failure uses the plugin's own code, and a refused edit batch
+returned as-is reaches the caller unchanged. Plugin shortcuts must use Mod or
+Alt, or a function key; built-in and clipboard shortcuts take precedence, and a
+clashing plugin shortcut is reported and not bound. Keys
+pressed in plugin chrome are the user's: built-in shortcuts act on the editor
+there, and a plugin's text fields keep their own editing keys. Replacement chrome
+shows toolbar contributions with
+`<DocxPluginToolbar />`, and `ToolbarCommandButton`, `ToolbarCommand`,
+`useDocxCommand` and `useDocxCommandState` accept contributed ids.
+
+**Coordinates.** `context.geometry` exists only while a rendered layout shows
+the current version. `geometry.dom` (a `RenderedDomContext`) answers in
+pages-container units divided by zoom, and `geometry.toOverlayRect(rect)`
+converts such a rectangle into pixels of the unscaled overlay layer, or returns
+`null` once that layout is no longer rendered. `geometry.dom` is experimental
+and may be replaced by a data-only facade. Overlays
+ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
+anchor to `{ version, story, paraId }` and appear only while that version is
+current and the body paragraph is unique; a card's `render` receives its `item`,
+so one component can draw every card and keep its state while that `id` stays.
+`navigation.scrollToParagraph`
+flushes input, waits briefly for a matching layout, keeps focus unless asked, and
+reports `layout-unavailable` or `unsupported` instead of success when it cannot
+scroll. In a narrow editor, side docks show tabs that open panels as drawers.
+
+**Failures.** Each contribution renders behind its own error boundary and with
+a command context restricted to its plugin. A throwing hook, renderer, sidebar
+or command-state function, command or action stops only that plugin, runs its
+cleanups and reaches `onPluginError`; other plugins and the editor continue.
+Plugins share the page's JavaScript realm, so grants govern the supported API
+rather than sandboxing code.
+
+**Migrating.** `pluginOverlays`, `pluginSidebarItems` and
+`pluginRenderedDomContext` remain as deprecated, unmanaged inputs;
+`onRenderedDomContextReady` receives the editor's own context. The
+snapshot-based `EditorPluginCore` contract in `@betteroffice/docx/plugin-api`
+is deprecated; its geometry types remain.
+
+## Compose the PPTX toolbar
+
+The PPTX editor's controls share one command store, `api.commands`, handed to
+`onReady`. Pass `toolbar` to replace the default controls with public parts in
+your own order, next to your own actions:
+
+```tsx
+import {
+  EditorToolbar,
+  PptxEditor,
+  ToolbarButton,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  ToolbarGroup,
+} from "@betteroffice/pptx-react";
+
+<PptxEditor
+  file={bytes}
+  fonts={fonts}
+  toolbar={
+    <EditorToolbar mode="commands">
+      <EditorToolbar.Toolbar>
+        <ToolbarGroup label="Text">
+          <ToolbarCommandSelect id="fontFamily" />
+          <ToolbarCommandButton id="bold" />
+        </ToolbarGroup>
+        <ToolbarCommandButton id="undo" />
+        <ToolbarCommandButton id="slideshow" />
+        <ToolbarButton title="Share" onClick={share}>Share</ToolbarButton>
+      </EditorToolbar.Toolbar>
+    </EditorToolbar>
+  }
+/>;
+```
+
+Omit `toolbar` for the default controls or pass `null` for none;
+`showToolbar={false}` hides the whole region. Supplied chrome also renders while
+`readOnly`. Outside the editor, render the same parts inside
+`<PptxCommandProvider commands={commands}>`, with `commands` captured from
+`onReady` (it may be `null` until then). A disabled command always states why
+(`disabledReason.code` and a localized `message`); mixed selections report
+`'mixed'`. `execute(id, args)` runs after input accepted before it, such as a
+picture still decoding, checks availability again, and resolves to `executed`,
+`noop`, `opened`, `requested` or a typed failure. Commands enforce read-only
+mode for the UI; `api.handle` stays direct host access. The prop-based
+`EditorToolbar` and `Toolbar` remain supported but deprecated: without `mode`
+they bind to their props, and `useEditorToolbar()` inside a command-mode toolbar
+returns a view whose callbacks run the commands. At narrow widths, groups move
+into an accessible More menu; wrap other host content in `ToolbarOverflow` to
+give it an entry there. Keystrokes typed while earlier work is pending keep
+their place through `handle.anchorCaret()` and `handle.resolveCaretAnchor()`,
+caret anchors that later edits, undo and remote updates move along; hosts can
+use them too.
+
+## Host PPTX editor plugins
+
+`PptxEditor` installs host-owned tools through the same `plugins`,
+`pluginGrants` and `onPluginError` props as the DOCX editor. A plugin created
+with `definePptxPlugin` contributes a docked panel, an overlay on the slide and
+commands, and works through restricted clients. The plugin API is experimental
+and may change in minor releases:
+
+```tsx
+import { PptxEditor, definePptxPlugin } from "@betteroffice/pptx-react";
+
+const review = definePptxPlugin<{ slides: number }>({
+  id: "acme.review",
+  createState: () => ({ slides: 0 }),
+  async onEvent(context, event) {
+    if (event.type !== "load" && event.type !== "document-change") return;
+    const read = await context.read.readContent();
+    if (read.ok) context.setState({ slides: read.slides.length }, read.version);
+  },
+  panel: {
+    title: "Review",
+    placement: "right",
+    render: ({ context }) => <p>{context.state.slides} slides</p>,
+  },
+  commands: [
+    {
+      id: "mark",
+      label: "Mark reviewed",
+      mutatesDocument: true,
+      async execute(context) {
+        if (!context.edits) return { ok: false, failure: { code: "not-granted", message: "Needs write access" } };
+        const read = await context.read.readContent();
+        if (!read.ok) return read;
+        const slideId = context.snapshot.selection?.slideId;
+        if (!slideId) return { ok: true, status: "noop" };
+        const result = await context.edits.applyEdits({
+          expectVersion: read.version,
+          steps: [{ op: "setSlideNotes", target: { slideId }, text: "Reviewed" }],
+        });
+        return result.ok ? { ok: true, status: "executed" } : result;
+      },
+    },
+  ],
+  toolbar: ["mark"],
+});
+
+<PptxEditor
+  file={bytes}
+  fonts={fonts}
+  plugins={[review]}
+  pluginGrants={{ "acme.review": { document: "write", editBatches: true } }}
+  onPluginError={(error) => console.error(error.pluginId, error.phase, error.error)}
+/>;
+```
+
+**Lifecycle and grants** follow the DOCX editor: fresh state, `initialize` and
+one `load` event per presentation (repeated when a change the hook did not make
+arrives first, and stopped after ten runs), then coalesced `document-change`,
+`selection-change`, `mode-change` (with `readOnly`), `layout-change` and
+`grants-change` events. `document-change` comes from the presentation's
+committed versions, so typing, commands, batches (a plugin's own included), undo,
+redo and remote updates each produce one, and refusals or no-ops none. Replacing the presentation,
+removing the plugin, changing its `revision`, unmounting or a failure ends the
+activation and runs its cleanups once. Without a grant a plugin reads
+(`read.version`, `readContent`, `findText`, `validateEdits`) and navigates;
+built-in commands need an allowlisted id, mutating ones refuse with
+`unsupported-policy`, and `applyEdits` needs `document: "write"` and
+`editBatches`. Grants and `readOnly` are checked again right before each change.
+Each client call waits for pending input in order with it; plugin handlers run
+outside that queue. A contributed command's failure uses the plugin's own code,
+and a refused edit batch returned as-is reaches the caller unchanged.
+
+**Selection and navigation.** `snapshot.selection` names the current slide
+(session `slideId` and one-based `slide`) and a slide, shape or text target;
+text keeps its `anchor`/`focus` direction. `navigation.goToSlide`,
+`selectShape` and `selectText` take the version the target was read at, keep
+keyboard focus unless `focus: true`, and refuse with `stale-version`,
+`missing-target`, `layout-unavailable` or `unsupported` rather than retarget a
+changed deck. Slide, shape and story ids are session-scoped.
+
+**Coordinates.** `context.geometry` exists only while the canvas shows a
+painted frame of the current version, and not during proposal review.
+`layout.width`/`height` are the unzoomed slide in display-list pixels and
+`layout.zoom` the resolved scale. `geometry.toOverlayRect({ space, rect })`
+converts `slide-emu` (9,525 EMU per pixel) or `slide-px` rectangles into pixels
+of the unscaled overlay layer on the slide, `getShapeRect(shapeId)` returns a
+shape's rendered bounds including group descendants, and `getPositionAtPoint`
+hit-tests client coordinates with the layout's `version` and `id`. The layer
+sits below selection handles and proposal controls and ignores the pointer
+unless an element sets `pointer-events: auto`. Panels dock left, right or bottom
+of the slide beside the thumbnail rail, and become drawers in a narrow editor.
+Place `<PptxPluginToolbar />` in replacement chrome to keep contributed toolbar
+commands. Plugin shortcuts must use Mod or Alt, or a function key; built-in and
+clipboard shortcuts take precedence, and a clashing plugin shortcut is reported
+and not bound. Keys pressed in plugin chrome are the user's: built-in shortcuts act
+on the editor there, and a plugin's text fields keep their own editing keys.
+Plugins share the page's JavaScript realm, so grants govern the
+supported API rather than sandboxing code.
+
+## Compose the XLSX toolbar
+
+The spreadsheet editor's built-in controls share one command store,
+`api.commands`, handed to `onReady`. Pass `toolbar` to replace the default
+chrome with parts bound to it; `EditorToolbar.FormulaBar` keeps the name box and
+formula input:
+
+```tsx
+import {
+  EditorToolbar,
+  ToolbarButton,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  ToolbarGroup,
+  XlsxEditor,
+} from "@betteroffice/xlsx-react";
+
+<XlsxEditor
+  file={bytes}
+  toolbar={
+    <EditorToolbar mode="commands">
+      <EditorToolbar.Toolbar>
+        <ToolbarGroup label="Formatting">
+          <ToolbarCommandSelect id="numberFormat" />
+          <ToolbarCommandButton id="bold" />
+        </ToolbarGroup>
+        <ToolbarCommandButton id="undo" />
+        <ToolbarButton title="Share" onClick={share}>Share</ToolbarButton>
+      </EditorToolbar.Toolbar>
+      <EditorToolbar.FormulaBar />
+    </EditorToolbar>
+  }
+/>;
+```
+
+Omit `toolbar` for the default chrome (hidden when `readOnly`), pass `null` for
+none, or set `showToolbar={false}`. Outside the editor, render the same parts
+inside `<XlsxCommandProvider commands={commands}>`, with `commands` captured from
+`onReady` (`null` until then). `execute(id, args)` runs in order with pastes
+and cell entries accepted before it, writes the cell or formula text typed so
+far, checks availability again, and resolves to `executed`, `noop`, `opened`,
+`requested` or a typed failure such as `target-changed`; a disabled command
+states why in `disabledReason`. The synchronous `api.save()` throws
+`XlsxSaveRefusedError` (`input-pending` or `input-failed`) instead of returning
+bytes without accepted input; `execute("save", null)` waits for it and saves.
+The editor API's `version`, `readCells`, `findText`, `validateEdits` and
+`applyEdits` wait for that input too, and reject with the exported
+`XlsxCommandAdmissionError` when they cannot run: its `code` is `input-failed`
+while a refused entry waits for correction, `gesture-active` during a chart drag
+and `document-replaced` when the workbook is replaced meanwhile.
+`selectCells` and `clearSelection` queue an open entry behind input that is
+still waiting, so it may not have landed when they return. An open entry the
+workbook refuses stays open and they change nothing; one it refused earlier
+reopens at its own cell once they land on its sheet.
+The store gates the editor's own UI, not direct
+`api.handle` calls. Existing prop-based `EditorToolbar` and `Toolbar` usage keeps
+working in the default legacy mode; `mode="commands"` rejects those props. Narrow
+rails move groups into an accessible More menu; wrap other host content in
+`ToolbarOverflow` to give it an entry there.
+
+## Host XLSX editor plugins
+
+`XlsxEditor` installs host-owned tools through the same `plugins`,
+`pluginGrants` and `onPluginError` props as the DOCX editor. A plugin
+created with `defineXlsxPlugin` contributes a docked panel, an overlay on the
+grid and commands, and works through restricted clients. The plugin API is
+experimental and may change in minor releases:
+
+```tsx
+import { XlsxEditor, defineXlsxPlugin } from "@betteroffice/xlsx-react";
+
+const review = defineXlsxPlugin<{ sheets: number }>({
+  id: "acme.review",
+  createState: () => ({ sheets: 0 }),
+  async onEvent(context, event) {
+    if (event.type !== "load" && event.type !== "document-change") return;
+    const read = await context.read.readCells({ ranges: [] });
+    if (read.ok) context.setState({ sheets: read.sheets.length }, read.version);
+  },
+  panel: {
+    title: "Review",
+    placement: "right",
+    render: ({ context }) => <p>{context.state.sheets} sheets</p>,
+  },
+  commands: [
+    {
+      id: "mark",
+      label: "Mark reviewed",
+      mutatesDocument: true,
+      async execute(context) {
+        if (!context.edits) return { ok: false, failure: { code: "not-granted", message: "Needs write access" } };
+        const selection = context.snapshot.selection;
+        const version = await context.read.version();
+        if (!version.ok) return version;
+        if (!selection?.cells) return { ok: true, status: "noop" };
+        const { anchor, focus } = selection.cells;
+        const start = { row: Math.min(anchor.row, focus.row), col: Math.min(anchor.col, focus.col) };
+        const end = { row: Math.max(anchor.row, focus.row), col: Math.max(anchor.col, focus.col) };
+        const result = await context.edits.applyEdits({
+          expectVersion: version.version,
+          steps: [
+            {
+              op: "patchStyle",
+              target: { sheetId: selection.sheetId, range: { kind: "rowCol", start, end } },
+              patch: { fillColor: "#d9ead3" },
+            },
+          ],
+        });
+        return result.ok ? { ok: true, status: "executed" } : result;
+      },
+    },
+  ],
+  toolbar: ["mark"],
+});
+
+<XlsxEditor
+  file={bytes}
+  plugins={[review]}
+  pluginGrants={{ "acme.review": { document: "write", editBatches: true } }}
+  onPluginError={(error) => console.error(error.pluginId, error.phase, error.error)}
+/>;
+```
+
+**Lifecycle and grants** follow the DOCX editor: fresh state,
+`initialize` and one `load` event per workbook (repeated when a change the hook
+did not make arrives first, and stopped after ten runs), then coalesced
+`document-change`, `selection-change`, `mode-change` (with `readOnly`),
+`layout-change` and `grants-change` events. `document-change` comes from the
+workbook's committed versions after recalculation, so typing, commands, batches
+(a plugin's own included), undo, redo and remote updates each produce one, and
+refusals or no-ops none. Replacing the workbook, removing the plugin, changing its `revision`,
+unmounting or a failure ends the activation and runs its cleanups once. Without
+a grant a plugin reads (`read.version`, `readCells`, `findText`,
+`validateEdits`) and navigates; built-in commands need an allowlisted id,
+mutating ones refuse with `unsupported-policy`, and `applyEdits` needs
+`document: "write"` and `editBatches`. Grants and `readOnly` are checked again
+right before each change. Each client call waits for pending input in order
+with it; plugin handlers run outside that queue. A contributed command's failure
+uses the plugin's own code, and a refused edit batch returned as-is reaches the
+caller unchanged.
+
+**Selection and navigation.** `snapshot.selection` names the active sheet
+(session `sheetId` and zero-based `sheetIndex`), the selected cells with their
+`anchor`/`focus` direction and a selected chart's id.
+`navigation.selectCells({ sheetId, selection }, { expectVersion })` activates
+the sheet, selects the cells and reveals the focus cell;
+`navigation.scrollToCell({ sheetId, row, col }, { expectVersion, align })`
+reveals a cell (`nearest`, `start` or `center`) and keeps the selection, which
+is cleared when the cell is on another sheet. Both keep keyboard focus unless
+`selectCells` gets `focus: true`, and refuse with `stale-version` or
+`missing-target` rather than retarget a changed workbook. Sheet ids and versions
+are session-scoped.
+
+**Coordinates.** `context.geometry` exists only while the canvas shows a
+painted frame of the current version. `layout` names its `sheetId`, `zoom` and
+painted `viewport` in unzoomed sheet pixels, and changes with every scroll,
+zoom and sheet switch. `geometry.getCellRect({ sheetId, row, col })` and
+`getRangeRect({ sheetId, range })` return pixels of the overlay layer, zoomed
+and clipped to the visible grid, frozen panes included; a cell scrolled out of
+view returns null, and merged areas are addressed as ranges.
+`getPositionAtPoint` is null until the editor exposes pointer queries. The
+overlay layer sits on the grid below the editor's selection and cell editor and
+ignores the pointer unless an element sets `pointer-events: auto`. Panels dock
+left, right or bottom of the grid, above the sheet tabs, and become drawers in a
+narrow editor. Place `<XlsxPluginToolbar />` in replacement chrome to keep
+contributed toolbar commands. Plugin shortcuts must use Mod or Alt, or a
+function key; built-in shortcuts win and a clashing plugin shortcut is reported. Keys pressed in plugin chrome are the user's:
+built-in shortcuts act on the editor there, a plugin's text fields keep their
+own editing keys, and no key or click in a contribution reaches the grid.
+Plugins share the page's JavaScript realm, so grants govern the supported API
+rather than sandboxing code, and they are not spreadsheet protection.
+
 ## Use the JavaScript core
 
 ```ts
@@ -59,6 +556,379 @@ a precompiled `WebAssembly.Module` in runtimes that cannot fetch that URL. The
 core also provides hit-testing, viewport calculations, accessibility data, and
 TSV clipboard helpers.
 
+## Edit DOCX in version-checked batches
+
+A DOCX session reads paragraphs with the version they were read at, then applies
+a batch against that version: every step commits in one transaction and one undo
+step, or the batch returns a typed refusal and nothing changes.
+
+```ts
+import { repackDocx } from "@betteroffice/docx/docx";
+import { createYrsSession, yrsToDocument } from "@betteroffice/docx/yrs";
+
+const session = await createYrsSession();
+session.openDocx(bytes, true);
+const read = session.readParagraphs({ view: "accepted" });
+if (!read.ok) throw new Error(read.failure.message);
+const first = read.paragraphs[0];
+
+const result = session.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: "insertText", target: { kind: "paragraph", story: "body", paraId: first.paraId }, at: "end", text: " (revised)" },
+    { op: "insertParagraphs", target: { story: "body", paraId: first.paraId }, at: "end", paragraphs: [{ text: "New clause" }] },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code);
+
+const saved = await repackDocx(yrsToDocument(session, session.materializeDocx()!));
+```
+
+Offsets are UTF-16 positions in the paragraph text, where each inline atom (hard
+break, image, content control, note reference, field) is one U+FFFC. Steps insert,
+replace and delete text within one paragraph, insert or delete complete
+paragraphs, and apply paragraph styles; text steps can be recorded as tracked
+changes. Versions belong to one session and change with every committed edit.
+The React editor exposes the same `readParagraphs`, `findText`, `validateEdits`
+and `applyEdits` on its ref, flushing pending input first. Paragraph and style
+steps need a session opened from DOCX bytes, inline atoms cannot be replaced, and
+list numbering is a v1 limitation: numbered paragraphs and styles that define or
+inherit numbering refuse with `unsupported` until a follow-up retains numbering
+definitions.
+
+## Edit PPTX in version-checked batches
+
+A presentation handle reads slides and story text with the version they were
+read at, then applies a batch against that version: every step commits in one
+transaction and one undo step, or the batch returns a typed refusal and nothing
+changes.
+
+```ts
+import { initWasm, openPresentation } from "@betteroffice/pptx";
+
+await initWasm();
+const deck = openPresentation(bytes);
+const read = deck.readContent();
+if (!read.ok) throw new Error(read.failure.message);
+const story = read.stories[0];
+const within = { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId };
+
+const result = deck.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: "replaceText", target: { kind: "search", within, text: "Q3" }, text: "Q4" },
+    { op: "setSlideNotes", target: { slideId: story.slideId }, text: "Updated for Q4" },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code);
+
+const saved = deck.save();
+```
+
+A story reads as its paragraphs joined by `\n`, with story-local UTF-16 offsets;
+the read reports each paragraph's span, soft line breaks and field results.
+Steps insert, replace and delete text within one paragraph, format and align
+text, replace speaker notes, and set a top-level shape's rectangle, fill or
+outline. Fields and soft line breaks are never replaced or deleted. Ids and
+versions belong to one open session. `PptxEditor` exposes the same
+`readContent`, `findText`, `validateEdits` and `applyEdits` on its editor API,
+flushing pending input first. The Rust `Presentation` and the Python binding
+take the same requests.
+
+### PPTX structured export
+
+`exportStructured()` returns the committed deck as JSON with the version it was
+read at, and `exportMarkdown()` renders that same read as Markdown; neither
+flushes input or changes anything. `exportPptxStructured(bytes)`,
+`exportPptxMarkdown(bytes)` and `renderPptxMarkdown(content)` do the same
+headless, anchored to the returned snapshot.
+
+```ts
+import { exportPptxMarkdown } from "@betteroffice/pptx";
+
+const read = deck.exportStructured({ includeNotes: true, includeComments: true });
+if (!read.ok) throw new Error(read.failure.message);
+const titles = read.content.slides.map((slide) => slide.shapes[0]?.name);
+
+const { markdown, anchors } = await exportPptxMarkdown(bytes);
+```
+
+Slides follow deck order and shapes the current shape tree, depth first; this
+is the authored order, not one inferred from geometry. Paragraphs carry levels,
+resolved list markers, runs with marks, links, line breaks and cached field
+results; tables keep spans and merges; pictures, media, charts, SmartArt and
+embedded objects become placeholders with their alternative text. Every record
+carries an anchor (`range` anchors are batch text targets in `readContent()`
+offsets) and, when read from the file, its source part, SHA-256 and element
+path. Hidden slides and shapes, notes and comments are explicit options, layout
+and master content is not exported, and every omission is a diagnostic.
+`maxBlocks` and `maxBytes` stop the export at a whole record and set
+`truncated`. Markdown marks each
+block with `<!-- pptx-export:N -->`, mapped back to its source in `anchors`.
+
+## Edit XLSX in version-checked batches
+
+A workbook reads cells with the version they were read at, then applies a batch
+against that version: every step commits as one recalculated change and one undo
+step, or the batch returns a typed refusal and nothing changes.
+
+```ts
+const read = workbook.readCells({
+  ranges: [{ sheetId: "sheet:0", range: { kind: "a1", a1: "B3:D3" } }],
+});
+if (!read.ok) throw new Error(read.failure.message);
+
+const result = workbook.applyEdits({
+  expectVersion: read.version,
+  calculation: { nowSerial: Date.now() / 86_400_000 + 25_569 },
+  steps: [
+    {
+      op: "setCellInputs",
+      target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } },
+      inputs: [["120"]],
+      expect: { cells: [[{ displayText: read.ranges[0].cells[0][0].displayText }]] },
+    },
+    { op: "setFormulas", target: { sheetId: "sheet:0", range: { kind: "a1", a1: "E3" } }, formulas: [["D3*1.2"]] },
+    { op: "patchStyle", target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3:E3" } }, patch: { bold: true } },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code);
+```
+
+Steps set cell inputs (parsed like typing, against each cell's current number
+format), set formulas (stored as formulas whatever the format), set number
+formats and patch styles. Targets name a sheet id from the current catalog and an
+A1 range or zero-based corners; value matrices and guards match the target
+exactly. Guards compare a cell's value, formula or display text before the
+batch, and steps may combine content with formatting on the same cells but not
+write one property twice. `findText` searches display text exactly and
+case-sensitively. Volatile functions see only `calculation.nowSerial`. Versions
+and sheet ids belong to one session. Batches do not insert or delete rows,
+columns or sheets, merge cells or move charts, and refuse writes to merged-cell
+followers, array-formula cells and protected sheets. The React editor's
+`onReady` API exposes the same operations, committing pending drafts, nudges and
+pastes first, and rejecting with `XlsxCommandAdmissionError` when that input
+cannot be written or the workbook is replaced meanwhile.
+
+## Export DOCX as structured content
+
+`exportDocxStructured` reads a DOCX into read-only JSON: ordered stories of
+headings, paragraphs, list items, tables and content controls, with the location
+of every block and inline and a diagnostic for everything omitted or not
+represented. `exportDocxMarkdown` renders the same content as Markdown with a
+marker per block.
+
+```ts
+import { exportDocxMarkdown, exportDocxStructured } from "@betteroffice/docx";
+
+const content = await exportDocxStructured(bytes, { revisionView: "accepted" });
+const { markdown, anchors } = await exportDocxMarkdown(bytes, {
+  revisionView: "markup",
+  stories: ["body", "footnotes", "comments"],
+});
+```
+
+`revisionView` is required: `accepted` and `original` project pending revisions,
+`markup` keeps both with attribution. Only the body is exported unless `stories`
+selects headers, footers, footnotes, endnotes or comments; omitted stories,
+formatting and revision content are listed in `diagnostics`. Ranges use the edit
+batch offsets (UTF-16, one U+FFFC per inline atom) in the view they name.
+Fields export their cached result and are never evaluated; images export alt
+text and relationship metadata, not image data. On a live session,
+`session.exportStructured(options)` and `session.exportMarkdown(options)` return
+the content with the version its anchors belong to, without committing or
+publishing anything, and `session.headings(story)` lists a story's headings
+classified the same way. Exports stop at whole blocks when they reach `maxBlocks` or
+`maxBytes` and report `truncated`. Markdown does not preserve Word pagination or
+layout.
+
+### Page fragments
+
+A paged export attaches a page map to the same structured content: which physical
+page, section and displayed page label shows each block and inline, and which
+header, footer or note occurrence it sits in. Ordinary exports never lay anything
+out; a paged export reads a layout and refuses one it cannot trust.
+
+```ts
+import { exportDocxStructuredWithPages, renderDocxMarkdownWithPages } from "@betteroffice/docx";
+
+const paged = await exportDocxStructuredWithPages(
+  bytes,
+  { revisionView: "markup", stories: ["body", "headers", "footnotes"] },
+  { fonts: [{ key: "sans", data: fontBase64 }], defaultChain: ["sans"] },
+);
+const { markdown } = await renderDocxMarkdownWithPages(paged, { pageMarkers: true });
+```
+
+The bytes export lays the document out in a private session with exactly the
+fonts it is given, as base64 data, in a font store of its own (no system fonts are
+looked up and no editor's fonts change) and returns a deterministic snapshot map.
+Its layout options are plain JSON: `measurementDefaults`, `renderEnvironment`
+(`showHiddenText`, `defaultTabStopTwips`) and `compatibility`; a font requirement
+left with no font, including the default family text naming none falls back to, or
+any text measured with stand-in metrics is refused as `layout-unavailable`. On a live session,
+`session.exportStructuredWithPages(options)` reads the region layout the session
+retains and never lays out, flushes or loads fonts; the React ref's
+`exportStructuredWithPages(options)` flushes pending input and exports the
+editor's layout of that version, laying the document out again or waiting for
+fonts when the layout was computed from other fonts, measurement defaults, render
+environment or pagination options. Page references describe that authoritative
+layout at the returned version; a later edit may supersede it before it is
+painted.
+
+- `pageIndex` counts physical pages from zero, blank parity pages included;
+  `displayedNumber` and `displayedLabel` follow the section's PAGE numbering,
+  which can restart, repeat or use Roman and letter formats. A format that cannot
+  be written falls back to decimal with `numberingStatus: "fallback"`.
+- A header or footer part is exported once as a story and has an occurrence on
+  every page that shows it; notes have occurrences on the pages their note areas
+  are on, independent of the page of their reference mark.
+- Fragments name the export node (`nodeId`) and its block. Text slices are ranges
+  in the export's own offsets; an atom such as a field, control or note mark is
+  sliced whole, and marked `partial` with an `anchor-only` diagnostic when only
+  part of its content is on the page. Tables list their row window with
+  continuation and repeated-header flags, and every cell paragraph has fragments
+  of its own for the lines its cell shows; a line the cell cuts through is listed
+  with a `clipped-content` diagnostic.
+- Pages are laid out with revision markup. `accepted` and `original` are refused
+  with `unsupported-revision-layout` while any laid-out story, exported or not,
+  holds pending revisions.
+- A layout older than the document is refused with `stale-document`; section,
+  settings or note metadata that no longer describes the document, changed fonts,
+  measurement options or a mismatched `expectLayoutVersion` with `stale-layout`;
+  no retained layout, or one missing a font the document needs, with
+  `layout-unavailable`; notes that did not settle with `layout-not-converged`; a
+  footnote the layout places away from its reference in a split table row with
+  `unsupported`. A note too tall for its page's note area is diagnosed
+  `unsupported-note-layout` instead of placed.
+- `includeGeometry` adds rectangles in unzoomed CSS pixels (96 per inch) from the
+  physical page's top-left corner. `maxFragments` and `maxLayoutBytes` bound the
+  map separately from the content and mark it `truncated`; mapping stops a page
+  past the limit, so a truncated map leaves out the diagnostics of later pages and
+  of paragraphs no page shows.
+- `renderDocxMarkdownWithPages` checks the map belongs to the content; with
+  `pageMarkers`, each block marker is followed by
+  `<!-- docx-pages: 0=i 1=ii -->` and no page break is written into the text.
+- The map carries its own `schemaVersion` (1): additive fields keep it, and a
+  change existing readers would misread bumps it.
+
+Native Rust and Python structured exports do not yet generate page maps.
+
+## Export XLSX content with anchors
+
+XLSX exports bounded sparse worksheet content and Markdown with positional
+anchors, formulas, stored values, formatted text, explicit hidden-content
+options, and omission diagnostics. Export does not recalculate formulas.
+
+```ts
+import { exportXlsxMarkdown } from "@betteroffice/xlsx";
+
+const result = workbook.exportStructured({
+  scope: [{ sheet: 0, range: "A1:H40" }],
+  includeHiddenRows: false,
+  maxCells: 20_000,
+});
+if (result.ok) {
+  const { version, content } = result;
+  const totals = content.sheets[0].cells.filter((cell) => cell.formula !== null);
+}
+
+const { markdown, anchors } = await exportXlsxMarkdown(bytes, {}, { maxRows: 100 });
+```
+
+A live export returns `{ ok, version, content }` read from the committed
+workbook without flushing, recalculating or publishing anything; a refused scope
+or option returns `{ ok: false, version, failure }` with `target` naming the
+sheet or `null`. `exportXlsxStructured`, `exportXlsxMarkdown` and
+`renderXlsxMarkdown` need no session: bytes are read as stored, with no clock.
+Cells carry a typed value, the formula without `=`, the engine's display text,
+the number format and merge membership; formula results are stored values
+marked `unverified`, `missing` (the file stored none and nothing has calculated
+since), `uncertain`, `cycle` or `limited`. Sheets also list merges,
+tables, hyperlinks, hidden row and column spans, and drawing objects as
+placeholders; defined names are listed read-only. Anchors are sheet index, sheet
+name and A1 in that version or snapshot, not identities that survive structural
+edits. `maxCells` and `maxBytes` stop at a complete record with `truncated`.
+Markdown renders one labelled grid per sheet (200 rows, 50 columns and 10,000
+positions by default), escaped HTML tables for merges, and
+`<!-- xlsx-export:N -->` markers whose anchors are returned beside it.
+
+## Fill DOCX content controls
+
+`listContentControls` lists a session's content controls in document order with
+their tag, alias, type, lock, placement, anchor and current text, and the version
+they were read at. A `setContentControlText` step in an edit batch fills a plain-
+or rich-text control by its `controlId`, or by a tag or `ooxmlId` (the authored
+`w:id`) only one control carries.
+
+```ts
+const read = session.listContentControls();
+if (!read.ok) throw new Error(read.failure.message);
+const byTag = (tag: string) => read.content.controls.find((control) => control.tag === tag)!;
+
+const result = session.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: "setContentControlText", target: { kind: "id", controlId: byTag("customer.name").controlId }, text: "Ada Lovelace" },
+    { op: "setContentControlText", target: { kind: "tag", tag: "customer.address" }, text: "12 Example Street\nLondon" },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code, result.failure.reason);
+```
+
+The text replaces the control's content and clears its placeholder: CRLF becomes
+LF, LF is a line break in an inline control and a new paragraph in a block
+control, and a plain-text control accepts it only with `w:multiLine`. The new
+text takes the formatting of the control's first text run, or the control's own
+run properties while it shows its placeholder. Every step commits or none does;
+missing or duplicate tags and `ooxmlId`s, locked, data-bound and nested controls,
+and content other than text, tabs and line breaks are refused as data with a
+`reason`. `findContentControls(query)` returns every exact match of an id, tag,
+`ooxmlId` or alias, and `listDocxContentControls(bytes)` and
+`findDocxContentControls` read bytes without a session. Control ids belong to the
+version they were read at and do not survive save and reopen; `ooxmlId` does, and
+tags are the template author's names. Checkbox, dropdown and date controls keep
+`setContentControlValue`; passing a string to it fills a text control the same
+way. The React editor exposes `listContentControls` and `findContentControls` on
+its ref. Filling needs a session opened from DOCX bytes; rich-text run input is
+not supported yet.
+
+## Compare DOCX files into tracked changes
+
+`compareDocx` compares the body paragraph text of an original and a revised DOCX
+and returns the original with the differences as tracked insertions and
+deletions, attributed to the author and date you pass. Everything else in the
+package keeps the original's bytes.
+
+```ts
+import { compareDocx } from "@betteroffice/docx";
+
+const result = await compareDocx(original, revised, {
+  author: "Contract review",
+  date: "2024-05-06T09:30:00+02:00",
+});
+if (result.ok) {
+  await save(result.docx);
+  for (const change of result.changes) console.log(change.kind, change.original.text, change.revised.text);
+} else {
+  for (const diagnostic of result.diagnostics) console.warn(diagnostic.code, diagnostic.message);
+}
+```
+
+Only text inside body paragraphs whose structure is unchanged is compared.
+Whole-paragraph additions, removals and moves, table and content-control
+changes, formatting or style changes, field, hyperlink and object changes,
+edits in paragraphs holding such content, existing tracked changes, and
+differences outside the body return `{ ok: false, diagnostics }` and never a
+partial redline; `unsupported: "report"` collects every diagnostic instead of
+stopping at the first. `granularity` reports differences by Unicode word
+(the default) or grapheme cluster, and `limits` can tighten the documented v1
+bounds. The result is reopened and checked against both inputs before it is
+returned: accepting every change gives the revised text and formatting,
+rejecting every change gives the original. Review in BetterOffice is tested;
+Word validation is reported separately. Native Rust and Python comparison is
+not available yet.
+
 ## Operation profiles
 
 XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
@@ -69,18 +939,42 @@ mutation/history methods such as `insertTextProfiled` and `undoProfiled`, return
 milliseconds and describe engine stages; measure the surrounding browser
 interaction separately when investigating input-to-paint latency.
 
+## DOCX paragraph anchors
+
+A DOCX `YrsSession` addresses paragraphs by session keys, which are never saved as Word
+paragraph IDs (`w14:paraId`); a session anchor resolves on every replica of one
+collaborative session, and each seeding open (`openDocx`, `seedFromDocx`) starts a new
+session. `saveYrsDocx(session)` from `@betteroffice/docx/yrs` returns the
+saved bytes and a persisted anchor for each saved paragraph that has a Word paragraph ID,
+qualified by its package part. Resolve it after reopening:
+
+```ts
+import { createYrsSession, saveYrsDocx } from "@betteroffice/docx/yrs";
+
+const saved = await saveYrsDocx(session);
+const reopened = await createYrsSession();
+reopened.openDocx(saved.bytes, true);
+const result = reopened.resolveParagraphAnchor(saved.paragraphs[0].persisted);
+```
+
+Paragraphs authored in the session always receive an ID. Source paragraphs without one
+keep none until the host calls `session.persistParagraphIds()`, which covers every story
+part, comments and note separators included, and refuses rather than guess at an
+ambiguous comment reference. Results are `found`, `missing`, `ambiguous`, or
+`unsupported`; table, cell, and content-control identities are not persisted.
+
 ## Package reference
 
 | Package | What it is |
 | --- | --- |
-| `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
-| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes. |
+| `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with source anchors, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
+| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, flushed version-checked edit batches and content-control discovery on its ref, and host-owned plugins with panels, overlays, sidebar items, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
-| `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
-| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |
+| `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, version-checked atomic cell batches, anchored JSON and Markdown export, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
+| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts, flushed version-checked edit batches on its `onReady` API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
-| `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
-| `@betteroffice/pptx-react` | The slides editor and viewer as a React component. |
+| `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, version-checked atomic edit batches, structured JSON and Markdown export with anchors, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
+| `@betteroffice/pptx-react` | The slides editor and viewer as a React component, with a command store, composable toolbar parts, flushed version-checked edit batches on its editor API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/pptx-i18n` | UI locale strings and types for the PPTX React editor. |
 
 See [Collaboration](./collaboration) to connect editors through a shared relay.

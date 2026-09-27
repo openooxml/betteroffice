@@ -580,12 +580,31 @@ fn format_number_value(n: f64, code: &str, ds: DateSystem) -> FormattedValue {
     FormattedValue { text, color }
 }
 
+/// whether formatting `value` with `code` degrades to a general render
+/// because the code asks for something the interpreter stubs.
+pub fn format_is_approximate(value: &CellValue, code: &str) -> bool {
+    let CellValue::Number { value } = value else {
+        return false;
+    };
+    let trimmed = code.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("general") {
+        return false;
+    }
+    let parsed = parsed_sections(code);
+    let section = &parsed[select(&parsed, *value).0];
+    !section.has_date() && degrades_to_general(section)
+}
+
+/// fractions are stubbed: they degrade to a general render.
+fn degrades_to_general(sec: &Section) -> bool {
+    !sec.has(|t| matches!(t, Tok::General)) && sec.has(|t| matches!(t, Tok::Slash))
+}
+
 fn render_number_section(sec: &Section, mag: f64) -> String {
     if sec.has(|t| matches!(t, Tok::General)) {
         return render_general_section(sec, mag);
     }
-    // fractions are stubbed: degrade to a general render.
-    if sec.has(|t| matches!(t, Tok::Slash)) {
+    if degrades_to_general(sec) {
         return format_general(mag);
     }
     if sec.has(|t| matches!(t, Tok::Exp(_))) {

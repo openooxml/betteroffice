@@ -20,6 +20,109 @@ export {
   type EditorMode,
 } from './components/DocxEditor';
 
+// Commands: one authority for built-in and host chrome
+export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';
+export {
+  useDocxCommands,
+  useDocxCommandState,
+  useDocxCommand,
+  type DocxBoundCommand,
+  type DocxBoundPluginCommand,
+} from './commands/hooks';
+export type {
+  CommandReason,
+  CommandState,
+  JsonValue,
+  DocxCommandArgs,
+  DocxCommandDescriptor,
+  DocxCommandDisabledCode,
+  DocxCommandFailureCode,
+  DocxCommandId,
+  DocxCommandOption,
+  DocxCommandOptionPreview,
+  DocxCommandResult,
+  DocxCommandShortcut,
+  DocxCommandState,
+  DocxCommandStatus,
+  DocxCommandStore,
+  DocxCommandValues,
+  DocxImageTransform,
+  DocxSelectCommandId,
+  DocxTableAction,
+  DocxTableValue,
+  DocxTextColor,
+} from './commands/types';
+
+// Composable chrome
+export {
+  EditorToolbar,
+  type EditorToolbarProps,
+  type TitleBarProps,
+  type LogoProps,
+  type DocumentNameProps,
+  type TitleBarRightProps,
+  type ToolbarProps,
+  type ToolbarReviewControlsProps,
+} from './components/EditorToolbar';
+export {
+  ToolbarButton,
+  ToolbarGroup,
+  ToolbarSeparator,
+  type ToolbarButtonProps,
+  type ToolbarGroupProps,
+} from './components/toolbar/ToolbarPrimitives';
+export { ToolbarOverflow, type ToolbarOverflowProps } from './components/toolbar/ToolbarOverflow';
+export {
+  ToolbarCommand,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  type ToolbarCommandArgs,
+  type ToolbarCommandButtonProps,
+  type ToolbarCommandProps,
+  type ToolbarCommandSelectProps,
+} from './components/toolbar/ToolbarCommand';
+
+// Plugins: host-owned extensions with granted access to the editor
+export { defineDocxPlugin } from './plugins/defineDocxPlugin';
+export { DocxPluginToolbar } from './plugins/DocxPluginToolbar';
+export type {
+  DocxEditorPluginProps,
+  DocxPlugin,
+  DocxPluginCommand,
+  DocxPluginCommandClient,
+  DocxPluginContext,
+  DocxPluginDefinition,
+  DocxPluginEditClient,
+  DocxPluginError,
+  DocxPluginErrorPhase,
+  DocxPluginEvent,
+  DocxPluginFailureCode,
+  DocxPluginGeometry,
+  DocxPluginGrant,
+  DocxPluginLayout,
+  DocxPluginNavigation,
+  DocxPluginNavigationFailureCode,
+  DocxPluginPanel,
+  DocxPluginReadClient,
+  DocxPluginRect,
+  DocxPluginRefusal,
+  DocxPluginSelection,
+  DocxPluginSidebarItem,
+  DocxPluginSnapshot,
+  MaybePromise,
+  PluginCleanupReason,
+  PluginGrant,
+  PluginLoadReason,
+} from './plugins/types';
+export type {
+  DocxPluginCommandDescriptor,
+  DocxPluginCommandId,
+  DocxPluginCommandResult,
+  DocxPluginCommandState,
+} from './commands/types';
+export type { SelectionState } from './components/DocxEditor/types';
+export type { RenderedDomContext, PositionCoordinates } from '@betteroffice/docx/plugin-api';
+
 export type { BundledFontProvider } from '@betteroffice/docx/layout';
 export {
   configureDefaultFonts,

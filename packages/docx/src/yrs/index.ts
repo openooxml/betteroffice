@@ -16,7 +16,15 @@
 
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
+import { registerSessionInternals } from './sessionInternals';
 import { noteYrsStoriesDirty } from './yrsToDocument';
+import type {
+  DocxParagraphAnchor,
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentityReceipt,
+  DocxParagraphIdentitySnapshot,
+  DocxParagraphSavePlan,
+} from './paragraphIdentity';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type {
   CollaborationCursor,
@@ -24,7 +32,42 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import type {
+  DocxEditRefusal,
+  DocxEditRequest,
+  DocxEditResult,
+  DocxFindTextRequest,
+  DocxFindTextResult,
+  DocxReadParagraphsRequest,
+  DocxReadParagraphsResult,
+  DocxTextTarget,
+  DocxValidationResult,
+} from './edits';
+import type { DocxParagraphHeading } from './readTypes';
+import type {
+  DocxContentControlQuery,
+  DocxContentControlsOptions,
+  DocxContentControlsResult,
+} from './contentControls';
+import type {
+  DocxExportFailure,
+  DocxExportOptions,
+  DocxExportResult,
+  DocxMarkdownContent,
+  DocxStructuredContent,
+} from './structuredExport';
+import type {
+  DocxLayoutMap,
+  DocxPageExportOptions,
+  DocxPagedStructuredContent,
+  DocxSnapshotLayoutMap,
+} from './pagedExport';
 
+export * from './edits';
+export * from './contentControls';
+export * from './readTypes';
+export * from './structuredExport';
+export * from './pagedExport';
 export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
@@ -41,6 +84,15 @@ export {
 } from './residentCaret';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
+export * from './paragraphIdentity';
+export {
+  captureSessionSave,
+  saveYrsDocx,
+  writeSessionSave,
+  type DocxSavedDocument,
+  type DocxSavedParagraph,
+  type DocxSessionSave,
+} from './saveYrsDocx';
 
 export interface YrsDocxHost {
   document: Document;
@@ -91,6 +143,8 @@ export type YrsRunMark =
   | { type: 'bold' }
   | { type: 'italic' }
   | { type: 'underline' }
+  | { type: 'superscript' }
+  | { type: 'subscript' }
   | { type: 'fontFamily'; value: string }
   | { type: 'fontSize'; value: number }
   | { type: 'color'; value: string };
@@ -142,8 +196,18 @@ export interface YrsStorySeed {
   paragraphs: readonly YrsParagraphSeed[];
 }
 
+/** How a seeding entry point starts its opening; see {@link YrsSession.beginOpening}. */
+export interface YrsOpeningOptions {
+  /**
+   * A fixed opening generation, for a deterministic seed every replica loads
+   * as one session. Each opening mints a fresh one by default.
+   */
+  generation?: string;
+}
+
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
 export interface YrsParagraph {
+  /** Session key; not the paragraph's Word `w14:paraId`. */
   paraId: string;
   text: string;
   /** pStyle / alignment plus any op-set extras. */
@@ -226,7 +290,11 @@ export interface YrsParagraphAttrs {
   other?: Readonly<Record<string, unknown | null>>;
 }
 
-/** Typed value stored on a structured document tag (content control). */
+/**
+ * Typed value for a content control. A string fills a plain- or rich-text control's content
+ * (as a `setContentControlText` edit step would); the objects set checkbox, dropdown and date
+ * controls.
+ */
 export type YrsContentControlValue =
   | { kind: 'dropdown'; value: string }
   | { kind: 'checkbox'; checked: boolean }
@@ -344,6 +412,10 @@ export type YrsRawOp =
   | { op: 'delete'; index: number; len: number }
   | { op: 'format'; index: number; len: number; attrs?: Record<string, unknown> }
   | {
+      /**
+       * A pilcrow's `ooxmlParaId` binds its Word paragraph ID and is dropped
+       * when it is not one; `sourceParaId` and `paraOrigin` are seeding's to set.
+       */
       op: 'insertEmbed';
       index: number;
       kind: string;
@@ -388,6 +460,17 @@ export interface YrsRenderEnv {
 /** Receipt of {@link YrsSession.addComment}. */
 export interface YrsCommentReceipt {
   commentId: string;
+}
+
+/** A comment the session holds; see {@link YrsSession.listComments}. @internal */
+export interface YrsCommentInfo {
+  id: string;
+  author: string;
+  date: string;
+  done: boolean;
+  parentId: string | null;
+  /** The body as it was given to {@link YrsSession.addComment} or `setComment`. */
+  body: unknown;
 }
 
 /**
@@ -515,12 +598,16 @@ export interface YrsSelectionContext {
   italic: YrsTriState;
   underline: YrsTriState;
   strike: YrsTriState;
+  superscript: YrsTriState;
+  subscript: YrsTriState;
   /** Uniform ASCII font family, or `null` when absent/mixed. */
   fontFamily: string | null;
   /** Uniform font size in half-points (the OOXML `w:sz` unit). */
   fontSize: number | null;
   /** Uniform RGB hex or theme-color name, or `null` when absent/mixed. */
   color: string | null;
+  /** Uniform highlight name (`yellow`, …) or unmapped hex, or `null` when absent/mixed. */
+  highlight: string | null;
   /** Paragraph containing the range start. */
   paraId: string;
   styleId: string | null;
@@ -653,6 +740,21 @@ export type YrsCellBorders = Partial<
   Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder | null>
 >;
 
+/** Undo grouping for tracked local transactions. */
+export type YrsUndoCaptureMode = 'auto' | 'manual';
+
+/** Outcome of a target-resolving helper edit. @internal */
+export type YrsTargetEditResult = { ok: true; version: string } | DocxEditRefusal;
+
+/** Accepted-view texts around a selection; U+FFFC stands for each inline atom. @internal */
+export interface YrsSelectionText {
+  paraId: string;
+  selectedText: string;
+  paragraphText: string;
+  before: string;
+  after: string;
+}
+
 /**
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
@@ -736,13 +838,26 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
   loadState(update: Uint8Array): void;
-  /** Parses a DOCX, seeds its stories, and returns thin host metadata. */
-  seedFromDocx(bytes: Uint8Array): YrsDocxHost;
-  /** Parses a DOCX and optionally seeds its stories. */
-  openDocx(bytes: Uint8Array, seedStories: boolean): YrsDocxHost;
+  /** Parses a DOCX, seeds its stories, and returns thin host metadata; see {@link openDocx}. */
+  seedFromDocx(bytes: Uint8Array, options?: YrsOpeningOptions): YrsDocxHost;
+  /**
+   * Parses a DOCX and optionally seeds its stories. Seeding starts a new
+   * opening, so its session anchors never resolve in another opening, even
+   * one seeded alike by the same client; see {@link beginOpening}.
+   */
+  openDocx(bytes: Uint8Array, seedStories: boolean, options?: YrsOpeningOptions): YrsDocxHost;
+  /**
+   * Starts a new opening of the document: its generation, replicated to
+   * every replica, becomes part of every session anchor. Every seeding entry
+   * point calls it; call it after building a document another way.
+   */
+  beginOpening(generation?: string): void;
   /** Materializes the retained canonical package for compatibility APIs. */
   materializeDocx(): Document | null;
-  /** Seeds stories and returns paragraph IDs in document order. */
+  /**
+   * Seeds stories and returns paragraph IDs in document order. Seeding a
+   * document that has no opening yet starts one; see {@link beginOpening}.
+   */
   loadStories(stories: readonly YrsStorySeed[]): Record<string, string[]>;
   /** Full document state as one yrs v1 update (Yjs wire format). */
   encodeState(): Uint8Array;
@@ -782,6 +897,12 @@ export interface YrsSession extends CollaborationReplica {
   cellSelection(): YrsTableRange | null;
   /** Begin local-origin undo capture once import/seeding has completed. */
   beginUndoCapture(): void;
+  /** Separates subsequent local edits from the current undo step; safe before capture starts. */
+  addUndoBoundary(): void;
+  /** Changes grouping policy, closing the current group while retaining history. */
+  setUndoCaptureMode(mode: YrsUndoCaptureMode): void;
+  /** Current grouping policy; defaults to auto. */
+  undoCaptureMode(): YrsUndoCaptureMode;
   /** Stories changed by the latest undo or redo, sorted. */
   historyStories(): string[];
   /** Undo/redo only local-origin direct operations (never remote/system transactions). */
@@ -852,7 +973,8 @@ export interface YrsSession extends CollaborationReplica {
   mergeParagraphs(story: string, paraId: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
   /**
    * Toggles one run mark across a range: removes it when every unit already
-   * carries it, otherwise adds it.
+   * carries it, otherwise adds it. Adding superscript clears subscript and
+   * vice versa.
    */
   toggleMark(range: YrsStoryRange, mark: YrsRunMark): void;
   /** Applies set-valued direct formatting; omitted fields are kept and `null` fields clear. */
@@ -871,21 +993,33 @@ export interface YrsSession extends CollaborationReplica {
     image: Readonly<Record<string, unknown>>,
     suggesting?: YrsAuthor
   ): YrsRevisionReceipt;
-  /** Sets the authored value on a content-control embed addressed by stable payload id. */
+  /**
+   * Sets the value of a content-control embed addressed by stable payload id. A string fills a
+   * text control's content as one version-checked step and throws when the fill is refused.
+   */
   setContentControlValue(embedId: string, value: YrsContentControlValue): void;
-  /** Sets a content-control value at a paragraph-keyed embed position. */
+  /** {@link setContentControlValue} for the embed at a paragraph-keyed position. */
   setContentControlValueAt(at: YrsLoc, value: YrsContentControlValue): void;
-  /** Removes the authored value from a content-control embed. */
+  /**
+   * Removes an authored value from a content-control embed. It never erases a text control's
+   * text: fill it with `''` for that.
+   */
   clearContentControlValue(embedId: string): void;
   /** Commits image size/wrapping/position fields in one transaction. */
   setImageGeometry(embedId: string, geometry: YrsImageGeometry): void;
+  /** Commits image geometry at a paragraph-keyed position; reaches images that share an id. */
+  setImageGeometryAt(at: YrsLoc, geometry: YrsImageGeometry): void;
   /** Inserts a native page-break embed at a paragraph-keyed location. */
   insertPageBreak(at: YrsLoc): void;
   /** Inserts a native section-break embed at a paragraph-keyed location. */
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
-  /** Applies raw story operations in one transaction. */
+  /**
+   * Applies raw story operations in one transaction, then repairs any
+   * paragraph identity a pilcrow they insert or re-key duplicates and
+   * promotes an editor-only paragraph they author into.
+   */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Applies seed raw operations with deterministic item ordering. */
   applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
@@ -921,6 +1055,8 @@ export interface YrsSession extends CollaborationReplica {
   listRevisions(): YrsRevisionInfo[];
   /** Current offsets of a comment's sticky anchors. Throws when an anchor no longer resolves. */
   resolveComment(commentId: string): YrsResolvedCommentAnchor[];
+  /** Every comment the session holds, sorted by id. @internal */
+  listComments(): YrsCommentInfo[];
   /** Story ids in the document, sorted. */
   storyIds(): string[];
   /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
@@ -939,6 +1075,132 @@ export interface YrsSession extends CollaborationReplica {
   storySegments(story: string): YrsStorySegment[];
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
+
+  // -- paragraph identity --
+
+  /**
+   * Session, persisted and source anchors of every paragraph, including the
+   * source package's paragraphs outside the stories, and the Word paragraph ID
+   * each saves with. Reads only.
+   */
+  paragraphIdentities(): DocxParagraphIdentitySnapshot;
+  /**
+   * Gives every paragraph that saves without a Word paragraph ID a fresh one,
+   * editor-only paragraphs excepted, and repairs duplicates, so persisted
+   * anchors survive save and reopen. Source IDs and saved claims keep their
+   * IDs over unsaved claims and copies. A replicated change outside undo
+   * history that later saves keep; a refusal changes nothing.
+   */
+  persistParagraphIds(): DocxParagraphIdentityReceipt;
+  /** Resolves an anchor to the paragraph that currently holds it. Reads only. */
+  resolveParagraphAnchor(anchor: DocxParagraphAnchor): DocxParagraphAnchorResult;
+  /** The Word paragraph ID each paragraph of a story saves with, in pilcrow order. @internal */
+  storyParagraphIds(story: string): Array<string | null>;
+  /** The paragraph IDs a save of the session applies. @internal */
+  paragraphSavePlan(): DocxParagraphSavePlan;
+  /**
+   * Publishes the `[owner, paraId]` pairs a save captured and returns those
+   * whose binding changed since. @internal
+   */
+  recordSavedParagraphIds(
+    saved: ReadonlyArray<readonly [string, string]>
+  ): Array<[string, string]>;
+  /**
+   * The Word paragraph IDs a DOCX package holds, by part URI, in document
+   * order and upper case. Reads only. @internal
+   */
+  writtenParagraphIds(bytes: Uint8Array): Record<string, string[]>;
+
+  // -- version-checked host edits --
+
+  /**
+   * The session-scoped version token. It changes on every committed change, local or remote,
+   * and when the document is replaced; compare tokens only within this session.
+   */
+  version(): string;
+  /** Paragraph texts in one view, with the version they were read at. */
+  readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
+  /** Exact, case-sensitive, paragraph-local search; overlapping matches count separately. */
+  findText(request: DocxFindTextRequest): DocxFindTextResult;
+  /** Resolves and checks an edit batch without changing anything or reserving ids. */
+  validateEdits(request: DocxEditRequest): DocxValidationResult;
+  /**
+   * Applies every step or none, resolving all targets against `expectVersion`. Policy
+   * failures are returned; malformed requests throw.
+   */
+  applyEdits(request: DocxEditRequest): DocxEditResult;
+  /** Resolves a text target and formats it in one call. @internal */
+  formatTextTarget(target: DocxTextTarget, delta: YrsInlineFormatDelta): YrsTargetEditResult;
+  /** Resolves a text target and anchors side-map comment `id` over it in one call. @internal */
+  commentTextTarget(
+    target: DocxTextTarget,
+    comment: { id: string; author: string; date: string; body: unknown }
+  ): YrsTargetEditResult;
+  /** Accepted-view texts around a paragraph-keyed selection. @internal */
+  selectionText(range: YrsStoryRange): YrsSelectionText;
+
+  // -- structured export --
+
+  /**
+   * Exports the committed document as read-only structured content with the version it was read
+   * at; anchors resolve against that version. Nothing is committed, flushed or published.
+   * Unusable options are refused; malformed ones throw.
+   */
+  exportStructured(options: DocxExportOptions): DocxExportResult<DocxStructuredContent>;
+  /** {@link exportStructured} rendered as Markdown from the same read. */
+  exportMarkdown(options: DocxExportOptions): DocxExportResult<DocxMarkdownContent>;
+  /**
+   * {@link exportStructured} with the page map of the region layout this session retains. The
+   * layout must have lowered the current version from this session's stories with section,
+   * settings and note metadata that describe it, and measured every font the document uses
+   * with the fonts registered now; this call lays nothing out, flushes nothing and loads no
+   * font, and refuses a stale or incomplete layout.
+   */
+  exportStructuredWithPages(
+    options: DocxPageExportOptions
+  ): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
+  /**
+   * {@link exportStructuredWithPages} for an editor: `currentRequest` is the region layout
+   * request it would lay the document out with now, and the retained layout must have used the
+   * same fonts, measurement defaults, render environment and pagination options. @internal
+   */
+  exportStructuredWithPagesFor(
+    options: DocxPageExportOptions,
+    currentRequest: string
+  ): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
+  /**
+   * Lays this private session out with `fonts` alone, in a measurement font store of its own,
+   * and exports it with snapshot anchors and a snapshot map. `fonts` holds the font files back
+   * to back and `fontLengths` their lengths; `request`'s font chains name them by index. Throws
+   * for a font the engine rejects. @internal
+   */
+  exportSnapshotWithPrivateFonts(
+    fonts: Uint8Array,
+    fontLengths: Uint32Array,
+    request: string,
+    options: DocxPageExportOptions
+  ):
+    | { ok: true; content: DocxPagedStructuredContent<DocxSnapshotLayoutMap> }
+    | { ok: false; failure: DocxExportFailure };
+  /**
+   * The heading paragraphs of `story` in document order, classified as the structured export
+   * classifies them. Throws for an unknown story.
+   */
+  headings(story: string): DocxParagraphHeading[];
+
+  // -- content controls --
+
+  /**
+   * The content controls of the committed document with the version they were read at; control
+   * ids and anchors resolve against that version. Nothing is committed, flushed or published.
+   * Unusable options are refused; malformed ones throw.
+   */
+  listContentControls(options?: DocxContentControlsOptions): DocxContentControlsResult;
+  /** The controls {@link listContentControls} lists that match `query` exactly; none or several. */
+  findContentControls(
+    query: DocxContentControlQuery,
+    options?: DocxContentControlsOptions
+  ): DocxContentControlsResult;
 
   /** Drops the observer and frees the wasm-side replica. Idempotent. */
   destroy(): void;
@@ -986,6 +1248,10 @@ function wireRanges(ranges: readonly YrsStoryRange[]): string {
       endOffset: range.end.offset,
     }))
   );
+}
+
+function targetStory(target: DocxTextTarget): string {
+  return target.kind === 'search' ? target.within.story : target.story;
 }
 
 function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -1142,10 +1408,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     observing = false;
   };
 
-  const openDocx = (bytes: Uint8Array, seedStories: boolean): YrsDocxHost => {
+  const openDocx = (
+    bytes: Uint8Array,
+    seedStories: boolean,
+    options: YrsOpeningOptions = {}
+  ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    const json = mutate(() => session.open_docx(source, seedStories));
+    const json = mutate(() => session.open_docx(source, seedStories, options.generation));
     const host = decodeDocxHost(json, source);
     docxSource = source;
     return host;
@@ -1297,8 +1567,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty('all');
       mutate(() => session.load(update));
     },
-    seedFromDocx: (bytes) => openDocx(bytes, true),
+    seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
     openDocx,
+    beginOpening: (generation) => mutate(() => session.begin_opening(generation)),
     materializeDocx: () => {
       const source = docxSource;
       const json = session.materialize_docx();
@@ -1398,6 +1669,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
     beginUndoCapture: ensureUndo,
+    addUndoBoundary: () => session.add_undo_boundary(),
+    setUndoCaptureMode: (mode) => session.set_undo_capture_mode(mode),
+    undoCaptureMode: () => session.undo_capture_mode() as YrsUndoCaptureMode,
     historyStories: () => session.history_stories(),
     undo: () =>
       mutate(() => {
@@ -1736,6 +2010,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     setContentControlValueAt: (at, value) => {
       ensureUndo(at.story);
+      if (typeof value === 'string') markDirty('all');
       mutate(() =>
         session.set_content_control_value_at(at.story, at.paraId, at.offset, JSON.stringify(value))
       );
@@ -1749,6 +2024,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       ensureUndo();
       markDirty('all');
       mutate(() => session.set_image_geometry(embedId, JSON.stringify(geometry)));
+    },
+    setImageGeometryAt: (at, geometry) => {
+      ensureUndo(at.story);
+      mutate(() =>
+        session.set_image_geometry_at(at.story, at.paraId, at.offset, JSON.stringify(geometry))
+      );
     },
     insertPageBreak: (at) => {
       ensureUndo(at.story);
@@ -1765,7 +2046,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     applyRawOps: (story, ops) => {
-      markDirty(story);
+      const rekeys = ops.some(
+        (op) =>
+          (op.op === 'insertEmbed' && op.kind === 'pilcrow') ||
+          (op.op === 'setEmbedAttr' && op.key === 'paraId')
+      );
+      markDirty(rekeys ? 'all' : story);
       mutate(() => session.apply_raw_ops(story, JSON.stringify(ops)));
     },
     applySeedRawOps: (story, ops) => {
@@ -1822,6 +2108,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
+    listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
     storyIds: () => session.story_ids(),
     storyLength: (story) => session.story_len(story),
     storyChecksum: (story) => BigInt(session.story_checksum(story)),
@@ -1851,6 +2138,114 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
 
+    paragraphIdentities: () =>
+      JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
+    persistParagraphIds: () => {
+      markDirty('all');
+      return mutate(
+        () => JSON.parse(session.persist_paragraph_ids()) as DocxParagraphIdentityReceipt
+      );
+    },
+    resolveParagraphAnchor: (anchor) =>
+      JSON.parse(
+        session.resolve_paragraph_anchor(JSON.stringify(anchor))
+      ) as DocxParagraphAnchorResult,
+    storyParagraphIds: (story) =>
+      JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
+    paragraphSavePlan: () => JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan,
+    recordSavedParagraphIds: (saved) =>
+      mutate(
+        () =>
+          JSON.parse(session.record_saved_paragraph_ids(JSON.stringify(saved))) as Array<
+            [string, string]
+          >
+      ),
+    writtenParagraphIds: (bytes) =>
+      JSON.parse(session.written_paragraph_ids(bytes)) as Record<string, string[]>,
+    exportStructured: (options) =>
+      JSON.parse(
+        session.export_structured_json(JSON.stringify(options))
+      ) as DocxExportResult<DocxStructuredContent>,
+    exportMarkdown: (options) =>
+      JSON.parse(
+        session.export_markdown_json(JSON.stringify(options))
+      ) as DocxExportResult<DocxMarkdownContent>,
+    exportStructuredWithPages: (options) =>
+      JSON.parse(
+        session.export_structured_with_pages_json(JSON.stringify(options), undefined)
+      ) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>,
+    exportStructuredWithPagesFor: (options, currentRequest) =>
+      JSON.parse(
+        session.export_structured_with_pages_json(JSON.stringify(options), currentRequest)
+      ) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>,
+    exportSnapshotWithPrivateFonts: (fonts, fontLengths, request, options) =>
+      JSON.parse(
+        session.export_snapshot_with_private_fonts_json(
+          fonts,
+          fontLengths,
+          request,
+          JSON.stringify(options)
+        )
+      ) as
+        | { ok: true; content: DocxPagedStructuredContent<DocxSnapshotLayoutMap> }
+        | { ok: false; failure: DocxExportFailure },
+    headings: (story) => JSON.parse(session.headings_json(story)) as DocxParagraphHeading[],
+    listContentControls: (options = {}) =>
+      JSON.parse(
+        session.list_content_controls_json(JSON.stringify(options))
+      ) as DocxContentControlsResult,
+    findContentControls: (query, options = {}) =>
+      JSON.parse(
+        session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
+      ) as DocxContentControlsResult,
+
+    version: () => session.version(),
+    readParagraphs: (request) =>
+      JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
+    findText: (request) =>
+      JSON.parse(session.find_text_json(JSON.stringify(request))) as DocxFindTextResult,
+    validateEdits: (request) =>
+      JSON.parse(session.validate_edits_json(JSON.stringify(request))) as DocxValidationResult,
+    applyEdits: (request) =>
+      mutate(() => {
+        const result = JSON.parse(
+          session.apply_edits_json(JSON.stringify(request))
+        ) as DocxEditResult;
+        if (result.ok && result.applied) markDirty(result.changedStories);
+        return result;
+      }),
+    formatTextTarget: (target, delta) => {
+      ensureUndo(targetStory(target));
+      return mutate(
+        () =>
+          JSON.parse(
+            session.format_text_target_json(JSON.stringify(target), JSON.stringify(delta))
+          ) as YrsTargetEditResult
+      );
+    },
+    commentTextTarget: (target, comment) => {
+      markDirty(targetStory(target));
+      return mutate(
+        () =>
+          JSON.parse(
+            session.comment_text_target_json(
+              JSON.stringify(target),
+              JSON.stringify({ ...comment, body: comment.body ?? null })
+            )
+          ) as YrsTargetEditResult
+      );
+    },
+    selectionText: (range) =>
+      JSON.parse(
+        session.selection_text_json(
+          range.story,
+          range.start.paraId,
+          range.start.offset,
+          range.end.paraId,
+          range.end.offset
+        )
+      ) as YrsSelectionText,
+
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
@@ -1860,6 +2255,17 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       session.free();
     },
   };
+
+  registerSessionInternals(facade, {
+    compareDocx: (original, revised, options) => {
+      markDirty('all');
+      const json = mutate(() => session.compare_docx_json(original, revised, options));
+      docxSource = original.slice();
+      return json;
+    },
+    finishComparedDocx: (bytes) => session.finish_compared_docx_json(bytes),
+    failComparedDocx: (message) => session.fail_compared_docx_json(message),
+  });
 
   return facade;
 }

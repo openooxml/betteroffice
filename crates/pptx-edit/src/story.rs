@@ -93,7 +93,7 @@ pub(crate) fn validate_style_values(
     Ok(())
 }
 
-fn validate_alignment(alignment: Option<&str>) -> EditResult<()> {
+pub(crate) fn validate_alignment(alignment: Option<&str>) -> EditResult<()> {
     if let Some(alignment) = alignment
         && !ALIGNMENTS.contains(&alignment)
     {
@@ -628,7 +628,7 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
     })
 }
 
-fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
+pub(crate) fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
     txn.get_map(STORIES)
         .and_then(|stories| stories.get(txn, story_id))
         .and_then(|value| value.cast::<TextRef>().ok())
@@ -664,8 +664,14 @@ fn check_text_bounds<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32)
     Ok(())
 }
 
-/// The pilcrow of every paragraph the range touches. A collapsed caret picks
-/// the paragraph it sits in; a range stopping at a paragraph start does not.
+/// Whether a paragraph-level edit over `start..end` touches the paragraph spanning
+/// `paragraph_start..=pilcrow`. A collapsed caret picks the paragraph it sits in; a range
+/// stopping at a paragraph start does not.
+pub(crate) fn selects_paragraph(start: u32, end: u32, paragraph_start: u32, pilcrow: u32) -> bool {
+    start <= pilcrow && (end > paragraph_start || (start == end && start >= paragraph_start))
+}
+
+/// The pilcrow of every paragraph the range touches, as [`selects_paragraph`] decides.
 fn selected_pilcrows<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> Vec<MapRef> {
     let start = start.min(story.len(txn).saturating_sub(1));
     let mut pilcrows = Vec::new();
@@ -674,9 +680,7 @@ fn selected_pilcrows<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32)
     for diff in story.diff(txn, YChange::identity) {
         let item_length = out_len(&diff.insert);
         if let Out::YMap(map) = diff.insert {
-            let touches = start <= offset
-                && (end > paragraph_start || (start == end && start >= paragraph_start));
-            if touches {
+            if selects_paragraph(start, end, paragraph_start, offset) {
                 pilcrows.push(map);
             }
             paragraph_start = offset + item_length;

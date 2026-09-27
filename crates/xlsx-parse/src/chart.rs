@@ -34,7 +34,7 @@ const NS_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 /// `cx:chartSpace`, whose reference syntax and caches are their own vocabulary.
 const NS_CHART_EX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
 /// the worksheet drawing vocabulary that carries the anchors.
-const NS_SPREADSHEET_DRAWING: &str =
+pub(crate) const NS_SPREADSHEET_DRAWING: &str =
     "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
 
 /// relationship types followed out of a sheet or drawing part.
@@ -379,26 +379,7 @@ fn read_anchors(root: &Element) -> Result<Vec<DrawingAnchor>, ParseError> {
     }
     let mut anchors = Vec::new();
     for child in root.child_elements().filter(is_anchor) {
-        let anchor = match child.local_name() {
-            "twoCellAnchor" => ChartAnchor::TwoCell {
-                from: anchor_cell(child.child("from"))?,
-                to: anchor_cell(child.child("to"))?,
-                edit_as: match child.attribute(None, "editAs") {
-                    Some(value) => AnchorEditAs::from_sml(value).ok_or_else(|| {
-                        ParseError::Malformed(format!("invalid chart editAs value {value:?}"))
-                    })?,
-                    None => AnchorEditAs::default(),
-                },
-            },
-            "oneCellAnchor" => ChartAnchor::OneCell {
-                from: anchor_cell(child.child("from"))?,
-                extent: anchor_extent(child.child("ext"))?,
-            },
-            _ => ChartAnchor::Absolute {
-                pos: anchor_pos(child.child("pos"))?,
-                extent: anchor_extent(child.child("ext"))?,
-            },
-        };
+        let anchor = anchor_geometry(child)?;
         if anchors.len() >= MAX_CHART_ANCHORS {
             return Err(ParseError::TooManyCharts);
         }
@@ -410,7 +391,31 @@ fn read_anchors(root: &Element) -> Result<Vec<DrawingAnchor>, ParseError> {
     Ok(anchors)
 }
 
-fn is_anchor(element: &&Element) -> bool {
+/// Where one `xdr:` anchor element sits on the grid.
+pub(crate) fn anchor_geometry(anchor: &Element) -> Result<ChartAnchor, ParseError> {
+    Ok(match anchor.local_name() {
+        "twoCellAnchor" => ChartAnchor::TwoCell {
+            from: anchor_cell(anchor.child("from"))?,
+            to: anchor_cell(anchor.child("to"))?,
+            edit_as: match anchor.attribute(None, "editAs") {
+                Some(value) => AnchorEditAs::from_sml(value).ok_or_else(|| {
+                    ParseError::Malformed(format!("invalid chart editAs value {value:?}"))
+                })?,
+                None => AnchorEditAs::default(),
+            },
+        },
+        "oneCellAnchor" => ChartAnchor::OneCell {
+            from: anchor_cell(anchor.child("from"))?,
+            extent: anchor_extent(anchor.child("ext"))?,
+        },
+        _ => ChartAnchor::Absolute {
+            pos: anchor_pos(anchor.child("pos"))?,
+            extent: anchor_extent(anchor.child("ext"))?,
+        },
+    })
+}
+
+pub(crate) fn is_anchor(element: &&Element) -> bool {
     element.namespace() == Some(NS_SPREADSHEET_DRAWING)
         && matches!(
             element.local_name(),
@@ -1346,7 +1351,7 @@ pub(crate) fn directory_of(path: &str) -> &str {
         .unwrap_or("")
 }
 
-fn type_is(kind: &str, suffix: &str) -> bool {
+pub(crate) fn type_is(kind: &str, suffix: &str) -> bool {
     kind.rsplit('/').next() == Some(suffix)
 }
 
@@ -1366,9 +1371,12 @@ fn relationship_target<'a>(
 pub(crate) fn parse_relationships(
     data: &[u8],
 ) -> Result<Vec<(String, String, String)>, ParseError> {
-    let root = parse_tree(data)?;
-    Ok(root
-        .child_elements()
+    Ok(relationships_of(&parse_tree(data)?))
+}
+
+/// [`parse_relationships`] over an already parsed `.rels` root.
+pub(crate) fn relationships_of(root: &Element) -> Vec<(String, String, String)> {
+    root.child_elements()
         .filter(|child| {
             child.local_name() == "Relationship"
                 && matches!(child.namespace(), None | Some(NS_PACKAGE_RELATIONSHIPS))
@@ -1385,5 +1393,5 @@ pub(crate) fn parse_relationships(
                 child.attribute_local("Target")?.to_owned(),
             ))
         })
-        .collect())
+        .collect()
 }

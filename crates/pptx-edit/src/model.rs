@@ -120,6 +120,10 @@ pub struct ShapeSnapshot {
     pub rotation_deg: f64,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// The geometry the shape draws at, present only while it has none of
+    /// its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited: Option<InheritedGeometry>,
     /// Hides this shape and its descendants.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
@@ -139,6 +143,19 @@ pub struct ShapeSnapshot {
     pub graphic: Option<GraphicFrameData>,
     pub text_stories: Vec<StorySnapshot>,
     pub children: Vec<ShapeSnapshot>,
+}
+
+/// The transform a placeholder takes from its layout or master.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InheritedGeometry {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+    pub rotation_deg: f64,
+    pub flip_h: bool,
+    pub flip_v: bool,
 }
 
 /// Image data shared by editing peers.

@@ -1,3 +1,7 @@
+pub(crate) mod batch;
+mod staging;
+pub(crate) mod target;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
@@ -35,6 +39,7 @@ use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
 };
+use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
@@ -43,6 +48,8 @@ use crate::{
 };
 #[cfg(feature = "raster")]
 use crate::{RenderOptions, RenderedPng};
+use batch::DocumentVersion;
+use staging::CommitHistory;
 
 const MAX_RANGE_CELLS: u64 = 100_000;
 pub const DEFAULT_TEXT_SEARCH_LIMIT: usize = 1_000;
@@ -101,6 +108,9 @@ struct PreservedSheetState {
     /// edits made since the package was read. `None` once an identity-less
     /// replay replaced the model wholesale, which reserializes edited sheets.
     axes: Vec<Option<xlsx_parse::SheetAxes>>,
+    /// Whether each sheet was added in this session, so its properties are the
+    /// defaults of a new sheet rather than unknown ones.
+    created: Vec<bool>,
 }
 
 impl PreservedSheetState {
@@ -110,6 +120,7 @@ impl PreservedSheetState {
         self.shared_string_cells
             .resize_with(sheets, Default::default);
         self.axes.resize(sheets, None);
+        self.created.resize(sheets, false);
     }
 
     fn insert(&mut self, index: usize) {
@@ -118,6 +129,7 @@ impl PreservedSheetState {
         self.shared_string_cells
             .insert(index, xlsx_parse::SharedStringCells::new());
         self.axes.insert(index, None);
+        self.created.insert(index.min(self.created.len()), true);
     }
 
     fn remove(&mut self, index: usize) {
@@ -127,6 +139,9 @@ impl PreservedSheetState {
         }
         if index < self.axes.len() {
             self.axes.remove(index);
+        }
+        if index < self.created.len() {
+            self.created.remove(index);
         }
     }
 
@@ -260,6 +275,17 @@ fn sheet_content(
     }
 }
 
+/// The cycle and limited cells of a calculation, order aside.
+fn calculation_status(result: &CalculationResult) -> [BTreeSet<(u32, u32, u32)>; 2] {
+    let cells = |cells: &[CellAddress]| {
+        cells
+            .iter()
+            .map(|address| (address.sheet.0, address.cell.row, address.cell.col))
+            .collect()
+    };
+    [cells(&result.cycle_cells), cells(&result.limited_cells)]
+}
+
 /// On the used range's edge — the only place removing a cell can shrink it.
 fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
     bounds.is_some_and(|bounds| {
@@ -297,9 +323,15 @@ pub struct Workbook {
     sheet_info_cache: Mutex<Option<SheetInfoCache>>,
     /// Mutation counter; chart resolutions cache against it.
     model_epoch: u64,
+    /// Rotated whenever the authority is replaced; half of [`Workbook::version`].
+    version_nonce: String,
+    /// Changes committed since the nonce was minted; the other half.
+    committed_changes: u64,
     /// Resolved `ChartSpace` per (chart part, owner sheet), valid for the
     /// stored epoch and part-bytes hash.
     chart_cache: Mutex<HashMap<(String, String), CachedChartSpace>>,
+    /// SHA-256 of retained source parts that exports have cited.
+    source_part_hashes: Mutex<BTreeMap<String, String>>,
 }
 
 struct CachedChartSpace {
@@ -453,13 +485,16 @@ impl Workbook {
                     .map(|index| package.source_shared_string_cells(index))
                     .collect(),
                 axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
+                created: vec![false; model.sheets.len()],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
                 shared_string_cells: vec![Default::default(); model.sheets.len()],
                 axes: vec![None; model.sheets.len()],
+                created: vec![false; model.sheets.len()],
             },
         };
+        let version_nonce = batch::mint_nonce();
         Ok(Self {
             authority,
             mode,
@@ -481,12 +516,22 @@ impl Workbook {
             opened_anchors,
             sheet_info_cache: Mutex::new(None),
             model_epoch: 0,
+            version_nonce,
+            committed_changes: 0,
             chart_cache: Mutex::new(HashMap::new()),
+            source_part_hashes: Mutex::new(BTreeMap::new()),
         })
     }
 
     pub fn client_id(&self) -> u64 {
         self.authority.client_id()
+    }
+
+    /// The session-scoped token of the committed document state. Every committed change,
+    /// remote update, undo, redo and value-changing recalculation moves it; selection, the
+    /// active sheet and proposals do not.
+    pub fn version(&self) -> DocumentVersion {
+        DocumentVersion::new(&self.version_nonce, self.committed_changes)
     }
 
     pub fn is_collaborative(&self) -> bool {
@@ -602,6 +647,7 @@ impl Workbook {
         self.authority.clear_history();
         self.proposals.clear();
         self.edited_since_open = true;
+        self.version_nonce = batch::mint_nonce();
         self.emit_update(UpdateEvent {
             update: migrated,
             origin: UpdateOrigin::Local,
@@ -756,6 +802,7 @@ impl Workbook {
         self.preserved.forget_axes();
         self.authority.clear_history();
         self.edited_since_open = true;
+        self.committed_changes += 1;
         self.emit_update(UpdateEvent {
             update,
             origin: UpdateOrigin::Remote,
@@ -840,6 +887,32 @@ impl Workbook {
         &self.model
     }
 
+    fn has_uncached_source_formulas(&self) -> bool {
+        self.source_package.as_ref().is_some_and(|package| {
+            (0..package.source_sheet_count()).any(|index| {
+                package
+                    .source_cell_facts(index)
+                    .is_some_and(|facts| !facts.uncached_formulas.is_empty())
+            })
+        })
+    }
+
+    /// The committed state a structured export reads.
+    pub(crate) fn export_source(&self) -> ExportSource<'_> {
+        ExportSource {
+            model: &self.model,
+            package: self.source_package.as_ref(),
+            origins: &self.preserved.origins,
+            shared_string_cells: &self.preserved.shared_string_cells,
+            axes: &self.preserved.axes,
+            calculation: &self.last_calculation,
+            created: &self.preserved.created,
+            edited: self.edited_since_open,
+            part_hashes: &self.source_part_hashes,
+            sheet_ids: self.sheet_keys(),
+        }
+    }
+
     pub fn into_model(self) -> WorkbookModel {
         self.model
     }
@@ -879,14 +952,8 @@ impl Workbook {
         let geometry = GridGeometry::new(sheet, &self.model.styles);
         let bounds = sheet.used_range();
         let content = sheet_content(bounds, sheet.freeze_pane, &geometry);
-        let sheet_ids = match &self.mode {
-            WorkbookMode::Collaborative { structure } => structure.sheet_keys.clone(),
-            WorkbookMode::Standalone => (0..self.model.sheets.len())
-                .map(|index| format!("sheet:{index}"))
-                .collect(),
-        };
         let info = SheetInfo {
-            sheet_ids,
+            sheet_ids: self.sheet_keys(),
             sheet_names: self
                 .model
                 .sheets
@@ -1204,7 +1271,7 @@ impl Workbook {
             at: cell,
             cell: state,
         }];
-        self.commit_user(&ops, None)?;
+        let update = self.commit_user(&ops)?;
         self.graph.as_mut().expect("graph initialized").set_formula(
             sheet,
             cell,
@@ -1219,7 +1286,9 @@ impl Workbook {
             options.now_serial,
         );
         mark(EditStage::Recalculated);
-        Ok(self.mutation_result(true, result, &seeds))
+        let result = self.mutation_result(true, result, &seeds);
+        self.publish(update);
+        Ok(result)
     }
 
     pub fn edit_cells(
@@ -1268,7 +1337,14 @@ impl Workbook {
             inverse.extend(chunk);
         }
         self.ensure_graph();
-        self.commit_user(&ops, Some(StagedApply::new(preview, inverse)))?;
+        let prepared = self.prepare_commit(
+            ops,
+            StagedApply::new(preview, inverse),
+            SyncOrigin::User,
+            CommitHistory::Separate,
+            None,
+        )?;
+        let update = self.commit_prepared(prepared)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -1286,7 +1362,9 @@ impl Workbook {
             &seeds,
             options.now_serial,
         );
-        Ok(self.mutation_result(true, result, &seeds))
+        let result = self.mutation_result(true, result, &seeds);
+        self.publish(update);
+        Ok(result)
     }
 
     pub fn apply_ops(
@@ -1344,7 +1422,14 @@ impl Workbook {
             inverse.extend(chunk);
         }
         let active_name = self.active_sheet_name();
-        self.commit_user(&ops, Some(StagedApply::new(preview, inverse)))?;
+        let prepared = self.prepare_commit(
+            ops,
+            StagedApply::new(preview, inverse),
+            SyncOrigin::User,
+            CommitHistory::Separate,
+            None,
+        )?;
+        let update = self.commit_prepared(prepared)?;
         self.restore_active_sheet(active_name.as_deref());
         if invalidates_proposals {
             self.proposals.clear();
@@ -1352,6 +1437,7 @@ impl Workbook {
         mark(EditStage::Applied);
         let result = self.rebuild_and_recalculate(options);
         mark(EditStage::Recalculated);
+        self.publish(update);
         Ok(MutationResult {
             applied: true,
             changed: result.changed,
@@ -1360,8 +1446,24 @@ impl Workbook {
         })
     }
 
+    /// A recalculation that moves any value moves [`Workbook::version`] too, since values
+    /// and display text can be guarded, as does one that changes what a structured export
+    /// reports about results: the cells left in a cycle or at a limit, or, on the first
+    /// calculation, formulas the file stored no result for. One that moves none of these
+    /// leaves it. Such a recalculation also notifies observers with an empty
+    /// [`UpdateOrigin::Recalculation`] event.
     pub fn recalculate_all(&mut self, options: CalculationOptions) -> CalculationResult {
-        self.rebuild_and_recalculate(options)
+        let first = !self.edited_since_open && self.has_uncached_source_formulas();
+        let before = calculation_status(&self.last_calculation);
+        let result = self.rebuild_and_recalculate(options);
+        if !result.changed.is_empty() || first || calculation_status(&result) != before {
+            self.committed_changes += 1;
+            self.emit_update(UpdateEvent {
+                update: Vec::new(),
+                origin: UpdateOrigin::Recalculation,
+            });
+        }
+        result
     }
 
     pub fn can_undo(&self) -> bool {
@@ -1408,7 +1510,7 @@ impl Workbook {
         };
         let update = self
             .authority
-            .apply_ops(&ops, SyncOrigin::Undo)
+            .apply_ops(&ops, SyncOrigin::Undo, &self.model.styles)
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.undo.undo(&mut self.model)?;
@@ -1424,12 +1526,7 @@ impl Workbook {
             self.proposals.clear();
         }
         let result = self.rebuild_and_recalculate(options);
-        if let Some(update) = update {
-            self.emit_update(UpdateEvent {
-                update,
-                origin: UpdateOrigin::Local,
-            });
-        }
+        self.publish(update);
         Ok(MutationResult {
             applied: true,
             changed: result.changed,
@@ -1449,7 +1546,7 @@ impl Workbook {
         };
         let update = self
             .authority
-            .apply_ops(&ops, SyncOrigin::Redo)
+            .apply_ops(&ops, SyncOrigin::Redo, &self.model.styles)
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.undo.redo(&mut self.model)?;
@@ -1465,12 +1562,7 @@ impl Workbook {
             self.proposals.clear();
         }
         let result = self.rebuild_and_recalculate(options);
-        if let Some(update) = update {
-            self.emit_update(UpdateEvent {
-                update,
-                origin: UpdateOrigin::Local,
-            });
-        }
+        self.publish(update);
         Ok(MutationResult {
             applied: true,
             changed: result.changed,
@@ -1542,10 +1634,7 @@ impl Workbook {
         self.proposals.clear();
         let result = self.rebuild_and_recalculate(options);
         let changed = changed_cells_between(&before, &self.model);
-        self.emit_update(UpdateEvent {
-            update: history.update,
-            origin: UpdateOrigin::Local,
-        });
+        self.publish(Some(history.update));
         Ok(MutationResult {
             applied: true,
             changed,
@@ -1644,6 +1733,7 @@ impl Workbook {
 
         let mut touched = Vec::with_capacity(proposal.edits.len());
         let mut ops = Vec::with_capacity(proposal.edits.len());
+        let mut per_op = Vec::with_capacity(proposal.edits.len());
         let mut preview = self.model.clone();
         for edit in &proposal.edits {
             let sheet = SheetId(edit.sheet);
@@ -1652,24 +1742,23 @@ impl Workbook {
             let state = edit_cell_state(&preview, sheet, cell, &edit.input);
             validate_cell_state(&state)?;
             if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
-                preview
-                    .sheet_mut(sheet)
-                    .expect("sheet validated")
-                    .set_cell(cell, state.clone().into());
                 touched.push((sheet, cell, state.formula.clone()));
-                ops.push(Op::SetCell {
+                let op = Op::SetCell {
                     sheet,
                     at: cell,
                     cell: state,
-                });
+                };
+                per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+                ops.push(op);
             }
             if let Some(format) = &edit.number_format {
-                apply_proposed_number_format(&mut preview, sheet, cell, format)?;
-                ops.push(Op::SetRangeNumberFormat {
+                let op = Op::SetRangeNumberFormat {
                     sheet,
                     range: CellRange::new(cell, cell),
                     format: format.clone(),
-                });
+                };
+                per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+                ops.push(op);
             }
         }
         if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
@@ -1680,16 +1769,17 @@ impl Workbook {
             });
         }
         if !force {
-            rebuild_and_recalc_all(&mut preview, options.now_serial);
+            let mut review = preview.clone();
+            rebuild_and_recalc_all(&mut review, options.now_serial);
             let mut refreshed = proposal.clone();
             for edit in &mut refreshed.edits {
                 edit.new_text = display_text_at(
-                    &preview,
+                    &review,
                     SheetId(edit.sheet),
                     CellRef::new(edit.row, edit.col),
                 )?;
             }
-            refreshed.ghosts = proposal_ghosts(&self.model, &preview, &refreshed.edits)?;
+            refreshed.ghosts = proposal_ghosts(&self.model, &review, &refreshed.edits)?;
             if refreshed.ghosts != proposal.ghosts {
                 let targets = refreshed
                     .edits
@@ -1703,8 +1793,19 @@ impl Workbook {
                 return Err(Error::StaleProposal(targets));
             }
         }
+        let mut inverse = Vec::new();
+        for chunk in per_op.into_iter().rev() {
+            inverse.extend(chunk);
+        }
         self.ensure_graph();
-        self.commit_agent(&ops, proposal.agent_id)?;
+        let prepared = self.prepare_commit(
+            ops,
+            StagedApply::new(preview, inverse),
+            SyncOrigin::Agent,
+            CommitHistory::Separate,
+            None,
+        )?;
+        let update = self.commit_prepared(prepared)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -1724,6 +1825,7 @@ impl Workbook {
         );
         let mutation = self.mutation_result(true, result, &seeds);
         self.proposals.remove(id);
+        self.publish(update);
         Ok(ProposalAcceptance {
             proposal_id: id.to_string(),
             mutation,
@@ -2129,12 +2231,14 @@ impl Workbook {
         Ok(())
     }
 
-    fn commit_user(&mut self, ops: &[Op], staged: Option<StagedApply>) -> Result<()> {
+    /// Commits a single-cell edit without staging a copy of the authority. Returns the update
+    /// to publish once the caller has recalculated.
+    fn commit_user(&mut self, ops: &[Op]) -> Result<Option<Vec<u8>>> {
         self.bump_model_epoch();
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
         let prior_styles = self.pre_edit_cell_styles(ops);
-        if self.is_collaborative() {
+        let update = if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
@@ -2144,34 +2248,17 @@ impl Workbook {
             retain_array_formulas(&self.model, &mut model);
             self.install_model(model)?;
             self.update_sheet_info_cache(ops, &prior_styles);
-            self.emit_update(UpdateEvent {
-                update: staged.update,
-                origin: UpdateOrigin::Local,
-            });
+            Some(staged.update)
         } else {
             let update = self
                 .authority
-                .apply_ops(ops, SyncOrigin::User)
+                .apply_ops(ops, SyncOrigin::User, &self.model.styles)
                 .map_err(authority_error)?;
-            match staged {
-                Some(staged) => {
-                    self.install_model(staged.model)?;
-                    self.undo.record(staged.inverse);
-                    self.update_sheet_info_cache(ops, &prior_styles);
-                }
-                None => {
-                    let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-                    self.undo.commit(&mut self.model, &transaction)?;
-                    self.update_sheet_info_cache(ops, &prior_styles);
-                }
-            }
-            if let Some(update) = update {
-                self.emit_update(UpdateEvent {
-                    update,
-                    origin: UpdateOrigin::Local,
-                });
-            }
-        }
+            let transaction = Transaction::new(ops.to_vec(), Provenance::User);
+            self.undo.commit(&mut self.model, &transaction)?;
+            self.update_sheet_info_cache(ops, &prior_styles);
+            update
+        };
         self.apply_preserved_state_ops(&names_before, ops);
         if let Some(before) = preserved_before {
             self.preserved_undo.push(PreservedStateHistory {
@@ -2181,53 +2268,19 @@ impl Workbook {
             self.preserved_redo.clear();
         }
         self.edited_since_open = true;
-        Ok(())
+        Ok(update)
     }
 
-    fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
-        self.bump_model_epoch();
-        let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
-        let names_before = self.sheet_names();
-        let prior_styles = self.pre_edit_cell_styles(ops);
-        if self.is_collaborative() {
-            let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
-            self.authority
-                .apply_local_update_v1(&staged.update, SyncOrigin::User)
-                .map_err(authority_error)?;
-            let mut model = staged.model;
-            retain_formula_caches(&self.model, &mut model);
-            retain_array_formulas(&self.model, &mut model);
-            self.install_model(model)?;
-            self.update_sheet_info_cache(ops, &prior_styles);
+    /// Makes a committed change visible: advances [`Workbook::version`], then hands observers
+    /// the update, so they see the recalculated state it produced.
+    fn publish(&mut self, update: Option<Vec<u8>>) {
+        self.committed_changes += 1;
+        if let Some(update) = update {
             self.emit_update(UpdateEvent {
-                update: staged.update,
+                update,
                 origin: UpdateOrigin::Local,
             });
-        } else {
-            let transaction = Transaction::new(ops.to_vec(), Provenance::Agent { id: agent_id });
-            self.undo.commit(&mut self.model, &transaction)?;
-            let update = self
-                .authority
-                .apply_ops(ops, SyncOrigin::Agent)
-                .map_err(authority_error)?;
-            self.update_sheet_info_cache(ops, &prior_styles);
-            if let Some(update) = update {
-                self.emit_update(UpdateEvent {
-                    update,
-                    origin: UpdateOrigin::Local,
-                });
-            }
         }
-        self.apply_preserved_state_ops(&names_before, ops);
-        if let Some(before) = preserved_before {
-            self.preserved_undo.push(PreservedStateHistory {
-                before,
-                after: self.preserved.clone(),
-            });
-            self.preserved_redo.clear();
-        }
-        self.edited_since_open = true;
-        Ok(())
     }
 
     fn stage_local_update(&self, ops: &[Op], origin: SyncOrigin) -> Result<StagedLocalUpdate> {
@@ -2237,7 +2290,7 @@ impl Workbook {
         };
         let staged = self
             .authority
-            .stage_local_ops_v1(ops, origin)
+            .stage_local_ops_v1(ops, origin, &self.model.styles)
             .map_err(authority_error)?;
         if &staged.structure != structure {
             return Err(Error::CollaborativeStructureChanged);

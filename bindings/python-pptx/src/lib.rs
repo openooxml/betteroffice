@@ -14,12 +14,14 @@ use python_common::{generated_client_id, map_io_error};
 
 use betteroffice_pptx::{
     Background, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx, EditError,
-    EditOrigin, Error as CoreError, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
-    ParagraphSnapshot, ParseLimits, Presentation as CorePresentation, PresetShapeDraft,
-    ProposalError, ProposalRequest, RenderOptions, ShapeAdjustReceipt, ShapeDraft,
-    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, StorySnapshot, TextReceipt, TextRunSnapshot,
-    TextStyle, TextStylePatch, TransformReceipt,
+    EditOrigin, EditRequest, Error as CoreError, ExportError as CoreExportError, FindRequest,
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_REQUEST_BYTES, ParagraphSnapshot,
+    ParseLimits, PptxExportOptions, PptxMarkdownOptions, PptxStructuredContent,
+    Presentation as CorePresentation, PresetShapeDraft, ProposalError, ProposalRequest,
+    ReadRequest, RenderOptions, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeKind,
+    ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, SlideReceipt,
+    SlideSnapshot, StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle, TextStylePatch,
+    TransformReceipt, export_outcome_json, outcome_json, oversized_request, snapshot_outcome_json,
 };
 
 create_exception!(
@@ -113,6 +115,73 @@ create_exception!(
     PptxError,
     "Proposal targets changed before acceptance."
 );
+create_exception!(
+    _betteroffice_pptx,
+    ExportError,
+    PptxError,
+    "The engine refused a structured export's options or content."
+);
+
+fn export_options(options: &str) -> PyResult<PptxExportOptions> {
+    serde_json::from_str(options)
+        .map_err(|error| PyValueError::new_err(format!("invalid export options: {error}")))
+}
+
+/// Keeps a headless export's refusal as data; unreadable bytes raise `ParseError`.
+fn refusal_as_data<T>(outcome: Result<T, CoreError>) -> PyResult<Result<T, CoreExportError>> {
+    match outcome {
+        Ok(content) => Ok(Ok(content)),
+        Err(CoreError::Export(CoreExportError::Parse(message))) => {
+            Err(ParseError::new_err(message))
+        }
+        Err(CoreError::Export(refused)) => Ok(Err(refused)),
+        Err(error) => Err(map_error(error)),
+    }
+}
+
+fn envelope(json: Result<String, String>) -> PyResult<String> {
+    json.map_err(PptxError::new_err)
+}
+
+/// A structured export of PPTX bytes: `{"ok": true, "content"}` or `{"ok": false, "failure"}`.
+#[pyfunction]
+fn export_pptx_structured_json(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    options: &str,
+) -> PyResult<String> {
+    let options = export_options(options)?;
+    let data = borrow_bytes(data);
+    let data: &[u8] = &data;
+    let outcome = py.detach(move || betteroffice_pptx::export_pptx_structured(data, &options));
+    envelope(snapshot_outcome_json(refusal_as_data(outcome)?))
+}
+
+/// `export_pptx_structured_json` rendered as Markdown.
+#[pyfunction]
+fn export_pptx_markdown_json(
+    py: Python<'_>,
+    data: &Bound<'_, PyBytes>,
+    options: &str,
+) -> PyResult<String> {
+    let options = export_options(options)?;
+    let data = borrow_bytes(data);
+    let data: &[u8] = &data;
+    let outcome = py.detach(move || betteroffice_pptx::export_pptx_markdown(data, &options));
+    envelope(snapshot_outcome_json(refusal_as_data(outcome)?))
+}
+
+/// Renders structured content JSON as Markdown: `{"ok": true, "content"}` or
+/// `{"ok": false, "failure"}`.
+#[pyfunction]
+fn render_pptx_markdown_json(py: Python<'_>, content: &str, options: &str) -> PyResult<String> {
+    let content: PptxStructuredContent = serde_json::from_str(content)
+        .map_err(|error| PyValueError::new_err(format!("invalid structured content: {error}")))?;
+    let options: PptxMarkdownOptions = serde_json::from_str(options)
+        .map_err(|error| PyValueError::new_err(format!("invalid Markdown options: {error}")))?;
+    let outcome = py.detach(move || betteroffice_pptx::render_pptx_markdown(&content, &options));
+    envelope(snapshot_outcome_json(refusal_as_data(outcome)?))
+}
 
 fn parse_background(value: &str) -> PyResult<Background> {
     match value {
@@ -1123,6 +1192,14 @@ pub struct PyPresentation {
 }
 
 impl PyPresentation {
+    /// The refusal JSON for a request over the byte budget, which is never decoded.
+    fn oversized(&self, request: &str) -> Option<PyResult<String>> {
+        (request.len() > MAX_REQUEST_BYTES).then(|| {
+            outcome_json::<()>(&Err(oversized_request(self.presentation.version())))
+                .map_err(|error| PptxError::new_err(error.to_string()))
+        })
+    }
+
     fn edit_ctx(&self) -> EditCtx {
         EditCtx {
             origin: self.origin,
@@ -1964,6 +2041,84 @@ impl PyPresentation {
         self.presentation.reject_proposal(id)
     }
 
+    /// The session-scoped version token of the committed deck state.
+    fn version(&self) -> String {
+        self.presentation.version().to_string()
+    }
+
+    fn read_content_json(&self, request: &str) -> PyResult<String> {
+        if let Some(refused) = self.oversized(request) {
+            return refused;
+        }
+        let request: ReadRequest = serde_json::from_str(request)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let outcome = self
+            .presentation
+            .read_content(&request)
+            .map_err(map_error)?;
+        outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    fn find_text_json(&self, request: &str) -> PyResult<String> {
+        if let Some(refused) = self.oversized(request) {
+            return refused;
+        }
+        let request: FindRequest = serde_json::from_str(request)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let outcome = self.presentation.find_text(&request).map_err(map_error)?;
+        outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    fn validate_edits_json(&self, request: &str) -> PyResult<String> {
+        if let Some(refused) = self.oversized(request) {
+            return refused;
+        }
+        let request: EditRequest = serde_json::from_str(request)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let outcome = self
+            .presentation
+            .validate_edits(&request)
+            .map_err(map_error)?;
+        outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    /// Marks the deck edited only when the batch applied.
+    fn apply_edits_json(&self, request: &str) -> PyResult<String> {
+        if let Some(refused) = self.oversized(request) {
+            return refused;
+        }
+        let request: EditRequest = serde_json::from_str(request)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let outcome = self.presentation.apply_edits(&request).map_err(map_error)?;
+        if outcome
+            .as_ref()
+            .is_ok_and(|application| application.applied)
+        {
+            self.edited.set(true);
+        }
+        outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    /// Structured content of the committed deck: `{"ok", "version", "content" | "failure"}`.
+    fn export_structured_json(&self, options: &str) -> PyResult<String> {
+        let options = export_options(options)?;
+        let outcome = self
+            .presentation
+            .export_structured(&options)
+            .map_err(map_error)?;
+        export_outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    /// `export_structured_json` rendered as Markdown from the same read.
+    fn export_markdown_json(&self, options: &str) -> PyResult<String> {
+        let options = export_options(options)?;
+        let outcome = self
+            .presentation
+            .export_markdown(&options)
+            .map_err(map_error)?;
+        export_outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
     fn render_proposal(&self, id: &str, slide: &Bound<'_, PyAny>) -> PyResult<PyDisplayList> {
         let index = self.resolve_slide_index(slide)?;
         let rendered = self
@@ -2047,6 +2202,10 @@ fn _betteroffice_pptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyCommentEdit>()?;
     module.add("PptxError", py.get_type::<PptxError>())?;
     module.add("StaleProposalError", py.get_type::<StaleProposalError>())?;
+    module.add("ExportError", py.get_type::<ExportError>())?;
+    module.add_function(wrap_pyfunction!(export_pptx_structured_json, module)?)?;
+    module.add_function(wrap_pyfunction!(export_pptx_markdown_json, module)?)?;
+    module.add_function(wrap_pyfunction!(render_pptx_markdown_json, module)?)?;
     module.add("ParseError", py.get_type::<ParseError>())?;
     module.add("RangeError", py.get_type::<RangeError>())?;
     module.add("RenderError", py.get_type::<RenderError>())?;

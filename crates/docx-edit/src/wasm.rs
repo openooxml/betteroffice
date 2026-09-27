@@ -47,15 +47,23 @@ use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
 
+use crate::batch::outcome_json;
+use crate::compare::{CompareApplied, CompareLimits, CompareOutcome};
+use crate::content_controls::{ContentControlQuery, ContentControlsOptions};
 use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
 use crate::segments::SegKind;
+use crate::structured::ExportOptions;
 use crate::{
-    CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
-    FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
-    Patch, Position, RawOp, SeedParagraph, SegmentContent, SimpleFormat, StoryRange, TabStop,
-    TableLocator, TableRange, TriState, UndoSession, story_ref,
+    AnchorResolution, AnchorUnsupported, CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx,
+    EditRefusal, EditRequest, EditTextView, EditingDoc, EngineSession, FindTextRequest,
+    FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, ParaAttrDelta,
+    ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal,
+    ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position, RawOp,
+    ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
+    SourceStory, SourceStoryKind, StoryRange, TabStop, TableLocator, TableRange, TextTarget,
+    TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -83,6 +91,19 @@ struct ApplyInputProfile {
 
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+/// Host randomness for version nonces; the wasm target has no ambient entropy source.
+fn js_entropy() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ((js_sys::Math::random() * 9_007_199_254_740_992.0) as u64)
+            ^ (js_sys::Date::now() as u64).rotate_left(21)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
 }
 /// Builds the op [`EditCtx`]. Suggesting mode crosses the boundary as an
 /// optional `(name, date)` pair — both-or-neither; a plain local edit uses an
@@ -660,6 +681,29 @@ fn json_to_any(value: &Value) -> Result<Any, JsValue> {
     Any::from_json(&value.to_string()).map_err(js_err)
 }
 
+/// Image geometry JSON → payload entries, with a nested `"other"` object
+/// flattened alongside the named fields.
+fn image_geometry_entries(geometry_json: &str) -> Result<Vec<(String, Any)>, JsValue> {
+    let value: Value = serde_json::from_str(geometry_json).map_err(js_err)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| js_err("image geometry must be a JSON object"))?;
+    let mut entries = Vec::new();
+    for (key, value) in object {
+        if key == "other" {
+            let other = value
+                .as_object()
+                .ok_or_else(|| js_err("image geometry \"other\" must be an object"))?;
+            for (other_key, other_value) in other {
+                entries.push((other_key.clone(), json_to_any(other_value)?));
+            }
+        } else {
+            entries.push((key.clone(), json_to_any(value)?));
+        }
+    }
+    Ok(entries)
+}
+
 /// A JSON object → yrs text/format attributes (`Arc<str>` keys, `Any` values).
 fn parse_attrs(value: Option<&Value>) -> Result<yrs::types::Attrs, JsValue> {
     let mut attrs = yrs::types::Attrs::new();
@@ -888,6 +932,164 @@ fn seed_paragraph(value: &Value) -> (String, String, String) {
     (text, p_style, alignment)
 }
 
+fn source_story_kind(kind: SourceStoryKind) -> &'static str {
+    match kind {
+        SourceStoryKind::Body => "body",
+        SourceStoryKind::Header => "header",
+        SourceStoryKind::Footer => "footer",
+        SourceStoryKind::Footnote => "footnote",
+        SourceStoryKind::Endnote => "endnote",
+        SourceStoryKind::Comment => "comment",
+    }
+}
+
+fn source_story_json(story: &SourceStory) -> Value {
+    let mut value = json!({
+        "partUri": story.part_uri,
+        "kind": source_story_kind(story.kind),
+    });
+    if let Some(item_id) = &story.item_id {
+        value["itemId"] = json!(item_id);
+    }
+    value
+}
+
+fn source_anchor_json(source: &SourceParagraphRef) -> Value {
+    json!({
+        "kind": "source",
+        "packageSha256": source.package_sha256,
+        "partUri": source.part_uri,
+        "paragraphOrdinal": source.paragraph_ordinal,
+    })
+}
+
+fn paragraph_anchor_json(session_id: &str, paragraph: &ParagraphRef) -> Value {
+    match paragraph {
+        ParagraphRef::Session { story, para_id } => {
+            json!({ "kind": "session", "sessionId": session_id, "story": story, "paraId": para_id })
+        }
+        ParagraphRef::Source(source) => source_anchor_json(source),
+    }
+}
+
+fn persisted_anchor_json(story: Option<&SourceStory>, para_id: Option<&str>) -> Value {
+    match (story, para_id) {
+        (Some(story), Some(para_id)) => json!({
+            "kind": "persisted",
+            "story": source_story_json(story),
+            "paraId": para_id,
+        }),
+        _ => Value::Null,
+    }
+}
+
+fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, JsValue> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| js_err(format!("anchor requires a string {key:?}")))
+}
+
+fn parse_source_story(value: Option<&Value>) -> Result<SourceStory, JsValue> {
+    let value = value.ok_or_else(|| js_err("anchor requires a \"story\" object"))?;
+    let kind = match required_str(value, "kind")? {
+        "body" => SourceStoryKind::Body,
+        "header" => SourceStoryKind::Header,
+        "footer" => SourceStoryKind::Footer,
+        "footnote" => SourceStoryKind::Footnote,
+        "endnote" => SourceStoryKind::Endnote,
+        "comment" => SourceStoryKind::Comment,
+        other => return Err(js_err(format!("unknown source story kind {other:?}"))),
+    };
+    let item_id = match kind {
+        SourceStoryKind::Footnote | SourceStoryKind::Endnote | SourceStoryKind::Comment => {
+            Some(required_str(value, "itemId")?.to_owned())
+        }
+        _ => None,
+    };
+    Ok(SourceStory {
+        part_uri: required_str(value, "partUri")?.to_owned(),
+        kind,
+        item_id,
+    })
+}
+
+fn parse_paragraph_anchor(anchor_json: &str) -> Result<ParagraphAnchor, JsValue> {
+    let value: Value = serde_json::from_str(anchor_json).map_err(js_err)?;
+    match required_str(&value, "kind")? {
+        "session" => Ok(ParagraphAnchor::Session {
+            session_id: required_str(&value, "sessionId")?.to_owned(),
+            story: required_str(&value, "story")?.to_owned(),
+            para_id: required_str(&value, "paraId")?.to_owned(),
+        }),
+        "source" => Ok(ParagraphAnchor::Source(SourceParagraphRef {
+            package_sha256: required_str(&value, "packageSha256")?.to_owned(),
+            part_uri: required_str(&value, "partUri")?.to_owned(),
+            paragraph_ordinal: value
+                .get("paragraphOrdinal")
+                .and_then(Value::as_u64)
+                .and_then(|ordinal| u32::try_from(ordinal).ok())
+                .ok_or_else(|| js_err("anchor requires a non-negative \"paragraphOrdinal\""))?,
+        })),
+        "persisted" => Ok(ParagraphAnchor::Persisted {
+            story: parse_source_story(value.get("story"))?,
+            para_id: required_str(&value, "paraId")?.to_owned(),
+        }),
+        other => Err(js_err(format!("unknown anchor kind {other:?}"))),
+    }
+}
+
+fn origin_json(origin: Option<ParagraphIdOrigin>) -> Value {
+    origin.map_or(Value::Null, |origin| json!(origin.as_str()))
+}
+
+fn paragraph_origin_json(origin: ParagraphOrigin) -> &'static str {
+    match origin {
+        ParagraphOrigin::Source => "source",
+        ParagraphOrigin::Authored => "authored",
+        ParagraphOrigin::Synthetic => "synthetic",
+    }
+}
+
+fn persisted_receipt_json(session_id: &str, persisted: &PersistedParagraphIds) -> Value {
+    let assignments: Vec<Value> = persisted
+        .assignments
+        .iter()
+        .map(|assignment| {
+            json!({
+                "paragraph": paragraph_anchor_json(session_id, &assignment.paragraph),
+                "replacedParaId": assignment.replaced_para_id,
+                "previousOoxmlParaId": assignment.previous_ooxml_para_id,
+                "ooxmlParaId": assignment.ooxml_para_id,
+                "idOrigin": assignment.origin.as_str(),
+                "persisted": persisted_anchor_json(
+                    assignment.source_story.as_ref(),
+                    Some(&assignment.ooxml_para_id),
+                ),
+            })
+        })
+        .collect();
+    let diagnostics: Vec<Value> = persisted
+        .diagnostics
+        .iter()
+        .map(|diagnostic| match diagnostic {
+            ParagraphIdDiagnostic::ConflictingSavedIds {
+                ooxml_para_id,
+                paragraphs,
+            } => json!({
+                "kind": "conflicting-saved-ids",
+                "ooxmlParaId": ooxml_para_id,
+                "paragraphs": paragraphs
+                    .iter()
+                    .map(|paragraph| paragraph_anchor_json(session_id, paragraph))
+                    .collect::<Vec<_>>(),
+            }),
+            ParagraphIdDiagnostic::NoSourcePackage => json!({ "kind": "no-source-package" }),
+        })
+        .collect();
+    json!({ "status": "applied", "assignments": assignments, "diagnostics": diagnostics })
+}
+
 /// One yrs replica of the DOCX editing model, held for a JS host.
 ///
 /// Owns the [`EditingDoc`] plus the (single) JS update observer. The JS facade
@@ -895,13 +1097,15 @@ fn seed_paragraph(value: &Value) -> (String, String, String) {
 #[wasm_bindgen]
 pub struct EditSession {
     engine: EngineSession,
-    docx_source: RefCell<Option<Vec<u8>>>,
+    docx_source: RefCell<Option<Arc<[u8]>>>,
     update_observer: Option<Subscription>,
     update_event_observer: Option<UpdateEventObserver>,
     undo: UndoSession,
     selection: RefCell<Option<LocalSelection>>,
     cell_selection: RefCell<Option<LocalCellSelection>>,
     last_apply_profile_json: RefCell<String>,
+    /// The comparison applied here, awaiting its saved bytes.
+    compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
 }
 
 struct UpdateEventObserver {
@@ -949,6 +1153,7 @@ fn thin_notes(notes: &Option<Vec<docx_parse::Note>>) -> Option<Vec<docx_parse::N
                 note_type: note.note_type.clone(),
                 content: Vec::new(),
                 verbatim_xml: None,
+                source_ordinal: None,
             })
             .collect()
     })
@@ -1004,13 +1209,33 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
 }
 
 impl EditSession {
-    fn open_docx_inner(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
-        let envelope = crate::seed::parse_docx_for_edit(bytes).map_err(js_err)?;
+    fn open_docx_inner(
+        &self,
+        bytes: &[u8],
+        seed_stories: bool,
+        generation: Option<&str>,
+    ) -> Result<String, JsValue> {
+        let source: Arc<[u8]> = Arc::from(bytes);
+        let (envelope, parts) = crate::seed::parse_docx_package(bytes).map_err(js_err)?;
         let host_envelope = thin_docx_envelope(&envelope);
         let referenced_fonts = if seed_stories {
-            crate::seed::seed_parsed_docx(self.engine.doc(), envelope).map_err(js_err)?
+            let fonts = crate::seed::seed_parsed_docx(
+                self.engine.doc(),
+                envelope,
+                parts,
+                Arc::clone(&source),
+            )
+            .map_err(js_err)?;
+            self.engine.doc().begin_opening(generation);
+            fonts
         } else {
             let fonts = crate::seed::referenced_fonts(&envelope).map_err(js_err)?;
+            let parts = crate::structured::source::SourceParts::new(parts);
+            let mut metadata =
+                crate::seed::source_metadata(&envelope, Some(&parts)).map_err(js_err)?;
+            metadata.watch_comments(self.engine.doc());
+            self.engine.doc().install_source(metadata, js_entropy());
+            self.engine.doc().retain_source_docx(Arc::clone(&source));
             drop(envelope);
             fonts
         };
@@ -1019,7 +1244,8 @@ impl EditSession {
             referenced_fonts,
         };
         let json = serde_json::to_string(&host).map_err(js_err)?;
-        self.docx_source.replace(Some(bytes.to_vec()));
+        self.docx_source.replace(Some(source));
+        self.engine.doc().rotate_version(js_entropy());
         Ok(json)
     }
 
@@ -1111,6 +1337,16 @@ impl EditSession {
         }
         Ok(story)
     }
+
+    /// An edit request, or the refusal a step's unrepresentable text earns.
+    fn edit_request(&self, json: &str) -> Result<Result<EditRequest, EditRefusal>, JsValue> {
+        Ok(EditRequest::from_json(json)
+            .map_err(js_err)?
+            .map_err(|failure| EditRefusal {
+                version: self.engine.doc().version(),
+                failure,
+            }))
+    }
 }
 
 #[wasm_bindgen]
@@ -1128,7 +1364,7 @@ impl EditSession {
         {
             return Err(js_err("client_id must be a non-negative safe integer"));
         }
-        Ok(Self {
+        let session = Self {
             engine: EngineSession::new(client_id as u64),
             docx_source: RefCell::new(None),
             update_observer: None,
@@ -1137,7 +1373,10 @@ impl EditSession {
             selection: RefCell::new(None),
             cell_selection: RefCell::new(None),
             last_apply_profile_json: RefCell::new("{}".to_owned()),
-        })
+            compared: RefCell::new(None),
+        };
+        session.engine.doc().rotate_version(js_entropy());
+        Ok(session)
     }
 
     /// This replica's client id, as passed to the constructor.
@@ -1626,17 +1865,30 @@ impl EditSession {
     /// [`EditSession::apply_update`]; the separate name marks the initial-load
     /// call site. Errors on a malformed update.
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
-        self.engine.doc().apply_update_v1(update).map_err(js_err)
+        self.engine.doc().apply_update_v1(update).map_err(js_err)?;
+        self.engine.doc().rotate_version(js_entropy());
+        Ok(())
     }
 
     /// [`EditSession::open_docx`] with seeding always on.
-    pub fn seed_from_docx(&self, bytes: &[u8]) -> Result<String, JsValue> {
-        self.open_docx_inner(bytes, true)
+    pub fn seed_from_docx(
+        &self,
+        bytes: &[u8],
+        generation: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.open_docx_inner(bytes, true, generation.as_deref())
+    }
+
+    /// Starts a new opening of the document; see [`EditingDoc::begin_opening`].
+    pub fn begin_opening(&self, generation: Option<String>) {
+        self.engine.doc().begin_opening(generation.as_deref());
     }
 
     /// Parses a DOCX package, optionally seeds its editable stories into this
     /// replica, and retains the source bytes for
-    /// [`EditSession::materialize_docx`].
+    /// [`EditSession::materialize_docx`] and paragraph identity reads.
+    /// Seeding starts a new opening, with `generation` or a fresh one, so its
+    /// session anchors are its own; see [`EditingDoc::begin_opening`].
     ///
     /// Returns `{"envelope","referencedFonts":[string, …]}`. The envelope is
     /// the parsed package with the parts the host does not need stripped —
@@ -1645,8 +1897,13 @@ impl EditSession {
     /// styles, theme, settings, fonts and relationships still cross while the
     /// bulk of the document stays in Rust. Errors on bytes that are not a
     /// readable DOCX.
-    pub fn open_docx(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
-        self.open_docx_inner(bytes, seed_stories)
+    pub fn open_docx(
+        &self,
+        bytes: &[u8],
+        seed_stories: bool,
+        generation: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.open_docx_inner(bytes, seed_stories, generation.as_deref())
     }
 
     /// Re-parses the DOCX bytes retained by the last
@@ -1669,7 +1926,9 @@ impl EditSession {
     /// text must not contain paragraph breaks. Receipt:
     /// `{storyId: [paraId, …]}` with each story's paragraphs in document
     /// order. Errors when a story entry has no `storyId`, no `paragraphs`
-    /// array, or an empty one, and when a story id already exists.
+    /// array, or an empty one, and when a story id already exists. Seeding a
+    /// document that has no opening yet starts one; see
+    /// [`EditingDoc::begin_opening`].
     pub fn load_json(&self, stories_json: &str) -> Result<String, JsValue> {
         let value: Value = serde_json::from_str(stories_json).map_err(js_err)?;
         let entries = value
@@ -1711,6 +1970,9 @@ impl EditSession {
                 .map(Value::String)
                 .collect();
             receipt.insert(story_id.to_owned(), Value::Array(para_ids));
+        }
+        if !self.engine.doc().has_opening() {
+            self.engine.doc().begin_opening(None);
         }
         serde_json::to_string(&Value::Object(receipt)).map_err(js_err)
     }
@@ -1855,8 +2117,34 @@ impl EditSession {
         self.undo.track(self.engine.doc());
     }
 
-    /// Notes the story a direct operation is about to edit; a different story
-    /// than the previous edit or caret closes the current undo step.
+    /// Closes the current undo capture without adding an empty step.
+    pub fn add_undo_boundary(&self) {
+        self.undo.add_undo_barrier();
+    }
+
+    /// Changes grouping policy while retaining undo and redo history.
+    pub fn set_undo_capture_mode(&self, mode: &str) -> Result<(), JsValue> {
+        let mode = match mode {
+            "auto" => UndoCaptureMode::Auto,
+            "manual" => UndoCaptureMode::Manual,
+            _ => {
+                return Err(js_err("undo capture mode must be auto or manual"));
+            }
+        };
+        self.undo.set_capture_mode(mode);
+        Ok(())
+    }
+
+    /// Current undo grouping policy.
+    pub fn undo_capture_mode(&self) -> String {
+        match self.undo.capture_mode() {
+            UndoCaptureMode::Auto => "auto",
+            UndoCaptureMode::Manual => "manual",
+        }
+        .to_owned()
+    }
+
+    /// Selects a story, closing capture unless manual grouping is selected.
     pub fn select_story(&self, story: &str) {
         self.undo.select_story(story);
     }
@@ -2755,8 +3043,10 @@ impl EditSession {
     }
 
     /// Sets the authored `value` (any JSON) on the content-control embed
-    /// carrying `embed_id`, searching every story. Errors when no embed has
-    /// that id.
+    /// carrying `embed_id`, searching every story. A plain- or rich-text
+    /// control takes a string, which fills its content as one
+    /// version-checked batch step instead. Errors when no embed has that id
+    /// and when a fill is refused.
     pub fn set_content_control_value(
         &self,
         embed_id: &str,
@@ -2764,6 +3054,10 @@ impl EditSession {
     ) -> Result<(), JsValue> {
         let value = Any::from_json(value_json).map_err(js_err)?;
         self.select_embed_story(embed_id)?;
+        let (story, index) = self.engine.doc().embed_position(embed_id).map_err(js_err)?;
+        if self.fill_text_control(&story, index, &value)? {
+            return Ok(());
+        }
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
@@ -2775,8 +3069,9 @@ impl EditSession {
     /// Sets the authored `value` on the content-control embed at
     /// `(story, para_id, offset)` — the way to reach a control with no
     /// authored `w:id` or tag, which
-    /// [`EditSession::set_content_control_value`] cannot address. Errors when
-    /// that position holds no embed.
+    /// [`EditSession::set_content_control_value`] cannot address. A text
+    /// control's string value fills it as that method does. Errors when that
+    /// position holds no embed.
     pub fn set_content_control_value_at(
         &self,
         story: &str,
@@ -2786,6 +3081,9 @@ impl EditSession {
     ) -> Result<(), JsValue> {
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let value = Any::from_json(value_json).map_err(js_err)?;
+        if self.fill_text_control(story, index, &value)? {
+            return Ok(());
+        }
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
@@ -2798,9 +3096,37 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// Fills the text control at `index` of `story` with a string value; `false` when the embed
+    /// there is not a text control.
+    fn fill_text_control(&self, story: &str, index: u32, value: &Any) -> Result<bool, JsValue> {
+        let doc = self.engine.doc();
+        if !doc.text_control_at(story, index).map_err(js_err)? {
+            return Ok(false);
+        }
+        let Any::String(text) = value else {
+            return Err(js_err(
+                "a plain- or rich-text content control takes a string value",
+            ));
+        };
+        match doc
+            .fill_text_control_at(story, index, text, &self.undo)
+            .map_err(js_err)?
+        {
+            Ok(_) => Ok(true),
+            Err(refusal) => Err(js_err(format!(
+                "{}: {}",
+                serde_json::to_value(refusal.failure.code)
+                    .ok()
+                    .and_then(|code| code.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+                refusal.failure.message
+            ))),
+        }
+    }
+
     /// Removes the authored `value` from the content-control embed carrying
-    /// `embed_id`, leaving the control itself in place. Errors when no embed
-    /// has that id.
+    /// `embed_id`, leaving the control and its content in place: it never
+    /// erases a text control's text. Errors when no embed has that id.
     pub fn clear_content_control_value(&self, embed_id: &str) -> Result<(), JsValue> {
         self.select_embed_story(embed_id)?;
         let ctx = EditCtx::local(String::new(), String::new());
@@ -2818,28 +3144,37 @@ impl EditSession {
     /// `geometry_json` or its `"other"` is not an object, and when no embed
     /// has that id.
     pub fn set_image_geometry(&self, embed_id: &str, geometry_json: &str) -> Result<(), JsValue> {
-        let value: Value = serde_json::from_str(geometry_json).map_err(js_err)?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| js_err("set_image_geometry expects a JSON object"))?;
-        let mut entries = Vec::new();
-        for (key, value) in object {
-            if key == "other" {
-                let other = value
-                    .as_object()
-                    .ok_or_else(|| js_err("image geometry \"other\" must be an object"))?;
-                for (other_key, other_value) in other {
-                    entries.push((other_key.clone(), json_to_any(other_value)?));
-                }
-            } else {
-                entries.push((key.clone(), json_to_any(value)?));
-            }
-        }
+        let entries = image_geometry_entries(geometry_json)?;
         self.select_embed_story(embed_id)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
             .set_embed_attrs_by_id(&ctx, embed_id, entries)
+            .map(|_| ())
+            .map_err(js_err)
+    }
+
+    /// [`EditSession::set_image_geometry`] for the image embed at
+    /// `(story, para_id, offset)` — the way to reach one of several images
+    /// sharing a relationship id, which the id variant resolves to the first.
+    /// Errors when that position holds no image.
+    pub fn set_image_geometry_at(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        geometry_json: &str,
+    ) -> Result<(), JsValue> {
+        let entries = image_geometry_entries(geometry_json)?;
+        let doc = self.engine.doc();
+        let at = Position::new(story, loc_index(doc, story, para_id, offset)?);
+        if doc.embed_kind(&at).map_err(js_err)?.as_deref() != Some("image") {
+            return Err(js_err(format!(
+                "offset {offset} of paragraph {para_id:?} holds no image"
+            )));
+        }
+        let ctx = EditCtx::local(String::new(), String::new());
+        doc.set_embed_attrs(&ctx, at, entries)
             .map(|_| ())
             .map_err(js_err)
     }
@@ -3073,6 +3408,307 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    // -- version-checked host edits --
+    //
+    // Requests and results are JSON. Policy outcomes come back as
+    // `{"ok":true,…}` or `{"ok":false,"version","failure":{"code","message",
+    // "stepIndex"?,"conflictingStepIndex"?,"target"?}}`; malformed JSON,
+    // unknown tags, missing fields and wrong types throw instead.
+
+    /// The session-scoped version token of the committed document state. It
+    /// changes on every committed change, local or remote, and when the
+    /// document or its retained source is replaced.
+    pub fn version(&self) -> String {
+        self.engine.doc().version().to_string()
+    }
+
+    /// Versioned paragraph texts:
+    /// `{"story"?,"paraIds"?,"view":"accepted"|"original"}` ->
+    /// `{"ok":true,"version","view","paragraphs":[{"story","paraId","text",
+    /// "styleId"?,"atoms":[{"offset","kind"}]}]}`. Each inline atom occupies one
+    /// U+FFFC in `text`.
+    pub fn read_paragraphs_json(&self, request: &str) -> Result<String, JsValue> {
+        let request: ReadParagraphsRequest = serde_json::from_str(request).map_err(js_err)?;
+        outcome_json(&self.engine.doc().read_paragraphs(&request)).map_err(js_err)
+    }
+
+    /// Exact, case-sensitive, paragraph-local search:
+    /// `{"text","within","view","limit"?}` ->
+    /// `{"ok":true,"version","matches":[{"text","range"}],"truncated"}`.
+    pub fn find_text_json(&self, request: &str) -> Result<String, JsValue> {
+        let request: FindTextRequest = serde_json::from_str(request).map_err(js_err)?;
+        outcome_json(&self.engine.doc().find_text(&request)).map_err(js_err)
+    }
+
+    /// Runs every check of [`EditSession::apply_edits_json`], staging included,
+    /// without changing anything: `{"ok":true,"baseVersion","wouldApply","previews"}`.
+    pub fn validate_edits_json(&self, request: &str) -> Result<String, JsValue> {
+        let outcome = match self.edit_request(request)? {
+            Ok(request) => self.engine.doc().validate_edits(&request).map_err(js_err)?,
+            Err(refusal) => Err(refusal),
+        };
+        outcome_json(&outcome).map_err(js_err)
+    }
+
+    /// Applies an edit batch all-or-nothing:
+    /// `{"ok":true,"baseVersion","version","applied","source","changedStories",
+    /// "receipts"}`. An applied batch commits one transaction; `history`
+    /// `"separate"` makes it exactly one undo step.
+    pub fn apply_edits_json(&self, request: &str) -> Result<String, JsValue> {
+        let outcome = match self.edit_request(request)? {
+            Ok(request) => self
+                .engine
+                .doc()
+                .apply_edits(&request, &self.undo)
+                .map_err(js_err)?,
+            Err(refusal) => Err(refusal),
+        };
+        outcome_json(&outcome).map_err(js_err)
+    }
+
+    /// Structured export of the committed document state:
+    /// `{"revisionView","stories"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
+    /// `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Anchors are scoped
+    /// to the returned version. Reads only: nothing is committed, minted or published.
+    pub fn export_structured_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
+        outcome_json(&self.engine.doc().export_structured(&options)).map_err(js_err)
+    }
+
+    /// [`EditSession::export_structured_json`] rendered as Markdown from the same read:
+    /// `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
+    pub fn export_markdown_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
+        outcome_json(&self.engine.doc().export_markdown(&options)).map_err(js_err)
+    }
+
+    /// The content controls of the committed state:
+    /// `{"stories"?,"maxControls"?,"maxBytes"?}` -> `{"ok":true,"version","content"}` or
+    /// `{"ok":false,"version","failure"}`. Control ids and anchors are scoped to the returned
+    /// version. Reads only.
+    pub fn list_content_controls_json(&self, options: &str) -> Result<String, JsValue> {
+        let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
+        outcome_json(&self.engine.doc().list_content_controls(&options)).map_err(js_err)
+    }
+
+    /// [`EditSession::list_content_controls_json`] keeping the controls that match `query`
+    /// (`{"kind":"id","controlId"}`, `{"kind":"tag","tag"}`, `{"kind":"ooxmlId","ooxmlId"}` or
+    /// `{"kind":"alias","alias"}`) exactly.
+    pub fn find_content_controls_json(
+        &self,
+        query: &str,
+        options: &str,
+    ) -> Result<String, JsValue> {
+        let query: ContentControlQuery = serde_json::from_str(query).map_err(js_err)?;
+        let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
+        outcome_json(&self.engine.doc().find_content_controls(&query, &options)).map_err(js_err)
+    }
+
+    /// [`EditSession::export_structured_json`] with the page map of the retained region
+    /// layout. `options` adds `"includeGeometry"?`, `"expectLayoutVersion"?`,
+    /// `"maxFragments"?` and `"maxLayoutBytes"?`; the reply is
+    /// `{"ok":true,"version","content":{"structured","layout"}}` or a refusal. An editor passes
+    /// the region layout request it would lay the document out with now as `current_request`,
+    /// and the layout must have been computed from the same inputs. Lays nothing out and changes
+    /// nothing.
+    pub fn export_structured_with_pages_json(
+        &self,
+        options: &str,
+        current_request: Option<String>,
+    ) -> Result<String, JsValue> {
+        let options: crate::structured::PageExportOptions =
+            serde_json::from_str(options).map_err(js_err)?;
+        let read = match current_request {
+            Some(current) => self
+                .engine
+                .export_structured_with_pages_for(&options, &current),
+            None => self.engine.export_structured_with_pages(&options),
+        };
+        outcome_json(&read).map_err(js_err)
+    }
+
+    /// Lays this private session out with its own fonts and exports it with pages as a
+    /// snapshot. `fonts` holds the font files back to back, `font_lengths` their byte lengths;
+    /// `request` is a region layout request whose font chains name fonts by their index. The
+    /// reply is `{"ok":true,"content"}` or `{"ok":false,"failure"}`; a rejected font or an
+    /// unusable request throws. The module's shared measurement fonts are left untouched.
+    pub fn export_snapshot_with_private_fonts_json(
+        &self,
+        fonts: &[u8],
+        font_lengths: &[u32],
+        request: &str,
+        options: &str,
+    ) -> Result<String, JsValue> {
+        let options: crate::structured::PageExportOptions =
+            serde_json::from_str(options).map_err(js_err)?;
+        let mut files = Vec::with_capacity(font_lengths.len());
+        let mut rest = fonts;
+        for length in font_lengths {
+            if rest.len() < *length as usize {
+                return Err(js_err("font lengths exceed the font bytes"));
+            }
+            let (file, tail) = rest.split_at(*length as usize);
+            files.push(file);
+            rest = tail;
+        }
+        let outcome = self
+            .engine
+            .export_snapshot_with_private_fonts(&files, request, &options)
+            .map_err(js_err)?
+            .map(|content| json!({ "content": content }))
+            .map_err(|failure| json!({ "failure": failure }));
+        outcome_json(&outcome).map_err(js_err)
+    }
+
+    /// Compares two DOCX packages into this session, which must hold no document: the original
+    /// is opened here and the revised body text differences are applied as tracked changes,
+    /// outside undo history.
+    ///
+    /// `options` is `{"author","date","granularity"?,"unsupported"?,"limits"?}`. Returns a final
+    /// `{"ok":false,"diagnostics"}` or `{"ok":true,"noop":true,"changes":[],"diagnostics"}`, or
+    /// `{"ok":true,"noop":false,"save"}` naming what a save of the applied changes may write:
+    /// then pass the saved bytes to [`EditSession::finish_compared_docx_json`], or the save
+    /// failure to [`EditSession::fail_compared_docx_json`]. Malformed options and internal
+    /// failures throw.
+    pub fn compare_docx_json(
+        &self,
+        original: &[u8],
+        revised: &[u8],
+        options: &str,
+    ) -> Result<String, JsValue> {
+        let options = match crate::compare::parse_options(options).map_err(js_err)? {
+            Ok(options) => options,
+            Err(diagnostic) => return crate::compare::refused_json(diagnostic).map_err(js_err),
+        };
+        let outcome = crate::compare::compare_into(
+            self.engine.doc(),
+            &self.undo,
+            original,
+            revised,
+            &options,
+        )
+        .map_err(js_err)?;
+        let json = outcome.to_json(&options.limits).map_err(js_err)?;
+        if let CompareOutcome::Applied(applied) = outcome {
+            self.docx_source.replace(Some(Arc::from(original)));
+            self.compared.replace(Some((applied, options.limits)));
+        }
+        Ok(json)
+    }
+
+    /// The final comparison result for `bytes`, the saved applied changes, verified against both
+    /// inputs: `{"ok":true,"changes","diagnostics"}` or `{"ok":false,"diagnostics"}`. Throws
+    /// when no comparison awaits its saved bytes.
+    pub fn finish_compared_docx_json(&self, bytes: &[u8]) -> Result<String, JsValue> {
+        let (applied, limits) = self
+            .compared
+            .take()
+            .ok_or_else(|| js_err("no comparison awaits its saved bytes"))?;
+        applied.finish(bytes, &limits).map_err(js_err)
+    }
+
+    /// The final comparison result when saving the applied changes failed with `message`.
+    pub fn fail_compared_docx_json(&self, message: &str) -> Result<String, JsValue> {
+        let (applied, limits) = self
+            .compared
+            .take()
+            .ok_or_else(|| js_err("no comparison awaits its saved bytes"))?;
+        applied.fail(message, &limits).map_err(js_err)
+    }
+
+    /// The headings of `story` in document order, classified as the structured export
+    /// classifies them: `[{"paraId","heading":{"outlineLevel","source"}}]`.
+    pub fn headings_json(&self, story: &str) -> Result<String, JsValue> {
+        let headings: Vec<_> = self
+            .engine
+            .doc()
+            .paragraph_headings(story)
+            .map_err(js_err)?
+            .into_iter()
+            .map(|(para_id, heading)| json!({ "paraId": para_id, "heading": heading }))
+            .collect();
+        serde_json::to_string(&headings).map_err(js_err)
+    }
+
+    /// Resolves a text target and formats it in one call (legacy agent
+    /// helpers). `delta_json` is the [`EditSession::format_range`] delta.
+    /// Returns `{"ok":true,"version"}` or a refusal.
+    pub fn format_text_target_json(
+        &self,
+        target_json: &str,
+        delta_json: &str,
+    ) -> Result<String, JsValue> {
+        let target: TextTarget = serde_json::from_str(target_json).map_err(js_err)?;
+        let delta = parse_inline_format_delta(delta_json)?;
+        let doc = self.engine.doc();
+        let outcome = doc.format_text_target(&target, &delta).map_err(js_err)?;
+        outcome_json(&outcome.map(|()| json!({ "version": doc.version() }))).map_err(js_err)
+    }
+
+    /// Resolves a text target and anchors a side-map comment over it in one
+    /// call (legacy agent helpers). `comment_json`:
+    /// `{"id","author","date","body"?}`. Returns `{"ok":true,"version"}` or a
+    /// refusal.
+    pub fn comment_text_target_json(
+        &self,
+        target_json: &str,
+        comment_json: &str,
+    ) -> Result<String, JsValue> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CommentWire {
+            id: String,
+            author: String,
+            date: String,
+            #[serde(default)]
+            body: Value,
+        }
+        let target: TextTarget = serde_json::from_str(target_json).map_err(js_err)?;
+        let comment: CommentWire = serde_json::from_str(comment_json).map_err(js_err)?;
+        let doc = self.engine.doc();
+        let outcome = doc
+            .comment_text_target(
+                &target,
+                &comment.id,
+                &comment.author,
+                &comment.date,
+                json_to_any(&comment.body)?,
+            )
+            .map_err(js_err)?;
+        outcome_json(&outcome.map(|()| json!({ "version": doc.version() }))).map_err(js_err)
+    }
+
+    /// Accepted-view texts around a paragraph-keyed selection:
+    /// `{"paraId","selectedText","paragraphText","before","after"}`, with
+    /// `\n` between paragraphs and U+FFFC for each inline atom.
+    #[allow(clippy::too_many_arguments)]
+    pub fn selection_text_json(
+        &self,
+        story: &str,
+        start_para: &str,
+        start_offset: u32,
+        end_para: &str,
+        end_offset: u32,
+    ) -> Result<String, JsValue> {
+        let range = LocRange::new(
+            Loc::new(story, start_para, start_offset),
+            Loc::new(story, end_para, end_offset),
+        );
+        let info = self
+            .engine
+            .doc()
+            .selection_text(&range, EditTextView::Accepted)
+            .map_err(js_err)?;
+        Ok(json!({
+            "paraId": info.para_id,
+            "selectedText": info.selected_text,
+            "paragraphText": info.paragraph_text,
+            "before": info.before,
+            "after": info.after,
+        })
+        .to_string())
+    }
+
     // -- read queries --
     //
     // Every query below is a pure snapshot of the document as it stands: it
@@ -3084,7 +3720,9 @@ impl EditSession {
     /// ```json
     /// {
     ///   "bold": true | false | "mixed", "italic": …, "underline": …, "strike": …,
+    ///   "superscript": …, "subscript": …,
     ///   "fontFamily": string|null, "fontSize": number|null, "color": string|null,
+    ///   "highlight": string|null,
     ///   "paraId": string, "styleId": string|null, "alignment": string|null,
     ///   "paragraphProperties": {…},
     ///   "hasSelection": bool, "isMultiParagraph": bool, "inTable": bool,
@@ -3121,9 +3759,12 @@ impl EditSession {
             "italic": tri_state_value(context.italic),
             "underline": tri_state_value(context.underline),
             "strike": tri_state_value(context.strike),
+            "superscript": tri_state_value(context.superscript),
+            "subscript": tri_state_value(context.subscript),
             "fontFamily": context.font_family,
             "fontSize": context.font_size,
             "color": context.color,
+            "highlight": context.highlight,
             "paraId": context.para_id,
             "styleId": context.style_id,
             "alignment": context.alignment,
@@ -3343,6 +3984,25 @@ impl EditSession {
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
     }
 
+    /// Every comment the session holds, sorted by id:
+    /// `[{"id","author","date","done","parentId","body"}, …]`, `parentId`
+    /// null for a top-level comment and `body` the JSON value it was given.
+    pub fn list_comments(&self) -> Result<String, JsValue> {
+        let comments = self.engine.doc().list_comments().map_err(js_err)?;
+        let mut items = Vec::with_capacity(comments.len());
+        for comment in comments {
+            items.push(json!({
+                "id": comment.id,
+                "author": comment.author,
+                "date": comment.date,
+                "done": comment.done,
+                "parentId": comment.parent_id,
+                "body": serde_json::to_value(&comment.body).map_err(js_err)?,
+            }));
+        }
+        serde_json::to_string(&items).map_err(js_err)
+    }
+
     /// Where a comment's sticky anchors currently sit:
     /// `[{"story","start","end"}, …]`, one entry per anchored range, in
     /// story-global UTF-16 units. Errors on an unknown comment id and when an
@@ -3361,6 +4021,265 @@ impl EditSession {
             .collect();
         serde_json::to_string(&items).map_err(js_err)
     }
+}
+
+#[wasm_bindgen]
+impl EditSession {
+    /// Gives every paragraph that saves without a Word paragraph ID a fresh
+    /// one and repairs duplicates; see [`EditingDoc::persist_paragraph_ids`].
+    /// Receipt: `{"status":"applied","assignments":[{"paragraph",
+    /// "replacedParaId","previousOoxmlParaId","ooxmlParaId","idOrigin",
+    /// "persisted"}],"diagnostics":[…]}`, or `{"status":"refused","refusal"}`
+    /// when nothing was changed.
+    pub fn persist_paragraph_ids(&self) -> Result<String, JsValue> {
+        let doc = self.engine.doc();
+        let session_id = doc.session_id();
+        let receipt = match doc.persist_paragraph_ids() {
+            Ok(persisted) => persisted_receipt_json(&session_id, &persisted),
+            Err(ParagraphIdRefusal::AmbiguousCommentReference {
+                ooxml_para_id,
+                comment_ids,
+            }) => json!({
+                "status": "refused",
+                "refusal": {
+                    "kind": "ambiguous-comment-reference",
+                    "ooxmlParaId": ooxml_para_id,
+                    "commentIds": comment_ids,
+                },
+            }),
+        };
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
+    /// The Word paragraph ID each paragraph of `story` saves with, as a JSON
+    /// array of strings or `null` in document order. Errors on an unknown story.
+    pub fn story_paragraph_ids(&self, story: &str) -> Result<String, JsValue> {
+        let ids = self
+            .engine
+            .doc()
+            .story_paragraph_ids(story)
+            .map_err(js_err)?;
+        serde_json::to_string(&ids).map_err(js_err)
+    }
+
+    /// Every paragraph's identities: `{"sessionId","packageSha256",
+    /// "paragraphs":[{"session","origin","ooxmlParaId","idOrigin",
+    /// "persisted","source"}]}`, session paragraphs with stories sorted and
+    /// in document order, then source paragraphs outside the stories, whose
+    /// `session` is `null`. Reads only.
+    pub fn paragraph_identities(&self) -> Result<String, JsValue> {
+        let identities = self.engine.doc().paragraph_identities();
+        let paragraphs: Vec<Value> = identities
+            .paragraphs
+            .iter()
+            .map(|paragraph| {
+                json!({
+                    "session": match &paragraph.paragraph {
+                        ParagraphRef::Session { .. } => {
+                            paragraph_anchor_json(&identities.session_id, &paragraph.paragraph)
+                        }
+                        ParagraphRef::Source(_) => Value::Null,
+                    },
+                    "origin": paragraph_origin_json(paragraph.origin),
+                    "ooxmlParaId": paragraph.ooxml_para_id,
+                    "idOrigin": origin_json(paragraph.id_origin),
+                    "persisted": persisted_anchor_json(
+                        paragraph.source_story.as_ref(),
+                        paragraph.ooxml_para_id.as_deref(),
+                    ),
+                    "source": paragraph.source.as_ref().map_or(Value::Null, source_anchor_json),
+                })
+            })
+            .collect();
+        serde_json::to_string(&json!({
+            "sessionId": identities.session_id,
+            "packageSha256": identities.package_sha256,
+            "paragraphs": paragraphs,
+        }))
+        .map_err(js_err)
+    }
+
+    /// Resolves a `session`, `source` or `persisted` anchor JSON against the
+    /// current state: `{"status":"found","anchor"}`, `{"status":"missing"}`,
+    /// `{"status":"ambiguous","candidates"}` or `{"status":"unsupported",
+    /// "reason"}` with a `foreign-session`, `foreign-package` or
+    /// `no-source-package` reason. A found source paragraph outside the
+    /// session stories comes back as its source anchor. Errors on a malformed
+    /// anchor.
+    pub fn resolve_paragraph_anchor(&self, anchor_json: &str) -> Result<String, JsValue> {
+        let anchor = parse_paragraph_anchor(anchor_json)?;
+        let doc = self.engine.doc();
+        let session_id = doc.session_id();
+        let result = match doc.resolve_paragraph_anchor(&anchor) {
+            AnchorResolution::Found(paragraph) => json!({
+                "status": "found",
+                "anchor": paragraph_anchor_json(&session_id, &paragraph),
+            }),
+            AnchorResolution::Missing => json!({ "status": "missing" }),
+            AnchorResolution::Ambiguous(candidates) => json!({
+                "status": "ambiguous",
+                "candidates": candidates
+                    .iter()
+                    .map(|paragraph| paragraph_anchor_json(&session_id, paragraph))
+                    .collect::<Vec<_>>(),
+            }),
+            AnchorResolution::Unsupported(reason) => json!({
+                "status": "unsupported",
+                "reason": match reason {
+                    AnchorUnsupported::ForeignSession => "foreign-session",
+                    AnchorUnsupported::ForeignPackage => "foreign-package",
+                    AnchorUnsupported::NoSourcePackage => "no-source-package",
+                },
+            }),
+        };
+        serde_json::to_string(&result).map_err(js_err)
+    }
+
+    /// The paragraph IDs a save applies, as the package writer's
+    /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
+    /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`.
+    pub fn paragraph_save_plan(&self) -> Result<String, JsValue> {
+        let plan = self.engine.doc().paragraph_save_plan();
+        serde_json::to_string(&json!({
+            "assignments": plan
+                .assignments
+                .iter()
+                .map(|(part, ordinal, para_id)| {
+                    json!({ "part": part, "ordinal": ordinal, "paraId": para_id })
+                })
+                .collect::<Vec<_>>(),
+            "patchedParts": plan
+                .patched_parts
+                .iter()
+                .map(|(part, para_ids)| json!({ "part": part, "paraIds": para_ids }))
+                .collect::<Vec<_>>(),
+        }))
+        .map_err(js_err)
+    }
+
+    /// Reconciles and publishes the `[owner, paraId]` pairs a save captured,
+    /// an owner being a session key or a source occurrence's
+    /// `{partUri}#{ordinal}`; returns the stale pairs as the same JSON shape.
+    /// See [`EditingDoc::record_saved_paragraph_ids`].
+    pub fn record_saved_paragraph_ids(&self, saved_json: &str) -> Result<String, JsValue> {
+        let saved: Vec<(String, String)> = serde_json::from_str(saved_json).map_err(js_err)?;
+        let stale = self.engine.doc().record_saved_paragraph_ids(&saved);
+        serde_json::to_string(&stale).map_err(js_err)
+    }
+
+    /// The Word paragraph IDs a DOCX package holds, as JSON mapping each XML
+    /// part URI to its paragraphs' IDs in document order, in canonical form.
+    pub fn written_paragraph_ids(&self, bytes: &[u8]) -> Result<String, JsValue> {
+        let ids = docx_parse::paragraph_identity::paragraph_ids_by_part(bytes).map_err(js_err)?;
+        serde_json::to_string(&ids).map_err(js_err)
+    }
+}
+
+/// A snapshot export as `{"ok":true,"content"}` or `{"ok":false,"failure"}`; unreadable packages
+/// and malformed options throw.
+fn snapshot_json<T: Serialize>(
+    outcome: Result<T, crate::structured::ExportError>,
+) -> Result<String, JsValue> {
+    let outcome = match outcome {
+        Ok(content) => Ok(json!({ "content": content })),
+        Err(crate::structured::ExportError::Refused(failure)) => Err(json!({ "failure": failure })),
+        Err(crate::structured::ExportError::Parse(message)) => return Err(js_err(message)),
+    };
+    outcome_json(&outcome).map_err(js_err)
+}
+
+/// Structured export of DOCX bytes as a snapshot; `options` as for
+/// [`EditSession::export_structured_json`]. No session is created.
+#[wasm_bindgen]
+pub fn export_docx_structured_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
+    let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(crate::structured::export_docx_structured(bytes, &options))
+}
+
+/// [`export_docx_structured_json`] rendered as Markdown.
+#[wasm_bindgen]
+pub fn export_docx_markdown_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
+    let options: ExportOptions = serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(crate::structured::export_docx_markdown(bytes, &options))
+}
+
+/// The content controls of DOCX bytes as a snapshot; `options` as for
+/// [`EditSession::list_content_controls_json`]. No session is created.
+#[wasm_bindgen]
+pub fn list_docx_content_controls_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
+    let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(crate::content_controls::list_docx_content_controls(
+        bytes, &options,
+    ))
+}
+
+/// The content controls of DOCX bytes that match `query` exactly.
+#[wasm_bindgen]
+pub fn find_docx_content_controls_json(
+    bytes: &[u8],
+    query: &str,
+    options: &str,
+) -> Result<String, JsValue> {
+    let query: ContentControlQuery = serde_json::from_str(query).map_err(js_err)?;
+    let options: ContentControlsOptions = serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(crate::content_controls::find_docx_content_controls(
+        bytes, &query, &options,
+    ))
+}
+
+/// Renders structured content as Markdown: `content` is a schema-version-1 export and
+/// `options` is `{"maxBytes"?}`.
+#[wasm_bindgen]
+pub fn render_docx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
+    let content: crate::structured::DocxStructuredContent =
+        serde_json::from_str(content).map_err(js_err)?;
+    let options: crate::structured::MarkdownOptions =
+        serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(
+        crate::structured::render_docx_markdown(&content, &options)
+            .map_err(crate::structured::ExportError::Refused),
+    )
+}
+
+/// Renders a paged export as Markdown: `content` is `{"structured","layout"}` from a paged
+/// export and `options` is `{"maxBytes"?,"pageMarkers"?}`.
+#[wasm_bindgen]
+pub fn render_docx_markdown_with_pages_json(
+    content: &str,
+    options: &str,
+) -> Result<String, JsValue> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Layout {
+        #[serde(
+            rename = "schemaVersion",
+            deserialize_with = "crate::structured::pages::page_map_schema_version"
+        )]
+        _schema_version: u8,
+        export_fingerprint: String,
+        pages: Vec<crate::structured::ExportPage>,
+        fragments: Vec<crate::structured::PageFragment>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Paged {
+        structured: crate::structured::DocxStructuredContent,
+        layout: Layout,
+    }
+    let content: Paged = serde_json::from_str(content).map_err(js_err)?;
+    let options: crate::structured::PageMarkdownOptions =
+        serde_json::from_str(options).map_err(js_err)?;
+    snapshot_json(
+        crate::structured::render_docx_markdown_with_pages(
+            &content.structured,
+            crate::structured::PageAnnotations {
+                export_fingerprint: &content.layout.export_fingerprint,
+                pages: &content.layout.pages,
+                fragments: &content.layout.fragments,
+            },
+            &options,
+        )
+        .map_err(crate::structured::ExportError::Refused),
+    )
 }
 
 #[cfg(test)]
@@ -3382,7 +4301,8 @@ mod tests {
         let expected = crate::seed::parse_docx_for_edit(&source).unwrap();
         assert!(!expected.document.package.media_entries.is_empty());
         let session = EditSession::new(7.0).unwrap();
-        let host: Value = serde_json::from_str(&session.open_docx(&source, true).unwrap()).unwrap();
+        let host: Value =
+            serde_json::from_str(&session.open_docx(&source, true, None).unwrap()).unwrap();
         assert_eq!(
             host["envelope"]["document"]["package"]["mediaEntries"],
             json!([])
@@ -3429,6 +4349,423 @@ mod tests {
             reopened.document.package.media_entries,
             expected.document.package.media_entries
         );
+    }
+
+    fn batch_docx() -> Vec<u8> {
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec()),
+            ("word/styles.xml".to_owned(), br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>"#.to_vec()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>Alpha</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>beta</w:t></w:r></w:p><w:p w14:paraId="00000002"><w:r><w:t>Gamma</w:t></w:r></w:p></w:body></w:document>"#.to_vec()),
+        ])
+        .unwrap()
+    }
+
+    fn envelope(json: &str) -> Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn replace_request(version: &str, extra: Value) -> String {
+        let mut request = json!({
+            "expectVersion": version,
+            "steps": [{
+                "op": "replaceText",
+                "target": {"kind": "search", "text": "beta",
+                    "within": {"kind": "paragraph", "story": "body", "paraId": "00000001"},
+                    "view": "accepted"},
+                "text": "BETA"
+            }]
+        });
+        if let (Some(request), Value::Object(extra)) = (request.as_object_mut(), extra) {
+            request.extend(extra);
+        }
+        request.to_string()
+    }
+
+    #[test]
+    fn batch_envelopes_default_and_refuse_as_data() {
+        let session = EditSession::new(71.0).unwrap();
+        session.open_docx(&batch_docx(), true, None).unwrap();
+        let version = session.version();
+        let read = envelope(
+            &session
+                .read_paragraphs_json(r#"{"view":"accepted"}"#)
+                .unwrap(),
+        );
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["version"], version.as_str());
+        assert_eq!(read["paragraphs"][0]["text"], "Alpha\u{FFFC}beta");
+        assert_eq!(read["paragraphs"][0]["atoms"][0]["kind"], "lineBreak");
+
+        let validated = envelope(
+            &session
+                .validate_edits_json(&replace_request(&version, json!({})))
+                .unwrap(),
+        );
+        assert_eq!(validated["ok"], true);
+        assert_eq!(validated["wouldApply"], true);
+        assert_eq!(session.version(), version);
+
+        let applied = envelope(
+            &session
+                .apply_edits_json(&replace_request(&version, json!({"history": "none"})))
+                .unwrap(),
+        );
+        assert_eq!(applied["ok"], true);
+        assert_eq!(applied["applied"], true);
+        assert_eq!(applied["source"], "host");
+        assert_eq!(applied["baseVersion"], version.as_str());
+        assert_eq!(applied["version"], session.version().as_str());
+        assert_eq!(applied["changedStories"], json!(["body"]));
+        assert_eq!(applied["receipts"][0]["range"]["start"]["offset"], 6);
+
+        let stale = envelope(
+            &session
+                .apply_edits_json(&replace_request(&version, json!({})))
+                .unwrap(),
+        );
+        assert_eq!(stale["ok"], false);
+        assert_eq!(stale["failure"]["code"], "stale-version");
+        assert_eq!(stale["version"], session.version().as_str());
+        assert_eq!(
+            session.engine.doc().paragraphs("body").unwrap()[0].text,
+            "AlphaBETA"
+        );
+    }
+
+    #[test]
+    fn export_envelopes_carry_versions_and_refusals_as_data() {
+        let session = EditSession::new(73.0).unwrap();
+        session.open_docx(&batch_docx(), true, None).unwrap();
+        let version = session.version();
+        let read = envelope(
+            &session
+                .export_structured_json(r#"{"revisionView":"accepted"}"#)
+                .unwrap(),
+        );
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["version"], version.as_str());
+        assert_eq!(read["content"]["schemaVersion"], 1);
+        assert_eq!(read["content"]["anchorScope"], "session");
+        assert_eq!(
+            read["content"]["stories"][0]["blocks"][0]["paragraph"]["inlines"][1]["kind"],
+            "break"
+        );
+        let markdown = envelope(
+            &session
+                .export_markdown_json(r#"{"revisionView":"markup","includeFormatting":false}"#)
+                .unwrap(),
+        );
+        assert_eq!(markdown["ok"], true);
+        assert!(
+            markdown["content"]["markdown"]
+                .as_str()
+                .unwrap()
+                .contains("Alpha\\\nbeta")
+        );
+        let refused = envelope(
+            &session
+                .export_structured_json(r#"{"revisionView":"accepted","maxBytes":8}"#)
+                .unwrap(),
+        );
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["version"], version.as_str());
+        assert_eq!(refused["failure"]["code"], "invalid-options");
+        assert_eq!(refused["failure"]["target"], Value::Null);
+        assert!(
+            refused["failure"]
+                .as_object()
+                .unwrap()
+                .contains_key("target")
+        );
+        assert_eq!(session.version(), version);
+        let empty = EditSession::new(74.0).unwrap();
+        let unsupported = envelope(
+            &empty
+                .export_structured_json(r#"{"revisionView":"accepted"}"#)
+                .unwrap(),
+        );
+        assert_eq!(unsupported["failure"]["code"], "unsupported");
+        assert_eq!(unsupported["failure"]["target"], Value::Null);
+    }
+
+    #[test]
+    fn paged_export_envelopes_carry_versions_maps_and_refusals() {
+        let font: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let session = EditSession::new(75.0).unwrap();
+        session.open_docx(&batch_docx(), true, None).unwrap();
+        let options = r#"{"revisionView":"markup"}"#;
+        let unavailable = envelope(
+            &session
+                .export_structured_with_pages_json(options, None)
+                .unwrap(),
+        );
+        assert_eq!(unavailable["ok"], false);
+        assert_eq!(unavailable["version"], session.version().as_str());
+        assert_eq!(unavailable["failure"]["code"], "layout-unavailable");
+        assert_eq!(unavailable["failure"]["target"], Value::Null);
+        let mut request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"properties": {}}]},
+            "renderEnv": {},
+        });
+        let requirements: Vec<Value> = serde_json::from_str(
+            &session
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains = |id: u32| -> serde_json::Map<String, Value> {
+            requirements
+                .iter()
+                .map(|requirement| (requirement["key"].as_str().unwrap().to_owned(), json!([id])))
+                .collect()
+        };
+        let defaults = json!({"fontSize": 11, "fontFamily": "Calibri"});
+        let snapshot_request = {
+            let mut private = request.clone();
+            private["measurement"] = json!({"fontChains": chains(0), "defaults": defaults});
+            private.to_string()
+        };
+        docx_layout::clear_measure_fonts();
+        let id = session.register_measure_font(font).unwrap();
+        request["measurement"] = json!({"fontChains": chains(id), "defaults": defaults});
+        let request = request.to_string();
+        session
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        let version = session.version();
+        let read = envelope(
+            &session
+                .export_structured_with_pages_json(options, Some(request.clone()))
+                .unwrap(),
+        );
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["version"], version.as_str());
+        assert_eq!(
+            read["content"]["layout"]["documentVersion"],
+            version.as_str()
+        );
+        assert_eq!(read["content"]["layout"]["layoutRevisionView"], "markup");
+        assert_eq!(read["content"]["layout"]["pages"][0]["displayedLabel"], "1");
+        assert!(
+            read["content"]["layout"]["provenance"]
+                .get("frameEpoch")
+                .is_none()
+        );
+        assert_eq!(
+            read["content"]["layout"]["fragments"][0]["geometry"],
+            Value::Null
+        );
+        assert_eq!(read["content"]["structured"]["anchorScope"], "session");
+        let private = EditSession::new(76.0).unwrap();
+        private.open_docx(&batch_docx(), true, None).unwrap();
+        let snapshot = envelope(
+            &private
+                .export_snapshot_with_private_fonts_json(
+                    font,
+                    &[font.len() as u32],
+                    &snapshot_request,
+                    options,
+                )
+                .unwrap(),
+        );
+        assert_eq!(snapshot["ok"], true);
+        assert!(snapshot.get("version").is_none());
+        assert!(
+            snapshot["content"]["layout"]
+                .get("documentVersion")
+                .is_none()
+        );
+        assert_eq!(snapshot["content"]["structured"]["anchorScope"], "snapshot");
+        assert_eq!(
+            session
+                .export_structured_with_pages_json(options, Some(request.clone()))
+                .map(|reply| envelope(&reply)["ok"].clone())
+                .unwrap(),
+            true,
+            "the private fonts never replaced the session's"
+        );
+        let marked = envelope(
+            &render_docx_markdown_with_pages_json(
+                &snapshot["content"].to_string(),
+                r#"{"pageMarkers":true}"#,
+            )
+            .unwrap(),
+        );
+        assert!(
+            marked["content"]["markdown"]
+                .as_str()
+                .unwrap()
+                .contains("<!-- docx-export:0 --><!-- docx-pages: 0=1 -->")
+        );
+        let limited = envelope(
+            &session
+                .export_structured_with_pages_json(
+                    r#"{"revisionView":"markup","maxLayoutBytes":8}"#,
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(limited["failure"]["code"], "invalid-options");
+        assert_eq!(session.version(), version);
+    }
+
+    #[test]
+    fn snapshot_exports_have_no_version_and_render_from_content() {
+        let options = r#"{"revisionView":"accepted"}"#;
+        let exported = envelope(&export_docx_structured_json(&batch_docx(), options).unwrap());
+        assert_eq!(exported["ok"], true);
+        assert!(exported.get("version").is_none());
+        assert_eq!(exported["content"]["anchorScope"], "snapshot");
+        let rendered =
+            envelope(&render_docx_markdown_json(&exported["content"].to_string(), "{}").unwrap());
+        let markdown = envelope(&export_docx_markdown_json(&batch_docx(), options).unwrap());
+        assert_eq!(rendered, markdown);
+        let refused = envelope(
+            &render_docx_markdown_json(&exported["content"].to_string(), r#"{"maxBytes":1}"#)
+                .unwrap(),
+        );
+        assert_eq!(refused["failure"]["code"], "invalid-options");
+    }
+
+    #[test]
+    fn untracked_batches_keep_history_and_source_is_echoed() {
+        let session = EditSession::new(72.0).unwrap();
+        session.open_docx(&batch_docx(), true, None).unwrap();
+        let request = replace_request(
+            &session.version(),
+            json!({"source": "agent", "history": "none"}),
+        );
+        let applied = envelope(&session.apply_edits_json(&request).unwrap());
+        assert_eq!(applied["source"], "agent");
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn reopening_and_hydrating_invalidate_versions() {
+        let bytes = batch_docx();
+        let origin = EditSession::new(73.0).unwrap();
+        origin.open_docx(&bytes, true, None).unwrap();
+        let joined = EditSession::new(74.0).unwrap();
+        let before_open = joined.version();
+        joined.open_docx(&bytes, false, None).unwrap();
+        assert_ne!(joined.version(), before_open);
+        let before_load = joined.version();
+        joined.load(&origin.encode_state()).unwrap();
+        assert_ne!(joined.version(), before_load);
+        let before_reopen = joined.version();
+        joined.open_docx(&bytes, false, None).unwrap();
+        assert_ne!(joined.version(), before_reopen);
+        let structural = json!({
+            "expectVersion": joined.version(),
+            "history": "none",
+            "steps": [{
+                "op": "insertParagraphs",
+                "target": {"story": "body", "paraId": "00000002"},
+                "at": "end",
+                "paragraphs": [{"text": "Joined"}]
+            }]
+        });
+        let applied = envelope(&joined.apply_edits_json(&structural.to_string()).unwrap());
+        assert_eq!(applied["ok"], true);
+        assert_eq!(applied["receipts"][0]["newParagraphs"][0]["story"], "body");
+    }
+
+    #[test]
+    fn compatibility_helpers_resolve_targets_after_atoms() {
+        let session = EditSession::new(75.0).unwrap();
+        session.open_docx(&batch_docx(), true, None).unwrap();
+        let target = r#"{"kind":"search","text":"beta","within":{"kind":"paragraph","story":"body","paraId":"00000001"},"view":"accepted"}"#;
+        let formatted = envelope(
+            &session
+                .format_text_target_json(target, r#"{"bold":true}"#)
+                .unwrap(),
+        );
+        assert_eq!(formatted["ok"], true);
+        let bold: String = session
+            .engine
+            .doc()
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                SegmentContent::Text(text)
+                    if segment.attributes.get("bold") == Some(&Any::Bool(true)) =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bold, "beta");
+        let commented = envelope(
+            &session
+                .comment_text_target_json(
+                    target,
+                    r#"{"id":"7","author":"Ann","date":"2026-09-24T00:00:00Z","body":"note"}"#,
+                )
+                .unwrap(),
+        );
+        assert_eq!(commented["ok"], true);
+        let anchor = session.engine.doc().resolve_comment("7").unwrap().remove(0);
+        assert_eq!((anchor.start, anchor.end), (6, 10));
+        let missing = envelope(
+            &session
+                .format_text_target_json(
+                    r#"{"kind":"paragraph","story":"body","paraId":"missing"}"#,
+                    "{}",
+                )
+                .unwrap(),
+        );
+        assert_eq!(missing["failure"]["code"], "missing-target");
+        let selection = envelope(
+            &session
+                .selection_text_json("body", "00000001", 3, "00000002", 2)
+                .unwrap(),
+        );
+        assert_eq!(selection["selectedText"], "ha\u{FFFC}beta\nGa");
+        assert_eq!(selection["before"], "Alp");
+        assert_eq!(selection["after"], "mma");
+    }
+
+    #[test]
+    fn image_geometry_at_a_position_reaches_one_of_several_images_sharing_an_id() {
+        let session = EditSession::new(22.0).unwrap();
+        session
+            .engine
+            .doc()
+            .create_story_with_paragraph_id("body", "p0", "AB", "Normal", "left")
+            .unwrap();
+        for offset in [2, 1] {
+            session
+                .insert_image("body", "p0", offset, r#"{"rId":"rIdShared"}"#, None, None)
+                .unwrap();
+        }
+        session
+            .set_image_geometry_at("body", "p0", 3, r#"{"alt":"second"}"#)
+            .unwrap();
+        session
+            .set_image_geometry("rIdShared", r#"{"title":"first"}"#)
+            .unwrap();
+
+        let images: Vec<_> = session
+            .engine
+            .doc()
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                SegmentContent::OtherEmbed { payload, .. } => Some(payload),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].get("alt"), None);
+        assert_eq!(images[0].get("title"), Some(&Any::from("first")));
+        assert_eq!(images[1].get("alt"), Some(&Any::from("second")));
+        assert_eq!(images[1].get("title"), None);
     }
 
     fn seed_paragraph_after_embeds(doc: &EditingDoc, embeds: &[&str], text: &str) {
@@ -3556,5 +4893,236 @@ mod tests {
         assert_eq!(snapshot["frameEpoch"], 1);
         assert_eq!(caret["pageIndex"], 0);
         assert!((caret["x"].as_f64().unwrap() - 40.0).abs() < 0.001);
+    }
+
+    fn content_controls_docx() -> Vec<u8> {
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/docx/src/yrs/__fixtures__/content-controls/template.docx"
+        ))
+        .unwrap()
+    }
+
+    fn control_text(session: &EditSession, tag: &str) -> Value {
+        let listed = envelope(&session.list_content_controls_json("{}").unwrap());
+        listed["content"]["controls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|control| control["tag"] == tag)
+            .map(|control| control["value"].clone())
+            .unwrap()
+    }
+
+    #[test]
+    fn content_control_envelopes_refuse_as_data() {
+        let bytes = content_controls_docx();
+        let session = EditSession::new(72.0).unwrap();
+        session.open_docx(&bytes, true, None).unwrap();
+        let listed = envelope(&session.list_content_controls_json("{}").unwrap());
+        assert_eq!(listed["ok"], true);
+        assert_eq!(listed["version"], session.version().as_str());
+        assert_eq!(listed["content"]["schemaVersion"], 1);
+        assert_eq!(listed["content"]["anchorScope"], "session");
+        assert_eq!(listed["content"]["controls"].as_array().unwrap().len(), 7);
+        assert_eq!(
+            listed["content"]["controls"][0]["parentControlId"],
+            Value::Null
+        );
+        let refused = envelope(
+            &session
+                .list_content_controls_json(r#"{"maxControls":1}"#)
+                .unwrap(),
+        );
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["failure"]["code"], "limit-exceeded");
+        let found = envelope(
+            &session
+                .find_content_controls_json(r#"{"kind":"alias","alias":"Address"}"#, "{}")
+                .unwrap(),
+        );
+        assert_eq!(found["content"]["controls"][0]["controlId"], "body:sdt0");
+
+        let request = json!({
+            "expectVersion": session.version(),
+            "steps": [{"op": "setContentControlText",
+                "target": {"kind": "tag", "tag": "account.reference"}, "text": "x"}]
+        });
+        let ambiguous = envelope(&session.apply_edits_json(&request.to_string()).unwrap());
+        assert_eq!(ambiguous["failure"]["code"], "ambiguous-target");
+        assert_eq!(ambiguous["failure"]["reason"], "ambiguous-tag");
+
+        session.clear_content_control_value("102").unwrap();
+        assert_eq!(
+            control_text(&session, "account.reference")["text"],
+            "REF-000"
+        );
+
+        let snapshot = envelope(&list_docx_content_controls_json(&bytes, "{}").unwrap());
+        assert_eq!(snapshot["ok"], true);
+        assert_eq!(snapshot["content"]["anchorScope"], "snapshot");
+        let matched = envelope(
+            &find_docx_content_controls_json(
+                &bytes,
+                r#"{"kind":"tag","tag":"customer.name"}"#,
+                "{}",
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            matched["content"]["controls"][0]["showingPlaceholder"],
+            true
+        );
+    }
+
+    #[test]
+    fn loading_shared_state_keeps_legacy_values_as_they_are() {
+        let bytes = content_controls_docx();
+        let author = EditSession::new(73.0).unwrap();
+        author.open_docx(&bytes, true, None).unwrap();
+        {
+            let doc = author.engine.doc();
+            let stories = doc.yrs_doc().transact().get_map(crate::STORIES).unwrap();
+            let mut txn = doc.yrs_doc().transact_mut();
+            let Some(yrs::Out::YText(body)) = stories.get(&txn, "body") else {
+                panic!("body");
+            };
+            let map = yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+                .into_iter()
+                .find_map(|diff| match diff.insert {
+                    yrs::Out::YMap(map)
+                        if map.get(&txn, "tag")
+                            == Some(yrs::Out::Any(Any::from("account.reference"))) =>
+                    {
+                        Some(map)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            map.insert(&mut txn, "value", "REF-LEGACY");
+        }
+        let joiner = EditSession::new(74.0).unwrap();
+        joiner.open_docx(&bytes, false, None).unwrap();
+        joiner.load(&author.encode_state()).unwrap();
+        assert_eq!(
+            control_text(&joiner, "account.reference")["text"],
+            "REF-000"
+        );
+        assert_eq!(joiner.encode_state_vector(), author.encode_state_vector());
+        let listed = envelope(&joiner.list_content_controls_json("{}").unwrap());
+        assert!(
+            listed["content"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic["code"] == "legacy-control-value")
+        );
+        assert!(!joiner.can_undo());
+    }
+
+    #[test]
+    fn unpaired_surrogates_in_fill_text_are_invalid_text() {
+        let session = EditSession::new(75.0).unwrap();
+        session
+            .open_docx(&content_controls_docx(), true, None)
+            .unwrap();
+        let request = |text: &str| {
+            format!(
+                r#"{{"expectVersion":"{}","steps":[{{"op":"setContentControlText","target":{{"kind":"tag","tag":"document.title"}},"text":"{text}"}}]}}"#,
+                session.version()
+            )
+        };
+        for outcome in [
+            session.validate_edits_json(&request(r"a\ud800b")).unwrap(),
+            session.apply_edits_json(&request(r"\udc00")).unwrap(),
+        ] {
+            let outcome = envelope(&outcome);
+            assert_eq!(outcome["ok"], false);
+            assert_eq!(outcome["failure"]["code"], "invalid-step");
+            assert_eq!(outcome["failure"]["reason"], "invalid-text");
+            assert_eq!(outcome["failure"]["stepIndex"], 0);
+        }
+        assert!(!session.can_undo());
+        let paired = envelope(
+            &session
+                .validate_edits_json(&request(r"\ud83d\ude00"))
+                .unwrap(),
+        );
+        assert_eq!(paired["wouldApply"], true);
+        let elsewhere = format!(
+            r#"{{"expectVersion":"{}","steps":[{{"op":"setContentControlText","target":{{"kind":"tag","tag":"\ud800"}},"text":"x"}}]}}"#,
+            session.version()
+        );
+        assert!(EditRequest::from_json(&elsewhere).is_err());
+    }
+
+    fn compare_fixture(body: &str) -> Vec<u8> {
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr/></w:body></w:document>"#).into_bytes()),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn compare_bridge_applies_changes_and_verifies_saved_bytes() {
+        let original = compare_fixture("<w:p><w:r><w:t>old text</w:t></w:r></w:p>");
+        let revised = compare_fixture("<w:p><w:r><w:t>new text</w:t></w:r></w:p>");
+        let options = r#"{"author":"A","date":"2024-01-02T03:04:05Z"}"#;
+        let session = EditSession::new(1.0).unwrap();
+        let outcome: Value = serde_json::from_str(
+            &session
+                .compare_docx_json(&original, &revised, options)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(outcome["ok"], true);
+        assert_eq!(outcome["noop"], false);
+        assert!(outcome.get("changes").is_none());
+        assert_eq!(
+            outcome["save"]["paragraphs"],
+            json!([{ "path": [0, 0], "block": 0 }])
+        );
+        assert_eq!(outcome["save"]["now"], "2024-01-02T03:04:05.000Z");
+        assert!(session.materialize_docx().unwrap().is_some());
+        let unchanged: Value =
+            serde_json::from_str(&session.finish_compared_docx_json(&original).unwrap()).unwrap();
+        assert_eq!(unchanged["ok"], false);
+        assert_eq!(unchanged["diagnostics"][0]["code"], "roundtrip-mismatch");
+
+        let failing = EditSession::new(4.0).unwrap();
+        failing
+            .compare_docx_json(&original, &revised, options)
+            .unwrap();
+        let failed: Value =
+            serde_json::from_str(&failing.fail_compared_docx_json("disk full").unwrap()).unwrap();
+        assert_eq!(failed["ok"], false);
+        assert_eq!(failed["diagnostics"][0]["code"], "serialization-failed");
+
+        let fresh = EditSession::new(2.0).unwrap();
+        let noop: Value = serde_json::from_str(
+            &fresh
+                .compare_docx_json(&original, &original, options)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            noop,
+            json!({ "ok": true, "noop": true, "changes": [], "diagnostics": [] })
+        );
+        let refused: Value = serde_json::from_str(
+            &EditSession::new(3.0)
+                .unwrap()
+                .compare_docx_json(
+                    &original,
+                    &revised,
+                    r#"{"author":"","date":"2024-01-02T03:04:05Z"}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["diagnostics"][0]["code"], "invalid-options");
     }
 }

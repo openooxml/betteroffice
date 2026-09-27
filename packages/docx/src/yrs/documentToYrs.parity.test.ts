@@ -11,6 +11,22 @@ const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
 const FIXTURE = resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.docx');
 const EXISTING_ROOM_SEED = resolve(import.meta.dir, '../../../../apps/demo/public/seeds/docx.bin');
 
+/** The model without the source occurrences a parse for an editing session records. */
+function withoutSourceOrdinals(value: unknown): unknown {
+  if (value instanceof Map) {
+    return new Map([...value].map(([key, entry]) => [key, withoutSourceOrdinals(entry)]));
+  }
+  if (Array.isArray(value)) return value.map(withoutSourceOrdinals);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== 'sourceOrdinal')
+        .map(([key, entry]) => [key, withoutSourceOrdinals(entry)])
+    );
+  }
+  return value;
+}
+
 function expectEquivalentStories(left: YrsSession, right: YrsSession): void {
   expect(left.storyIds()).toEqual(right.storyIds());
   for (const storyId of left.storyIds()) {
@@ -27,8 +43,8 @@ describe('DOCX engine seeding', () => {
     const projected = await createYrsSession({ clientId: 47001 });
     const engine = await createYrsSession({ clientId: 47001 });
     try {
-      documentToYrs(projected, parsed);
-      engine.seedFromDocx(bytes);
+      documentToYrs(projected, parsed, { generation: 'parity' });
+      engine.seedFromDocx(bytes, { generation: 'parity' });
 
       expectEquivalentStories(engine, projected);
       expect(engine.encodeStateVector()).toEqual(projected.encodeStateVector());
@@ -105,10 +121,15 @@ describe('DOCX engine seeding', () => {
       expect(host.referencedFonts.length).toBeGreaterThan(0);
 
       const materialized = engine.materializeDocx();
-      expect(materialized?.package.document.content).toEqual(parsed.package.document.content);
-      expect(materialized?.package.document.sections).toEqual(parsed.package.document.sections);
-      expect(materialized?.package.headers).toEqual(parsed.package.headers);
-      expect(materialized?.package.footers).toEqual(parsed.package.footers);
+      expect(materialized?.package.document.content[0]).toMatchObject({ sourceOrdinal: 0 });
+      expect(withoutSourceOrdinals(materialized?.package.document.content)).toEqual(
+        parsed.package.document.content
+      );
+      expect(withoutSourceOrdinals(materialized?.package.document.sections)).toEqual(
+        parsed.package.document.sections
+      );
+      expect(withoutSourceOrdinals(materialized?.package.headers)).toEqual(parsed.package.headers);
+      expect(withoutSourceOrdinals(materialized?.package.footers)).toEqual(parsed.package.footers);
 
       existingRoom.loadState(Uint8Array.from(readFileSync(EXISTING_ROOM_SEED)));
       engine.loadState(existingRoom.encodeState());

@@ -81,6 +81,49 @@ modified_by=...)` overrides that for one call.
 The container is rebuilt rather than patched, so output is not byte-identical to
 the source even with no edits; the parts the model retained survive unchanged.
 
+## Export structured content
+
+```python
+content = document.export_structured(revision_view="accepted", stories=["body", "comments"])
+for block in content["stories"][0]["blocks"]:
+    print(block["kind"], block["anchor"])
+
+markdown = document.export_markdown(revision_view="markup")
+print(markdown["markdown"])
+```
+
+`export_structured` returns plain dicts in the same camelCase schema the
+JavaScript and Rust APIs produce: ordered stories of paragraphs, headings, list
+items, tables and content controls, each with the location it was read from, and
+`diagnostics` for everything omitted or not represented. `revision_view` is
+required (`accepted`, `original`, or `markup`); only the body is exported unless
+`stories` selects `headers`, `footers`, `footnotes`, `endnotes` or `comments`.
+Fields keep their cached result and are never evaluated, and images export alt
+text and relationship metadata, not image data. `max_blocks` and `max_bytes`
+stop the export at a whole block and set `truncated`. `export_markdown` and
+`render_docx_markdown(content)` add a `<!-- docx-export:N -->` marker per block,
+mapped to its anchor in `anchors`. Content with no location of its own is
+anchored `{"kind": "unlocated", "story": ..., "reason": ...}`, never as a
+paragraph. Python exports do not yet generate page maps; the JavaScript
+packages attach them from a layout of the current document.
+
+## List content controls
+
+```python
+for control in document.list_content_controls()["controls"]:
+    print(control["tag"], control["controlType"], control["value"])
+
+matches = document.find_content_controls({"kind": "tag", "tag": "customer.name"})
+```
+
+Controls come in document order with the same camelCase fields the JavaScript and
+Rust APIs produce: the control's id, `w:id`, type, tag, alias, lock and
+placeholder state, whether it is data-bound, its placement, anchor, parent,
+current `value` and effective lock. `stories` defaults to every category, and
+`max_controls` or `max_bytes` refuse with `ExportError` rather than returning a
+partial list. Tags, aliases and `ooxmlId`s match exactly. Filling controls needs
+a JavaScript editing session and is not available from Python yet.
+
 ## Lay a document out
 
 Layout is a two-stage contract. Something else measures text — the browser, or
@@ -162,6 +205,9 @@ is the gap this fills.
 | `document.paragraph_ids` / `text` | body IDs, and the whole text |
 | `document.warnings` / `template_variables` | what the parser found |
 | `document.replace_text(para_id, text)` | rewrite one paragraph |
+| `document.export_structured(...)` / `export_markdown(...)` | read-only structured content or Markdown |
+| `document.list_content_controls(...)` / `find_content_controls(query)` | the document's content controls |
+| `render_docx_markdown(content)` | render exported content as Markdown |
 | `document.author` / `origin` / `timestamp` | how an edit is attributed and stamped |
 | `document.layout(input)` | paginate a measured envelope |
 | `document.register_font` / `register_image` | raster resources |
@@ -169,7 +215,9 @@ is the gap this fills.
 | `document.save()` / `save_path(path)` | serialize to DOCX |
 
 Errors raise `DocxError` or a more specific subclass: `ParseError`,
-`EditError`, `UnsupportedEditError`, `LayoutError`, `RenderError`. An unknown
+`EditError`, `UnsupportedEditError`, `LayoutError`, `RenderError`,
+`ExportError` (export or content-control read options the engine refuses; its `failure` is the refusal
+as a dict). An unknown
 paragraph ID raises `KeyError`, an out-of-range index `IndexError`, and a bad
 argument — an unknown parse limit, an unknown image scope, malformed font bytes
 — `ValueError`.

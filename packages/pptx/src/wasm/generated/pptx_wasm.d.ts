@@ -11,6 +11,16 @@ export class PptxDocument {
     addShapeJson(args: string): string;
     addTextBoxJson(args: string): string;
     addTextBoxProfiledJson(args: string): string;
+    addUndoBoundary(): void;
+    /**
+     * Anchors a caret offset so that later edits, undo and remote updates move it.
+     */
+    anchorCaretJson(args: string): string;
+    /**
+     * Applies a batch all-or-nothing: `{"ok":true,"baseVersion","version","applied","source",
+     * "changedSlides","changedStories","receipts"}`.
+     */
+    applyEditsJson(request: string): string;
     applyUpdateJson(update: Uint8Array): string;
     bringShapeForwardJson(args: string): string;
     bringShapeToFrontJson(args: string): string;
@@ -21,10 +31,29 @@ export class PptxDocument {
     deleteSlideJson(args: string): string;
     deleteTextJson(args: string): string;
     deleteTextProfiledJson(args: string): string;
+    /**
+     * The session-scoped version token of the committed deck state.
+     */
+    documentVersion(): string;
     drainUpdateEvent(): Uint8Array;
     encodeDiff(remote_state_vector: Uint8Array): Uint8Array;
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
+    /**
+     * `exportStructuredJson` rendered as Markdown from the same read:
+     * `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
+     */
+    exportMarkdownJson(options: string): string;
+    /**
+     * Structured export of the committed deck: `{"includeHiddenSlides"?,"includeHiddenShapes"?,
+     * "includeNotes"?,"includeComments"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
+     * `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Nothing changes.
+     */
+    exportStructuredJson(options: string): string;
+    /**
+     * `{"text","within"?,"limit"?}` -> `{"ok":true,"version","matches","truncated"}`.
+     */
+    findTextJson(request: string): string;
     formatTextJson(args: string): string;
     insertParagraphBreakJson(args: string): string;
     insertSlideJson(args: string): string;
@@ -46,12 +75,20 @@ export class PptxDocument {
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
     previewProposalJson(args: string): string;
     proposeJson(args: string): string;
+    /**
+     * `{"slideIds"?}` -> `{"ok":true,"version","slides","stories"}`.
+     */
+    readContentJson(request: string): string;
     redoJson(): string;
     rejectProposalJson(args: string): string;
     removeCommentJson(args: string): string;
     removeShapeJson(args: string): string;
     replyToCommentJson(args: string): string;
     resizeShapeJson(args: string): string;
+    /**
+     * The current offset of an anchor from `anchorCaretJson`, or `null` once its story is gone.
+     */
+    resolveCaretAnchorJson(args: string): string;
     /**
      * Serializes the deck back to `.pptx` bytes, edits included.
      */
@@ -60,6 +97,7 @@ export class PptxDocument {
     sendShapeBackwardJson(args: string): string;
     sendShapeToBackJson(args: string): string;
     setCommentFlavorJson(args: string): string;
+    setCommentPositionJson(args: string): string;
     setCommentStatusJson(args: string): string;
     setParagraphAlignmentJson(args: string): string;
     setShapeAdjustJson(args: string): string;
@@ -67,15 +105,22 @@ export class PptxDocument {
     setShapeRectJson(args: string): string;
     setShapeStrokeJson(args: string): string;
     setSlideNotesJson(args: string): string;
+    setUndoCaptureMode(mode: string): void;
     snapshotJson(): string;
     startUpdateObservation(): void;
     storyJson(args: string): string;
+    undoCaptureMode(): string;
     undoJson(): string;
     /**
      * `undoJson` timed at its undo, snapshot and serialize boundaries, as
      * `{"receipt": ..., "profile": {"undoMs", "snapshotMs", "serializeMs"}}`.
      */
     undoProfiledJson(): string;
+    /**
+     * Runs every check of `applyEditsJson`, staging included, without changing anything:
+     * `{"ok":true,"baseVersion","wouldApply","previews"}`.
+     */
+    validateEditsJson(request: string): string;
     static version(): string;
     readonly clientId: number;
 }
@@ -93,6 +138,7 @@ export class PptxRenderer {
      */
     layoutSlideProfiledJson(document: PptxDocument, slide_index: number): string;
     constructor();
+    registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
 }
 
@@ -100,7 +146,24 @@ export function compileSlideJson(slide_json: string): string;
 
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
 
+/**
+ * `exportPptxStructuredJson` rendered as Markdown.
+ */
+export function exportPptxMarkdownJson(data: Uint8Array, options: string): string;
+
+/**
+ * Structured export of PPTX bytes as a snapshot, with the options of
+ * `PptxDocument.exportStructuredJson`: `{"ok":true,"content"}` or `{"ok":false,"failure"}`.
+ * Bytes that are not a readable PPTX throw.
+ */
+export function exportPptxStructuredJson(data: Uint8Array, options: string): string;
+
 export function parsePptxJson(data: Uint8Array): string;
+
+/**
+ * Renders schema-version-1 structured content as Markdown; `options` is `{"maxBytes"?}`.
+ */
+export function renderPptxMarkdownJson(content: string, options: string): string;
 
 export function rendererVersion(): string;
 
@@ -111,6 +174,8 @@ export interface InitOutput {
     readonly __wbg_pptxrenderer_free: (a: number, b: number) => void;
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
+    readonly exportPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly exportPptxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly parsePptxJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -118,7 +183,9 @@ export interface InitOutput {
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_new: () => number;
+    readonly pptxrenderer_registerFallbackFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly renderPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly rendererVersion: () => [number, number];
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
     readonly pptxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -127,6 +194,9 @@ export interface InitOutput {
     readonly pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_addUndoBoundary: (a: number) => void;
+    readonly pptxdocument_anchorCaretJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_applyEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_bringShapeForwardJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -138,10 +208,14 @@ export interface InitOutput {
     readonly pptxdocument_deleteSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_documentVersion: (a: number) => [number, number];
     readonly pptxdocument_drainUpdateEvent: (a: number) => [number, number];
     readonly pptxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly pptxdocument_encodeStateVector: (a: number) => [number, number];
+    readonly pptxdocument_exportMarkdownJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_formatTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertParagraphBreakJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -157,17 +231,20 @@ export interface InitOutput {
     readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly pptxdocument_previewProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_readContentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_replyToCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_resolveCaretAnchorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly pptxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_sendShapeBackwardJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_sendShapeToBackJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setCommentPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setParagraphAlignmentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -175,11 +252,14 @@ export interface InitOutput {
     readonly pptxdocument_setShapeRectJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setSlideNotesJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setUndoCaptureMode: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_undoCaptureMode: (a: number) => [number, number];
     readonly pptxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_undoProfiledJson: (a: number) => [number, number, number, number];
+    readonly pptxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;

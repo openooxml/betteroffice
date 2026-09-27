@@ -8,13 +8,11 @@
 import * as React from 'react';
 import { Select, SelectContent, SelectItem, SelectTrigger } from './Select';
 import { cn } from '../../lib/utils';
-import type { Style, StyleType, Theme } from '@betteroffice/docx/types/document';
-import {
-  getStylePreviewProps,
-  resolveParagraphStyleOptions,
-} from '@betteroffice/docx/utils/stylePreview';
+import type { StyleType } from '@betteroffice/docx/types/document';
+import { getStylePreviewProps } from '@betteroffice/docx/utils/stylePreview';
 import { useTranslation } from '../../i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
+import { useDisabledDescription } from './disabledDescription';
 
 // ============================================================================
 // TYPES
@@ -41,9 +39,11 @@ export interface StyleOption {
 export interface StylePickerProps {
   value?: string;
   onChange?: (styleId: string) => void;
-  styles?: Style[];
-  theme?: Theme | null;
+  /** Styles to offer, in display order; defaults to the built-in presets. */
+  options?: readonly StyleOption[];
   disabled?: boolean;
+  /** Why the picker is disabled. */
+  description?: string;
   className?: string;
   width?: number | string;
 }
@@ -52,7 +52,7 @@ export interface StylePickerProps {
 // DEFAULT STYLES (matching Google Docs order and appearance)
 // ============================================================================
 
-const DEFAULT_STYLES: StyleOption[] = [
+export const DEFAULT_STYLES: readonly StyleOption[] = [
   {
     styleId: 'Normal',
     name: 'Normal text',
@@ -122,30 +122,22 @@ const DEFAULT_STYLES: StyleOption[] = [
 export function StylePicker({
   value,
   onChange,
-  styles,
+  options,
   disabled = false,
+  description,
   className,
   width = 120,
 }: StylePickerProps) {
   const { t } = useTranslation();
-  // Convert document styles to options. Filter/sort + preview CSS come from the
-  // shared core helper (resolveParagraphStyleOptions / getStylePreviewProps) so
-  // React and Vue stay in lockstep; only the i18n nameKey lookup is React-side.
-  const styleOptions: StyleOption[] = React.useMemo(() => {
-    const resolved = resolveParagraphStyleOptions(styles);
-    if (resolved.length === 0) return DEFAULT_STYLES;
-    return resolved.map((o) => ({
-      ...o,
-      type: 'paragraph' as StyleType,
-      nameKey: DEFAULT_STYLES.find((d) => d.styleId === o.styleId)?.nameKey,
-    }));
-  }, [styles]);
+  const reason = useDisabledDescription(disabled, description);
+  const [open, setOpen] = React.useState(false);
+  const styleOptions = options && options.length > 0 ? options : DEFAULT_STYLES;
 
   const handleValueChange = React.useCallback(
     (newValue: string) => {
-      onChange?.(newValue);
+      if (!disabled) onChange?.(newValue);
     },
-    [onChange]
+    [disabled, onChange]
   );
 
   const getStyleName = (style: StyleOption) => (style.nameKey ? t(style.nameKey) : style.name);
@@ -155,13 +147,23 @@ export function StylePicker({
   const displayName = currentStyle ? getStyleName(currentStyle) : currentValue;
 
   return (
-    <Select value={currentValue} onValueChange={handleValueChange} disabled={disabled}>
+    <Select
+      value={currentValue}
+      onValueChange={handleValueChange}
+      disabled={reason.triggerProps.disabled}
+      open={open && !disabled}
+      onOpenChange={(next) => setOpen(next && !disabled)}
+    >
       <SelectTrigger
-        className={cn('h-8 text-sm', className)}
+        className={cn('h-8 text-sm', disabled && 'opacity-50', className)}
         style={{ width: typeof width === 'number' ? `${width}px` : width }}
         aria-label={t('styles.selectAriaLabel')}
+        aria-disabled={reason.triggerProps['aria-disabled']}
+        aria-describedby={reason.triggerProps['aria-describedby']}
+        title={reason.title}
       >
         <span className="truncate">{displayName}</span>
+        {reason.node}
       </SelectTrigger>
       <SelectContent className="min-w-[260px] max-h-[400px]">
         {styleOptions.map((style) => (

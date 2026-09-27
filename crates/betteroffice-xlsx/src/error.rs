@@ -32,6 +32,8 @@ pub enum Error {
     SheetOutOfRange(SheetId),
     CellOutOfRange(CellRef),
     InvalidOperation(String),
+    /// A JSON request that does not decode to the request type.
+    InvalidRequest(String),
     /// A stored `SetChartAnchor` named a frame that no longer holds the chart
     /// part and anchor it was recorded against, so its drawing changed under
     /// it. Distinct from a malformed op: the replay should be dropped, not the
@@ -111,6 +113,7 @@ impl fmt::Display for Error {
                 u64::from(cell.col) + 1
             ),
             Self::InvalidOperation(message) => f.write_str(message),
+            Self::InvalidRequest(message) => write!(f, "malformed request: {message}"),
             Self::ChartFrameShifted { frame } => write!(
                 f,
                 "chart frame {frame} does not hold the chart part and anchor this op was recorded against; its drawing has changed"

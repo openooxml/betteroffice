@@ -1885,6 +1885,7 @@ impl SaveProjection {
                 modified_by: None,
             },
             selective: None,
+            paragraph_ids: None,
         };
         let projected = write_docx_s13(request, &self.original).map_err(anyhow::Error::from)?;
         patch_document_paragraphs(

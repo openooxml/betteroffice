@@ -86,13 +86,59 @@ pub struct FontRequirement {
     pub scripts: Vec<String>,
 }
 
-pub fn collect_font_requirements(blocks: &[LayoutBlock]) -> Vec<FontRequirement> {
+/// The fonts `blocks` need, text naming no family taking `default_family`, the family
+/// measurement defaults to.
+pub fn collect_font_requirements<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    default_family: &str,
+) -> Vec<FontRequirement> {
     let mut requirements = BTreeMap::<String, FontRequirement>::new();
-    walk_paragraphs(blocks, &mut |paragraph| {
-        let scripts = paragraph_scripts(paragraph);
-        collect_paragraph_font_requirements(paragraph, &scripts, &mut requirements);
-    });
+    for block in blocks {
+        walk_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
+            let scripts = paragraph_scripts(paragraph);
+            collect_paragraph_font_requirements(
+                paragraph,
+                &scripts,
+                default_family,
+                &mut requirements,
+            );
+        });
+    }
     requirements.into_values().collect()
+}
+
+/// The family measurement gives text naming none: `defaults.fontFamily`, else Calibri.
+pub fn default_font_family(defaults: &Value) -> &str {
+    defaults
+        .get("fontFamily")
+        .and_then(Value::as_str)
+        .unwrap_or("Calibri")
+}
+
+/// Whether any line of `extents` carries synthetic metrics because measuring it failed.
+pub fn measured_synthetically<'a>(extents: impl IntoIterator<Item = &'a BlockExtent>) -> bool {
+    fn synthetic(lines: &[crate::types::TypesetRow]) -> bool {
+        lines
+            .iter()
+            .any(|line| line.synthetic_fallback == Some(true))
+    }
+    fn block(extent: &BlockExtent) -> bool {
+        match extent {
+            BlockExtent::Paragraph(paragraph) => synthetic(&paragraph.lines),
+            BlockExtent::Table(table) => table
+                .rows
+                .iter()
+                .flat_map(|row| &row.cells)
+                .flat_map(|cell| &cell.blocks)
+                .any(block),
+            BlockExtent::TextBox(text_box) => text_box
+                .inner_measures
+                .iter()
+                .any(|paragraph| synthetic(&paragraph.lines)),
+            _ => false,
+        }
+    }
+    extents.into_iter().any(block)
 }
 
 fn walk_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBlock)) {
@@ -169,13 +215,14 @@ fn add_font_requirement(
 fn collect_paragraph_font_requirements(
     paragraph: &ParagraphBlock,
     scripts: &[String],
+    fallback_family: &str,
     requirements: &mut BTreeMap<String, FontRequirement>,
 ) {
     let default_family = paragraph
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.default_font_family.as_deref())
-        .unwrap_or("Calibri");
+        .unwrap_or(fallback_family);
     add_font_requirement(default_family, false, false, scripts, requirements);
     for run in &paragraph.runs {
         let (formatting, include_regular) = match run {
@@ -730,7 +777,9 @@ fn extent_cache_lookup(
             }
         }
         key.extend_from_slice(&config_fingerprint(config).to_le_bytes());
-        key.extend_from_slice(&crate::measure_store_id().to_le_bytes());
+        let (store, fonts) = crate::measure_fonts_generation();
+        key.extend_from_slice(&store.to_le_bytes());
+        key.extend_from_slice(&(fonts as u64).to_le_bytes());
         match EXTENT_CACHE.with(|cache| cache.borrow_mut().get(key)) {
             Some(extent) => ExtentLookup::Hit(extent),
             None => ExtentLookup::Miss(Some(key.clone())),
@@ -2753,7 +2802,7 @@ mod tests {
         }]))
         .unwrap();
 
-        let requirements = collect_font_requirements(&blocks);
+        let requirements = collect_font_requirements(&blocks, "Calibri");
         let value = serde_json::to_value(requirements).unwrap();
 
         assert!(value.as_array().unwrap().iter().any(|requirement| {

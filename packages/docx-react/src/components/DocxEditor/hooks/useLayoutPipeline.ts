@@ -24,6 +24,7 @@ import type {
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
+import { readSessionVersion, stampSourceVersion } from '../internals/layoutProvenance';
 import {
   captureDisplayListScrollAnchor,
   captureDisplayListViewportAnchor,
@@ -97,6 +98,11 @@ export interface UseLayoutPipelineReturn {
   runLayoutPipeline: () => void;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
   cancelPendingScrollRestore: () => void;
+  /**
+   * The region layout request the pipeline would lay the current document out with now, or
+   * `null` while it has no session or the fonts the document needs are not ready.
+   */
+  getLayoutRequest: () => string | null;
 }
 
 export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipelineReturn {
@@ -270,10 +276,12 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       }
 
       const computeInputs = { document, pageGap, session, renderEnv, measurement };
+      const sourceVersion = readSessionVersion(session);
 
       // Step 4+: paint + scroll/events with the computed values.
       const applyComputation = (computation: LayoutComputation) => {
         const { layout: newLayout } = computation;
+        stampSourceVersion(newLayout, sourceVersion);
 
         const pagesEl = pagesContainerRef.current;
         const scrollParent =
@@ -502,11 +510,24 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     };
   }, []);
 
+  const getLayoutRequest = useCallback((): string | null => {
+    if (!session) return null;
+    const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
+    const requirements = JSON.parse(
+      session.layoutFontRequirementsJson(JSON.stringify(request))
+    ) as ResidentFontRequirement[];
+    const measurement = residentMeasurementConfig(requirements);
+    if (!measurement) return null;
+    request.measurement = measurement;
+    return JSON.stringify(request);
+  }, [document, pageGap, renderEnv, residentMeasurementConfig, session]);
+
   return {
     layout,
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
     scheduleLayout,
     cancelPendingScrollRestore,
+    getLayoutRequest,
   };
 }
