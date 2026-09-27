@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { SectionProperties, TabStop } from '@betteroffice/docx/types/document';
 import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
@@ -16,6 +17,7 @@ import { PageIndicator } from './PageIndicator';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
 import { Z_INDEX } from '../../styles/zIndex';
 import type { HeadingInfo } from '@betteroffice/docx/utils';
+import type { DockPlacement } from '../../plugins/PluginPanels';
 
 interface ScrollPageInfo {
   currentPage: number;
@@ -54,16 +56,41 @@ interface OutlineProps {
   headings: HeadingInfo[];
   onHeadingClick: (pmPos: number) => void;
   onClose: () => void;
-  topOffset: number;
   scrollLeft: number;
+}
+
+/** Tracks the size of the area the plugin docks share with the document viewport. */
+function useDockArea(): [
+  React.RefObject<HTMLDivElement | null>,
+  { width: number; height: number },
+] {
+  const ref = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () =>
+      setSize((previous) =>
+        previous.width === element.clientWidth && previous.height === element.clientHeight
+          ? previous
+          : { width: element.clientWidth, height: element.clientHeight }
+      );
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return [ref, size];
 }
 
 /**
  * Outer chrome of the editor: i18n + error provider wrappers, the
  * scroll container with its background-click handler, horizontal and
  * vertical rulers, the floating page indicator, document outline panel
- * + toggle button, plus slots for the toolbar, paged-area body, overlays,
- * dialogs, and hidden file inputs.
+ * + toggle button, plus slots for the toolbar, plugin docks around the
+ * document viewport, paged-area body, overlays, dialogs, and hidden file
+ * inputs.
  *
  * The expanded-sidebar-item highlight styles are computed here from
  * `expandedSidebarItem` + `trackedChanges` because they need to live
@@ -86,7 +113,6 @@ export function DocxEditorShell({
   showOutlineButton,
   sidebarOpen,
   minLayoutWidth,
-  toolbarHeight,
   editorScrollLeft,
   expandedSidebarItem,
   trackedChanges,
@@ -99,6 +125,7 @@ export function DocxEditorShell({
   onToggleOutline,
   scrollPageInfo,
   toolbar,
+  renderDock,
   pagedArea,
   overlays,
   dialogs,
@@ -120,7 +147,6 @@ export function DocxEditorShell({
   showOutlineButton: boolean;
   sidebarOpen: boolean;
   minLayoutWidth: number;
-  toolbarHeight: number;
   editorScrollLeft: number;
   expandedSidebarItem: string | null;
   trackedChanges: TrackedChangesResult['entries'];
@@ -133,11 +159,17 @@ export function DocxEditorShell({
   onToggleOutline: () => void;
   scrollPageInfo: ScrollPageInfo;
   toolbar: ReactNode;
+  /** Plugin panels for one dock; the viewport keeps the rest of the area. */
+  renderDock?: (
+    placement: DockPlacement,
+    available: { width: number; height: number }
+  ) => ReactNode;
   pagedArea: ReactNode;
   overlays: ReactNode;
   dialogs: ReactNode;
   fileInputs: ReactNode;
 }) {
+  const [dockAreaRef, dockArea] = useDockArea();
   return (
     <LocaleProvider i18n={i18n}>
       <ErrorProvider>
@@ -162,120 +194,151 @@ export function DocxEditorShell({
                 {toolbar}
 
                 <div
-                  ref={scrollContainerRef}
-                  className="docx-editor__scroll-container"
-                  style={editorContainerStyle}
-                  onMouseDown={onScrollContainerMouseDown}
+                  ref={dockAreaRef}
+                  className="docx-editor__dock-area"
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    flex: 1,
+                    minHeight: 0,
+                    minWidth: 0,
+                  }}
                 >
-                  {/* Horizontal ruler — sticky-top, scrolls horizontally with
-                      the doc. paddingRight biases the centered ruler so it
-                      tracks the page when the comments sidebar shifts the
-                      page left. Outline doesn't bias; the page stays centered
-                      until minLayoutWidth forces horizontal scroll. */}
-                  {showRuler && (
+                  <div style={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0 }}>
+                    {renderDock?.('left', dockArea)}
                     <div
-                      className="flex justify-center py-1 flex-shrink-0 bg-doc-bg"
-                      style={{
-                        position: 'sticky',
-                        top: 0,
-                        // Must sit above the inline HF editor so the ruler stays readable.
-                        zIndex: Z_INDEX.ruler,
-                        paddingLeft: 20,
-                        paddingRight: 20 + (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0),
-                        minWidth: minLayoutWidth,
-                        transition: 'padding 0.2s ease',
-                      }}
-                    >
-                      <HorizontalRuler {...horizontalRulerProps} />
-                    </div>
-                  )}
-                  <div
-                    style={{
-                      display: 'flex',
-                      flex: 1,
-                      minHeight: 0,
-                      position: 'relative',
-                      minWidth: minLayoutWidth,
-                    }}
-                  >
-                    <div
-                      ref={editorContentRef}
+                      className="docx-editor__viewport"
                       style={{
                         position: 'relative',
+                        display: 'flex',
+                        flexDirection: 'column',
                         flex: 1,
+                        minHeight: 0,
                         minWidth: 0,
                       }}
-                      onMouseDown={onEditorBgMouseDown}
-                      onContextMenu={onEditorContextMenu}
                     >
-                      {/* Vertical ruler — sits at the editor content's left
-                          edge so it scrolls horizontally with the page. */}
-                      {showRuler && !readOnlyProp && (
+                      <div
+                        ref={scrollContainerRef}
+                        className="docx-editor__scroll-container"
+                        style={editorContainerStyle}
+                        onMouseDown={onScrollContainerMouseDown}
+                      >
+                        {/* Horizontal ruler — sticky-top, scrolls horizontally with
+                            the doc. paddingRight biases the centered ruler so it
+                            tracks the page when the comments sidebar shifts the
+                            page left. Outline doesn't bias; the page stays centered
+                            until minLayoutWidth forces horizontal scroll. */}
+                        {showRuler && (
+                          <div
+                            className="flex justify-center py-1 flex-shrink-0 bg-doc-bg"
+                            style={{
+                              position: 'sticky',
+                              top: 0,
+                              // Must sit above the inline HF editor so the ruler stays readable.
+                              zIndex: Z_INDEX.ruler,
+                              paddingLeft: 20,
+                              paddingRight: 20 + (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0),
+                              minWidth: minLayoutWidth,
+                              transition: 'padding 0.2s ease',
+                            }}
+                          >
+                            <HorizontalRuler {...horizontalRulerProps} />
+                          </div>
+                        )}
                         <div
                           style={{
-                            position: 'absolute',
-                            left: 0,
-                            top: 0,
-                            // Above the inline HF editor so it stays readable on horizontal scroll.
-                            zIndex: Z_INDEX.ruler,
-                            // Must match `.paged-editor__pages` padding-top
-                            // (24 viewport + 24 pages container) in editor.css.
-                            paddingTop: 48,
+                            display: 'flex',
+                            flex: 1,
+                            minHeight: 0,
+                            position: 'relative',
+                            minWidth: minLayoutWidth,
                           }}
                         >
-                          <VerticalRuler {...verticalRulerProps} />
+                          <div
+                            ref={editorContentRef}
+                            style={{
+                              position: 'relative',
+                              flex: 1,
+                              minWidth: 0,
+                            }}
+                            onMouseDown={onEditorBgMouseDown}
+                            onContextMenu={onEditorContextMenu}
+                          >
+                            {/* Vertical ruler — sits at the editor content's left
+                                edge so it scrolls horizontally with the page. */}
+                            {showRuler && !readOnlyProp && (
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  left: 0,
+                                  top: 0,
+                                  // Above the inline HF editor so it stays readable on horizontal scroll.
+                                  zIndex: Z_INDEX.ruler,
+                                  // Must match `.paged-editor__pages` padding-top
+                                  // (24 viewport + 24 pages container) in editor.css.
+                                  paddingTop: 48,
+                                }}
+                              >
+                                <VerticalRuler {...verticalRulerProps} />
+                              </div>
+                            )}
+                            {/* Brightened highlight for the focused/expanded sidebar item. */}
+                            {expandedSidebarItem && expandedSidebarItem.startsWith('comment-') && (
+                              <style>{`.paged-editor__pages [data-comment-id="${expandedSidebarItem.replace('comment-', '')}"] { background-color: rgba(255, 212, 0, 0.35) !important; border-bottom: 2px solid rgba(255, 212, 0, 0.7) !important; }`}</style>
+                            )}
+                            {expandedSidebarItem?.startsWith('tc-') &&
+                              (() => {
+                                const revId = expandedSidebarItem.split('-')[1];
+                                const tc = trackedChanges.find(
+                                  (c) => String(c.revisionId) === revId
+                                );
+                                const insRevId = tc?.insertionRevisionId;
+                                return (
+                                  <style>{`
+                                  .paged-editor__pages .docx-insertion[data-revision-id="${insRevId ?? revId}"] { background-color: rgba(52, 168, 83, 0.2) !important; border-bottom: 2px solid #2e7d32 !important; }
+                                  .paged-editor__pages .docx-deletion[data-revision-id="${revId}"] { background-color: rgba(211, 47, 47, 0.2) !important; text-decoration-thickness: 2px !important; }
+                                `}</style>
+                                );
+                              })()}
+                            {pagedArea}
+                          </div>
                         </div>
+                      </div>
+
+                      {scrollPageInfo.totalPages > 1 && (
+                        <PageIndicator
+                          currentPage={scrollPageInfo.currentPage}
+                          totalPages={scrollPageInfo.totalPages}
+                          visible={scrollPageInfo.visible}
+                        />
                       )}
-                      {/* Brightened highlight for the focused/expanded sidebar item. */}
-                      {expandedSidebarItem && expandedSidebarItem.startsWith('comment-') && (
-                        <style>{`.paged-editor__pages [data-comment-id="${expandedSidebarItem.replace('comment-', '')}"] { background-color: rgba(255, 212, 0, 0.35) !important; border-bottom: 2px solid rgba(255, 212, 0, 0.7) !important; }`}</style>
+
+                      {/* When the vertical ruler is shown it overlays the editor's
+                          left edge (left:0, width RULER_WIDTH); inset the outline
+                          toggle/panel past it so they don't render on top. */}
+                      {showOutline && (
+                        <DocumentOutline
+                          {...outlineProps}
+                          leftOffset={OUTLINE_LEFT_OFFSET + (showRuler ? RULER_WIDTH : 0)}
+                        />
                       )}
-                      {expandedSidebarItem?.startsWith('tc-') &&
-                        (() => {
-                          const revId = expandedSidebarItem.split('-')[1];
-                          const tc = trackedChanges.find((c) => String(c.revisionId) === revId);
-                          const insRevId = tc?.insertionRevisionId;
-                          return (
-                            <style>{`
-                            .paged-editor__pages .docx-insertion[data-revision-id="${insRevId ?? revId}"] { background-color: rgba(52, 168, 83, 0.2) !important; border-bottom: 2px solid #2e7d32 !important; }
-                            .paged-editor__pages .docx-deletion[data-revision-id="${revId}"] { background-color: rgba(211, 47, 47, 0.2) !important; text-decoration-thickness: 2px !important; }
-                          `}</style>
-                          );
-                        })()}
-                      {pagedArea}
+
+                      {showOutlineButton && !showOutline && (
+                        <OutlineToggleButton
+                          onClick={onToggleOutline}
+                          // Aligns with the page top: horizontal ruler row (22 ruler
+                          // + 8 py-1 padding) + PagedEditor viewport padding-top (24)
+                          // + pages container padding (24).
+                          topPx={(showRuler ? 30 : 0) + 48}
+                          scrollLeft={editorScrollLeft}
+                          leftOffset={OUTLINE_BUTTON_LEFT_OFFSET + (showRuler ? RULER_WIDTH : 0)}
+                        />
+                      )}
                     </div>
+                    {renderDock?.('right', dockArea)}
                   </div>
+                  {renderDock?.('bottom', dockArea)}
                 </div>
-
-                {scrollPageInfo.totalPages > 1 && (
-                  <PageIndicator
-                    currentPage={scrollPageInfo.currentPage}
-                    totalPages={scrollPageInfo.totalPages}
-                    visible={scrollPageInfo.visible}
-                  />
-                )}
-
-                {/* When the vertical ruler is shown it overlays the editor's
-                    left edge (left:0, width RULER_WIDTH); inset the outline
-                    toggle/panel past it so they don't render on top. */}
-                {showOutline && (
-                  <DocumentOutline
-                    {...outlineProps}
-                    leftOffset={OUTLINE_LEFT_OFFSET + (showRuler ? RULER_WIDTH : 0)}
-                  />
-                )}
-
-                {showOutlineButton && !showOutline && (
-                  <OutlineToggleButton
-                    onClick={onToggleOutline}
-                    // Aligns with the page top: toolbar + horizontal ruler row
-                    // (22 ruler + 8 py-1 padding) + PagedEditor viewport
-                    // padding-top (24) + pages container padding (24).
-                    topPx={toolbarHeight + (showRuler ? 30 : 0) + 48}
-                    scrollLeft={editorScrollLeft}
-                    leftOffset={OUTLINE_BUTTON_LEFT_OFFSET + (showRuler ? RULER_WIDTH : 0)}
-                  />
-                )}
               </div>
 
             </div>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import math
 import numbers
 import os
@@ -27,12 +28,28 @@ from ._betteroffice_xlsx import (
 )
 from ._betteroffice_xlsx import Workbook as _Workbook
 from ._betteroffice_xlsx import XlsxError, __version__
+from .edits import (
+    EditRequest,
+    EditResult,
+    EditStep,
+    FindRequest,
+    FindResult,
+    RangeTarget,
+    ReadRequest,
+    ReadResult,
+    ValidationResult,
+)
 
 __all__ = [
     "Calculation",
     "CellError",
     "CellValue",
     "CollaborativeStateError",
+    "EditRequest",
+    "EditResult",
+    "EditStep",
+    "FindRequest",
+    "FindResult",
     "History",
     "InvalidUpdateError",
     "MAX_COLLABORATION_BYTES",
@@ -43,10 +60,14 @@ __all__ = [
     "ParseError",
     "Png",
     "RangeError",
+    "RangeTarget",
+    "ReadRequest",
+    "ReadResult",
     "RenderError",
     "Sheet",
     "SheetKey",
     "StaleProposalError",
+    "ValidationResult",
     "Workbook",
     "XlsxError",
     "__version__",
@@ -316,6 +337,34 @@ class Workbook:
 
     def reject_proposal(self, proposal_id: str) -> bool:
         return self._inner.reject_proposal(proposal_id)
+
+    def version(self) -> str:
+        """The session-scoped version of the committed workbook state.
+
+        Committed edits, peer updates, undo, redo and value-changing recalculation move it;
+        the active sheet and proposals do not. It never survives save and reopen.
+        """
+        return self._inner.version()
+
+    def read_cells(self, request: ReadRequest) -> ReadResult:
+        """Cells with the version they were read at; empty ``ranges`` reads the sheet catalog."""
+        return json.loads(self._inner.read_cells_json(json.dumps(request)))
+
+    def find_text(self, request: FindRequest) -> FindResult:
+        """Exact, case-sensitive search over display text, one match per cell."""
+        return json.loads(self._inner.find_text_json(json.dumps(request)))
+
+    def validate_edits(self, request: EditRequest) -> ValidationResult:
+        """Resolve, stage and rehearse a batch like :meth:`apply_edits`, changing nothing."""
+        return json.loads(self._inner.validate_edits_json(json.dumps(request)))
+
+    def apply_edits(self, request: EditRequest) -> EditResult:
+        """Apply every step as one recalculated change, or refuse with nothing changed.
+
+        Refusals come back as ``{"ok": False, "version", "failure"}``; a malformed request
+        raises ``ValueError``.
+        """
+        return json.loads(self._inner.apply_edits_json(json.dumps(request)))
 
     @property
     def active_sheet(self) -> int:

@@ -158,7 +158,7 @@ pub fn parse_relationships(
     Ok(relationships)
 }
 
-/// The main document part the package's officeDocument relationship names.
+/// The main document part `_rels/.rels` names, `word/document.xml` when it names none.
 pub fn office_document_path(
     parts: &[(String, Vec<u8>)],
     budget: &mut ParseBudget<'_>,

@@ -892,12 +892,17 @@ pub(crate) fn raw_foreign_node(
     Some(*raw)
 }
 
-pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<InlineNode> {
+/// Whether `element` is foreign markup the model keeps as raw XML, read from its name alone.
+pub(crate) fn is_foreign(element: &crate::xml::XmlElement) -> bool {
     let prefix = match element.name.split_once(':') {
         Some((prefix, _)) => prefix,
         None => "",
     };
-    if MODELLED_PREFIXES.contains(&prefix) {
+    !MODELLED_PREFIXES.contains(&prefix)
+}
+
+pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<InlineNode> {
+    if !is_foreign(element) {
         return None;
     }
     Some(InlineNode::RawXml(Box::new(RawInlineXml {

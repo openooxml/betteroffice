@@ -1,13 +1,34 @@
 import initWasmModule, {
   decodeTiffPng,
+  exportPptxMarkdownJson,
+  exportPptxStructuredJson,
   parsePptxJson,
   PptxDocument,
   PptxRenderer,
+  renderPptxMarkdownJson,
   rendererVersion,
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { StaleProposalError } from '../proposals';
+import { PptxExportError } from '../structuredExport';
+import type {
+  PptxExportFailure,
+  PptxExportOptions,
+  PptxExportResult,
+  PptxMarkdownContent,
+  PptxMarkdownOptions,
+  PptxStructuredContent,
+} from '../structuredExport';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
+import type {
+  PptxEditRequest,
+  PptxEditResult,
+  PptxFindRequest,
+  PptxFindResult,
+  PptxReadRequest,
+  PptxReadResult,
+  PptxValidationResult,
+} from '../edits';
 import type {
   CollaborationReplica,
   CollaborationUpdateOrigin,
@@ -80,6 +101,30 @@ export interface PresentationHandle extends CollaborationReplica {
   anchorCaret(storyId: string, index: number): PptxCaretAnchor;
   /** The anchor's current offset, or `null` once its story is gone. */
   resolveCaretAnchor(anchor: PptxCaretAnchor): number | null;
+  /**
+   * The session-scoped version token. It changes with every committed change, local or remote,
+   * undo and redo included; compare tokens only within this session.
+   */
+  version(): string;
+  /** Slides and their stories' text, with the version they were read at. */
+  readContent(request?: PptxReadRequest): PptxReadResult;
+  /** Exact, case-sensitive, paragraph-local search; overlapping matches count separately. */
+  findText(request: PptxFindRequest): PptxFindResult;
+  /**
+   * Structured slide content with the version it was read at, read from committed state: pending
+   * editor input is not flushed and nothing changes. Option refusals are returned; malformed
+   * options throw.
+   */
+  exportStructured(options?: PptxExportOptions): PptxExportResult<PptxStructuredContent>;
+  /** `exportStructured` rendered as Markdown from the same read. */
+  exportMarkdown(options?: PptxExportOptions): PptxExportResult<PptxMarkdownContent>;
+  /** Runs every check of `applyEdits`, staging included, without changing anything. */
+  validateEdits(request: PptxEditRequest): PptxValidationResult;
+  /**
+   * Applies every step or none against `expectVersion`, as one transaction, one update and, for
+   * `history: 'separate'`, one undo step. Policy failures are returned; malformed requests throw.
+   */
+  applyEdits(request: PptxEditRequest): PptxEditResult;
   /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
@@ -232,6 +277,51 @@ export function wasmVersion(): string {
 export function inspectPresentation(bytes: Uint8Array): unknown {
   requireInitialized();
   return call(() => parsePptxJson(bytes));
+}
+
+type ExportOutcome<T> = { ok: true; content: T } | { ok: false; failure: PptxExportFailure };
+
+function exported<T>(operation: () => string): T {
+  const outcome = jsonCall<ExportOutcome<T>>(operation);
+  if (!outcome.ok) throw new PptxExportError(outcome.failure);
+  return outcome.content;
+}
+
+/**
+ * Exports PPTX bytes as structured content whose anchors address the returned snapshot. No
+ * session, DOM or font is involved. Throws `PptxExportError` for refused options and an `Error`
+ * for bytes that are not a readable PPTX.
+ */
+export async function exportPptxStructured(
+  bytes: Uint8Array,
+  options: PptxExportOptions = {}
+): Promise<PptxStructuredContent> {
+  await initWasm();
+  const json = requestJson(options);
+  return exported(() => exportPptxStructuredJson(bytes, json));
+}
+
+/** `exportPptxStructured` rendered as Markdown with anchor markers. */
+export async function exportPptxMarkdown(
+  bytes: Uint8Array,
+  options: PptxExportOptions = {}
+): Promise<PptxMarkdownContent> {
+  await initWasm();
+  const json = requestJson(options);
+  return exported(() => exportPptxMarkdownJson(bytes, json));
+}
+
+/**
+ * Renders structured content (schema version 1) as Markdown. Content the renderer cannot trust
+ * refuses with `invalid-content`.
+ */
+export async function renderPptxMarkdown(
+  content: PptxStructuredContent,
+  options: PptxMarkdownOptions = {}
+): Promise<PptxMarkdownContent> {
+  await initWasm();
+  const json = requestJson(options);
+  return exported(() => renderPptxMarkdownJson(JSON.stringify(content), json));
 }
 
 export function decodeTiffImage(bytes: Uint8Array): Uint8Array {
@@ -400,6 +490,33 @@ export function openPresentation(
           JSON.stringify({ storyId: anchor.storyId, position: anchor.position })
         )
       );
+    },
+    version(): string {
+      return wasmCall(() => doc.documentVersion());
+    },
+    readContent(request = {}) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.readContentJson(json));
+    },
+    findText(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.findTextJson(json));
+    },
+    exportStructured(options = {}) {
+      const json = requestJson(options);
+      return jsonWasmCall(() => doc.exportStructuredJson(json));
+    },
+    exportMarkdown(options = {}) {
+      const json = requestJson(options);
+      return jsonWasmCall(() => doc.exportMarkdownJson(json));
+    },
+    validateEdits(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.validateEditsJson(json));
+    },
+    applyEdits(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.applyEditsJson(json), true);
     },
     searchText(query, options = {}) {
       if (!query) return [];
@@ -736,6 +853,16 @@ export function openPresentation(
     },
   };
   return handle;
+}
+
+/** JSON for a host request; `JSON.stringify` would turn NaN and infinities into `null`. */
+function requestJson(request: unknown): string {
+  return JSON.stringify(request, (_key, value: unknown) => {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new RangeError('host requests must not contain NaN or infinite numbers');
+    }
+    return value;
+  });
 }
 
 function registerFont(renderer: PptxRenderer, face: PptxFontFace, fallback = false): number {

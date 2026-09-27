@@ -55,6 +55,12 @@ describe("homepage markdown", () => {
     }
   });
 
+  test("states the PPTX structured export", () => {
+    const pptx = PACKAGES.find((pkg) => pkg.name === "@betteroffice/pptx");
+    expect(pptx.desc).toContain("structured JSON and Markdown export with anchors");
+    expect(markdown).toContain(pptx.desc);
+  });
+
   test("carries an install line and a guide for every ecosystem", () => {
     for (const eco of ECOSYSTEMS) {
       expect(markdown).toContain(eco.install);

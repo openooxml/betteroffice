@@ -7,14 +7,12 @@ import { EditorToolbar } from '../EditorToolbar';
  * formatting rail. Controls read and run the editor's commands.
  */
 export function DocxEditorToolbar({
-  toolbarRefCallback,
   renderLogo,
   documentName,
   onDocumentNameChange,
   documentNameEditable,
   renderTitleBarRight,
 }: {
-  toolbarRefCallback: (el: HTMLDivElement | null) => void;
   renderLogo: (() => ReactNode) | undefined;
   documentName: string | undefined;
   onDocumentNameChange: ((name: string) => void) | undefined;
@@ -22,7 +20,7 @@ export function DocxEditorToolbar({
   renderTitleBarRight: (() => ReactNode) | undefined;
 }) {
   return (
-    <div ref={toolbarRefCallback} className="z-50 flex flex-col gap-0 flex-shrink-0">
+    <div className="z-50 flex flex-col gap-0 flex-shrink-0">
       <EditorToolbar>
         <EditorToolbar.TitleBar>
           {renderLogo && <EditorToolbar.Logo>{renderLogo()}</EditorToolbar.Logo>}

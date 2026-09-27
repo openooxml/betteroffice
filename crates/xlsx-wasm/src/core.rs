@@ -2,7 +2,7 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, EditProfile, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
+    CellRef, EditProfile, Error, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
     UpdateEvent, UpdateSubscription, Viewport, Workbook,
 };
@@ -217,6 +217,26 @@ struct ProposalList<'a> {
 #[derive(Serialize)]
 struct RejectResult {
     removed: bool,
+}
+
+/// A stale acceptance, sent as JSON so the sheet of each drifted cell survives the boundary.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaleProposal {
+    code: &'static str,
+    message: String,
+    cells: Vec<String>,
+    targets: Vec<StaleTarget>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaleTarget {
+    sheet: u32,
+    sheet_id: String,
+    row: u32,
+    col: u32,
+    a1: String,
 }
 
 #[derive(Serialize)]
@@ -746,7 +766,7 @@ impl Session {
         let result = self
             .workbook
             .accept_proposal(&args.id, args.force, calculation_options(now_serial))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| self.proposal_error(error))?;
         serde_json::to_string(&AcceptResult {
             applied: result.mutation.applied,
             sheet_info: self.sheet_info()?,
@@ -768,6 +788,67 @@ impl Session {
 
     pub fn save(&self) -> Result<Vec<u8>, String> {
         self.workbook.save().map_err(|error| error.to_string())
+    }
+
+    pub fn document_version(&self) -> String {
+        self.workbook.version().to_string()
+    }
+
+    /// `{"ok":true,"version","sheets","ranges","calculation"}` or a refusal; malformed
+    /// requests are errors.
+    pub fn read_cells_json(&self, request: &str) -> Result<String, String> {
+        self.workbook
+            .read_cells_json(request)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn find_text_json(&self, request: &str) -> Result<String, String> {
+        self.workbook
+            .find_text_json(request)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn validate_edits_json(&self, request: &str) -> Result<String, String> {
+        self.workbook
+            .validate_edits_json(request)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Calculates against `calculation.nowSerial` from the request alone; no clock is added.
+    pub fn apply_edits_json(&mut self, request: &str) -> Result<String, String> {
+        self.workbook
+            .apply_edits_json(request)
+            .map_err(|error| error.to_string())
+    }
+
+    fn proposal_error(&self, error: Error) -> String {
+        let message = error.to_string();
+        let Error::StaleProposal(cells) = error else {
+            return message;
+        };
+        let Ok(info) = self.workbook.sheet_info() else {
+            return message;
+        };
+        let stale = StaleProposal {
+            code: "staleProposal",
+            cells: cells.iter().map(|address| address.cell.to_a1()).collect(),
+            targets: cells
+                .iter()
+                .map(|address| StaleTarget {
+                    sheet: address.sheet.0,
+                    sheet_id: info
+                        .sheet_ids
+                        .get(address.sheet.0 as usize)
+                        .cloned()
+                        .unwrap_or_default(),
+                    row: address.cell.row,
+                    col: address.cell.col,
+                    a1: address.cell.to_a1(),
+                })
+                .collect(),
+            message,
+        };
+        serde_json::to_string(&stale).unwrap_or(stale.message)
     }
 
     pub fn version() -> &'static str {
@@ -1321,10 +1402,19 @@ mod tests {
         session
             .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"moved"}"#, None)
             .unwrap();
-        let error = session
-            .accept_proposal_json(r#"{"id":"p1"}"#, None)
-            .unwrap_err();
-        assert!(error.starts_with("stale: A1"));
+        let error: serde_json::Value = serde_json::from_str(
+            &session
+                .accept_proposal_json(r#"{"id":"p1"}"#, None)
+                .unwrap_err(),
+        )
+        .unwrap();
+        assert_eq!(error["code"], "staleProposal");
+        assert_eq!(error["message"], "stale: A1");
+        assert_eq!(error["cells"], serde_json::json!(["A1"]));
+        assert_eq!(
+            error["targets"],
+            serde_json::json!([{ "sheet": 0, "sheetId": "sheet:0", "row": 0, "col": 0, "a1": "A1" }])
+        );
         assert!(
             session
                 .accept_proposal_json(r#"{"id":"p1","force":true}"#, None)
@@ -1373,6 +1463,66 @@ mod tests {
             .unwrap();
         assert!(display.contains("$3,000.00"), "{display}");
         assert!(!display.contains(r##""color":"#c62828""##), "{display}");
+    }
+
+    fn json(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn edit_batches_return_refusals_as_data_and_malformed_requests_as_errors() {
+        let mut session = Session::open(&formula_xlsx(), None).unwrap();
+        let version = session.document_version();
+        let read = json(
+            &session
+                .read_cells_json(
+                    r#"{"ranges":[{"sheetId":"sheet:0","range":{"kind":"a1","a1":"B1"}}]}"#,
+                )
+                .unwrap(),
+        );
+        assert_eq!(read["ok"], true);
+        assert_eq!(read["version"], version.as_str());
+        assert_eq!(read["ranges"][0]["cells"][0][0]["formula"], "SUM(A1:A2)");
+        assert_eq!(read["ranges"][0]["cells"][0][0]["displayText"], "15");
+
+        let batch = |version: &str, input: &str| {
+            format!(
+                r#"{{"expectVersion":"{version}","steps":[{{"op":"setCellInputs","target":{{"sheetId":"sheet:0","range":{{"kind":"a1","a1":"A1"}}}},"inputs":[["{input}"]]}}]}}"#
+            )
+        };
+        let validated = json(&session.validate_edits_json(&batch(&version, "20")).unwrap());
+        assert_eq!(validated["ok"], true);
+        assert_eq!(validated["wouldApply"], true);
+        assert_eq!(session.document_version(), version);
+
+        let applied = json(&session.apply_edits_json(&batch(&version, "20")).unwrap());
+        assert_eq!(applied["ok"], true);
+        assert_eq!(applied["applied"], true);
+        assert_eq!(applied["source"], "host");
+        assert_eq!(applied["calculation"]["changed"][0]["a1"], "B1");
+        assert_eq!(applied["version"], session.document_version().as_str());
+
+        let stale = json(&session.apply_edits_json(&batch(&version, "30")).unwrap());
+        assert_eq!(stale["ok"], false);
+        assert_eq!(stale["failure"]["code"], "stale-version");
+        assert_eq!(stale["version"], session.document_version().as_str());
+
+        let found = json(&session.find_text_json(r#"{"text":"25"}"#).unwrap());
+        assert_eq!(found["matches"][0]["cell"]["a1"], "B1");
+        assert_eq!(found["truncated"], false);
+
+        let oversized = json(
+            &session
+                .apply_edits_json(&format!(
+                    r#"{{"expectVersion":"x","steps":[],"padding":"{}"}}"#,
+                    "x".repeat(betteroffice_xlsx::MAX_REQUEST_BYTES)
+                ))
+                .unwrap(),
+        );
+        assert_eq!(oversized["failure"]["code"], "limit-exceeded");
+        assert!(session.apply_edits_json("{}").is_err());
+        assert!(session.read_cells_json(r#"{"ranges":[{}]}"#).is_err());
+        assert!(session.find_text_json("not json").is_err());
     }
 
     #[test]

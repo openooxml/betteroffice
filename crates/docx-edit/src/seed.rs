@@ -12,6 +12,11 @@ use crate::identity::{
     PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC, SeededParagraph, SourceIndex, SourcePackage,
     SourcePartInput, SourceStoryKind,
 };
+use crate::structured::source::{
+    CellLayout, CommentWrites, InlineRecord, InlineSource, Pin, Provenance, RawSource, ReadSource,
+    Relocated, RowLayout, SourceMerge, SourceParts, Step, TableLayout, Witness,
+};
+use crate::structured::{BreakType, Revision, RevisionKind};
 use crate::{EditCtx, EditingDoc, RawOp};
 
 type JsonObject = BTreeMap<String, Value>;
@@ -44,6 +49,18 @@ struct StoryPlan {
     story_id: String,
     units: Vec<InlineUnit>,
     comment_coverage: Vec<(String, Vec<(u32, u32)>)>,
+    /// How many units [`StoryPlan::width`] has measured, and their width.
+    measured: (usize, u32),
+}
+
+impl StoryPlan {
+    /// The story index the next unit gets.
+    fn width(&mut self) -> u32 {
+        let (count, width) = self.measured;
+        let width = width + self.units[count..].iter().map(unit_width).sum::<u32>();
+        self.measured = (self.units.len(), width);
+        width
+    }
 }
 
 struct ProjectedCell {
@@ -80,6 +97,9 @@ struct LoweringContext {
     /// Every lowered paragraph in document order, nested stories in place.
     paragraphs: Vec<SeededParagraph>,
     source: SourceStructure,
+    provenance: Provenance,
+    /// Each source story's steps from its part's root element.
+    locators: HashMap<String, Vec<Step>>,
 }
 
 /// A story's source blocks as the save projection sees them when it puts raw XML back: each raw
@@ -111,10 +131,11 @@ struct SourceStructure {
     run_revisions: HashSet<(String, String)>,
 }
 
-/// Package context retained after lowering, for planning host edits in Rust.
+/// Package context retained after lowering, for planning host edits and exporting in Rust.
 pub(crate) struct SourceMetadata {
     styles: StyleResolver,
     structure: SourceStructure,
+    read: ReadSource,
 }
 
 /// A paragraph's style-derived pilcrow properties and run formatting.
@@ -217,6 +238,64 @@ impl SourceMetadata {
                 Restoration::Unanchored
             })
             .collect()
+    }
+
+    pub(crate) fn read(&self) -> &ReadSource {
+        &self.read
+    }
+
+    /// The document's numbering definitions.
+    pub(crate) fn numbering(&self) -> Arc<docx_parse::NumberingMap> {
+        Arc::clone(&self.read.numbering)
+    }
+
+    /// Records the comment writes committed to `doc` from now on.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn watch_comments(&mut self, doc: &EditingDoc) {
+        self.read.comment_writes = CommentWrites::watch(doc);
+    }
+
+    pub(crate) fn has_style(&self, style_id: &str) -> bool {
+        self.styles.style(style_id).is_some()
+    }
+
+    /// The paragraph style that applies when a paragraph names none or an undefined one.
+    pub(crate) fn default_paragraph_style(&self) -> Option<&str> {
+        self.styles.default_paragraph.as_deref()
+    }
+
+    /// The outline level `style_id` defines, its `basedOn` chain included.
+    pub(crate) fn style_outline_level(&self, style_id: &str) -> Option<f64> {
+        number(field(
+            field(self.styles.style(style_id), "pPr"),
+            "outlineLevel",
+        ))
+    }
+
+    /// Whether paragraph styles `left` and `right` give runs the same bold, italic, underline,
+    /// strike, vertical alignment and hidden state.
+    pub(crate) fn same_run_marks(&self, left: Option<&str>, right: Option<&str>) -> bool {
+        let marks = |style_id: Option<&str>| {
+            let (_, run) = self.styles.resolve_paragraph_style(style_id);
+            [
+                "bold",
+                "italic",
+                "underline",
+                "strike",
+                "vertAlign",
+                "hidden",
+            ]
+            .map(|key| field(run.as_ref(), key).cloned().unwrap_or(Value::Null))
+        };
+        marks(left) == marks(right)
+    }
+
+    /// The outline level of the document's default paragraph properties.
+    pub(crate) fn default_outline_level(&self) -> Option<f64> {
+        number(field(
+            field(self.styles.doc_defaults.as_ref(), "pPr"),
+            "outlineLevel",
+        ))
     }
 
     pub(crate) fn run_revision(&self, story: &str, para_id: &str) -> bool {
@@ -336,7 +415,7 @@ impl<'de> Deserialize<'de> for OrderedValue {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct StyleResolver {
     enabled: bool,
     styles: BTreeMap<String, Value>,
@@ -1472,11 +1551,13 @@ fn note_ref_unit(
     )
 }
 
-fn hidden_marks(marks: &[Mark]) -> &[Mark] {
+/// The marks a drawing keeps: hidden text and its tracked insertion or deletion.
+fn drawing_marks(marks: &[Mark]) -> Vec<Mark> {
     marks
         .iter()
-        .find(|mark| mark.name == "hidden")
-        .map_or(&[], std::slice::from_ref)
+        .filter(|mark| matches!(mark.name.as_str(), "hidden" | "insertion" | "deletion"))
+        .cloned()
+        .collect()
 }
 
 fn run_content_to_units(
@@ -1552,7 +1633,7 @@ fn run_content_to_units(
         "drawing" => vec![embed_unit(
             "image",
             image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
-            hidden_marks(marks),
+            &drawing_marks(marks),
             None,
             1,
         )],
@@ -1569,7 +1650,7 @@ fn run_content_to_units(
                 field(Some(content), "shape").unwrap_or(&Value::Null),
                 source,
             ),
-            hidden_marks(marks),
+            &drawing_marks(marks),
             None,
             1,
         )],
@@ -1579,7 +1660,7 @@ fn run_content_to_units(
                 field(Some(content), "chart").unwrap_or(&Value::Null),
                 source,
             ),
-            hidden_marks(marks),
+            &drawing_marks(marks),
             None,
             1,
         )],
@@ -2307,13 +2388,344 @@ fn para_attrs_to_ppr(attrs: JsonObject) -> JsonObject {
         .collect()
 }
 
+/// A paragraph content node seeding leaves out, before the unit at `unit`.
+struct Omitted {
+    unit: usize,
+    element: String,
+    /// Inside the content control whose embed is the unit at `unit`.
+    in_control: bool,
+}
+
+/// Where a paragraph's page or column break sits in the source.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BreakPlace {
+    Paragraph,
+    /// Inside the content control whose embed is the unit.
+    Control,
+    /// Inside a field, whose cached result carries it.
+    Field,
+}
+
+/// A page or column break of a paragraph, listed in the order [`inline_tokens`] meets it.
+struct FlowBreak {
+    kind: BreakType,
+    /// The index into the paragraph's units of the unit the break precedes.
+    unit: usize,
+    place: BreakPlace,
+    revision: Option<Revision>,
+    /// For a break inside a content control: its UTF-16 offset into the control's content,
+    /// then into each nested control's.
+    control_offset: Option<Vec<u32>>,
+}
+
+fn break_kind(content: &Value) -> Option<BreakType> {
+    match flow_break_type(content)? {
+        "column" => Some(BreakType::Column),
+        _ => Some(BreakType::Page),
+    }
+}
+
+fn tracked_revision(content: &Value) -> Revision {
+    let info = field(Some(content), "info");
+    let text = |key: &str| {
+        field(info, key).and_then(|value| match value {
+            Value::String(value) if !value.is_empty() => Some(value.clone()),
+            Value::Number(number) => Some(crate::structured::source::number_text(number)),
+            _ => None,
+        })
+    };
+    Revision {
+        kind: match string(field(Some(content), "type")).unwrap_or_default() {
+            "insertion" => RevisionKind::Insertion,
+            "moveTo" => RevisionKind::MoveTo,
+            "moveFrom" => RevisionKind::MoveFrom,
+            _ => RevisionKind::Deletion,
+        },
+        id: text("id"),
+        author: text("author"),
+        date: text("date"),
+    }
+}
+
+/// The breaks of one run's content, placed after the units before them.
+fn run_breaks(
+    run: &Value,
+    start: usize,
+    place: BreakPlace,
+    revision: Option<&Revision>,
+    source: &BTreeMap<String, String>,
+    output: &mut Vec<FlowBreak>,
+) -> usize {
+    let mut offset = 0;
+    for content in array(field(Some(run), "content")) {
+        match break_kind(content) {
+            Some(kind) => output.push(FlowBreak {
+                kind,
+                unit: start + offset,
+                place,
+                revision: revision.cloned(),
+                control_offset: None,
+            }),
+            None => offset += run_content_to_units(content, &[], None, source).len(),
+        }
+    }
+    offset
+}
+
+fn units_width(units: &[InlineUnit]) -> u32 {
+    units.iter().map(unit_width).sum()
+}
+
+/// Where each break inside an inline content control sits in the control's frozen content, in
+/// [`inline_tokens`] order: UTF-16 offsets that count tabs and embeds as one, as
+/// [`sdt_payload`] lowers the content, followed by the offsets into each nested control. Also
+/// how many breaks [`inline_tokens`] finds in the control, read in the same single pass.
+fn control_break_offsets(
+    sdt: &Value,
+    styles: &StyleResolver,
+    source: &BTreeMap<String, String>,
+) -> (Vec<Vec<u32>>, usize) {
+    let mut offsets = Vec::new();
+    let mut count = 0usize;
+    let mut offset = 0u32;
+    let run = |run: &Value, mut at: u32, offsets: &mut Vec<Vec<u32>>| {
+        for item in array(field(Some(run), "content")) {
+            match break_kind(item) {
+                Some(_) => offsets.push(vec![at]),
+                None => at += units_width(&run_content_to_units(item, &[], None, source)),
+            }
+        }
+        at
+    };
+    let breaks_below = |node: &Value| {
+        let mut tokens = Vec::new();
+        inline_tokens(std::slice::from_ref(node), &mut tokens);
+        tokens
+            .iter()
+            .filter(|token| matches!(**token, "pageBreak" | "columnBreak"))
+            .count()
+    };
+    for child in array(field(Some(sdt), "content")) {
+        let kind = string(field(Some(child), "type")).unwrap_or_default();
+        let below = if kind == "inlineSdt" {
+            0
+        } else {
+            breaks_below(child)
+        };
+        count += below;
+        match kind {
+            "run" => offset = run(child, offset, &mut offsets),
+            "hyperlink" => {
+                let mut at = offset;
+                for inner in array(field(Some(child), "children")) {
+                    if string(field(Some(inner), "type")) == Some("run") {
+                        at = run(inner, at, &mut offsets);
+                    }
+                }
+                offset += units_width(&hyperlink_to_units(child, None, styles, &[], source));
+            }
+            "inlineSdt" => {
+                let (nested, below) = control_break_offsets(child, styles, source);
+                count += below;
+                if nested.len() == below {
+                    offsets.extend(
+                        nested
+                            .into_iter()
+                            .map(|path| std::iter::once(offset).chain(path).collect::<Vec<u32>>()),
+                    );
+                } else {
+                    offsets.extend(std::iter::repeat_n(vec![offset], below));
+                }
+                offset += 1;
+            }
+            "simpleField" | "complexField" | "mathEquation" => {
+                offsets.extend(std::iter::repeat_n(vec![offset], below));
+                offset += 1;
+            }
+            "insertion" | "deletion" | "moveFrom" | "moveTo" => {
+                offsets.extend(std::iter::repeat_n(vec![offset], below));
+            }
+            _ => {}
+        }
+    }
+    (offsets, count)
+}
+
+/// The breaks of one paragraph content node, in [`inline_tokens`] order; `start` is the index of
+/// the node's first unit. Breaks inside a control get their offsets into it when `positions`;
+/// a control nested in another leaves that to the outermost.
+fn content_breaks(
+    content: &Value,
+    start: usize,
+    styles: &StyleResolver,
+    source: &BTreeMap<String, String>,
+    output: &mut Vec<FlowBreak>,
+    positions: bool,
+) {
+    let runs = |key: &str, output: &mut Vec<FlowBreak>| {
+        let mut found = Vec::new();
+        for child in array(field(Some(content), key)) {
+            if string(field(Some(child), "type")) == Some("run") {
+                run_breaks(child, start, BreakPlace::Field, None, source, &mut found);
+            }
+        }
+        output.extend(found.into_iter().map(|found| FlowBreak {
+            unit: start,
+            ..found
+        }));
+    };
+    match string(field(Some(content), "type")).unwrap_or_default() {
+        "run" => {
+            run_breaks(content, start, BreakPlace::Paragraph, None, source, output);
+        }
+        "hyperlink" => {
+            let mut offset = 0;
+            for child in array(field(Some(content), "children")) {
+                if string(field(Some(child), "type")) == Some("run") {
+                    offset += run_breaks(
+                        child,
+                        start + offset,
+                        BreakPlace::Paragraph,
+                        None,
+                        source,
+                        output,
+                    );
+                }
+            }
+        }
+        "simpleField" => runs("content", output),
+        "complexField" => {
+            runs("fieldCode", output);
+            runs("fieldResult", output);
+        }
+        "inlineSdt" => {
+            let mut nested = Vec::new();
+            for child in array(field(Some(content), "content")) {
+                content_breaks(child, start, styles, source, &mut nested, false);
+            }
+            let offsets = positions
+                .then(|| control_break_offsets(content, styles, source).0)
+                .filter(|offsets| offsets.len() == nested.len());
+            output.extend(
+                nested
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, found)| FlowBreak {
+                        unit: start,
+                        place: if found.place == BreakPlace::Field {
+                            BreakPlace::Field
+                        } else {
+                            BreakPlace::Control
+                        },
+                        control_offset: offsets.as_ref().map(|offsets| offsets[index].clone()),
+                        ..found
+                    }),
+            );
+        }
+        "insertion" | "deletion" | "moveFrom" | "moveTo" => {
+            let revision = tracked_revision(content);
+            let mut offset = 0;
+            for child in array(field(Some(content), "content")) {
+                if string(field(Some(child), "type")) == Some("run") {
+                    offset += run_breaks(
+                        child,
+                        start + offset,
+                        BreakPlace::Paragraph,
+                        Some(&revision),
+                        source,
+                        output,
+                    );
+                } else {
+                    offset += hyperlink_to_units(child, None, styles, &[], source).len();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn drawing_element(kind: &str) -> String {
+    match kind {
+        "alternateContent" => "mc:AlternateContent".to_owned(),
+        kind => format!("w:{kind}"),
+    }
+}
+
+/// The unmodelled source nodes inside one paragraph content node, in source order.
+fn unmodelled_nodes(content: &Value, output: &mut Vec<String>) {
+    let children = |key: &str| array(field(Some(content), key));
+    match string(field(Some(content), "type")).unwrap_or_default() {
+        "run" => output.extend(
+            children("content")
+                .iter()
+                .filter(|item| string(field(Some(item), "type")) == Some("opaqueDrawing"))
+                .map(|item| drawing_element(string(field(Some(item), "kind")).unwrap_or_default())),
+        ),
+        "hyperlink" => {
+            let nodes = field(Some(content), "structuredChildren")
+                .or_else(|| field(Some(content), "children"));
+            for child in array(nodes) {
+                unmodelled_nodes(child, output);
+            }
+        }
+        "insertion" | "deletion" | "moveFrom" | "moveTo" => {
+            for child in children("content") {
+                unmodelled_nodes(child, output);
+            }
+        }
+        "simpleField" => {
+            for child in children("content") {
+                unmodelled_nodes(child, output);
+            }
+        }
+        "complexField" => {
+            for child in children("fieldResult") {
+                unmodelled_nodes(child, output);
+            }
+        }
+        "inlineSdt" => {
+            for child in children("content") {
+                match string(field(Some(child), "type")).unwrap_or_default() {
+                    "run" | "hyperlink" | "simpleField" | "complexField" | "inlineSdt" => {
+                        unmodelled_nodes(child, output)
+                    }
+                    "mathEquation" | "bookmarkStart" | "bookmarkEnd" | "commentRangeStart"
+                    | "commentRangeEnd" => {}
+                    "insertion" => output.push("w:ins".to_owned()),
+                    "deletion" => output.push("w:del".to_owned()),
+                    "moveFrom" => output.push("w:moveFrom".to_owned()),
+                    "moveTo" => output.push("w:moveTo".to_owned()),
+                    "rawXml" => output.push(crate::structured::source::element_name(
+                        string(field(Some(child), "xml")).unwrap_or_default(),
+                    )),
+                    other => output.push(other.to_owned()),
+                }
+            }
+        }
+        "rawXml" => output.push(crate::structured::source::element_name(
+            string(field(Some(content), "xml")).unwrap_or_default(),
+        )),
+        _ => {}
+    }
+}
+
+/// A paragraph's units and pilcrow properties, with the content seeding leaves out of them.
+struct ParagraphUnits {
+    units: Vec<InlineUnit>,
+    ppr: JsonObject,
+    omitted: Vec<Omitted>,
+    breaks: Vec<FlowBreak>,
+}
+
 fn paragraph_units(
     paragraph: &Value,
     styles: &StyleResolver,
     extra_run_formatting: Option<&Value>,
     source: &BTreeMap<String, String>,
-) -> (Vec<InlineUnit>, JsonObject) {
+) -> ParagraphUnits {
     let mut units = Vec::new();
+    let mut omitted = Vec::new();
+    let mut breaks = Vec::new();
     let mut active_comments: Vec<String> = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
@@ -2401,10 +2813,41 @@ fn paragraph_units(
             "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
             _ => boundaries = None,
         }
+        content_breaks(content, start, styles, source, &mut breaks, true);
+        let mut elements = Vec::new();
+        unmodelled_nodes(content, &mut elements);
+        if !elements.is_empty() {
+            let kind = string(field(Some(content), "type")).unwrap_or_default();
+            let (unit, in_control) = match kind {
+                "inlineSdt" => (units.len() - 1, true),
+                "run" => (start + run_prefix_units(content, source), false),
+                "rawXml" => (start, false),
+                _ => (units.len(), false),
+            };
+            omitted.extend(elements.into_iter().map(|element| Omitted {
+                unit,
+                element,
+                in_control,
+            }));
+        }
         unit_counts.push(units.len() - start);
     }
     let attrs = paragraph_attrs(paragraph, styles, &units, &unit_counts, boundaries);
-    (units, para_attrs_to_ppr(attrs))
+    ParagraphUnits {
+        ppr: para_attrs_to_ppr(attrs),
+        units,
+        omitted,
+        breaks,
+    }
+}
+
+/// Units a run seeds before its first unmodelled drawing.
+fn run_prefix_units(run: &Value, source: &BTreeMap<String, String>) -> usize {
+    array(field(Some(run), "content"))
+        .iter()
+        .take_while(|item| string(field(Some(item), "type")) != Some("opaqueDrawing"))
+        .map(|item| run_content_to_units(item, &[], None, source).len())
+        .sum()
 }
 
 fn run_tokens(run: &Value, tokens: &mut Vec<&'static str>) {
@@ -3333,6 +3776,186 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
     }
 }
 
+/// For each row of `table`, the source index of every cell seeding keeps as a cell story.
+fn source_cells(table: &Value) -> Vec<Vec<usize>> {
+    let spans = calculate_row_spans(table);
+    array(field(Some(table), "rows"))
+        .iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let mut column = 0usize;
+            array(field(Some(row), "cells"))
+                .iter()
+                .enumerate()
+                .filter_map(|(index, cell)| {
+                    let start = column;
+                    column += number(field(field(Some(cell), "formatting"), "gridSpan"))
+                        .unwrap_or(1.0) as usize;
+                    (!spans
+                        .get(&(row_index, start))
+                        .is_some_and(|(_, skipped)| *skipped))
+                    .then_some(index)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn unit_width(unit: &InlineUnit) -> u32 {
+    match &unit.content {
+        UnitContent::Text(text) => utf16_len(text),
+        UnitContent::Embed { .. } => 1,
+    }
+}
+
+/// Whether a source block subtree holds any text or drawing.
+fn has_content(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => match string(object.get("type")) {
+            Some("text") => string(object.get("text")).is_some_and(|text| !text.is_empty()),
+            Some("drawing" | "shape" | "chart" | "opaqueDrawing" | "mathEquation") => true,
+            _ => object.values().any(has_content),
+        },
+        Value::Array(values) => values.iter().any(has_content),
+        _ => false,
+    }
+}
+
+/// Where each source cell of `table` sits on its grid, with the cell story seeding made for it.
+fn table_layout(table: &Value, story_id: &str, table_index: usize) -> TableLayout {
+    let sources = source_cells(table);
+    let count = |value: Option<&Value>, default: f64| {
+        number(value)
+            .filter(|value| value.is_finite())
+            .unwrap_or(default)
+            .clamp(0.0, f64::from(u16::MAX)) as u32
+    };
+    let mut grid_columns = array(field(Some(table), "columnWidths")).len() as u32;
+    let rows = array(field(Some(table), "rows"))
+        .iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let formatting = field(Some(row), "formatting");
+            let grid_before = count(field(formatting, "gridBefore"), 0.0);
+            let grid_after = count(field(formatting, "gridAfter"), 0.0);
+            let mut column = grid_before;
+            let cells = array(field(Some(row), "cells"))
+                .iter()
+                .enumerate()
+                .map(|(index, cell)| {
+                    let formatting = field(Some(cell), "formatting");
+                    let span = count(field(formatting, "gridSpan"), 1.0).max(1);
+                    let story = sources
+                        .get(row_index)
+                        .and_then(|kept| kept.binary_search(&index).ok())
+                        .map(|projected| {
+                            table_cell_story_id(story_id, table_index, row_index, projected)
+                        });
+                    let layout = CellLayout {
+                        column,
+                        span,
+                        merge: match string(field(formatting, "vMerge")) {
+                            Some("restart") => SourceMerge::Restart,
+                            Some("continue") => SourceMerge::Continue,
+                            _ => SourceMerge::None,
+                        },
+                        story,
+                        content: has_content(field(Some(cell), "content").unwrap_or(&Value::Null)),
+                    };
+                    column = column.saturating_add(span);
+                    layout
+                })
+                .collect();
+            grid_columns = grid_columns.max(column.saturating_add(grid_after));
+            RowLayout {
+                grid_before,
+                grid_after,
+                cells,
+            }
+        })
+        .collect();
+    TableLayout { grid_columns, rows }
+}
+
+/// Records the revision identity of every move below `value`.
+fn record_moves(value: &Value, moves: &mut HashSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(kind @ ("moveFrom" | "moveTo")) = string(object.get("type")) {
+                let revision = tracked_revision(value);
+                moves.insert(crate::structured::source::move_key(
+                    kind == "moveTo",
+                    revision.id.as_deref().unwrap_or_default(),
+                    revision.author.as_deref().unwrap_or_default(),
+                    revision.date.as_deref().unwrap_or_default(),
+                ));
+            }
+            for child in object.values() {
+                record_moves(child, moves);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                record_moves(child, moves);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Records where a paragraph's page and column breaks sat, and which break embeds seeding moved
+/// out of the paragraph stand for them. `embeds` are the story indices of those embeds, in order.
+fn record_breaks(
+    context: &mut LoweringContext,
+    paragraph: &Value,
+    story_id: &str,
+    para_id: &str,
+    breaks: Vec<FlowBreak>,
+    embeds: Vec<u32>,
+) {
+    let mut tokens = Vec::new();
+    inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
+    let expected = tokens
+        .iter()
+        .filter(|token| matches!(**token, "pageBreak" | "columnBreak"))
+        .count();
+    if breaks.len() != expected || breaks.is_empty() {
+        return;
+    }
+    let leading = tokens.first() == Some(&"pageBreak") && tokens.contains(&"visible");
+    let mut embeds = embeds.into_iter();
+    for (index, found) in breaks.into_iter().enumerate() {
+        let witness = if index == 0 && leading {
+            Witness::Leading
+        } else {
+            match embeds.next() {
+                Some(unit) => {
+                    context.provenance.relocated.push(Relocated {
+                        pin: Pin::new(story_id, unit),
+                        para_id: para_id.to_owned(),
+                    });
+                    Witness::Embed(context.provenance.relocated.len() - 1)
+                }
+                None => Witness::Invisible,
+            }
+        };
+        if found.place == BreakPlace::Field {
+            continue;
+        }
+        context.provenance.inline.push(InlineRecord {
+            pin: Pin::new(story_id, found.unit as u32),
+            para_id: para_id.to_owned(),
+            in_control: found.place == BreakPlace::Control,
+            control_offset: found.control_offset,
+            content: InlineSource::Break {
+                kind: found.kind,
+                revision: found.revision,
+            },
+            witness,
+        });
+    }
+}
+
 fn visit_story(
     context: &mut LoweringContext,
     story_id: String,
@@ -3344,6 +3967,7 @@ fn visit_story(
         story_id: story_id.clone(),
         units: Vec::new(),
         comment_coverage: Vec::new(),
+        measured: (0, 0),
     });
     let empty_story;
     let source = !source_blocks.is_empty();
@@ -3357,13 +3981,34 @@ fn visit_story(
     let mut result_table_ids = BTreeMap::new();
     let mut last_kind = None;
     let mut block_order = Vec::new();
+    let mut source_order = Vec::new();
     for (block_index, block) in blocks.iter().enumerate() {
         let position = cursor;
         let Some(block_id) = cursor.take(&story_id, block) else {
             block_order.push(SourceBlock::Raw);
+            source_order.push(None);
+            let xml = string(field(Some(block), "xml")).unwrap_or_default();
+            let raws = context
+                .provenance
+                .raw_blocks
+                .entry(story_id.clone())
+                .or_default();
+            raws.push(crate::structured::source::element_name(xml));
+            let index = raws.len() - 1;
+            if let Some(steps) = context.locators.get(&story_id) {
+                let mut steps = steps.clone();
+                steps.push(Step::Block(block_index));
+                context.provenance.raw_sources.push(RawSource {
+                    story: story_id.clone(),
+                    index,
+                    steps,
+                    xml: xml.to_owned(),
+                });
+            }
             continue;
         };
         let kind = string(field(Some(block), "type")).unwrap_or_default();
+        source_order.push(Some(block_id.clone()));
         block_order.push(
             if kind == "paragraph"
                 && string(field(Some(block), "paraId")).is_some_and(|id| !id.is_empty())
@@ -3381,9 +4026,12 @@ fn visit_story(
                         .run_revisions
                         .insert((story_id.clone(), block_id.clone()));
                 }
+                record_moves(block, &mut context.provenance.moves);
                 let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(block);
+                let mut embeds = Vec::new();
                 if options.include_page_breaks {
                     for kind in leading_breaks {
+                        embeds.push(context.plans[plan_index].width());
                         context.plans[plan_index].units.push(embed_unit(
                             kind,
                             JsonObject::new(),
@@ -3393,8 +4041,33 @@ fn visit_story(
                         ));
                     }
                 }
-                let (mut units, mut ppr) =
-                    paragraph_units(block, &context.styles, None, &context.source_json);
+                let ParagraphUnits {
+                    mut units,
+                    mut ppr,
+                    omitted,
+                    breaks,
+                } = paragraph_units(block, &context.styles, None, &context.source_json);
+                let base = context.plans[plan_index].width();
+                let offsets: Vec<u32> = std::iter::once(0)
+                    .chain(units.iter().scan(0, |width, unit| {
+                        *width += unit_width(unit);
+                        Some(*width)
+                    }))
+                    .collect();
+                let end = offsets.last().copied().unwrap_or_default();
+                for omission in omitted {
+                    let at = offsets.get(omission.unit).copied().unwrap_or(end);
+                    context.provenance.inline.push(InlineRecord {
+                        pin: Pin::new(&story_id, base + at),
+                        para_id: block_id.clone(),
+                        in_control: omission.in_control,
+                        control_offset: None,
+                        content: InlineSource::Omitted {
+                            element: omission.element,
+                        },
+                        witness: Witness::Invisible,
+                    });
+                }
                 let source_para_id = string(field(Some(block), "paraId"))
                     .filter(|value| source && !value.is_empty())
                     .map(str::to_owned);
@@ -3407,7 +4080,7 @@ fn visit_story(
                 ppr.insert("paraId".to_owned(), Value::String(block_id.clone()));
                 context.paragraphs.push(SeededParagraph {
                     root: context.root.clone(),
-                    key: block_id,
+                    key: block_id.clone(),
                     source_para_id,
                     ordinal: number(field(Some(block), SOURCE_ORDINAL))
                         .map(|ordinal| ordinal as u32),
@@ -3427,6 +4100,7 @@ fn visit_story(
                     .push(embed_unit("pilcrow", ppr, &[], None, 1));
                 if options.include_page_breaks {
                     for kind in trailing_breaks {
+                        embeds.push(context.plans[plan_index].width());
                         context.plans[plan_index].units.push(embed_unit(
                             kind,
                             JsonObject::new(),
@@ -3436,10 +4110,31 @@ fn visit_story(
                         ));
                     }
                 }
+                let breaks: Option<Vec<FlowBreak>> = breaks
+                    .into_iter()
+                    .map(|found| {
+                        Some(FlowBreak {
+                            unit: (base + offsets.get(found.unit)?) as usize,
+                            ..found
+                        })
+                    })
+                    .collect();
+                record_breaks(
+                    context,
+                    block,
+                    &story_id,
+                    &block_id,
+                    breaks.unwrap_or_default(),
+                    embeds,
+                );
                 last_kind = Some("paragraph");
             }
             "table" => {
                 let current_table = position.table;
+                context.provenance.tables.insert(
+                    format!("{story_id}:t{current_table}"),
+                    table_layout(block, &story_id, current_table),
+                );
                 let table = project_table(
                     block,
                     &context.styles,
@@ -3489,9 +4184,33 @@ fn visit_story(
                     .units
                     .push(embed_unit("table", payload, &[], None, 1));
                 let previous_table_formatting = context.styles.table_paragraph_formatting.take();
+                let sources = source_cells(block);
                 for (row_index, row) in table.rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
                         context.styles.table_paragraph_formatting = cell.paragraph_formatting;
+                        let source_cell = sources
+                            .get(row_index)
+                            .and_then(|cells| cells.get(cell_index))
+                            .copied();
+                        if let (Some(steps), Some(source_cell)) =
+                            (context.locators.get(&story_id), source_cell)
+                        {
+                            let mut steps = steps.clone();
+                            steps.extend([
+                                Step::Block(block_index),
+                                Step::Row(row_index),
+                                Step::Cell(source_cell),
+                            ]);
+                            context.locators.insert(
+                                table_cell_story_id(
+                                    &story_id,
+                                    current_table,
+                                    row_index,
+                                    cell_index,
+                                ),
+                                steps,
+                            );
+                        }
                         visit_story(
                             context,
                             table_cell_story_id(&story_id, current_table, row_index, cell_index),
@@ -3521,6 +4240,11 @@ fn visit_story(
                     None,
                     1,
                 ));
+                if let Some(steps) = context.locators.get(&story_id) {
+                    let mut steps = steps.clone();
+                    steps.extend([Step::Block(block_index), Step::Content]);
+                    context.locators.insert(child_story.clone(), steps);
+                }
                 visit_story(
                     context,
                     child_story,
@@ -3540,7 +4264,12 @@ fn visit_story(
         .any(|block| matches!(block, SourceBlock::Raw))
     {
         context.source.blocks.insert(story_id.clone(), block_order);
+        context
+            .provenance
+            .block_order
+            .insert(story_id.clone(), source_order);
     }
+
     if options.append_body_tail && matches!(last_kind, Some("table" | "blockSdt")) {
         let key = format!("{story_id}:p{}", cursor.paragraph);
         context.plans[plan_index].units.push(embed_unit(
@@ -3695,6 +4424,7 @@ fn seed_plan(plan: StoryPlan) -> Result<(String, Vec<RawOp>, BTreeSet<String>), 
         story_id,
         units,
         comment_coverage,
+        ..
     } = plan;
     let mut referenced_fonts = BTreeSet::new();
     let mut ops = units_to_raw_ops(units, &mut referenced_fonts)?;
@@ -3740,6 +4470,19 @@ pub(crate) fn parse_docx_package(
     .map_err(|error| error.to_string())
 }
 
+/// [`parse_docx_for_edit`] plus the parts provenance resolves against.
+pub(crate) fn parse_docx_with_parts(
+    bytes: &[u8],
+) -> Result<(docx_parse::S9WireEnvelope, SourceParts), String> {
+    let (envelope, parts) = docx_parse::parse_docx_s9_wire_parts_with_limits(
+        bytes,
+        docx_parse::S9ParseOptions::default(),
+        &docx_parse::ParseLimits::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((envelope, SourceParts::new(parts)))
+}
+
 #[cfg(feature = "wasm")]
 pub(crate) fn referenced_fonts(
     envelope: &docx_parse::S9WireEnvelope,
@@ -3753,15 +4496,22 @@ pub(crate) fn referenced_fonts(
 
 type SourceRoot = (String, SourceStoryKind, Option<String>);
 
-/// One package lowered into story plans, with what its identity index needs.
+/// One package lowered into story plans, with what its identity index and structured reads
+/// need.
 struct LoweredDocx {
     context: LoweringContext,
     referenced_fonts: BTreeSet<String>,
     roots: Vec<SourceRoot>,
     relationships: Vec<(String, docx_parse::Relationship)>,
+    read: ReadSource,
 }
 
-fn lower_docx(mut envelope: docx_parse::S9WireEnvelope) -> Result<LoweredDocx, String> {
+/// Lowers `envelope`, resolving source provenance against `parts` when the package's parts are
+/// at hand.
+fn lower_docx(
+    mut envelope: docx_parse::S9WireEnvelope,
+    parts: Option<&SourceParts>,
+) -> Result<LoweredDocx, String> {
     envelope.document.package.media_entries.clear();
     let relationships = envelope.document.package.relationship_entries.clone();
     let mut referenced_fonts = BTreeSet::new();
@@ -3782,27 +4532,196 @@ fn lower_docx(mut envelope: docx_parse::S9WireEnvelope) -> Result<LoweredDocx, S
     drop(envelope);
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
-    let (context, roots) = lower_package(package, source_json);
+    let mut read = read_source(package, &parsed, parts);
+    let (mut context, roots) = lower_package(package, source_json);
+    drop(parsed);
+    read.provenance = std::mem::take(&mut context.provenance);
+    read.seeded_comments = seeded_comments(&context.plans);
+    if let Some(parts) = parts {
+        let comment_raw = comment_raw_sources(&context.styles, &read);
+        read.resolve_sources(parts, comment_raw);
+    }
     Ok(LoweredDocx {
         context,
         referenced_fonts,
         roots,
         relationships,
+        read,
     })
+}
+
+/// Seeds `envelope` and retains its package context, resolving source provenance against
+/// `parts` when the package's parts are at hand.
+pub(crate) fn seed_parsed_docx_with(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+    parts: Option<&SourceParts>,
+) -> Result<Vec<String>, String> {
+    seed_lowered(document, lower_docx(envelope, parts)?, None)
+}
+
+/// Seeds every lowered story into `document` and retains the package context, with the identity
+/// index when there is one.
+fn seed_lowered(
+    document: &EditingDoc,
+    lowered: LoweredDocx,
+    index: Option<SourceIndex>,
+) -> Result<Vec<String>, String> {
+    let LoweredDocx {
+        context,
+        mut referenced_fonts,
+        mut read,
+        ..
+    } = lowered;
+    document
+        .create_empty_stories(
+            &context
+                .plans
+                .iter()
+                .map(|plan| plan.story_id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+    let mut batches = Vec::with_capacity(context.plans.len());
+    for plan in context.plans {
+        let (story_id, ops, fonts) = seed_plan(plan)?;
+        batches.push((story_id, ops));
+        referenced_fonts.extend(fonts);
+    }
+    document
+        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+        .map_err(|error| error.to_string())?;
+    read.pin(document);
+    read.comment_writes = CommentWrites::watch(document);
+    if let Some(index) = index {
+        document.retain_source(SourcePackage::Ready(Arc::new(index)));
+    }
+    document.install_source(
+        SourceMetadata {
+            styles: context.styles,
+            structure: context.source,
+            read,
+        },
+        0,
+    );
+    Ok(referenced_fonts.into_iter().collect())
+}
+
+/// Where the raw XML blocks of every source comment body sit in the comments part, as lowering
+/// the body into a story of its own records them.
+fn comment_raw_sources(styles: &StyleResolver, read: &ReadSource) -> Vec<RawSource> {
+    let mut context = scratch_context(styles.clone());
+    for comment in &read.comments {
+        let story = format!("comment:{}", comment.id);
+        context
+            .locators
+            .insert(story.clone(), vec![Step::Comment(comment.id.clone())]);
+        visit_story(&mut context, story, &comment.body, scratch_options());
+    }
+    context.provenance.raw_sources
+}
+
+fn scratch_context(styles: StyleResolver) -> LoweringContext {
+    LoweringContext {
+        styles,
+        theme: None,
+        source_json: Arc::new(BTreeMap::new()),
+        plans: Vec::new(),
+        compatibility_mode: 12,
+        root: String::new(),
+        paragraphs: Vec::new(),
+        source: SourceStructure::default(),
+        provenance: Provenance::default(),
+        locators: HashMap::new(),
+    }
+}
+
+fn scratch_options() -> StoryOptions {
+    StoryOptions {
+        include_page_breaks: false,
+        append_body_tail: false,
+        seed_comments: false,
+    }
+}
+
+fn read_source(package: &Value, parsed: &Value, parts: Option<&SourceParts>) -> ReadSource {
+    let document = parts.map_or(crate::structured::source::DOCUMENT_PART, |parts| {
+        parts.document.as_str()
+    });
+    ReadSource::from_package(package, document, warnings(parsed))
+}
+
+fn seeded_comments(plans: &[StoryPlan]) -> HashSet<String> {
+    plans
+        .iter()
+        .flat_map(|plan| plan.comment_coverage.iter().map(|(id, _)| id.clone()))
+        .collect()
+}
+
+fn warnings(parsed: &Value) -> Vec<String> {
+    array(field(Some(parsed), "warnings"))
+        .iter()
+        .filter_map(|warning| warning.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Lowers each `(story, blocks)` into `doc` as its own story with `source`'s styles, for content
+/// the session does not hold, such as comment bodies and field results. Returns what lowering
+/// left out, pinned to `doc`.
+pub(crate) fn seed_blocks(
+    doc: &EditingDoc,
+    source: Option<&SourceMetadata>,
+    stories: &[(String, &[Value])],
+) -> Result<Provenance, String> {
+    let mut context = scratch_context(
+        source
+            .map(|source| source.styles.clone())
+            .unwrap_or_default(),
+    );
+    for (story, blocks) in stories {
+        visit_story(&mut context, story.clone(), blocks, scratch_options());
+    }
+    doc.create_empty_stories(
+        &context
+            .plans
+            .iter()
+            .map(|plan| plan.story_id.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut provenance = std::mem::take(&mut context.provenance);
+    let mut batches = Vec::with_capacity(context.plans.len());
+    for plan in context.plans {
+        let (story_id, ops, _) = seed_plan(plan)?;
+        batches.push((story_id, ops));
+    }
+    doc.apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+        .map_err(|error| error.to_string())?;
+    provenance.pin(doc);
+    Ok(provenance)
 }
 
 /// Source metadata for a package whose stories arrive another way, such as shared state.
 #[cfg(feature = "wasm")]
 pub(crate) fn source_metadata(
     envelope: &docx_parse::S9WireEnvelope,
+    parts: Option<&SourceParts>,
 ) -> Result<SourceMetadata, String> {
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
-    let (context, _) = lower_package(package, BTreeMap::new());
+    let mut read = read_source(package, &parsed, parts);
+    let (mut context, _) = lower_package(package, BTreeMap::new());
+    read.provenance = std::mem::take(&mut context.provenance);
+    read.seeded_comments = seeded_comments(&context.plans);
+    if let Some(parts) = parts {
+        let comment_raw = comment_raw_sources(&context.styles, &read);
+        read.resolve_sources(parts, comment_raw);
+    }
     Ok(SourceMetadata {
         styles: context.styles,
         structure: context.source,
+        read,
     })
 }
 
@@ -3820,6 +4739,8 @@ fn lower_package(
         root: "body".to_owned(),
         paragraphs: Vec::new(),
         source: SourceStructure::default(),
+        provenance: Provenance::default(),
+        locators: HashMap::from([("body".to_owned(), vec![Step::Body])]),
     };
     let mut roots = vec![("body".to_owned(), SourceStoryKind::Body, None)];
     visit_story(
@@ -3845,6 +4766,7 @@ fn lower_package(
                 continue;
             }
             context.root = story_id.clone();
+            context.locators.insert(story_id.clone(), Vec::new());
             roots.push((story_id.clone(), kind, Some(relationship_id.to_owned())));
             visit_story(
                 &mut context,
@@ -3858,9 +4780,9 @@ fn lower_package(
             );
         }
     }
-    for (key, prefix, kind) in [
-        ("footnotes", "fn", SourceStoryKind::Footnote),
-        ("endnotes", "en", SourceStoryKind::Endnote),
+    for (key, prefix, element, kind) in [
+        ("footnotes", "fn", "footnote", SourceStoryKind::Footnote),
+        ("endnotes", "en", "endnote", SourceStoryKind::Endnote),
     ] {
         for note in array(field(Some(package), key)) {
             let Some(id) = field(Some(note), "id") else {
@@ -3868,6 +4790,9 @@ fn lower_package(
             };
             let story_id = format!("{prefix}:{}", js_string(id));
             context.root = story_id.clone();
+            context
+                .locators
+                .insert(story_id.clone(), vec![Step::Note(element, js_string(id))]);
             roots.push((story_id.clone(), kind, Some(js_string(id))));
             visit_story(
                 &mut context,
@@ -3884,28 +4809,49 @@ fn lower_package(
     (context, roots)
 }
 
-const FOOTNOTES_PART: &str = "word/footnotes.xml";
-const ENDNOTES_PART: &str = "word/endnotes.xml";
-const COMMENTS_PART: &str = "word/comments.xml";
 const COMMENT_COMPANIONS: [&str; 2] = ["word/commentsExtended.xml", "word/commentsIds.xml"];
 
+/// What the identity index reads from every part of a package, before its parts narrow to the
+/// stories: every paragraph ID an XML part uses, and the IDs the comment companion parts
+/// reference.
+struct PackageIds {
+    occupied: BTreeSet<u32>,
+    comment_references: BTreeSet<u32>,
+}
+
+impl PackageIds {
+    fn scan(parts: &[(String, Vec<u8>)]) -> Self {
+        Self {
+            occupied: docx_parse::paragraph_identity::package_paragraph_ids(parts),
+            comment_references: COMMENT_COMPANIONS
+                .iter()
+                .filter_map(|path| {
+                    parts
+                        .iter()
+                        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(path))
+                })
+                .flat_map(|(_, xml)| docx_parse::paragraph_identity::paragraph_id_attributes(xml))
+                .collect(),
+        }
+    }
+}
+
 /// Indexes the package's paragraph identities: every story part with the
-/// root stories seeded from it, every paragraph ID it uses, and the IDs the
-/// comment companion parts reference.
+/// root stories seeded from it, and the IDs `ids` read from the whole package.
 fn build_source_index(
     bytes: Arc<[u8]>,
-    parts: &[(String, Vec<u8>)],
+    parts: &SourceParts,
+    ids: PackageIds,
     roots: Vec<SourceRoot>,
     relationships: &[(String, docx_parse::Relationship)],
     paragraphs: Vec<SeededParagraph>,
 ) -> SourceIndex {
+    use crate::structured::source::{COMMENTS_PART, ENDNOTES_PART, FOOTNOTES_PART};
     use sha2::{Digest, Sha256};
-    let limits = docx_parse::xml::ParseLimits::default();
-    let mut budget = docx_parse::xml::ParseBudget::new(&limits);
-    let document_path = docx_parse::relationships::office_document_path(parts, &mut budget)
-        .unwrap_or_else(|_| "word/document.xml".to_owned());
+    let document_path = &parts.document;
     let find = |path: &str| {
         parts
+            .parts
             .iter()
             .find(|(candidate, _)| candidate.eq_ignore_ascii_case(path))
     };
@@ -3938,7 +4884,7 @@ fn build_source_index(
                 .iter()
                 .find(|(id, _)| Some(id) == item.as_ref())
                 .and_then(|(_, relationship)| {
-                    match docx_parse::resolve_relationship_target(&document_path, relationship) {
+                    match docx_parse::resolve_relationship_target(document_path, relationship) {
                         Ok(docx_parse::RelationshipTarget::Internal(path)) => Some(path),
                         _ => None,
                     }
@@ -3953,17 +4899,12 @@ fn build_source_index(
     add(FOOTNOTES_PART, SourceStoryKind::Footnote, None);
     add(ENDNOTES_PART, SourceStoryKind::Endnote, None);
     add(COMMENTS_PART, SourceStoryKind::Comment, None);
-    let comment_references = COMMENT_COMPANIONS
-        .iter()
-        .filter_map(|path| find(path))
-        .flat_map(|(_, xml)| docx_parse::paragraph_identity::paragraph_id_attributes(xml))
-        .collect();
     SourceIndex::new(
         format!("{:x}", Sha256::digest(&bytes)),
         bytes,
-        docx_parse::paragraph_identity::package_paragraph_ids(parts),
+        ids.occupied,
         inputs,
-        comment_references,
+        ids.comment_references,
         paragraphs,
     )
 }
@@ -3971,57 +4912,39 @@ fn build_source_index(
 /// The identity index of a package, lowered without seeding.
 pub(crate) fn source_index(bytes: Arc<[u8]>) -> Result<SourceIndex, String> {
     let (envelope, parts) = parse_docx_package(&bytes)?;
-    let lowered = lower_docx(envelope)?;
+    let ids = PackageIds::scan(&parts);
+    let parts = SourceParts::new(parts);
+    let lowered = lower_docx(envelope, None)?;
     Ok(build_source_index(
         bytes,
         &parts,
+        ids,
         lowered.roots,
         &lowered.relationships,
         lowered.context.paragraphs,
     ))
 }
 
-/// Seeds every story of the parsed package and retains its identity index.
+/// Seeds every story of the parsed package, resolving source provenance against `parts`, and
+/// retains its identity index.
 pub(crate) fn seed_parsed_docx(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
-    parts: &[(String, Vec<u8>)],
+    parts: Vec<(String, Vec<u8>)>,
     bytes: Arc<[u8]>,
 ) -> Result<Vec<String>, String> {
-    let LoweredDocx {
-        context,
-        mut referenced_fonts,
-        roots,
-        relationships,
-    } = lower_docx(envelope)?;
-    document
-        .create_empty_stories(
-            &context
-                .plans
-                .iter()
-                .map(|plan| plan.story_id.clone())
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|error| error.to_string())?;
-    let mut batches = Vec::with_capacity(context.plans.len());
-    for plan in context.plans {
-        let (story_id, ops, fonts) = seed_plan(plan)?;
-        batches.push((story_id, ops));
-        referenced_fonts.extend(fonts);
-    }
-    document
-        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
-        .map_err(|error| error.to_string())?;
-    let index = build_source_index(bytes, parts, roots, &relationships, context.paragraphs);
-    document.retain_source(SourcePackage::Ready(Arc::new(index)));
-    document.install_source(
-        SourceMetadata {
-            styles: context.styles,
-            structure: context.source,
-        },
-        0,
+    let ids = PackageIds::scan(&parts);
+    let parts = SourceParts::new(parts);
+    let mut lowered = lower_docx(envelope, Some(&parts))?;
+    let index = build_source_index(
+        bytes,
+        &parts,
+        ids,
+        std::mem::take(&mut lowered.roots),
+        &lowered.relationships,
+        std::mem::take(&mut lowered.context.paragraphs),
     );
-    Ok(referenced_fonts.into_iter().collect())
+    seed_lowered(document, lowered, Some(index))
 }
 
 /// Opens a DOCX: seeds every story and starts a new opening with a fresh
@@ -4048,7 +4971,7 @@ pub fn seed_from_docx_with_generation(
 /// Seeds every story of a DOCX without starting an opening.
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
     let (envelope, parts) = parse_docx_package(bytes)?;
-    seed_parsed_docx(document, envelope, &parts, Arc::from(bytes)).map(|_| ())
+    seed_parsed_docx(document, envelope, parts, Arc::from(bytes)).map(|_| ())
 }
 
 #[cfg(test)]
@@ -4063,6 +4986,8 @@ mod tests {
             root: "body".to_owned(),
             paragraphs: Vec::new(),
             source: SourceStructure::default(),
+            provenance: Provenance::default(),
+            locators: HashMap::new(),
         };
         visit_story(
             &mut context,
@@ -4242,8 +5167,8 @@ mod tests {
         let styles = StyleResolver::new(Some(
             &json!({"styles":[{"type":"character","styleId":"Hyperlink","rPr":{"color":{"rgb":"0563C1"}}}]}),
         ));
-        let (units, _) =
-            paragraph_units(&json!({"content":[value]}), &styles, None, &BTreeMap::new());
+        let units =
+            paragraph_units(&json!({"content":[value]}), &styles, None, &BTreeMap::new()).units;
         assert!(matches!(&units[0].content, UnitContent::Text(text) if text == "Heading"));
         assert_eq!(units[0].attrs["hyperlink"]["href"], json!("#_Toc1"));
         assert_eq!(units[0].attrs["textColor"]["rgb"], json!("0563C1"));
@@ -4308,6 +5233,8 @@ mod tests {
             root: "body".to_owned(),
             paragraphs: Vec::new(),
             source: SourceStructure::default(),
+            provenance: Provenance::default(),
+            locators: HashMap::new(),
         };
         visit_story(
             &mut context,
@@ -4332,7 +5259,7 @@ mod tests {
 
     #[test]
     fn raw_inline_nodes_leave_run_boundaries_intact() {
-        let (_, properties) = paragraph_units(
+        let properties = paragraph_units(
             &json!({"content":[
                 {"type":"run","content":[{"type":"text","text":"A"}]},
                 {"type":"rawXml","xml":"<x:mark/>"},
@@ -4341,7 +5268,8 @@ mod tests {
             &StyleResolver::new(None),
             None,
             &BTreeMap::new(),
-        );
+        )
+        .ppr;
         assert_eq!(
             properties["_originalRunBoundaries"]
                 .as_array()
@@ -4632,10 +5560,10 @@ mod tests {
             without_media.document.package.media_entries.clear();
             let with_media_doc = EditingDoc::new(7);
             let without_media_doc = EditingDoc::new(7);
-            let fonts = seed_parsed_docx(&with_media_doc, envelope, &[], Arc::from([])).unwrap();
+            let fonts = seed_parsed_docx_with(&with_media_doc, envelope, None).unwrap();
             assert_eq!(
                 fonts,
-                seed_parsed_docx(&without_media_doc, without_media, &[], Arc::from([])).unwrap()
+                seed_parsed_docx_with(&without_media_doc, without_media, None).unwrap()
             );
             assert!(fonts.iter().any(|font| font == "Image Caption"));
             assert_eq!(
@@ -4855,7 +5783,7 @@ mod tests {
 
     #[test]
     fn reused_run_units_keep_comments_out_of_saved_boundaries() {
-        let (units, ppr) = paragraph_units(
+        let ParagraphUnits { units, ppr, .. } = paragraph_units(
             &json!({"content": [
                 {"type": "commentRangeStart", "id": 7},
                 {"type": "run", "formatting": {"bold": true}, "content": [

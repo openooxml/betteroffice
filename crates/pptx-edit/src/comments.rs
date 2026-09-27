@@ -122,8 +122,23 @@ pub(crate) fn import_source_comments(
 
 pub(crate) fn snapshot_comments<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentSnapshot>> {
     let comments = required_map(txn, COMMENTS)?;
+    comment_keys(txn)?
+        .iter()
+        .map(|key| snapshot_comment(&comments, txn, &key.id))
+        .collect()
+}
+
+/// A live comment's place in [`snapshot_comments`] order.
+pub(crate) struct CommentKey {
+    pub id: String,
+    pub slide_id: String,
+}
+
+/// The live comments, ordered by creation time and id, without reading their text.
+pub(crate) fn comment_keys<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentKey>> {
+    let comments = required_map(txn, COMMENTS)?;
     let slides = required_map(txn, SLIDES)?;
-    let mut output = Vec::new();
+    let mut keys = Vec::new();
     for (id, value) in comments.iter(txn) {
         let Ok(entry) = value.cast::<MapRef>() else {
             return Err(EditError::InvalidState(format!(
@@ -134,25 +149,36 @@ pub(crate) fn snapshot_comments<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentSn
         if !slides.contains_key(txn, &slide_id) {
             continue;
         }
-        output.push(CommentSnapshot {
-            id: id.to_owned(),
-            slide_id,
-            author: map_string(&entry, txn, "author").unwrap_or_default(),
-            initials: map_string(&entry, txn, "initials").unwrap_or_default(),
-            text: map_string(&entry, txn, "text").unwrap_or_default(),
-            created: map_string(&entry, txn, "created"),
-            x_emu: map_number(&entry, txn, "x").unwrap_or(0.0) as i64,
-            y_emu: map_number(&entry, txn, "y").unwrap_or(0.0) as i64,
-            parent_id: live_parent(&comments, &entry, txn),
-            resolved: map_bool(&entry, txn, "resolved").unwrap_or(false),
-        });
+        keys.push((map_string(&entry, txn, "created"), id.to_owned(), slide_id));
     }
-    output.sort_by(|left, right| {
-        left.created
-            .cmp(&right.created)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    Ok(output)
+    keys.sort();
+    Ok(keys
+        .into_iter()
+        .map(|(_, id, slide_id)| CommentKey { id, slide_id })
+        .collect())
+}
+
+pub(crate) fn snapshot_comment<T: ReadTxn>(
+    comments: &MapRef,
+    txn: &T,
+    id: &str,
+) -> EditResult<CommentSnapshot> {
+    let entry = comments
+        .get(txn, id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .ok_or_else(|| EditError::InvalidState(format!("comment {id} is not a map")))?;
+    Ok(CommentSnapshot {
+        id: id.to_owned(),
+        slide_id: map_string(&entry, txn, "slideId").unwrap_or_default(),
+        author: map_string(&entry, txn, "author").unwrap_or_default(),
+        initials: map_string(&entry, txn, "initials").unwrap_or_default(),
+        text: map_string(&entry, txn, "text").unwrap_or_default(),
+        created: map_string(&entry, txn, "created"),
+        x_emu: map_number(&entry, txn, "x").unwrap_or(0.0) as i64,
+        y_emu: map_number(&entry, txn, "y").unwrap_or(0.0) as i64,
+        parent_id: live_parent(comments, &entry, txn),
+        resolved: map_bool(&entry, txn, "resolved").unwrap_or(false),
+    })
 }
 
 /// Promotes alternating levels so undo cannot create nested replies.

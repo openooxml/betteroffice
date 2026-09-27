@@ -66,7 +66,6 @@ async function editorSave(live: YrsSession): Promise<Uint8Array> {
   const { result } = renderHook(() =>
     useFileIO({
       pagedEditorRef: { current: editor },
-      displayList: null,
       resolveImage: () => null,
       comments: base.package.document.comments ?? [],
       documentName: 'saved',

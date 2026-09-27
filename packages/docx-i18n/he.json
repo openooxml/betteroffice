@@ -932,7 +932,17 @@
       "inputFailed": null,
       "documentReplaced": null,
       "targetChanged": null,
-      "commandFailed": null
+      "commandFailed": null,
+      "permissionDenied": null,
+      "unsupportedPolicy": null,
+      "pluginUnavailable": null,
+      "aborted": null
     }
+  },
+  "plugins": {
+    "toolbarGroup": null,
+    "panelTabs": null,
+    "collapsePanel": null,
+    "expandPanel": null
   }
 }
