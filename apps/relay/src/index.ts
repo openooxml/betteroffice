@@ -67,18 +67,19 @@ export class CollaborationRoom extends DurableObject<Env> {
       return new Response("WebSocket upgrade required", { status: 426 });
     }
 
-    await this.persist;
-    if (this.failed) return new Response("Room storage unavailable", { status: 503 });
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    this.ctx.acceptWebSocket(server);
-    await this.enqueue(() => this.refreshExpiry());
-    if (this.failed) return new Response("Room storage unavailable", { status: 503 });
-    this.updates.replay((update) => sendIfOpen(server, update));
-    sendIfOpen(server, this.updates.syncRequest());
-    this.broadcastPeerCount();
-    return new Response(null, { status: 101, webSocket: client });
+    let response: Response | undefined;
+    await this.enqueue(async () => {
+      await this.refreshExpiry();
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      this.ctx.acceptWebSocket(server);
+      this.updates.replay((update) => sendIfOpen(server, update));
+      sendIfOpen(server, this.updates.syncRequest());
+      this.broadcastPeerCount();
+      response = new Response(null, { status: 101, webSocket: client });
+    });
+    return response ?? new Response("Room storage unavailable", { status: 503 });
   }
 
   webSocketMessage(

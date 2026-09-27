@@ -227,6 +227,26 @@ describe('CollaborationRoom', () => {
     doc.destroy();
   });
 
+  test('serializes joining-client replay with updates awaiting commit', async () => {
+    const h = createRoom();
+    await h.initialization;
+    send(h, documentFrame('first', 1));
+    await flush(h);
+    let release!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    h.onCommit(async () => { started(); await gate; });
+    send(h, documentFrame('second', 2));
+    await ready;
+    const joining = join(h);
+    await Promise.resolve();
+    expect(h.sockets).toHaveLength(2);
+    release();
+    const joined = await joining;
+    expect(rehydrate(frames(joined)).getText('body').toString()).toBe('firstsecond');
+  });
+
   test('keeps committed data after a failed checkpoint and refuses uncommitted broadcasts', async () => {
     const h = createRoom();
     await h.initialization;
