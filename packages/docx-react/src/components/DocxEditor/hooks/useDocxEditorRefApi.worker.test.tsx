@@ -105,6 +105,7 @@ function Harness({ session, layout, overrides, pagedRef, docxRef, display }: Har
     applyYrsCommand: () => false,
     getYrsPositionProjection: () => null,
     displayPositionToYrsLoc: () => null,
+    getPositionAtPoint: () => null,
   });
   useDocxEditorRefApi({
     ref: docxRef,

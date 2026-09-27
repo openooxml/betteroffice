@@ -42,6 +42,7 @@ import {
 import { cn } from '../lib/utils';
 import type {
   DocxEditorCollaborationOptions,
+  DocxPointPosition,
   SelectionState,
   TableContextInfo,
 } from './DocxEditor/types';
@@ -140,7 +141,7 @@ import type { RenderedDomContext } from '../plugin-api/types';
 // TYPES
 // ============================================================================
 
-export type { DocxEditorCollaborationOptions } from './DocxEditor/types';
+export type { DocxEditorCollaborationOptions, DocxPointPosition } from './DocxEditor/types';
 
 /**
  * DocxEditor props
@@ -408,6 +409,13 @@ export interface DocxEditorRef {
   exportStructuredWithPages: (
     options: DocxPageExportOptions
   ) => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>;
+  /**
+   * The text under a client point, such as a drop event's `clientX`/`clientY`, from the same
+   * hit testing as the caret, without moving selection or focus. Its `target` and `version` form
+   * an edit batch step's target and `expectVersion`. Null outside text (margins, images, page
+   * gaps) and while the rendered layout does not show the current version.
+   */
+  getPositionAtPoint: (clientX: number, clientY: number) => DocxPointPosition | null;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */

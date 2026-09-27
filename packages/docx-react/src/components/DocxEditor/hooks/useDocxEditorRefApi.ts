@@ -242,6 +242,8 @@ export function useDocxEditorRefApi({
       },
 
       exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options),
+      getPositionAtPoint: (clientX, clientY) =>
+        pagedEditorRef.current?.getPositionAtPoint(clientX, clientY) ?? null,
 
       addComment: (options) => {
         const editor = pagedEditorRef.current;

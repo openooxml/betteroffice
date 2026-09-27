@@ -1,6 +1,7 @@
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
+import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import type { DocxPointPosition } from '../components/DocxEditor/types';
 import type { DocxPluginGeometry, DocxPluginLayout, DocxPluginRect } from './types';
 
 const layoutIds = new WeakMap<DisplayListQueries, string>();
@@ -49,16 +50,26 @@ export function toOverlayRect(
   };
 }
 
+/**
+ * `resolve` turns a hit of `dom` into a batch target at `layout.version`, or null once the
+ * document has moved past it.
+ */
 export function createPluginGeometry(
   layout: DocxPluginLayout,
   dom: RenderedDomContext,
   layer: HTMLElement,
-  current: () => boolean
+  current: () => boolean,
+  resolve: (hit: PointPosition | null, version: string) => DocxPointPosition | null
 ): DocxPluginGeometry {
   return {
     layout,
     dom,
     toOverlayRect: (rect) =>
       current() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,
+    getPositionAtPoint(clientX, clientY) {
+      if (!current()) return null;
+      const position = resolve(dom.getPositionAtPoint(clientX, clientY), layout.version);
+      return position ? { ...position, layoutId: layout.id } : null;
+    },
   };
 }

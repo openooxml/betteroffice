@@ -23,6 +23,7 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
 import type { ReactSidebarItem } from '../plugin-api/types';
@@ -248,7 +249,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
             () =>
               host.layoutId() === currentLayout.id &&
               domRef.current === dom &&
-              dom.context.pagesContainer.isConnected
+              dom.context.pagesContainer.isConnected,
+            (hit, layoutVersion) =>
+              resolvePointPosition(latest.current.pagedEditorRef.current, hit, layoutVersion)
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.

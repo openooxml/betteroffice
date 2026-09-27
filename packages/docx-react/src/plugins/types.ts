@@ -32,7 +32,7 @@ import type {
   DocxPluginCommandState,
 } from '../commands/types';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
-import type { SelectionState } from '../components/DocxEditor/types';
+import type { DocxPointPosition, SelectionState } from '../components/DocxEditor/types';
 
 export type {
   MaybePromise,
@@ -146,16 +146,24 @@ export interface DocxPluginSnapshot {
   layout: DocxPluginLayout | null;
 }
 
+/** A text position under the pointer, with the layout it was resolved against. */
+export type DocxPluginPointPosition = DocxPointPosition & { layoutId: string };
+
 /**
  * Local geometry of the rendered layout. `dom` answers in pages-container units divided by zoom;
- * `toOverlayRect` converts one of those rectangles into overlay-layer pixels, and returns null
- * once its layout is no longer rendered.
+ * `toOverlayRect` converts one of those rectangles into overlay-layer pixels. `toOverlayRect` and
+ * `getPositionAtPoint` return null once the layout is no longer rendered.
  */
 export interface DocxPluginGeometry {
   layout: DocxPluginLayout;
   /** @experimental DOM access that a data-only geometry facade may replace in a minor release. */
   dom: RenderedDomContext;
   toOverlayRect(rect: DocxPluginRect): DocxPluginRect | null;
+  /**
+   * Client coordinates to the text under them, with an edit batch target at `layout.version`;
+   * null outside text. Selection and focus stay where they are.
+   */
+  getPositionAtPoint(clientX: number, clientY: number): DocxPluginPointPosition | null;
 }
 
 export type DocxPluginNavigationFailureCode =

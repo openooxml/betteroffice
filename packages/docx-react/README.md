@@ -277,6 +277,12 @@ content); in suggesting mode every step must carry `suggest`. The promise reject
 flushes. `proposeChange`, `addComment` and `applyFormatting` resolve their
 `{ paraId, search }` targets through the same Rust resolver in the accepted view.
 
+`getPositionAtPoint(clientX, clientY)` returns the text under a client point, such
+as a drop target, with the `version` its layout shows and a collapsed
+accepted-view `target` to insert at with `expectVersion: version`. It never moves
+selection or focus, and returns null outside text and while the rendered layout is
+behind the document.
+
 `listContentControls()` and `findContentControls(query)` flush the same way and
 list the document's content controls with the version they were read at; fill
 plain- and rich-text controls with `setContentControlText` steps through
@@ -377,7 +383,10 @@ const review = defineDocxPlugin<State>({
   current version, and whenever it falls behind. `geometry.dom` answers in
   pages-container units divided by zoom; `geometry.toOverlayRect(rect)` converts
   one of those rectangles into pixels of the unscaled overlay layer, once, or
-  returns null after that layout stops being rendered. `geometry.dom` is
+  returns null after that layout stops being rendered.
+  `geometry.getPositionAtPoint(clientX, clientY)` returns the text under a client
+  point with the layout's `layoutId` and `version` and an edit batch `target`, or
+  null likewise. `geometry.dom` is
   experimental and may be replaced by a data-only facade. The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit

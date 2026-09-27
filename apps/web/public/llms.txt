@@ -28,8 +28,10 @@ PPTX pictures stored as SVG render in both backends. The browser packages hand t
 
 DOCX `RenderedDomContext.getPositionAtPoint(clientX, clientY)` resolves a pointer to
 a display position, page, and document region without changing focus or selection.
-`PagedEditorRef.displayPositionToYrsLoc(hit)` maps the hit into its editing location,
-including headers, footers, notes, and tables.
+`DocxEditorRef.getPositionAtPoint` and plugin `geometry.getPositionAtPoint` add the
+`version` the layout shows and a collapsed accepted-view `target` for edit batch steps,
+in body, header, footer, note and table cell stories, and return null while the layout
+is behind the document.
 
 The XLSX and PPTX JavaScript cores expose opt-in operation profiles for edit and render/layout timings. Ordinary methods retain their existing return types; see the [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) for the profiling APIs.
 

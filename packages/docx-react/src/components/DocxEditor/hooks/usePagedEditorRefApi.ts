@@ -81,6 +81,7 @@ interface RefApiInputs {
   applyYrsCommandRef: React.MutableRefObject<(command: YrsEditorCommand) => boolean>;
   getYrsPositionProjectionRef: React.MutableRefObject<() => YrsPositionProjection | null>;
   displayPositionToYrsLocRef: React.MutableRefObject<PagedEditorRef['displayPositionToYrsLoc']>;
+  getPositionAtPointRef: React.MutableRefObject<PagedEditorRef['getPositionAtPoint']>;
 }
 
 function storyOffsetToLoc(session: YrsSession, story: string, offset: number): YrsLoc | null {
@@ -120,6 +121,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
     displayPositionToYrsLocRef,
+    getPositionAtPointRef,
   } = inputs;
 
   const setDisplaySelection = (anchor: number, head = anchor): void => {
@@ -189,6 +191,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
         : null;
     },
     displayPositionToYrsLoc: (position) => displayPositionToYrsLocRef.current(position),
+    getPositionAtPoint: (clientX, clientY) => getPositionAtPointRef.current(clientX, clientY),
     getYrsSession: () => yrsSessionRef.current,
     flushPendingInput: async () => {
       const input = yrsInputRef.current;
@@ -270,6 +273,7 @@ export interface UsePagedEditorRefApiOptions {
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   getYrsPositionProjection: () => YrsPositionProjection | null;
   displayPositionToYrsLoc: PagedEditorRef['displayPositionToYrsLoc'];
+  getPositionAtPoint: PagedEditorRef['getPositionAtPoint'];
 }
 
 export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
@@ -293,6 +297,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     applyYrsCommand,
     getYrsPositionProjection,
     displayPositionToYrsLoc,
+    getPositionAtPoint,
   } = opts;
   const documentFromYrsRef = useRef(documentFromYrs);
   const yrsSessionRef = useRef(yrsSession);
@@ -302,6 +307,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const applyYrsCommandRef = useRef(applyYrsCommand);
   const getYrsPositionProjectionRef = useRef(getYrsPositionProjection);
   const displayPositionToYrsLocRef = useRef(displayPositionToYrsLoc);
+  const getPositionAtPointRef = useRef(getPositionAtPoint);
   documentFromYrsRef.current = documentFromYrs;
   yrsSessionRef.current = yrsSession;
   yrsLocToDisplayPositionRef.current = yrsLocToDisplayPosition;
@@ -310,6 +316,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   applyYrsCommandRef.current = applyYrsCommand;
   getYrsPositionProjectionRef.current = getYrsPositionProjection;
   displayPositionToYrsLocRef.current = displayPositionToYrsLoc;
+  getPositionAtPointRef.current = getPositionAtPoint;
 
   const inputs = {
     yrsInputRef,
@@ -329,6 +336,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
     displayPositionToYrsLocRef,
+    getPositionAtPointRef,
   };
 
   useImperativeHandle(ref, () => buildRefApi(inputs), [

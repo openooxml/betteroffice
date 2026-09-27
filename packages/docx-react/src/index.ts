@@ -103,6 +103,7 @@ export type {
   DocxPluginNavigation,
   DocxPluginNavigationFailureCode,
   DocxPluginPanel,
+  DocxPluginPointPosition,
   DocxPluginReadClient,
   DocxPluginRect,
   DocxPluginRefusal,
@@ -120,8 +121,12 @@ export type {
   DocxPluginCommandResult,
   DocxPluginCommandState,
 } from './commands/types';
-export type { SelectionState } from './components/DocxEditor/types';
-export type { RenderedDomContext, PositionCoordinates } from '@betteroffice/docx/plugin-api';
+export type { DocxPointPosition, SelectionState } from './components/DocxEditor/types';
+export type {
+  RenderedDomContext,
+  PositionCoordinates,
+  PointPosition,
+} from '@betteroffice/docx/plugin-api';
 
 export type { BundledFontProvider } from '@betteroffice/docx/layout';
 export {

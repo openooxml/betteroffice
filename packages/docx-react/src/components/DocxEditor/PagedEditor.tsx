@@ -135,7 +135,8 @@ import {
   type YrsPositionProjection,
 } from './internals/yrsPositionProjection';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
-import type { DocxEditorCollaborationOptions } from './types';
+import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
+import { positionAtClientPoint } from './internals/pointPosition';
 
 export { DEFAULT_PAGE_WIDTH };
 
@@ -372,8 +373,17 @@ export interface PagedEditorRef {
   selectAll(): void;
   /** Get the current display-position selection. */
   getSelectionRange(): { from: number; to: number } | null;
-  /** Resolve a body position or region-aware hit into an authoritative Yrs location. */
+  /**
+   * Resolve a body position or region-aware hit into an authoritative Yrs location, against the
+   * current document. A hit from a layout behind the document maps to the wrong place; prefer
+   * {@link getPositionAtPoint}, which refuses one.
+   */
   displayPositionToYrsLoc(position: number | PointPosition): YrsLoc | null;
+  /**
+   * The text under a client point with an edit batch target, without moving selection or focus.
+   * Null outside text and while the rendered layout does not show the current version.
+   */
+  getPositionAtPoint(clientX: number, clientY: number): DocxPointPosition | null;
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
   /** Commits accepted input and selection; waits for active IME composition. */
@@ -1710,6 +1720,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       renderEnv: yrsRenderEnv,
     });
 
+    const displayPositionToYrsLoc = (position: number | PointPosition): YrsLoc | null => {
+      const target = projectYrsDisplayPosition(position, getYrsPositionProjection);
+      return target ? yrsCore.displayPositionToLoc(target.displayPosition, target.story) : null;
+    };
+
     // Imperative-handle setup — exposes PagedEditorRef + mirrors via onReady.
     usePagedEditorRefApi({
       ref,
@@ -1731,10 +1746,16 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       applyYrsFormatting,
       applyYrsCommand,
       getYrsPositionProjection: () => getYrsPositionProjection('body'),
-      displayPositionToYrsLoc: (position) => {
-        const target = projectYrsDisplayPosition(position, getYrsPositionProjection);
-        return target ? yrsCore.displayPositionToLoc(target.displayPosition, target.story) : null;
-      },
+      displayPositionToYrsLoc,
+      getPositionAtPoint: (clientX, clientY) =>
+        positionAtClientPoint(
+          { getYrsSession: () => yrsCore.session, displayPositionToYrsLoc },
+          canvasHostRef?.current,
+          displayListQueries,
+          zoom,
+          clientX,
+          clientY
+        ),
     });
 
     usePagedEditorCommandBridge({
