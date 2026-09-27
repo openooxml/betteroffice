@@ -81,6 +81,11 @@
   delete rows, columns or sheets, and refuse writes to merged-cell followers,
   array-formula cells and protected sheets.
 
+- **Host-owned DOCX plugins.** DOCX React supports host-owned plugins with
+  panels, overlays, sidebar items, lifecycle events, and explicitly granted
+  commands and edit batches. Plugins read and navigate by default; every write
+  is checked against its grant, the editor mode and document policy when it runs.
+
 - **Structured XLSX export.** XLSX exports bounded sparse worksheet content and
   Markdown with positional anchors, formulas, stored values, formatted text,
   explicit hidden-content options, and omission diagnostics. Export does not
