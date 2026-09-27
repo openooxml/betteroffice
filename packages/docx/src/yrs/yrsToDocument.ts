@@ -2019,6 +2019,8 @@ interface SessionProjectionMemo {
   clean: Set<string>;
   dirty: Set<string>;
   stories: Map<string, ProjectedStory>;
+  /** The story each nested story was last projected inside. */
+  parents: Map<string, string>;
 }
 
 const projectedBlocks = new WeakMap<BlockContent, ProjectedBlockMemo>();
@@ -2053,7 +2055,13 @@ const sessionProjectionMemos = new WeakMap<YrsSession, SessionProjectionMemo>();
 function sessionProjectionMemo(session: YrsSession): SessionProjectionMemo {
   let memo = sessionProjectionMemos.get(session);
   if (!memo) {
-    memo = { wholesale: true, clean: new Set(), dirty: new Set(), stories: new Map() };
+    memo = {
+      wholesale: true,
+      clean: new Set(),
+      dirty: new Set(),
+      stories: new Map(),
+      parents: new Map(),
+    };
     sessionProjectionMemos.set(session, memo);
   }
   return memo;
@@ -2088,16 +2096,21 @@ export function noteYrsStoriesDirty(
     memo.clean.clear();
     memo.dirty.clear();
     memo.stories.clear();
+    memo.parents.clear();
     return;
   }
   const queue = typeof stories === 'string' ? [stories] : [...stories];
+  const queued = new Set(queue);
   for (let index = 0; index < queue.length; index += 1) {
     const story = queue[index]!;
     memo.dirty.add(story);
     memo.clean.delete(story);
     memo.stories.delete(story);
-    const parent = NESTED_STORY_ID.exec(story)?.[1];
-    if (parent) queue.push(parent);
+    const parent = memo.parents.get(story) ?? NESTED_STORY_ID.exec(story)?.[1];
+    if (parent && !queued.has(parent)) {
+      queued.add(parent);
+      queue.push(parent);
+    }
   }
 }
 
@@ -2129,10 +2142,11 @@ class SaveContext {
       : !this.memo.dirty.has(storyId);
   }
 
-  private cellContents(payload: TablePayload): BlockContent[][] {
+  private cellContents(payload: TablePayload, parent: string): BlockContent[][] {
     const contents: BlockContent[][] = [];
     for (const row of Array.isArray(payload.rows) ? payload.rows : []) {
       for (const cell of Array.isArray(row.cells) ? row.cells : []) {
+        if (cell.story !== undefined) this.memo.parents.set(cell.story, parent);
         contents.push(
           cell.story !== undefined && this.storyIds.has(cell.story)
             ? this.storyToBlocks(cell.story)
@@ -2282,7 +2296,7 @@ class SaveContext {
         const firstCell = Array.isArray(payload.rows) ? payload.rows[0]?.cells?.[0] : undefined;
         const key = `T${firstCell?.story ?? ''}`;
         const contents =
-          candidatesFor(key).length > 0 ? this.cellContents(payload) : undefined;
+          candidatesFor(key).length > 0 ? this.cellContents(payload, storyId) : undefined;
         const reused =
           contents !== undefined
             ? (reuseContainer(key, inputs, contents) as Table | undefined)
@@ -2295,12 +2309,13 @@ class SaveContext {
           projectedBlocks.set(table, {
             key,
             inputs,
-            children: contents ?? this.cellContents(payload),
+            children: contents ?? this.cellContents(payload, storyId),
           });
         }
         blocks.push(table);
       } else if (segment.embedKind === 'blockSdt') {
         const childStory = asString(segment.payload.story);
+        if (childStory) this.memo.parents.set(childStory, storyId);
         const childContent =
           childStory && this.storyIds.has(childStory)
             ? this.storyToBlocks(childStory)
