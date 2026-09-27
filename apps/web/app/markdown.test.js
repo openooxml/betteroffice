@@ -55,6 +55,12 @@ describe("homepage markdown", () => {
     }
   });
 
+  test("names the XLSX core's structured export", () => {
+    const xlsx = PACKAGES.find((pkg) => pkg.name === "@betteroffice/xlsx");
+    expect(xlsx.desc).toContain("anchored JSON and Markdown export");
+    expect(markdown).toContain(xlsx.desc);
+  });
+
   test("states the PPTX structured export", () => {
     const pptx = PACKAGES.find((pkg) => pkg.name === "@betteroffice/pptx");
     expect(pptx.desc).toContain("structured JSON and Markdown export with anchors");

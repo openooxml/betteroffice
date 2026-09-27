@@ -220,7 +220,7 @@ fn parse_cell(text: &str) -> Option<CellRef> {
         .map(|cell| CellRef::new(cell.row, cell.col))
 }
 
-fn parse_range(address: &RangeAddress) -> std::result::Result<CellRange, String> {
+pub(crate) fn parse_range(address: &RangeAddress) -> std::result::Result<CellRange, String> {
     let (start, end) = match address {
         RangeAddress::A1 { a1 } => {
             let (start, end) = a1.split_once(':').unwrap_or((a1, a1));

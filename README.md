@@ -91,6 +91,11 @@
   commands and edit batches. Plugins read and navigate by default; every write
   is checked against its grant, the editor mode and document policy when it runs.
 
+- **Host-owned PPTX plugins.** PPTX React supports host-owned plugins with
+  panels, overlays, lifecycle events, and explicitly granted commands and edit
+  batches. Plugins read and navigate by default; every write is checked against
+  its grant and `readOnly` when it runs.
+
 - **Structured PPTX export.** PPTX JavaScript, Rust and Python hosts export
   structured slide content and Markdown with session or snapshot anchors,
   explicit hidden-content and notes/comment options, and omission diagnostics.
@@ -98,6 +103,11 @@
 - **Structured DOCX export.** DOCX exports read-only structured JSON and
   Markdown with source anchors, explicit story and revision options, and
   omission diagnostics. Page fragments are not yet included.
+
+- **Structured XLSX export.** XLSX exports bounded sparse worksheet content and
+  Markdown with positional anchors, formulas, stored values, formatted text,
+  explicit hidden-content options, and omission diagnostics. Export does not
+  recalculate formulas.
 
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.

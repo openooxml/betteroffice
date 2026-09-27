@@ -150,21 +150,29 @@ export function frameBoundsForShape(
   frame: SlideDisplayList,
   shape: ShapeSnapshot
 ): FrameBounds | null {
+  const rendered = renderedShapeBounds(frame, shape);
+  if (rendered) return rendered;
+  const rect = effectiveShapeRect(shape);
+  if (!rect || deck.widthEmu <= 0 || deck.heightEmu <= 0) return null;
+  return {
+    x: (rect.x * frame.width) / deck.widthEmu,
+    y: (rect.y * frame.height) / deck.heightEmu,
+    width: (rect.width * frame.width) / deck.widthEmu,
+    height: (rect.height * frame.height) / deck.heightEmu,
+  };
+}
+
+/** The bounds of what `frame` draws for `shape` and its descendants; null when it draws nothing. */
+export function renderedShapeBounds(
+  frame: SlideDisplayList,
+  shape: ShapeSnapshot
+): FrameBounds | null {
   const shapeIds = new Set<string>();
   collectShapeIds(shape, shapeIds);
   const primitives = frame.primitives.filter(
     (primitive) => primitive.shapeId && shapeIds.has(primitive.shapeId)
   );
-  if (primitives.length === 0) {
-    const rect = effectiveShapeRect(shape);
-    if (!rect || deck.widthEmu <= 0 || deck.heightEmu <= 0) return null;
-    return {
-      x: (rect.x * frame.width) / deck.widthEmu,
-      y: (rect.y * frame.height) / deck.heightEmu,
-      width: (rect.width * frame.width) / deck.widthEmu,
-      height: (rect.height * frame.height) / deck.heightEmu,
-    };
-  }
+  if (primitives.length === 0) return null;
   const bounds = primitives.map((primitive) => {
     const angle = ((primitive.transform?.rotationDeg ?? 0) * Math.PI) / 180;
     const width = Math.abs(primitive.w * Math.cos(angle)) + Math.abs(primitive.h * Math.sin(angle));

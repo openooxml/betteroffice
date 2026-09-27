@@ -120,6 +120,10 @@ const REASON_KEYS: Record<PptxCommandFailureCode, TranslationKey> = {
   'host-disabled': 'commands.reasons.hostDisabled',
   'unsupported-command': 'commands.reasons.unsupportedCommand',
   'invalid-arguments': 'commands.reasons.invalidArguments',
+  'permission-denied': 'commands.reasons.permissionDenied',
+  'unsupported-policy': 'commands.reasons.unsupportedPolicy',
+  'plugin-unavailable': 'commands.reasons.pluginUnavailable',
+  aborted: 'commands.reasons.aborted',
   'input-failed': 'commands.reasons.inputFailed',
   'document-replaced': 'commands.reasons.documentReplaced',
   'target-changed': 'commands.reasons.targetChanged',
@@ -598,6 +602,16 @@ function choiceState<K extends PptxCommandId>(
   return state.enabled
     ? { ...active, enabled: true }
     : { ...active, enabled: false, disabledReason: state.disabledReason };
+}
+
+/** The editor's gate for a contributed command; null when it passes. */
+export function contributedCommandGate(
+  mutatesDocument: boolean,
+  env: PptxCommandEnvironment | null
+): CommandReason<PptxCommandDisabledCode> | null {
+  if (!env) return commandReason('editor-unavailable', null);
+  const gate = mutatesDocument ? writeGate(env) : documentGate(env);
+  return gate ? commandReason(gate, env) : null;
 }
 
 /** The single availability gate for snapshots and execution. */

@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 use serde::{Deserialize, Serialize};
 
@@ -307,6 +307,62 @@ impl Sheet {
         })
     }
 
+    /// stored cells inside `range`, row-major, without enumerating its empty
+    /// positions: each step seeks the next stored cell.
+    pub fn cells_in_range(&self, range: CellRange) -> SparseCells<'_> {
+        SparseCells {
+            cells: &self.cells,
+            range,
+            next: Some((range.start.row, range.start.col)),
+            seeks: 0,
+        }
+    }
+
+    /// whether `row` has no height: hidden, authored at zero, or unsized under
+    /// `zeroHeight`. rendering and export share this reading.
+    pub fn row_hidden(&self, row: RowId) -> bool {
+        match self.row_heights.get(&row) {
+            Some(&height) => no_extent(height),
+            None => self.format.zero_height,
+        }
+    }
+
+    /// whether `col` has no width: hidden or authored at zero.
+    pub fn col_hidden(&self, col: ColId) -> bool {
+        self.col_widths
+            .get(&col)
+            .is_some_and(|&width| no_extent(width))
+    }
+
+    /// maximal runs of rows inside `rows` that [`Sheet::row_hidden`] hides, as
+    /// inclusive pairs in order; costs one step per sized row, not per row.
+    pub fn hidden_row_spans(
+        &self,
+        rows: RangeInclusive<RowId>,
+    ) -> impl Iterator<Item = (RowId, RowId)> + '_ {
+        HiddenSpans::new(
+            self.row_heights
+                .range(rows.clone())
+                .map(|(&row, &height)| (row, no_extent(height))),
+            rows,
+            self.format.zero_height,
+        )
+    }
+
+    /// maximal runs of columns inside `cols` that [`Sheet::col_hidden`] hides.
+    pub fn hidden_col_spans(
+        &self,
+        cols: RangeInclusive<ColId>,
+    ) -> impl Iterator<Item = (ColId, ColId)> + '_ {
+        HiddenSpans::new(
+            self.col_widths
+                .range(cols.clone())
+                .map(|(&col, &width)| (col, no_extent(width))),
+            cols,
+            false,
+        )
+    }
+
     pub fn hyperlink_at(&self, at: CellRef) -> Option<&Hyperlink> {
         self.hyperlinks.iter().find(|link| link.range.contains(at))
     }
@@ -336,6 +392,126 @@ impl Sheet {
             CellRef::new(min_r, min_c),
             CellRef::new(max_r, max_c),
         ))
+    }
+}
+
+fn no_extent(extent: f64) -> bool {
+    extent <= 0.0
+}
+
+/// runs of hidden indices from the sized entries of one axis; an index without
+/// an entry is hidden when `unsized_hidden`.
+struct HiddenSpans<I> {
+    sized: I,
+    next: Option<u32>,
+    last: u32,
+    unsized_hidden: bool,
+    run: Option<(u32, u32)>,
+}
+
+impl<I: Iterator<Item = (u32, bool)>> HiddenSpans<I> {
+    fn new(sized: I, span: RangeInclusive<u32>, unsized_hidden: bool) -> Self {
+        let (first, last) = span.into_inner();
+        Self {
+            sized,
+            next: (first <= last).then_some(first),
+            last,
+            unsized_hidden,
+            run: None,
+        }
+    }
+
+    /// classifies `start..=end`, returning the run a visible index closes.
+    fn mark(&mut self, start: u32, end: u32, hidden: bool) -> Option<(u32, u32)> {
+        if start > end {
+            return None;
+        }
+        if hidden {
+            self.run = Some((self.run.map_or(start, |(first, _)| first), end));
+            None
+        } else {
+            self.run.take()
+        }
+    }
+}
+
+impl<I: Iterator<Item = (u32, bool)>> Iterator for HiddenSpans<I> {
+    type Item = (u32, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let Some(next) = self.next else {
+                return self.run.take();
+            };
+            let closed = match self.sized.next() {
+                Some((index, hidden)) => {
+                    let gap = match index.checked_sub(1) {
+                        Some(before) if index > next => {
+                            self.mark(next, before, self.unsized_hidden)
+                        }
+                        _ => None,
+                    };
+                    self.next = index.checked_add(1).filter(|&after| after <= self.last);
+                    gap.or(self.mark(index, index, hidden))
+                }
+                None => {
+                    self.next = None;
+                    self.mark(next, self.last, self.unsized_hidden)
+                }
+            };
+            if closed.is_some() {
+                return closed;
+            }
+        }
+    }
+}
+
+/// cursor over the stored cells of one rectangle; see [`Sheet::cells_in_range`].
+pub struct SparseCells<'a> {
+    cells: &'a BTreeMap<(RowId, ColId), Cell>,
+    range: CellRange,
+    next: Option<(RowId, ColId)>,
+    seeks: u64,
+}
+
+impl SparseCells<'_> {
+    /// map lookups made so far; rows whose stored cells all sit outside the
+    /// column band cost one each.
+    pub fn seeks(&self) -> u64 {
+        self.seeks
+    }
+
+    /// continue from the first column of the row after `row`.
+    pub fn skip_row(&mut self, row: RowId) {
+        self.next = (row < self.range.end.row).then(|| (row + 1, self.range.start.col));
+    }
+}
+
+impl<'a> Iterator for SparseCells<'a> {
+    type Item = (CellRef, &'a Cell);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let end = (self.range.end.row, self.range.end.col);
+        loop {
+            let from = self.next.filter(|from| *from <= end)?;
+            self.seeks += 1;
+            let Some((&(row, col), cell)) = self.cells.range(from..=end).next() else {
+                self.next = None;
+                return None;
+            };
+            if col < self.range.start.col {
+                self.next = Some((row, self.range.start.col));
+            } else if col > self.range.end.col {
+                self.skip_row(row);
+            } else {
+                self.next = if col < self.range.end.col {
+                    Some((row, col + 1))
+                } else {
+                    (row < self.range.end.row).then(|| (row + 1, self.range.start.col))
+                };
+                return Some((CellRef::new(row, col), cell));
+            }
+        }
     }
 }
 
@@ -502,6 +678,101 @@ mod tests {
 
         sheet.set_cell(b2, Cell::default());
         assert_eq!(sheet.used_range().unwrap().to_a1(), "D7");
+    }
+
+    #[test]
+    fn cells_in_range_seeks_only_stored_rows() {
+        let mut sheet = Sheet::new("Sheet1");
+        for a1 in ["A1", "C1", "B2", "D2", "C1000000", "B1048576"] {
+            sheet.set_cell(
+                CellRef::parse_a1(a1).unwrap(),
+                Cell {
+                    value: CellValue::Number { value: 1.0 },
+                    ..Cell::default()
+                },
+            );
+        }
+        let range = CellRange::parse_a1("B1:C1048576").unwrap();
+        let mut cells = sheet.cells_in_range(range);
+        let found = cells.by_ref().map(|(at, _)| at.to_a1()).collect::<Vec<_>>();
+        assert_eq!(found, ["C1", "B2", "C1000000", "B1048576"]);
+        assert!(cells.seeks() <= 8, "{} seeks", cells.seeks());
+
+        let mut skipping = sheet.cells_in_range(range);
+        assert_eq!(skipping.next().unwrap().0.to_a1(), "C1");
+        skipping.skip_row(1);
+        assert_eq!(skipping.next().unwrap().0.to_a1(), "C1000000");
+        assert_eq!(
+            sheet
+                .cells_in_range(CellRange::parse_a1("E1:F9").unwrap())
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn hidden_spans_agree_with_the_per_index_predicates() {
+        let mut sheet = Sheet::new("Sheet1");
+        for (row, height) in [
+            (2, 0.0),
+            (3, 0.0),
+            (5, 12.0),
+            (6, 0.0),
+            (9, 15.0),
+            (12, 0.0),
+        ] {
+            sheet.row_heights.insert(row, height);
+        }
+        for (col, width) in [(0, 0.0), (1, 8.0), (2, 0.0), (3, 0.0), (7, 0.0)] {
+            sheet.col_widths.insert(col, width);
+        }
+        let brute = |hidden: &dyn Fn(u32) -> bool, first: u32, last: u32| {
+            let mut spans: Vec<(u32, u32)> = Vec::new();
+            for index in first..=last {
+                if !hidden(index) {
+                    continue;
+                }
+                match spans.last_mut() {
+                    Some(span) if span.1 + 1 == index => span.1 = index,
+                    _ => spans.push((index, index)),
+                }
+            }
+            spans
+        };
+        for zero_height in [false, true] {
+            sheet.format.zero_height = zero_height;
+            for (first, last) in [(0, 14), (3, 9), (5, 5), (10, 11), (6, 6)] {
+                assert_eq!(
+                    sheet.hidden_row_spans(first..=last).collect::<Vec<_>>(),
+                    brute(&|row| sheet.row_hidden(row), first, last),
+                    "rows {first}..={last} zero_height={zero_height}"
+                );
+            }
+        }
+        for (first, last) in [(0, 9), (2, 3), (4, 6)] {
+            assert_eq!(
+                sheet.hidden_col_spans(first..=last).collect::<Vec<_>>(),
+                brute(&|col| sheet.col_hidden(col), first, last)
+            );
+        }
+        sheet.format.zero_height = true;
+        assert_eq!(
+            sheet.hidden_row_spans(0..=crate::addr::MAX_ROWS - 1).last(),
+            Some((10, crate::addr::MAX_ROWS - 1))
+        );
+    }
+
+    #[test]
+    fn hidden_rows_and_columns_have_no_extent() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.row_heights.insert(1, 0.0);
+        sheet.row_heights.insert(2, 15.0);
+        sheet.col_widths.insert(3, 0.0);
+        assert!(sheet.row_hidden(1));
+        assert!(!sheet.row_hidden(2) && !sheet.row_hidden(3));
+        assert!(sheet.col_hidden(3) && !sheet.col_hidden(4));
+        sheet.format.zero_height = true;
+        assert!(sheet.row_hidden(3) && !sheet.row_hidden(2));
     }
 
     #[test]
