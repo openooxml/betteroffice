@@ -58,6 +58,10 @@
   next to host actions, inside or outside the editor, through one command store
   with disabled reasons, platform-aware shortcuts, and ordered execution.
 
+- **Composable XLSX toolbars.** Replace the spreadsheet toolbar with built-in
+  controls and the formula bar in your own order. Commands run after pending
+  cell input and state why they are unavailable.
+
 - **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
   paragraphs with a session version, then apply atomic text and paragraph
   batches that commit as one undo step or return a typed refusal with nothing
