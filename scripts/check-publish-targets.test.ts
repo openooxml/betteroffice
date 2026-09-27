@@ -11,7 +11,9 @@ const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
 const packages = publishedPackageVersions();
 const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
 
-const NOT_FOUND = new Response('{"error":"Not found"}', { status: 404 });
+function notFound() {
+  return new Response('{"error":"Not found"}', { status: 404 });
+}
 
 function versions(...published: string[]) {
   return Response.json({ versions: Object.fromEntries(published.map((v) => [v, {}])) });
@@ -80,7 +82,7 @@ describe('npm publish targets', () => {
   test('a package that exists at its release version passes', async () => {
     const result = await guard('--npm', (name) => {
       const found = packages.find((entry) => entry.name === name);
-      return found ? versions(found.version) : NOT_FOUND;
+      return found ? versions(found.version) : notFound();
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`${packages[0]!.name}@${packages[0]!.version} is on npm.`);
@@ -96,7 +98,7 @@ describe('npm publish targets', () => {
   test('a package that does not exist fails, by name', async () => {
     const missing = packages[0]!.name;
     const result = await guard('--npm', (name) => {
-      if (name === missing) return NOT_FOUND;
+      if (name === missing) return notFound();
       const found = packages.find((entry) => entry.name === name);
       return versions(found!.version);
     });
@@ -120,7 +122,7 @@ describe('crates.io publish targets', () => {
 
   test('a crate that does not exist fails, by name', async () => {
     const result = await guard('--crates', (name) =>
-      name === crates[0] ? NOT_FOUND : Response.json({})
+      name === crates[0] ? notFound() : Response.json({})
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`${crates[0]} is not on crates.io.`);
@@ -130,7 +132,7 @@ describe('crates.io publish targets', () => {
   test('a bootstrap token creates missing crates, so a missing one only prints', async () => {
     const result = await guard(
       '--crates',
-      (name) => (name === crates[0] ? NOT_FOUND : Response.json({})),
+      (name) => (name === crates[0] ? notFound() : Response.json({})),
       { CRATES_IO_BOOTSTRAP_TOKEN: 'cio_bootstrap' }
     );
     expect(result.status).toBe(0);
