@@ -19,6 +19,7 @@ import {
 import { createRoomTransport } from "../../demo/app/collab/createRoomTransport";
 import type { CollaborationReplica } from "../../demo/app/collab/types";
 import type { Format } from "./bridge";
+import { savedBytes } from "./session";
 import "@betteroffice/docx-react/styles.css";
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
@@ -98,6 +99,7 @@ export default function Editor({
   onStatus(status: string): void;
 }) {
   const serializing = useRef(false);
+  const saveFailure = useRef<Error | null>(null);
   const docx = useRef<DocxEditorRef>(null);
   const xlsx = useRef<XlsxEditorApi | null>(null);
   const pptx = useRef<PptxEditorApi | null>(null);
@@ -145,10 +147,10 @@ export default function Editor({
     (bytes: Uint8Array) => callbacks.current.onSave(bytes),
     []
   );
-  const error = useCallback(
-    (error: Error) => callbacks.current.onError(error),
-    []
-  );
+  const error = useCallback((error: Error) => {
+    if (serializing.current) saveFailure.current = error;
+    callbacks.current.onError(error);
+  }, []);
   const workbookReady = useCallback(
     (api: XlsxEditorApi) => {
       xlsx.current = api;
@@ -180,6 +182,7 @@ export default function Editor({
           document.activeElement.blur();
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
         serializing.current = true;
+        saveFailure.current = null;
         try {
           const bytes =
             file.format === "docx"
@@ -187,11 +190,7 @@ export default function Editor({
               : file.format === "xlsx"
               ? xlsx.current?.handle.save()
               : pptx.current?.save();
-          if (!bytes)
-            throw new Error(
-              "The editor is still opening the file. Try again in a moment."
-            );
-          return new Uint8Array(bytes);
+          return savedBytes(bytes, saveFailure.current);
         } finally {
           serializing.current = false;
         }
