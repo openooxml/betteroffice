@@ -12,7 +12,25 @@
 import { useRef, useCallback, useState, useEffect, useMemo, forwardRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Document, Theme } from '@betteroffice/docx/types/document';
-import type { YrsLoc, YrsSession, YrsStoryRange } from '@betteroffice/docx/yrs';
+import type {
+  DocxContentControlQuery,
+  DocxContentControlsOptions,
+  DocxContentControlsResult,
+  DocxEditRequest,
+  DocxEditResult,
+  DocxExportResult,
+  DocxFindTextRequest,
+  DocxFindTextResult,
+  DocxLayoutMap,
+  DocxPageExportOptions,
+  DocxPagedStructuredContent,
+  DocxReadParagraphsRequest,
+  DocxReadParagraphsResult,
+  DocxValidationResult,
+  YrsLoc,
+  YrsSession,
+  YrsStoryRange,
+} from '@betteroffice/docx/yrs';
 import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
@@ -22,9 +40,9 @@ import {
 } from '@betteroffice/docx/layout/render';
 
 import { cn } from '../lib/utils';
-import { type SelectionFormatting } from './Toolbar';
 import type {
   DocxEditorCollaborationOptions,
+  DocxPointPosition,
   SelectionState,
   TableContextInfo,
 } from './DocxEditor/types';
@@ -42,9 +60,18 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
-import { useFormattingActions } from './DocxEditor/hooks/useFormattingActions';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
+import { commandOutcome, useDocxCommandBinding } from './DocxEditor/hooks/useDocxCommands';
+import type {
+  PagedEditorCommandBridge,
+  PagedEditorImageHandle,
+  PagedEditorSelectedImage,
+} from './DocxEditor/hooks/usePagedEditorRefApi';
+import { DocxCommandAdmissionError } from '../commands/createDocxCommandStore';
+import { DocxCommandProvider } from '../commands/DocxCommandProvider';
+import type { DocxCommandStore } from '../commands/types';
+import { EditorChromeContext, type EditorChrome } from './EditorToolbarContext';
 import { useControllableBoolean } from './DocxEditor/hooks/useControllableBoolean';
 import { useTableDialogs } from './DocxEditor/hooks/useTableDialogs';
 import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditing';
@@ -83,6 +110,11 @@ import { RULER_WIDTH } from './ui/VerticalRuler';
 import { SIDEBAR_DOCUMENT_SHIFT } from './sidebar/constants';
 import { useCommentSidebarItems, type CommentCallbacks } from '../hooks/useCommentSidebarItems';
 import type { ReactSidebarItem } from '../plugin-api/types';
+import type { DocxEditorPluginProps } from '../plugins/types';
+import { useDocxPluginHost } from '../plugins/useDocxPluginHost';
+import { PluginOverlays } from '../plugins/PluginOverlays';
+import { PluginDock } from '../plugins/PluginPanels';
+import { mergeSidebarItems } from '../plugins/PluginSidebarItems';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Translations } from '@betteroffice/docx-i18n';
 import { type PrintOptions } from './ui/PrintPreview';
@@ -109,18 +141,20 @@ import type { RenderedDomContext } from '../plugin-api/types';
 // TYPES
 // ============================================================================
 
-export type { DocxEditorCollaborationOptions } from './DocxEditor/types';
+export type { DocxEditorCollaborationOptions, DocxPointPosition } from './DocxEditor/types';
 
 /**
  * DocxEditor props
  */
-export interface DocxEditorProps {
+export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Document data — ArrayBuffer, Uint8Array, Blob, or File */
   documentBuffer?: DocxInput | null;
   /** Pre-parsed document (alternative to documentBuffer) */
   document?: Document | null;
   /** Callback when document is saved */
   onSave?: (buffer: ArrayBuffer) => void;
+  /** Owns File > Save and Cmd/Ctrl+S; return true to continue the built-in save. */
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Whether Save also downloads a copy. Defaults to true. */
   downloadOnSave?: boolean;
   /** Configure the Yrs collaboration replica used by the editor. */
@@ -177,6 +211,13 @@ export interface DocxEditorProps {
   disableFindReplaceShortcuts?: boolean;
   /** Custom toolbar actions */
   toolbarExtra?: ReactNode;
+  /**
+   * Replaces the built-in chrome: omit it for the default toolbar, pass
+   * `null` for none, or pass chrome composed from the toolbar parts. Supplied
+   * chrome also renders when `readOnly` is set; `showToolbar={false}` hides both.
+   * @experimental
+   */
+  toolbar?: ReactNode;
   /** Additional CSS class name */
   className?: string;
   /** Additional inline styles */
@@ -275,19 +316,22 @@ export interface DocxEditorProps {
   commentsSidebarOpen?: boolean;
   /** Fires with the next open state whenever the editor wants to show or hide the comments sidebar. Fires in both controlled and uncontrolled modes. */
   onCommentsSidebarOpenChange?: (open: boolean) => void;
-  /**
-   * Callback when rendered DOM context is ready (for plugin overlays).
-   * Used by PluginHost to get access to the rendered page DOM for positioning.
-   */
+  /** Receives the editor's rendered-DOM context whenever a new frame or zoom rebuilds it. */
   onRenderedDomContextReady?: (context: RenderedDomContext) => void;
   /**
-   * Plugin overlays to render inside the editor viewport.
-   * Passed from PluginHost to render plugin-specific overlays.
+   * Unmanaged overlay content, drawn under managed plugin overlays.
+   * @deprecated Contribute an `overlay` through `plugins` instead.
    */
   pluginOverlays?: ReactNode;
-  /** Sidebar items from plugins (passed from PluginHost). */
+  /**
+   * Unmanaged sidebar items, merged with comments and managed plugin items.
+   * @deprecated Contribute sidebar items through `plugins` instead.
+   */
   pluginSidebarItems?: ReactSidebarItem[];
-  /** Rendered DOM context from PluginHost (for sidebar position resolution). */
+  /**
+   * Geometry for `pluginSidebarItems`; ignored while `plugins` are installed.
+   * @deprecated The editor supplies its own geometry.
+   */
   pluginRenderedDomContext?: RenderedDomContext | null;
   /** Custom logo/icon for the title bar */
   renderLogo?: () => ReactNode;
@@ -314,10 +358,65 @@ export interface DocxEditorProps {
  * DocxEditor ref interface
  */
 export interface DocxEditorRef {
+  /**
+   * The editor's commands, shared by built-in and host chrome.
+   * @experimental
+   */
+  readonly commands: DocxCommandStore;
   /** Get the current document */
   getDocument: () => Document | null;
   /** Get the editor ref */
   getEditorRef: () => PagedEditorRef | null;
+  /** Commits accepted input and selection; waits for active IME composition. */
+  flushPendingInput: () => Promise<void>;
+  /**
+   * Flushes pending input, then reads paragraph texts with the version they were read at. Build
+   * edit targets and `expectVersion` from this result.
+   */
+  readParagraphs: (request: DocxReadParagraphsRequest) => Promise<DocxReadParagraphsResult>;
+  /** Flushes pending input, then searches exactly and case-sensitively within one scope. */
+  findText: (request: DocxFindTextRequest) => Promise<DocxFindTextResult>;
+  /** Flushes pending input, then checks an edit batch without changing anything. */
+  validateEdits: (request: DocxEditRequest) => Promise<DocxValidationResult>;
+  /**
+   * Flushes pending input, then applies every step or none against `expectVersion`. A refusal
+   * is returned as data and never rolls back the flushed typing. Read-only editors refuse with
+   * `read-only`, and suggesting mode requires `suggest` on every step. Throws when the document
+   * is replaced while input is flushing.
+   */
+  applyEdits: (request: DocxEditRequest) => Promise<DocxEditResult>;
+  /**
+   * Flushes pending input, then lists the document's content controls with the version they were
+   * read at. Fill text controls with `setContentControlText` steps through {@link applyEdits}.
+   */
+  listContentControls: (options?: DocxContentControlsOptions) => Promise<DocxContentControlsResult>;
+  /** Flushes pending input, then returns the content controls matching `query` exactly. */
+  findContentControls: (
+    query: DocxContentControlQuery,
+    options?: DocxContentControlsOptions
+  ) => Promise<DocxContentControlsResult>;
+  /**
+   * Flushes pending input, then exports the document as structured content with the page map
+   * of the editor's authoritative layout of that version: the physical page, displayed page
+   * label and body, header, footer or note occurrence showing each block and inline. The layout
+   * must have been computed from the editor's current fonts, measurement defaults, render
+   * environment and pagination options; the editor lays the document out, or waits for its
+   * fonts, when it was not. The references describe that layout, which a later edit may
+   * supersede before it is painted. Refuses as data when no such layout is ready in time, and
+   * never lays out again when `expectLayoutVersion` names a layout. Throws when the document is
+   * replaced meanwhile.
+   */
+  exportStructuredWithPages: (
+    options: DocxPageExportOptions
+  ) => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>;
+  /**
+   * The text under a client point, such as a drop event's `clientX`/`clientY`, from the same
+   * hit testing as the caret, without moving selection or focus. Its `target` and `version` form
+   * an edit batch step's target and `expectVersion`. Null outside text (margins, images, page
+   * gaps), while typed or composed input is pending, and until the painted pages show the current
+   * version; retry after {@link flushPendingInput} or on the next frame.
+   */
+  getPositionAtPoint: (clientX: number, clientY: number) => DocxPointPosition | null;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */
@@ -486,8 +585,6 @@ interface EditorState {
   isLoading: boolean;
   parseError: string | null;
   zoom: number;
-  /** Current selection formatting for toolbar */
-  selectionFormatting: SelectionFormatting;
   /** Paragraph indent data for ruler */
   paragraphIndentLeft: number;
   paragraphIndentRight: number;
@@ -496,20 +593,46 @@ interface EditorState {
   paragraphTabs: import('@betteroffice/docx/types/document').TabStop[] | null;
   /** Table context for showing the table toolbar. */
   pmTableContext: TableContextInfo | null;
-  /** Image context when cursor is on an image node */
-  pmImageContext: {
-    pos: number;
-    wrapType: string;
-    displayMode: string;
-    cssFloat: string | null;
-    transform: string | null;
-    alt: string | null;
-    borderWidth: number | null;
-    borderColor: string | null;
-    borderStyle: string | null;
-    width: number | null;
-    height: number | null;
-  } | null;
+}
+
+/** The image an image dialog edits, captured when it opened. */
+interface ImageDialogTarget {
+  pos: number;
+  handle: PagedEditorImageHandle | null;
+  wrapType: string;
+  displayMode: string;
+  cssFloat: string | null;
+  transform: string | null;
+  alt: string | null;
+  borderWidth: number | null;
+  borderColor: string | null;
+  borderStyle: string | null;
+  width: number | null;
+  height: number | null;
+}
+
+function imageDialogTarget(
+  image: PagedEditorSelectedImage,
+  handle: PagedEditorImageHandle | null
+): ImageDialogTarget {
+  const { attrs } = image;
+  const text = (value: unknown) => (typeof value === 'string' ? value : null);
+  const number = (value: unknown) =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
+  return {
+    pos: image.pos,
+    handle,
+    wrapType: text(attrs.wrapType) ?? 'inline',
+    displayMode: text(attrs.displayMode) ?? 'inline',
+    cssFloat: text(attrs.cssFloat),
+    transform: text(attrs.transform),
+    alt: text(attrs.alt),
+    borderWidth: number(attrs.borderWidth),
+    borderColor: text(attrs.borderColor),
+    borderStyle: text(attrs.borderStyle),
+    width: number(attrs.width),
+    height: number(attrs.height),
+  };
 }
 
 export type { EditorMode } from './DocxEditor/internals/editing-modes';
@@ -557,6 +680,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     documentBuffer,
     document: initialDocument,
     onSave,
+    onSaveRequest,
     downloadOnSave = true,
     collaboration,
     onOpen,
@@ -580,6 +704,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     readOnly: readOnlyProp = false,
     disableFindReplaceShortcuts = false,
     toolbarExtra,
+    toolbar,
     className = '',
     style,
     placeholder,
@@ -608,6 +733,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pluginOverlays,
     pluginSidebarItems,
     pluginRenderedDomContext,
+    plugins,
+    pluginGrants,
+    onPluginError,
     renderLogo,
     documentName,
     onDocumentNameChange,
@@ -630,15 +758,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     isLoading: !!documentBuffer,
     parseError: null,
     zoom: initialZoom,
-    selectionFormatting: {},
     paragraphIndentLeft: 0,
     paragraphIndentRight: 0,
     paragraphFirstLineIndent: 0,
     paragraphHangingIndent: false,
     paragraphTabs: null,
     pmTableContext: null,
-    pmImageContext: null,
   });
+  const [imageTarget, setImageTarget] = useState<ImageDialogTarget | null>(null);
 
   const isDark = useIsDark(colorMode);
 
@@ -702,7 +829,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // Canvas renderer plumbing. `resolvedIdsForRender` reaches the Rust
   // display-list build so the canvas drops the comment wash of resolved
   // threads (and re-tints the one whose sidebar card is expanded).
-  const canvasRenderer = useCanvasRenderer(rustFontChainsProviderRef, resolvedIdsForRender);
+  const canvasRenderer = useCanvasRenderer(rustFontChainsProviderRef, resolvedIdsForRender, () =>
+    pagedEditorRef.current?.relayout()
+  );
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
   }, [canvasRenderer.error, onError]);
@@ -728,6 +857,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   };
   // 'viewing' mode acts as read-only
   const readOnly = readOnlyProp || editingMode === 'viewing';
+  const commandBridgeRef = useRef<PagedEditorCommandBridge | null>(null);
+  const writeModeRef = useRef<EditorMode>(editingMode);
+  writeModeRef.current = readOnly ? 'viewing' : editingMode;
 
   // Bridge / agent event subscribers — fan-out from the existing onChange and
   // onSelectionChange paths so multiple listeners (host app, MCP server, etc.)
@@ -741,14 +873,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     maxEntries: 100,
     groupingInterval: 500,
   });
-  const [yrsHistoryState, setYrsHistoryState] = useState({ canUndo: false, canRedo: false });
-  const handleYrsHistoryChange = useCallback((canUndo: boolean, canRedo: boolean) => {
-    setYrsHistoryState((previous) =>
-      previous.canUndo === canUndo && previous.canRedo === canRedo
-        ? previous
-        : { canUndo, canRedo }
-    );
-  }, []);
 
   // Refs (pagedEditorRef is declared earlier — useCommentManagement needs it)
   const containerRef = useRef<HTMLDivElement>(null);
@@ -762,8 +886,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     outlineHeadings,
     setHeadingInfos,
     refreshHeadings,
-    toolbarHeight,
-    toolbarRefCallback,
     editorScrollLeft,
   } = useOutlineSidebar({
     showOutlineProp,
@@ -794,7 +916,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     []
   );
 
-  const { focusActiveEditor, undoActiveEditor, redoActiveEditor } = useActiveEditor({
+  const { focusActiveEditor } = useActiveEditor({
     pagedEditorRef,
   });
 
@@ -814,7 +936,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // tracked-change allocation in this component and its hooks.
   const commentIdAllocatorRef = useRef(createCommentIdAllocator());
 
-  const { resetForNewDocument } = useResetEditorState({
+  const beginPluginLoadRef = useRef<() => void>(() => {});
+  const { resetForNewDocument: resetEditorState } = useResetEditorState({
     commentsLoadedRef,
     trackedChangesLoadedRef,
     setComments,
@@ -829,6 +952,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     clearFindReplaceMatches: useCallback(() => findReplace.setMatches([], 0), [findReplace]),
     cleanOrphanedCommentsTimerRef,
   });
+  const resetForNewDocument = useCallback(() => {
+    beginPluginLoadRef.current();
+    resetEditorState();
+  }, [resetEditorState]);
 
   const {
     loadParsedDocument,
@@ -876,7 +1003,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     imageInputRef,
     docxInputRef,
     handleSave,
-    handleDirectPrint,
+    reservePrint,
     handleDownloadDocument,
     handleOpenDocument,
     handleDocxFileChange,
@@ -884,11 +1011,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleImageFileChange,
   } = useFileIO({
     pagedEditorRef,
-    displayList: canvasRenderer.displayList,
     resolveImage: canvasRenderer.resolveImage,
     comments,
     documentName,
     onSave,
+    onSaveRequest,
     downloadOnSave,
     onOpen,
     onError,
@@ -897,6 +1024,65 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     loadBuffer,
     focusActiveEditor,
   });
+
+  const handleZoomChange = useCallback((zoom: number) => {
+    setState((prev) => ({ ...prev, zoom }));
+  }, []);
+
+  const commands = useDocxCommandBinding({
+    pagedEditorRef,
+    bridgeRef: commandBridgeRef,
+    isLoading: state.isLoading,
+    parseError: state.parseError,
+    document: history.state,
+    session: yrsCore.session,
+    readOnly: readOnlyProp,
+    mode: editingMode,
+    modeControlled: modeProp !== undefined,
+    onModeChange,
+    setEditingMode,
+    sidebarOpen: showCommentsSidebar,
+    sidebarControlled: commentsSidebarOpen !== undefined,
+    sidebarHasSetter: onCommentsSidebarOpenChange !== undefined,
+    setShowCommentsSidebar,
+    setExpandedSidebarItem,
+    zoom: state.zoom,
+    setZoom: handleZoomChange,
+    showFileOpen,
+    showHelpMenu,
+    partEditing: partEditTarget !== null,
+    fontFamilies,
+    documentFonts,
+    theme: history.state?.package.theme ?? theme ?? null,
+    i18n,
+    isDark,
+    displayListQueries: canvasRenderer.queries,
+    getCachedStyleResolver,
+    hyperlinkDialog,
+    findReplace,
+    save: handleDownloadDocument,
+    reservePrint,
+    renderedDisplayList: () =>
+      canvasRenderer.settledDisplayList(() => pagedEditorRef.current?.relayout()),
+    openDocument: handleOpenDocument,
+    pickImage: handleInsertImageClick,
+    tableAction: (action) => handleTableAction(action),
+    openImageProperties: (image) => {
+      setImageTarget(
+        imageDialogTarget(image, commandBridgeRef.current?.imageHandle(image.pos) ?? null)
+      );
+      setImagePropsOpen(true);
+    },
+    openPageSetup: () => handleOpenPageSetup(),
+    openWatermark: () => handleOpenWatermark(),
+    refreshTrackedChanges: (session) => refreshTrackedChanges(session),
+  });
+  const commandController = commands.controller;
+  const runBridgeCommand = useCallback(
+    (command: Parameters<PagedEditorCommandBridge['command']>[0]) =>
+      commandOutcome(commandBridgeRef.current?.command(command) ?? false),
+    []
+  );
 
   // Auto-open the sidebar once if the loaded document already has tracked changes.
   useCommentLifecycle({
@@ -1024,8 +1210,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const { handleYrsSelectionChange } = useSelectionTracker({
     borderSpecRef,
     theme,
-    historyStateRef,
-    getCachedStyleResolver,
     setFloatingCommentBtn,
     applySelectionDelta: useCallback(
       (delta: SelectionStateDelta) =>
@@ -1054,12 +1238,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   });
 
   useKeyboardShortcuts({
+    commands: commandController,
     pagedEditorRef,
+    containerRef,
     disableFindReplaceShortcuts,
-    showFileOpen,
-    onOpenDocument: handleOpenDocument,
-    findReplace,
-    hyperlinkDialog,
     tableSelection,
   });
 
@@ -1089,18 +1271,24 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     setImagePropsOpen,
     footnotePropsOpen,
     setFootnotePropsOpen,
-    handleImageWrapType,
-    handleImageTransform,
     handleApplyImagePosition,
-    handleOpenImageProperties,
     handleApplyImageProperties,
     handleApplyFootnoteProperties,
   } = useImageActions({
     document: history.state,
-    pmImageContext: state.pmImageContext,
-    displayListQueries: canvasRenderer.queries,
-    pagedEditorRef,
-    focusActiveEditor,
+    pmImageContext: imageTarget,
+    applyGeometry: (patch) => {
+      const handle = imageTarget?.handle ?? null;
+      void commands
+        .complete('imageProperties', () => {
+          const pos = handle ? commandBridgeRef.current?.imagePosition(handle) : null;
+          if (pos == null) throw new DocxCommandAdmissionError('target-changed');
+          return runBridgeCommand({ type: 'imageGeometry', pmPos: pos, patch });
+        })
+        .then((result) => {
+          if (result.ok && result.status === 'executed') focusActiveEditor();
+        });
+    },
     pushDocument,
   });
 
@@ -1110,31 +1298,17 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     currentTableProperties,
     handleTablePropertiesApply,
     splitCellDialogState,
-    openSplitCellDialog,
     handleTableAction,
     handleSplitCellDialogClose,
     handleSplitCellDialogApply,
   } = useTableDialogs({
     pagedEditorRef,
     borderSpecRef,
+    apply: (command) => commandBridgeRef.current?.command(command) ?? false,
+    complete: (dialog, command) => {
+      void commands.complete(dialog, () => runBridgeCommand(command));
+    },
   });
-
-  const {
-    handleFormat,
-    handleInsertTable,
-    handleInsertPageBreak,
-    handleInsertSectionBreakNextPage,
-    handleInsertSectionBreakContinuous,
-    handleInsertTOC,
-  } = useFormattingActions({
-    focusActiveEditor,
-    pagedEditorRef,
-    hyperlinkDialog,
-  });
-
-  const handleZoomChange = useCallback((zoom: number) => {
-    setState((prev) => ({ ...prev, zoom }));
-  }, []);
 
   const {
     hyperlinkPopupData,
@@ -1148,7 +1322,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleHyperlinkPopupClose,
   } = useHyperlinkActions({
     hyperlinkDialog,
-    pagedEditorRef,
+    openPopup: useCallback(() => commands.open('linkPopup'), [commands]),
+    applyCommand: (source, command) => {
+      void commands.complete(source, () => runBridgeCommand(command));
+    },
     focusActiveEditor,
   });
 
@@ -1165,7 +1342,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useContextMenus({
     pagedEditorRef,
     focusActiveEditor,
-    openSplitCellDialog,
+    runTableAction: (action) => void commandController.store.execute('tableAction', action),
     editorContentRef,
     displayListQueries: canvasRenderer.queries,
     interactionPageHostRef: canvasRenderer.canvasHostRef,
@@ -1215,11 +1392,52 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     document: history.state,
     pushDocument,
   });
+  const dialogApply = useRef({ pageSetup: handlePageSetupApply, watermark: handleWatermarkApply });
+  dialogApply.current = { pageSetup: handlePageSetupApply, watermark: handleWatermarkApply };
 
   const { scrollPageInfo, setScrollPageInfo } = useScrollPageInfo({
     scrollContainerRef,
     pagedEditorRef,
   });
+
+  const pluginOverlayTarget = useCanvasOverlayTarget((plugins?.length ?? 0) > 0, editorContentRef);
+  const pluginHost = useDocxPluginHost({
+    plugins,
+    pluginGrants,
+    onPluginError,
+    pagedEditorRef,
+    writeModeRef,
+    mode: editingMode,
+    readOnly,
+    commands: commandController,
+    session:
+      yrsCore.session &&
+      yrsCore.sessionGeneration === yrsSeedGeneration &&
+      history.state &&
+      !state.isLoading &&
+      !state.parseError
+        ? yrsCore.session
+        : null,
+    loadGeneration: yrsSeedGeneration,
+    queries: canvasRenderer.queries,
+    zoom: state.zoom,
+    canvasHostRef: canvasRenderer.canvasHostRef,
+    overlayTarget: pluginOverlayTarget,
+    selectionChangeSubscribersRef,
+    i18n,
+    onRenderedDomContextReady,
+  });
+  beginPluginLoadRef.current = pluginHost.beginLoad;
+  const sidebarDomContext = pluginHost.managed
+    ? pluginHost.renderedDomContext
+    : (pluginRenderedDomContext ?? null);
+  useEffect(() => {
+    if (pluginHost.managed && pluginRenderedDomContext) {
+      console.warn(
+        '[DocxEditor] pluginRenderedDomContext is ignored while plugins are installed; the editor supplies its own geometry.'
+      );
+    }
+  }, [pluginHost.managed, pluginRenderedDomContext]);
 
   // Handle save
   // Handle error from editor
@@ -1240,6 +1458,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useFindReplaceBridge({
     pagedEditorRef,
     findReplace,
+    complete: (write) => commands.complete('replace', write),
   });
 
   // Canvas-mode find highlights. The bridge stores the live display range on every
@@ -1305,7 +1524,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     historyStateRef,
     pagedEditorRef,
     handleSave,
-    handleDirectPrint,
     zoom: state.zoom,
     setZoom: (zoom: number) => setState((prev) => ({ ...prev, zoom })),
     scrollPageInfo,
@@ -1318,6 +1536,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     selectionChangeSubscribersRef,
     getCachedStyleResolver,
     commentIdAllocator: commentIdAllocatorRef.current,
+    commands: commandController.store,
+    modeRef: writeModeRef,
   });
 
   const initialSectionProperties = useMemo(
@@ -1433,6 +1653,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       setAddCommentYPosition(null);
     },
     onAcceptChange: (from, to) => {
+      if (readOnly) return;
       const editor = pagedEditorRef.current;
       const session = editor?.getYrsSession();
       const range = editor ? displayRangeToYrsRange(editor, from, to) : null;
@@ -1442,6 +1663,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       refreshTrackedChanges(session);
     },
     onRejectChange: (from, to) => {
+      if (readOnly) return;
       const editor = pagedEditorRef.current;
       const session = editor?.getYrsSession();
       const range = editor ? displayRangeToYrsRange(editor, from, to) : null;
@@ -1451,27 +1673,21 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       refreshTrackedChanges(session);
     },
     onAcceptChangeById: (revisionId) => {
-      const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
-      const revision = session
+      const revision = pagedEditorRef.current
+        ?.getYrsSession()
         ?.listRevisions()
         .find((candidate) => yrsIdToNumericId(candidate.revisionId) === revisionId);
-      if (revision && session) {
-        session.acceptChange({ revisionId: revision.revisionId });
-        editor?.syncYrsInputState(true);
-        refreshTrackedChanges(session);
+      if (revision) {
+        void commandController.store.execute('reviewAccept', { revisionId: revision.revisionId });
       }
     },
     onRejectChangeById: (revisionId) => {
-      const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
-      const revision = session
+      const revision = pagedEditorRef.current
+        ?.getYrsSession()
         ?.listRevisions()
         .find((candidate) => yrsIdToNumericId(candidate.revisionId) === revisionId);
-      if (revision && session) {
-        session.rejectChange({ revisionId: revision.revisionId });
-        editor?.syncYrsInputState(true);
-        refreshTrackedChanges(session);
+      if (revision) {
+        void commandController.store.execute('reviewReject', { revisionId: revision.revisionId });
       }
     },
     onTrackedChangeReply: (revisionId, text) => {
@@ -1510,12 +1726,24 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     addCommentYPosition,
   });
 
-  const allSidebarItems = useMemo(() => {
-    const items: ReactSidebarItem[] = [];
-    if (showCommentsSidebar) items.push(...commentSidebarItems);
-    if (pluginSidebarItems) items.push(...pluginSidebarItems);
-    return items;
-  }, [showCommentsSidebar, commentSidebarItems, pluginSidebarItems]);
+  const allSidebarItems = useMemo(
+    () =>
+      mergeSidebarItems(
+        showCommentsSidebar ? commentSidebarItems : [],
+        pluginSidebarItems ?? [],
+        pluginHost.sidebarItems
+      ),
+    [showCommentsSidebar, commentSidebarItems, pluginSidebarItems, pluginHost.sidebarItems]
+  );
+
+  useEffect(() => {
+    if (
+      expandedSidebarItem?.startsWith('plugin:') &&
+      !allSidebarItems.some((item) => item.id === expandedSidebarItem)
+    ) {
+      setExpandedSidebarItem(null);
+    }
+  }, [allSidebarItems, expandedSidebarItem]);
 
   // Build a map from insertion revisionIds to sidebar item IDs for replacement tracked changes.
   // This allows clicking the insertion part of a replacement to activate the same sidebar card.
@@ -1529,7 +1757,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     return map;
   }, [trackedChanges]);
 
-  const sidebarOpen = allSidebarItems.length > 0;
+  const sidebarOpen = allSidebarItems.some((item) => !item.hidden);
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.
   const outlineLeftAllowance =
@@ -1558,20 +1786,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const minLayoutWidth =
     2 * outlineLeftAllowance + maxPageWidthPx + (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0);
 
-  const liveYrsStory = (() => {
-    try {
-      return pagedEditorRef.current?.getYrsSession()?.selection()?.head.story;
-    } catch {
-      return undefined;
-    }
-  })();
-  const toolbarTableContext =
-    liveYrsStory && /:t\d+:r\d+c\d+/.test(liveYrsStory)
-      ? state.pmTableContext?.isInTable
-        ? state.pmTableContext
-        : { isInTable: true, canSplitCell: true }
-      : state.pmTableContext;
-
   // pageWidthPx — the final section's width — positions the sidebar / comment
   // margin markers against the page most content lives under.
   const sectionPropsPageWidth = docBody?.finalSectionProperties?.pageWidth;
@@ -1587,6 +1801,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     // selection event so range/caret announcements are never lost to toolbar
     // state deduplication.
     canvasA11yNotifyRef.current?.();
+    pluginHost.publishSelection();
     const session = pagedEditorRef.current?.getYrsSession();
     const head = session?.selection()?.head;
     if (!session || !head) return;
@@ -1629,7 +1844,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       setShowCommentsSidebar(true);
     }
     setExpandedSidebarItem(cursorSidebarItem);
-  }, [comments, resolvedCommentIds, commentSidebarItems, revisionIdAliases, setShowCommentsSidebar]);
+  }, [
+    comments,
+    resolvedCommentIds,
+    commentSidebarItems,
+    revisionIdAliases,
+    setShowCommentsSidebar,
+    pluginHost.publishSelection,
+  ]);
 
   const handleYrsToolbarSelectionChange = useCallback(
     (selection: YrsToolbarSelection) => {
@@ -1658,6 +1880,26 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     position: 'relative',
     overflowAnchor: 'none',
   };
+
+  const chromeContext = useMemo<EditorChrome>(
+    () => ({ showZoomControl, toolbarExtra }),
+    [showZoomControl, toolbarExtra]
+  );
+  const chrome = !showToolbar ? null : toolbar !== undefined ? (
+    toolbar !== null && (
+      <div className="z-50 flex flex-col gap-0 flex-shrink-0">
+        {toolbar}
+      </div>
+    )
+  ) : readOnlyProp ? null : (
+    <DocxEditorToolbar
+      renderLogo={renderLogo}
+      documentName={documentName}
+      onDocumentNameChange={onDocumentNameChange}
+      documentNameEditable={documentNameEditable}
+      renderTitleBarRight={renderTitleBarRight}
+    />
+  );
 
   // Render loading state
   if (state.isLoading) {
@@ -1725,7 +1967,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   };
 
   return (
-    <>
+    <DocxCommandProvider commands={commandController.store}>
       <DocxEditorShell
         i18n={i18n}
         isDark={isDark}
@@ -1743,7 +1985,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         showOutlineButton={showOutlineButton}
         sidebarOpen={sidebarOpen}
         minLayoutWidth={minLayoutWidth}
-        toolbarHeight={toolbarHeight}
         editorScrollLeft={editorScrollLeft}
         expandedSidebarItem={expandedSidebarItem}
         trackedChanges={trackedChanges}
@@ -1779,62 +2020,24 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           headings: outlineHeadings,
           onHeadingClick: handleHeadingInfoClick,
           onClose: () => setShowOutline(false),
-          topOffset: toolbarHeight,
           scrollLeft: editorScrollLeft,
         }}
         onToggleOutline={handleToggleOutline}
         scrollPageInfo={scrollPageInfo}
+        renderDock={(placement, available) => (
+          <PluginDock
+            host={pluginHost.host}
+            placement={placement}
+            activations={pluginHost.activations.filter(
+              (activation) => activation.plugin.panel?.placement === placement
+            )}
+            available={available}
+          />
+        )}
         toolbar={
-          showToolbar && !readOnlyProp ? (
-            <DocxEditorToolbar
-              toolbarRefCallback={toolbarRefCallback}
-              document={history.state}
-              theme={theme}
-              authoritativeCanUndo={yrsHistoryState.canUndo}
-              authoritativeCanRedo={yrsHistoryState.canRedo}
-              selectionFormatting={state.selectionFormatting}
-              tableContext={toolbarTableContext}
-              imageContext={state.pmImageContext}
-              readOnly={readOnly}
-              editingMode={editingMode}
-              setEditingMode={setEditingMode}
-              setShowCommentsSidebar={setShowCommentsSidebar}
-              setExpandedSidebarItem={setExpandedSidebarItem}
-              showCommentsSidebar={showCommentsSidebar}
-              renderLogo={renderLogo}
-              documentName={documentName}
-              onDocumentNameChange={onDocumentNameChange}
-              documentNameEditable={documentNameEditable}
-              renderTitleBarRight={renderTitleBarRight}
-              toolbarExtra={toolbarExtra}
-              fontFamilies={fontFamilies}
-              documentFonts={documentFonts}
-              zoom={state.zoom}
-              showZoomControl={showZoomControl}
-              onFormat={handleFormat}
-              onUndo={undoActiveEditor}
-              onRedo={redoActiveEditor}
-              onPrint={handleDirectPrint}
-              showFileOpen={showFileOpen}
-              showHelpMenu={showHelpMenu}
-              onOpen={handleOpenDocument}
-              onSave={handleDownloadDocument}
-              onZoomChange={handleZoomChange}
-              onRefocusEditor={focusActiveEditor}
-              onInsertTable={handleInsertTable}
-              onInsertImage={handleInsertImageClick}
-              onInsertPageBreak={handleInsertPageBreak}
-              onInsertSectionBreakNextPage={handleInsertSectionBreakNextPage}
-              onInsertSectionBreakContinuous={handleInsertSectionBreakContinuous}
-              onInsertTOC={handleInsertTOC}
-              onImageWrapType={handleImageWrapType}
-              onImageTransform={handleImageTransform}
-              onOpenImageProperties={handleOpenImageProperties}
-              onPageSetup={handleOpenPageSetup}
-              onWatermark={handleOpenWatermark}
-              onTableAction={handleTableAction}
-            />
-          ) : null
+          chrome && (
+            <EditorChromeContext.Provider value={chromeContext}>{chrome}</EditorChromeContext.Provider>
+          )
         }
         pagedArea={
           <CanvasPagedArea
@@ -1848,6 +2051,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             interactive={!readOnly}
           >
             <DocxEditorPagedArea
+              commandBridgeRef={commandBridgeRef}
               yrsCore={yrsCore}
               onError={reportLayoutError}
               collaboration={collaboration}
@@ -1876,10 +2080,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               measurementFontProvider={measurementFontProvider}
               rustFontChainsProviderRef={rustFontChainsProviderRef}
               onYrsContentChange={handleYrsContentChange}
-              onYrsHistoryChange={handleYrsHistoryChange}
               onPagedSelectionChange={handlePagedSelectionChange}
               onYrsSelectionChange={handleYrsToolbarSelectionChange}
-              onRenderedDomContextReady={onRenderedDomContextReady}
+              onRenderedDomContextReady={
+                pluginHost.managed || onRenderedDomContextReady
+                  ? pluginHost.onRenderedDomContext
+                  : undefined
+              }
               pluginOverlays={pluginOverlays}
               onHyperlinkClick={handleHyperlinkClick}
               hyperlinkPopupData={hyperlinkPopupData}
@@ -1894,7 +2101,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               anchorPositions={anchorPositions}
               onAnchorPositionsChange={setAnchorPositions}
               onYrsTrackedChangesChange={setYrsTrackedChangesResult}
-              pluginRenderedDomContext={pluginRenderedDomContext}
+              pluginRenderedDomContext={sidebarDomContext}
               pageWidthPx={pageWidthPx}
               expandedSidebarItem={expandedSidebarItem}
               setExpandedSidebarItem={setExpandedSidebarItem}
@@ -1941,6 +2148,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
                 }
               />
             )}
+            <PluginOverlays
+              host={pluginHost.host}
+              activations={pluginHost.activations}
+              target={pluginOverlayTarget}
+              layerRef={pluginHost.overlayLayerRef}
+            />
           </CanvasPagedArea>
         }
         overlays={
@@ -1952,7 +2165,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             imageContextMenu={imageContextMenu}
             onImageWrapApply={handleImageWrapApply}
             imageContextMenuTextActions={imageContextMenuTextActions}
-            onOpenImageProperties={handleOpenImageProperties}
+            onOpenImageProperties={() => void commandController.store.execute('imageProperties', null)}
             readOnly={readOnly}
           />
         }
@@ -1981,13 +2194,23 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             imagePropsOpen={imagePropsOpen}
             onImagePropsClose={() => setImagePropsOpen(false)}
             onApplyImageProperties={handleApplyImageProperties}
-            pmImageContext={state.pmImageContext}
+            pmImageContext={imageTarget}
             showPageSetup={showPageSetup}
             onPageSetupClose={() => setShowPageSetup(false)}
-            onPageSetupApply={handlePageSetupApply}
+            onPageSetupApply={(properties) => {
+              void commands.complete('pageSetup', () => {
+                dialogApply.current.pageSetup(properties);
+                return commandOutcome(true);
+              });
+            }}
             showWatermark={showWatermark}
             onWatermarkClose={() => setShowWatermark(false)}
-            onWatermarkApply={handleWatermarkApply}
+            onWatermarkApply={(watermark) => {
+              void commands.complete('watermark', () => {
+                dialogApply.current.watermark(watermark);
+                return commandOutcome(true);
+              });
+            }}
             currentWatermark={currentWatermark}
             watermarkPresets={watermarkPresets}
             document={history.state}
@@ -2039,7 +2262,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           zoom={state.zoom}
         />
       ) : null}
-    </>
+    </DocxCommandProvider>
   );
 });
 

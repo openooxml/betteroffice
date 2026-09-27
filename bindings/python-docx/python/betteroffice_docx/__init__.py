@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Iterator, Mapping, Union
+from typing import Any, Iterator, Mapping, Sequence, Union
 
 from ._betteroffice_docx import (
     DisplayList,
     Edit,
     EditError,
+    ExportError,
     HeaderFooter,
     Layout,
     LayoutError,
@@ -25,6 +26,7 @@ from ._betteroffice_docx import (
     TableRow,
     TextRun,
     UnsupportedEditError,
+    render_docx_markdown,
 )
 from ._betteroffice_docx import Document as _Document
 from ._betteroffice_docx import DocxError, __version__
@@ -35,6 +37,7 @@ __all__ = [
     "DocxError",
     "Edit",
     "EditError",
+    "ExportError",
     "HeaderFooter",
     "Layout",
     "LayoutError",
@@ -55,6 +58,7 @@ __all__ = [
     "TextRun",
     "UnsupportedEditError",
     "__version__",
+    "render_docx_markdown",
 ]
 
 TWIPS_PER_INCH = 1440
@@ -181,6 +185,96 @@ class Document:
         paragraph the engine cannot rebuild from a single run.
         """
         return self._inner.replace_text(para_id, text)
+
+    def export_structured(
+        self,
+        *,
+        revision_view: str,
+        stories: "Sequence[str] | None" = None,
+        include_formatting: bool = True,
+        max_blocks: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> "dict[str, Any]":
+        """Export read-only structured content as a camelCase dict.
+
+        ``revision_view`` is accepted, original, or markup; ``stories`` names
+        body (the default), headers, footers, footnotes, endnotes, and comments.
+        Anchors address this snapshot. Raises ``ExportError`` for unusable
+        limits.
+        """
+        return self._inner.export_structured(
+            revision_view=revision_view,
+            stories=None if stories is None else list(stories),
+            include_formatting=include_formatting,
+            max_blocks=max_blocks,
+            max_bytes=max_bytes,
+        )
+
+    def export_markdown(
+        self,
+        *,
+        revision_view: str,
+        stories: "Sequence[str] | None" = None,
+        include_formatting: bool = True,
+        max_blocks: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> "dict[str, Any]":
+        """``export_structured`` rendered as Markdown with source anchors.
+
+        Returns ``{"markdown", "anchors", "diagnostics", "truncated"}``. Markdown
+        does not preserve Word layout.
+        """
+        return self._inner.export_markdown(
+            revision_view=revision_view,
+            stories=None if stories is None else list(stories),
+            include_formatting=include_formatting,
+            max_blocks=max_blocks,
+            max_bytes=max_bytes,
+        )
+
+    def list_content_controls(
+        self,
+        *,
+        stories: "Sequence[str] | None" = None,
+        max_controls: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> "dict[str, Any]":
+        """List the document's content controls in document order as a camelCase dict.
+
+        Each control carries its tag, alias, type, lock, placement, anchor and
+        current ``value``. ``stories`` defaults to every category. Ids and
+        anchors address this snapshot. Filling controls needs an editing
+        session (JavaScript or React) and is not available here yet. Raises
+        ``ExportError`` for unusable limits or more controls than
+        ``max_controls``.
+        """
+        return self._inner.list_content_controls(
+            stories=None if stories is None else list(stories),
+            max_controls=max_controls,
+            max_bytes=max_bytes,
+        )
+
+    def find_content_controls(
+        self,
+        query: "Mapping[str, Any]",
+        *,
+        stories: "Sequence[str] | None" = None,
+        max_controls: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> "dict[str, Any]":
+        """The content controls matching ``query`` exactly, case-sensitively.
+
+        ``query`` is ``{"kind": "tag", "tag": ...}``, ``{"kind": "alias",
+        "alias": ...}``, ``{"kind": "ooxmlId", "ooxmlId": ...}`` (the authored
+        ``w:id``) or ``{"kind": "id", "controlId": ...}``. Every match is
+        returned; none and several are both results.
+        """
+        return self._inner.find_content_controls(
+            dict(query),
+            stories=None if stories is None else list(stories),
+            max_controls=max_controls,
+            max_bytes=max_bytes,
+        )
 
     def layout(self, input: "str | Mapping[str, Any]") -> Layout:
         """Paginate a ``{"measured": [...], "options": {...}}`` envelope.

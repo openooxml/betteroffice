@@ -82,27 +82,27 @@ export const PACKAGES_SECTION = {
 export const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with page references, document comparison into tracked changes, and undoable reanchoring of existing comments.",
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The DOCX editor as a drop-in React component.",
+    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, composable toolbar controls, version-checked edit batches, host-owned plugins with explicitly granted access, content-control discovery, and page-referenced structured export.",
   },
   {
     name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with opt-in operation timings.",
+    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with version-checked atomic cell batches, anchored JSON and Markdown export, and opt-in operation timings.",
   },
   {
     name: "@betteroffice/xlsx-react",
-    desc: "The spreadsheet editor as a drop-in React component.",
+    desc: "The spreadsheet editor as a drop-in React component, with composable toolbar controls, version-checked edit batches that flush pending input first, and host-owned plugins with explicitly granted access.",
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with opt-in operation timings.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with version-checked atomic edit batches, structured JSON and Markdown export with anchors, opt-in operation timings, manual undo boundaries, comment repositioning, and caret anchors.",
   },
   {
     name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component.",
+    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, composable toolbar controls, version-checked edit batches, and host-owned plugins with explicitly granted access.",
   },
 ];
 
@@ -128,11 +128,11 @@ export const CAPABILITIES = [
   },
   {
     name: "Undo and redo",
-    desc: "Navigate editing history and undo accepted agent proposals as a single step.",
+    desc: "Navigate editing history and undo accepted agent proposals as a single step. DOCX hosts can set explicit boundaries and choose automatic or manual grouping.",
   },
   {
     name: "Embed or automate",
-    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows.",
+    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows. DOCX paragraphs with saved Word IDs resolve to the same anchor after reopening. DOCX hosts can query pointer positions for drops and hover tools.",
   },
   {
     name: "Open source and self-hostable",

@@ -12,6 +12,12 @@ pub fn apply_image_effects(data: &mut [u8], effects: &[ImageEffect]) {
                     pixel[..3].fill(value);
                 }
             }
+            ImageEffect::Alpha { amount } => {
+                let amount = f64::from(amount.clamp(0.0, 1.0));
+                for pixel in pixels {
+                    pixel[3] = (f64::from(pixel[3]) * amount).round() as u8;
+                }
+            }
             ImageEffect::Grayscale => {
                 for pixel in pixels {
                     let value = luma(pixel).round() as u8;
@@ -130,6 +136,13 @@ mod tests {
             }],
         );
         assert_eq!(opaque, [255, 255, 255, 200]);
+    }
+
+    #[test]
+    fn alpha_mod_fix_scales_the_existing_alpha() {
+        let mut data = [255, 0, 0, 255, 0, 255, 0, 128];
+        apply_image_effects(&mut data, &[ImageEffect::Alpha { amount: 0.2 }]);
+        assert_eq!(data, [255, 0, 0, 51, 0, 255, 0, 26]);
     }
 
     #[test]

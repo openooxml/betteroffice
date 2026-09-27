@@ -30,18 +30,74 @@ describe('resolution', () => {
   });
 
   test('last resort always returns a face, serif-aware', () => {
-    expect(resolveLastResortFace('Totally Unknown', false, false).family).toBe('Liberation Sans');
+    expect(resolveLastResortFace('Totally Unknown', false, false).family).toBe('Carlito');
     expect(resolveLastResortFace('Garamond', false, false).family).toBe('Liberation Serif');
-    expect(resolveLastResortFace('Unknown', true, true).file).toBe('LiberationSans-BoldItalic.ttf');
+    expect(resolveLastResortFace('Unknown', true, true).file).toBe('Carlito-BoldItalic.ttf');
     expect(resolveLastResortFace('Calibri Light', false, false).file).toBe('Carlito-Regular.ttf');
-    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-BoldItalic.ttf');
+    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-Italic.ttf');
     expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
+  });
+
+  test('a typewriter or old-style name lands on a face of its own kind', () => {
+    expect(resolveLastResortFace('Consolas', false, false).file).toBe('LiberationMono-Regular.ttf');
+    expect(resolveLastResortFace('Lucida Console', false, false).file).toBe(
+      'LiberationMono-Regular.ttf'
+    );
+    expect(resolveLastResortFace('Book Antiqua', false, false).file).toBe(
+      'LiberationSerif-Regular.ttf'
+    );
+    expect(resolveLastResortFace('Bookman Old Style', true, false).file).toBe(
+      'LiberationSerif-Bold.ttf'
+    );
+    expect(resolveLastResortFace('Calisto MT', false, false).file).toBe(
+      'LiberationSerif-Regular.ttf'
+    );
+    expect(resolveLastResortFace('Monotype Corsiva', false, false).file).toBe(
+      'Carlito-Regular.ttf'
+    );
+  });
+
+  test('a family with no clone takes the bundled face closest in width', () => {
+    expect(resolveLastResortFace('Verdana', false, false).file).toBe('Montserrat-Regular.ttf');
+    expect(resolveLastResortFace('Verdana', true, false).file).toBe('Montserrat-Bold.ttf');
+    expect(resolveLastResortFace('Trebuchet MS', false, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace('Gill Sans MT', false, false).file).toBe('Carlito-Regular.ttf');
+  });
+
+  test('a trailing light weight on a known family outranks the bold flag', () => {
+    expect(resolveLastResortFace('Calibri Light', true, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace('Inter Light', true, false).file).toBe('Inter-Regular.ttf');
+    expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Lato Light', true, false).file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Blackadder ITC', true, false).file).toBe('Carlito-Bold.ttf');
+  });
+
+  test('metric-compatible clones resolve to the family they clone', () => {
+    expect(resolveMetricCompatFamily('Arimo')).toBe('Liberation Sans');
+    expect(resolveMetricCompatFamily('Tinos')).toBe('Liberation Serif');
+    expect(resolveMetricCompatFamily('Carlito')).toBe('Carlito');
+    expect(resolveMetricCompatFamily('Caladea')).toBe('Caladea');
   });
 
   test('script fallbacks prefer the sans face of the bucket', () => {
     expect(resolveScriptFallbackFace('cjk-sc', false, false)?.family).toBe('Noto Sans SC');
     expect(resolveScriptFallbackFace('arabic', false, false)?.family).toBe('Noto Sans Arabic');
     expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf');
+  });
+
+  test('known heavy family names select the bold face and preserve italics', () => {
+    for (const family of ['Arial Black', ' ARIAL-BLACK ', 'Arial Heavy', 'Arial ExtraBold']) {
+      expect(resolveLastResortFace(family, false, false).file).toBe('LiberationSans-Bold.ttf');
+      expect(resolveLastResortFace(family, false, true).file).toBe('LiberationSans-BoldItalic.ttf');
+    }
+    expect(resolveLastResortFace('Calibri Heavy', false, false).file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Calibri Heavy', false, true).file).toBe('Carlito-BoldItalic.ttf');
+  });
+
+  test('unknown heavy family names keep the normal fallback weight', () => {
+    expect(resolveLastResortFace('Archivo Black', false, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace('Archivo Black', false, true).file).toBe('Carlito-Italic.ttf');
+    expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('Carlito-Bold.ttf');
   });
 });
 

@@ -44,7 +44,7 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "devDependencies": {
-    "@types/bun": "^1.3.14",
+    "@types/bun": "^1.4.2",
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3"

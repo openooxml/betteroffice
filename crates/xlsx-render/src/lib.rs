@@ -1522,7 +1522,7 @@ fn cell_display_text(
 
 /// the number-format code a cell's xf resolves to; general when unset or when
 /// a builtin id is not modeled.
-fn format_code_for_cell(styles: &Stylesheet, cell: &xlsx_model::Cell) -> String {
+pub fn format_code_for_cell(styles: &Stylesheet, cell: &xlsx_model::Cell) -> String {
     match cell.style.map(|s| styles.format_code_for(s)) {
         Some(FormatCode::Custom(c)) => c.to_string(),
         Some(FormatCode::Builtin(id)) => builtin_format_code(id).unwrap_or("General").to_string(),

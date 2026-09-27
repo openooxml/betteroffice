@@ -824,6 +824,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             font,
             color,
             align,
+            rotation_deg: _,
         } => {
             let x = finite_f32(x)?;
             let y = finite_f32(baseline_y)?;

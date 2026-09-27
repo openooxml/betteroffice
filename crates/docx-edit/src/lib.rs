@@ -46,7 +46,8 @@
 //!   `comments` Y.Map. Starts use [`Assoc::After`], ends use [`Assoc::Before`].
 //!
 //! Internal IDs are `{clientID}:{counter}`. Dense integer `w:id` values are an export concern and
-//! must be minted only while serializing OOXML.
+//! must be minted only while serializing OOXML. A paragraph's Word `w14:paraId` is a separate
+//! binding on its pilcrow, never derived from its internal ID; see [`ParagraphIdentity`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -63,30 +64,55 @@ use yrs::{
     Update,
 };
 
+mod batch;
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+mod compare;
+pub mod content_controls;
+mod control_source;
+mod control_values;
 mod ctx;
 mod deterministic;
 mod format;
+mod heading;
+mod identity;
+mod list_marker;
 mod op;
 mod ops;
+mod policy;
 mod presence;
 mod queries;
 mod raw;
 mod read_state;
+pub mod read_types;
 mod search;
 mod seed;
 mod segments;
+pub mod structured;
+mod target;
 mod undo;
 
 pub mod canonical;
 pub mod engine;
 pub mod frame_delta;
 
+pub use batch::{
+    DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditFailureReason, EditGuard,
+    EditHistory, EditOperation, EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource,
+    EditStep, EditSuggestion, EditTarget, EditValidation, ParagraphInput, ResolvedControl,
+    TargetEdge,
+};
 pub use canonical::{CanonicalItem, checksum, project_story, story_checksum, to_canonical_bytes};
 pub use ctx::{EditCtx, EditOrigin, SuggestCtx};
 pub use engine::{EngineSession, EngineStats};
 pub use format::{
     ColorPatch, FontFamilyPatch, FormatPolicy, HYPERLINK, InlineFormatDelta, Patch, SimpleFormat,
     StrikePatch, UnderlinePatch, highlight_color_name,
+};
+pub use identity::{
+    AnchorResolution, AnchorUnsupported, ParagraphAnchor, ParagraphIdAssignment,
+    ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal, ParagraphIdentities,
+    ParagraphIdentity, ParagraphOrigin, ParagraphRef, ParagraphSavePlan, PersistedParagraphIds,
+    SourceParagraphRef, SourceStory, SourceStoryKind,
 };
 pub use op::{Loc, LocRange, OpError, OpResult, Receipt, SplitReceipt};
 pub use ops::paragraph::{
@@ -103,9 +129,14 @@ pub use queries::{
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
-pub use seed::seed_from_docx;
+pub use seed::{seed_from_docx, seed_from_docx_with_generation};
 use segments::SegmentIndex;
-pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoSession};
+pub use target::{
+    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
+    ReadParagraphsRequest, ReadParagraphsResponse, SearchScope, TextAtom, TextMatch, TextPosition,
+    TextRange, TextTarget,
+};
+pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -291,6 +322,8 @@ impl fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
+static DOC_INSTANCES: AtomicU64 = AtomicU64::new(1);
+
 /// A single yrs replica of the DOCX editing model.
 pub struct EditingDoc {
     doc: Doc,
@@ -299,9 +332,17 @@ pub struct EditingDoc {
     /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
     /// indexes and chunk snapshots older than the current value are rebuilt on next lookup.
     epoch: Arc<AtomicU64>,
+    /// Process-unique identity of this replica object.
+    instance: u64,
+    /// Rotated whenever the replica's content or retained source is replaced.
+    version_nonce: AtomicU64,
+    metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
     chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
+    source: Mutex<Option<identity::SourcePackage>>,
+    seen: identity::SeenCell,
     _update_sub: Subscription,
+    _seen_subs: Vec<Subscription>,
 }
 
 impl EditingDoc {
@@ -314,6 +355,9 @@ impl EditingDoc {
         // explicit transactions below.
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(COMMENTS);
+        doc.get_or_insert_map(identity::PARAGRAPH_IDS);
+        doc.get_or_insert_map(identity::SOURCE_PARAGRAPH_IDS);
+        doc.get_or_insert_map(identity::SESSION);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
         // after_transaction: bumps on any store-changing commit without encoding an update.
@@ -324,15 +368,53 @@ impl EditingDoc {
                 }
             })
             .expect("a fresh doc accepts an update observer");
+        let seen = identity::SeenCell::default();
+        let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
             doc,
             client_id,
             id_counter: AtomicU64::new(0),
             epoch,
+            instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
+            version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
+            metadata: Mutex::new(None),
             segment_indexes: Mutex::new(HashMap::new()),
             chunk_snapshots: Mutex::new(HashMap::new()),
+            source: Mutex::new(None),
+            seen,
             _update_sub: update_sub,
+            _seen_subs: seen_subs,
         }
+    }
+
+    /// The optimistic-concurrency token of this replica's committed state.
+    ///
+    /// It changes with every committed change (local, remote, undo and redo) and whenever the
+    /// document or its retained source is replaced. It is scoped to this replica: equal tokens
+    /// from different replicas mean nothing.
+    pub fn version(&self) -> DocumentVersion {
+        batch::version_token(
+            self.version_nonce.load(Ordering::Relaxed),
+            self.epoch.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Invalidates every version handed out so far. `entropy` is mixed into the new nonce.
+    pub(crate) fn rotate_version(&self, entropy: u64) {
+        self.version_nonce.store(
+            batch::mint_nonce(self.client_id, entropy),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Retains the opened package's style and structure context and rotates the version.
+    pub(crate) fn install_source(&self, source: seed::SourceMetadata, entropy: u64) {
+        *self.metadata.lock().unwrap() = Some(Arc::new(source));
+        self.rotate_version(entropy);
+    }
+
+    pub(crate) fn source_metadata(&self) -> Option<Arc<seed::SourceMetadata>> {
+        self.metadata.lock().unwrap().clone()
     }
 
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
@@ -387,6 +469,52 @@ impl EditingDoc {
 
     pub fn client_id(&self) -> u64 {
         self.client_id
+    }
+
+    /// Retains the package the stories were, or will be, seeded from.
+    pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
+        *self.source.lock().unwrap() = Some(source);
+    }
+
+    /// Retains the DOCX package another replica seeded this document from, so
+    /// a replica hydrated from state resolves source and persisted anchors and
+    /// reserves the package's paragraph IDs. Indexed on first identity use.
+    pub fn retain_source_docx(&self, bytes: impl Into<Arc<[u8]>>) {
+        self.retain_source(identity::SourcePackage::Pending(bytes.into()));
+    }
+
+    /// Runs `f` over the identities this replica has seen, building them from
+    /// `txn` on first use. `f` must not commit a transaction.
+    pub(crate) fn with_seen<T: ReadTxn, R>(
+        &self,
+        txn: &T,
+        f: impl FnOnce(&mut identity::Seen) -> R,
+    ) -> R {
+        let mut seen = self.seen.lock().unwrap();
+        f(seen.get_or_insert_with(|| identity::Seen::scan(txn)))
+    }
+
+    pub(crate) fn seen_cell(&self) -> identity::SeenCell {
+        Arc::clone(&self.seen)
+    }
+
+    /// Drops the seen identities after seeding wrote stories wholesale, so
+    /// the next use rebuilds them from the seeded state.
+    pub(crate) fn forget_seen(&self) {
+        *self.seen.lock().unwrap() = None;
+    }
+
+    /// The retained package's identity index, built on first use.
+    pub(crate) fn source_index(&self) -> Option<Arc<identity::SourceIndex>> {
+        let mut source = self.source.lock().unwrap();
+        let index = match source.as_ref()? {
+            identity::SourcePackage::Ready(index) => return Some(Arc::clone(index)),
+            identity::SourcePackage::Pending(bytes) => {
+                seed::source_index(Arc::clone(bytes)).ok().map(Arc::new)
+            }
+        };
+        *source = index.clone().map(identity::SourcePackage::Ready);
+        index
     }
 
     /// Low-level access for the transport, awareness, and undo bridges.
@@ -531,7 +659,8 @@ impl EditingDoc {
     /// Updates one independently-convergent property on the pilcrow identified by `para_id`.
     ///
     /// Arbitrary values leave room for `pPrIns`, `pPrDel`, `pPrChange`, and passive OOXML property
-    /// bags. `paraId` and the embed discriminator are immutable schema identity.
+    /// bags. `paraId`, the paragraph's identity bindings and the embed discriminator are schema
+    /// identity.
     pub fn set_paragraph_attr(
         &self,
         para_id: &str,
@@ -539,7 +668,7 @@ impl EditingDoc {
         value: Any,
     ) -> EditResult<()> {
         let key = key.into();
-        if key == PARA_ID || key == KIND_KEY {
+        if is_identity_key(&key) {
             return Err(EditError::ReservedParagraphKey(key));
         }
         let mut txn = self.doc.transact_mut_with(self.client_id);
@@ -552,6 +681,7 @@ impl EditingDoc {
             };
             for (_, pilcrow) in pilcrows(&story, &txn) {
                 if map_string(&pilcrow, &txn, PARA_ID).as_deref() == Some(para_id) {
+                    identity::promote(self, &mut txn, &pilcrow);
                     pilcrow.insert(&mut txn, key, value);
                     return Ok(());
                 }
@@ -601,6 +731,43 @@ impl EditingDoc {
         comment.insert(&mut txn, "body", body);
         comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
         Ok(comment_id)
+    }
+
+    /// Replaces an existing comment's non-empty ranges, preserving all metadata.
+    pub fn set_comment_ranges(&self, comment_id: &str, ranges: &[StoryRange]) -> EditResult<()> {
+        if ranges.is_empty() {
+            return Err(EditError::InvalidComment(
+                "at least one anchored range is required".into(),
+            ));
+        }
+        let mut txn = self.doc.transact_mut_with(self.client_id);
+        let comments = txn.get_map(COMMENTS).expect("comments root is declared");
+        let comment = comments
+            .get(&txn, comment_id)
+            .and_then(|value| value.cast::<MapRef>().ok())
+            .ok_or_else(|| EditError::CommentNotFound(comment_id.to_owned()))?;
+        let mut anchors = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let len = range.len()?;
+            if len == 0 {
+                return Err(EditError::InvalidComment(
+                    "comment ranges must be non-empty".into(),
+                ));
+            }
+            let story = story_ref(&txn, &range.story)?;
+            check_range(&story, &txn, range.start, len)?;
+            let start = story
+                .sticky_index(&txn, range.start, Assoc::After)
+                .ok_or_else(|| {
+                    EditError::InvalidComment("start anchor could not be made".into())
+                })?;
+            let end = story
+                .sticky_index(&txn, range.end, Assoc::Before)
+                .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
+            anchors.push(anchor_value(&range.story, &start, &end));
+        }
+        comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
+        Ok(())
     }
 
     pub fn comment_anchors(&self, comment_id: &str) -> EditResult<Vec<CommentAnchor>> {
@@ -725,10 +892,56 @@ impl EditingDoc {
     pub fn apply_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        self.integrate_update(update, false)
+    }
+
+    /// Applies an update, then repairs any paragraph identities it duplicated.
+    pub(crate) fn integrate_update(&self, update: Update, local: bool) -> EditResult<()> {
+        let watch = identity::IdentityWatch::new(self);
+        let result = if local {
+            self.doc
+                .transact_mut_with(self.client_id)
+                .apply_update(update)
+        } else {
+            self.doc.transact_mut().apply_update(update)
+        };
+        result.map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        if watch.changed() {
+            drop(watch);
+            self.repair_paragraph_identities();
+        }
+        Ok(())
+    }
+
+    /// Applies an update as it is, without the identity repair [`Self::apply_update_v1`] runs.
+    pub(crate) fn apply_verbatim_v1(&self, bytes: &[u8]) -> EditResult<()> {
+        let update = Update::decode_v1(bytes)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         self.doc
             .transact_mut()
             .apply_update(update)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+    }
+
+    /// A private replica of `state`, this document's committed state, that allocates identities
+    /// as this document would: the same client id and key counter, the retained source index,
+    /// and every key and Word paragraph ID this replica has seen, deleted ones included. What
+    /// the fork allocates stays its own until its update is adopted.
+    pub(crate) fn fork(&self, state: &[u8]) -> EditResult<Self> {
+        let fork = Self::new(self.client_id);
+        fork.apply_verbatim_v1(state)?;
+        fork.id_counter
+            .store(self.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
+        if let Some(index) = self.source_index() {
+            fork.retain_source(identity::SourcePackage::Ready(index));
+        }
+        {
+            let (txn, forked) = (self.doc.transact(), fork.doc.transact());
+            self.with_seen(&txn, |seen| {
+                fork.with_seen(&forked, |copy| copy.inherit(seen));
+            });
+        }
+        Ok(fork)
     }
 
     /// Applies a v1 update using this replica's local transaction origin.
@@ -739,10 +952,7 @@ impl EditingDoc {
     pub fn apply_local_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        self.doc
-            .transact_mut_with(self.client_id)
-            .apply_update(update)
-            .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+        self.integrate_update(update, true)
     }
 
     fn next_id(&self) -> String {
@@ -805,6 +1015,18 @@ fn write_pilcrow_properties(
     pilcrow.insert(txn, PARA_ID, para_id);
     pilcrow.insert(txn, "pStyle", p_style);
     pilcrow.insert(txn, "alignment", alignment);
+}
+
+/// Pilcrow keys the schema manages: identity and the embed discriminator.
+fn is_identity_key(key: &str) -> bool {
+    matches!(
+        key,
+        PARA_ID
+            | KIND_KEY
+            | identity::OOXML_PARA_ID
+            | identity::SOURCE_PARA_ID
+            | identity::PARA_ORIGIN
+    )
 }
 
 fn map_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<String> {
@@ -871,7 +1093,7 @@ fn segment_content<T: ReadTxn>(value: Out, txn: &T) -> SegmentContent {
             let values = map
                 .iter(txn)
                 .filter_map(|(key, value)| {
-                    if matches!(key, KIND_KEY | PARA_ID) {
+                    if is_identity_key(key) {
                         return None;
                     }
                     let Out::Any(value) = value else {
@@ -939,6 +1161,7 @@ fn decode_anchor(value: &Any) -> EditResult<CommentAnchor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yrs::types::ToJson;
 
     const DATE: &str = "2026-07-13T12:00:00Z";
 
@@ -1006,6 +1229,138 @@ mod tests {
             text: text.to_owned(),
             p_style: "Normal".to_owned(),
             alignment: "left".to_owned(),
+        }
+    }
+
+    #[test]
+    fn comment_reanchoring_survives_whole_text_replacement_history() {
+        let doc = EditingDoc::new(801);
+        doc.create_story("body", "Antes achado depois", "Normal", "left")
+            .unwrap();
+        let id = doc
+            .add_comment(
+                &[StoryRange::new("body", 6, 12)],
+                "Ada",
+                DATE,
+                Any::from("Review body"),
+            )
+            .unwrap();
+        let mut undo = doc.undo_manager();
+        doc.replace_range(
+            &local("Ada"),
+            StoryRange::new("body", 0, 19),
+            "Novo achado fim",
+        )
+        .unwrap();
+        doc.set_comment_ranges(&id, &[StoryRange::new("body", 5, 11)])
+            .unwrap();
+        for _ in 0..3 {
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (5, 11));
+            assert!(undo.undo());
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (6, 12));
+            assert!(undo.redo());
+        }
+    }
+
+    #[test]
+    fn comment_reanchoring_preserves_unicode_in_history() {
+        let doc = EditingDoc::new(802);
+        doc.create_story("body", "Antes 🦀 depois", "Normal", "left")
+            .unwrap();
+        let id = doc
+            .add_comment(
+                &[StoryRange::new("body", 6, 8)],
+                "Ada",
+                DATE,
+                Any::from("Review body"),
+            )
+            .unwrap();
+        let mut undo = doc.undo_manager();
+        doc.replace_range(&local("Ada"), StoryRange::new("body", 0, 15), "Novo 🦀 fim")
+            .unwrap();
+        doc.set_comment_ranges(&id, &[StoryRange::new("body", 5, 7)])
+            .unwrap();
+        let text = || {
+            doc.story_segments("body")
+                .unwrap()
+                .into_iter()
+                .filter_map(|segment| match segment.content {
+                    SegmentContent::Text(text) => Some(text),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        for _ in 0..3 {
+            assert_eq!(text(), "Novo 🦀 fim");
+            assert_eq!(doc.story_len("body").unwrap(), 12);
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (5, 7));
+            assert!(undo.undo());
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (6, 8));
+            assert_eq!(text(), "Antes 🦀 depois");
+            assert_eq!(doc.story_len("body").unwrap(), 16);
+            assert!(undo.redo());
+        }
+    }
+
+    #[test]
+    fn comment_reanchoring_preserves_metadata_and_undo() {
+        let doc = EditingDoc::new(800);
+        doc.create_story("body", "first second", "Normal", "left")
+            .unwrap();
+        let id = doc
+            .add_comment(
+                &[StoryRange::new("body", 0, 5)],
+                "Ada",
+                DATE,
+                Any::from("Review body"),
+            )
+            .unwrap();
+        let metadata = || {
+            let txn = doc.doc.transact();
+            let comment = txn
+                .get_map(COMMENTS)
+                .unwrap()
+                .get(&txn, &id)
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            comment
+                .iter(&txn)
+                .filter(|(key, _)| *key != "anchors")
+                .map(|(key, value)| (key.to_owned(), value.to_json(&txn)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        {
+            let mut txn = doc.doc.transact_mut_with(doc.client_id);
+            let comment = txn
+                .get_map(COMMENTS)
+                .unwrap()
+                .get(&txn, &id)
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            comment.insert(&mut txn, "parentId", "parent");
+            comment.insert(&mut txn, "done", true);
+            comment.insert(&mut txn, "custom", "retained");
+        }
+        let before = metadata();
+        let mut undo = doc.undo_manager();
+        doc.set_comment_ranges(&id, &[StoryRange::new("body", 6, 12)])
+            .unwrap();
+        for _ in 0..3 {
+            assert_eq!(metadata(), before);
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (6, 12));
+            assert!(undo.undo());
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (0, 5));
+            assert_eq!(metadata(), before);
+            assert_eq!(undo.changed_stories(), ["body"]);
+            assert!(undo.redo());
         }
     }
 

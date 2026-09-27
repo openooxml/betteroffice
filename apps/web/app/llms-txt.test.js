@@ -47,6 +47,34 @@ describe("llms.txt", () => {
     expect(missing).toEqual([]);
   });
 
+  test("states what XLSX structured export covers and that it never recalculates", () => {
+    expect(LLMS).toContain(
+      "XLSX exports bounded sparse worksheet content and Markdown with positional anchors, formulas, stored values, formatted text, explicit hidden-content options, and omission diagnostics",
+    );
+    expect(LLMS).toContain("Export does not recalculate formulas.");
+    for (const api of [
+      "exportStructured",
+      "exportMarkdown",
+      "exportXlsxStructured",
+      "exportXlsxMarkdown",
+      "renderXlsxMarkdown",
+      "export_structured",
+    ]) {
+      expect(LLMS).toContain(api);
+    }
+  });
+
+  test("states the PPTX structured export", () => {
+    for (const phrase of [
+      "`exportStructured`/`exportMarkdown`",
+      "`exportPptxStructured`/`exportPptxMarkdown`/`renderPptxMarkdown`",
+      "omissions are listed as diagnostics",
+      "`export_structured`/`export_markdown` and `export_pptx_structured`",
+    ]) {
+      expect(LLMS).toContain(phrase);
+    }
+  });
+
   test("tells no one to install a distribution that is not on PyPI", () => {
     const real = new Set(PYPI_DISTRIBUTIONS);
     const claimed = [...LLMS.matchAll(/pip install (betteroffice-[a-z0-9-]+)/g)].map(

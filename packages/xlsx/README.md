@@ -79,7 +79,116 @@ if (isProposalsAvailable()) {
 
 The React editor paints pending proposals as in-cell tracked-change ghosts with
 an accept/reject panel. Guard with `isProposalsAvailable()` against cores built
-without the feature.
+without the feature. `StaleProposalError.targets` names each drifted cell's sheet
+beside `cells`.
+
+## Version-checked edit batches
+
+Read cells with the version they were read at, then apply a batch against it.
+Every step commits as one recalculated change and one undo step, or the batch
+returns a typed refusal and nothing changes:
+
+```ts
+const read = workbook.readCells({
+  ranges: [{ sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } }],
+});
+if (!read.ok) throw new Error(read.failure.message);
+
+const result = workbook.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    {
+      op: "setCellInputs",
+      target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } },
+      inputs: [["120"]],
+      expect: { cells: [[{ value: read.ranges[0].cells[0][0].value }]] },
+    },
+    { op: "setNumberFormat", target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } }, format: "currency" },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
+```
+
+- Steps: `setCellInputs` (parsed like typing, against each cell's current
+  number format), `setFormulas` (source without `=`, stored as formulas whatever
+  the format), `setNumberFormat` and `patchStyle`. Content and formatting may
+  combine on the same cells; writing one property twice refuses with
+  `overlapping-steps`.
+- Targets name a sheet id from the current catalog (`sheet:{index}` standalone,
+  the replica's sheet keys in collaboration) and an A1 range or zero-based
+  corners. Matrices and guards match the target's shape exactly. Guards compare
+  a cell's value, formula (`null` for none) or display text before the batch.
+- `validateEdits` stages a batch without changing anything; `findText` searches
+  display text exactly and case-sensitively. Update listeners run once, after
+  `applyEdits` returns, and see the recalculated state and its new version.
+  `changedSheets` names every sheet the batch or its recalculation changed.
+- Requests over 16 MiB and results over 64 MiB refuse with `limit-exceeded`;
+  calculation diagnostics stop at 10,000 cells per list and set `truncated`.
+- `history: "none"` keeps a batch out of undo; standalone undo still replays
+  older steps over its cells. It is experimental: that interaction may change
+  in a minor release. `source` records provenance only. Volatile functions see
+  only `calculation.nowSerial`.
+- Versions and sheet ids are session-scoped; standalone sheet ids are
+  positional, so each is valid only for the version it was read at. Batches do
+  not insert or delete rows, columns or sheets, merge cells or move charts, and
+  refuse writes to merged-cell followers, array-formula cells and protected
+  sheets.
+
+## Structured export
+
+XLSX exports bounded sparse worksheet content and Markdown with positional
+anchors, formulas, stored values, formatted text, explicit hidden-content
+options, and omission diagnostics. Export does not recalculate formulas:
+
+```ts
+const result = workbook.exportStructured({ scope: [{ sheet: 0, range: "A1:D20" }] });
+if (result.ok) {
+  for (const cell of result.content.sheets[0].cells) {
+    console.log(cell.anchor, cell.value, cell.formula, cell.displayText);
+  }
+}
+
+const markdown = workbook.exportMarkdown({}, { maxRows: 100 });
+const fromBytes = await exportXlsxStructured(bytes); // no session, no clock
+```
+
+- Each sheet lists its stored cells in row-major order (formula cells and
+  styled empty cells included, empty positions skipped) with value, formula,
+  display text, number format and merge membership, plus merges, tables,
+  hyperlinks, hidden row and column spans, and charts, pictures and shapes as
+  placeholders with alt text. Defined names are listed read-only.
+- Anchors are `{ sheet: { sheetId, index, name }, a1 }` positions in the
+  exported version (`anchorScope: "session"`) or bytes snapshot (`"snapshot"`);
+  neither follows later row, column or sheet edits. `sheetId` is the id edit
+  batches take in that session (`sheet:{index}` for bytes), so a cell or range
+  anchor's `{ sheetId: anchor.sheet.sheetId, range: { kind: "a1", a1: anchor.a1 } }`
+  is its batch target at the exported version. Retained drawings carry a `sourcePart`
+  provenance with the part's SHA-256.
+- Formula results are the stored values (`calculation.policy: "asStored"`,
+  `freshness: "unverified"`); cells mark results the file did not store as
+  `missing` (`uncertain` once anything has calculated, or where it cannot be
+  traced) and the last calculation's `cycle` and `limited` cells. Live exports
+  reflect whatever calculation already ran, and the same version and options
+  always export the same content; `exportXlsxStructured` reads bytes without
+  recalculating.
+- Hidden sheets, rows, columns and names are excluded unless requested
+  (`includeHiddenSheets`, `includeHiddenRows`, `includeHiddenColumns`,
+  `includeHiddenNames`), with a `hidden-content-excluded` diagnostic. A sheet
+  whose visibility is unknown, such as one from a model handed in without its
+  package, counts as hidden.
+  Comments, rich-text runs, conditional formatting, pivot tables and unreadable
+  charts are diagnosed, not exported.
+- `maxCells` (default 100,000) and `maxBytes` (default 8 MiB) stop at a complete
+  record with `truncated: true` and a `truncated` diagnostic; an absent cell is
+  empty only before that point. Scope refusals (`invalid-scope`,
+  `invalid-options`, `limit-exceeded`) return `{ ok: false, version, failure }`.
+- Markdown renders one grid per sheet labelled with its A1 columns and row
+  numbers (200 rows, 50 columns and 10,000 positions by default), using an
+  escaped HTML table where merges need spans, and `<!-- xlsx-export:N -->`
+  markers whose anchors come back in `anchors`. Document text is escaped and
+  kept on one line, and hyperlinks become Markdown links only for `http`,
+  `https` and `mailto` destinations. `renderXlsxMarkdown` renders content you
+  already hold, refusing content that does not validate.
 
 ## Collaboration
 

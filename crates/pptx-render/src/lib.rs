@@ -2,6 +2,7 @@
 
 mod chart;
 mod display_list;
+mod family_metrics;
 mod geometry;
 mod image_effects;
 mod layout;
@@ -242,6 +243,7 @@ fn compile(slide: ComposedSlide) -> Result<SurfaceDisplayList, String> {
                     asset_id: image_part_path,
                     effects,
                     crop,
+                    tile: None,
                     path,
                     stroke: stroke.map(Into::into),
                     shadow: None,
@@ -319,6 +321,7 @@ fn composed_chart(base: ShapeBase, chart: &ChartSpace) -> Primitive {
     };
     let plotted = chart_primitive(frame, chart, "", MAX_CHART_PRIMITIVES, &mut |text| {
         Ok(Primitive::TextBox {
+            text_shadow: None,
             object_id: text.object_id,
             shape_id: None,
             story_id: None,
@@ -373,6 +376,7 @@ fn text_primitive(
     text: ComposedText,
 ) -> Primitive {
     Primitive::TextBox {
+        text_shadow: None,
         object_id,
         shape_id: None,
         story_id: None,
@@ -547,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chart_space_fill_grounds_the_chart_instead_of_the_default_white() {
+    fn a_chart_space_fill_grounds_the_chart_and_a_bare_one_stays_transparent() {
         let compile = |fill: &str| {
             let json = format!(
                 r##"{{
@@ -567,9 +571,16 @@ mod tests {
             );
             let output: serde_json::Value =
                 serde_json::from_str(&compile_json(&json).expect("compile")).expect("json");
-            output["primitives"][0]["primitives"][0]["fill"]["color"].clone()
+            output["primitives"][0]["primitives"]
+                .as_array()
+                .expect("chart parts")
+                .iter()
+                .find(|part| part["w"] == 300.0 && part["h"] == 150.0)
+                .map_or(serde_json::Value::Null, |part| {
+                    part["fill"]["color"].clone()
+                })
         };
-        assert_eq!(compile(""), "#FFFFFF");
+        assert_eq!(compile(""), serde_json::Value::Null);
         assert_eq!(
             compile(r##""fill":{"kind":"solid","color":"#01BABC"},"##),
             "#01BABC"

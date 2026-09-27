@@ -31,6 +31,7 @@ import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
+import { clearPresented, markPresented } from './internals/layoutProvenance';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
@@ -141,7 +142,11 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
 }) {
   return (
-    <div className="canvas-page" style={{ position: 'relative' }}>
+    <div
+      className="canvas-page"
+      data-page-index={page.pageIndex}
+      style={{ position: 'relative', width: page.width * zoom, height: page.height * zoom }}
+    >
       <canvas
         ref={(el) => registerCanvas(pageKey, el)}
         data-page-index={page.pageIndex}
@@ -213,6 +218,7 @@ export function CanvasPagesView({
   const [offscreenFailed, setOffscreenFailed] = useState(false);
   const offscreenFailedRef = useRef(false);
   const offscreenAttachedRef = useRef(false);
+  const pendingAttachRef = useRef<{ generation: number; displayList: DisplayList } | null>(null);
   const workerPresentationRef = useRef(false);
   const publishWorkerPresentation = useCallback(
     (active: boolean) => {
@@ -421,11 +427,15 @@ export function CanvasPagesView({
           return;
         }
       }
-      const caretColor = resolveCaretPaintColor(innerHostRef.current);
+      const host = innerHostRef.current;
+      const caretColor = resolveCaretPaintColor(host);
       const caretStyle = { color: caretColor, width: DEFAULT_CARET_WIDTH };
       const signature = `${activePageIds.join(',')}|${dpr}|${zoom}|${caretColor}`;
       if (pages.length > 0 || signature !== offscreenSignatureRef.current) {
         offscreenSignatureRef.current = signature;
+        if (host) clearPresented(host);
+        const pendingAttach = { generation: replayGeneration, displayList };
+        pendingAttachRef.current = pendingAttach;
         void offscreenReplay.attach(pages, activePageIds, dpr, zoom, caretStyle).then((attached) => {
           // Publish on resolution regardless of replay generation: attach
           // resolutions are FIFO, so the last one reflects the worker's real
@@ -440,15 +450,31 @@ export function CanvasPagesView({
             // next pass retries instead of permanently flipping surfaces
             offscreenSignatureRef.current = '';
           }
+          if (pendingAttachRef.current !== pendingAttach) return;
+          pendingAttachRef.current = null;
+          const current = pendingAttach.generation === replayGenerationRef.current;
+          if (attached && current && innerHostRef.current) {
+            markPresented(innerHostRef.current, pendingAttach.displayList);
+          }
         }, () => {
+          if (pendingAttachRef.current === pendingAttach) pendingAttachRef.current = null;
           offscreenFailedRef.current = true;
           publishWorkerPresentation(false);
           setOffscreenFailed(true);
         });
-      } else if (offscreenAttachedRef.current) {
+      } else {
+        const pendingAttach = pendingAttachRef.current;
+        if (pendingAttach) {
+          // The worker replays its latest frame onto attached pages before the attach replies.
+          pendingAttach.generation = replayGeneration;
+          pendingAttach.displayList = displayList;
+        } else if (offscreenAttachedRef.current && host) {
+          // The worker presents a frame before it replies with it, so these pages show no other.
+          markPresented(host, displayList);
+        }
         // Heal any publish lost to ordering (StrictMode remount, late
         // resolution): the worker is attached and this pass kept it active.
-        publishWorkerPresentation(true);
+        if (offscreenAttachedRef.current) publishWorkerPresentation(true);
       }
       return;
     }
@@ -498,11 +524,16 @@ export function CanvasPagesView({
     void presentCanvasReplay(
       preparations,
       () => replayGeneration === replayGenerationRef.current
-    ).catch((error) => {
-      if (replayGeneration === replayGenerationRef.current) {
-        console.error('[CanvasRenderer] Canvas replay failed', error);
+    ).then(
+      (presented) => {
+        if (presented && innerHostRef.current) markPresented(innerHostRef.current, displayList);
+      },
+      (error) => {
+        if (replayGeneration === replayGenerationRef.current) {
+          console.error('[CanvasRenderer] Canvas replay failed', error);
+        }
       }
-    });
+    );
     return () => {
       replayGenerationRef.current += 1;
     };

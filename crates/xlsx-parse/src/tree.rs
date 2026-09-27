@@ -420,7 +420,7 @@ impl Part {
     }
 
     pub(crate) fn tree(&self) -> Result<Element, ParseError> {
-        parse_text(&self.text)
+        parse_text(&self.text, MAX_TREE_NODES).map(|(root, _)| root)
     }
 
     /// rewrite disjoint spans of the decoded text and re-encode the result.
@@ -535,14 +535,26 @@ pub(crate) fn parse_tree(data: &[u8]) -> Result<Element, ParseError> {
     Part::decode(data)?.tree()
 }
 
-fn parse_text(text: &str) -> Result<Element, ParseError> {
+/// [`parse_tree`] spending at most `nodes` elements and attributes, returning how many it
+/// spent. Running out is [`ParseError::TreeTooLarge`].
+pub(crate) fn parse_tree_within(data: &[u8], nodes: usize) -> Result<(Element, usize), ParseError> {
+    let cap = nodes.min(MAX_TREE_NODES);
+    parse_text(&Part::decode(data)?.text, cap)
+}
+
+/// Whether a parse failed on a size or depth cap rather than on malformed markup.
+pub(crate) fn exceeds_limits(error: &ParseError) -> bool {
+    matches!(error, ParseError::TreeTooLarge | ParseError::DepthExceeded)
+}
+
+fn parse_text(text: &str, nodes: usize) -> Result<(Element, usize), ParseError> {
     let mut reader = Reader::from_str(text);
     let config = reader.config_mut();
     config.expand_empty_elements = false;
     config.check_end_names = true;
 
     let mut budget = Budget {
-        nodes: MAX_TREE_NODES,
+        nodes,
         text: MAX_TREE_TEXT_BYTES,
     };
     let mut stack: Vec<Element> = Vec::new();
@@ -601,7 +613,8 @@ fn parse_text(text: &str) -> Result<Element, ParseError> {
     if !stack.is_empty() {
         return Err(ParseError::Malformed("unclosed element".into()));
     }
-    root.ok_or_else(|| ParseError::Malformed("no root element".into()))
+    let root = root.ok_or_else(|| ParseError::Malformed("no root element".into()))?;
+    Ok((root, nodes - budget.nodes))
 }
 
 fn open_element(

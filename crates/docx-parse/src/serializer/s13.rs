@@ -19,6 +19,7 @@ use crate::inline::{Hyperlink, InlineNode, Run, RunContent};
 use crate::notes::Note;
 use crate::numbering::NumberingDefinitions;
 use crate::paragraph::{Paragraph, ParagraphContent};
+use crate::paragraph_identity::parse_paragraph_id;
 use crate::relationships::{
     Relationship, TargetMode, relationship_part_path, relationship_types, resolve_relative_path,
 };
@@ -29,6 +30,10 @@ use crate::xml::ParseError;
 use super::context::SerializerContext;
 use super::numbering::serialize_numbering_xml;
 use super::paragraph::serialize_paragraph;
+use super::paragraph_ids::{
+    COMMENTS_PART, S13ParagraphIds, apply_assignments, comment_companions, model_paragraph_ids,
+    patch_comment_parts, patch_part,
+};
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_with_info, serialize_document_part,
@@ -75,7 +80,32 @@ impl Default for S13SaveOptions {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct S13SelectiveSave {
+    #[serde(default)]
     pub changed_para_ids: Vec<String>,
+    /// Body paragraphs addressed by source location. When present, only their spans of the main
+    /// document part change and every other part keeps its source bytes; `changed_para_ids`
+    /// must then be empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_paragraphs: Option<S13SourceParagraphs>,
+}
+
+/// Main-document body paragraphs to replace, guarded by the digest of the part they address.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct S13SourceParagraphs {
+    /// Lowercase hex SHA-256 of the source main document part.
+    pub part_sha256: String,
+    pub paragraphs: Vec<S13SourceParagraph>,
+}
+
+/// A `w:p` at `path` (element-child ordinals from the part's root element) whose content is
+/// written from the model paragraph at body block `block`, which must be the story block at that
+/// path. The source start tag and `w:pPr` are kept.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct S13SourceParagraph {
+    pub path: Vec<u32>,
+    pub block: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,6 +133,8 @@ pub struct S13SaveRequest {
     pub options: S13SaveOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selective: Option<S13SelectiveSave>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paragraph_ids: Option<S13ParagraphIds>,
 }
 
 fn default_true() -> bool {
@@ -133,7 +165,47 @@ pub fn write_docx_s13_parts(
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
+    if let Some(sources) = request
+        .selective
+        .as_ref()
+        .and_then(|selective| selective.source_paragraphs.as_ref())
+    {
+        if request
+            .selective
+            .as_ref()
+            .is_some_and(|selective| !selective.changed_para_ids.is_empty())
+        {
+            return Err(save_error(
+                "source paragraphs and changed paragraph ids cannot be combined",
+            ));
+        }
+        let original = package
+            .bytes("word/document.xml")
+            .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
+        let mut context = SerializerContext::new(&request.determinism)?;
+        let patched =
+            build_source_patched_document_xml(&request.document, original, sources, &mut context)?;
+        package.set_text("word/document.xml", patched);
+        update_core_part(&request.options, &mut package, context.now());
+        return rezip_package(&package, source);
+    }
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
+    let paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
+    paragraph_ids.validate()?;
+    apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
+    let patched: HashMap<&str, &[(u32, String)]> = paragraph_ids
+        .patched_parts
+        .iter()
+        .map(|part| (part.part.as_str(), part.para_ids.as_slice()))
+        .collect();
+    let patched_part = |package: &Package, path: &str| {
+        let path = package.resolve_path(path);
+        patched.get(path).and_then(|ids| {
+            package
+                .original_bytes(path)
+                .and_then(|bytes| patch_part(bytes, ids))
+        })
+    };
 
     if request.selective.is_some() {
         validate_selective_header_footer_parts(&package, &relationships)?;
@@ -144,7 +216,9 @@ pub fn write_docx_s13_parts(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    let document_xml = if let Some(selective) = request.selective.as_ref() {
+    let document_xml = if let Some(patched) = patched_part(&package, "word/document.xml") {
+        String::from_utf8(patched).map_err(|error| save_error(error.to_string()))?
+    } else if let Some(selective) = request.selective.as_ref() {
         let original = package
             .text("word/document.xml")
             .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
@@ -173,18 +247,62 @@ pub fn write_docx_s13_parts(
         &mut package,
         &mut context,
     )?;
+    let story_parts: Vec<String> = relationships
+        .values()
+        .filter(|relationship| {
+            matches!(
+                relationship.relationship_type.as_str(),
+                relationship_types::HEADER | relationship_types::FOOTER
+            ) && relationship.target_mode != Some(TargetMode::External)
+        })
+        .filter_map(|relationship| {
+            resolve_relative_path(&package.document_path, &relationship.target).ok()
+        })
+        .collect();
+    for path in story_parts {
+        if let Some(bytes) = patched_part(&package, &path) {
+            package.set(path, bytes);
+        }
+    }
 
     if request.selective.is_none() {
         ensure_header_footer_parts(&relationships, &mut package)?;
         ensure_numbering_part(request.numbering.as_ref(), &mut package);
     }
 
-    serialize_comment_parts(&request.document, &mut package, &mut context);
+    let patched_comments = patched.get(COMMENTS_PART).and_then(|ids| {
+        let companions = comment_companions().map(|path| (path, package.original_bytes(path)));
+        patch_comment_parts(package.original_bytes(COMMENTS_PART)?, &companions, ids)
+    });
+    if let Some(parts) = patched_comments {
+        for (path, bytes) in parts {
+            package.set(path, bytes);
+        }
+    } else {
+        if comments_need_paragraph_ids(&request.document) {
+            let mut reserved = crate::paragraph_identity::package_paragraph_ids(original_parts);
+            model_paragraph_ids(&request.document, &mut reserved);
+            model_paragraph_ids(&request.header_entries, &mut reserved);
+            model_paragraph_ids(&request.footer_entries, &mut reserved);
+            for notes in [
+                &request.footnotes,
+                &request.endnotes,
+                &request.footnote_separators,
+                &request.endnote_separators,
+            ] {
+                model_paragraph_ids(notes, &mut reserved);
+            }
+            context.reserve_paragraph_ids(reserved);
+        }
+        serialize_comment_parts(&request.document, &mut package, &mut context);
+    }
 
     if request.selective.is_none() {
         let mut footnotes = request.footnote_separators;
         footnotes.extend(request.footnotes);
-        if !footnotes.is_empty() {
+        if let Some(bytes) = patched_part(&package, "word/footnotes.xml") {
+            package.set("word/footnotes.xml", bytes);
+        } else if !footnotes.is_empty() {
             package.set_text(
                 "word/footnotes.xml",
                 serialize_footnotes_part(&footnotes, &mut context)?,
@@ -192,7 +310,9 @@ pub fn write_docx_s13_parts(
         }
         let mut endnotes = request.endnote_separators;
         endnotes.extend(request.endnotes);
-        if !endnotes.is_empty() {
+        if let Some(bytes) = patched_part(&package, "word/endnotes.xml") {
+            package.set("word/endnotes.xml", bytes);
+        } else if !endnotes.is_empty() {
             package.set_text(
                 "word/endnotes.xml",
                 serialize_endnotes_part(&endnotes, &mut context)?,
@@ -200,18 +320,25 @@ pub fn write_docx_s13_parts(
         }
     }
 
-    if request.options.update_modified_date || request.options.modified_by.is_some() {
-        if let Some(core_xml) = package.text("docProps/core.xml") {
-            let updated = update_core_properties(
-                &core_xml,
-                request.options.update_modified_date,
-                request.options.modified_by.as_deref(),
-                context.now(),
-            );
-            package.set_text("docProps/core.xml", updated);
-        }
-    }
+    update_core_part(&request.options, &mut package, context.now());
+    rezip_package(&package, source)
+}
 
+fn update_core_part(options: &S13SaveOptions, package: &mut Package, now: &str) {
+    if (options.update_modified_date || options.modified_by.is_some())
+        && let Some(core_xml) = package.text("docProps/core.xml")
+    {
+        let updated = update_core_properties(
+            &core_xml,
+            options.update_modified_date,
+            options.modified_by.as_deref(),
+            now,
+        );
+        package.set_text("docProps/core.xml", updated);
+    }
+}
+
+fn rezip_package(package: &Package, source: Option<&[u8]>) -> Result<Vec<u8>, ParseError> {
     match source {
         Some(source) => ooxml_opc::rezip_parts_preserving(&package.refs(), source),
         None => ooxml_opc::rezip_parts_borrowed(&package.refs()),
@@ -278,6 +405,12 @@ impl<'a> Package<'a> {
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
     }
 
+    /// The part as the source package holds it, ignoring this save's edits.
+    fn original_bytes(&self, path: &str) -> Option<&'a [u8]> {
+        let index = *self.positions.get(self.resolve_path(path))?;
+        self.original.get(index).map(|(_, bytes)| bytes.as_slice())
+    }
+
     fn set(&mut self, path: impl Into<String>, bytes: Vec<u8>) {
         let path = path.into();
         let path = self.resolve_path(&path).to_owned();
@@ -327,6 +460,61 @@ impl<'a> Package<'a> {
 
 fn save_error(message: impl Into<String>) -> ParseError {
     ParseError::Canonical(format!("S13 package save: {}", message.into()))
+}
+
+fn comments_need_paragraph_ids(document: &DocumentBody) -> bool {
+    let valid = |id: Option<&str>| id.is_some_and(|id| parse_paragraph_id(id).is_some());
+    document.comments.iter().flatten().any(|comment| {
+        !valid(comment.content.last().and_then(|p| p.para_id.as_deref()))
+            && !valid(comment.para_id.as_deref())
+    })
+}
+
+/// Applies the plan's source-paragraph IDs to every serialized part's model.
+fn apply_paragraph_id_assignments(
+    request: &mut S13SaveRequest,
+    paragraph_ids: &S13ParagraphIds,
+    relationships: &IndexMap<String, Relationship>,
+    package: &Package,
+) -> Result<(), ParseError> {
+    let parts = paragraph_ids.assignments_by_part();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    if let Some(ids) = parts.get(package.document_path.as_str()) {
+        let comments = request.document.comments.take();
+        apply_assignments(&mut request.document, ids)?;
+        request.document.comments = comments;
+    }
+    if let (Some(ids), Some(comments)) =
+        (parts.get(COMMENTS_PART), request.document.comments.as_mut())
+    {
+        apply_assignments(comments, ids)?;
+    }
+    for entries in [&mut request.header_entries, &mut request.footer_entries] {
+        for (relationship_id, story) in entries.iter_mut() {
+            let path = relationships
+                .get(relationship_id)
+                .filter(|relationship| relationship.target_mode != Some(TargetMode::External))
+                .and_then(|relationship| {
+                    resolve_relative_path(&package.document_path, &relationship.target).ok()
+                });
+            if let Some(ids) = path.as_deref().and_then(|path| parts.get(path)) {
+                apply_assignments(story, ids)?;
+            }
+        }
+    }
+    for (path, notes) in [
+        ("word/footnotes.xml", &mut request.footnotes),
+        ("word/footnotes.xml", &mut request.footnote_separators),
+        ("word/endnotes.xml", &mut request.endnotes),
+        ("word/endnotes.xml", &mut request.endnote_separators),
+    ] {
+        if let Some(ids) = parts.get(path) {
+            apply_assignments(notes, ids)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_selective_header_footer_parts(
@@ -1855,6 +2043,254 @@ fn build_selective_document_xml(
     Ok(Some(patched))
 }
 
+/// Replaces the content of the `w:p` elements `sources` address in the original main document
+/// part with that of their serialized model paragraphs; every other byte of the part, the
+/// paragraphs' start tags and properties included, is kept.
+fn build_source_patched_document_xml(
+    document: &DocumentBody,
+    original: &[u8],
+    sources: &S13SourceParagraphs,
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
+    use sha2::{Digest, Sha256};
+    if format!("{:x}", Sha256::digest(original)) != sources.part_sha256.to_ascii_lowercase() {
+        return Err(save_error(
+            "the main document part is not the one the source paragraphs address",
+        ));
+    }
+    let original_xml = std::str::from_utf8(original)
+        .map_err(|_| save_error("the main document part is not UTF-8"))?;
+    let limits = crate::xml::ParseLimits::default();
+    let parsed = crate::xml::parse_xml(
+        original,
+        "word/document.xml",
+        &mut crate::xml::ParseBudget::new(&limits),
+    )?;
+    let root = parsed
+        .root()
+        .ok_or_else(|| save_error("the main document part has no root element"))?;
+    if root.attribute(None, "xmlns:w")
+        != Some("http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+    {
+        return Err(save_error(
+            "the main document part does not bind the w prefix to WordprocessingML",
+        ));
+    }
+    let (body_index, body) = root
+        .child_elements()
+        .enumerate()
+        .find(|(_, element)| element.matches_name("w", "body"))
+        .ok_or_else(|| save_error("the main document part has no body"))?;
+    let blocks = crate::block::story_block_elements(body);
+    let mut replacements = Vec::with_capacity(sources.paragraphs.len());
+    for target in &sources.paragraphs {
+        let Some((relative, element)) = blocks.get(target.block) else {
+            return Err(save_error(format!(
+                "body block {} does not exist",
+                target.block
+            )));
+        };
+        let expected: Vec<u32> = std::iter::once(body_index as u32)
+            .chain(relative.iter().copied())
+            .collect();
+        if expected != target.path || !element.matches_name("w", "p") {
+            return Err(save_error(format!(
+                "body block {} is not the paragraph at the addressed path",
+                target.block
+            )));
+        }
+        let Some(BlockContent::Paragraph(paragraph)) = document.content.get(target.block) else {
+            return Err(save_error(format!(
+                "model block {} is not a paragraph",
+                target.block
+            )));
+        };
+        let span = element_span(original_xml, &target.path)
+            .ok_or_else(|| save_error("an addressed paragraph has no lexical span"))?;
+        let serialized = serialize_paragraph(paragraph, context)?;
+        let replacement = replace_paragraph_content(&original_xml[span.clone()], &serialized)
+            .ok_or_else(|| save_error("an addressed paragraph cannot be patched"))?;
+        replacements.push((span, replacement));
+    }
+    replacements.sort_unstable_by(|(left, _), (right, _)| right.start.cmp(&left.start));
+    if replacements
+        .windows(2)
+        .any(|pair| pair[1].0.end > pair[0].0.start)
+    {
+        return Err(save_error("source paragraphs overlap"));
+    }
+    let mut patched = original_xml.to_owned();
+    for (span, replacement) in replacements {
+        patched.replace_range(span, &replacement);
+    }
+    Ok(patched)
+}
+
+/// Where a `w:p` element's content starts, after its start tag and any leading `w:pPr`, and
+/// where it ends; `None` unless `xml` is exactly one `w:p` element.
+fn paragraph_content(xml: &str) -> Option<(usize, usize, bool)> {
+    let bytes = xml.as_bytes();
+    let start = next_markup(bytes, 0)?;
+    let open = &bytes[start.start..start.end];
+    if start.start != 0 || !is_open_paragraph_tag(open) {
+        return None;
+    }
+    if start.kind == (MarkupKind::Open { self_closing: true }) {
+        return (start.end == xml.len()).then_some((start.end, start.end, true));
+    }
+    let close = xml.len().checked_sub("</w:p>".len())?;
+    if !xml.ends_with("</w:p>") {
+        return None;
+    }
+    let mut cursor = start.end;
+    let first = loop {
+        let markup = next_markup(bytes, cursor)?;
+        match markup.kind {
+            MarkupKind::Other => cursor = markup.end,
+            _ => break markup,
+        }
+    };
+    let properties = first.kind != MarkupKind::Close
+        && std::str::from_utf8(&bytes[first.start..first.end])
+            .ok()
+            .is_some_and(|tag| {
+                tag.starts_with("<w:pPr")
+                    && matches!(
+                        tag.as_bytes().get(6),
+                        Some(b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n')
+                    )
+            });
+    let content = if properties {
+        element_span(xml, &[0])
+            .filter(|span| span.start == first.start)?
+            .end
+    } else {
+        start.end
+    };
+    Some((content, close, false))
+}
+
+/// `original`, a source `w:p`, with its content after the start tag and `w:pPr` replaced by that
+/// of `serialized`.
+fn replace_paragraph_content(original: &str, serialized: &str) -> Option<String> {
+    let (kept, _, self_closing) = paragraph_content(original)?;
+    let (content, end, _) = paragraph_content(serialized)?;
+    let mut patched = String::with_capacity(original.len() + serialized.len());
+    if self_closing {
+        let tag = original
+            .trim_end_matches('>')
+            .trim_end_matches('/')
+            .trim_end();
+        patched.push_str(tag);
+        patched.push('>');
+    } else {
+        patched.push_str(&original[..kept]);
+    }
+    patched.push_str(&serialized[content..end]);
+    patched.push_str("</w:p>");
+    Some(patched)
+}
+
+/// One tag, comment, CDATA section, processing instruction or declaration.
+struct Markup {
+    start: usize,
+    end: usize,
+    kind: MarkupKind,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MarkupKind {
+    Open { self_closing: bool },
+    Close,
+    Other,
+}
+
+fn next_markup(bytes: &[u8], from: usize) -> Option<Markup> {
+    let start = from + bytes.get(from..)?.iter().position(|byte| *byte == b'<')?;
+    let rest = &bytes[start..];
+    let (end, kind) = if rest.starts_with(b"<!--") {
+        (find_bytes(bytes, start + 4, b"-->")? + 3, MarkupKind::Other)
+    } else if rest.starts_with(b"<![CDATA[") {
+        (find_bytes(bytes, start + 9, b"]]>")? + 3, MarkupKind::Other)
+    } else if rest.starts_with(b"<?") {
+        (find_bytes(bytes, start + 2, b"?>")? + 2, MarkupKind::Other)
+    } else if rest.starts_with(b"<!") {
+        (find_tag_end(bytes, start)? + 1, MarkupKind::Other)
+    } else if rest.starts_with(b"</") {
+        (find_tag_end(bytes, start)? + 1, MarkupKind::Close)
+    } else {
+        let end = find_tag_end(bytes, start)?;
+        (
+            end + 1,
+            MarkupKind::Open {
+                self_closing: is_self_closing(&bytes[start..=end]),
+            },
+        )
+    };
+    Some(Markup { start, end, kind })
+}
+
+/// The byte span of the element `path` reaches by element-child ordinals from the root element
+/// of `xml`, found lexically so the bytes around it can be kept exactly.
+pub fn element_span(xml: &str, path: &[u32]) -> Option<std::ops::Range<usize>> {
+    let bytes = xml.as_bytes();
+    let mut cursor = 0;
+    let mut current = loop {
+        let markup = next_markup(bytes, cursor)?;
+        match markup.kind {
+            MarkupKind::Open { .. } => break markup,
+            MarkupKind::Other => cursor = markup.end,
+            MarkupKind::Close => return None,
+        }
+    };
+    for &ordinal in path {
+        if current.kind
+            != (MarkupKind::Open {
+                self_closing: false,
+            })
+        {
+            return None;
+        }
+        let (mut cursor, mut depth, mut index) = (current.end, 0usize, 0u32);
+        current = loop {
+            let markup = next_markup(bytes, cursor)?;
+            cursor = markup.end;
+            match markup.kind {
+                MarkupKind::Open { self_closing } => {
+                    if depth == 0 {
+                        if index == ordinal {
+                            break markup;
+                        }
+                        index += 1;
+                    }
+                    if !self_closing {
+                        depth += 1;
+                    }
+                }
+                MarkupKind::Close if depth == 0 => return None,
+                MarkupKind::Close => depth -= 1,
+                MarkupKind::Other => {}
+            }
+        };
+    }
+    if current.kind == (MarkupKind::Open { self_closing: true }) {
+        return Some(current.start..current.end);
+    }
+    let (mut cursor, mut depth) = (current.end, 0usize);
+    loop {
+        let markup = next_markup(bytes, cursor)?;
+        cursor = markup.end;
+        match markup.kind {
+            MarkupKind::Open {
+                self_closing: false,
+            } => depth += 1,
+            MarkupKind::Close if depth == 0 => return Some(current.start..markup.end),
+            MarkupKind::Close => depth -= 1,
+            _ => {}
+        }
+    }
+}
+
 /// Updates direct-child core-property text using a fixed clock.
 pub fn update_core_properties(
     core_xml: &str,
@@ -2241,6 +2677,114 @@ mod tests {
         assert!(document.contains("<w:t>edited</w:t>"));
         assert!(!document.contains("model copy"));
         assert_eq!(parts["custom/opaque.dat"], b"opaque\0bytes");
+    }
+
+    #[test]
+    fn element_span_follows_element_children_lexically() {
+        let xml = concat!(
+            "<?xml version=\"1.0\"?><!-- lead --><w:document><w:body>",
+            "<w:p a='>'><w:r><w:t>one</w:t></w:r></w:p>",
+            "<!-- <w:p>not an element</w:p> --><![CDATA[<w:p/>]]>",
+            "<w:p/>",
+            "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+            "</w:body></w:document>"
+        );
+        let span = |path: &[u32]| element_span(xml, path).map(|range| &xml[range]);
+        assert_eq!(
+            span(&[0, 0]),
+            Some("<w:p a='>'><w:r><w:t>one</w:t></w:r></w:p>")
+        );
+        assert_eq!(span(&[0, 1]), Some("<w:p/>"));
+        assert_eq!(
+            span(&[0, 2, 0, 0, 0]),
+            Some("<w:p><w:r><w:t>cell</w:t></w:r></w:p>")
+        );
+        assert_eq!(span(&[0, 3]), None);
+        assert_eq!(span(&[0, 1, 0]), None);
+        assert_eq!(span(&[]), Some(&xml[xml.find("<w:document>").unwrap()..]));
+    }
+
+    #[test]
+    fn source_paragraph_save_patches_only_the_addressed_spans() {
+        use sha2::{Digest, Sha256};
+        let document = concat!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:body>",
+            "<w:p w14:paraId=\"AAAAAAAA\"><w:r><w:t xml:space=\"preserve\"> keep me </w:t></w:r></w:p>",
+            "<!-- opaque authored gap -->",
+            "<w:p w14:paraId=\"AAAAAAAA\"><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>old</w:t></w:r></w:p>",
+            "<w:p w:rsidR=\"00AB\"/>",
+            "<w:sectPr/></w:body></w:document>"
+        );
+        let original = base_package(document);
+        let digest = format!("{:x}", Sha256::digest(document.as_bytes()));
+        let request = |digest: &str, paragraphs: serde_json::Value| -> S13SaveRequest {
+            serde_json::from_value(json!({
+                "determinism": determinism(),
+                "document": {
+                    "content": [
+                        text_paragraph("model copy", Some("AAAAAAAA")),
+                        text_paragraph("edited", Some("BBBBBBBB")),
+                        text_paragraph("also edited", None)
+                    ],
+                    "comments": [{ "id": 1, "author": "A", "content": [] }]
+                },
+                "options": { "updateModifiedDate": false },
+                "selective": {
+                    "sourceParagraphs": { "partSha256": digest, "paragraphs": paragraphs }
+                }
+            }))
+            .expect("request")
+        };
+        let saved = write_docx_s13(
+            request(
+                &digest,
+                json!([{ "path": [0, 1], "block": 1 }, { "path": [0, 2], "block": 2 }]),
+            ),
+            &original,
+        )
+        .expect("source paragraph save");
+        let before = part_map(&original);
+        let after = part_map(&saved);
+        assert_eq!(
+            before.keys().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>()
+        );
+        for (path, bytes) in &before {
+            if path != "word/document.xml" {
+                assert_eq!(&after[path], bytes, "{path}");
+            }
+        }
+        let patched = String::from_utf8(after["word/document.xml"].clone()).unwrap();
+        let old = "<w:p w14:paraId=\"AAAAAAAA\"><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>old</w:t></w:r></w:p><w:p w:rsidR=\"00AB\"/>";
+        let (prefix, suffix) = document.split_once(old).unwrap();
+        assert!(patched.starts_with(prefix));
+        assert!(patched.ends_with(suffix));
+        assert_eq!(
+            &patched[prefix.len()..patched.len() - suffix.len()],
+            concat!(
+                "<w:p w14:paraId=\"AAAAAAAA\"><w:pPr><w:jc w:val=\"center\"/></w:pPr>",
+                "<w:r><w:t>edited</w:t></w:r></w:p>",
+                "<w:p w:rsidR=\"00AB\"><w:r><w:t>also edited</w:t></w:r></w:p>"
+            )
+        );
+        assert!(!patched.contains("model copy"));
+
+        let refused = |digest: &str, paragraphs: serde_json::Value| {
+            write_docx_s13(request(digest, paragraphs), &original).is_err()
+        };
+        assert!(refused(
+            &"0".repeat(64),
+            json!([{ "path": [0, 1], "block": 1 }])
+        ));
+        assert!(refused(&digest, json!([{ "path": [0, 2], "block": 1 }])));
+        assert!(refused(&digest, json!([{ "path": [0, 3], "block": 3 }])));
+        assert!(refused(
+            &digest,
+            json!([{ "path": [0, 1], "block": 1 }, { "path": [0, 1], "block": 1 }])
+        ));
+        let mut mixed = request(&digest, json!([]));
+        mixed.selective.as_mut().unwrap().changed_para_ids = vec!["AAAAAAAA".to_owned()];
+        assert!(write_docx_s13(mixed, &original).is_err());
     }
 
     #[test]

@@ -122,8 +122,23 @@ pub(crate) fn import_source_comments(
 
 pub(crate) fn snapshot_comments<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentSnapshot>> {
     let comments = required_map(txn, COMMENTS)?;
+    comment_keys(txn)?
+        .iter()
+        .map(|key| snapshot_comment(&comments, txn, &key.id))
+        .collect()
+}
+
+/// A live comment's place in [`snapshot_comments`] order.
+pub(crate) struct CommentKey {
+    pub id: String,
+    pub slide_id: String,
+}
+
+/// The live comments, ordered by creation time and id, without reading their text.
+pub(crate) fn comment_keys<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentKey>> {
+    let comments = required_map(txn, COMMENTS)?;
     let slides = required_map(txn, SLIDES)?;
-    let mut output = Vec::new();
+    let mut keys = Vec::new();
     for (id, value) in comments.iter(txn) {
         let Ok(entry) = value.cast::<MapRef>() else {
             return Err(EditError::InvalidState(format!(
@@ -134,25 +149,36 @@ pub(crate) fn snapshot_comments<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentSn
         if !slides.contains_key(txn, &slide_id) {
             continue;
         }
-        output.push(CommentSnapshot {
-            id: id.to_owned(),
-            slide_id,
-            author: map_string(&entry, txn, "author").unwrap_or_default(),
-            initials: map_string(&entry, txn, "initials").unwrap_or_default(),
-            text: map_string(&entry, txn, "text").unwrap_or_default(),
-            created: map_string(&entry, txn, "created"),
-            x_emu: map_number(&entry, txn, "x").unwrap_or(0.0) as i64,
-            y_emu: map_number(&entry, txn, "y").unwrap_or(0.0) as i64,
-            parent_id: live_parent(&comments, &entry, txn),
-            resolved: map_bool(&entry, txn, "resolved").unwrap_or(false),
-        });
+        keys.push((map_string(&entry, txn, "created"), id.to_owned(), slide_id));
     }
-    output.sort_by(|left, right| {
-        left.created
-            .cmp(&right.created)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    Ok(output)
+    keys.sort();
+    Ok(keys
+        .into_iter()
+        .map(|(_, id, slide_id)| CommentKey { id, slide_id })
+        .collect())
+}
+
+pub(crate) fn snapshot_comment<T: ReadTxn>(
+    comments: &MapRef,
+    txn: &T,
+    id: &str,
+) -> EditResult<CommentSnapshot> {
+    let entry = comments
+        .get(txn, id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .ok_or_else(|| EditError::InvalidState(format!("comment {id} is not a map")))?;
+    Ok(CommentSnapshot {
+        id: id.to_owned(),
+        slide_id: map_string(&entry, txn, "slideId").unwrap_or_default(),
+        author: map_string(&entry, txn, "author").unwrap_or_default(),
+        initials: map_string(&entry, txn, "initials").unwrap_or_default(),
+        text: map_string(&entry, txn, "text").unwrap_or_default(),
+        created: map_string(&entry, txn, "created"),
+        x_emu: map_number(&entry, txn, "x").unwrap_or(0.0) as i64,
+        y_emu: map_number(&entry, txn, "y").unwrap_or(0.0) as i64,
+        parent_id: live_parent(comments, &entry, txn),
+        resolved: map_bool(&entry, txn, "resolved").unwrap_or(false),
+    })
 }
 
 /// Promotes alternating levels so undo cannot create nested replies.
@@ -302,7 +328,7 @@ impl DeckSession {
         if text.is_empty() {
             return Err(EditError::InvalidComment("comment text is empty".into()));
         }
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         let comment_id = self.next_id("comment");
         let mut txn = self.transact_for(context);
         crate::deck::slide_ref(&txn, slide_id)?;
@@ -318,7 +344,7 @@ impl DeckSession {
         entry.insert(&mut txn, "y", y_emu as f64);
         entry.insert(&mut txn, "resolved", false);
         drop(txn);
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         Ok(CommentReceipt {
             comment_id,
             slide_id: slide_id.to_owned(),
@@ -340,7 +366,7 @@ impl DeckSession {
         if text.is_empty() {
             return Err(EditError::InvalidComment("reply text is empty".into()));
         }
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         let reply_id = self.next_id("comment");
         let mut txn = self.transact_for(context);
         require_modern(&txn)?;
@@ -364,12 +390,53 @@ impl DeckSession {
         entry.insert(&mut txn, "parentId", comment_id);
         entry.insert(&mut txn, "resolved", false);
         drop(txn);
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         Ok(CommentReceipt {
             comment_id: reply_id,
             slide_id,
             parent_id: Some(comment_id.to_owned()),
             resolved: false,
+        })
+    }
+
+    pub fn set_comment_position(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        x_emu: i64,
+        y_emu: i64,
+    ) -> EditResult<CommentReceipt> {
+        const MAX_COORDINATE: u64 = (1_u64 << 53) - 1;
+        if x_emu.unsigned_abs() > MAX_COORDINATE || y_emu.unsigned_abs() > MAX_COORDINATE {
+            return Err(EditError::InvalidComment(
+                "coordinates exceed safe integer range".into(),
+            ));
+        }
+        {
+            let txn = self.doc.transact();
+            let comments = required_map(&txn, COMMENTS)?;
+            let entry = comment_ref(&comments, &txn, comment_id)?;
+            if live_parent(&comments, &entry, &txn).is_some() {
+                return Err(EditError::InvalidComment(
+                    "replies share their root comment position".into(),
+                ));
+            }
+        }
+        self.automatic_undo_barrier();
+        let mut txn = self.transact_for(context);
+        let comments = required_map(&txn, COMMENTS)?;
+        let entry = comment_ref(&comments, &txn, comment_id)?;
+        let slide_id = map_string(&entry, &txn, "slideId").unwrap_or_default();
+        let resolved = map_bool(&entry, &txn, "resolved").unwrap_or(false);
+        entry.insert(&mut txn, "x", x_emu as f64);
+        entry.insert(&mut txn, "y", y_emu as f64);
+        drop(txn);
+        self.automatic_undo_barrier();
+        Ok(CommentReceipt {
+            comment_id: comment_id.to_owned(),
+            slide_id,
+            parent_id: None,
+            resolved,
         })
     }
 
@@ -379,7 +446,7 @@ impl DeckSession {
         comment_id: &str,
         resolved: bool,
     ) -> EditResult<CommentReceipt> {
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         require_modern(&txn)?;
         let comments = required_map(&txn, COMMENTS)?;
@@ -388,7 +455,7 @@ impl DeckSession {
         let parent_id = live_parent(&comments, &entry, &txn);
         entry.insert(&mut txn, "resolved", resolved);
         drop(txn);
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         Ok(CommentReceipt {
             comment_id: comment_id.to_owned(),
             slide_id,
@@ -402,7 +469,7 @@ impl DeckSession {
         context: &EditCtx,
         comment_id: &str,
     ) -> EditResult<CommentReceipt> {
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         let comments = required_map(&txn, COMMENTS)?;
         let entry = comment_ref(&comments, &txn, comment_id)?;
@@ -422,7 +489,7 @@ impl DeckSession {
         }
         comments.remove(&mut txn, comment_id);
         drop(txn);
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         Ok(CommentReceipt {
             comment_id: comment_id.to_owned(),
             slide_id,
@@ -436,7 +503,7 @@ impl DeckSession {
         context: &EditCtx,
         flavor: CommentFlavor,
     ) -> EditResult<CommentFlavor> {
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         let comments = required_map(&txn, COMMENTS)?;
         if comments.len(&txn) > 0 {
@@ -447,7 +514,7 @@ impl DeckSession {
         let meta = required_map(&txn, META)?;
         meta.insert(&mut txn, "commentFlavor", flavor_key(flavor));
         drop(txn);
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         Ok(flavor)
     }
 

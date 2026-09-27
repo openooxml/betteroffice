@@ -7,9 +7,9 @@ use base64::Engine as _;
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
     Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
-    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, Placeholder,
-    PptxPackage, RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform,
-    ShapeWrite, SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite,
+    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, PptxPackage,
+    RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeWrite, SlideWrite, TextTarget,
+    TextWrite,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
@@ -18,58 +18,6 @@ use crate::{
     CommentSnapshot, DeckSession, DeckSnapshot, EditError, EditResult, ParagraphSnapshot,
     ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot,
 };
-
-/// Source shapes and inherited geometry.
-struct SlideContext<'a> {
-    layout: Option<&'a SlideLayout>,
-    master: Option<&'a SlideMaster>,
-    source_shapes: &'a [ShapeNode],
-}
-
-impl<'a> SlideContext<'a> {
-    fn new(package: &'a PptxPackage, snapshot: &SlideSnapshot) -> Self {
-        let source_shapes = snapshot
-            .source_part_path
-            .as_deref()
-            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path))
-            .map(|slide| slide.shapes.as_slice())
-            .unwrap_or_default();
-        let layout = snapshot
-            .layout_part_path
-            .as_deref()
-            .and_then(|path| {
-                package
-                    .layouts
-                    .iter()
-                    .find(|layout| layout.part_path == path)
-            })
-            .or_else(|| package.layouts.first());
-        let master = layout
-            .and_then(|layout| layout.master_part_path.as_deref())
-            .and_then(|path| {
-                package
-                    .masters
-                    .iter()
-                    .find(|master| master.part_path == path)
-            })
-            .or_else(|| {
-                layout.and_then(|layout| {
-                    package.masters.iter().find(|master| {
-                        master
-                            .layout_part_paths
-                            .iter()
-                            .any(|path| path == &layout.part_path)
-                    })
-                })
-            })
-            .or_else(|| package.masters.first());
-        Self {
-            layout,
-            master,
-            source_shapes,
-        }
-    }
-}
 
 impl DeckSession {
     /// Serializes the deck with all edits applied. Untouched slides keep their
@@ -112,10 +60,7 @@ fn deck_write(
             },
             Some(base) => SlideWrite::Patch {
                 part_path: source_part_path(slide)?,
-                shapes: {
-                    let context = SlideContext::new(package, slide);
-                    shape_writes(&slide.shapes, &base.shapes, &context, context.source_shapes)?
-                },
+                shapes: shape_writes(&slide.shapes, &base.shapes, source_shapes(package, slide))?,
             },
             None => SlideWrite::Add {
                 name: slide.name.clone(),
@@ -371,10 +316,23 @@ fn source_part_path(slide: &SlideSnapshot) -> EditResult<String> {
         .ok_or_else(|| EditError::Write(format!("slide {} has no source part", slide.id)))
 }
 
+fn source_shapes<'a>(package: &'a PptxPackage, slide: &SlideSnapshot) -> &'a [ShapeNode] {
+    slide
+        .source_part_path
+        .as_deref()
+        .and_then(|path| {
+            package
+                .slides
+                .iter()
+                .find(|source| source.part_path == path)
+        })
+        .map(|source| source.shapes.as_slice())
+        .unwrap_or_default()
+}
+
 fn shape_writes(
     current: &[ShapeSnapshot],
     baseline: &[ShapeSnapshot],
-    context: &SlideContext<'_>,
     source: &[ShapeNode],
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
@@ -391,12 +349,7 @@ fn shape_writes(
                 let index = addressed_source_index(shape, source)?;
                 ShapeWrite::Patch {
                     source_index: index,
-                    patch: Box::new(shape_patch(
-                        shape,
-                        base,
-                        context,
-                        group_children(source, index),
-                    )?),
+                    patch: Box::new(shape_patch(shape, base, group_children(source, index))?),
                 }
             }
             None => ShapeWrite::Add(Box::new(shape_add(shape)?)),
@@ -438,18 +391,20 @@ fn source_index(shape_id: &str) -> EditResult<usize> {
 fn shape_patch(
     shape: &ShapeSnapshot,
     base: &ShapeSnapshot,
-    context: &SlideContext<'_>,
     source_children: &[ShapeNode],
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
-    let moved = (shape.x, shape.y) != (base.x, base.y);
+    let source_inherited = base.width <= 0 || base.height <= 0;
+    let materialized = source_inherited && shape.width > 0 && shape.height > 0;
+    let moved = materialized || (shape.x, shape.y) != (base.x, base.y);
     let resized = (shape.width, shape.height) != (base.width, base.height);
     if moved || resized {
         patch.offset = moved.then_some((shape.x, shape.y));
         patch.extent = resized.then_some((shape.width, shape.height));
-        let source_inherited = base.width <= 0 || base.height <= 0;
+        patch.materializes = base.inherited.is_some();
         patch.inherited = source_inherited.then(|| {
-            inherited_transform(shape, context)
+            base.inherited
+                .filter(|_| !materialized)
                 .map(|transform| InheritedTransform {
                     x: transform.x,
                     y: transform.y,
@@ -500,82 +455,9 @@ fn shape_patch(
         });
     }
     if shape.children != base.children {
-        patch.children = shape_writes(&shape.children, &base.children, context, source_children)?;
+        patch.children = shape_writes(&shape.children, &base.children, source_children)?;
     }
     Ok(patch)
-}
-
-/// The transform a placeholder inherits: the layout's matching placeholder,
-/// then the master's. The shape's own parsed node cannot contribute — a
-/// positive extent there would already be in the snapshot.
-fn inherited_transform<'a>(
-    shape: &ShapeSnapshot,
-    context: &SlideContext<'a>,
-) -> Option<&'a ShapeTransform> {
-    let layout = shape.placeholder.as_ref().and_then(|placeholder| {
-        context
-            .layout
-            .and_then(|layout| find_placeholder(&layout.shapes, placeholder))
-    });
-    let master = shape.placeholder.as_ref().and_then(|placeholder| {
-        context
-            .master
-            .and_then(|master| find_placeholder(&master.shapes, placeholder))
-    });
-    [layout, master]
-        .into_iter()
-        .flatten()
-        .map(node_transform)
-        .find(|transform| transform.width > 0 && transform.height > 0)
-}
-
-fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Option<&'a ShapeNode> {
-    for node in nodes {
-        if node_placeholder(node).is_some_and(|value| placeholders_match(value, target)) {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_placeholder(&group.children, target)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn placeholders_match(left: &Placeholder, right: &Placeholder) -> bool {
-    match (left.index, right.index) {
-        (Some(left), Some(right)) => left == right,
-        _ => {
-            normalize_placeholder_type(left.placeholder_type.as_deref())
-                == normalize_placeholder_type(right.placeholder_type.as_deref())
-        }
-    }
-}
-
-fn normalize_placeholder_type(value: Option<&str>) -> &str {
-    match value.unwrap_or("body") {
-        "ctrTitle" => "title",
-        "obj" => "body",
-        value => value,
-    }
-}
-
-fn node_placeholder(node: &ShapeNode) -> Option<&Placeholder> {
-    node_base(node).placeholder.as_ref()
-}
-
-fn node_transform(node: &ShapeNode) -> &ShapeTransform {
-    &node_base(node).transform
-}
-
-fn node_base(node: &ShapeNode) -> &pptx_parse::ShapeBase {
-    match node {
-        ShapeNode::Shape(shape) => &shape.base,
-        ShapeNode::Picture(shape) => &shape.base,
-        ShapeNode::GraphicFrame(shape) => &shape.base,
-        ShapeNode::Group(shape) => &shape.base,
-    }
 }
 
 fn text_target(story_id: &str, shape_id: &str) -> EditResult<TextTarget> {
@@ -665,6 +547,7 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
             color: run.style.color.as_deref().map(color_from_hex),
             language: None,
             hyperlink_relationship_id: None,
+            effects: None,
         },
     }
 }

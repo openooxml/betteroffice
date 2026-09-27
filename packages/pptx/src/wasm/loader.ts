@@ -1,13 +1,34 @@
 import initWasmModule, {
   decodeTiffPng,
+  exportPptxMarkdownJson,
+  exportPptxStructuredJson,
   parsePptxJson,
   PptxDocument,
   PptxRenderer,
+  renderPptxMarkdownJson,
   rendererVersion,
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { StaleProposalError } from '../proposals';
+import { PptxExportError } from '../structuredExport';
+import type {
+  PptxExportFailure,
+  PptxExportOptions,
+  PptxExportResult,
+  PptxMarkdownContent,
+  PptxMarkdownOptions,
+  PptxStructuredContent,
+} from '../structuredExport';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
+import type {
+  PptxEditRequest,
+  PptxEditResult,
+  PptxFindRequest,
+  PptxFindResult,
+  PptxReadRequest,
+  PptxReadResult,
+  PptxValidationResult,
+} from '../edits';
 import type {
   CollaborationReplica,
   CollaborationUpdateOrigin,
@@ -26,6 +47,7 @@ import type {
   Profiled,
   ProfiledLayout,
   PptxFontFace,
+  PptxCaretAnchor,
   PptxTextMatch,
   PptxTextSearchOptions,
   ShapeAdjustReceipt,
@@ -50,6 +72,8 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenPresentationOptions {
   clientId?: number;
   fonts?: ReadonlyArray<PptxFontFace>;
+  /** Faces drawn only for characters the run's own face has no glyph for, e.g. a script's Noto face. */
+  fallbackFonts?: ReadonlyArray<PptxFontFace>;
   /**
    * Opens from a collaboration update instead of parsing the file bytes.
    * When the bytes are the file the update was seeded from, the session
@@ -58,6 +82,8 @@ export interface OpenPresentationOptions {
    */
   initialUpdate?: Uint8Array;
 }
+
+export type UndoCaptureMode = 'auto' | 'manual';
 
 export interface PresentationHandle extends CollaborationReplica {
   isProposalsAvailable(): boolean;
@@ -71,9 +97,39 @@ export interface PresentationHandle extends CollaborationReplica {
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
+  /** Anchors the UTF-16 caret `index` of a story so later edits move it along. */
+  anchorCaret(storyId: string, index: number): PptxCaretAnchor;
+  /** The anchor's current offset, or `null` once its story is gone. */
+  resolveCaretAnchor(anchor: PptxCaretAnchor): number | null;
+  /**
+   * The session-scoped version token. It changes with every committed change, local or remote,
+   * undo and redo included; compare tokens only within this session.
+   */
+  version(): string;
+  /** Slides and their stories' text, with the version they were read at. */
+  readContent(request?: PptxReadRequest): PptxReadResult;
+  /** Exact, case-sensitive, paragraph-local search; overlapping matches count separately. */
+  findText(request: PptxFindRequest): PptxFindResult;
+  /**
+   * Structured slide content with the version it was read at, read from committed state: pending
+   * editor input is not flushed and nothing changes. Option refusals are returned; malformed
+   * options throw.
+   */
+  exportStructured(options?: PptxExportOptions): PptxExportResult<PptxStructuredContent>;
+  /** `exportStructured` rendered as Markdown from the same read. */
+  exportMarkdown(options?: PptxExportOptions): PptxExportResult<PptxMarkdownContent>;
+  /** Runs every check of `applyEdits`, staging included, without changing anything. */
+  validateEdits(request: PptxEditRequest): PptxValidationResult;
+  /**
+   * Applies every step or none against `expectVersion`, as one transaction, one update and, for
+   * `history: 'separate'`, one undo step. Policy failures are returned; malformed requests throw.
+   */
+  applyEdits(request: PptxEditRequest): PptxEditResult;
   /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
+  /** Registers a face drawn only where a run's own face has no glyph. */
+  registerFallbackFont(face: PptxFontFace): number;
   layoutSlide(slideIndex: number): SlideDisplayList;
   /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
@@ -150,6 +206,8 @@ export interface PresentationHandle extends CollaborationReplica {
   ): CommentReceipt;
   /** Resolves or reopens a modern comment. */
   setCommentStatus(commentId: string, resolved: boolean): CommentReceipt;
+  /** Moves a root comment on its slide; coordinates are safe integer EMU. */
+  setCommentPosition(commentId: string, position: { xEmu: number; yEmu: number }): CommentReceipt;
   removeComment(commentId: string): CommentReceipt;
   /** Only legal while the deck has no comments. */
   setCommentFlavor(flavor: CommentFlavor): CommentFlavor;
@@ -165,6 +223,9 @@ export interface PresentationHandle extends CollaborationReplica {
   setShapeRect(slideId: string, shapeId: string, rect: ShapeRect): TransformReceipt;
   canUndo(): boolean;
   canRedo(): boolean;
+  undoCaptureMode(): UndoCaptureMode;
+  setUndoCaptureMode(mode: UndoCaptureMode): void;
+  addUndoBoundary(): void;
   undo(): HistoryResult;
   /** `undo` with undo, snapshot and serialize time measured at the boundary. */
   undoProfiled(): Profiled<HistoryResult, HistoryProfile>;
@@ -218,6 +279,51 @@ export function inspectPresentation(bytes: Uint8Array): unknown {
   return call(() => parsePptxJson(bytes));
 }
 
+type ExportOutcome<T> = { ok: true; content: T } | { ok: false; failure: PptxExportFailure };
+
+function exported<T>(operation: () => string): T {
+  const outcome = jsonCall<ExportOutcome<T>>(operation);
+  if (!outcome.ok) throw new PptxExportError(outcome.failure);
+  return outcome.content;
+}
+
+/**
+ * Exports PPTX bytes as structured content whose anchors address the returned snapshot. No
+ * session, DOM or font is involved. Throws `PptxExportError` for refused options and an `Error`
+ * for bytes that are not a readable PPTX.
+ */
+export async function exportPptxStructured(
+  bytes: Uint8Array,
+  options: PptxExportOptions = {}
+): Promise<PptxStructuredContent> {
+  await initWasm();
+  const json = requestJson(options);
+  return exported(() => exportPptxStructuredJson(bytes, json));
+}
+
+/** `exportPptxStructured` rendered as Markdown with anchor markers. */
+export async function exportPptxMarkdown(
+  bytes: Uint8Array,
+  options: PptxExportOptions = {}
+): Promise<PptxMarkdownContent> {
+  await initWasm();
+  const json = requestJson(options);
+  return exported(() => exportPptxMarkdownJson(bytes, json));
+}
+
+/**
+ * Renders structured content (schema version 1) as Markdown. Content the renderer cannot trust
+ * refuses with `invalid-content`.
+ */
+export async function renderPptxMarkdown(
+  content: PptxStructuredContent,
+  options: PptxMarkdownOptions = {}
+): Promise<PptxMarkdownContent> {
+  await initWasm();
+  const json = requestJson(options);
+  return exported(() => renderPptxMarkdownJson(JSON.stringify(content), json));
+}
+
 export function decodeTiffImage(bytes: Uint8Array): Uint8Array {
   requireInitialized();
   return construct(() => decodeTiffPng(bytes));
@@ -240,6 +346,7 @@ export function openPresentation(
   );
   const renderer = construct(() => new PptxRenderer());
   for (const face of options.fonts ?? []) registerFont(renderer, face);
+  for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -374,6 +481,43 @@ export function openPresentation(
     story(storyId: string): StorySnapshot {
       return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));
     },
+    anchorCaret(storyId, index): PptxCaretAnchor {
+      return jsonWasmCall(() => doc.anchorCaretJson(JSON.stringify({ storyId, index })));
+    },
+    resolveCaretAnchor(anchor): number | null {
+      return jsonWasmCall(() =>
+        doc.resolveCaretAnchorJson(
+          JSON.stringify({ storyId: anchor.storyId, position: anchor.position })
+        )
+      );
+    },
+    version(): string {
+      return wasmCall(() => doc.documentVersion());
+    },
+    readContent(request = {}) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.readContentJson(json));
+    },
+    findText(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.findTextJson(json));
+    },
+    exportStructured(options = {}) {
+      const json = requestJson(options);
+      return jsonWasmCall(() => doc.exportStructuredJson(json));
+    },
+    exportMarkdown(options = {}) {
+      const json = requestJson(options);
+      return jsonWasmCall(() => doc.exportMarkdownJson(json));
+    },
+    validateEdits(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.validateEditsJson(json));
+    },
+    applyEdits(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.applyEditsJson(json), true);
+    },
     searchText(query, options = {}) {
       if (!query) return [];
       const limit = options.limit ?? Number.POSITIVE_INFINITY;
@@ -390,6 +534,9 @@ export function openPresentation(
     },
     registerFont(face: PptxFontFace): number {
       return wasmCall(() => registerFont(renderer, face));
+    },
+    registerFallbackFont(face: PptxFontFace): number {
+      return wasmCall(() => registerFont(renderer, face, true));
     },
     layoutSlide(slideIndex: number): SlideDisplayList {
       return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
@@ -509,6 +656,14 @@ export function openPresentation(
         true
       );
     },
+    setCommentPosition(commentId, position): CommentReceipt {
+      if (!Number.isSafeInteger(position.xEmu) || !Number.isSafeInteger(position.yEmu)) {
+        throw new Error('Comment coordinates must be safe integer EMU');
+      }
+      return jsonWasmCall(
+        () => doc.setCommentPositionJson(JSON.stringify({ commentId, ...position })), true
+      );
+    },
     setCommentStatus(commentId, resolved): CommentReceipt {
       return jsonWasmCall(
         () => doc.setCommentStatusJson(JSON.stringify({ commentId, resolved })),
@@ -617,6 +772,15 @@ export function openPresentation(
     canRedo(): boolean {
       return wasmCall(() => doc.canRedo());
     },
+    undoCaptureMode(): UndoCaptureMode {
+      return wasmCall(() => doc.undoCaptureMode()) as UndoCaptureMode;
+    },
+    setUndoCaptureMode(mode): void {
+      wasmCall(() => doc.setUndoCaptureMode(mode));
+    },
+    addUndoBoundary(): void {
+      wasmCall(() => doc.addUndoBoundary());
+    },
     undo(): HistoryResult {
       return jsonWasmCall(() => doc.undoJson(), true);
     },
@@ -691,9 +855,20 @@ export function openPresentation(
   return handle;
 }
 
-function registerFont(renderer: PptxRenderer, face: PptxFontFace): number {
+/** JSON for a host request; `JSON.stringify` would turn NaN and infinities into `null`. */
+function requestJson(request: unknown): string {
+  return JSON.stringify(request, (_key, value: unknown) => {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new RangeError('host requests must not contain NaN or infinite numbers');
+    }
+    return value;
+  });
+}
+
+function registerFont(renderer: PptxRenderer, face: PptxFontFace, fallback = false): number {
   try {
-    return renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes);
+    const register = fallback ? renderer.registerFallbackFont : renderer.registerFont;
+    return register.call(renderer, face.family, face.bold ?? false, face.italic ?? false, face.bytes);
   } catch (error) {
     throw toError(error);
   }
