@@ -108,6 +108,10 @@ jobs:
         if: matrix.suite == 'browser'
         run: bun run test:e2e:browser
 
+      - name: Run the DOCX plugin host in Chromium
+        if: matrix.suite == 'browser'
+        run: bun run test:e2e:browser:plugins
+
       - name: Upload corpus results
         if: always() && matrix.suite == 'corpus'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

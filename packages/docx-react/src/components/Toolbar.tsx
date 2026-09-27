@@ -8,6 +8,7 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { useDocxCommandState } from '../commands/hooks';
 import { useTranslation } from '../i18n';
+import { DocxPluginToolbar } from '../plugins/DocxPluginToolbar';
 import { useEditorChrome } from './EditorToolbarContext';
 import { ToolbarCommand } from './toolbar/ToolbarCommand';
 import { ToolbarRail } from './toolbar/ToolbarOverflow';
@@ -86,6 +87,7 @@ function DefaultToolbarItems() {
       <ToolbarCommand id="commentsSidebar" />
       <ToolbarSeparator />
       <ToolbarCommand id="editingMode" />
+      <DocxPluginToolbar />
       {chrome?.toolbarExtra}
     </>
   );

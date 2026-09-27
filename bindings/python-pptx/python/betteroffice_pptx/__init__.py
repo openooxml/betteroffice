@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import json
-from typing import Iterator, Mapping, Sequence, Union
+from typing import Any, Iterator, Mapping, Sequence, Union
 from .edits import (
     PptxEditFailure,
     PptxEditFailureCode,
@@ -30,6 +30,19 @@ from .edits import (
     PptxTextTarget,
     PptxValidationResult,
 )
+from .exports import (
+    PptxAnchor,
+    PptxAnchorScope,
+    PptxExportDiagnostic,
+    PptxExportFailure,
+    PptxExportFailureCode,
+    PptxExportOptions,
+    PptxExportRefusal,
+    PptxMarkdownContent,
+    PptxMarkdownResult,
+    PptxStructuredContent,
+    PptxStructuredResult,
+)
 from .proposals import Proposal, ProposalChange, ProposalPreview
 
 from ._betteroffice_pptx import (
@@ -39,6 +52,7 @@ from ._betteroffice_pptx import (
     CommentEdit,
     Deck,
     DisplayList,
+    ExportError,
     FillEdit,
     InvalidUpdateError,
     MAX_COLLABORATION_BYTES,
@@ -61,6 +75,9 @@ from ._betteroffice_pptx import (
     TextEdit,
     TextRun,
     TransformEdit,
+    export_pptx_markdown_json as _export_pptx_markdown_json,
+    export_pptx_structured_json as _export_pptx_structured_json,
+    render_pptx_markdown_json as _render_pptx_markdown_json,
 )
 from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
@@ -75,6 +92,7 @@ __all__ = [
     "EMU_PER_CENTIMETER",
     "EMU_PER_INCH",
     "EMU_PER_POINT",
+    "ExportError",
     "FillEdit",
     "InvalidUpdateError",
     "MAX_COLLABORATION_BYTES",
@@ -85,6 +103,8 @@ __all__ = [
     "Png",
     "PptxError",
     "Presentation",
+    "PptxAnchor",
+    "PptxAnchorScope",
     "PptxEditFailure",
     "PptxEditFailureCode",
     "PptxEditHistory",
@@ -94,10 +114,17 @@ __all__ = [
     "PptxEditResult",
     "PptxEditSource",
     "PptxEditStep",
+    "PptxExportDiagnostic",
+    "PptxExportFailure",
+    "PptxExportFailureCode",
+    "PptxExportOptions",
+    "PptxExportRefusal",
     "PptxFindMatch",
     "PptxFindRequest",
     "PptxFindResult",
     "PptxFindScope",
+    "PptxMarkdownContent",
+    "PptxMarkdownResult",
     "PptxParagraphText",
     "PptxReadRequest",
     "PptxReadResult",
@@ -105,6 +132,8 @@ __all__ = [
     "PptxSlideTarget",
     "PptxStoryTarget",
     "PptxStoryText",
+    "PptxStructuredContent",
+    "PptxStructuredResult",
     "PptxTextRange",
     "PptxTextTarget",
     "PptxValidationResult",
@@ -127,6 +156,9 @@ __all__ = [
     "TextRun",
     "TransformEdit",
     "__version__",
+    "export_pptx_markdown",
+    "export_pptx_structured",
+    "render_pptx_markdown",
 ]
 
 EMU_PER_INCH = 914400
@@ -544,6 +576,62 @@ class Presentation:
         """Exact, case-sensitive, paragraph-local search; overlapping matches all count."""
         return json.loads(self._inner.find_text_json(_request_json(request)))
 
+    def export_structured(
+        self,
+        *,
+        include_hidden_slides: bool = False,
+        include_hidden_shapes: bool = False,
+        include_notes: bool = False,
+        include_comments: bool = False,
+        include_formatting: bool = True,
+        max_blocks: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> PptxStructuredResult:
+        """Structured slide content with the version it was read at; nothing changes.
+
+        Returns ``{"ok": True, "version", "content"}``, or ``{"ok": False, "version",
+        "failure"}`` when the limits are unusable. Anchors belong to that version.
+        """
+        return json.loads(
+            self._inner.export_structured_json(
+                _export_options(
+                    include_hidden_slides,
+                    include_hidden_shapes,
+                    include_notes,
+                    include_comments,
+                    include_formatting,
+                    max_blocks,
+                    max_bytes,
+                )
+            )
+        )
+
+    def export_markdown(
+        self,
+        *,
+        include_hidden_slides: bool = False,
+        include_hidden_shapes: bool = False,
+        include_notes: bool = False,
+        include_comments: bool = False,
+        include_formatting: bool = True,
+        max_blocks: int = 10_000,
+        max_bytes: int = 8_388_608,
+    ) -> PptxMarkdownResult:
+        """``export_structured`` rendered as Markdown with anchor markers, from the same read."""
+        return json.loads(
+            self._inner.export_markdown_json(
+                _export_options(
+                    include_hidden_slides,
+                    include_hidden_shapes,
+                    include_notes,
+                    include_comments,
+                    include_formatting,
+                    max_blocks,
+                    max_bytes,
+                )
+            )
+        )
+
     def validate_edits(self, request: PptxEditRequest) -> PptxValidationResult:
         """Run every check of ``apply_edits`` without changing anything."""
         return json.loads(self._inner.validate_edits_json(_request_json(request)))
@@ -626,6 +714,75 @@ class Presentation:
 
     def __repr__(self) -> str:
         return f"Presentation(slides={self.slide_count})"
+
+
+def export_pptx_structured(
+    data: "bytes | bytearray | memoryview",
+    *,
+    options: "PptxExportOptions | None" = None,
+) -> PptxStructuredContent:
+    """Export PPTX bytes as structured content whose anchors address this snapshot only.
+
+    ``options`` uses the camelCase wire keys. Raises ``ExportError`` for refused options (its
+    ``failure`` is the refusal) and ``ParseError`` for bytes that are not a readable PPTX.
+    """
+    return _content(_export_pptx_structured_json(_as_bytes(data), _request_json(options or {})))
+
+
+def export_pptx_markdown(
+    data: "bytes | bytearray | memoryview",
+    *,
+    options: "PptxExportOptions | None" = None,
+) -> PptxMarkdownContent:
+    """``export_pptx_structured`` rendered as Markdown with anchor markers."""
+    return _content(_export_pptx_markdown_json(_as_bytes(data), _request_json(options or {})))
+
+
+def render_pptx_markdown(
+    content: "PptxStructuredContent | Mapping[str, Any]", *, max_bytes: int = 8_388_608
+) -> PptxMarkdownContent:
+    """Render structured content (schema version 1) as Markdown.
+
+    Raises ``ExportError`` for a refused limit or content that contradicts itself, and
+    ``ValueError`` for content that is not schema version 1.
+    """
+    return _content(
+        _render_pptx_markdown_json(
+            json.dumps(dict(content), allow_nan=False),
+            _request_json({"maxBytes": max_bytes}),
+        )
+    )
+
+
+def _content(envelope: str) -> Any:
+    outcome = json.loads(envelope)
+    if not outcome["ok"]:
+        error = ExportError(outcome["failure"]["message"])
+        error.failure = outcome["failure"]
+        raise error
+    return outcome["content"]
+
+
+def _export_options(
+    include_hidden_slides: bool,
+    include_hidden_shapes: bool,
+    include_notes: bool,
+    include_comments: bool,
+    include_formatting: bool,
+    max_blocks: int,
+    max_bytes: int,
+) -> str:
+    return _request_json(
+        {
+            "includeHiddenSlides": include_hidden_slides,
+            "includeHiddenShapes": include_hidden_shapes,
+            "includeNotes": include_notes,
+            "includeComments": include_comments,
+            "includeFormatting": include_formatting,
+            "maxBlocks": max_blocks,
+            "maxBytes": max_bytes,
+        }
+    )
 
 
 def _request_json(request: "Mapping[str, object]") -> str:

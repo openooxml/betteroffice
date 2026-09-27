@@ -274,3 +274,17 @@ anchor in `anchors`. Only http, https, mailto and internal-anchor targets are li
 judged after entity and percent decoding, and `&` in a target is written `&amp;`; document text, titles and alt text never keep a
 line break or unescaped HTML. It does not
 preserve Word pagination or layout. Page fragments are not included yet.
+
+### Editor plugin contract (deprecated)
+
+`@betteroffice/docx/plugin-api` keeps its geometry and sidebar building blocks:
+`RenderedDomContext`, `PositionCoordinates`, `SidebarItem`,
+`createRenderedDomContext`, `createCanvasHostProjector` and
+`resolveItemPositions`. The snapshot-based `EditorPluginCore`,
+`PluginPanelProps`, `PanelConfig` and `SidebarItemContext` are deprecated: they
+pass serialized `Document` snapshots and have no host that manages their
+lifecycle. Host plugins for the React editor use `defineDocxPlugin` and the
+`plugins` prop of
+[`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react),
+which provide versioned reads, granted commands and edit batches, lifecycle
+events and cleanup.

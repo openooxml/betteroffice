@@ -210,7 +210,7 @@ pub(crate) struct StoryView<'a> {
 }
 
 impl<'a> StoryView<'a> {
-    fn build(
+    pub(crate) fn build(
         package: &PptxPackage,
         slide: &'a SlideSnapshot,
         shape: &'a ShapeSnapshot,
@@ -444,7 +444,7 @@ fn source_body<'p>(
 }
 
 /// The source paragraph a seeded paragraph id names.
-fn source_paragraph<'b>(
+pub(crate) fn source_paragraph<'b>(
     body: &'b TextBody,
     story_id: &str,
     paragraph_id: &str,
@@ -460,7 +460,7 @@ fn source_paragraph<'b>(
 
 /// The leading and trailing bytes `source` and `target` share, compared by character, the
 /// trailing ones within what the leading ones leave. Saving keeps source runs verbatim there.
-fn common_ends(source: &str, target: &str) -> (usize, usize) {
+pub(crate) fn common_ends(source: &str, target: &str) -> (usize, usize) {
     let prefix: usize = source
         .chars()
         .zip(target.chars())
