@@ -85,6 +85,8 @@ describe('grep, read, propose, export', () => {
     expect(changed).toBeDefined();
     const run = reopened.read(changed.ref).runs.find(run => run.start <= changed.start && run.end >= changed.end);
     expect(run?.formatting.bold).toBe(true);
+    expect(run?.formatting.fontSizePt).toBe(11);
+    expect(run?.formatting.fontSize).toBeUndefined();
     expect(JSON.stringify(run?.formatting)).toContain('0066AA');
     expect(await doc.verify(proposal.id)).toMatchObject({ reopened: true });
   });

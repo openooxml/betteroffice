@@ -43,9 +43,16 @@ function boundary(text: string, offset: number): boolean {
 }
 
 function visibleFormatting(attributes: Record<string, unknown>): Record<string, unknown> {
-  const keys = new Set(['bold', 'italic', 'underline', 'strike', 'textColor', 'color', 'fontSize', 'fontFamily', 'fontFamilyAscii', 'fontFamilyHAnsi', 'highlight', 'verticalAlign', 'hyperlink', 'ins', 'del']);
-  return Object.fromEntries(Object.entries(attributes).filter(([key]) => keys.has(key)).map(([key, value]) =>
+  const keys = new Set(['bold', 'italic', 'underline', 'strike', 'textColor', 'color', 'fontFamily', 'fontFamilyAscii', 'fontFamilyHAnsi', 'highlight', 'verticalAlign', 'hyperlink', 'ins', 'del']);
+  const formatting = Object.fromEntries(Object.entries(attributes).filter(([key]) => keys.has(key)).map(([key, value]) =>
     [key, JSON.stringify(value).length <= 500 ? value : '(formatting value exceeds preview limit)']));
+  const fontSize = attributes.fontSize;
+  if (fontSize && typeof fontSize === 'object') {
+    const size = fontSize as { size?: unknown; sizeCs?: unknown };
+    if (typeof size.size === 'number') formatting.fontSizePt = size.size / 2;
+    if (typeof size.sizeCs === 'number') formatting.complexScriptFontSizePt = size.sizeCs / 2;
+  }
+  return formatting;
 }
 
 function literal(query: string, caseSensitive: boolean): RegExp {

@@ -56,6 +56,8 @@ Use the `document` ID from `office_open` on subsequent calls. Use paragraph
 `ref` and `revision` values returned by search or reads; these belong to the
 open session. Reopening a file creates new references. `paragraph` and `page`
 numbers are one-based; text offsets and pagination offsets are zero-based.
+Run formatting reports `fontSizePt` and `complexScriptFontSizePt` in points,
+converting Word's stored half-point values.
 
 Search is literal and case-insensitive by default. It stays within paragraphs,
 never crosses an inline embed, and excludes existing tracked changes. Follow
