@@ -126,6 +126,59 @@ fn a_facade_seeded_update_accepts_the_source_file() {
 }
 
 #[test]
+fn edit_batches_run_through_the_facade() {
+    use betteroffice_pptx::{
+        EditFailureCode, EditHistory, EditRequest, EditSource, EditStep, ReadRequest, TargetEdge,
+        TextRange, TextTarget,
+    };
+
+    let presentation = Presentation::open(FIXTURE).unwrap();
+    let read = presentation
+        .read_content(&ReadRequest::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.version, presentation.version());
+    let story = &read.stories[0];
+    let request = EditRequest {
+        expect_version: read.version.clone(),
+        source: EditSource::Agent,
+        history: EditHistory::Separate,
+        steps: vec![EditStep::InsertText {
+            target: TextTarget::Range(TextRange {
+                slide_id: story.slide_id.clone(),
+                shape_id: story.shape_id.clone(),
+                story_id: story.story_id.clone(),
+                start: 0,
+                end: 0,
+            }),
+            at: TargetEdge::Start,
+            text: "Draft: ".into(),
+            expect: None,
+        }],
+    };
+    assert!(
+        presentation
+            .validate_edits(&request)
+            .unwrap()
+            .unwrap()
+            .would_apply
+    );
+    let applied = presentation.apply_edits(&request).unwrap().unwrap();
+    assert!(applied.applied);
+    assert!(presentation.can_undo());
+    let stale = presentation.apply_edits(&request).unwrap().unwrap_err();
+    assert_eq!(stale.failure.code, EditFailureCode::StaleVersion);
+    let reopened = Presentation::open(&presentation.save().unwrap()).unwrap();
+    assert!(
+        reopened
+            .story(&story.story_id)
+            .unwrap()
+            .plain_text()
+            .starts_with("Draft: ")
+    );
+}
+
+#[test]
 fn reports_native_parse_errors() {
     assert!(matches!(
         Presentation::open(b"not a presentation"),

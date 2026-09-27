@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 
 use pptx_edit::{
     CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
-    EditCtx, EditError, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt,
+    DocumentVersion, EditCtx, EditError, EditOutcome, EditRequest, FindOutcome, FindRequest,
+    PresetShapeDraft, ReadOutcome, ReadRequest, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt,
     ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideScope,
     StorySnapshot, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
-    UpdateEvent, UpdateSubscription,
+    UpdateEvent, UpdateSubscription, ValidationOutcome,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -145,6 +146,33 @@ impl Presentation {
 
     pub fn snapshot(&self) -> Result<DeckSnapshot> {
         Ok(self.session.snapshot()?)
+    }
+
+    /// The session-scoped version token of the committed deck state; see
+    /// [`DeckSession::version`].
+    pub fn version(&self) -> DocumentVersion {
+        self.session.version()
+    }
+
+    /// Slides and their stories' text with the version it was read at. Policy refusals are the
+    /// inner `Err`.
+    pub fn read_content(&self, request: &ReadRequest) -> Result<ReadOutcome> {
+        Ok(self.session.read_content(request)?)
+    }
+
+    /// Exact, case-sensitive, paragraph-local search with the version it ran at.
+    pub fn find_text(&self, request: &FindRequest) -> Result<FindOutcome> {
+        Ok(self.session.find_text(request)?)
+    }
+
+    /// Runs every check of [`Presentation::apply_edits`] without changing anything.
+    pub fn validate_edits(&self, request: &EditRequest) -> Result<ValidationOutcome> {
+        Ok(self.session.validate_edits(request)?)
+    }
+
+    /// Applies every step or none against `expect_version`, as one transaction.
+    pub fn apply_edits(&self, request: &EditRequest) -> Result<EditOutcome> {
+        Ok(self.session.apply_edits(request)?)
     }
 
     /// Slide ids in deck order, without serializing a full [`DeckSnapshot`].

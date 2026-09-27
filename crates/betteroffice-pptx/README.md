@@ -29,6 +29,12 @@ Display lists carry vector geometry, images, shaped text, caret data, and
 hit-test metadata. Register at least one font face before rendering a slide
 that contains text.
 
+`read_content`, `find_text`, `validate_edits` and `apply_edits` run
+version-checked edit batches: every step resolves against the version the host
+read, and the batch commits as one transaction or comes back as an
+`EditRefusal` with nothing changed. The request types are the JSON contract of
+the JavaScript core.
+
 `pptx-edit` keeps the wasm surface for JavaScript clients. This facade exposes
 the same engine operations without its JSON argument and result wrappers.
 
@@ -50,6 +56,7 @@ without edits.
 | --- | --- |
 | Presentation, slide, master, layout, shape, text, theme, and media inspection | Yes |
 | Yrs slide, shape, and text editing | Yes |
+| Version-checked edit batches | Yes |
 | Yrs v1 state vectors, diffs, updates, undo, and redo | Yes |
 | Slide display lists and hit testing | Yes |
 | Part-preserving package save | Yes |

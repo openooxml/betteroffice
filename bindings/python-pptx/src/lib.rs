@@ -14,12 +14,13 @@ use python_common::{generated_client_id, map_io_error};
 
 use betteroffice_pptx::{
     Background, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx, EditError,
-    EditOrigin, Error as CoreError, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
-    ParagraphSnapshot, ParseLimits, Presentation as CorePresentation, PresetShapeDraft,
-    ProposalError, ProposalRequest, RenderOptions, ShapeAdjustReceipt, ShapeDraft,
-    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, StorySnapshot, TextReceipt, TextRunSnapshot,
-    TextStyle, TextStylePatch, TransformReceipt,
+    EditOrigin, EditRequest, Error as CoreError, FindRequest, MAX_COLLABORATION_BYTES,
+    MAX_COLLABORATION_CLIENT_ID, MAX_REQUEST_BYTES, ParagraphSnapshot, ParseLimits,
+    Presentation as CorePresentation, PresetShapeDraft, ProposalError, ProposalRequest,
+    ReadRequest, RenderOptions, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeKind,
+    ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, SlideReceipt,
+    SlideSnapshot, StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle, TextStylePatch,
+    TransformReceipt, outcome_json, oversized_request,
 };
 
 create_exception!(
@@ -1123,6 +1124,14 @@ pub struct PyPresentation {
 }
 
 impl PyPresentation {
+    /// The refusal JSON for a request over the byte budget, which is never decoded.
+    fn oversized(&self, request: &str) -> Option<PyResult<String>> {
+        (request.len() > MAX_REQUEST_BYTES).then(|| {
+            outcome_json::<()>(&Err(oversized_request(self.presentation.version())))
+                .map_err(|error| PptxError::new_err(error.to_string()))
+        })
+    }
+
     fn edit_ctx(&self) -> EditCtx {
         EditCtx {
             origin: self.origin,
@@ -1962,6 +1971,64 @@ impl PyPresentation {
 
     fn reject_proposal(&self, id: &str) -> bool {
         self.presentation.reject_proposal(id)
+    }
+
+    /// The session-scoped version token of the committed deck state.
+    fn version(&self) -> String {
+        self.presentation.version().to_string()
+    }
+
+    fn read_content_json(&self, request: &str) -> PyResult<String> {
+        if let Some(refused) = self.oversized(request) {
+            return refused;
+        }
+        let request: ReadRequest = serde_json::from_str(request)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let outcome = self
+            .presentation
+            .read_content(&request)
+            .map_err(map_error)?;
+        outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    fn find_text_json(&self, request: &str) -> PyResult<String> {
+        if let Some(refused) = self.oversized(request) {
+            return refused;
+        }
+        let request: FindRequest = serde_json::from_str(request)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let outcome = self.presentation.find_text(&request).map_err(map_error)?;
+        outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    fn validate_edits_json(&self, request: &str) -> PyResult<String> {
+        if let Some(refused) = self.oversized(request) {
+            return refused;
+        }
+        let request: EditRequest = serde_json::from_str(request)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let outcome = self
+            .presentation
+            .validate_edits(&request)
+            .map_err(map_error)?;
+        outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    /// Marks the deck edited only when the batch applied.
+    fn apply_edits_json(&self, request: &str) -> PyResult<String> {
+        if let Some(refused) = self.oversized(request) {
+            return refused;
+        }
+        let request: EditRequest = serde_json::from_str(request)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let outcome = self.presentation.apply_edits(&request).map_err(map_error)?;
+        if outcome
+            .as_ref()
+            .is_ok_and(|application| application.applied)
+        {
+            self.edited.set(true);
+        }
+        outcome_json(&outcome).map_err(|error| PptxError::new_err(error.to_string()))
     }
 
     fn render_proposal(&self, id: &str, slide: &Bound<'_, PyAny>) -> PyResult<PyDisplayList> {

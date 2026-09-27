@@ -68,6 +68,12 @@
   changed. Text steps stay within one paragraph and paragraph steps need a
   document opened from DOCX bytes.
 
+- **Version-checked PPTX edit batches.** PPTX JavaScript, React, Rust and
+  Python hosts read slides and story text with a session version, then apply
+  atomic text, speaker-notes and shape batches that commit as one undo step or
+  return a typed refusal with nothing changed. Text steps stay within one
+  paragraph and leave fields and line breaks whole.
+
 - **Version-checked XLSX edit batches.** XLSX hosts in JavaScript, React, Rust
   and Python read cells with a session version, then apply atomic cell input,
   formula, number-format and style batches that commit as one recalculated undo
