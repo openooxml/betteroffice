@@ -121,6 +121,12 @@
   atomically through version-checked edit batches. Native and Python filling and
   explicit rich-text run input are not yet supported.
 
+- **DOCX comparison into tracked changes.** Compare body paragraph text in two
+  DOCX files with unchanged paragraph structure and emit attributed tracked
+  insertions and deletions. Unsupported or ambiguous comparisons return
+  diagnostics. The headless JavaScript API supports BetterOffice review; Word
+  validation is reported separately.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

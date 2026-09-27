@@ -4047,6 +4047,12 @@ fn visit_story(
         );
         match kind {
             "paragraph" => {
+                context
+                    .provenance
+                    .paragraph_sources
+                    .entry(story_id.clone())
+                    .or_default()
+                    .push((!source_blocks.is_empty()).then_some(block_index));
                 if has_run_property_changes(field(Some(block), "content").unwrap_or(&Value::Null)) {
                     context
                         .source
@@ -4298,6 +4304,12 @@ fn visit_story(
     }
 
     if options.append_body_tail && matches!(last_kind, Some("table" | "blockSdt")) {
+        context
+            .provenance
+            .paragraph_sources
+            .entry(story_id.clone())
+            .or_default()
+            .push(None);
         let key = format!("{story_id}:p{}", cursor.paragraph);
         context.plans[plan_index].units.push(embed_unit(
             "pilcrow",

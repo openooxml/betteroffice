@@ -183,6 +183,9 @@ pub(crate) struct Provenance {
     pub by_story: HashMap<String, (Vec<usize>, Vec<usize>)>,
     /// Once pinned, the relocated breaks an inline record witnesses.
     pub witnessed: HashSet<usize>,
+    /// Each story's paragraphs in stream order, with the story block index of those seeded
+    /// from a source `w:p`; `None` for paragraphs seeding supplied.
+    pub paragraph_sources: HashMap<String, Vec<Option<usize>>>,
 }
 
 impl Provenance {
@@ -320,7 +323,7 @@ impl SourceParts {
 }
 
 /// The relationship part of `part`.
-fn relationship_part(part: &str) -> String {
+pub(crate) fn relationship_part(part: &str) -> String {
     match part.rsplit_once('/') {
         Some((directory, name)) => format!("{directory}/_rels/{name}.rels"),
         None => format!("_rels/{part}.rels"),
@@ -763,7 +766,7 @@ fn walk<'a>(
     Some((path, current))
 }
 
-fn sha256(bytes: &[u8]) -> String {
+pub(crate) fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
         .iter()

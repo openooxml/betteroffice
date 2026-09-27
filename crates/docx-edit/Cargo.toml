@@ -31,6 +31,7 @@ tiff = ["docx-parse/tiff"]
 # policy; there is no Cargo deny/release-age policy, and the existing lockfile already pins it.
 docx-layout.workspace = true
 docx-parse.workspace = true
+ooxml-diff.workspace = true
 ooxml-opc.workspace = true
 ryu-js = "1"
 serde = { version = "1", features = ["derive"] }

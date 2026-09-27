@@ -60,6 +60,15 @@ and a fill drops it outside undo history. Collaboration updates integrate
 whatever values they carry; saving ignores a text control's value, and
 discovery reads its content and flags the value with `legacy-control-value`.
 
+`compare` backs the JavaScript package's `compareDocx`: it inspects two DOCX
+packages in full, aligns their body paragraphs, diffs the text of paired
+paragraphs with the bounded LCS from
+[betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff),
+and applies each supported difference to the original's session as a rich
+tracked replacement in one batch; anything else is diagnosed and refuses the
+comparison. The saved result is verified against both inputs. It has no native
+entry point yet.
+
 Used by [betteroffice-docx](https://crates.io/crates/betteroffice-docx).
 
 Measure DOCX parsing, seeding, and body lowering with:

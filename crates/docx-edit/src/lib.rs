@@ -65,6 +65,8 @@ use yrs::{
 };
 
 mod batch;
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+mod compare;
 pub mod content_controls;
 mod control_source;
 mod control_values;

@@ -50,6 +50,18 @@ export type * from './yrs/structuredExport';
 export type * from './yrs/pagedExport';
 export type * from './yrs/readTypes';
 
+export { compareDocx } from './docx/compare';
+export type {
+  DocxCompareDiagnostic,
+  DocxCompareDiagnosticCode,
+  DocxCompareLimits,
+  DocxCompareLocation,
+  DocxCompareOptions,
+  DocxCompareResult,
+  DocxComparedChange,
+  DocxCompareTextSpan,
+} from './docx/compare';
+
 // ============================================================================
 // CONTENT CONTROLS
 // ============================================================================

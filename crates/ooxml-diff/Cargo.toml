@@ -1,0 +1,16 @@
+[package]
+name = "betteroffice-ooxml-diff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Bounded, dependency-free token LCS diff shared by the OOXML review and comparison features."
+readme = "README.md"
+keywords = ["ooxml", "diff", "lcs", "text"]
+categories = ["algorithms", "text-processing"]
+
+[lib]
+name = "ooxml_diff"
+crate-type = ["rlib"]

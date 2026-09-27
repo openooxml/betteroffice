@@ -88,6 +88,7 @@ version = "0.2.0"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-ooxml-diff",
  "betteroffice-opc",
  "ryu-js",
  "serde",
@@ -159,6 +160,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-ooxml-diff"
+version = "0.2.0"
+
+[[package]]
 name = "betteroffice-ooxml-text"
 version = "0.2.0"
 dependencies = [
@@ -194,6 +199,7 @@ version = "0.2.0"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
+ "betteroffice-ooxml-diff",
  "betteroffice-pptx-parse",
  "serde",
  "serde_json",
