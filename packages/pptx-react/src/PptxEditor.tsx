@@ -1164,11 +1164,11 @@ function PptxEditorContent({
     goToSlide(index + 1);
   };
 
-  const createTextBox = (start: SlidePoint, end: SlidePoint) => {
+  const createTextBox = (slideId: string, start: SlidePoint, end: SlidePoint) => {
     const handle = handleRef.current;
     const current = modelRef.current;
     if (!handle || !current?.frame || readOnlyRef.current) return;
-    const slide = current.snapshot.slides[current.slideIndex];
+    const slide = current.snapshot.slides.find((candidate) => candidate.id === slideId);
     if (!slide) return;
     const dragged = Math.abs(end.x - start.x) >= 6 || Math.abs(end.y - start.y) >= 6;
     const width = dragged ? Math.abs(end.x - start.x) : current.frame.width * 0.36;
@@ -1231,6 +1231,7 @@ function PptxEditorContent({
   };
 
   const createShape = (
+    slideId: string,
     geometry: PptxShapePreset,
     start: SlidePoint,
     end: SlidePoint
@@ -1238,7 +1239,7 @@ function PptxEditorContent({
     const handle = handleRef.current;
     const current = modelRef.current;
     if (!handle || !current?.frame || readOnlyRef.current) return;
-    const slide = current.snapshot.slides[current.slideIndex];
+    const slide = current.snapshot.slides.find((candidate) => candidate.id === slideId);
     const preset = SHAPE_PRESETS.find((candidate) => candidate.geometry === geometry);
     if (!slide || !preset) return;
     const dragged = Math.abs(end.x - start.x) >= 6 || Math.abs(end.y - start.y) >= 6;
@@ -1277,7 +1278,11 @@ function PptxEditorContent({
       const next = refreshAt(undefined, true);
       setActiveTool('select');
       setSelection(null);
-      setShapeSelection({ slideId: slide.id, shapeId: receipt.shapeId });
+      setShapeSelection(
+        next?.snapshot.slides[next.slideIndex]?.id === slide.id
+          ? { slideId: slide.id, shapeId: receipt.shapeId }
+          : null
+      );
       setDragPreview(null);
       setTextBoxPreview(null);
       pointerGestureRef.current = null;
@@ -1687,14 +1692,16 @@ function PptxEditorContent({
     }
     if (gesture.kind === 'textBox') {
       setTextBoxPreview(null);
-      void coordinator.input(() => createTextBox(gesture.start, gesture.last)).catch(() => {});
+      void coordinator
+        .input(() => createTextBox(gesture.slideId, gesture.start, gesture.last))
+        .catch(() => {});
       event.preventDefault();
       return;
     }
     if (gesture.kind === 'shapeInsert') {
       setTextBoxPreview(null);
       void coordinator
-        .input(() => createShape(gesture.geometry, gesture.start, gesture.last))
+        .input(() => createShape(gesture.slideId, gesture.geometry, gesture.start, gesture.last))
         .catch(() => {});
       event.preventDefault();
       return;

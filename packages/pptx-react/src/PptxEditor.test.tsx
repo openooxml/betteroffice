@@ -1446,6 +1446,43 @@ describe('PptxEditor commands', () => {
     }
   }, 60_000);
 
+  for (const [tool, name] of [['textBox', 'Text Box'], ['shape:rect', 'Rectangle']] as const) {
+    it(`inserts a ${tool} queued behind an image decode on the slide it was drawn on`, async () => {
+      const images = pauseImages();
+      try {
+        const { view, api } = await open();
+        const before = api.handle.snapshot();
+        const added = (index: number) =>
+          api.handle
+            .snapshot()
+            .slides[index].shapes.filter((shape) => !before.slides[index].shapes.some((old) => old.id === shape.id))
+            .map((shape) => shape.name);
+        await act(async () => {
+          await api.commands.execute('tool', { value: tool });
+        });
+        chooseImage(view);
+        await waitFor(() => expect(images.pending).toHaveLength(1));
+        const canvas = view.getByTestId('pptx-slide-canvas');
+        const frame = api.handle.layoutSlide(0);
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, frame.width, frame.height);
+        canvas.setPointerCapture = () => {};
+        canvas.hasPointerCapture = () => false;
+        fireEvent.pointerDown(canvas, { isPrimary: true, button: 0, pointerId: 3, clientX: 20, clientY: 20 });
+        fireEvent.pointerMove(canvas, { pointerId: 3, clientX: 140, clientY: 90 });
+        fireEvent.pointerUp(canvas, { pointerId: 3, clientX: 140, clientY: 90 });
+        await act(async () => {
+          expect(api.goToSlide(2)).toBe(true);
+        });
+        await act(async () => images.pending[0].load());
+        await api.flushPendingInput();
+        expect(added(0)).toEqual(['queued.png', name]);
+        expect(added(1)).toEqual([]);
+      } finally {
+        images.restore();
+      }
+    }, 60_000);
+  }
+
   it('answers shortcuts only in the owning editor, past composition, prevented keys and fields', async () => {
     const saved: Uint8Array[] = [];
     const first = await open({ onSave: (bytes) => saved.push(bytes) });
