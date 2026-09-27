@@ -1074,12 +1074,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const admit = (): Promise<T> => {
         if (!queue) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));
         pendingResidentTextRef.current = null;
-        return queue.run(() => {
+        return queue.run((inputLost) => {
           if (!lifetime.mounted || !lifetime.enabled || !admitted) {
             throw new DocxCommandAdmissionError('editor-unavailable');
           }
           if (lifetime.session !== admitted) throw new DocxCommandAdmissionError('document-replaced');
-          if (queue.failed) throw new DocxCommandAdmissionError('input-failed');
+          if (inputLost) throw new DocxCommandAdmissionError('input-failed');
           return operation();
         });
       };

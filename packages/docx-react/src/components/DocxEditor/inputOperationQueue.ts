@@ -1,7 +1,8 @@
 export class InputOperationQueue {
   private pending: Promise<void> = Promise.resolve();
   private interactionEpoch = 0;
-  private failure: { error: unknown } | null = null;
+  private failures = 0;
+  private lastFailure: unknown;
   private depth = 0;
 
   constructor(
@@ -9,19 +10,18 @@ export class InputOperationQueue {
     private readonly onPendingChange?: (pending: boolean) => void
   ) {}
 
-  /** Admits accepted input; its failure marks the queue as having lost input. */
+  /** Admits accepted input; its failure is reported and fails only what was waiting for it. */
   enqueue(operation: () => void | Promise<void>): void {
     void this.admit(operation, true).catch(() => undefined);
   }
 
-  /** Admits an operation in input order and settles with its own outcome. */
-  run<T>(operation: () => T | Promise<T>): Promise<T> {
-    return this.admit(operation, false);
-  }
-
-  /** Whether an earlier input operation failed. */
-  get failed(): boolean {
-    return this.failure !== null;
+  /**
+   * Admits an operation in input order and settles with its own outcome; `inputLost` is whether
+   * input accepted before it failed.
+   */
+  run<T>(operation: (inputLost: boolean) => T | Promise<T>): Promise<T> {
+    const failures = this.failures;
+    return this.admit(() => operation(this.failures !== failures), false);
   }
 
   hasPending(): boolean {
@@ -32,10 +32,11 @@ export class InputOperationQueue {
     return this.pending;
   }
 
-  /** Waits for accepted operations and rejects if this queue has lost input. */
+  /** Waits for accepted operations and rejects if one of them failed. */
   flush(): Promise<void> {
+    const failures = this.failures;
     return this.pending.then(() => {
-      if (this.failure) throw this.failure.error;
+      if (this.failures !== failures) throw this.lastFailure;
     });
   }
 
@@ -59,7 +60,8 @@ export class InputOperationQueue {
       () => this.settle(),
       (error) => {
         if (input) {
-          this.failure ??= { error };
+          this.failures += 1;
+          this.lastFailure = error;
           this.reportError(error);
         }
         this.settle();

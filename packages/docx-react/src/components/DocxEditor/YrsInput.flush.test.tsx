@@ -267,6 +267,31 @@ test('a command after lost input is refused as input-failed', async () => {
   }
 });
 
+test('input and commands after lost input still apply', async () => {
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    let fail = true;
+    const { session, input } = await mount(async () => {
+      if (!fail) return null;
+      fail = false;
+      throw new Error('resident failure');
+    });
+    act(() => input.current!.insertText(' lost'));
+    await expect(input.current!.flushPendingInput()).rejects.toThrow('resident failure');
+    act(() => input.current!.insertText(' kept'));
+    let ran: unknown;
+    await act(async () => {
+      await input.current!.flushPendingInput();
+      ran = await input.current!.runAfterPendingInput(() => 'ran');
+    });
+    expect(ran).toBe('ran');
+    expect(text(session)).toBe('Seed kept');
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test('a command admitted before the document was replaced is refused', async () => {
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => {
