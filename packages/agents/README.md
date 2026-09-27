@@ -18,9 +18,16 @@ bunx --package @betteroffice/agents betteroffice-mcp --root /absolute/path/to/do
 ```
 
 The server speaks MCP over stdin/stdout. Connect it from an MCP client rather
-than typing commands into the process. All file access stays inside `--root`,
+than typing commands into the process. File paths are checked against `--root`,
 including resolved symlinks. Exports require a new filename. Add `--read-only`
 to omit proposal, acceptance, rejection, and export tools.
+
+Use a workspace whose directory structure you control. Path checks are not an
+operating-system sandbox against other local processes moving directories.
+If an export fails after creating its destination, `EXPORT_INCOMPLETE` identifies
+the potentially partial file and the underlying error. Inspect it and retry with
+a new filename. The server does not delete the path, since another process could
+have replaced it after the failure.
 
 For Codex, register the installed executable:
 
