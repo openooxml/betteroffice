@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { decodeMessages } from "../../../packages/docx/src/collaboration/protocol";
+import * as Y from "yjs";
+import { documentFrame, rehydrate } from "./fixtures";
 import { RetainedUpdateLog, classifyFrame } from "../src/retention";
 
 function encodeVarUint(value: number): Uint8Array {
@@ -58,193 +60,119 @@ function documentMessages(protocolFrame: Uint8Array) {
 }
 
 describe("RetainedUpdateLog", () => {
-  test("retains sync from a mixed awareness frame and replays it", () => {
-    const document = syncFrame(2, Uint8Array.of(10, 11));
-    const mixed = frame(document, awarenessFrame(Uint8Array.of(12)));
+  test("retains document messages and excludes transient traffic", () => {
+    const document = documentFrame();
     const log = new RetainedUpdateLog(512, 1024);
-
-    expect(log.retain(mixed)).not.toBeNull();
-    const [retained] = log.snapshot();
-    expect(retained).toEqual(document);
-    expect(decodeMessages(retained)).toEqual(documentMessages(mixed));
-
-    const newSocket = { send: mock((_: Uint8Array) => {}) };
-    log.replay((update) => newSocket.send(update));
-    expect(newSocket.send).toHaveBeenCalledTimes(1);
-    const replayed = newSocket.send.mock.calls[0][0];
-    expect(replayed).toEqual(document);
-    expect(decodeMessages(replayed)).toEqual(documentMessages(mixed));
-  });
-
-  test("does not retain awareness-only frames", () => {
-    const log = new RetainedUpdateLog(512, 1024);
-
-    expect(log.retain(awarenessFrame(Uint8Array.of(13)))).toBeNull();
-    expect(log.snapshot()).toEqual([]);
-  });
-
-  test("keeps sync-only frames byte-identical in a fresh buffer", () => {
-    const document = syncFrame(1, new Uint8Array(130).fill(14));
-    const log = new RetainedUpdateLog(512, 1024);
-
-    expect(log.retain(document)).not.toBeNull();
-    const [retained] = log.snapshot();
-    expect(retained).toEqual(document);
-    expect(retained).not.toBe(document);
-    expect(decodeMessages(retained)).toEqual(decodeMessages(document));
-  });
-
-  test("retains sync from a mixed query-awareness frame", () => {
-    const document = syncFrame(1, Uint8Array.of(15));
-    const mixed = frame(encodeVarUint(3), document);
-    const log = new RetainedUpdateLog(512, 1024);
-
-    expect(log.retain(mixed)).not.toBeNull();
-    const [retained] = log.snapshot();
-    expect(retained).toEqual(document);
-    expect(decodeMessages(retained)).toEqual(documentMessages(mixed));
-  });
-
-  test("does not retain sync-step-1 state-vector queries", () => {
-    const query = syncFrame(0, Uint8Array.of(15));
-    const log = new RetainedUpdateLog(512, 1024);
-
-    expect(log.retain(query)).toBeNull();
-    expect(
-      log.retain(frame(query, awarenessFrame(Uint8Array.of(16)))),
-    ).toBeNull();
-    expect(log.snapshot()).toEqual([]);
-  });
-
-  test("drops sync-step-1 from a frame that also carries an update", () => {
-    const update = syncFrame(2, Uint8Array.of(17));
-    const mixed = frame(syncFrame(0, Uint8Array.of(16)), update);
-    const log = new RetainedUpdateLog(512, 1024);
-
-    expect(log.retain(mixed)).not.toBeNull();
-    expect(log.snapshot()).toEqual([update]);
-  });
-
-  test("retains multiple sync messages in their original order", () => {
-    const first = syncFrame(1, Uint8Array.of(16));
-    const second = syncFrame(2, Uint8Array.of(17, 18));
-    const mixed = frame(
-      first,
-      awarenessFrame(Uint8Array.of(19)),
-      second,
-    );
-    const expected = frame(first, second);
-    const log = new RetainedUpdateLog(512, 1024);
-
-    expect(log.retain(mixed)).not.toBeNull();
-    const [retained] = log.snapshot();
-    expect(retained).toEqual(expected);
-    expect(decodeMessages(retained)).toEqual(documentMessages(mixed));
-  });
-
-  test("rejects malformed frames without throwing or retaining", () => {
-    const document = syncFrame(2, Uint8Array.of(20));
-    const frames = [
-      frame(document, Uint8Array.of(1, 2, 21)),
-      frame(document, Uint8Array.of(4)),
-      frame(document, Uint8Array.of(0x80, 0)),
-    ];
-    const log = new RetainedUpdateLog(512, 1024);
-
-    for (const malformed of frames) {
-      let retained: unknown = "unset";
-      expect(() => {
-        retained = log.retain(malformed);
-      }).not.toThrow();
-      expect(retained).toBeNull();
-    }
-    expect(log.snapshot()).toEqual([]);
-  });
-
-  test("does not retain frames carrying an auth message", () => {
-    const log = new RetainedUpdateLog(512, 1024);
-    const mixed = frame(
-      syncFrame(2, Uint8Array.of(24)),
-      authFrame(Uint8Array.of(105)),
-    );
-
-    expect(log.retain(mixed)).toBeNull();
-    expect(log.snapshot()).toEqual([]);
-  });
-
-  test("normalizes mixed stored frames and removes invalid entries", () => {
-    const document = syncFrame(1, Uint8Array.of(22));
-    const awareness = awarenessFrame(Uint8Array.of(23));
-    const mixed = frame(document, awareness);
-    const log = new RetainedUpdateLog(512, 1024);
-
-    expect(
-      log.restore([
-        { seq: 0, bytes: awareness },
-        { seq: 1, bytes: Uint8Array.of(0x80) },
-        { seq: 2, bytes: mixed },
-      ]),
-    ).toEqual({ puts: [{ seq: 2, bytes: document }], deletes: [0, 1] });
+    expect(log.retain(frame(document, awarenessFrame(Uint8Array.of(12))))?.puts[0].bytes).toEqual(document);
+    expect(log.retain(awarenessFrame(Uint8Array.of(12)))).toBeNull();
+    expect(log.retain(syncFrame(0, Uint8Array.of(0)))).toBeNull();
     expect(log.snapshot()).toEqual([document]);
   });
 
-  test("reports nothing to write when the stored log is canonical", () => {
-    const log = new RetainedUpdateLog(512, 1024);
-    const stored = [
-      { seq: 4, bytes: syncFrame(1, Uint8Array.of(25)) },
-      { seq: 9, bytes: syncFrame(2, Uint8Array.of(26)) },
-    ];
-
-    expect(log.restore(stored)).toBeNull();
-    expect(log.snapshot()).toEqual(stored.map((entry) => entry.bytes));
+  test("checkpoints rather than discarding the oldest edits", () => {
+    const log = new RetainedUpdateLog(2, 4096);
+    const first = documentFrame('first', 1);
+    const second = documentFrame('second', 2);
+    log.retain(first);
+    const mutation = log.retain(second)!;
+    expect(mutation.checkpoint?.seq).toBe(1);
+    expect(mutation.deletes).toEqual([0, 1]);
+    expect(log.snapshot()).toHaveLength(1);
+    const restored = rehydrate(log.snapshot());
+    expect(restored.getText('body').toString()).toBe('firstsecond');
+    restored.destroy();
   });
 
-  test("restores in sequence order and appends above the highest seq", () => {
-    const first = syncFrame(2, Uint8Array.of(27));
-    const second = syncFrame(2, Uint8Array.of(28));
-    const third = syncFrame(2, Uint8Array.of(29));
-    const log = new RetainedUpdateLog(512, 1024);
-
-    log.restore([
-      { seq: 9, bytes: second },
-      { seq: 2, bytes: first },
-    ]);
-    expect(log.snapshot()).toEqual([first, second]);
-    expect(log.retain(third)).toEqual({
-      puts: [{ seq: 10, bytes: third }],
-      deletes: [],
-    });
-    expect(log.snapshot()).toEqual([first, second, third]);
+  test("restores a checkpoint plus its newer tail with monotonic sequence numbers", () => {
+    const source = new RetainedUpdateLog(2, 4096);
+    source.retain(documentFrame('first', 1));
+    const checkpoint = source.retain(documentFrame('second', 2))!.checkpoint!;
+    const third = documentFrame('third', 3);
+    const restored = new RetainedUpdateLog(2, 4096);
+    const repair = restored.restore([{ seq: 0, bytes: documentFrame('first', 1) }, { seq: 2, bytes: third }], checkpoint);
+    expect(repair?.deletes).toEqual([0]);
+    expect(restored.snapshot()).toEqual([checkpoint.bytes, third]);
+    expect(restored.retain(documentFrame('fourth', 4))!.checkpoint?.seq).toBe(3);
+    const doc = rehydrate(restored.snapshot());
+    expect(doc.getText('body').toString()).toBe('firstsecondthirdfourth');
+    doc.destroy();
   });
 
-  test("reports the appended entry and the seqs it evicted", () => {
-    const first = syncFrame(2, Uint8Array.of(30));
-    const second = syncFrame(2, Uint8Array.of(31));
-    const third = syncFrame(2, Uint8Array.of(32));
-    const log = new RetainedUpdateLog(2, 1024);
-
-    expect(log.retain(first)).toEqual({
-      puts: [{ seq: 0, bytes: first }],
-      deletes: [],
-    });
-    expect(log.retain(second)?.deletes).toEqual([]);
-    expect(log.retain(third)).toEqual({
-      puts: [{ seq: 2, bytes: third }],
-      deletes: [0],
-    });
-    expect(log.snapshot()).toEqual([second, third]);
+  test("rehydrates dependent edits received out of order", () => {
+    const doc = new Y.Doc();
+    const frames: Uint8Array[] = [];
+    doc.on('update', update => frames.push(syncFrame(2, update)));
+    doc.getText('body').insert(0, 'base');
+    doc.getText('body').insert(4, ' tail');
+    const log = new RetainedUpdateLog(1, 4096);
+    log.retain(frames[1]);
+    const checkpoint = log.checkpoint();
+    expect(checkpoint).toBeNull();
+    log.retain(frames[0]);
+    const restored = rehydrate(log.snapshot());
+    expect(restored.getText('body').toString()).toBe('base tail');
+    restored.destroy();
+    doc.destroy();
   });
 
-  test("replays nothing after clear and restarts sequence numbers", () => {
-    const document = syncFrame(2, Uint8Array.of(33));
-    const log = new RetainedUpdateLog(512, 1024);
-    log.retain(document);
+  test("keeps offline edits mergeable after multiple checkpoints", () => {
+    const first = rehydrate([documentFrame('base')]);
+    const offline = rehydrate([documentFrame('base')]);
+    const log = new RetainedUpdateLog(1, 4096);
+    log.retain(documentFrame('base'));
+    first.on('update', update => log.retain(syncFrame(2, update)));
+    first.getText('body').insert(4, ' online');
+    first.getText('body').delete(0, 1);
+    offline.getText('body').insert(0, 'offline ');
+    log.retain(syncFrame(2, Y.encodeStateAsUpdate(offline)));
+    const restored = rehydrate(log.snapshot());
+    Y.applyUpdate(first, Y.encodeStateAsUpdate(offline));
+    expect(restored.getText('body').toString()).toBe(first.getText('body').toString());
+    for (const doc of [first, offline, restored]) doc.destroy();
+  });
 
+  test("compacts duplicate traffic under the byte budget", () => {
+    const frame = documentFrame('a'.repeat(200));
+    const log = new RetainedUpdateLog(512, 512);
+    for (let i = 0; i < 20; i++) log.retain(frame);
+    expect(log.snapshot().reduce((sum, bytes) => sum + bytes.length, 0)).toBeLessThanOrEqual(512);
+    expect(rehydrate(log.snapshot()).getText('body').toString()).toBe('a'.repeat(200));
+  });
+
+  test("refuses capacity overflow without losing the previous state", () => {
+    const log = new RetainedUpdateLog(1, 256);
+    log.retain(documentFrame('a'.repeat(100), 1));
+    const before = log.snapshot();
+    expect(() => log.retain(documentFrame('b'.repeat(200), 2))).toThrow('capacity');
+    expect(log.snapshot()).toEqual(before);
+  });
+
+  test("rejects malformed document payloads without adopting them", () => {
+    const log = new RetainedUpdateLog(2, 4096);
+    log.retain(documentFrame());
+    expect(() => log.retain(syncFrame(2, Uint8Array.of(255)))).toThrow();
+    expect(log.snapshot()).toEqual([documentFrame()]);
+    expect(() => log.restore([{ seq: 0, bytes: syncFrame(2, Uint8Array.of(255)) }])).toThrow();
+  });
+
+  test("answers state vectors and requests the seed missing from a fresh room", () => {
+    const log = new RetainedUpdateLog(2, 4096);
+    expect(decodeMessages(log.syncRequest())).toEqual([{ type: 'sync-step-1', stateVector: Uint8Array.of(0) }]);
+    log.retain(documentFrame());
+    const answers = log.responses(syncFrame(0, Uint8Array.of(0)));
+    expect(rehydrate(answers).getText('body').toString()).toBe('hello');
+    const peer = rehydrate(answers);
+    const [response] = log.responses(syncFrame(0, Y.encodeStateVector(peer)));
+    expect(decodeMessages(response)).toEqual([{ type: 'sync-step-2', update: Uint8Array.of(0, 0) }]);
+    peer.destroy();
+  });
+
+  test("clears both checkpoint and tail", () => {
+    const log = new RetainedUpdateLog(1, 4096);
+    log.retain(documentFrame());
     log.clear();
-    const replayed: Uint8Array[] = [];
-    log.replay((update) => replayed.push(update));
-    expect(replayed).toEqual([]);
-    expect(log.retain(document)?.puts).toEqual([{ seq: 0, bytes: document }]);
+    expect(log.snapshot()).toEqual([]);
+    expect(log.retain(documentFrame())!.checkpoint?.seq).toBe(0);
   });
 });
 

@@ -53,7 +53,9 @@ jobs:
           git diff --exit-code -- bun.lock
 
       - name: Type check
-        run: bun run typecheck:packages
+        run: |
+          bun run typecheck:packages
+          bun run --filter '@betteroffice/collaboration-relay' typecheck
 
       - name: Test
         run: bun run test

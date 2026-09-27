@@ -31,7 +31,9 @@
 
 - **Real-time collaboration.** People and agents edit the same file together,
   with live cursors and selections. Concurrent changes merge automatically,
-  and offline edits sync when peers reconnect.
+  and offline edits sync when peers reconnect. The reference relay checkpoints
+  stored updates and rehydrates rooms after restarts, preserving CRDT identities.
+  Its 24-hour idle expiration still applies.
 
 - **Undo and redo.** Navigate editing history and undo accepted agent
   proposals as a single step.
