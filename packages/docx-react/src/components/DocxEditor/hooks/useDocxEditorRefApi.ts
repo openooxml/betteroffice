@@ -2,6 +2,8 @@ import { useImperativeHandle } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
 import type {
+  DocxEditStep,
+  DocxTextTarget,
   YrsInlineFormatDelta,
   YrsLoc,
   YrsParagraph,
@@ -15,8 +17,9 @@ import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { createComment } from '../commentFactories';
+import { applyEditBatch, flushedSession, modeRefusal } from '../editorBatches';
+import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
-import { overlapsTextRevision } from './agentProposalRange';
 
 type LocatedParagraph = {
   story: string;
@@ -35,35 +38,11 @@ function locateParagraph(session: YrsSession, paraId: string): LocatedParagraph 
   return null;
 }
 
-function uniqueMatchOffset(text: string, search: string): number | null {
-  const offset = text.indexOf(search);
-  return offset >= 0 && text.indexOf(search, offset + 1) < 0 ? offset : null;
-}
-
-function paragraphRange(
-  session: YrsSession,
-  paraId: string,
-  search?: string
-): YrsStoryRange | null {
-  const located = locateParagraph(session, paraId);
-  if (!located) return null;
-  const { story, paragraph } = located;
-  let start = 0;
-  let end = paragraph.text.length;
-  if (search !== undefined) {
-    if (search === '') start = end;
-    else {
-      const offset = uniqueMatchOffset(paragraph.text, search);
-      if (offset == null) return null;
-      start = offset;
-      end = offset + search.length;
-    }
-  }
-  return {
-    story,
-    start: { paraId, offset: start },
-    end: { paraId, offset: end },
-  };
+/** The legacy helpers' `{ paraId, search? }` target, resolved in the accepted view by Rust. */
+function helperTarget(story: string, paraId: string, search?: string): DocxTextTarget {
+  return search === undefined
+    ? { kind: 'paragraph', story, paraId }
+    : { kind: 'search', text: search, within: { kind: 'paragraph', story, paraId }, view: 'accepted' };
 }
 
 function storyOffset(session: YrsSession, loc: YrsLoc): number {
@@ -82,21 +61,6 @@ function normalizeSelection(session: YrsSession): YrsStoryRange | null {
     start: { paraId: start.paraId, offset: start.offset },
     end: { paraId: end.paraId, offset: end.offset },
   };
-}
-
-function textForRange(session: YrsSession, range: YrsStoryRange): string {
-  const paragraphs = session.paragraphs(range.story);
-  const startIndex = paragraphs.findIndex((paragraph) => paragraph.paraId === range.start.paraId);
-  const endIndex = paragraphs.findIndex((paragraph) => paragraph.paraId === range.end.paraId);
-  if (startIndex < 0 || endIndex < startIndex) return '';
-  if (startIndex === endIndex) {
-    return paragraphs[startIndex].text.slice(range.start.offset, range.end.offset);
-  }
-  return [
-    paragraphs[startIndex].text.slice(range.start.offset),
-    ...paragraphs.slice(startIndex + 1, endIndex).map((paragraph) => paragraph.text),
-    paragraphs[endIndex].text.slice(0, range.end.offset),
-  ].join('\n');
 }
 
 function formattingDelta(marks: Parameters<DocxEditorRef['applyFormatting']>[0]['marks']) {
@@ -150,6 +114,7 @@ export function useDocxEditorRefApi({
   getCachedStyleResolver,
   commentIdAllocator,
   commands,
+  modeRef,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -172,6 +137,8 @@ export function useDocxEditorRefApi({
   ) => ReturnType<typeof createStyleResolver>;
   commentIdAllocator: CommentIdAllocator;
   commands: DocxCommandStore;
+  /** The editor's current write mode; `viewing` also stands for a read-only editor. */
+  modeRef: React.RefObject<EditorMode>;
 }) {
   useImperativeHandle(
     ref,
@@ -180,12 +147,7 @@ export function useDocxEditorRefApi({
       getDocument: () => pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document,
       getEditorRef: () => pagedEditorRef.current,
       flushPendingInput: async () => {
-        const editor = pagedEditorRef.current;
-        if (!editor) throw new Error('The editor input is unavailable');
-        await editor.flushPendingInput();
-        if (editor !== pagedEditorRef.current) {
-          throw new Error('The document changed while flushing input');
-        }
+        await flushedSession(pagedEditorRef);
       },
       save: handleSave,
       setZoom,
@@ -201,28 +163,35 @@ export function useDocxEditorRefApi({
       loadDocument: loadParsedDocument,
       loadDocumentBuffer: loadBuffer,
 
+      readParagraphs: async (request) => (await flushedSession(pagedEditorRef)).session.readParagraphs(request),
+      findText: async (request) => (await flushedSession(pagedEditorRef)).session.findText(request),
+      validateEdits: async (request) => {
+        const { session } = await flushedSession(pagedEditorRef);
+        return modeRefusal(session, modeRef.current, request) ?? session.validateEdits(request);
+      },
+      applyEdits: async (request) => {
+        const outcome = await applyEditBatch(pagedEditorRef, () => modeRef.current, request);
+        if ('flush' in outcome) throw outcome.flush.error;
+        return outcome.result;
+      },
+
       addComment: (options) => {
         const editor = pagedEditorRef.current;
         const session = editor?.getYrsSession();
-        const range = session ? paragraphRange(session, options.paraId, options.search) : null;
-        if (!editor || !session || !range || textForRange(session, range).length === 0) return null;
+        const located = session ? locateParagraph(session, options.paraId) : null;
+        if (!editor || !session || !located || options.search === '') return null;
         const comment = createComment(commentIdAllocator, options.text, options.author);
-        session.applyRawOps(range.story, [
+        const result = session.commentTextTarget(
+          helperTarget(located.story, options.paraId, options.search),
           {
-            op: 'setComment',
             id: String(comment.id),
-            ranges: [
-              [
-                storyOffset(session, { story: range.story, ...range.start }),
-                storyOffset(session, { story: range.story, ...range.end }),
-              ],
-            ],
             author: options.author,
-            date: comment.date,
+            date: comment.date ?? '',
             body: comment.content,
-          },
-        ]);
-        editor.syncYrsInputState(true);
+          }
+        );
+        if (!result.ok) return null;
+        editor.syncYrsInputState(true, [located.story]);
         setComments((previous) => [...previous, comment]);
         setShowCommentsSidebar(true);
         return comment.id;
@@ -247,14 +216,30 @@ export function useDocxEditorRefApi({
         const editor = pagedEditorRef.current;
         const session = editor?.getYrsSession();
         if (!editor || !session || (!options.search && !options.replaceWith)) return false;
-        const range = paragraphRange(session, options.paraId, options.search);
-        if (!range) return false;
-        if (overlapsTextRevision(session, range)) return false;
-        session.replaceRange(range, options.replaceWith, {
-          name: options.author,
-          date: new Date().toISOString(),
+        const located = locateParagraph(session, options.paraId);
+        if (!located) return false;
+        const suggest = { author: options.author, date: new Date().toISOString() };
+        const step: DocxEditStep = options.search
+          ? {
+              op: 'replaceText',
+              target: helperTarget(located.story, options.paraId, options.search),
+              text: options.replaceWith,
+              suggest,
+            }
+          : {
+              op: 'insertText',
+              target: helperTarget(located.story, options.paraId),
+              at: 'end',
+              text: options.replaceWith,
+              suggest,
+            };
+        const result = session.applyEdits({
+          expectVersion: session.version(),
+          source: 'agent',
+          steps: [step],
         });
-        editor.syncYrsInputState(true);
+        if (!result.ok) return false;
+        if (result.applied) editor.syncYrsInputState(true, result.changedStories);
         setShowCommentsSidebar(true);
         return true;
       },
@@ -262,18 +247,26 @@ export function useDocxEditorRefApi({
       applyFormatting: (options) => {
         const editor = pagedEditorRef.current;
         const session = editor?.getYrsSession();
-        const range = session ? paragraphRange(session, options.paraId, options.search) : null;
-        if (!editor || !session || !range) return false;
-        if (textForRange(session, range).length > 0) session.formatRange(range, formattingDelta(options.marks));
-        editor.syncYrsInputState(true);
+        const located = session ? locateParagraph(session, options.paraId) : null;
+        if (!editor || !session || !located) return false;
+        if (options.search !== '') {
+          const result = session.formatTextTarget(
+            helperTarget(located.story, options.paraId, options.search),
+            formattingDelta(options.marks)
+          );
+          if (!result.ok) return false;
+        }
+        editor.syncYrsInputState(true, [located.story]);
         return true;
       },
 
       setParagraphStyle: (options) => {
         const editor = pagedEditorRef.current;
         const session = editor?.getYrsSession();
-        const range = session ? paragraphRange(session, options.paraId) : null;
-        if (!editor || !session || !range) return false;
+        const located = session ? locateParagraph(session, options.paraId) : null;
+        if (!editor || !session || !located) return false;
+        const at = { paraId: options.paraId, offset: 0 };
+        const range: YrsStoryRange = { story: located.story, start: at, end: at };
         const currentDocument = historyStateRef.current;
         const resolver = currentDocument?.package.styles
           ? getCachedStyleResolver(currentDocument.package.styles)
@@ -289,10 +282,11 @@ export function useDocxEditorRefApi({
         const session = editor?.getYrsSession();
         const located = session ? locateParagraph(session, options.paraId) : null;
         if (!editor || !session || !located || located.story !== 'body') return false;
+        const span = session.locateParagraph(located.story, located.paragraph.paraId);
         const at = {
           story: located.story,
           paraId: located.paragraph.paraId,
-          offset: located.paragraph.text.length,
+          offset: span.end - span.start,
         };
         if (options.type === 'page') session.insertPageBreak(at);
         else if (options.type === 'sectionNextPage') {
@@ -372,22 +366,11 @@ export function useDocxEditorRefApi({
         const session = pagedEditorRef.current?.getYrsSession();
         const range = session ? normalizeSelection(session) : null;
         if (!session || !range) return null;
-        const paragraphs = session.paragraphs(range.story);
-        const startParagraph = paragraphs.find(
-          (paragraph) => paragraph.paraId === range.start.paraId
-        );
-        const endParagraph = paragraphs.find((paragraph) => paragraph.paraId === range.end.paraId);
-        if (!startParagraph || !endParagraph) return null;
-        return {
-          paraId: startParagraph.paraId,
-          selectedText: textForRange(session, range),
-          paragraphText: startParagraph.text,
-          before: startParagraph.text.slice(0, range.start.offset),
-          after:
-            startParagraph.paraId === endParagraph.paraId
-              ? startParagraph.text.slice(range.end.offset)
-              : endParagraph.text.slice(range.end.offset),
-        };
+        try {
+          return session.selectionText(range);
+        } catch {
+          return null;
+        }
       },
 
       getComments: () => comments,

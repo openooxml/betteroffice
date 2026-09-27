@@ -226,6 +226,7 @@ pub struct UndoSession {
     manager: RefCell<Option<DocUndoManager>>,
     story: RefCell<Option<String>>,
     mode: Cell<UndoCaptureMode>,
+    doc: Cell<Option<u64>>,
 }
 
 impl Default for UndoSession {
@@ -246,6 +247,7 @@ impl UndoSession {
             manager: RefCell::new(None),
             story: RefCell::new(None),
             mode: Cell::new(UndoCaptureMode::Auto),
+            doc: Cell::new(None),
         }
     }
 
@@ -256,7 +258,15 @@ impl UndoSession {
             let mut next = DocUndoManager::new(doc, Arc::clone(&self.clock));
             next.set_capture_mode(self.mode.get());
             *manager = Some(next);
+            self.doc.set(Some(doc.instance));
         }
+    }
+
+    /// Whether this history is unbound or tracks `doc`.
+    pub fn belongs_to(&self, doc: &EditingDoc) -> bool {
+        self.doc
+            .get()
+            .is_none_or(|instance| instance == doc.instance)
     }
 
     /// Story switches close capture unless manual grouping is selected.

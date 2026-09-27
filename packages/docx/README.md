@@ -108,3 +108,183 @@ are `true`, `false` or `'mixed'`; value marks such as `fontFamily`, `color` and
 `highlight` are `null` when absent or not uniform. `highlight` reports Word's
 highlight name (`'yellow'`) or an unmapped hex value. `toggleMark` accepts
 `{ type: 'superscript' }` and `{ type: 'subscript' }`; adding one clears the other.
+
+### Version-checked edit batches
+
+Read what you will target together with the session version, then apply a batch
+against that version. Every step resolves against the state that was read; the
+batch commits as one transaction or returns a typed refusal with nothing changed.
+
+```ts
+const read = session.readParagraphs({ story: 'body', view: 'accepted' });
+if (!read.ok) throw new Error(read.failure.message);
+const clause = read.paragraphs.find((paragraph) => paragraph.text.startsWith('Term'))!;
+
+const result = session.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    {
+      op: 'replaceText',
+      target: { kind: 'search', text: '30 days', view: 'accepted',
+        within: { kind: 'paragraph', story: 'body', paraId: clause.paraId } },
+      text: '45 days',
+      expect: { text: '30 days' },
+    },
+    {
+      op: 'insertParagraphs',
+      target: { story: 'body', paraId: clause.paraId },
+      at: 'end',
+      paragraphs: [{ text: 'Renewal is automatic.' }],
+    },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code, result.failure.message);
+```
+
+`version()` changes with every committed change, local or remote (including
+undo and redo), and when the session reopens its document. Tokens are scoped to
+one session; after a lost response, read again rather than retrying with a new
+version.
+
+Offsets are UTF-16 positions into a paragraph's projected text. Each inline atom
+(hard break, image, content control, note reference, field, other embed) is one
+U+FFFC listed in `atoms`, tabs stay `\t`, and paragraph marks are excluded. The
+`accepted` view includes pending insertions and hides pending deletions;
+`original` does the reverse. `findText` is exact, case-sensitive and
+paragraph-local, and a `search` target must match exactly once in its scope.
+
+| Step | Effect |
+| --- | --- |
+| `insertText` | Inserts at the start or end of a target, formatted like typing there. |
+| `replaceText` | Replaces a target's text inside one paragraph, keeping the paragraph. |
+| `deleteText` | Deletes a target's text inside one paragraph. |
+| `insertParagraphs` | Inserts complete paragraphs before or after an anchor, in the given or the anchor's style. |
+| `deleteParagraphs` | Deletes a contiguous span of complete paragraphs without merging properties into a neighbour. |
+| `setParagraphStyle` | Applies a document paragraph style with its paragraph and run formatting. |
+
+Refusals carry a `code` (`stale-version`, `missing-target`, `ambiguous-target`,
+`content-mismatch`, `overlapping-steps`, `locked-target`,
+`tracked-revision-conflict`, `unsupported`, `invalid-step`, `limit-exceeded`),
+the failing `stepIndex`, and the target. Editor hosts add `read-only` for an
+editor that does not accept edits. Malformed requests throw.
+`validateEdits(request)` runs the same checks and previews each step without
+changing anything or reserving ids.
+
+An applied batch is exactly one undo step in both capture modes; pass
+`history: 'none'` to keep it out of undo history while preserving existing undo
+and redo entries. `source: 'agent'` records provenance only. Add
+`suggest: { author, date }` to a text step to record it as a tracked change.
+
+Current limits: text targets stay within one paragraph; inline atoms cannot be
+replaced or deleted; content-locked controls, existing tracked changes a step
+would touch (including tracked run formatting), and pending paragraph-mark
+revisions refuse. Paragraph and style steps need a session opened from DOCX
+bytes (`openDocx`/`seedFromDocx`) and cannot be suggested. Inserting or
+restyling a paragraph with a style that defines or inherits list numbering
+refuses with `unsupported`, as does restyling a paragraph that is already numbered. An
+inserted paragraph takes only its style's defaults, so it is not numbered even
+next to a list item numbered by direct formatting. Deleting spans that hold tables,
+controls, section breaks, opaque XML, fields' cached results, or comments and
+bookmarks crossing the span refuses, as does any step after which saving would
+move an opaque XML block, such as one that precedes a table. A batch holds at most 128 steps,
+1,048,576 inserted UTF-16 units and 1,024 new paragraphs. Paragraph ids are
+session anchors: they are not guaranteed to survive save and reopen.
+
+### Structured export
+
+Export a document as read-only structured JSON or Markdown, with the location of
+every block and inline and a diagnostic for everything the export omits or cannot
+represent.
+
+```ts
+import { exportDocxMarkdown, exportDocxStructured } from '@betteroffice/docx';
+
+const content = await exportDocxStructured(bytes, {
+  revisionView: 'accepted',
+  stories: ['body', 'headers', 'footers'],
+});
+for (const block of content.stories[0].blocks) {
+  if (block.kind === 'heading') console.log(block.heading.outlineLevel, block.anchor);
+}
+const { markdown, anchors } = await exportDocxMarkdown(bytes, { revisionView: 'markup' });
+```
+
+On a live session, `session.exportStructured(options)` and
+`session.exportMarkdown(options)` return `{ ok: true, version, content }` from one
+read of the committed state: anchors resolve against that version, and nothing is
+committed, flushed or published. Bytes exports and `renderDocxMarkdown(content)`
+return snapshot content and throw `DocxExportError` for unusable options. A
+refusal's `failure` is `{ code, target, message }`, with `target: null` when it
+concerns no anchor; `unsupported` means the session holds no document content.
+`session.headings(story)` lists a story's headings classified the same way; the
+legacy `collectHeadings` tree walker from `@betteroffice/docx/utils` is deprecated
+in its favour.
+
+Content is `schemaVersion: 1`: ordered stories (`body` by default; `headers`,
+`footers`, `footnotes`, `endnotes` and `comments` only when selected), each a list
+of paragraphs, headings (outline level and whether it came from direct formatting,
+the style chain, document defaults or a `HeadingN` style id), list items (numbering
+format and the rendered marker, counted as Word counts them: numbering instances of
+one abstract definition continue each other unless one overrides a start and so
+begins its own list, levels begin at `w:start` and restart as `w:lvlRestart` says,
+and a number a format cannot write, such as a Roman numeral past 3,999, is left
+unresolved with a diagnostic), tables on the source grid with spans, skipped grid columns
+and vertical-merge continuations, content controls, section breaks, and
+placeholders for content v1 does not represent. Inlines cover text, tabs, line,
+page and column breaks where the source has them, note and comment references,
+fields with their cached result in result order, hyperlinks and nested fields
+included, all anchored to the field (never evaluated; a numeric field's result
+blocks stay inside the field), images (alt text and the relationship of the part
+that owns them, no binary data) and inline controls. A header or footer part
+referenced through several relationships is one story with every section that
+uses it while the copies hold the same content, and one story per copy with a
+diagnostic once they differ. `revisionView` is required: `accepted` and
+`original` project pending revisions like `readParagraphs`, and `markup` keeps
+both with `revisions` attribution on each inline, moves as `moveFrom` and
+`moveTo`. Where a view cannot reconstruct history (a paragraph-mark revision,
+tracked formatting or a style change that changes the exported marks, tracked
+cell or grid changes,
+or row and table revisions the markup view cannot attribute) the block is an
+anchored `unsupported` placeholder with an `unsupported-revision` diagnostic.
+
+Anchors use the batch offsets: a range is paragraph-local UTF-16 in the view it
+names, one U+FFFC per atom, the same shape the edit batches take; ranges from a
+session export address the version it returned. Content without a session
+location (comment bodies, omitted raw XML) carries a `sourcePart` anchor: the
+part, its SHA-256, and element-child ordinals into its XML. Content with no
+location of its own carries `{ kind: 'unlocated', story, reason }`: the reason is
+`duplicate-paragraph-id` (parsing gives a repeated paragraph id a fresh one, but a
+session can give two paragraphs one id), `story-too-large`, `missing-story` or
+`provenance-unavailable`. Comment metadata reads
+the session's comment store once a field has been written there, and the source
+until then. Ids are deterministic export-tree paths, and a bytes export is
+identical across runs. Exports admit one top-level block at a time, charge text before copying it, and stop at
+`maxBlocks` (10,000 by default, every nested block counted) or `maxBytes`
+(8,388,608 by default, on the compact JSON) at a whole top-level block, set
+`truncated`, and end with a `truncated` diagnostic; the prefix already admitted is
+kept, and a larger `maxBytes` never keeps fewer blocks. Of a story longer than
+four units per remaining byte beyond one million, only the leading paragraphs
+within that bound are read: those that fit are kept, then the export stops and says
+so. A comment body, field payload, shape or table cell past the bound is not read
+at all. Markdown keeps story separators, headings, lists, tables (entity-escaped
+HTML, nested where needed, where Markdown tables cannot carry merges or several
+blocks per cell), attributed insertions and deletions, and a
+`<!-- docx-export:N -->` marker per block, nested ones included, mapped to its
+anchor in `anchors`. Only http, https, mailto and internal-anchor targets are linked,
+judged after entity and percent decoding, and `&` in a target is written `&amp;`; document text, titles and alt text never keep a
+line break or unescaped HTML. It does not
+preserve Word pagination or layout. Page fragments are not included yet.
+
+### Editor plugin contract (deprecated)
+
+`@betteroffice/docx/plugin-api` keeps its geometry and sidebar building blocks:
+`RenderedDomContext`, `PositionCoordinates`, `SidebarItem`,
+`createRenderedDomContext`, `createCanvasHostProjector` and
+`resolveItemPositions`. The snapshot-based `EditorPluginCore`,
+`PluginPanelProps`, `PanelConfig` and `SidebarItemContext` are deprecated: they
+pass serialized `Document` snapshots and have no host that manages their
+lifecycle. Host plugins for the React editor use `defineDocxPlugin` and the
+`plugins` prop of
+[`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react),
+which provide versioned reads, granted commands and edit batches, lifecycle
+events and cleanup.
