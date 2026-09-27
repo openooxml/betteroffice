@@ -28,6 +28,11 @@ export function markPresented(host: object, displayList: object): void {
   presentedLists.set(host, displayList);
 }
 
+/** Forgets what `host` shows, while its canvas pages repaint for a new surface or zoom. */
+export function clearPresented(host: object): void {
+  presentedLists.delete(host);
+}
+
 /** Whether the canvas pages under `host` show the pixels of `displayList`. */
 export function isPresented(host: object | null | undefined, displayList: object): boolean {
   return !!host && presentedLists.get(host) === displayList;
