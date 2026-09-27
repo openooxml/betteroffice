@@ -5,10 +5,11 @@ Bundled open fonts for the [BetterOffice](https://betteroffice.dev/) engine, plu
 Word documents overwhelmingly reference the MS core fonts (Calibri, Cambria, Arial, Times New Roman, Courier New), whose binaries cannot be redistributed. This package ships the open fonts the LibreOffice/ChromeOS ecosystem uses as drop-in metric replacements: same advance widths, so line breaks and pagination match Word even where glyph outlines differ slightly.
 
 Beyond the core replacements it also ships the families PowerPoint decks are
-commonly drawn with — Inter, Roboto, Source Sans 3, DM Sans, Open Sans and
-Montserrat, the fonts themselves — plus Gelasio for Georgia and Comic Relief for
-Comic Sans MS, both metric-compatible. A deck naming a family nobody has falls
-back to Calibri, which is what Office substitutes.
+commonly drawn with — Inter, Roboto, Source Sans 3, DM Sans, DM Serif Display,
+Open Sans, Montserrat, Poppins, Oswald and Heebo, the fonts themselves — plus
+Gelasio for Georgia and Comic Relief for Comic Sans MS, both metric-compatible.
+A deck naming a family nobody has falls back to Calibri, which is what Office
+substitutes.
 
 ## Why it matters
 
@@ -38,10 +39,10 @@ configureDefaultFonts({ fonts });
 
 Add [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) when your documents contain Chinese, Japanese or Korean text — those five faces are 33 MB and ship separately so nobody installs them unnecessarily.
 
-| Package                   | Faces | Size on disk | Contents                                     |
-| ------------------------- | ----- | ------------ | -------------------------------------------- |
-| `@betteroffice/fonts`     | 25    | 7.9 MB       | Latin metric-compatible set + Hebrew/Arabic  |
-| `@betteroffice/fonts-cjk` | 5     | 33 MB        | Noto Sans SC/TC/JP/KR, Noto Serif SC         |
+| Package                   | Faces | Size on disk | Contents                                                   |
+| ------------------------- | ----- | ------------ | ---------------------------------------------------------- |
+| `@betteroffice/fonts`     | 65    | 14.2 MB      | Latin metric-compatible set, deck families + Hebrew/Arabic |
+| `@betteroffice/fonts-cjk` | 5     | 33 MB        | Noto Sans SC/TC/JP/KR, Noto Serif SC                       |
 
 Faces are fetched per face, lazily. A typical English document using regular and bold Calibri pulls Carlito Regular + Bold plus the chain's always-appended Liberation Sans Regular + Bold: 2,135,668 bytes (2.04 MiB) raw.
 
@@ -55,7 +56,9 @@ Faces are fetched per face, lazily. A typical English document using regular and
 | Liberation Serif | Times New Roman        | Times                 | OFL 1.1 | 2.1.5   |
 | Liberation Mono  | Courier New            | Courier               | OFL 1.1 | 2.1.5   |
 
-Each Latin family ships four faces: Regular, Bold, Italic, BoldItalic — 20 TTFs under `assets/`.
+Gelasio 1.008 is metric-compatible with Georgia, and Comic Relief 1.200 with Comic Sans MS; both are OFL 1.1. Each of these seven families ships Regular, Bold, Italic and BoldItalic, except Comic Relief, which has no italics.
+
+The deck families (Inter, Roboto, Source Sans 3 for Source Sans Pro, DM Sans, Open Sans, Montserrat, Poppins) ship the same four faces. Oswald and Heebo ship Regular and Bold, DM Serif Display ships Regular and Italic. Styles a family does not ship fall back through the font chain.
 
 ## Script-coverage mapping (CJK + RTL)
 
@@ -129,7 +132,7 @@ configureDefaultFonts({ fonts, baseUrl: 'https://cdn.example.com/betteroffice-fo
 
 or by building the provider yourself with `createFontProvider({ baseUrl })`. The base URL is joined with each face's asset filename, so serve the contents of `assets/` at that path.
 
-**A base URL moves the binaries, not the package.** The manifest that maps a Word font name to a face lives in this package's 14 KB of JavaScript, so a CDN deployment still installs `@betteroffice/fonts`; what it stops shipping is the 7.9 MB of faces. A `baseUrl` with no module loads nothing and warns.
+**A base URL moves the binaries, not the package.** The manifest that maps a Word font name to a face lives in this package's 23 KB of JavaScript, so a CDN deployment still installs `@betteroffice/fonts`; what it stops shipping is the 14.2 MB of faces. A `baseUrl` with no module loads nothing and warns.
 
 `configureDefaultFonts` is process-global: call it at module initialization before any editor resolves fonts, not from `useEffect`; existing registries retain their provider, and a multi-tenant server cannot use it to choose different base URLs per tenant.
 
@@ -139,7 +142,7 @@ A relative base URL is pinned to the current browser route when configuration or
 
 Every loaded asset is checked against the vendored manifest's exact decoded byte length. This detects truncation, not same-length tampering, so the configured origin still needs to be trusted.
 
-Serve the files with `Content-Encoding: br` or `gzip`. The faces are TTF/OTF rather than woff2 (see above), and transport compression recovers most of the difference: the Latin set is 7,252 KB raw and 3,602 KB gzipped.
+Serve the files with `Content-Encoding: br` or `gzip`. The faces are TTF/OTF rather than woff2 (see above), and transport compression recovers most of the difference: the 65 faces are 14,527 KB raw and 7,156 KB gzipped.
 
 ## Bundler note
 
@@ -202,5 +205,6 @@ The loader code is Apache-2.0 (see `LICENSE`). The font binaries are licensed un
 - `LICENSES/OFL-Liberation.txt` — Digitized data copyright (c) 2010 Google Corporation; Copyright (c) 2012 Red Hat, Inc., Reserved Font Name Liberation. Vendored unmodified from the [Liberation Fonts 2.1.5 release](https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5).
 - `LICENSES/OFL-NotoSansHebrew.txt` — Copyright 2022 The Noto Project Authors. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansHebrew/hinted/ttf/`); upstream project [notofonts/hebrew](https://github.com/notofonts/hebrew).
 - `LICENSES/OFL-NotoArabic.txt` — Copyright 2022 The Noto Project Authors; covers Noto Sans Arabic and Noto Naskh Arabic. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansArabic/hinted/ttf/`, `fonts/NotoNaskhArabic/hinted/ttf/`); upstream project [notofonts/arabic](https://github.com/notofonts/arabic).
+- `LICENSES/OFL-Gelasio.txt`, `OFL-ComicRelief.txt`, `OFL-Inter.txt`, `OFL-Roboto.txt`, `OFL-SourceSans3.txt`, `OFL-DMSans.txt`, `OFL-DMSerifDisplay.txt`, `OFL-OpenSans.txt`, `OFL-Montserrat.txt`, `OFL-Poppins.txt`, `OFL-Oswald.txt`, `OFL-Heebo.txt`: one per family, each with that family's copyright notice.
 
 The CJK binaries and their `OFL-NotoCJK.txt` license text ship in [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk).
