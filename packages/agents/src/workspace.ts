@@ -1,4 +1,5 @@
-import { readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, readdir, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { openDocx, type DocxAgentDocument } from './document';
 import { DocumentToolError, type DocumentRenderer } from './types';
@@ -32,9 +33,14 @@ export class FileWorkspace {
     if (extname(file).toLowerCase() !== '.docx') throw new DocumentToolError('UNSUPPORTED_FORMAT', 'This release supports DOCX.');
     for (const [id, entry] of this.documents) if (entry.path === file) return { document: id, ...entry.document.overview() };
     if (this.documents.size >= 10) throw new DocumentToolError('DOCUMENT_LIMIT', 'Close a document before opening more than 10.');
-    const info = await stat(file);
-    if (!info.isFile() || info.size > 64 * 1024 * 1024) throw new DocumentToolError('FILE_TOO_LARGE', 'Open a DOCX file up to 64 MiB.');
-    const document = await openDocx(await readFile(file), { name: basename(file), renderer: this.renderer });
+    const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    let bytes: Uint8Array;
+    try {
+      const info = await this.validateHandle(file, handle);
+      if (!info.isFile() || info.size > 64 * 1024 * 1024) throw new DocumentToolError('FILE_TOO_LARGE', 'Open a DOCX file up to 64 MiB.');
+      bytes = await handle.readFile();
+    } finally { await handle.close(); }
+    const document = await openDocx(bytes, { name: basename(file), renderer: this.renderer });
     const id = `doc${this.nextId++}`;
     this.documents.set(id, { path: file, document });
     return { document: id, ...document.overview() };
@@ -48,12 +54,16 @@ export class FileWorkspace {
 
   async export(id: string, path: string, proposal?: string) {
     const lexical = this.contained(path);
+    if (extname(lexical).toLowerCase() !== '.docx') throw new DocumentToolError('UNSUPPORTED_FORMAT', 'Export path must end in .docx.');
+    const bytes = await this.get(id).export(proposal);
     const parent = await realpath(dirname(lexical));
     this.contained(parent);
     const file = resolve(parent, basename(lexical));
-    if (extname(file).toLowerCase() !== '.docx') throw new DocumentToolError('UNSUPPORTED_FORMAT', 'Export path must end in .docx.');
-    const bytes = await this.get(id).export(proposal);
-    await writeFile(file, bytes, { flag: 'wx' });
+    const handle = await open(file, 'wx', 0o600);
+    try {
+      await this.validateHandle(file, handle);
+      await handle.writeFile(bytes);
+    } finally { await handle.close(); }
     return { path: relative(this.root, file), bytes: bytes.length, ...(proposal ? { proposal, accepted: false } : {}) };
   }
 
@@ -79,5 +89,15 @@ export class FileWorkspace {
 
   private async path(path: string) {
     return this.contained(await realpath(this.contained(path)));
+  }
+
+  private async validateHandle(file: string, handle: FileHandle) {
+    const canonical = await this.path(file);
+    const current = await lstat(canonical);
+    const opened = await handle.stat();
+    if (current.isSymbolicLink() || current.dev !== opened.dev || current.ino !== opened.ino) {
+      throw new DocumentToolError('FILE_CHANGED', 'The file changed during access. Retry with a stable workspace.');
+    }
+    return opened;
   }
 }

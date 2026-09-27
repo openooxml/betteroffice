@@ -30,6 +30,8 @@ export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
     warnings.add('Some characters have no glyph in the available fonts. Their preview may show replacement boxes.');
   }
   const images = new Map<string, Awaited<ReturnType<typeof loadImage>> | null>();
+  const media = document.package.media;
+  const mediaBySource = new Map([...media?.values() ?? []].map(file => [file.dataUrl, file]));
   const glyphCache = new GlyphCache({
     provider: (font, glyph) => session.outlineGlyphJson(font, glyph),
     createPath: () => new Path2D() as unknown as globalThis.Path2D,
@@ -40,14 +42,13 @@ export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
       if (images.has(id)) return images.get(id) as unknown as CanvasImageSource | null;
       const relationship = document.package.relationships?.get(id);
       const target = relationship?.target.replace(/^\//, '').replace(/^\.\//, '');
-      const media = document.package.media;
-      const file = media?.get(id) ?? (target ? media?.get(target) ?? media?.get(`word/${target}`) : undefined);
-      if (!file) { warnings.add(`Image unavailable: ${id}`); images.set(id, null); return null; }
+      const file = mediaBySource.get(id) ?? media?.get(id) ?? (target ? media?.get(target) ?? media?.get(`word/${target}`) : undefined);
+      if (!file) { warnings.add('Image unavailable in the embedded document media.'); images.set(id, null); return null; }
       try {
         const image = await loadImage(Buffer.from(file.data));
         images.set(id, image);
         return image as unknown as CanvasImageSource;
-      } catch { warnings.add(`Image could not be decoded: ${id}`); images.set(id, null); return null; }
+      } catch { warnings.add('An embedded image could not be decoded.'); images.set(id, null); return null; }
     },
   });
   return { png: await canvas.encode('png'), page: pageNumber, pageCount: display.pages.length, width: canvas.width, height: canvas.height, warnings: [...warnings] };

@@ -13,8 +13,8 @@ package.
 ## MCP quickstart
 
 ```sh
-npm install @betteroffice/agents
-npx betteroffice-mcp --root /absolute/path/to/documents
+bun add @betteroffice/agents
+bunx --package @betteroffice/agents betteroffice-mcp --root /absolute/path/to/documents
 ```
 
 The server speaks MCP over stdin/stdout. Connect it from an MCP client rather

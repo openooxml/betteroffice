@@ -57,6 +57,13 @@ export function publishedPackages() {
   return publishedPackageVersions().map((entry) => entry.name);
 }
 
+/** Executables declared by published npm packages. */
+export function publishedCommands() {
+  return workspaceManifests().filter(manifest => !manifest.private && manifest.bin).flatMap(manifest =>
+    typeof manifest.bin === 'string' ? [manifest.name.split('/').pop()] : Object.keys(manifest.bin)
+  ).sort();
+}
+
 /** The crates a release uploads to crates.io. */
 export function publishedCrates() {
   const dir = join(ROOT, 'crates');

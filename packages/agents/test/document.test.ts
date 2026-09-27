@@ -133,6 +133,38 @@ describe('grep, read, propose, export', () => {
     expect(doc.grep({ query: 'draft' }).matches).toHaveLength(0);
   });
 
+  test('inserts immediately after protected content without changing it', async () => {
+    const doc = await open();
+    const [hit] = doc.grep({ query: 'After 😀' }).matches;
+    const before = doc.read(hit.ref);
+    const proposal = doc.propose({ author: 'test', edits: [{ ...before, start: hit.start, oldText: '', newText: 'Inserted ' }] });
+    await doc.accept(proposal.id);
+    expect(doc.read(hit.ref).text).toBe(before.text.replace('After', 'Inserted After'));
+    expect(doc.read(hit.ref).runs.filter(run => run.protected)).toEqual(before.runs.filter(run => run.protected));
+    const target = doc.session.paragraphs('body')[0];
+    doc.session.insertText({ story: 'body', paraId: target.paraId, offset: 0 }, 'Tracked', { name: 'Peer', date: '2026-09-27T12:00:00Z' });
+    const heading = doc.list({ story: 'body' }).items[0];
+    const revisions = doc.session.listRevisions();
+    const next = doc.propose({ author: 'test', edits: [{ ...heading, start: 7, oldText: '', newText: ' Ordinary ' }] });
+    await doc.accept(next.id);
+    expect(doc.session.listRevisions()).toEqual(revisions);
+    expect(doc.grep({ query: ' Ordinary ' }).matches).toHaveLength(1);
+  });
+
+  test('releases deleted identities and gives recreated paragraphs fresh references', async () => {
+    const doc = await open();
+    doc.session.createStory('temporary', 'Transient content');
+    const [old] = doc.grep({ query: 'Transient content' }).matches;
+    doc.session.deleteStory('temporary');
+    expect(() => doc.read(old.ref)).toThrow('Paragraph missing');
+    const identities = (doc as unknown as { identities: Map<string, unknown> }).identities;
+    expect(identities.size).toBe(doc.overview().paragraphs);
+    doc.session.createStory('temporary', 'Transient content');
+    const [current] = doc.grep({ query: 'Transient content' }).matches;
+    expect(current.ref).not.toBe(old.ref);
+    expect(() => doc.propose({ author: 'test', edits: [{ match: old.match, newText: 'Changed' }] })).toThrow('Paragraph missing');
+  });
+
   test('detects formatting and deletion changes, and permits unrelated edits', async () => {
     const doc = await open(1);
     const [hit] = doc.grep({ query: '€4.2 million' }).matches;

@@ -221,7 +221,7 @@ export class DocxAgentDocument {
       const end = start + edit.oldText.length;
       if (!boundary(p.text, start) || !boundary(p.text, end)) throw new DocumentToolError('INVALID_RANGE', 'Text ranges must not split a Unicode character.');
       if (edit.oldText === edit.newText) throw new DocumentToolError('NO_CHANGE', 'oldText and newText are identical.');
-      if (p.runs.some(run => run.protected && (run.start < end && run.end > start || start === end && run.start <= start && run.end >= start))) {
+      if (p.runs.some(run => run.protected && (run.start < end && run.end > start || start === end && run.start <= start && start < run.end))) {
         throw new DocumentToolError('PROTECTED_CONTENT', 'This range contains an embed or an existing tracked change. Choose an ordinary text range.');
       }
       if (changes.some(change => change.ref === p.ref && start <= change.start + change.oldText.length && end >= change.start)) {
@@ -321,6 +321,7 @@ export class DocxAgentDocument {
     if (this.closed) throw new DocumentToolError('CLOSED', 'This document is closed. Open it again.');
     if (this.indexedEpoch === this.epoch) return;
     const paragraphs: Paragraph[] = [];
+    const active = new Set<string>();
     for (const story of this.session.storyIds().sort()) {
       const headings = new Map(this.session.headings(story).map(entry => [entry.paraId, entry.heading.outlineLevel + 1]));
       let text = '';
@@ -331,6 +332,7 @@ export class DocxAgentDocument {
         segments.push(segment);
         if (segment.kind === 'pilcrow') {
           const key = JSON.stringify([story, segment.paraId]);
+          active.add(key);
           const previous = this.identities.get(key);
           const fingerprint = JSON.stringify(segments);
           const p: Paragraph = {
@@ -350,6 +352,7 @@ export class DocxAgentDocument {
         }
       }
     }
+    for (const key of this.identities.keys()) if (!active.has(key)) this.identities.delete(key);
     this.paragraphs = paragraphs;
     this.indexedEpoch = this.epoch;
   }
