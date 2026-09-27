@@ -16,6 +16,8 @@ const MAX_POINTS: usize = 100_000;
 const MAX_PLOT_GROUPS: usize = 64;
 const MAX_AXES: usize = 128;
 /// Chart-wide, so per-vector limits cannot multiply into an unbounded parse.
+/// Points are charged as read: an X cache that also labels a scatter's
+/// categories is charged once, so a chart retains at most twice its budget.
 const MAX_CHART_SERIES: usize = 1_024;
 const MAX_CHART_POINTS: usize = 200_000;
 const MAX_AXIS_IDS: usize = 16;
@@ -1891,6 +1893,37 @@ mod tests {
             );
             assert!(!ops.is_empty(), "{count}/{index}");
         }
+    }
+
+    #[test]
+    fn a_full_scatter_x_cache_labels_its_categories_within_twice_the_budget() {
+        let cache = |name: &str| {
+            Node::el(
+                name,
+                vec![Node::el(
+                    "c:numCache",
+                    vec![
+                        Node::val("c:ptCount", "100000"),
+                        Node::el("c:pt", vec![Node::text("c:v", "1")]).attr("idx", "99999"),
+                    ],
+                )],
+            )
+        };
+        let series = (0..16).map(|_| Node::el("c:ser", vec![cache("c:xVal"), cache("c:yVal")]));
+        let space = parse_chart_space(&plot_area(Node::el("c:scatterChart", series.collect())))
+            .expect("chart space parses");
+        let series = &space.plot_groups[0].series;
+        let slots: usize = series
+            .iter()
+            .map(|series| {
+                series.categories.capacity()
+                    + series.values.capacity()
+                    + series.x_values.as_ref().map_or(0, Vec::capacity)
+            })
+            .sum();
+        assert_eq!(series[0].values.len(), MAX_POINTS);
+        assert_eq!(series[0].categories.len(), MAX_POINTS);
+        assert!(slots <= 2 * MAX_CHART_POINTS, "{slots} slots");
     }
 
     #[test]
