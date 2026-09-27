@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+use pptx_edit::structured::{
+    PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxStructuredContent,
+};
 use pptx_edit::{
     CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
     DocumentVersion, EditCtx, EditError, EditOutcome, EditRequest, FindOutcome, FindRequest,
@@ -163,6 +166,23 @@ impl Presentation {
     /// Exact, case-sensitive, paragraph-local search with the version it ran at.
     pub fn find_text(&self, request: &FindRequest) -> Result<FindOutcome> {
         Ok(self.session.find_text(request)?)
+    }
+
+    /// Structured slide content with the version it was read at; anchors are scoped to that
+    /// version. Nothing changes. Option refusals are the inner `Err`.
+    pub fn export_structured(
+        &self,
+        options: &PptxExportOptions,
+    ) -> Result<PptxExportResult<PptxStructuredContent>> {
+        Ok(self.session.export_structured(options)?)
+    }
+
+    /// [`Presentation::export_structured`] rendered as Markdown from the same read.
+    pub fn export_markdown(
+        &self,
+        options: &PptxExportOptions,
+    ) -> Result<PptxExportResult<PptxMarkdownContent>> {
+        Ok(self.session.export_markdown(options)?)
     }
 
     /// Runs every check of [`Presentation::apply_edits`] without changing anything.
@@ -530,4 +550,32 @@ impl Presentation {
     pub fn add_undo_barrier(&self) {
         self.session.add_undo_barrier();
     }
+}
+
+/// Exports PPTX bytes as structured content; anchors address the returned snapshot only.
+pub fn export_pptx_structured(
+    bytes: &[u8],
+    options: &PptxExportOptions,
+) -> Result<PptxStructuredContent> {
+    Ok(pptx_edit::structured::export_pptx_structured(
+        bytes, options,
+    )?)
+}
+
+/// [`export_pptx_structured`] rendered as Markdown.
+pub fn export_pptx_markdown(
+    bytes: &[u8],
+    options: &PptxExportOptions,
+) -> Result<PptxMarkdownContent> {
+    Ok(pptx_edit::structured::export_pptx_markdown(bytes, options)?)
+}
+
+/// Renders structured content as Markdown.
+pub fn render_pptx_markdown(
+    content: &PptxStructuredContent,
+    options: &pptx_edit::structured::PptxMarkdownOptions,
+) -> Result<PptxMarkdownContent> {
+    Ok(pptx_edit::structured::render_pptx_markdown(
+        content, options,
+    )?)
 }

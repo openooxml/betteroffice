@@ -35,6 +35,19 @@ export { repackDocx, createDocx, updateMultipleFiles } from './docx/rezip';
 export { attemptSelectiveSave } from './docx/selectiveSave';
 
 // ============================================================================
+// STRUCTURED EXPORT
+// ============================================================================
+
+export {
+  DocxExportError,
+  exportDocxMarkdown,
+  exportDocxStructured,
+  renderDocxMarkdown,
+} from './docx/structuredExport';
+export type * from './yrs/structuredExport';
+export type * from './yrs/readTypes';
+
+// ============================================================================
 // UTILITIES
 // ============================================================================
 

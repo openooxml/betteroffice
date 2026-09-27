@@ -121,6 +121,18 @@ DOCX files while preserving unsupported package content.
 `render_png` renders a page from that layout. Register the required fonts before
 rendering; a missing font produces an error.
 
+`export_structured` returns the document as read-only structured content, a dict
+in the same camelCase schema the JavaScript and Rust APIs produce, and
+`export_markdown` renders it as Markdown with source anchors:
+
+```python
+content = document.export_structured(revision_view="accepted", stories=["body", "footnotes"])
+markdown = document.export_markdown(revision_view="markup")["markdown"]
+```
+
+Omitted and unsupported content is listed in `diagnostics`; unusable limits raise
+`ExportError`. Page fragments are not included yet.
+
 ## PPTX
 
 [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) reads decks,
@@ -135,6 +147,12 @@ A `Presentation` must be used and released on the thread that opened it.
 that version as one undo step, or returns `{"ok": False, "failure": ...}` with
 nothing changed. Requests are the typed dictionaries `PptxEditRequest` and
 friends, shared with the JavaScript core.
+
+`export_structured` and `export_markdown` return the committed deck as
+structured content or Markdown with the version it was read at, and
+`export_pptx_structured(data)` reads bytes as a snapshot. Records carry anchors
+and source provenance, hidden slides and shapes, notes and comments are keyword
+options, and every omission is listed in `diagnostics`.
 
 `comments()` returns the deck's comments, and `comment_flavor` identifies the
 legacy or modern format. Modern comments support replies and resolved status in
