@@ -68,16 +68,16 @@
   changed. Text steps stay within one paragraph and paragraph steps need a
   document opened from DOCX bytes.
 
-- **Host-owned DOCX plugins.** DOCX React supports host-owned plugins with
-  panels, overlays, sidebar items, lifecycle events, and explicitly granted
-  commands and edit batches. Plugins read and navigate by default; every write
-  is checked against its grant, the editor mode and document policy when it runs.
-
 - **Version-checked PPTX edit batches.** PPTX JavaScript, React, Rust and
   Python hosts read slides and story text with a session version, then apply
   atomic text, speaker-notes and shape batches that commit as one undo step or
   return a typed refusal with nothing changed. Text steps stay within one
   paragraph and leave fields and line breaks whole.
+
+- **Host-owned DOCX plugins.** DOCX React supports host-owned plugins with
+  panels, overlays, sidebar items, lifecycle events, and explicitly granted
+  commands and edit batches. Plugins read and navigate by default; every write
+  is checked against its grant, the editor mode and document policy when it runs.
 
 - **Host-owned PPTX plugins.** PPTX React supports host-owned plugins with
   panels, overlays, lifecycle events, and explicitly granted commands and edit
