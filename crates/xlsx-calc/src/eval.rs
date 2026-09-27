@@ -906,6 +906,12 @@ impl Area {
         Ok(out)
     }
 
+    /// the cells a read of `read` values left unread past the used extent,
+    /// every one of them blank.
+    pub(crate) fn unread(&self, read: u64) -> u64 {
+        self.cell_count().unwrap_or(0).saturating_sub(read)
+    }
+
     pub(crate) fn cell_count(&self) -> Option<u64> {
         u64::try_from(self.rows)
             .ok()?

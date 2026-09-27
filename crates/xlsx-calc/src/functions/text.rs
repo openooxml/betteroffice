@@ -506,12 +506,15 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut output_chars = 0;
     let mut first = true;
     for arg in &args[2..] {
-        let values = match as_area(arg, ctx) {
+        let (values, unread) = match as_area(arg, ctx) {
             Some(area) => match area.values_ref(ctx) {
-                Ok(v) => v,
+                Ok(v) => {
+                    let unread = area.unread(v.len() as u64);
+                    (v, unread)
+                }
                 Err(e) => return err(e),
             },
-            None => vec![Cow::Owned(evaluate(arg, ctx))],
+            None => (vec![Cow::Owned(evaluate(arg, ctx))], 0),
         };
         for v in values {
             let empty = matches!(v.as_ref(), CellValue::Empty)
@@ -530,6 +533,19 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                     first = false;
                 }
                 Err(e) => return err(e),
+            }
+        }
+        // the blanks past a whole-column or whole-row read still join, each
+        // one a delimiter wide
+        if !ignore_empty && unread > 0 {
+            let separators = unread - u64::from(first);
+            first = false;
+            if !delim.is_empty() {
+                for _ in 0..separators {
+                    if !append_limited(&mut output, &delim, &mut output_chars) {
+                        return err(ErrorValue::Value);
+                    }
+                }
             }
         }
     }

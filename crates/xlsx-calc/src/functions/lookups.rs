@@ -32,7 +32,7 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
         return err(value);
     }
     let area = match crate::eval::required_area(&args[1], ctx) {
-        Ok(a) => crate::eval::bound_area(a, ctx),
+        Ok(a) => a,
         Err(error) => return err(error),
     };
     let index = match nth_int(args, ctx, 2) {
@@ -50,10 +50,13 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
     } else {
         true
     };
+    // the search stops where the sheet's data does, but the index may still
+    // reach past it into blanks
+    let searched = crate::eval::bound_area(area, ctx);
     let (lines, depth) = if vertical {
-        (area.rows, area.cols)
+        (searched.rows, area.cols)
     } else {
-        (area.cols, area.rows)
+        (searched.cols, area.rows)
     };
     if index as usize > depth {
         return err(ErrorValue::Ref);

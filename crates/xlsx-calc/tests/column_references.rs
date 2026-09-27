@@ -2,7 +2,7 @@ use std::cell::Cell as Counter;
 
 use xlsx_calc::{ColumnRange, EvalContext, Expr, evaluate, parse_formula, references};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
+use xlsx_model::{Cell, CellProvider, CellRef, CellValue, ErrorValue, Sheet, SheetId, Workbook};
 
 #[test]
 fn parses_and_prints_anchored_column_ranges() {
@@ -238,4 +238,124 @@ fn lookups_and_metadata_do_not_materialize_entire_columns() {
         );
         assert_eq!(data.visits.get(), visits, "{formula}");
     }
+}
+
+/// One holds only A1:A3; Two holds A1:B10 and, in C, a column of numbers as
+/// tall as a row is wide.
+fn two_sheets() -> Workbook {
+    let mut one = Sheet::new("One");
+    for (row, value) in [1.0, 2.0, 4.0].into_iter().enumerate() {
+        one.set_cell(CellRef::new(row as u32, 0), number(value));
+    }
+    let mut two = Sheet::new("Two");
+    for row in 0..10 {
+        two.set_cell(CellRef::new(row, 0), number(1.0));
+        two.set_cell(CellRef::new(row, 1), number(f64::from(row + 1)));
+    }
+    for row in 0..MAX_COLS {
+        two.set_cell(CellRef::new(row, 2), number(1.0));
+    }
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(one);
+    workbook.sheets.push(two);
+    workbook
+}
+
+fn number(value: f64) -> Cell {
+    Cell {
+        value: CellValue::Number { value },
+        ..Cell::default()
+    }
+}
+
+fn on_one(workbook: &Workbook, formula: &str) -> CellValue {
+    let context = EvalContext::new(workbook, SheetId(0));
+    evaluate(&parse_formula(formula).unwrap(), &context)
+}
+
+/// a whole-column or whole-row read stops at the used range, but the blanks
+/// past it still count wherever a result depends on them.
+#[test]
+fn blank_counts_include_the_cells_past_the_used_range() {
+    let workbook = two_sheets();
+    let blanks = f64::from(MAX_ROWS - 3);
+    for (formula, expected) in [
+        ("COUNTBLANK(A:A)", blanks),
+        ("COUNTBLANK(A1:A1048576)", blanks),
+        ("COUNTBLANK(1:1)", f64::from(MAX_COLS - 1)),
+        ("COUNTIF(A:A,\"\")", blanks),
+        ("COUNTIF(A:A,\"<>5\")", f64::from(MAX_ROWS)),
+        ("COUNTIF(A:A,\"<>\")", 3.0),
+        ("COUNTIFS(A:A,\"\",B:B,\"\")", blanks),
+        ("COUNTIFS(A:A,\">1\",B:B,\"\")", 2.0),
+        ("LEN(TEXTJOIN(\",\",FALSE,1:1))", f64::from(MAX_COLS)),
+    ] {
+        assert_eq!(
+            on_one(&workbook, formula),
+            CellValue::Number { value: expected },
+            "{formula}"
+        );
+    }
+    assert_eq!(
+        on_one(&workbook, "TEXTJOIN(\",\",FALSE,A:A)"),
+        CellValue::Error {
+            value: ErrorValue::Value
+        }
+    );
+}
+
+/// cutting a reference to the used range leaves its shape alone: an index
+/// may still reach past the data, and ranges of different sizes still differ.
+#[test]
+fn a_cut_reference_keeps_its_shape() {
+    let workbook = two_sheets();
+    for (formula, expected) in [
+        ("HLOOKUP(1,A:A,5,FALSE)", CellValue::Empty),
+        ("VLOOKUP(1,1:1,5,FALSE)", CellValue::Empty),
+        (
+            "COUNTIFS(A:A,\">1\",B1:B3,\"\")",
+            CellValue::Error {
+                value: ErrorValue::Value,
+            },
+        ),
+        (
+            "SUMIFS(B1:B3,A:A,\">1\")",
+            CellValue::Error {
+                value: ErrorValue::Value,
+            },
+        ),
+        (
+            "MMULT(1:1,Two!C1:C16384)",
+            CellValue::Error {
+                value: ErrorValue::Value,
+            },
+        ),
+    ] {
+        assert_eq!(on_one(&workbook, formula), expected, "{formula}");
+    }
+}
+
+/// whole references on two sheets are cut to one extent, so they still pair
+/// row for row past the shorter sheet's data.
+#[test]
+fn whole_references_on_two_sheets_stay_aligned() {
+    let workbook = two_sheets();
+    for (formula, expected) in [
+        ("SUMIF(A:A,\"\",Two!B:B)", 49.0),
+        ("SUMIFS(Two!B:B,A:A,\"\")", 49.0),
+        ("AVERAGEIF(A:A,\"\",Two!B:B)", 7.0),
+        ("MAXIFS(Two!B:B,A:A,\"\")", 10.0),
+        ("SUMPRODUCT(A:A,Two!B:B)", 17.0),
+        ("SUMPRODUCT(Two!B:B,A:A)", 17.0),
+    ] {
+        assert_eq!(
+            on_one(&workbook, formula),
+            CellValue::Number { value: expected },
+            "{formula}"
+        );
+    }
+    let CellValue::Number { value } = on_one(&workbook, "CORREL(A:A,Two!B:B)") else {
+        panic!("CORREL pairs the three rows One holds");
+    };
+    assert!((value - 3.0 / (42.0_f64 / 9.0 * 2.0).sqrt()).abs() < 1e-12);
 }
