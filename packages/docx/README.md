@@ -343,3 +343,17 @@ Checkbox, dropdown and date controls keep `setContentControlValue`; a
 string passed to it fills a text control through the same step, and
 `clearContentControlValue` never erases a text control's text. Explicit rich-text
 runs are not supported yet.
+
+### Editor plugin contract (deprecated)
+
+`@betteroffice/docx/plugin-api` keeps its geometry and sidebar building blocks:
+`RenderedDomContext`, `PositionCoordinates`, `SidebarItem`,
+`createRenderedDomContext`, `createCanvasHostProjector` and
+`resolveItemPositions`. The snapshot-based `EditorPluginCore`,
+`PluginPanelProps`, `PanelConfig` and `SidebarItemContext` are deprecated: they
+pass serialized `Document` snapshots and have no host that manages their
+lifecycle. Host plugins for the React editor use `defineDocxPlugin` and the
+`plugins` prop of
+[`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react),
+which provide versioned reads, granted commands and edit batches, lifecycle
+events and cleanup.

@@ -14,7 +14,7 @@ import {
   docxCommandController,
   type DocxPendingCommand,
 } from '../../commands/createDocxCommandStore';
-import { commandShortcut } from '../../commands/descriptors';
+import { commandShortcut, isPluginCommandId } from '../../commands/descriptors';
 import {
   useDocxChrome,
   useDocxCommand,
@@ -27,6 +27,7 @@ import type {
   DocxCommandResult,
   DocxCommandState,
   DocxCommandStore,
+  DocxPluginCommandId,
   DocxSelectCommandId,
   DocxTableAction,
 } from '../../commands/types';
@@ -113,16 +114,22 @@ const ALIGNMENT_ICONS: Record<string, string> = {
  * Arguments a control binds; required when the command takes arguments.
  * @experimental
  */
-export type ToolbarCommandArgs<K extends DocxCommandId> = null extends DocxCommandArgs[K]
-  ? { args?: DocxCommandArgs[K] }
-  : { args: DocxCommandArgs[K] };
+export type ToolbarCommandArgs<K extends DocxCommandId | DocxPluginCommandId> =
+  K extends DocxCommandId
+    ? null extends DocxCommandArgs[K]
+      ? { args?: DocxCommandArgs[K] }
+      : { args: DocxCommandArgs[K] }
+    : { args?: null };
 
-/** @experimental */
-export type ToolbarCommandButtonProps<K extends DocxCommandId> = {
+/**
+ * A built-in or contributed command; a contributed one renders nothing while inactive.
+ * @experimental
+ */
+export type ToolbarCommandButtonProps<K extends DocxCommandId | DocxPluginCommandId> = {
   id: K;
   /** Button content; defaults to the command's icon, or its label when it has none. */
   children?: ReactNode;
-  /** Accessible name; defaults to the localized command label. */
+  /** Accessible name; defaults to the localized or contributed command label. */
   label?: string;
   className?: string;
 } & ToolbarCommandArgs<K>;
@@ -134,10 +141,10 @@ export interface ToolbarCommandSelectProps<K extends DocxSelectCommandId> {
 }
 
 /** @experimental */
-export interface ToolbarCommandProps<K extends DocxCommandId> {
+export interface ToolbarCommandProps<K extends DocxCommandId | DocxPluginCommandId> {
   id: K;
   /** Binds arguments; omit to render the command's full built-in control. */
-  args?: DocxCommandArgs[K];
+  args?: K extends DocxCommandId ? DocxCommandArgs[K] : null;
   className?: string;
 }
 
@@ -687,13 +694,14 @@ function useCommandOverflow<K extends DocxCommandId>(
  * A button bound to one command, showing its pressed and disabled state.
  * @experimental
  */
-export function ToolbarCommandButton<K extends DocxCommandId>(
+export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommandId>(
   props: ToolbarCommandButtonProps<K>
 ) {
   const { id, children, label, className } = props;
-  const args = (props as { args?: DocxCommandArgs[K] }).args;
-  const command = useDocxCommand(id, args);
-  const icon = iconFor(id, args);
+  const args = (props as { args?: unknown }).args;
+  const command = useDocxCommand(id as DocxCommandId, args as never);
+  if (isPluginCommandId(id) && command.descriptor === null) return null;
+  const icon = isPluginCommandId(id) ? undefined : iconFor(id, args);
   const name = label ?? command.label;
   return (
     <ToolbarButton
@@ -1066,8 +1074,14 @@ function CommandImageTransform() {
  * The built-in control of any command, as the default toolbar presents it.
  * @experimental
  */
-export function ToolbarCommand<K extends DocxCommandId>(props: ToolbarCommandProps<K>) {
+export function ToolbarCommand<K extends DocxCommandId | DocxPluginCommandId>(
+  props: ToolbarCommandProps<K>
+) {
   const { id, args, className } = props;
+  if (isPluginCommandId(id)) {
+    const pluginId: DocxPluginCommandId = id;
+    return <ToolbarCommandButton id={pluginId} className={className} />;
+  }
   if (args === undefined) {
     switch (id) {
       case 'paragraphStyle':
