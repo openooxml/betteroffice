@@ -2017,16 +2017,7 @@ fn row_insert_shifts_preserved_row_and_cell_markup() {
     let parts = markup_package();
     let parsed = parse_workbook_with_package(&parts).unwrap();
     let mut workbook = parsed.workbook.clone();
-    let cells: Vec<(CellRef, Cell)> = workbook.sheets[0]
-        .iter_cells()
-        .map(|(at, cell)| (at, cell.clone()))
-        .collect();
-    for (at, _) in &cells {
-        workbook.sheets[0].set_cell(*at, Cell::default());
-    }
-    for (at, cell) in cells {
-        workbook.sheets[0].set_cell(CellRef::new(at.row + 1, at.col), cell);
-    }
+    workbook.sheets[0].remap_cells(|at| Some(CellRef::new(at.row + 1, at.col)));
     let heights: Vec<(u32, f64)> = workbook.sheets[0]
         .row_heights
         .iter()
@@ -6325,6 +6316,33 @@ fn writes_sparse_and_height_only_rows_in_one_ascending_pass() {
     assert_eq!(reparsed.sheets[0].row_heights.get(&0), Some(&20.0));
     assert_eq!(reparsed.sheets[0].row_heights.get(&2), Some(&15.0));
     assert_eq!(reparsed.sheets[0].row_heights.get(&119), Some(&0.0));
+}
+
+/// Only a cell whose `cm` names a dynamic-array block in `xl/metadata.xml` is
+/// a dynamic array; any other `t="array"` anchor is a legacy one.
+#[test]
+fn reads_dynamic_arrays_from_cell_metadata() {
+    let body = r#"<sheetData><row r="1">
+        <c r="A1" cm="2"><f t="array" ref="A1:A2">SEQUENCE(2)</f></c>
+        <c r="B1" cm="1"><f t="array" ref="B1:B2">SEQUENCE(2)</f></c>
+        <c r="C1"><f t="array" ref="C1:C2">SEQUENCE(2)</f></c>
+        <c r="D1" cm="3"><f t="array" ref="D1:D2">SEQUENCE(2)</f></c>
+    </row></sheetData>"#;
+    let metadata = r#"<metadata xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray"><metadataTypes count="2"><metadataType name="XLRICHVALUE"/><metadataType name="XLDAPR"/></metadataTypes><futureMetadata name="XLDAPR" count="2"><bk><extLst><ext><xda:dynamicArrayProperties fDynamic="0"/></ext></extLst></bk><bk><extLst><ext><xda:dynamicArrayProperties fDynamic="1"/></ext></extLst></bk></futureMetadata><cellMetadata count="3"><bk><rc t="1" v="1"/></bk><bk><rc t="2" v="1"/></bk><bk><rc t="2" v="0"/></bk></cellMetadata></metadata>"#;
+    let kinds = |parts: &[(String, Vec<u8>)]| {
+        let parsed = parse_workbook_with_package(parts).unwrap();
+        let sheet = &parsed.workbook.sheets[0];
+        let dynamic = ["A1", "B1", "C1", "D1"].map(|address| {
+            let at = CellRef::parse_a1(address).unwrap();
+            assert!(sheet.array_formula(at).is_some(), "{address}");
+            sheet.is_dynamic_array(at)
+        });
+        (dynamic, parsed.package.dynamic_array_cm)
+    };
+    let mut parts = package(body, &[], false);
+    assert_eq!(kinds(&parts), ([false; 4], None));
+    parts.push(("xl/metadata.xml".to_owned(), metadata.as_bytes().to_vec()));
+    assert_eq!(kinds(&parts), ([true, false, false, false], Some(2)));
 }
 
 /// `<f t="array" ref>` records the rectangle the result occupies; a shared

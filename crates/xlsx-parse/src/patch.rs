@@ -13,8 +13,8 @@ use crate::axis::SheetAxes;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
 use crate::read::SharedStringCells;
 use crate::write::{
-    SharedStringPlan, fmt_num, fragment, shared_string_index, write_cell, write_col, write_cols,
-    write_row,
+    SharedStringPlan, array_markup, fmt_num, fragment, shared_string_index, write_cell, write_col,
+    write_cols, write_row,
 };
 use crate::xml::{attr, xml_err};
 use crate::{MAX_DEPTH, ParseError};
@@ -28,6 +28,7 @@ pub(crate) struct SheetPatch<'a> {
     pub(crate) sst_index: &'a HashMap<&'a str, usize>,
     pub(crate) retained: &'a SharedStringCells,
     pub(crate) plan: Option<&'a SharedStringPlan>,
+    pub(crate) dynamic_cm: Option<u32>,
 }
 
 struct SourceElement {
@@ -262,6 +263,7 @@ impl SheetPatch<'_> {
             self.sst_index,
             self.retained,
             self.plan,
+            self.dynamic_cm,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
@@ -446,7 +448,7 @@ impl SheetPatch<'_> {
             cell,
             self.sst_index,
             retained,
-            self.sheet.array_formula(at),
+            array_markup(self.sheet, at, self.dynamic_cm),
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
@@ -493,6 +495,7 @@ impl SheetPatch<'_> {
                     changed.contains(key)
                         || !self.moves_uniformly(*reference)
                         || range_changed(*reference, &changed)
+                        || self.array_changed(CellRef::new(key.0, key.1))
                 })
                 .map(|(key, _)| key)
                 .collect(),
@@ -515,6 +518,20 @@ impl SheetPatch<'_> {
             }
         }
         changed
+    }
+
+    /// Whether the array anchored at `source` fills another rectangle, or is
+    /// another kind of array, than it was read as.
+    fn array_changed(&self, source: CellRef) -> bool {
+        let Some(at) = self.mapped(source) else {
+            return false;
+        };
+        self.sheet.array_formula(at)
+            != self
+                .original
+                .array_formula(source)
+                .and_then(|range| self.remap_range(range))
+            || self.sheet.is_dynamic_array(at) != self.original.is_dynamic_array(source)
     }
 
     fn moves_uniformly(&self, reference: CellRange) -> bool {

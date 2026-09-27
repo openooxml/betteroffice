@@ -56,6 +56,13 @@ const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml"
 const REL_STYLES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
 const REL_THEME: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
+const REL_METADATA: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata";
+const CT_METADATA: &str =
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml";
+/// the cell metadata excel writes for dynamic arrays, as `cm="1"`.
+const DYNAMIC_ARRAY_METADATA: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray"><metadataTypes count="1"><metadataType name="XLDAPR" minSupportedVersion="120000" copy="1" pasteAll="1" pasteValues="1" merge="1" splitFirst="1" rowColShift="1" clearFormats="1" clearComments="1" assign="1" coerce="1" cellMeta="1"/></metadataTypes><futureMetadata name="XLDAPR" count="1"><bk><extLst><ext uri="{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}"><xda:dynamicArrayProperties fDynamic="1" fCollapsed="0"/></ext></extLst></bk></futureMetadata><cellMetadata count="1"><bk><rc t="1" v="0"/></bk></cellMetadata></metadata>"#;
 const REL_OFFICE_DOCUMENT: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 const REL_HYPERLINK: &str =
@@ -104,10 +111,11 @@ pub fn serialize_workbook_with_active_sheet(
     }
     let have_sst = !wb.shared_strings.is_empty();
     let have_styles = !wb.styles.is_empty();
+    let dynamic_cm = has_dynamic_arrays(wb).then_some(1);
     let mut parts = vec![
         (
             "[Content_Types].xml".to_string(),
-            content_types(wb, have_sst, have_styles)?,
+            content_types(wb, have_sst, have_styles, dynamic_cm.is_some())?,
         ),
         ("_rels/.rels".to_string(), root_rels()?),
         (
@@ -116,9 +124,15 @@ pub fn serialize_workbook_with_active_sheet(
         ),
         (
             "xl/_rels/workbook.xml.rels".to_string(),
-            workbook_rels(wb, have_sst, have_styles)?,
+            workbook_rels(wb, have_sst, have_styles, dynamic_cm.is_some())?,
         ),
     ];
+    if dynamic_cm.is_some() {
+        parts.push((
+            "xl/metadata.xml".to_string(),
+            DYNAMIC_ARRAY_METADATA.to_vec(),
+        ));
+    }
     if have_sst {
         parts.push(("xl/sharedStrings.xml".to_string(), shared_strings_xml(wb)?));
     }
@@ -133,7 +147,7 @@ pub fn serialize_workbook_with_active_sheet(
         let links = HyperlinkPlan::new(sheet, &[], REL_HYPERLINK);
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, NS_R, &links, None)?,
+            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, NS_R, &links, None, dynamic_cm)?,
         ));
         if !links.relationships.is_empty() {
             parts.push((
@@ -434,6 +448,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                         &relationship_namespace,
                         &links,
                         shared_string_plan.as_ref(),
+                        package.dynamic_array_cm,
                     )?,
                     relationships: Some(links.relationships),
                 }
@@ -878,6 +893,7 @@ fn sheet_body_matches(sheet: &Sheet, original: &Sheet) -> bool {
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
         && sheet.iter_cells().eq(original.iter_cells())
+        && sheet.array_formulas().eq(original.array_formulas())
 }
 
 #[derive(Clone)]
@@ -1739,7 +1755,12 @@ fn write_empty_element(
     Ok(())
 }
 
-fn content_types(wb: &Workbook, have_sst: bool, have_styles: bool) -> Result<Vec<u8>, ParseError> {
+fn content_types(
+    wb: &Workbook,
+    have_sst: bool,
+    have_styles: bool,
+    have_metadata: bool,
+) -> Result<Vec<u8>, ParseError> {
     doc(|w| {
         w.create_element("Types")
             .with_attribute(("xmlns", NS_CT))
@@ -1776,6 +1797,12 @@ fn content_types(wb: &Workbook, have_sst: bool, have_styles: bool) -> Result<Vec
                     w.create_element("Override")
                         .with_attribute(("PartName", "/xl/theme/theme1.xml"))
                         .with_attribute(("ContentType", CT_THEME))
+                        .write_empty()?;
+                }
+                if have_metadata {
+                    w.create_element("Override")
+                        .with_attribute(("PartName", "/xl/metadata.xml"))
+                        .with_attribute(("ContentType", CT_METADATA))
                         .write_empty()?;
                 }
                 for i in 0..wb.sheets.len() {
@@ -2209,7 +2236,12 @@ fn workbook_child_rank(name: &str) -> usize {
     }
 }
 
-fn workbook_rels(wb: &Workbook, have_sst: bool, have_styles: bool) -> Result<Vec<u8>, ParseError> {
+fn workbook_rels(
+    wb: &Workbook,
+    have_sst: bool,
+    have_styles: bool,
+    have_metadata: bool,
+) -> Result<Vec<u8>, ParseError> {
     doc(|w| {
         w.create_element("Relationships")
             .with_attribute(("xmlns", NS_PKG_REL))
@@ -2242,10 +2274,19 @@ fn workbook_rels(wb: &Workbook, have_sst: bool, have_styles: bool) -> Result<Vec
                         .with_attribute(("Target", "styles.xml"))
                         .write_empty()?;
                     let rid = format!("rId{next}");
+                    next += 1;
                     w.create_element("Relationship")
                         .with_attribute(("Id", rid.as_str()))
                         .with_attribute(("Type", REL_THEME))
                         .with_attribute(("Target", "theme/theme1.xml"))
+                        .write_empty()?;
+                }
+                if have_metadata {
+                    let rid = format!("rId{next}");
+                    w.create_element("Relationship")
+                        .with_attribute(("Id", rid.as_str()))
+                        .with_attribute(("Type", REL_METADATA))
+                        .with_attribute(("Target", "metadata.xml"))
                         .write_empty()?;
                 }
                 Ok(())
@@ -2434,6 +2475,7 @@ fn worksheet_xml_with_namespace(
     relationship_namespace: &str,
     links: &HyperlinkPlan,
     shared_string_plan: Option<&SharedStringPlan>,
+    dynamic_cm: Option<u32>,
 ) -> Result<Vec<u8>, ParseError> {
     doc(|writer| {
         let mut root = BytesStart::new("worksheet");
@@ -2450,6 +2492,7 @@ fn worksheet_xml_with_namespace(
             wb,
             &SharedStringCells::new(),
             shared_string_plan,
+            dynamic_cm,
         )?;
         write_merges(writer, sheet)?;
         write_hyperlinks(writer, sheet, &links.ids, REL_ID_ATTRIBUTE, &[])?;
@@ -2468,6 +2511,7 @@ struct WorksheetOutput {
 /// The `<cols>` and `<sheetData>` elements with only the changed columns, rows
 /// and cells rewritten and every other byte kept verbatim. `None` when the
 /// source cannot be patched cell by cell, which reserializes from the model.
+#[allow(clippy::too_many_arguments)]
 fn patched_grid(
     sheet: &Sheet,
     wb: &Workbook,
@@ -2476,6 +2520,7 @@ fn patched_grid(
     axes: &SheetAxes,
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
+    dynamic_cm: Option<u32>,
 ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
@@ -2491,6 +2536,7 @@ fn patched_grid(
         sst_index: &sst_index,
         retained: shared_string_cells,
         plan: shared_string_plan,
+        dynamic_cm,
     };
     let columns = patch
         .cols(
@@ -2506,7 +2552,14 @@ fn patched_grid(
     }
     .or_else(|| {
         fragment(|writer| {
-            write_sheet_data(writer, sheet, wb, shared_string_cells, shared_string_plan)
+            write_sheet_data(
+                writer,
+                sheet,
+                wb,
+                shared_string_cells,
+                shared_string_plan,
+                dynamic_cm,
+            )
         })
         .ok()
     })?;
@@ -2536,6 +2589,7 @@ fn worksheet_xml_with_template(
             axes,
             shared_string_cells,
             shared_string_plan,
+            package.dynamic_array_cm,
         ),
         _ => None,
     };
@@ -2546,7 +2600,14 @@ fn worksheet_xml_with_template(
                 .then(|| fragment(|writer| write_cols(writer, sheet)))
                 .transpose()?,
             Some(fragment(|writer| {
-                write_sheet_data(writer, sheet, wb, shared_string_cells, shared_string_plan)
+                write_sheet_data(
+                    writer,
+                    sheet,
+                    wb,
+                    shared_string_cells,
+                    shared_string_plan,
+                    package.dynamic_array_cm,
+                )
             })?),
         ),
     };
@@ -2709,6 +2770,7 @@ fn write_sheet_data(
     wb: &Workbook,
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
+    dynamic_cm: Option<u32>,
 ) -> io::Result<()> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
@@ -2740,6 +2802,7 @@ fn write_sheet_data(
                     &sst_index,
                     retained,
                     shared_string_plan,
+                    dynamic_cm,
                 )?;
                 if height_row == Some(row) {
                     heights.next();
@@ -2865,6 +2928,7 @@ pub(crate) fn write_row<'a, I>(
     sst_index: &HashMap<&str, usize>,
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
+    dynamic_cm: Option<u32>,
 ) -> io::Result<()>
 where
     I: Iterator<Item = (CellRef, &'a Cell)>,
@@ -2889,7 +2953,7 @@ where
             cell,
             sst_index,
             retained,
-            sheet.array_formula(addr),
+            array_markup(sheet, addr, dynamic_cm),
         )?;
     }
     w.write_event(Event::End(BytesEnd::new("row")))?;
@@ -2918,6 +2982,33 @@ pub(crate) fn shared_string_index(
     }
 }
 
+/// what an array anchor's markup records: the rectangle it fills and, for a
+/// dynamic array, the `cm` index marking it one.
+#[derive(Clone, Copy)]
+pub(crate) struct ArrayMarkup {
+    range: xlsx_model::CellRange,
+    metadata: Option<u32>,
+}
+
+pub(crate) fn array_markup(
+    sheet: &Sheet,
+    at: CellRef,
+    dynamic_cm: Option<u32>,
+) -> Option<ArrayMarkup> {
+    sheet.array_formula(at).map(|range| ArrayMarkup {
+        range,
+        metadata: dynamic_cm.filter(|_| sheet.is_dynamic_array(at)),
+    })
+}
+
+fn has_dynamic_arrays(wb: &Workbook) -> bool {
+    wb.sheets.iter().any(|sheet| {
+        sheet.array_formulas().any(|(at, _)| {
+            sheet.is_dynamic_array(at) && sheet.cell(at).is_some_and(|cell| cell.formula.is_some())
+        })
+    })
+}
+
 /// serialize a single cell, choosing the `t` type and body from its value and
 /// whether it carries a formula.
 pub(crate) fn write_cell(
@@ -2926,7 +3017,7 @@ pub(crate) fn write_cell(
     cell: &Cell,
     sst_index: &HashMap<&str, usize>,
     retained: Option<usize>,
-    array_ref: Option<xlsx_model::CellRange>,
+    array: Option<ArrayMarkup>,
 ) -> io::Result<()> {
     let a1 = addr.to_a1();
     let has_formula = cell.formula.is_some();
@@ -2968,9 +3059,16 @@ pub(crate) fn write_cell(
     if let Some(t) = ty {
         start.push_attribute(("t", t));
     }
+    let metadata = array
+        .and_then(|array| array.metadata)
+        .filter(|_| has_formula)
+        .map(|cm| cm.to_string());
+    if let Some(cm) = &metadata {
+        start.push_attribute(("cm", cm.as_str()));
+    }
     w.write_event(Event::Start(start))?;
     if let Some(f) = &cell.formula {
-        let reference = array_ref.map(|range| range.to_a1());
+        let reference = array.map(|array| array.range.to_a1());
         let mut element = w.create_element("f");
         if let Some(reference) = &reference {
             element = element

@@ -57,7 +57,7 @@ pub fn parse_workbook_with_owned_package(
     parts: Vec<(String, Vec<u8>)>,
 ) -> Result<ParsedWorkbook, ParseError> {
     let parsed = read::parse_workbook_indexed(&parts)?;
-    let package = PreservedPackage::capture(
+    let mut package = PreservedPackage::capture(
         parts,
         &parsed.workbook,
         parsed.active_sheet,
@@ -66,6 +66,7 @@ pub fn parse_workbook_with_owned_package(
         parsed.rich_shared_strings,
         parsed.cell_facts,
     )?;
+    package.dynamic_array_cm = parsed.dynamic_array_cm;
     Ok(ParsedWorkbook {
         workbook: parsed.workbook,
         active_sheet: parsed.active_sheet,

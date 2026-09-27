@@ -49,6 +49,8 @@ pub(crate) struct IndexedWorkbook {
     pub(crate) declined_parts: Vec<String>,
     /// Shared strings authored with formatted runs.
     pub(crate) rich_shared_strings: BTreeSet<usize>,
+    /// The `cm` index `xl/metadata.xml` gives a dynamic array.
+    pub(crate) dynamic_array_cm: Option<u32>,
 }
 
 /// One sheet's row heights and column widths as releases before `hidden` was
@@ -80,6 +82,10 @@ pub(crate) fn parse_workbook_indexed(
     let styles_bytes = typed_part(parts, wb_rels, "styles", "xl/styles.xml")?;
     let theme_bytes = typed_part(parts, wb_rels, "theme", "xl/theme/theme1.xml")?;
     let (styles, legacy_styles) = parse_stylesheet(styles_bytes, theme_bytes)?;
+    let dynamic_arrays = match typed_part(parts, wb_rels, "sheetMetadata", "xl/metadata.xml")? {
+        Some(bytes) => dynamic_array_metadata(bytes)?,
+        None => BTreeSet::new(),
+    };
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
     let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
@@ -117,6 +123,7 @@ pub(crate) fn parse_workbook_indexed(
             bytes,
             &shared_strings,
             &sheet_rels,
+            &dynamic_arrays,
             &mut indices,
             &mut legacy,
             &mut facts,
@@ -145,7 +152,87 @@ pub(crate) fn parse_workbook_indexed(
         legacy_styles,
         declined_parts,
         rich_shared_strings,
+        dynamic_array_cm: dynamic_arrays.first().copied(),
     })
+}
+
+/// bound on the metadata blocks and records read from `xl/metadata.xml`.
+const MAX_METADATA_ENTRIES: usize = 65_536;
+
+/// the `cm` indices `xl/metadata.xml` gives dynamic arrays: cell metadata
+/// blocks with a record naming an `XLDAPR` block whose `fDynamic` is set.
+fn dynamic_array_metadata(data: &[u8]) -> Result<BTreeSet<u32>, ParseError> {
+    #[derive(PartialEq)]
+    enum Section {
+        Other,
+        DynamicArrays,
+        Cells,
+    }
+    let mut reader = reader(data);
+    let mut buf = Vec::new();
+    let mut depth = 0;
+    let mut section = Section::Other;
+    let mut types: Vec<bool> = Vec::new();
+    let mut dynamic: Vec<bool> = Vec::new();
+    let mut blocks = 0_u32;
+    let mut records: Vec<(u32, Option<usize>, Option<usize>)> = Vec::new();
+    loop {
+        match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) => match local_name(&e).as_slice() {
+                b"metadataType" if types.len() < MAX_METADATA_ENTRIES => {
+                    types.push(attr(&e, b"name")?.as_deref() == Some("XLDAPR"));
+                }
+                b"futureMetadata" => {
+                    section = if attr(&e, b"name")?.as_deref() == Some("XLDAPR") {
+                        Section::DynamicArrays
+                    } else {
+                        Section::Other
+                    };
+                }
+                b"cellMetadata" => section = Section::Cells,
+                b"valueMetadata" => section = Section::Other,
+                b"bk"
+                    if section == Section::DynamicArrays
+                        && dynamic.len() < MAX_METADATA_ENTRIES =>
+                {
+                    dynamic.push(false);
+                }
+                b"bk" if section == Section::Cells => blocks = blocks.saturating_add(1),
+                b"dynamicArrayProperties" if section == Section::DynamicArrays => {
+                    if let Some(block) = dynamic.last_mut() {
+                        *block |= attr(&e, b"fDynamic")?.is_some_and(|value| is_truthy(&value));
+                    }
+                }
+                b"rc" if section == Section::Cells && records.len() < MAX_METADATA_ENTRIES => {
+                    let index = |name: &[u8]| -> Result<Option<usize>, ParseError> {
+                        Ok(attr(&e, name)?.and_then(|value| value.trim().parse::<usize>().ok()))
+                    };
+                    records.push((blocks, index(b"t")?, index(b"v")?));
+                }
+                _ => {}
+            },
+            Event::End(e)
+                if matches!(
+                    e.local_name().as_ref(),
+                    b"futureMetadata" | b"cellMetadata" | b"valueMetadata"
+                ) =>
+            {
+                section = Section::Other;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(records
+        .into_iter()
+        .filter(|&(block, t, v)| {
+            block > 0
+                && t.and_then(|t| t.checked_sub(1))
+                    .is_some_and(|t| types.get(t) == Some(&true))
+                && v.is_some_and(|v| dynamic.get(v) == Some(&true))
+        })
+        .map(|(block, _, _)| block)
+        .collect())
 }
 
 /// resolve an optional part by relationship type suffix, falling back to
@@ -530,15 +617,18 @@ struct CellBuild {
     inline_text: Option<String>,
     inline_runs: bool,
     formula: Option<String>,
+    metadata: Option<u32>,
 }
 
 /// parse one worksheet into a `Sheet`: cells (values, cached formulas, types),
 /// merges, and column/row sizing. `shared` resolves `t="s"` indices.
+#[allow(clippy::too_many_arguments)]
 fn parse_worksheet(
     name: &str,
     data: &[u8],
     shared: &[String],
     relationships: &BTreeMap<String, Relationship>,
+    dynamic_arrays: &BTreeSet<u32>,
     shared_string_cells: &mut SharedStringCells,
     legacy: &mut LegacySheetDimensions,
     facts: &mut SourceCellFacts,
@@ -590,6 +680,7 @@ fn parse_worksheet(
                         addr: Some(addr),
                         ty: attr(&e, b"t")?,
                         style,
+                        metadata: attr(&e, b"cm")?.and_then(|v| v.trim().parse::<u32>().ok()),
                         ..CellBuild::default()
                     });
                 }
@@ -606,7 +697,11 @@ fn parse_worksheet(
                         if let Some(origin) = c.addr {
                             shared_formulas.record(&e, origin, &text)?;
                             if let Some(range) = array_ref.filter(|range| range.contains(origin)) {
-                                sheet.set_array_formula(origin, range);
+                                if c.metadata.is_some_and(|cm| dynamic_arrays.contains(&cm)) {
+                                    sheet.set_dynamic_array_formula(origin, range);
+                                } else {
+                                    sheet.set_array_formula(origin, range);
+                                }
                             }
                         }
                         c.formula = Some(text);

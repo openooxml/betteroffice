@@ -42,7 +42,7 @@ pub fn recalc_after(
     dirty_seeds: &[(SheetId, CellRef)],
     now_serial: Option<f64>,
 ) -> RecalcResult {
-    let recompute = collect_recompute(graph, dirty_seeds);
+    let recompute = collect_recompute(wb, graph, dirty_seeds);
     let result = run_recalc(wb, graph, recompute, now_serial);
     graph.refresh_spills(wb);
     result
@@ -61,8 +61,14 @@ pub fn rebuild_and_recalc_all(
 }
 
 /// formula cells to re-evaluate: transitive dependents of the seeds, plus
-/// volatile cells and their dependents.
-fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<Key> {
+/// volatile cells and their dependents. an array whose result covers a seed
+/// re-evaluates too, as do the readers of an array anchor a seed rewrote and,
+/// on a seed's sheet, the dynamic arrays something obstructs.
+fn collect_recompute(
+    wb: &Workbook,
+    graph: &DepGraph,
+    seeds: &[(SheetId, CellRef)],
+) -> HashSet<Key> {
     let mut recompute: HashSet<Key> = HashSet::new();
     let mut worklist: Vec<Key> = Vec::new();
 
@@ -71,6 +77,36 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
         worklist.push(k);
         if graph.is_formula(sheet, cell) {
             recompute.insert(k);
+        }
+        for (sheet, anchor) in graph.spill_sources(sheet, CellRange::new(cell, cell)) {
+            let anchor = key(sheet, anchor);
+            if recompute.insert(anchor) {
+                worklist.push(anchor);
+            }
+        }
+        if let Some(range) = wb.sheet(sheet).and_then(|s| s.array_formula(cell)) {
+            for (sheet, reader) in graph.readers_of(sheet, range) {
+                recompute.insert(key(sheet, reader));
+                worklist.push(key(sheet, reader));
+            }
+        }
+    }
+    let obstructed = CellValue::Error {
+        value: ErrorValue::Spill,
+    };
+    let seeded: HashSet<SheetId> = seeds.iter().map(|&(sheet, _)| sheet).collect();
+    for sheet in seeded {
+        let Some(cells) = wb.sheet(sheet) else {
+            continue;
+        };
+        for (anchor, _) in cells.array_formulas() {
+            if cells.is_dynamic_array(anchor)
+                && graph.is_formula(sheet, anchor)
+                && *wb.value_cow(sheet, anchor) == obstructed
+                && recompute.insert(key(sheet, anchor))
+            {
+                worklist.push(key(sheet, anchor));
+            }
         }
     }
     for (sheet, cell) in graph.volatile_cells() {
@@ -421,13 +457,21 @@ fn eval_node_with(
     };
     let cell = cell_of(u);
     let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
+    let dynamic = wb
+        .sheet(u.0)
+        .is_some_and(|sheet| sheet.is_dynamic_array(cell));
     let mut ctx = EvalContext::with_budget(provider, u.0, budget);
     ctx.cell = Some(cell);
     ctx.now_serial = now_serial;
     ctx.date_system = wb.date_system;
     ctx.parse_cache = Some(graph.asts());
     let value = match authored {
-        Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
+        Some(range) => NodeValue::Spill(evaluate_spill(
+            &expr,
+            &ctx,
+            cell,
+            (!dynamic).then_some(range),
+        )),
         None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
     };
     let unsupported = ctx.has_unhandled_unsupported_function();
@@ -486,7 +530,10 @@ fn write_spill(
 ) -> Vec<(SheetId, CellRef)> {
     let anchor = cell_of(u);
     let previous = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(anchor));
-    let (range, values) = if blocked(wb, u.0, anchor, spill.range, previous) {
+    let dynamic = wb
+        .sheet(u.0)
+        .is_some_and(|sheet| sheet.is_dynamic_array(anchor));
+    let (range, values) = if dynamic && blocked(wb, u.0, anchor, spill.range, previous) {
         (
             CellRange::new(anchor, anchor),
             vec![CellValue::Error {

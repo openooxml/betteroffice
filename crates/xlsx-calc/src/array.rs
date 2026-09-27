@@ -2928,14 +2928,46 @@ pub fn spill_at(anchor: CellRef, authored: Option<CellRange>, value: Value) -> S
     Spill { range, values: out }
 }
 
-/// evaluate a formula as an array formula and lay its result out from `anchor`.
+/// fill a legacy array's rectangle as ctrl-shift-enter does: a single row or
+/// column repeats across it, and positions the result does not reach show
+/// `#N/A`.
+pub fn fill_at(range: CellRange, value: Value) -> Spill {
+    let (rows, cols, values) = match value {
+        Value::Array(array) => (array.rows, array.cols, array.values),
+        value => (1, 1, vec![value.into_scalar()]),
+    };
+    let height = (range.end.row - range.start.row + 1) as usize;
+    let width = (range.end.col - range.start.col + 1) as usize;
+    let mut out = Vec::with_capacity(height * width);
+    for row in 0..height {
+        for col in 0..width {
+            let row = if rows == 1 { 0 } else { row };
+            let col = if cols == 1 { 0 } else { col };
+            out.push(match values.get(row * cols + col) {
+                Some(value) if row < rows && col < cols => crate::engine::computed(value.clone()),
+                _ => CellValue::Error {
+                    value: ErrorValue::NA,
+                },
+            });
+        }
+    }
+    Spill { range, values: out }
+}
+
+/// evaluate a formula as an array formula: a dynamic array lays its result out
+/// from `anchor` at the result's size, a legacy one fills the rectangle it was
+/// `entered` in.
 pub fn evaluate_spill(
     expr: &Expr,
     ctx: &EvalContext<'_>,
     anchor: CellRef,
-    authored: Option<CellRange>,
+    entered: Option<CellRange>,
 ) -> Spill {
-    spill_at(anchor, authored, evaluate_array(expr, ctx))
+    let value = evaluate_array(expr, ctx);
+    match entered {
+        Some(range) => fill_at(range, value),
+        None => spill_at(anchor, None, value),
+    }
 }
 
 /// the single value an array formula shows in its anchor when it does not

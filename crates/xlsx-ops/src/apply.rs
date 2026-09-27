@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, ColId, DefinedName, RowId, Sheet, SheetId, Workbook};
+use xlsx_model::{
+    Cell, CellRange, CellRef, CellValue, ColId, DefinedName, RowId, Sheet, SheetId, Workbook,
+};
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
@@ -87,7 +89,13 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
     match op {
         Op::SetCell { sheet, at, cell } => {
             let s = sheet_mut(wb, *sheet)?;
-            let old = s.cell(*at).map(CellState::from).unwrap_or_default();
+            let mut old = s.cell(*at).map(CellState::from).unwrap_or_default();
+            if settle_array_write(s, *at, &old, cell) {
+                old = CellState {
+                    style: old.style,
+                    ..CellState::default()
+                };
+            }
             s.set_cell(*at, cell.clone().into());
             Ok(InvertedOp(vec![Op::SetCell {
                 sheet: *sheet,
@@ -445,6 +453,25 @@ fn apply_range_formats(
         }
     }
     Ok(InvertedOp(inverse))
+}
+
+/// what writing `cell` over `old` at `at` does to the arrays around it: a value
+/// or formula of its own written into a dynamic array's spill obstructs it, and
+/// an anchor that loses its formula clears what it filled. returns whether the
+/// write obstructed a spill, whose value was never the cell's own, so undoing
+/// the write clears the cell.
+pub fn settle_array_write(
+    sheet: &mut Sheet,
+    at: CellRef,
+    old: &CellState,
+    cell: &CellState,
+) -> bool {
+    if old.formula.is_some() && cell.formula.is_none() {
+        sheet.clear_array_result(at);
+    }
+    (cell.formula.is_some() || !matches!(cell.value, CellValue::Empty))
+        && (cell.value != old.value || cell.formula != old.formula)
+        && sheet.obstruct_spill(at).is_some()
 }
 
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
@@ -1100,6 +1127,93 @@ mod tests {
             cell: num(1.0),
         };
         assert_eq!(remap_ref(r("Z9"), &op), Some(r("Z9")));
+    }
+
+    /// C1 holds a dynamic array spilled over C1:C3.
+    fn spilled() -> Workbook {
+        let mut wb = wb_one_sheet();
+        let sheet = &mut wb.sheets[0];
+        sheet.set_cell(
+            r("C1"),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                formula: Some("_xlfn.SEQUENCE(3)".into()),
+                style: None,
+            },
+        );
+        for (address, value) in [("C2", 2.0), ("C3", 3.0)] {
+            sheet.set_cell(r(address), Cell::from(num(value)));
+        }
+        sheet.set_dynamic_array_formula(r("C1"), CellRange::parse_a1("C1:C3").unwrap());
+        wb
+    }
+
+    #[test]
+    fn a_value_written_into_a_spill_obstructs_it_and_undoes_to_blank() {
+        let mut wb = spilled();
+        let write = Op::SetCell {
+            sheet: SheetId(0),
+            at: r("C2"),
+            cell: num(9.0),
+        };
+        let inverse = apply(&mut wb, &write).unwrap();
+        let sheet = &wb.sheets[0];
+        assert_eq!(
+            sheet.array_formula(r("C1")),
+            Some(CellRange::parse_a1("C1").unwrap())
+        );
+        assert_eq!(
+            wb.value(SheetId(0), r("C1")),
+            CellValue::Error {
+                value: xlsx_model::ErrorValue::Spill
+            }
+        );
+        assert_eq!(
+            wb.value(SheetId(0), r("C2")),
+            CellValue::Number { value: 9.0 }
+        );
+        assert_eq!(wb.value(SheetId(0), r("C3")), CellValue::Empty);
+        assert_eq!(
+            inverse.0,
+            vec![Op::SetCell {
+                sheet: SheetId(0),
+                at: r("C2"),
+                cell: CellState::default(),
+            }]
+        );
+
+        let mut restyled = spilled();
+        let mut styled = num(2.0);
+        styled.style = Some(1);
+        apply(
+            &mut restyled,
+            &Op::SetCell {
+                sheet: SheetId(0),
+                at: r("C2"),
+                cell: styled,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            restyled.sheets[0].array_formula(r("C1")),
+            Some(CellRange::parse_a1("C1:C3").unwrap())
+        );
+    }
+
+    #[test]
+    fn an_array_anchor_that_loses_its_formula_clears_what_it_filled() {
+        let mut wb = spilled();
+        apply(
+            &mut wb,
+            &Op::SetCell {
+                sheet: SheetId(0),
+                at: r("C1"),
+                cell: num(5.0),
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.value(SheetId(0), r("C2")), CellValue::Empty);
+        assert_eq!(wb.value(SheetId(0), r("C3")), CellValue::Empty);
     }
 
     #[test]

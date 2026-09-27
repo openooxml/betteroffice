@@ -160,6 +160,20 @@ impl DepGraph {
             .map(|(anchor, _)| (anchor.sheet, anchor.cell()))
     }
 
+    /// formula cells that read anywhere in `range` on `sheet`.
+    pub(crate) fn readers_of(
+        &self,
+        sheet: SheetId,
+        range: CellRange,
+    ) -> impl Iterator<Item = (SheetId, CellRef)> + '_ {
+        self.by_sheet
+            .get(&sheet)
+            .into_iter()
+            .flatten()
+            .filter(move |(read, _)| read.overlaps(&range))
+            .map(|(_, node)| (node.sheet, node.cell()))
+    }
+
     /// coarse invalidation for a sheet insert: ids shift, so rebuild wholesale.
     pub fn add_sheet(&mut self, wb: &Workbook) {
         *self = Self::build(wb);

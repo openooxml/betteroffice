@@ -313,7 +313,19 @@ fn scalar_evaluation_is_unchanged() {
     );
 }
 
+/// a dynamic array at the top left of `reference`, which it last filled.
 fn spilling_workbook(formula: &str, reference: &str) -> (Workbook, SheetId) {
+    let (mut workbook, sheet) = entered_workbook(formula, reference);
+    let anchor = a1(reference.split(':').next().unwrap());
+    workbook
+        .sheet_mut(sheet)
+        .unwrap()
+        .set_dynamic_array_formula(anchor, range(reference));
+    (workbook, sheet)
+}
+
+/// a legacy ctrl-shift-enter array entered over `reference`.
+fn entered_workbook(formula: &str, reference: &str) -> (Workbook, SheetId) {
     let mut workbook = fixture();
     let sheet = workbook.sheet_mut(SheetId(0)).unwrap();
     sheet.set_cell(
@@ -326,6 +338,14 @@ fn spilling_workbook(formula: &str, reference: &str) -> (Workbook, SheetId) {
     );
     sheet.set_array_formula(a1(reference.split(':').next().unwrap()), range(reference));
     (workbook, SheetId(0))
+}
+
+fn value_at(workbook: &Workbook, address: &str) -> CellValue {
+    workbook
+        .sheet(SheetId(0))
+        .unwrap()
+        .cell(a1(address))
+        .map_or(CellValue::Empty, |cell| cell.value.clone())
 }
 
 #[test]
@@ -369,15 +389,96 @@ fn a_shrinking_result_clears_what_it_no_longer_fills() {
     }
 }
 
-/// a single value repeats across the rectangle the file recorded.
+/// a single value repeats across the rectangle a legacy array was entered in.
 #[test]
 fn a_single_value_fills_the_recorded_rectangle() {
-    let (mut workbook, sheet) = spilling_workbook("SUM(B1:B4)", "D1:E2");
+    let (mut workbook, sheet) = entered_workbook("SUM(B1:B4)", "D1:E2");
     rebuild_and_recalc_all(&mut workbook, None);
     let sheet = workbook.sheet(sheet).unwrap();
     for address in ["D1", "E1", "D2", "E2"] {
         assert_eq!(sheet.cell(a1(address)).unwrap().value, n(10.0));
     }
+}
+
+/// a dynamic array that now computes one value keeps only its anchor.
+#[test]
+fn a_dynamic_single_value_retires_the_rest_of_its_rectangle() {
+    let (mut workbook, sheet) = spilling_workbook("SUM(B1:B4)", "D1:E2");
+    for address in ["E1", "D2", "E2"] {
+        put(workbook.sheet_mut(sheet).unwrap(), address, n(10.0));
+    }
+    rebuild_and_recalc_all(&mut workbook, None);
+    assert_eq!(value_at(&workbook, "D1"), n(10.0));
+    for address in ["E1", "D2", "E2"] {
+        assert_eq!(value_at(&workbook, address), CellValue::Empty, "{address}");
+    }
+    assert_eq!(
+        workbook.sheet(sheet).unwrap().array_formula(a1("D1")),
+        Some(range("D1"))
+    );
+}
+
+/// a legacy array keeps the rectangle it was entered in whatever size its
+/// result is: a smaller one never spills, a larger one pads with `#N/A`, and
+/// nothing beside it obstructs it.
+#[test]
+fn a_legacy_array_fills_exactly_the_rectangle_it_was_entered_in() {
+    let na = CellValue::Error {
+        value: ErrorValue::NA,
+    };
+    let (mut workbook, _) = entered_workbook("B1:B4*2", "D1");
+    put(workbook.sheet_mut(SheetId(0)).unwrap(), "D3", t("keep"));
+    rebuild_and_recalc_all(&mut workbook, None);
+    assert_eq!(value_at(&workbook, "D1"), n(6.0));
+    assert_eq!(value_at(&workbook, "D2"), CellValue::Empty);
+    assert_eq!(value_at(&workbook, "D3"), t("keep"));
+    assert_eq!(
+        workbook.sheet(SheetId(0)).unwrap().array_formula(a1("D1")),
+        Some(range("D1"))
+    );
+
+    let (mut workbook, _) = entered_workbook("B1:B4*2", "D1:D2");
+    rebuild_and_recalc_all(&mut workbook, None);
+    assert_eq!(value_at(&workbook, "D2"), n(2.0));
+    assert_eq!(value_at(&workbook, "D3"), CellValue::Empty);
+
+    let (mut workbook, _) = entered_workbook("B1:B4*2", "D1:D5");
+    rebuild_and_recalc_all(&mut workbook, None);
+    assert_eq!(value_at(&workbook, "D4"), n(4.0));
+    assert_eq!(value_at(&workbook, "D5"), na);
+    assert_eq!(
+        workbook.sheet(SheetId(0)).unwrap().array_formula(a1("D1")),
+        Some(range("D1:D5"))
+    );
+}
+
+/// a single row or column repeats across a wider legacy rectangle; a block
+/// shows `#N/A` where it runs out.
+#[test]
+fn a_legacy_array_repeats_a_single_row_or_column() {
+    let (mut workbook, _) = entered_workbook("B1:B2", "D1:E3");
+    rebuild_and_recalc_all(&mut workbook, None);
+    for (address, expected) in [("D1", n(3.0)), ("E1", n(3.0)), ("E2", n(1.0))] {
+        assert_eq!(value_at(&workbook, address), expected, "{address}");
+    }
+    assert_eq!(
+        value_at(&workbook, "E3"),
+        CellValue::Error {
+            value: ErrorValue::NA
+        }
+    );
+
+    let (mut workbook, _) = entered_workbook("{1,2}", "D1:F2");
+    rebuild_and_recalc_all(&mut workbook, None);
+    for (address, expected) in [("D2", n(1.0)), ("E2", n(2.0))] {
+        assert_eq!(value_at(&workbook, address), expected, "{address}");
+    }
+    assert_eq!(
+        value_at(&workbook, "F1"),
+        CellValue::Error {
+            value: ErrorValue::NA
+        }
+    );
 }
 
 /// a result growing past its recorded rectangle must not overwrite what the

@@ -623,7 +623,8 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
-        retain_array_formulas(&self.model, &mut model);
+        let authored = self.authored_state()?;
+        retain_arrays_over(&self.model, authored, &mut model);
         self.gate_incoming(&model)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
@@ -653,6 +654,15 @@ impl Workbook {
             origin: UpdateOrigin::Local,
         });
         Ok(true)
+    }
+
+    /// The document state a projection replacing it is settled over, needed
+    /// only while this replica holds an array.
+    fn authored_state(&self) -> Result<Option<WorkbookModel>> {
+        has_array_formulas(&self.model)
+            .then(|| self.authority.materialize())
+            .transpose()
+            .map_err(authority_error)
     }
 
     fn stage_remote_updates(
@@ -783,7 +793,8 @@ impl Workbook {
 
         let commit_update = staged.commit_update;
         let mut model = staged.model;
-        retain_array_formulas(&self.model, &mut model);
+        let authored = self.authored_state()?;
+        retain_arrays_over(&self.model, authored, &mut model);
         let update = staged.update;
         let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
         let mut calculation = calculation_result(&recalc);
@@ -1313,21 +1324,14 @@ impl Workbook {
             if cell_states_semantically_equal(&old, &state) {
                 continue;
             }
-            preview
-                .sheet_mut(sheet)
-                .expect("sheet validated")
-                .set_cell(edit.cell, state.clone().into());
             touched.push((sheet, edit.cell, state.formula.clone()));
-            per_op.push(vec![Op::SetCell {
-                sheet,
-                at: edit.cell,
-                cell: old,
-            }]);
-            ops.push(Op::SetCell {
+            let op = Op::SetCell {
                 sheet,
                 at: edit.cell,
                 cell: state,
-            });
+            };
+            per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+            ops.push(op);
         }
         if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
             return Ok(MutationResult::default());
@@ -1586,13 +1590,14 @@ impl Workbook {
         redo: bool,
     ) -> Result<MutationResult> {
         let checkpoint = self.authority.checkpoint();
+        let authored = self.authored_state()?;
         let stepped = if redo {
             self.authority.redo()
         } else {
             self.authority.undo()
         };
         let outcome = match stepped {
-            Ok(history) => self.apply_collaborative_history(history, options),
+            Ok(history) => self.apply_collaborative_history(history, authored, options),
             Err(error) => Err(authority_error(error)),
         };
         match outcome {
@@ -1609,6 +1614,7 @@ impl Workbook {
     fn apply_collaborative_history(
         &mut self,
         history: Option<HistoryUpdate>,
+        authored: Option<WorkbookModel>,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
         let Some(history) = history else {
@@ -1624,7 +1630,7 @@ impl Workbook {
         let active_name = self.active_sheet_name();
         let before = self.model.clone();
         let mut restored = history.model;
-        retain_array_formulas(&self.model, &mut restored);
+        retain_arrays_over(&self.model, authored, &mut restored);
         self.install_model(restored)?;
         self.invalidate_sheet_info();
         self.edited_since_open = true;
@@ -1653,10 +1659,12 @@ impl Workbook {
             self.validate_target(edit.sheet, edit.cell)?;
             let state = edit_cell_state(&preview, edit.sheet, edit.cell, &edit.input);
             validate_cell_state(&state)?;
-            preview
-                .sheet_mut(edit.sheet)
-                .ok_or(Error::SheetOutOfRange(edit.sheet))?
-                .set_cell(edit.cell, state.into());
+            let op = Op::SetCell {
+                sheet: edit.sheet,
+                at: edit.cell,
+                cell: state,
+            };
+            xlsx_ops::apply_in_place(&mut preview, &op)?;
             if let Some(format) = &edit.number_format {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
@@ -2246,6 +2254,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
+            settle_projection(&self.model, &self.model, &mut model, &written_cells(ops));
             self.install_model(model)?;
             self.update_sheet_info_cache(ops, &prior_styles);
             Some(staged.update)
@@ -2774,8 +2783,114 @@ fn retain_array_formulas(current: &WorkbookModel, projected: &mut WorkbookModel)
             })
             .collect();
         for (at, range) in anchors {
-            sheet.set_array_formula(at, range);
+            if source.is_dynamic_array(at) {
+                sheet.set_dynamic_array_formula(at, range);
+            } else {
+                sheet.set_array_formula(at, range);
+            }
         }
+    }
+}
+
+/// the collaboration document holds what authors wrote, and computed values
+/// only as they were opened. a projection keeps what this replica computed
+/// wherever nothing was `written`, then replays what each write does to the
+/// arrays around it over `authored`, the state it was written over.
+fn settle_projection(
+    current: &WorkbookModel,
+    authored: &WorkbookModel,
+    projected: &mut WorkbookModel,
+    written: &[(SheetId, CellRef)],
+) {
+    if !has_array_formulas(current) {
+        return;
+    }
+    retain_computed_values(current, projected, written);
+    for &(sheet, at) in written {
+        let old = current_cell_state(authored, sheet, at);
+        let new = current_cell_state(projected, sheet, at);
+        if let Some(sheet) = projected.sheet_mut(sheet) {
+            xlsx_ops::settle_array_write(sheet, at, &old, &new);
+        }
+    }
+}
+
+fn retain_computed_values(
+    current: &WorkbookModel,
+    projected: &mut WorkbookModel,
+    written: &[(SheetId, CellRef)],
+) {
+    let written: HashSet<(u32, u32, u32)> = written
+        .iter()
+        .map(|(sheet, at)| (sheet.0, at.row, at.col))
+        .collect();
+    for (index, sheet) in projected.sheets.iter_mut().enumerate() {
+        let Some(source) = current.sheets.get(index) else {
+            continue;
+        };
+        let untouched = |at: CellRef| !written.contains(&(index as u32, at.row, at.col));
+        let mut computed: Vec<(CellRef, CellValue)> = source
+            .iter_cells()
+            .filter(|(at, cell)| {
+                cell.formula.is_none()
+                    && untouched(*at)
+                    && sheet
+                        .cell(*at)
+                        .is_none_or(|stored| stored.formula.is_none() && stored.value != cell.value)
+            })
+            .map(|(at, cell)| (at, cell.value.clone()))
+            .collect();
+        computed.extend(
+            sheet
+                .iter_cells()
+                .filter(|(at, cell)| {
+                    cell.formula.is_none()
+                        && cell.value != CellValue::Empty
+                        && untouched(*at)
+                        && source.cell(*at).is_none()
+                })
+                .map(|(at, _)| (at, CellValue::Empty)),
+        );
+        for (at, value) in computed {
+            let mut cell = sheet.cell(at).cloned().unwrap_or_default();
+            cell.value = value;
+            sheet.set_cell(at, cell);
+        }
+    }
+}
+
+fn written_cells(ops: &[Op]) -> Vec<(SheetId, CellRef)> {
+    ops.iter()
+        .filter_map(|op| match op {
+            Op::SetCell { sheet, at, .. } => Some((*sheet, *at)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_array_formulas(model: &WorkbookModel) -> bool {
+    model
+        .sheets
+        .iter()
+        .any(|sheet| sheet.array_formulas().next().is_some())
+}
+
+/// [`retain_array_formulas`] for a projection that replaces `authored`, the
+/// document state it was written over.
+fn retain_arrays_over(
+    current: &WorkbookModel,
+    authored: Option<WorkbookModel>,
+    projected: &mut WorkbookModel,
+) {
+    let written: Option<Vec<_>> = authored.as_ref().map(|authored| {
+        changed_cells_between(authored, projected)
+            .into_iter()
+            .map(|address| (address.sheet, address.cell))
+            .collect()
+    });
+    retain_array_formulas(current, projected);
+    if let (Some(authored), Some(written)) = (&authored, &written) {
+        settle_projection(current, authored, projected, written);
     }
 }
 

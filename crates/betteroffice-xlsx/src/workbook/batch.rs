@@ -510,8 +510,8 @@ fn overlap(left: CellRange, right: CellRange) -> Option<CellRange> {
     (start.row <= end.row && start.col <= end.col).then_some(CellRange { start, end })
 }
 
-/// The first cell of `range` that follows a merge or that an array formula fills; writes to
-/// it would split it from its owner.
+/// The first cell of `range` that follows a merge or that a legacy array formula fills; writes
+/// to it would split it from its owner. A write into a dynamic array obstructs its spill.
 fn write_lock(sheet: &Sheet, range: CellRange) -> Option<(CellRef, &'static str)> {
     for merged in &sheet.merges {
         let Some(shared) = overlap(*merged, range) else {
@@ -535,7 +535,10 @@ fn write_lock(sheet: &Sheet, range: CellRange) -> Option<(CellRef, &'static str)
             ));
         }
     }
-    sheet.array_formulas().find_map(|(_, filled)| {
+    sheet.array_formulas().find_map(|(anchor, filled)| {
+        if sheet.is_dynamic_array(anchor) {
+            return None;
+        }
         overlap(filled, range).map(|shared| {
             (
                 CellRef::new(shared.start.row, shared.start.col),

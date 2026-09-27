@@ -10,7 +10,7 @@ use crate::addr::{CellRange, CellRef, ColId, RowId, SheetId};
 use crate::chart::SheetChart;
 use crate::date::DateSystem;
 use crate::styles::Stylesheet;
-use crate::value::CellValue;
+use crate::value::{CellValue, ErrorValue};
 
 /// upper bound on the cells one array formula may fill. a malformed or hostile
 /// `ref` must not be able to ask for a sheet's worth of cells.
@@ -148,7 +148,15 @@ pub struct Sheet {
     pub charts: Vec<SheetChart>,
     /// anchors of `t="array"` formulas mapped to the rectangle their result
     /// occupies. authored from the file, then kept current by recalc.
-    array_formulas: BTreeMap<(RowId, ColId), CellRange>,
+    array_formulas: BTreeMap<(RowId, ColId), ArrayFormula>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArrayFormula {
+    range: CellRange,
+    /// a dynamic array spills to its result's size; a legacy one keeps the
+    /// rectangle it was entered in.
+    dynamic: bool,
 }
 
 impl Sheet {
@@ -161,11 +169,39 @@ impl Sheet {
 
     /// the rectangle the array formula anchored at `at` currently fills.
     pub fn array_formula(&self, at: CellRef) -> Option<CellRange> {
-        self.array_formulas.get(&(at.row, at.col)).copied()
+        self.array_formulas
+            .get(&(at.row, at.col))
+            .map(|array| array.range)
     }
 
+    /// whether the array formula anchored at `at` is a dynamic array.
+    pub fn is_dynamic_array(&self, at: CellRef) -> bool {
+        self.array_formulas
+            .get(&(at.row, at.col))
+            .is_some_and(|array| array.dynamic)
+    }
+
+    /// moves an anchor's rectangle, keeping its kind; a new anchor is a legacy
+    /// array.
     pub fn set_array_formula(&mut self, at: CellRef, spill: CellRange) {
-        self.array_formulas.insert((at.row, at.col), spill);
+        self.array_formulas
+            .entry((at.row, at.col))
+            .and_modify(|array| array.range = spill)
+            .or_insert(ArrayFormula {
+                range: spill,
+                dynamic: false,
+            });
+    }
+
+    /// records a dynamic array anchored at `at`, currently filling `spill`.
+    pub fn set_dynamic_array_formula(&mut self, at: CellRef, spill: CellRange) {
+        self.array_formulas.insert(
+            (at.row, at.col),
+            ArrayFormula {
+                range: spill,
+                dynamic: true,
+            },
+        );
     }
 
     pub fn clear_array_formula(&mut self, at: CellRef) {
@@ -176,7 +212,61 @@ impl Sheet {
     pub fn array_formulas(&self) -> impl Iterator<Item = (CellRef, CellRange)> + '_ {
         self.array_formulas
             .iter()
-            .map(|(&(row, col), &spill)| (CellRef::new(row, col), spill))
+            .map(|(&(row, col), array)| (CellRef::new(row, col), array.range))
+    }
+
+    /// the anchor of the dynamic array whose result covers `at`, when `at` is
+    /// not that anchor.
+    pub fn spill_anchor(&self, at: CellRef) -> Option<CellRef> {
+        self.array_formulas.iter().find_map(|(&(row, col), array)| {
+            let anchor = CellRef::new(row, col);
+            (array.dynamic
+                && (row, col) != (at.row, at.col)
+                && array.range.contains(at)
+                && self.cell(anchor).is_some_and(owns_formula))
+            .then_some(anchor)
+        })
+    }
+
+    /// a value authored at `at` obstructs the dynamic array spilling over it:
+    /// the array falls back to its anchor, which shows `#SPILL!`, and clears
+    /// the rest of its result. returns the anchor.
+    pub fn obstruct_spill(&mut self, at: CellRef) -> Option<CellRef> {
+        let anchor = self.spill_anchor(at)?;
+        let array = self.array_formulas.get_mut(&(anchor.row, anchor.col))?;
+        let range = std::mem::replace(&mut array.range, CellRange::new(anchor, anchor));
+        if let Some(cell) = self.cell_mut(anchor) {
+            cell.value = CellValue::Error {
+                value: ErrorValue::Spill,
+            };
+        }
+        self.clear_filled(anchor, range, at);
+        Some(anchor)
+    }
+
+    /// clears what the array anchored at `anchor` filled beside it, as when
+    /// its formula is removed. the anchor stays registered, so restoring the
+    /// formula fills the rectangle again.
+    pub fn clear_array_result(&mut self, anchor: CellRef) {
+        if let Some(range) = self.array_formula(anchor) {
+            self.clear_filled(anchor, range, anchor);
+        }
+    }
+
+    fn clear_filled(&mut self, anchor: CellRef, range: CellRange, keep: CellRef) {
+        let filled: Vec<CellRef> = self
+            .cells_in_range(range)
+            .filter(|(cell, stored)| *cell != anchor && *cell != keep && !owns_formula(stored))
+            .map(|(cell, _)| cell)
+            .collect();
+        for cell in filled {
+            if let Some(stored) = self.cell_mut(cell) {
+                stored.value = CellValue::Empty;
+                if *stored == Cell::default() {
+                    self.cells.remove(&(cell.row, cell.col));
+                }
+            }
+        }
     }
 
     pub fn cell(&self, at: CellRef) -> Option<&Cell> {
@@ -271,17 +361,24 @@ impl Sheet {
             return;
         }
         let mut moved = BTreeMap::new();
-        for (&(row, col), &spill) in &self.array_formulas {
+        for (&(row, col), array) in &self.array_formulas {
             let Some(to) = remap(CellRef::new(row, col)) else {
                 continue;
             };
+            let spill = array.range;
             let rows = spill.end.row.saturating_sub(spill.start.row);
             let cols = spill.end.col.saturating_sub(spill.start.col);
             let end = CellRef::new(
                 to.row.saturating_add(rows).min(crate::addr::MAX_ROWS - 1),
                 to.col.saturating_add(cols).min(crate::addr::MAX_COLS - 1),
             );
-            moved.insert((to.row, to.col), CellRange::new(to, end));
+            moved.insert(
+                (to.row, to.col),
+                ArrayFormula {
+                    range: CellRange::new(to, end),
+                    ..*array
+                },
+            );
         }
         self.array_formulas = moved;
     }
@@ -393,6 +490,14 @@ impl Sheet {
             CellRef::new(max_r, max_c),
         ))
     }
+}
+
+/// whether a cell carries a formula of its own. producers mark the interior of
+/// a spill with an empty `<f/>`, which is the anchor's formula reaching it.
+fn owns_formula(cell: &Cell) -> bool {
+    cell.formula
+        .as_deref()
+        .is_some_and(|formula| !formula.trim().is_empty())
 }
 
 fn no_extent(extent: f64) -> bool {

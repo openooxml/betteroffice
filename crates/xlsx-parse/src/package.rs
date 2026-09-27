@@ -32,6 +32,8 @@ pub struct PreservedPackage {
     pub(crate) active_sheet: SheetId,
     pub(crate) unpatchable_references: Vec<UnpatchableReference>,
     pub(crate) rich_shared_strings: BTreeSet<usize>,
+    /// The `cm` index the source's cell metadata gives a dynamic array.
+    pub(crate) dynamic_array_cm: Option<u32>,
 }
 
 impl PreservedPackage {
@@ -181,6 +183,7 @@ impl PreservedPackage {
             active_sheet,
             unpatchable_references,
             rich_shared_strings,
+            dynamic_array_cm: None,
         })
     }
 
