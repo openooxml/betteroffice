@@ -1050,6 +1050,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const flushPendingInput = useCallback(async (): Promise<void> => {
     const queue = inputOperationQueueRef.current;
+    const since = queue?.failureCheckpoint();
     const assertCurrent = () => {
       const current = inputLifetimeRef.current;
       if (!session || !current.mounted || !current.enabled || current.session !== session) {
@@ -1062,13 +1063,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       assertCurrent();
     }
     pendingResidentTextRef.current = null;
-    await queue?.flush();
+    await queue?.flush(since);
     assertCurrent();
   }, [session]);
 
   const runAfterPendingInput = useCallback(
     <T,>(operation: () => T | Promise<T>): Promise<T> => {
       const queue = inputOperationQueueRef.current;
+      const since = queue?.failureCheckpoint();
       const lifetime = inputLifetimeRef.current;
       const admitted = session;
       const admit = (): Promise<T> => {
@@ -1081,7 +1083,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           if (lifetime.session !== admitted) throw new DocxCommandAdmissionError('document-replaced');
           if (inputLost) throw new DocxCommandAdmissionError('input-failed');
           return operation();
-        });
+        }, since);
       };
       if (!composingRef.current && !compositionPendingRef.current) return admit();
       return new Promise<T>((resolve, reject) => {

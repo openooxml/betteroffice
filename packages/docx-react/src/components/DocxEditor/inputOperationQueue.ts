@@ -17,11 +17,15 @@ export class InputOperationQueue {
 
   /**
    * Admits an operation in input order and settles with its own outcome; `inputLost` is whether
-   * input accepted before it failed.
+   * input failed after the `since` checkpoint.
    */
-  run<T>(operation: (inputLost: boolean) => T | Promise<T>): Promise<T> {
-    const failures = this.failures;
-    return this.admit(() => operation(this.failures !== failures), false);
+  run<T>(operation: (inputLost: boolean) => T | Promise<T>, since = this.failures): Promise<T> {
+    return this.admit(() => operation(this.failures !== since), false);
+  }
+
+  /** Checkpoint for {@link run} and {@link flush} requested before their admission. */
+  failureCheckpoint(): number {
+    return this.failures;
   }
 
   hasPending(): boolean {
@@ -32,11 +36,10 @@ export class InputOperationQueue {
     return this.pending;
   }
 
-  /** Waits for accepted operations and rejects if one of them failed. */
-  flush(): Promise<void> {
-    const failures = this.failures;
+  /** Waits for accepted operations and rejects if input failed after the `since` checkpoint. */
+  flush(since = this.failures): Promise<void> {
     return this.pending.then(() => {
-      if (this.failures !== failures) throw this.lastFailure;
+      if (this.failures !== since) throw this.lastFailure;
     });
   }
 
