@@ -2245,14 +2245,13 @@ fn text_width<S: PlotSink + ?Sized>(
 }
 
 /// A label's width when the sink cannot measure text: half an em a character,
-/// a full em for East Asian wide ones, plus n - 1 tracked gaps as a measured
-/// line has.
+/// plus n - 1 tracked gaps as a measured line has.
 pub fn fallback_label_width(label: &str, font: &PlotFont) -> f64 {
-    estimated_width(label, font, fallback_advance)
+    estimated_width(label, font, |_| 0.5)
 }
 
-/// A legend label's estimate: Calibri's advances, never under
-/// [`fallback_label_width`]'s.
+/// A legend label's estimate: Calibri's advances and a full em for East Asian
+/// wide characters, never under [`fallback_label_width`]'s.
 fn legend_fallback_width(label: &str, font: &PlotFont) -> f64 {
     estimated_width(label, font, legend_advance)
 }
@@ -2278,12 +2277,6 @@ fn legend_advance(character: char) -> f64 {
         code @ 0x20..=0x7E => {
             (f64::from(FALLBACK_ADVANCES[(code - 0x20) as usize]) / 1000.0).max(0.5)
         }
-        _ => fallback_advance(character),
-    }
-}
-
-fn fallback_advance(character: char) -> f64 {
-    match character as u32 {
         0x1100..=0x115F
         | 0x2E80..=0xA4CF
         | 0xAC00..=0xD7A3
@@ -7185,7 +7178,11 @@ mod tests {
             fallback_label_width("July", &font),
             4.0 * 0.5 * font.size_px
         );
-        assert_eq!(fallback_label_width("日本", &font), 2.0 * font.size_px);
+        assert_eq!(
+            fallback_label_width("日本", &font),
+            2.0 * 0.5 * font.size_px
+        );
+        assert_eq!(legend_fallback_width("日本", &font), 2.0 * font.size_px);
         for label in ["July", "illicit", "WW", "日本"] {
             assert!(legend_fallback_width(label, &font) >= fallback_label_width(label, &font));
         }
