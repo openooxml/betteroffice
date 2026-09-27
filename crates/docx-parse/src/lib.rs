@@ -70,7 +70,7 @@ pub mod xml;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-pub use block::{BlockContent, BlockSdt, StoryParser};
+pub use block::{BlockContent, BlockSdt, StoryParser, story_block_elements, table_part_elements};
 pub use borders::{
     BorderSpec, Borders, parse_border_spec, parse_paragraph_borders, parse_table_borders,
 };

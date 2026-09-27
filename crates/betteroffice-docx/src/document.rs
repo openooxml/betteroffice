@@ -1,12 +1,19 @@
 use std::sync::Arc;
 
+use docx_edit::structured::{
+    DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions,
+    export_package_structured,
+};
 use docx_edit::{EditCtx, EditingDoc, Receipt, StoryRange};
 use docx_layout::types::Input as LayoutInput;
 use docx_parse::block::BlockContent;
 use docx_parse::document::{DocumentBody, Section, get_paragraph_text};
 use docx_parse::inline::{InlineNode, Run, RunContent, RunType};
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
-use docx_parse::s9::{S9DocumentBodyWire, S9PackageWire, S9ParseOptions, S9SectionWire};
+use docx_parse::s9::{
+    S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions, S9SectionWire,
+    S9WireEnvelope,
+};
 use docx_parse::serializer::{
     S13SaveOptions, S13SaveRequest, SerializerDeterminism, write_docx_s13_parts,
 };
@@ -168,6 +175,60 @@ impl Document {
         Ok(receipt)
     }
 
+    /// Exports the current model as read-only structured content. Anchors address the returned
+    /// snapshot; source-part provenance is kept only where the opened package still matches.
+    pub fn export_structured(&self, options: &ExportOptions) -> Result<DocxStructuredContent> {
+        Ok(export_package_structured(
+            self.envelope(),
+            &self.original_parts,
+            options,
+        )?)
+    }
+
+    /// [`Document::export_structured`] rendered as Markdown.
+    pub fn export_markdown(&self, options: &ExportOptions) -> Result<MarkdownContent> {
+        let content = self.export_structured(options)?;
+        render_docx_markdown(
+            &content,
+            &MarkdownOptions {
+                max_bytes: options.max_bytes,
+            },
+        )
+    }
+
+    /// The current model as the parsed package seeding reads.
+    fn envelope(&self) -> S9WireEnvelope {
+        let model = self.model.clone();
+        S9WireEnvelope {
+            wire_version: 1,
+            document: S9DocumentWire {
+                package: S9PackageWire {
+                    document: S9DocumentBodyWire::from(model.body),
+                    styles: model.styles,
+                    theme: model.theme,
+                    numbering: model.numbering,
+                    settings: model.settings,
+                    font_table: model.font_table,
+                    header_entries: Some(model.headers),
+                    footer_entries: Some(model.footers),
+                    footnotes: Some(model.footnotes),
+                    endnotes: Some(model.endnotes),
+                    footnote_separators: Some(model.footnote_separators),
+                    endnote_separators: Some(model.endnote_separators),
+                    relationship_entries: model.relationships,
+                    media_entries: Vec::new(),
+                    chart_entries: model.charts,
+                },
+                template_variables: None,
+                warnings: (!model.warnings.is_empty()).then_some(model.warnings),
+            },
+            embedded_font_parts: Vec::new(),
+            font_table_relationships_xml: None,
+            canonical_base64: None,
+            canonical_sha256: None,
+        }
+    }
+
     pub fn layout(&self, mut input: LayoutInput) -> Result<LayoutResult> {
         let layout = docx_layout::compute_layout_input(&mut input)?;
         let display_list =
@@ -205,6 +266,16 @@ impl Document {
         };
         write_docx_s13_parts(request, &self.original_parts, None).map_err(Error::from)
     }
+}
+
+/// Renders structured content as Markdown within `options.max_bytes`.
+pub fn render_docx_markdown(
+    content: &DocxStructuredContent,
+    options: &MarkdownOptions,
+) -> Result<MarkdownContent> {
+    Ok(docx_edit::structured::render_docx_markdown(
+        content, options,
+    )?)
 }
 
 type RunTemplate = Option<(

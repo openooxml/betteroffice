@@ -88,6 +88,26 @@ let saved = presentation.save()?;
 `open_with_limits` on DOCX and PPTX accepts custom parser resource limits. Files
 that exceed those limits are rejected.
 
+`Document::export_structured` exports the current DOCX model as read-only
+structured content, and `export_markdown` renders it as Markdown with source
+anchors:
+
+```rust
+use betteroffice_docx::{Document, ExportOptions, RevisionView, StorySelection};
+
+let document = Document::open(&docx_bytes)?;
+let content = document.export_structured(&ExportOptions {
+    stories: Some(vec![StorySelection::Body, StorySelection::Headers]),
+    ..ExportOptions::new(RevisionView::Accepted)
+})?;
+let markdown = document.export_markdown(&ExportOptions::new(RevisionView::Markup))?;
+```
+
+The export reads edits made through the model, lists omitted and unsupported
+content in `diagnostics`, and returns `Error::Export` for unusable limits. The
+same content comes from `docx_edit::structured` for a live `EditingDoc` or raw
+bytes. Page fragments are not included yet.
+
 PPTX edits can also run as version-checked batches. `Presentation::read_content`
 and `find_text` return story text with the session version, and `apply_edits`
 applies every step against that version as one transaction and one undo step.
@@ -110,6 +130,26 @@ match presentation.apply_edits(&request)? {
 
 The request types are the JSON contract the JavaScript core and Python binding
 use; `validate_edits` runs the same checks without changing anything.
+
+`export_structured` and `export_markdown` read the committed deck as structured
+content or Markdown with the version it was read at, and
+`betteroffice_pptx::export_pptx_structured` reads bytes as a snapshot. Records
+carry session or snapshot anchors and source provenance, and every omission is
+a diagnostic:
+
+```rust
+use betteroffice_pptx::PptxExportOptions;
+
+let options = PptxExportOptions {
+    include_notes: Some(true),
+    ..PptxExportOptions::default()
+};
+let read = presentation.export_structured(&options)?.expect("usable options");
+for slide in &read.content.slides {
+    println!("slide {}: {} shapes", slide.index, slide.shapes.len());
+}
+let markdown = betteroffice_pptx::export_pptx_markdown(&bytes, &options)?;
+```
 
 ## PowerPoint comments
 
