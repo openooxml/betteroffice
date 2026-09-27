@@ -4,6 +4,9 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use docx_edit::structured::{
+    Anchor, Block, BlockKind, DiagnosticCode, ExportOptions, InlineKind, RevisionView,
+};
 use docx_edit::*;
 use docx_parse::paragraph_identity::{
     package_paragraph_ids, paragraph_ids_by_part, parse_paragraph_id,
@@ -1661,4 +1664,222 @@ fn stories_sharing_a_part_are_views_of_one_paragraph_each() {
             AnchorResolution::Found(_)
         ));
     }
+}
+
+/// Every paragraph block the accepted body export locates, table cells included, as its
+/// anchor's story and key and its exported text, with the version the export read.
+fn exported_paragraphs(doc: &EditingDoc) -> (DocumentVersion, Vec<(String, String, String)>) {
+    fn collect(blocks: &[Block], found: &mut Vec<(String, String, String)>) {
+        for block in blocks {
+            match &block.content {
+                BlockKind::Paragraph { paragraph }
+                | BlockKind::Heading { paragraph, .. }
+                | BlockKind::ListItem { paragraph, .. } => {
+                    let Anchor::Paragraph { story, para_id } = &block.anchor else {
+                        panic!("paragraph without a location: {block:?}");
+                    };
+                    let text = paragraph
+                        .inlines
+                        .iter()
+                        .filter_map(|inline| match &inline.content {
+                            InlineKind::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    found.push((story.clone(), para_id.clone(), text));
+                }
+                BlockKind::Table { table } => {
+                    for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                        collect(&cell.blocks, found);
+                    }
+                }
+                BlockKind::ContentControl { blocks, .. } => collect(blocks, found),
+                _ => {}
+            }
+        }
+    }
+    let read = doc
+        .export_structured(&ExportOptions::new(RevisionView::Accepted))
+        .unwrap();
+    assert!(
+        read.content
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != DiagnosticCode::AmbiguousIdentity),
+        "{:?}",
+        read.content.diagnostics
+    );
+    let mut found = Vec::new();
+    for story in &read.content.stories {
+        collect(&story.blocks, &mut found);
+    }
+    (read.version, found)
+}
+
+/// Prefixes each exported paragraph with its index through one batch that targets the export's
+/// anchors at the export's version, and checks each edit landed on the paragraph its anchor named.
+fn edit_through_export_anchors(doc: &EditingDoc) {
+    let (version, exported) = exported_paragraphs(doc);
+    let steps = exported
+        .iter()
+        .enumerate()
+        .map(|(index, (story, key, _))| {
+            EditStep::new(EditOperation::InsertText {
+                target: TextTarget::Paragraph(ParagraphTarget {
+                    story: story.clone(),
+                    para_id: key.clone(),
+                }),
+                at: TargetEdge::Start,
+                text: format!("{index}:"),
+            })
+        })
+        .collect();
+    let request = EditRequest {
+        expect_version: version,
+        source: EditSource::Host,
+        history: EditHistory::Separate,
+        steps,
+    };
+    doc.apply_edits(&request, &UndoSession::new())
+        .unwrap()
+        .unwrap_or_else(|refusal| panic!("batch refused: {refusal:?}"));
+    for (index, (story, key, text)) in exported.iter().enumerate() {
+        let edited = doc
+            .paragraphs(story)
+            .unwrap()
+            .into_iter()
+            .find(|paragraph| &paragraph.para_id == key)
+            .unwrap_or_else(|| panic!("{key} is gone"))
+            .text;
+        assert!(
+            edited.starts_with(&format!("{index}:{text}")),
+            "{key}: {edited:?}"
+        );
+    }
+}
+
+#[test]
+fn export_anchors_name_paragraphs_by_the_keys_batches_target() {
+    let doc = seeded(&fixture());
+    let split = doc
+        .split_paragraph(&ctx(), Position::new("body", 2), None)
+        .unwrap();
+    let (version, exported) = exported_paragraphs(&doc);
+    assert_eq!(version, doc.version());
+    let located: Vec<(&str, &str, &str)> = exported
+        .iter()
+        .map(|(story, key, text)| (story.as_str(), key.as_str(), text.as_str()))
+        .collect();
+    assert_eq!(
+        located,
+        [
+            ("body", "1A2B3C4D", "Va"),
+            ("body", split.second_para_id.as_str(), "lid"),
+            ("body", "body:p1", "Missing"),
+            ("body", "0000abcd", "Lower"),
+            ("body", "body:p3", "Duplicate"),
+            ("body", "body:p4", "Malformed"),
+            ("body:t0:r0c0", "2B3C4D5E", "Cell"),
+            ("body", "0A0B0C0D", "Tail"),
+        ],
+        "session keys, not Word paragraph IDs"
+    );
+    assert_ne!(
+        identity(&doc, &split.second_para_id)
+            .ooxml_para_id
+            .as_deref(),
+        Some(split.second_para_id.as_str())
+    );
+    edit_through_export_anchors(&doc);
+}
+
+#[test]
+fn export_anchors_after_a_save_and_reopen_are_the_persisted_paragraphs() {
+    let bytes = fixture();
+    let doc = seeded(&bytes);
+    let assigned: Vec<(String, String)> = doc
+        .persist_paragraph_ids()
+        .unwrap()
+        .assignments
+        .into_iter()
+        .filter_map(|assignment| match assignment.paragraph {
+            ParagraphRef::Session { story, para_id } if story == "body" => {
+                Some((para_id, assignment.ooxml_para_id))
+            }
+            _ => None,
+        })
+        .collect();
+    let (_, before) = exported_paragraphs(&doc);
+    let saved = ooxml_opc::rezip_parts(&save_unchanged(&doc, &bytes)).unwrap();
+    let reopened = seeded(&saved);
+    let (_, after) = exported_paragraphs(&reopened);
+    assert_eq!(after.len(), before.len());
+    for ((story, key, text), (reopened_story, reopened_key, reopened_text)) in
+        before.iter().zip(&after)
+    {
+        assert_eq!((reopened_story, reopened_text), (story, text));
+        let word_id = assigned
+            .iter()
+            .find(|(assigned_key, _)| assigned_key == key)
+            .map_or_else(
+                || identity(&doc, key).ooxml_para_id.unwrap(),
+                |(_, id)| id.clone(),
+            );
+        assert_eq!(
+            reopened.resolve_paragraph_anchor(&persisted(body(), &word_id)),
+            found(reopened_story, reopened_key),
+            "{text}: the persisted anchor resolves to the paragraph the export names"
+        );
+    }
+    let keys = |exported: &[(String, String, String)]| -> Vec<String> {
+        exported.iter().map(|(_, key, _)| key.clone()).collect()
+    };
+    assert!(
+        ["body:p1", "body:p3", "body:p4"]
+            .iter()
+            .all(|key| keys(&before).contains(&key.to_string())
+                && !keys(&after).contains(&key.to_string())),
+        "a persisted paragraph reopens keyed by its Word paragraph ID"
+    );
+    edit_through_export_anchors(&reopened);
+}
+
+#[test]
+fn repeated_word_ids_export_located_twins_that_resolve_as_ambiguous() {
+    let doc = seeded(&fixture());
+    let (_, exported) = exported_paragraphs(&doc);
+    let twin = |text: &str| {
+        let (story, key, _) = exported
+            .iter()
+            .find(|(_, _, exported)| exported == text)
+            .unwrap();
+        session(story, key)
+    };
+    let twins = vec![twin("Valid"), twin("Duplicate")];
+    assert_eq!(
+        doc.resolve_paragraph_anchor(&persisted(body(), "1A2B3C4D")),
+        AnchorResolution::Ambiguous(twins.clone())
+    );
+    edit_through_export_anchors(&doc);
+
+    let copy = doc.paragraph_mark_position("body:p3").unwrap();
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::SetEmbedAttr {
+            index: copy.index,
+            key: "paraId".to_owned(),
+            value: Any::from("1A2B3C4D"),
+        }],
+        &ctx(),
+    )
+    .unwrap();
+    let (_, exported) = exported_paragraphs(&doc);
+    let keys: HashSet<&str> = exported.iter().map(|(_, key, _)| key.as_str()).collect();
+    assert_eq!(
+        keys.len(),
+        exported.len(),
+        "an edit that copies a key re-keys the copy, so both twins keep a location"
+    );
+    assert!(keys.contains("1A2B3C4D") && !keys.contains("body:p3"));
+    edit_through_export_anchors(&doc);
 }

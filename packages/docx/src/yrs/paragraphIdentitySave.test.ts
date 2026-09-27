@@ -10,6 +10,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import {
   createYrsSession,
   saveYrsDocx,
+  type DocxExportBlock,
   type DocxParagraphAnchor,
   type DocxParagraphRef,
   type DocxPersistedParagraphAnchor,
@@ -1052,4 +1053,108 @@ describe('source bytes are reused only for stories the session left as seeded', 
       expect(reopened.listRevisions()).toEqual([]);
     });
   }
+});
+
+type ExportedParagraph = {
+  anchor: { kind: 'paragraph'; story: string; paraId: string };
+  text: string;
+};
+
+/** Each paragraph the accepted export locates, table cells included, with its exported text. */
+function exportedParagraphs(session: YrsSession): { version: string; paragraphs: ExportedParagraph[] } {
+  const read = session.exportStructured({ revisionView: 'accepted' });
+  if (!read.ok) throw new Error(JSON.stringify(read.failure));
+  expect(read.content.diagnostics.filter(({ code }) => code === 'ambiguous-identity')).toEqual([]);
+  const paragraphs: ExportedParagraph[] = [];
+  const collect = (blocks: DocxExportBlock[]) => {
+    for (const block of blocks) {
+      if (block.kind === 'paragraph' || block.kind === 'heading' || block.kind === 'listItem') {
+        if (block.anchor.kind !== 'paragraph') throw new Error(JSON.stringify(block.anchor));
+        const text = block.paragraph.inlines
+          .map((inline) => (inline.kind === 'text' ? inline.text : ''))
+          .join('');
+        paragraphs.push({ anchor: block.anchor, text });
+      } else if (block.kind === 'table') {
+        for (const cell of block.table.rows.flatMap((row) => row.cells)) collect(cell.blocks);
+      } else if (block.kind === 'contentControl') {
+        collect(block.blocks);
+      }
+    }
+  };
+  for (const story of read.content.stories) collect(story.blocks);
+  return { version: read.version, paragraphs };
+}
+
+/** Prefixes every exported paragraph through one batch whose targets are the export's anchors. */
+function editThroughExportAnchors(session: YrsSession): void {
+  const { version, paragraphs } = exportedParagraphs(session);
+  expect(
+    session.applyEdits({
+      expectVersion: version,
+      steps: paragraphs.map(({ anchor }, index) => ({
+        op: 'insertText' as const,
+        target: anchor,
+        at: 'start' as const,
+        text: `${index}:`,
+      })),
+    })
+  ).toMatchObject({ ok: true });
+  paragraphs.forEach(({ anchor, text }, index) => {
+    const edited = session.paragraphs(anchor.story).find((entry) => entry.paraId === anchor.paraId);
+    expect(edited?.text.startsWith(`${index}:${text}`)).toBe(true);
+  });
+}
+
+/** The exported anchors a persisted anchor resolves to in `session`. */
+function resolvedAnchors(session: YrsSession, anchor: DocxPersistedParagraphAnchor): ExportedParagraph['anchor'][] {
+  const result = session.resolveParagraphAnchor(anchor);
+  const candidates =
+    result.status === 'found' ? [result.anchor] : result.status === 'ambiguous' ? result.candidates : [];
+  return candidates.map((candidate) => {
+    if (candidate.kind !== 'session') throw new Error(JSON.stringify(candidate));
+    return { kind: 'paragraph', story: candidate.story, paraId: candidate.paraId };
+  });
+}
+
+describe('structured export anchors and paragraph identities', () => {
+  it('names paragraphs by the keys edit batches target, before and after a save', async () => {
+    const opened = await open(fixture(), 7);
+    const split = opened.splitParagraph({ story: 'body', paraId: '1A2B3C4D', offset: 2 });
+    expect(
+      exportedParagraphs(opened).paragraphs.map(({ anchor, text }) => [anchor.story, anchor.paraId, text])
+    ).toEqual([
+      ['body', '1A2B3C4D', 'Va'],
+      ['body', split.secondParaId, 'lid'],
+      ['body', 'body:p1', 'Missing'],
+      ['body', '0000abcd', 'Lower'],
+      ['body', 'body:p3', 'Duplicate'],
+      ['body', 'body:p4', 'Malformed'],
+      ['body:t0:r0c0', '2B3C4D5E', 'Cell'],
+      ['body', '0A0B0C0D', 'Tail'],
+    ]);
+
+    const saved = await saveYrsDocx(opened);
+    const reopened = await open(saved.bytes, 8);
+    const exported = exportedParagraphs(reopened).paragraphs;
+    const anchors = exported.map(({ anchor }) => anchor);
+    const inBody = saved.paragraphs.filter((entry) => entry.session.story.startsWith('body'));
+    expect(inBody.length).toBeGreaterThan(0);
+    for (const { persisted } of inBody) {
+      const resolved = resolvedAnchors(reopened, persisted);
+      expect(resolved.length).toBeGreaterThan(0);
+      for (const anchor of resolved) expect(anchors).toContainEqual(anchor);
+    }
+    const authored = saved.paragraphs.find((entry) => entry.session.paraId === split.secondParaId)!;
+    expect(exported.find(({ text }) => text === 'lid')?.anchor).toEqual({
+      kind: 'paragraph',
+      story: 'body',
+      paraId: authored.persisted.paraId,
+    });
+    expect(resolvedAnchors(reopened, { kind: 'persisted', story: BODY, paraId: '1A2B3C4D' })).toEqual(
+      ['Va', 'Duplicate'].map((text) => exported.find((entry) => entry.text === text)!.anchor)
+    );
+
+    editThroughExportAnchors(opened);
+    editThroughExportAnchors(reopened);
+  });
 });
