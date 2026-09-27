@@ -381,13 +381,16 @@ export interface PagedEditorRef {
   displayPositionToYrsLoc(position: number | PointPosition): YrsLoc | null;
   /**
    * The text under a client point with an edit batch target, without moving selection or focus.
-   * Null outside text and while the rendered layout does not show the current version.
+   * Null outside text, while input is pending and until the painted layout shows the current
+   * version; retry after {@link flushPendingInput} or on the next frame.
    */
   getPositionAtPoint(clientX: number, clientY: number): DocxPointPosition | null;
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
   /** Commits accepted input and selection; waits for active IME composition. */
   flushPendingInput(): Promise<void>;
+  /** Whether typed or composed input has yet to reach the session. @internal */
+  hasPendingInput(): boolean;
   /** Paragraph-local stored inline formatting for the current yrs caret. */
   getYrsStoredFormatting(): YrsStoredFormatting | null;
   /** Resolve a live yrs Loc to the display position used by overlays. */
@@ -1749,7 +1752,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       displayPositionToYrsLoc,
       getPositionAtPoint: (clientX, clientY) =>
         positionAtClientPoint(
-          { getYrsSession: () => yrsCore.session, displayPositionToYrsLoc },
+          {
+            getYrsSession: () => yrsCore.session,
+            displayPositionToYrsLoc,
+            hasPendingInput: () => yrsInputRef.current?.hasPendingInput() ?? false,
+          },
           canvasHostRef?.current,
           displayListQueries,
           zoom,

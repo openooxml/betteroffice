@@ -190,7 +190,8 @@ converts such a rectangle into pixels of the unscaled overlay layer, or returns
 `null` once that layout is no longer rendered. `geometry.getPositionAtPoint`
 hit-tests client coordinates like the caret and returns the layout's `version` and
 `layoutId` with a collapsed accepted-view `target` for edit batch steps, or `null`
-likewise. `geometry.dom` is experimental
+likewise, while input is pending, and until the pages show that layout.
+`geometry.dom` is experimental
 and may be replaced by a data-only facade. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
 anchor to `{ version, story, paraId }` and appear only while that version is

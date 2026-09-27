@@ -161,7 +161,8 @@ export interface DocxPluginGeometry {
   toOverlayRect(rect: DocxPluginRect): DocxPluginRect | null;
   /**
    * Client coordinates to the text under them, with an edit batch target at `layout.version`;
-   * null outside text. Selection and focus stay where they are.
+   * null outside text, while input is pending and until the pages show this layout. Selection
+   * and focus stay where they are.
    */
   getPositionAtPoint(clientX: number, clientY: number): DocxPluginPointPosition | null;
 }

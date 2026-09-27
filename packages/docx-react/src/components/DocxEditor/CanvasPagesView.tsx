@@ -31,6 +31,7 @@ import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
+import { markPresented } from './internals/layoutProvenance';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
@@ -425,6 +426,8 @@ export function CanvasPagesView({
           return;
         }
       }
+      // The worker presents a frame before it replies with it, so these pages show no other.
+      if (innerHostRef.current) markPresented(innerHostRef.current, displayList);
       const caretColor = resolveCaretPaintColor(innerHostRef.current);
       const caretStyle = { color: caretColor, width: DEFAULT_CARET_WIDTH };
       const signature = `${activePageIds.join(',')}|${dpr}|${zoom}|${caretColor}`;
@@ -502,11 +505,16 @@ export function CanvasPagesView({
     void presentCanvasReplay(
       preparations,
       () => replayGeneration === replayGenerationRef.current
-    ).catch((error) => {
-      if (replayGeneration === replayGenerationRef.current) {
-        console.error('[CanvasRenderer] Canvas replay failed', error);
+    ).then(
+      (presented) => {
+        if (presented && innerHostRef.current) markPresented(innerHostRef.current, displayList);
+      },
+      (error) => {
+        if (replayGeneration === replayGenerationRef.current) {
+          console.error('[CanvasRenderer] Canvas replay failed', error);
+        }
       }
-    });
+    );
     return () => {
       replayGenerationRef.current += 1;
     };

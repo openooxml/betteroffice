@@ -51,15 +51,15 @@ export function toOverlayRect(
 }
 
 /**
- * `resolve` turns a hit of `dom` into a batch target at `layout.version`, or null once the
- * document has moved past it.
+ * `resolve` turns a hit of `dom` into a batch target at `layout.version`, or null while the pages
+ * show another frame or once the document has moved past it.
  */
 export function createPluginGeometry(
   layout: DocxPluginLayout,
   dom: RenderedDomContext,
   layer: HTMLElement,
   current: () => boolean,
-  resolve: (hit: PointPosition | null, version: string) => DocxPointPosition | null
+  resolve: (hit: PointPosition | null) => DocxPointPosition | null
 ): DocxPluginGeometry {
   return {
     layout,
@@ -68,7 +68,7 @@ export function createPluginGeometry(
       current() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,
     getPositionAtPoint(clientX, clientY) {
       if (!current()) return null;
-      const position = resolve(dom.getPositionAtPoint(clientX, clientY), layout.version);
+      const position = resolve(dom.getPositionAtPoint(clientX, clientY));
       return position ? { ...position, layoutId: layout.id } : null;
     },
   };

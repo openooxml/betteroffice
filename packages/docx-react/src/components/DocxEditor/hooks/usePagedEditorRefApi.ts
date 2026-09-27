@@ -204,6 +204,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
         throw new Error('The document changed while flushing input');
       }
     },
+    hasPendingInput: () => yrsInputRef.current?.hasPendingInput() ?? false,
     getYrsStoredFormatting: () => yrsInputRef.current?.storedFormatting() ?? null,
     yrsLocToDisplayPosition: (loc) => yrsLocToDisplayPositionRef.current(loc),
     syncYrsInputState: (docChanged, dirtyStories) =>

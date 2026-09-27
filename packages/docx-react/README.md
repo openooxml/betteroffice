@@ -280,8 +280,9 @@ flushes. `proposeChange`, `addComment` and `applyFormatting` resolve their
 `getPositionAtPoint(clientX, clientY)` returns the text under a client point, such
 as a drop target, with the `version` its layout shows and a collapsed
 accepted-view `target` to insert at with `expectVersion: version`. It never moves
-selection or focus, and returns null outside text and while the rendered layout is
-behind the document.
+selection or focus, and returns null outside text, while typed or composed input is
+pending, and until the painted pages show the current version; retry after
+`flushPendingInput()` or on the next frame.
 
 `listContentControls()` and `findContentControls(query)` flush the same way and
 list the document's content controls with the version they were read at; fill
@@ -386,7 +387,8 @@ const review = defineDocxPlugin<State>({
   returns null after that layout stops being rendered.
   `geometry.getPositionAtPoint(clientX, clientY)` returns the text under a client
   point with the layout's `layoutId` and `version` and an edit batch `target`, or
-  null likewise. `geometry.dom` is
+  null likewise, while input is pending, and until the pages show that layout.
+  `geometry.dom` is
   experimental and may be replaced by a data-only facade. The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit

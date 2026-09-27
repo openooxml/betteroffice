@@ -30,8 +30,8 @@ DOCX `RenderedDomContext.getPositionAtPoint(clientX, clientY)` resolves a pointe
 a display position, page, and document region without changing focus or selection.
 `DocxEditorRef.getPositionAtPoint` and plugin `geometry.getPositionAtPoint` add the
 `version` the layout shows and a collapsed accepted-view `target` for edit batch steps,
-in body, header, footer, note and table cell stories, and return null while the layout
-is behind the document.
+in body, header, footer, note and table cell stories, and return null while input is
+pending or the painted layout is behind the document.
 
 The XLSX and PPTX JavaScript cores expose opt-in operation profiles for edit and render/layout timings. Ordinary methods retain their existing return types; see the [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) for the profiling APIs.
 

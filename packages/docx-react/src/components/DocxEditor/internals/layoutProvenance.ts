@@ -20,3 +20,15 @@ export function readSessionVersion(
     return null;
   }
 }
+
+const presentedLists = new WeakMap<object, object>();
+
+/** Records that the canvas pages under `host` finished painting `displayList`. */
+export function markPresented(host: object, displayList: object): void {
+  presentedLists.set(host, displayList);
+}
+
+/** Whether the canvas pages under `host` show the pixels of `displayList`. */
+export function isPresented(host: object | null | undefined, displayList: object): boolean {
+  return !!host && presentedLists.get(host) === displayList;
+}

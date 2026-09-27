@@ -6,28 +6,36 @@ import {
 } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
 import type { DocxPointPosition } from '../types';
-import { readSessionVersion, sourceVersionOf } from './layoutProvenance';
+import { isPresented, readSessionVersion, sourceVersionOf } from './layoutProvenance';
 
 /** What resolving a hit needs from the paged editor. */
 export interface PointPositionEditor {
   getYrsSession(): YrsSession | null;
   displayPositionToYrsLoc(position: PointPosition): YrsLoc | null;
+  /** True while typed or composed input has yet to reach the session. */
+  hasPendingInput(): boolean;
 }
 
 /**
- * Resolves a hit from the layout of `layoutVersion` into a batch target, or null unless that
- * layout shows the session's current version: display positions shift with every edit. Rust
- * projects the live location into the accepted view, so text a pending deletion hides before
- * the point does not count.
+ * Resolves a hit from the layout `queries` answer for into a batch target, or null unless `host`
+ * shows that layout's pixels, it lays out the session's current version and no input is still on
+ * its way to the session: display positions shift with every edit. Rust projects the live
+ * location into the accepted view, so text a pending deletion hides before the point does not
+ * count.
  */
 export function resolvePointPosition(
   editor: PointPositionEditor | null | undefined,
   hit: PointPosition | null,
-  layoutVersion: string | null
+  host: object | null | undefined,
+  queries: DisplayListQueries | null | undefined
 ): DocxPointPosition | null {
   const session = editor?.getYrsSession() ?? null;
-  if (!editor || !session || !hit || layoutVersion === null) return null;
-  if (readSessionVersion(session) !== layoutVersion) return null;
+  if (!editor || !session || !hit || !queries || !isPresented(host, queries.displayList)) {
+    return null;
+  }
+  const version = sourceVersionOf(queries);
+  if (version === null || readSessionVersion(session) !== version) return null;
+  if (editor.hasPendingInput()) return null;
   const loc = editor.displayPositionToYrsLoc(hit);
   if (!loc) return null;
   let offset: number;
@@ -38,7 +46,7 @@ export function resolvePointPosition(
   }
   return {
     ...hit,
-    version: layoutVersion,
+    version,
     target: {
       kind: 'range',
       story: loc.story,
@@ -63,9 +71,5 @@ export function positionAtClientPoint(
     displayListQueries: queries,
     projector: createCanvasHostProjector(host, queries, zoom),
   });
-  return resolvePointPosition(
-    editor,
-    dom.getPositionAtPoint(clientX, clientY),
-    sourceVersionOf(queries)
-  );
+  return resolvePointPosition(editor, dom.getPositionAtPoint(clientX, clientY), host, queries);
 }

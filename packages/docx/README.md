@@ -579,9 +579,10 @@ if (hit) {
 }
 ```
 
-It returns `null` while the rendered layout does not show the current version, and
-a batch applied after further typing refuses with `stale-version`, so a drop never
-lands at a shifted position. Plugins get the same query as
+It returns `null` while typed or composed input is pending and until the painted
+pages show the current version (retry after `flushPendingInput()` or on the next
+frame), and a batch applied after further typing refuses with `stale-version`, so a
+drop never lands at a shifted position. Plugins get the same query as
 `context.geometry.getPositionAtPoint`, with the layout's `layoutId`. The lower-level
 `editorRef.getEditorRef()?.displayPositionToYrsLoc(hit)` maps a hit to its live
 `YrsLoc` (offsets that count text a pending deletion hides) without the version

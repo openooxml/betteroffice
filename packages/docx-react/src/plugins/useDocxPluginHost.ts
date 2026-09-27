@@ -250,8 +250,13 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
               host.layoutId() === currentLayout.id &&
               domRef.current === dom &&
               dom.context.pagesContainer.isConnected,
-            (hit, layoutVersion) =>
-              resolvePointPosition(latest.current.pagedEditorRef.current, hit, layoutVersion)
+            (hit) =>
+              resolvePointPosition(
+                latest.current.pagedEditorRef.current,
+                hit,
+                dom.context.pagesContainer,
+                dom.queries
+              )
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.

@@ -20,7 +20,7 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { createPluginGeometry, pluginLayout } from '../../../plugins/geometry';
-import { stampSourceVersion } from './layoutProvenance';
+import { markPresented, stampSourceVersion } from './layoutProvenance';
 import {
   positionAtClientPoint,
   resolvePointPosition,
@@ -79,9 +79,10 @@ afterAll(async () => {
 });
 
 /** The paged editor's mapping: region-aware projection, then the story's input position map. */
-function editorFor(session: YrsSession): PointPositionEditor {
+function editorFor(session: YrsSession, hasPendingInput = () => false): PointPositionEditor {
   return {
     getYrsSession: () => session,
+    hasPendingInput,
     displayPositionToYrsLoc(hit) {
       const target = projectYrsDisplayPosition(hit, (root) =>
         createYrsPositionProjection(session, root)
@@ -93,8 +94,11 @@ function editorFor(session: YrsSession): PointPositionEditor {
   };
 }
 
-/** A painted frame of the session's current version: the paragraph's markup text on one line. */
-async function paint(session: YrsSession, stamp = true) {
+/**
+ * A frame of the session's current version, the paragraph's markup text on one line, which its
+ * host shows unless `presented` is false.
+ */
+async function paint(session: YrsSession, { stamp = true, presented = true } = {}) {
   const start = createYrsPositionProjection(session, 'body')!.positionForLoc({
     story: 'body',
     paraId: '00000001',
@@ -140,6 +144,7 @@ async function paint(session: YrsSession, stamp = true) {
   page.getBoundingClientRect = canvas.getBoundingClientRect;
   page.append(canvas);
   host.append(page);
+  if (presented) markPresented(host, queries.displayList);
   const point = (x: number, y: number) => ({ clientX: 64 + x, clientY: 84 + y });
   return { queries, host, start, point };
 }
@@ -155,6 +160,29 @@ async function open() {
   sessions.push(session);
   session.openDocx(fixture(), true);
   return session;
+}
+
+/** Plugin geometry over `queries` as the plugin host builds it. */
+function pluginGeometry(
+  editor: PointPositionEditor,
+  session: YrsSession,
+  host: HTMLElement,
+  queries: DisplayListQueries,
+  current = () => true
+) {
+  const dom = createRenderedDomContext(host, 1, {
+    displayListQueries: queries,
+    projector: createCanvasHostProjector(host, queries, 1),
+  });
+  const layout = pluginLayout(queries, session.version(), 1)!;
+  const geometry = createPluginGeometry(
+    layout,
+    dom,
+    document.createElement('div'),
+    current,
+    (hit) => resolvePointPosition(editor, hit, host, queries)
+  );
+  return { layout, geometry };
 }
 
 describe('point positions as edit targets', () => {
@@ -211,7 +239,7 @@ describe('point positions as edit targets', () => {
     });
     const hit = dom.getPositionAtPoint(clientX, clientY);
     expect(hit).not.toBeNull();
-    expect(resolvePointPosition(editor, hit, before.version)).toBeNull();
+    expect(resolvePointPosition(editor, hit, host, queries)).toBeNull();
     const refused = session.applyEdits({
       expectVersion: before.version,
       steps: [{ op: 'insertText', target: before.target, at: 'start', text: 'X' }],
@@ -219,7 +247,7 @@ describe('point positions as edit targets', () => {
     expect(refused).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
     expect(texts(session, 'original')).toBe(`Now ${RAW}`);
 
-    const unstamped = await paint(session, false);
+    const unstamped = await paint(session, { stamp: false });
     expect(
       positionAtClientPoint(editor, unstamped.host, unstamped.queries, 1, clientX, clientY)
     ).toBeNull();
@@ -230,19 +258,8 @@ describe('point positions as edit targets', () => {
     const editor = editorFor(session);
     const { queries, host, point } = await paint(session);
     const { clientX, clientY } = point(225, 145);
-    const dom = createRenderedDomContext(host, 1, {
-      displayListQueries: queries,
-      projector: createCanvasHostProjector(host, queries, 1),
-    });
-    const layout = pluginLayout(queries, session.version(), 1)!;
     let current = true;
-    const geometry = createPluginGeometry(
-      layout,
-      dom,
-      document.createElement('div'),
-      () => current,
-      (hit, version) => resolvePointPosition(editor, hit, version)
-    );
+    const { layout, geometry } = pluginGeometry(editor, session, host, queries, () => current);
     const expected = positionAtClientPoint(editor, host, queries, 1, clientX, clientY)!;
     expect(geometry.getPositionAtPoint(clientX, clientY)).toEqual({
       ...expected,
@@ -254,5 +271,44 @@ describe('point positions as edit targets', () => {
     current = true;
     session.insertText({ story: 'body', paraId: '00000002', offset: 0 }, 'Z');
     expect(geometry.getPositionAtPoint(clientX, clientY)).toBeNull();
+  });
+
+  test('a layout the pages have not painted yet refuses until they show it', async () => {
+    const session = await open();
+    const editor = editorFor(session);
+    const shown = await paint(session);
+    session.insertText({ story: 'body', paraId: '00000002', offset: 0 }, 'Z');
+    const next = await paint(session, { presented: false });
+    const { clientX, clientY } = next.point(225, 145);
+    markPresented(next.host, shown.queries.displayList);
+    const { layout, geometry } = pluginGeometry(editor, session, next.host, next.queries);
+    expect(layout.version).toBe(session.version());
+    expect(positionAtClientPoint(editor, next.host, next.queries, 1, clientX, clientY)).toBeNull();
+    expect(geometry.getPositionAtPoint(clientX, clientY)).toBeNull();
+
+    markPresented(next.host, next.queries.displayList);
+    const position = positionAtClientPoint(editor, next.host, next.queries, 1, clientX, clientY);
+    expect(position).toMatchObject({ version: session.version() });
+    expect(geometry.getPositionAtPoint(clientX, clientY)).toEqual({
+      ...position!,
+      layoutId: layout.id,
+    });
+  });
+
+  test('input on its way to the session refuses until it lands', async () => {
+    const session = await open();
+    let pending = true;
+    const editor = editorFor(session, () => pending);
+    const { queries, host, point } = await paint(session);
+    const { clientX, clientY } = point(225, 145);
+    const { geometry } = pluginGeometry(editor, session, host, queries);
+    expect(positionAtClientPoint(editor, host, queries, 1, clientX, clientY)).toBeNull();
+    expect(geometry.getPositionAtPoint(clientX, clientY)).toBeNull();
+
+    pending = false;
+    expect(positionAtClientPoint(editor, host, queries, 1, clientX, clientY)).toMatchObject({
+      version: session.version(),
+    });
+    expect(geometry.getPositionAtPoint(clientX, clientY)).not.toBeNull();
   });
 });

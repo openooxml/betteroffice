@@ -413,7 +413,8 @@ export interface DocxEditorRef {
    * The text under a client point, such as a drop event's `clientX`/`clientY`, from the same
    * hit testing as the caret, without moving selection or focus. Its `target` and `version` form
    * an edit batch step's target and `expectVersion`. Null outside text (margins, images, page
-   * gaps) and while the rendered layout does not show the current version.
+   * gaps), while typed or composed input is pending, and until the painted pages show the current
+   * version; retry after {@link flushPendingInput} or on the next frame.
    */
   getPositionAtPoint: (clientX: number, clientY: number) => DocxPointPosition | null;
   /** Save the document to a buffer. */

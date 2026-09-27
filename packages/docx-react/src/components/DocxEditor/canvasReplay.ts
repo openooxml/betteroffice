@@ -80,10 +80,11 @@ export interface CanvasReplayPreparation {
   present(): void;
 }
 
+/** Resolves true once every page is presented, false when a newer replay superseded it first. */
 export async function presentCanvasReplay(
   preparations: CanvasReplayPreparation[],
   isCurrent: () => boolean
-): Promise<void> {
+): Promise<boolean> {
   try {
     const results = await Promise.allSettled(preparations.map(({ ready }) => ready));
     const failure = results.find((result) => result.status === 'rejected');
@@ -98,11 +99,12 @@ export async function presentCanvasReplay(
           failures.push({ preparation, reason });
         }
       }
-      if (failures.length === 0) return;
+      if (failures.length === 0) return true;
       if (attempt === 1) throw failures[0].reason;
       pending = failures.map(({ preparation }) => preparation);
       await Promise.resolve();
     }
+    return false;
   } finally {
     for (const { buffer } of preparations) {
       buffer.width = 0;
