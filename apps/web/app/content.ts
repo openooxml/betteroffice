@@ -82,7 +82,7 @@ export const PACKAGES_SECTION = {
 export const PACKAGES = [
   {
     name: "@betteroffice/agents",
-    desc: "DOCX tools for agents — bounded search and reads, occurrence handles, reviewable text proposals, tracked edits, page previews and verified export. Use the TypeScript SDK or local MCP server. XLSX and PPTX adapters are not included yet.",
+    desc: "Office tools for agents — bounded search and reads, reviewable proposals and export through a TypeScript SDK or local MCP server. DOCX includes tracked edits and page previews; XLSX cell/formula and PPTX slide-text adapters are available as first prototypes.",
   },
   {
     name: "@betteroffice/docx",

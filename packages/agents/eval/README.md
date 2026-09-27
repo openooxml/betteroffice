@@ -48,3 +48,32 @@ Record task completion, failed calls, recovery behavior, expected tool usage,
 and validator results in the PR. These are a small usability sample, not a
 general model benchmark. If a run fails because the server was unavailable,
 fix installation/discovery and restart; do not count it as a document-task pass.
+
+## XLSX/PPTX prototype tasks
+
+Build and pack the agents package with the matching XLSX and PPTX engine builds.
+Install those tarballs in an isolated consumer; override transitive engine
+versions so the consumer uses the same unreleased engine APIs as the package.
+
+```sh
+bun packages/agents/eval/prepare-formats.ts /tmp/betteroffice-formats-eval
+```
+
+Run independent Codex `gpt-6-luna` sessions with the installed MCP CLI rooted at
+each task directory. Ask for these tasks using only MCP document tools:
+
+- `xlsx`: set Budget!B3 to 1000 and E3 to `=D3*2`; review, verify, export
+  `budget-revised.xlsx`, and inspect its calculated result.
+- `pptx`: change revenue to €5.1 million and only the second occurrence in
+  “Risk risk.” to “opportunity”; review, verify, export `slides-revised.pptx`.
+- `mixed`: set Budget!B3 to 700 and presentation revenue to €6.0 million;
+  review, verify, export `budget-revised.xlsx` and `slides-revised.pptx`.
+
+Require original files, formatting, and unrelated content to remain intact.
+Keep prompts, tool traces, and screenshots outside git. Validate the outputs:
+
+```sh
+python3 packages/agents/eval/check-formats.py /tmp/betteroffice-formats-eval
+```
+
+These are reproducible smoke tasks, not a general model-quality benchmark.
