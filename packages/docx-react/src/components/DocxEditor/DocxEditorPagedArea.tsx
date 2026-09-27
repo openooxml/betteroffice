@@ -161,7 +161,9 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: () => void;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
-  onRenderedDomContextReady: ((ctx: RenderedDomContext) => void) | undefined;
+  onRenderedDomContextReady:
+    | ((ctx: RenderedDomContext, queries: DisplayListQueries) => void)
+    | undefined;
   pluginOverlays: ReactNode;
   onHyperlinkClick: (data: HyperlinkPopupData) => void;
   hyperlinkPopupData: HyperlinkPopupData | null;

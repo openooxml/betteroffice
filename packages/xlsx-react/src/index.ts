@@ -45,6 +45,10 @@ export {
 export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n';
 
 export {
+  XlsxCommandAdmissionError,
+  type XlsxCommandAdmissionCode,
+} from './commands/createXlsxCommandStore';
+export {
   XlsxCommandProvider,
   type XlsxCommandProviderProps,
 } from './commands/XlsxCommandProvider';

@@ -21,6 +21,7 @@ import {
   type YrsToolbarSelection,
 } from '../yrsToolbar';
 import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandStore';
+import type { RevealPositionOutcome } from './usePagedScrollApi';
 
 /** The image under a one-unit selection. */
 export interface PagedEditorSelectedImage {
@@ -65,6 +66,7 @@ interface RefApiInputs {
   layout: Layout | null;
   runLayoutPipeline: () => void;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
+  revealPositionImpl: (position: number) => RevealPositionOutcome;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
   setIsFocused: React.Dispatch<React.SetStateAction<boolean>>;
@@ -104,6 +106,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     layout,
     runLayoutPipeline,
     scrollToPositionImpl,
+    revealPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
     setIsFocused,
@@ -205,6 +208,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getLayout: () => layout,
     relayout: runLayoutPipeline,
     scrollToPosition: scrollToPositionImpl,
+    revealDisplayPosition: revealPositionImpl,
     scrollToParaId: scrollToParaIdImpl,
     scrollToPage: scrollToPageImpl,
     highlightRange: (from, to) => {
@@ -249,6 +253,7 @@ export interface UsePagedEditorRefApiOptions {
   layout: Layout | null;
   runLayoutPipeline: () => void;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
+  revealPositionImpl: (position: number) => RevealPositionOutcome;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
   setIsFocused: React.Dispatch<React.SetStateAction<boolean>>;
@@ -270,6 +275,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     layout,
     runLayoutPipeline,
     scrollToPositionImpl,
+    revealPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
     setIsFocused,
@@ -305,6 +311,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     layout,
     runLayoutPipeline,
     scrollToPositionImpl,
+    revealPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
     setIsFocused,
@@ -322,6 +329,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     layout,
     runLayoutPipeline,
     scrollToPositionImpl,
+    revealPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
   ]);

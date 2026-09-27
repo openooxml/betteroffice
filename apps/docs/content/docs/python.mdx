@@ -70,6 +70,27 @@ transport.
 `propose` stages agent edits with before-and-after text for review.
 `accept_proposal` applies the edits as a single undo step.
 
+## Version-checked edit batches
+
+`read_cells` and `find_text` return cells with the workbook version they were
+read at; `apply_edits` applies a batch against that version as one recalculated
+undo step, or returns a refusal dictionary with nothing changed. Requests and
+results are the same camelCase dictionaries JavaScript uses:
+
+```python
+read = wb.read_cells({"ranges": [{"sheetId": "sheet:0", "range": {"kind": "a1", "a1": "B3"}}]})
+result = wb.apply_edits({
+    "expectVersion": read["version"],
+    "steps": [{
+        "op": "setCellInputs",
+        "target": {"sheetId": "sheet:0", "range": {"kind": "a1", "a1": "B3"}},
+        "inputs": [["120"]],
+    }],
+})
+if not result["ok"]:
+    print(result["failure"]["code"])   # e.g. "stale-version"
+```
+
 See the [package README](https://pypi.org/project/betteroffice-xlsx/) for the full
 API, error types, and an openpyxl comparison.
 

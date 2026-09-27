@@ -58,14 +58,22 @@ export function useKeyboardShortcuts({
       const { disableFindReplaceShortcuts: noFind, tableSelection: table } = optionsRef.current;
       const plain = !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey;
       if (plain && (event.key === 'Delete' || event.key === 'Backspace')) {
-        if (table.state.tableIndex !== null) {
+        if (table.state.tableIndex !== null && !isForeignTextField(event.target)) {
           event.preventDefault();
           table.handleAction('deleteTable');
         }
         return;
       }
       const binding = BINDINGS.find(({ shortcut }) => matchesChord(shortcut.chord, event));
-      if (!binding) return;
+      if (!binding) {
+        const contributed = commands
+          .pluginShortcuts()
+          .find(({ chord }) => matchesChord(chord, event));
+        if (!contributed || isForeignTextField(event.target)) return;
+        event.preventDefault();
+        if (!event.repeat) void commands.store.execute(contributed.id, null);
+        return;
+      }
       const { id, shortcut } = binding;
       if (isForeignTextField(event.target) && !FIELD_COMMANDS.has(id)) return;
       if (noFind && FIND_REPLACE.has(id)) return;

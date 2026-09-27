@@ -21,6 +21,8 @@ type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 /** The React editor's sole mutable document session. */
 export interface YrsCoreSession {
   session: YrsSession | null;
+  /** The seed generation `session` was created for. */
+  sessionGeneration: number | null;
   storyBlocks(storyId: string, env: YrsRenderEnv): LayoutBlock[] | null;
   bodyBlocks(env: YrsRenderEnv): LayoutBlock[] | null;
   inputPositionMap(storyId?: string): YrsInputPositionMap | null;
@@ -180,6 +182,7 @@ export function useYrsCoreSession(
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
+  const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
 
   useEffect(() => {
     setSession(null);
@@ -207,6 +210,7 @@ export function useYrsCoreSession(
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
+        setSessionGeneration(seedGeneration);
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration);
       })
       .catch((error) => {
@@ -348,6 +352,7 @@ export function useYrsCoreSession(
 
   return {
     session,
+    sessionGeneration,
     storyBlocks,
     bodyBlocks,
     inputPositionMap,

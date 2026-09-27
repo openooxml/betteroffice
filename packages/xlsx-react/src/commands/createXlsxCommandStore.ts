@@ -15,15 +15,28 @@ import type {
   XlsxCommandStore,
 } from './types';
 
-/** Raised when an admitted command cannot run after the input before it. */
+/** Why work queued behind accepted input could not run. */
+export type XlsxCommandAdmissionCode = Extract<
+  XlsxCommandFailureCode,
+  'input-failed' | 'document-replaced' | 'target-changed' | 'gesture-active' | 'editor-unavailable'
+>;
+
+const ADMISSION_MESSAGES: Record<XlsxCommandAdmissionCode, string> = {
+  'input-failed': 'Input accepted earlier could not be written',
+  'document-replaced': 'The workbook was replaced',
+  'target-changed': 'The selection changed',
+  'gesture-active': 'Finish the chart drag first',
+  'editor-unavailable': 'The editor is not ready',
+};
+
+/**
+ * Raised when work queued behind accepted input cannot run: a command, or a version, read or
+ * edit-batch call of the editor API.
+ */
 export class XlsxCommandAdmissionError extends Error {
-  constructor(
-    readonly code: Extract<
-      XlsxCommandFailureCode,
-      'input-failed' | 'document-replaced' | 'target-changed' | 'gesture-active' | 'editor-unavailable'
-    >
-  ) {
-    super(code);
+  constructor(readonly code: XlsxCommandAdmissionCode) {
+    super(ADMISSION_MESSAGES[code]);
+    this.name = 'XlsxCommandAdmissionError';
   }
 }
 
