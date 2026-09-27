@@ -91,6 +91,14 @@
   batches. Plugins read and navigate by default; every write is checked against
   its grant and `readOnly` when it runs.
 
+- **Structured PPTX export.** PPTX JavaScript, Rust and Python hosts export
+  structured slide content and Markdown with session or snapshot anchors,
+  explicit hidden-content and notes/comment options, and omission diagnostics.
+
+- **Structured DOCX export.** DOCX exports read-only structured JSON and
+  Markdown with source anchors, explicit story and revision options, and
+  omission diagnostics. Page fragments are not yet included.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

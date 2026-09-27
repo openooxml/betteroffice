@@ -25,6 +25,15 @@ document, history and id allocation untouched. `validate_edits` runs the same
 checks without changing anything. The operation, target, failure-code and atom
 enums are `#[non_exhaustive]`, so later releases can add variants.
 
+`structured` exports read-only structured content and Markdown in schema
+version 1: `EditingDoc::export_structured` and `export_markdown` read a live
+session with its version, and `export_docx_structured` reads DOCX bytes through
+the same walker. Blocks and inlines carry anchors (paragraph ids, batch-offset
+ranges, table and control ids, `sourcePart` locations in retained XML, or
+`unlocated` with the reason there is no location), and
+everything omitted or not represented is diagnosed. `read_types` holds the
+anchor, story-selection and content-control types shared by the read APIs.
+
 Used by [betteroffice-docx](https://crates.io/crates/betteroffice-docx).
 
 Measure DOCX parsing, seeding, and body lowering with:

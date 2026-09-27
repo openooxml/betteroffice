@@ -581,6 +581,11 @@ function noteRefUnit(
   );
 }
 
+/** The tracked insertion or deletion a drawing keeps from its run. */
+function trackedMarks(marks: readonly MarkDescriptor[]): MarkDescriptor[] {
+  return marks.filter((mark) => mark.name === 'insertion' || mark.name === 'deletion');
+}
+
 function runContentToUnits(
   content: RunContent,
   marks: readonly MarkDescriptor[],
@@ -633,13 +638,13 @@ function runContentToUnits(
         }),
       ];
     case 'drawing':
-      return [embedUnit('image', imagePayload(content.image))];
+      return [embedUnit('image', imagePayload(content.image), trackedMarks(marks))];
     case 'horizontalRule':
       return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
     case 'shape':
-      return [embedUnit('shape', shapePayload(content.shape))];
+      return [embedUnit('shape', shapePayload(content.shape), trackedMarks(marks))];
     case 'chart':
-      return [embedUnit('chart', chartPayload(content.chart))];
+      return [embedUnit('chart', chartPayload(content.chart), trackedMarks(marks))];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks, commentId)];
     case 'endnoteRef':
