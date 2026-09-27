@@ -1,6 +1,6 @@
 export * from './manifest';
 export type { BundledFontSource } from './provider';
-import type { BundledFontFace } from './manifest';
+import { BUNDLED_FONTS, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
 
@@ -198,6 +198,10 @@ function resolvedAssetBase(baseUrl: string | URL): URL {
   }
 }
 
+const CJK_FILES = new Set(
+  BUNDLED_FONTS.filter((face) => face.script?.startsWith('cjk-')).map((face) => face.file),
+);
+
 async function assetUrl(
   { file, script }: BundledFontFace,
   baseUrl: URL | undefined,
@@ -205,7 +209,7 @@ async function assetUrl(
   if (baseUrl !== undefined) return new URL(file, baseUrl);
   const local = FONT_ASSET_URLS[file];
   if (local) return local();
-  if (script?.startsWith('cjk-')) {
+  if (script?.startsWith('cjk-') || CJK_FILES.has(file)) {
     const cjk = await loadCjkAssetUrls();
     const resolveCjk = cjk?.[file];
     if (resolveCjk) return resolveCjk();

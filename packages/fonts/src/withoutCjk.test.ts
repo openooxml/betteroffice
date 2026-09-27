@@ -15,4 +15,6 @@ test('without the CJK add-on only a CJK face asks for it', async () => {
   await expect(
     loadBundledFontBytes(resolveScriptFallbackFace('cjk-sc', false, false)!)
   ).rejects.toThrow('install @betteroffice/fonts-cjk');
+  const { script: _script, ...withoutScript } = resolveScriptFallbackFace('cjk-sc', false, false)!;
+  await expect(loadBundledFontBytes(withoutScript)).rejects.toThrow('install @betteroffice/fonts-cjk');
 });

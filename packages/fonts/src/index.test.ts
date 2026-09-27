@@ -113,12 +113,8 @@ describe('loading', () => {
     const provider = createFontProvider();
     const bytes = await provider.resolveScriptFallback('cjk-sc', false, false)!();
     expect(new DataView(bytes).getUint32(0)).toBe(SFNT_CFF);
-  });
-
-  test('loads every manifest face from the package without a base URL', async () => {
-    for (const face of BUNDLED_FONTS) {
-      expect((await loadBundledFontBytes(face)).byteLength).toBe(face.byteLength);
-    }
+    const { script: _script, ...withoutScript } = resolveScriptFallbackFace('cjk-sc', false, false)!;
+    expect(new DataView(await loadBundledFontBytes(withoutScript)).getUint32(0)).toBe(SFNT_CFF);
   });
 
   test('caches per face, handing out one buffer identity', async () => {
@@ -200,6 +196,12 @@ describe('loading', () => {
       expect(bytes.byteLength).toBe(319508);
     } finally {
       globalThis.fetch = realFetch;
+    }
+  });
+
+  test('loads every manifest face from the package without a base URL', async () => {
+    for (const face of BUNDLED_FONTS) {
+      expect((await loadBundledFontBytes(face)).byteLength).toBe(face.byteLength);
     }
   });
 });
