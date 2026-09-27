@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_xlsxdocument_free: (a: number, b: number) => void;
 export const xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_applyEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyOpsProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -16,6 +17,7 @@ export const xlsxdocument_clearUpdateObservation: (a: number) => void;
 export const xlsxdocument_clientId: (a: number) => number;
 export const xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_displayListProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_documentVersion: (a: number) => [number, number];
 export const xlsxdocument_drainUpdateEvent: (a: number) => [number, number, number, number];
 export const xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_editCellProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -23,6 +25,7 @@ export const xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [n
 export const xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
 export const xlsxdocument_encodeStateVector: (a: number) => [number, number];
+export const xlsxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -33,6 +36,7 @@ export const xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number)
 export const xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_readCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_redoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
@@ -45,6 +49,7 @@ export const xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: nu
 export const xlsxdocument_sheetInfoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_startUpdateObservation: (a: number) => [number, number];
 export const xlsxdocument_undoJson: (a: number) => [number, number, number, number];
+export const xlsxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_version: () => [number, number];
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;

@@ -350,3 +350,17 @@ counted across every story while the parts are read, 250,000 alignment cells,
 output, the no-op included.
 Review in BetterOffice is tested; Word validation is reported separately.
 Native Rust and Python comparison is not available yet.
+
+### Editor plugin contract (deprecated)
+
+`@betteroffice/docx/plugin-api` keeps its geometry and sidebar building blocks:
+`RenderedDomContext`, `PositionCoordinates`, `SidebarItem`,
+`createRenderedDomContext`, `createCanvasHostProjector` and
+`resolveItemPositions`. The snapshot-based `EditorPluginCore`,
+`PluginPanelProps`, `PanelConfig` and `SidebarItemContext` are deprecated: they
+pass serialized `Document` snapshots and have no host that manages their
+lifecycle. Host plugins for the React editor use `defineDocxPlugin` and the
+`plugins` prop of
+[`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react),
+which provide versioned reads, granted commands and edit batches, lifecycle
+events and cleanup.

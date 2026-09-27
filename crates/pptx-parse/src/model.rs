@@ -8,6 +8,7 @@ use ooxml_drawingml::{
 use serde::{Deserialize, Serialize};
 
 use crate::comments::{Comment, CommentAuthor, CommentFlavor};
+use crate::inventory::{NotesSource, SlideSource};
 use crate::relationships::Relationship;
 
 pub use ooxml_drawingml::chart::{
@@ -67,6 +68,12 @@ pub struct PptxPackage {
     pub(crate) source_container: ooxml_opc::SourceContainer,
     #[serde(default, skip_serializing_if = "ShapeElements::is_legacy")]
     pub(crate) shape_elements: ShapeElements,
+    /// Source inventories of the slide parts, by part path, found while parsing.
+    #[serde(skip)]
+    pub(crate) sources: BTreeMap<String, SlideSource>,
+    /// Notes pages, by the part path of the slide they belong to.
+    #[serde(skip)]
+    pub(crate) notes_sources: BTreeMap<String, NotesSource>,
 }
 
 impl PptxPackage {
@@ -81,6 +88,17 @@ impl PptxPackage {
     /// the parsed model but not the raw part bytes.
     pub fn has_parts(&self) -> bool {
         !self.parts.is_empty()
+    }
+
+    /// Where a slide part's shapes sit in its XML and what the model leaves out; `None` for
+    /// packages not parsed from file bytes.
+    pub fn slide_source(&self, part_path: &str) -> Option<&SlideSource> {
+        self.sources.get(part_path)
+    }
+
+    /// The notes page of the slide at `slide_part_path`, when the package was parsed with one.
+    pub fn notes_source(&self, slide_part_path: &str) -> Option<&NotesSource> {
+        self.notes_sources.get(slide_part_path)
     }
 
     /// Whether source ordinals include connectors.
@@ -159,6 +177,9 @@ pub struct Slide {
     pub color_map_override: Option<ColorMap>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// `p:sld/@show` negated; `None` in packages stored before slide visibility was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
