@@ -115,6 +115,10 @@ impl XlsxDocument {
         let subscription = self
             .session
             .observe_update_v1(move |event| {
+                // carries no update, and nothing this handle exposes recalculates alone.
+                if event.origin == UpdateOrigin::Recalculation {
+                    return;
+                }
                 let mut observed = observed
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -172,7 +176,7 @@ impl XlsxDocument {
             .saturating_sub(event.update.len().saturating_add(1));
         let mut encoded = Vec::with_capacity(event.update.len() + 1);
         encoded.push(match event.origin {
-            UpdateOrigin::Local => 0,
+            UpdateOrigin::Local | UpdateOrigin::Recalculation => 0,
             UpdateOrigin::Remote => 1,
         });
         encoded.extend_from_slice(&event.update);
@@ -408,7 +412,7 @@ impl XlsxDocument {
     }
 
     /// accept a proposal as one agent transaction; returns the edit envelope
-    /// plus `proposalId`, or a `stale: ...` error when the base moved.
+    /// plus `proposalId`, or a `{"code":"staleProposal",...}` error when the base moved.
     #[wasm_bindgen(js_name = acceptProposalJson)]
     pub fn accept_proposal_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.session
@@ -424,6 +428,60 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    /// The session-scoped version of the committed workbook state.
+    #[wasm_bindgen(js_name = documentVersion)]
+    pub fn document_version(&self) -> String {
+        self.session.document_version()
+    }
+
+    #[wasm_bindgen(js_name = readCellsJson)]
+    pub fn read_cells_json(&self, request: &str) -> Result<String, JsValue> {
+        self.session
+            .read_cells_json(request)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = findTextJson)]
+    pub fn find_text_json(&self, request: &str) -> Result<String, JsValue> {
+        self.session
+            .find_text_json(request)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = validateEditsJson)]
+    pub fn validate_edits_json(&self, request: &str) -> Result<String, JsValue> {
+        self.session
+            .validate_edits_json(request)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// apply an edit batch all-or-nothing; volatile functions see only the request's clock.
+    #[wasm_bindgen(js_name = applyEditsJson)]
+    pub fn apply_edits_json(&mut self, request: &str) -> Result<String, JsValue> {
+        self.session
+            .apply_edits_json(request)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Export the committed workbook with the version it was read at; nothing recalculates.
+    #[wasm_bindgen(js_name = exportStructuredJson)]
+    pub fn export_structured_json(&self, options: &str) -> Result<String, JsValue> {
+        self.session
+            .export_structured_json(options)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = exportMarkdownJson)]
+    pub fn export_markdown_json(
+        &self,
+        options: &str,
+        markdown_options: &str,
+    ) -> Result<String, JsValue> {
+        self.session
+            .export_markdown_json(options, markdown_options)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// serialize the current workbook back to `.xlsx` bytes.
     #[wasm_bindgen(js_name = saveBytes)]
     pub fn save_bytes(&self) -> Result<Vec<u8>, JsValue> {
@@ -434,6 +492,27 @@ impl XlsxDocument {
     pub fn version() -> String {
         Session::version().to_string()
     }
+}
+
+/// Export `.xlsx` bytes as read: stored formula results, no clock.
+#[wasm_bindgen(js_name = exportXlsxStructuredJson)]
+pub fn export_xlsx_structured_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
+    core::export_xlsx_structured_json(bytes, options).map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen(js_name = exportXlsxMarkdownJson)]
+pub fn export_xlsx_markdown_json(
+    bytes: &[u8],
+    options: &str,
+    markdown_options: &str,
+) -> Result<String, JsValue> {
+    core::export_xlsx_markdown_json(bytes, options, markdown_options)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen(js_name = renderXlsxMarkdownJson)]
+pub fn render_xlsx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
+    core::render_xlsx_markdown_json(content, options).map_err(|e| JsValue::from_str(&e))
 }
 
 fn parse_client_id(client_id: f64) -> Result<u64, JsValue> {

@@ -36,6 +36,11 @@ import type { RustFontChainsProvider } from './useRustMeasurement';
 import { displayListNeedsHostImages } from '../canvasPresentation';
 import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
+  readSessionVersion,
+  sourceVersionOf,
+  stampSourceVersion,
+} from '../internals/layoutProvenance';
+import {
   DisplayListQueryEpochGate,
   type ResolveDisplayListQueries,
 } from './displayListQueryEpochGate';
@@ -60,6 +65,11 @@ export interface UseRustDisplayListResult {
   queries: DisplayListQueries | null;
   /** Resolve the newest query facade after pending document/frame changes. */
   resolveQueries: ResolveDisplayListQueries;
+  /**
+   * The display list once it shows every document change so far. `relayout`
+   * runs a layout pass when none is on its way; rejects when rendering fails.
+   */
+  settledDisplayList(relayout: () => void, timeoutMs?: number): Promise<DisplayList>;
   /** Worker-computed caret tagged to `frame`. */
   caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
@@ -140,14 +150,33 @@ export function useRustDisplayList(
   // Changing the set rebuilds the display list so resolve/reopen — and the
   // "expanded resolved card re-tints its range" flow — repaint immediately.
   resolvedCommentIds?: ReadonlySet<number>,
-  engine?: RustDisplayListEngine | null
+  engine?: RustDisplayListEngine | null,
+  /** Asks the host for a layout of the document as it is now. */
+  requestLayout?: () => void
 ): UseRustDisplayListResult {
+  const requestLayoutRef = useRef(requestLayout);
+  requestLayoutRef.current = requestLayout;
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const queryEpochGateRef = useRef<DisplayListQueryEpochGate | null>(null);
   if (!queryEpochGateRef.current) queryEpochGateRef.current = new DisplayListQueryEpochGate();
   const queryEpochGate = queryEpochGateRef.current;
   const contentEpochRef = useRef(0);
+  const settledEpochRef = useRef<number | null>(null);
+  const settleErrorRef = useRef<Error | null>(null);
+  const settleWaitersRef = useRef(new Set<() => void>());
+  const settleRelayoutRef = useRef<(() => void) | null>(null);
+  const markSettled = useCallback((epoch: number | null, failure: Error | null = null): void => {
+    settledEpochRef.current = epoch;
+    settleErrorRef.current = failure;
+    for (const waiter of [...settleWaitersRef.current]) waiter();
+  }, []);
+  const requestSettleRelayout = useCallback((): void => {
+    if (settleWaitersRef.current.size === 0) return;
+    setTimeout(() => {
+      if (settleWaitersRef.current.size > 0) settleRelayoutRef.current?.();
+    }, 0);
+  }, []);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(true);
   const generationRef = useRef(0);
@@ -280,6 +309,7 @@ export function useRustDisplayList(
       if (suppressWorkerInvalidationRef.current > 0) return;
       contentEpochRef.current += 1;
       queryEpochGate.invalidate();
+      requestSettleRelayout();
       // Update observers fire from inside the wasm transaction. Calling any
       // other EditSession method here would re-enter the borrowed wasm object
       // (wasm-bindgen correctly rejects that unsafe alias). Selection is sent
@@ -289,7 +319,7 @@ export function useRustDisplayList(
       // (workerSurfacesActive) so the canvas retains its pixels until the
       // post-sync frame lands — flipping surfaces would remount every page.
     });
-  }, [queryEpochGate, residentEngine]);
+  }, [queryEpochGate, requestSettleRelayout, residentEngine]);
 
   useEffect(
     () => () => {
@@ -417,7 +447,8 @@ export function useRustDisplayList(
           nextFrame,
           caret,
           null,
-          { ...previous, queries: null }
+          { ...previous, queries: null },
+          readSessionVersion(hostEngine)
         );
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
@@ -425,6 +456,7 @@ export function useRustDisplayList(
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
+        markSettled(contentEpochRef.current);
         applyPaintedCaretReply(false, paintToken);
         return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false };
       };
@@ -434,6 +466,7 @@ export function useRustDisplayList(
         if (!worker || !worker.client.isReady() || !currentFrame) return null;
         const selection = worker.engine.selection();
         if (!selection) return null;
+        const dispatchedEpoch = contentEpochRef.current;
         paintedCaretMachine.noteInput(performance.now());
         const paintCaret = workerPresentationActiveRef.current;
         const paintToken = paintedCaretMachine.token();
@@ -501,12 +534,31 @@ export function useRustDisplayList(
           worker.engine.selection(),
           nextFrame
         );
+        if (contentEpochRef.current !== dispatchedEpoch) {
+          // Another change reached the session while the worker computed this frame: show its
+          // pixels, but publish no queries and leave rendering unsettled until a fresh layout.
+          const overtaken: RustDisplayListSnapshot = {
+            displayList: nextFrame.displayList,
+            frame: nextFrame,
+            queries: null,
+            caret,
+          };
+          snapshotRef.current = overtaken;
+          setSnapshot(overtaken);
+          setError(null);
+          setLoading(false);
+          requestSettleRelayout();
+          setTimeout(() => requestLayoutRef.current?.(), 0);
+          applyPaintedCaretReply(false, paintToken);
+          return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false };
+        }
         const nextSnapshot = createRustDisplayListSnapshot(
           nextFrame.displayList,
           nextFrame,
           caret,
           null,
-          previous
+          previous,
+          readSessionVersion(worker.engine)
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -516,6 +568,7 @@ export function useRustDisplayList(
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
+        markSettled(contentEpochRef.current);
         applyPaintedCaretReply(Boolean(result.caretPainted && caret?.caretRect), paintToken);
         return {
           frameEpoch: nextFrame.frameEpoch,
@@ -542,6 +595,7 @@ export function useRustDisplayList(
         console.error('[CanvasRenderer] Resident input failed', nextError);
         queryEpochGate.clear();
         setError(nextError);
+        markSettled(null, nextError);
         // Once invoked, never fall through to the legacy op: a worker failure
         // may have happened after committing the transaction.
         return { frameEpoch: null, caretSynchronized: false };
@@ -549,9 +603,11 @@ export function useRustDisplayList(
     },
     [
       applyPaintedCaretReply,
+      markSettled,
       paintedCaretMachine,
       publishQuerySnapshot,
       queryEpochGate,
+      requestSettleRelayout,
     ]
   );
 
@@ -596,6 +652,8 @@ export function useRustDisplayList(
       setSnapshot(EMPTY_DISPLAY_LIST_SNAPSHOT);
       setError(null);
       setLoading(true);
+      settledEpochRef.current = null;
+      settleErrorRef.current = null;
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
       notifyCaretInterrupt();
@@ -603,6 +661,7 @@ export function useRustDisplayList(
     }
     queryEpochGate.invalidate();
     const contentEpoch = contentEpochRef.current;
+    const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
     if (!inputs) {
@@ -762,6 +821,7 @@ export function useRustDisplayList(
           generation !== generationRef.current ||
           contentEpoch !== contentEpochRef.current
         ) {
+          if (contentEpoch !== contentEpochRef.current) requestSettleRelayout();
           return;
         }
         const nextSnapshot = createRustDisplayListSnapshot(
@@ -769,13 +829,15 @@ export function useRustDisplayList(
           result.frame,
           result.caret,
           result.queryEngine,
-          snapshotRef.current
+          snapshotRef.current,
+          sourceVersion
         );
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
+        markSettled(contentEpoch);
         const workerProduced = Boolean(
           result.workerProduced && probe && workerRef.current?.client.isReady()
         );
@@ -798,6 +860,7 @@ export function useRustDisplayList(
         queryEpochGate.clear();
         setError(nextError);
         setLoading(false);
+        markSettled(null, nextError);
       });
   }, [
     layout,
@@ -812,7 +875,40 @@ export function useRustDisplayList(
     notifyCaretInterrupt,
     publishQuerySnapshot,
     queryEpochGate,
+    markSettled,
+    requestSettleRelayout,
   ]);
+
+  const settledDisplayList = useCallback(
+    (relayout: () => void, timeoutMs = 15_000): Promise<DisplayList> =>
+      new Promise<DisplayList>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const settle = (): boolean => {
+          const failure = settleErrorRef.current;
+          const displayList = snapshotRef.current.displayList;
+          const current =
+            displayList !== null && settledEpochRef.current === contentEpochRef.current;
+          if (!failure && !current) return false;
+          settleWaitersRef.current.delete(waiter);
+          if (timer !== undefined) clearTimeout(timer);
+          if (failure) reject(failure);
+          else resolve(displayList!);
+          return true;
+        };
+        const waiter = (): void => {
+          settle();
+        };
+        if (settle()) return;
+        settleRelayoutRef.current = relayout;
+        settleWaitersRef.current.add(waiter);
+        timer = setTimeout(() => {
+          settleWaitersRef.current.delete(waiter);
+          reject(new Error('The document did not finish rendering'));
+        }, timeoutMs);
+        relayout();
+      }),
+    []
+  );
 
   return {
     displayList: snapshot.displayList,
@@ -821,6 +917,7 @@ export function useRustDisplayList(
     frame: snapshot.frame,
     queries: snapshot.queries,
     resolveQueries,
+    settledDisplayList,
     caret: snapshot.caret,
     applyInput,
     applyDelete,
@@ -835,20 +932,19 @@ export function useRustDisplayList(
   };
 }
 
+/** `sourceVersion`: the document version the frame's pixels and queries show. */
 function createRustDisplayListSnapshot(
   displayList: DisplayList,
   frame: RetainedFrame | null,
   caret: YrsResidentCaretSnapshot | null,
   engine: RustDisplayListEngine | null | undefined,
-  previous: RustDisplayListSnapshot
+  previous: RustDisplayListSnapshot,
+  sourceVersion: string | null
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
-  return {
-    displayList,
-    frame,
-    queries: createDisplayListQueries(displayList, residentQueries, previous.queries),
-    caret,
-  };
+  const queries = createDisplayListQueries(displayList, residentQueries, previous.queries);
+  stampSourceVersion(queries, sourceVersion);
+  return { displayList, frame, queries, caret };
 }
 
 function residentCaretForSelection(
@@ -933,6 +1029,8 @@ export interface UseCanvasRendererResult {
   queries: DisplayListQueries | null;
   /** Resolve the newest facade after pending edits and relayouts. */
   resolveQueries: ResolveDisplayListQueries;
+  /** The display list once it shows every document change so far. */
+  settledDisplayList(relayout: () => void, timeoutMs?: number): Promise<DisplayList>;
   /** Worker caret from the same atomic renderer snapshot. */
   caret: YrsResidentCaretSnapshot | null;
   /** Whether worker-presented pixels make `caret` authoritative. */
@@ -978,7 +1076,9 @@ export function useCanvasRenderer(
   fontChainsProviderRef?: React.RefObject<RustFontChainsProvider | null>,
   // Resolved comment ids whose range wash the canvas hides; identity changes
   // rebuild the display list (resolve / reopen / expand-a-resolved-card).
-  resolvedCommentIds?: ReadonlySet<number>
+  resolvedCommentIds?: ReadonlySet<number>,
+  /** Asks the host for a layout of the document as it is now. */
+  requestLayout?: () => void
 ): UseCanvasRendererResult {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [engine, setEngine] = useState<
@@ -1001,6 +1101,7 @@ export function useCanvasRenderer(
     frame,
     queries: snapshotQueries,
     resolveQueries,
+    settledDisplayList,
     caret,
     applyInput,
     applyDelete,
@@ -1012,7 +1113,14 @@ export function useCanvasRenderer(
     notifyCaretInput,
     notifyCaretInputDispatched,
     notifyCaretInterrupt,
-  } = useRustDisplayList(layout, undefined, fontChainsProviderRef, resolvedCommentIds, engine);
+  } = useRustDisplayList(
+    layout,
+    undefined,
+    fontChainsProviderRef,
+    resolvedCommentIds,
+    engine,
+    requestLayout
+  );
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
@@ -1086,6 +1194,7 @@ export function useCanvasRenderer(
     resolveImage,
     queries: geometryReady ? snapshotQueries : null,
     resolveQueries,
+    settledDisplayList,
     caret,
     authoritativeCaretActive,
     canvasHostRef,

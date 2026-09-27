@@ -105,6 +105,97 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     [319508, 307996, 281536, 284068],
   ),
 
+  // Families the office-quality references are actually drawn with. The Google
+  // families are the same font PowerPoint used, so their lines break where the
+  // deck wrote them; Gelasio is Georgia's metric-compatible clone and Comic
+  // Relief is Comic Sans MS's (#797).
+  ...familyFaces('Gelasio', 'Georgia', 'Gelasio', [107588, 107864, 107904, 107932]),
+  ...familyFaces('Inter', 'Inter', 'Inter', [341396, 343104, 344784, 346628]),
+  ...familyFaces('Roboto', 'Roboto', 'Roboto', [157584, 158316, 163212, 164100]),
+  ...familyFaces(
+    'Source Sans 3',
+    'Source Sans Pro',
+    'SourceSans3',
+    [379576, 379468, 240444, 240384],
+  ),
+  ...familyFaces('DM Sans', 'DM Sans', 'DMSans', [56856, 56784, 61472, 61324]),
+  ...familyFaces('Open Sans', 'Open Sans', 'OpenSans', [130484, 130504, 136020, 135700]),
+  ...familyFaces(
+    'Montserrat',
+    'Montserrat',
+    'Montserrat',
+    [374500, 374640, 384612, 384792],
+  ),
+  ...familyFaces('Poppins', 'Poppins', 'Poppins', [28468, 28108, 30772, 30388]),
+  // Faces the references use that ship no italic, or none at all: the missing
+  // ones fall back through the chain.
+  {
+    family: 'Oswald',
+    metricCompatWith: 'Oswald',
+    weight: 400,
+    style: 'normal',
+    file: 'Oswald-Regular.ttf',
+    byteLength: 78404,
+  },
+  {
+    family: 'Oswald',
+    metricCompatWith: 'Oswald',
+    weight: 700,
+    style: 'normal',
+    file: 'Oswald-Bold.ttf',
+    byteLength: 78736,
+  },
+  {
+    family: 'Heebo',
+    metricCompatWith: 'Heebo',
+    weight: 400,
+    style: 'normal',
+    file: 'Heebo-Regular.ttf',
+    byteLength: 42368,
+  },
+  {
+    family: 'Heebo',
+    metricCompatWith: 'Heebo',
+    weight: 700,
+    style: 'normal',
+    file: 'Heebo-Bold.ttf',
+    byteLength: 42732,
+  },
+  {
+    family: 'DM Serif Display',
+    metricCompatWith: 'DM Serif Display',
+    weight: 400,
+    style: 'normal',
+    file: 'DMSerifDisplay-Regular.ttf',
+    byteLength: 70440,
+  },
+  {
+    family: 'DM Serif Display',
+    metricCompatWith: 'DM Serif Display',
+    weight: 400,
+    style: 'italic',
+    file: 'DMSerifDisplay-Italic.ttf',
+    byteLength: 68560,
+  },
+
+  // Comic Relief ships no italics, so those fall back through the chain.
+  {
+    family: 'Comic Relief',
+    metricCompatWith: 'Comic Sans MS',
+    weight: 400,
+    style: 'normal',
+    file: 'ComicRelief-Regular.ttf',
+    byteLength: 80324,
+  },
+  {
+    family: 'Comic Relief',
+    metricCompatWith: 'Comic Sans MS',
+    weight: 700,
+    style: 'normal',
+    file: 'ComicRelief-Bold.ttf',
+    byteLength: 94684,
+  },
+
   // RTL script fallbacks. No metricCompatWith: Hebrew/Arabic documents mostly
   // name Latin families (Arial, Times New Roman, ...) whose mapping stays with
   // the Liberation faces; these faces ride the per-script fallback chain.
@@ -215,6 +306,22 @@ export const WORD_FAMILY_ALIASES: Record<string, string> = {
   helvetica: 'arial',
   times: 'times new roman',
   courier: 'courier new',
+
+  // Metric-compatible clones of the core families. A deck that asks for one
+  // was laid out against those metrics, so it resolves to the same face rather
+  // than through the last-resort pick (#797).
+  arimo: 'arial',
+  'liberation sans': 'arial',
+  'nimbus sans': 'arial',
+  'helvetica neue': 'arial',
+  carlito: 'calibri',
+  tinos: 'times new roman',
+  'liberation serif': 'times new roman',
+  'nimbus roman': 'times new roman',
+  cousine: 'courier new',
+  'liberation mono': 'courier new',
+  'nimbus mono ps': 'courier new',
+  caladea: 'cambria',
 
   // Simplified Chinese — sans
   simhei: 'microsoft yahei',
@@ -344,6 +451,17 @@ export function resolveScriptFallbackFace(
 function looksSerif(family: string): boolean {
   const lower = family.toLowerCase();
   return (
+    lower.includes('antiqua') ||
+    lower.includes('bookman') ||
+    lower.includes('calisto') ||
+    lower.includes('schoolbook') ||
+    lower.includes('goudy') ||
+    lower.includes('perpetua') ||
+    lower.includes('rockwell') ||
+    lower.includes('caslon') ||
+    lower.includes('constantia') ||
+    lower.includes('didot') ||
+    lower.includes('baskerville') ||
     lower.includes('times') ||
     lower.includes('georgia') ||
     lower.includes('garamond') ||
@@ -362,14 +480,111 @@ function looksSerif(family: string): boolean {
   );
 }
 
-/** Choose a related family, then a serif or sans fallback. */
+/**
+ * A family no clone matches, paired with the bundled face whose advance widths
+ * come closest: Montserrat is within 0.3% of Verdana over a sentence of
+ * mixed-case text, where Calibri is 24% too narrow, and it keeps the line
+ * breaks the deck was written against. Measured the same way, Trebuchet MS,
+ * Tahoma, Century Gothic, Tw Cen MT and Lucida Grande all scored worse on the
+ * corpus than plain Calibri does, so they are deliberately left out — a closer
+ * advance is not worth a letterform that far off (#797).
+ */
+const WIDTH_MATCHED_SUBSTITUTES: Record<string, string> = {
+  verdana: 'Montserrat',
+};
+
+/**
+ * `Calibri Light` and `Inter Light` are families of their own on the machine
+ * that drew the reference: a Regular and an Italic, no bold member, so a run
+ * marked bold is still drawn at the family's own weight, and a name we cannot
+ * place at all is Calibri, whatever weight it claims (#797).
+ */
+const LIGHTER_THAN_REGULAR = new Set([
+  'thin',
+  'hairline',
+  'extralight',
+  'ultralight',
+  'semilight',
+  'light',
+  'medium',
+]);
+
+function lightVariantOf(
+  family: string,
+  italic: boolean,
+): BundledFontFace | undefined {
+  const words = family.trim().split(/[\s-]+/);
+  if (words.length < 2) return undefined;
+  if (!LIGHTER_THAN_REGULAR.has(words[words.length - 1].toLowerCase())) {
+    return undefined;
+  }
+  return resolveMetricCompatFace(words.slice(0, -1).join(' '), false, italic);
+}
+
+/**
+ * Whether a family name reads as a typewriter face. A monospaced document was
+ * laid out against a fixed pitch, so a proportional substitute rewraps every
+ * line of it; Courier New's clone keeps the pitch even where the shapes differ.
+ */
+function looksMono(family: string): boolean {
+  const lower = family.toLowerCase();
+  return (
+    lower.includes('consolas') ||
+    lower.includes('monaco') ||
+    lower.includes('menlo') ||
+    lower.includes('console') ||
+    lower.includes('andale') ||
+    lower.includes('inconsolata') ||
+    lower.includes('cascadia') ||
+    lower.includes('typewriter') ||
+    /(^|[\s-])mono([\s-]|$)/.test(lower)
+  );
+}
+
+const HEAVIER_THAN_REGULAR = new Set([
+  'black',
+  'heavy',
+  'extrabold',
+  'ultrabold',
+  'extrablack',
+  'ultra',
+]);
+
+function heavyVariantOf(family: string, italic: boolean): BundledFontFace | undefined {
+  const words = family.trim().split(/[\s-]+/);
+  if (words.length < 2 || !HEAVIER_THAN_REGULAR.has(words[words.length - 1].toLowerCase())) {
+    return undefined;
+  }
+  return resolveMetricCompatFace(words.slice(0, -1).join(' '), true, italic);
+}
+
+/**
+ * Choose a related family, then a serif or sans fallback.
+ *
+ * The sans fallback is Calibri because that is what Office substitutes for a
+ * family it cannot find: a deck asking for Google Sans, Inter or Questrial is
+ * drawn in Calibri, which is ~7% narrower than Arial, so falling back to Arial
+ * rewraps every line the document wrote against those metrics. A heavy weight
+ * in the name is read only for a family we bundle: Office substitutes
+ * `Archivo Black` with a regular face, and matching that keeps the line breaks.
+ */
 export function resolveLastResortFace(
   family: string,
   bold: boolean,
   italic: boolean,
 ): BundledFontFace {
-  const base = family.trim().toLowerCase() === 'calibri light'
-    ? 'Calibri'
-    : looksSerif(family) ? 'Times New Roman' : 'Arial';
+  const light = lightVariantOf(family, italic);
+  if (light) return light;
+  const heavy = heavyVariantOf(family, italic);
+  if (heavy) return heavy;
+  if (looksMono(family)) {
+    return resolveMetricCompatFace('Courier New', bold, italic)!;
+  }
+  const matched = WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()];
+  if (matched) {
+    const face = resolveMetricCompatFace(matched, bold, italic);
+    if (face) return face;
+  }
+  const base = looksSerif(family) ? 'Times New Roman' : 'Calibri';
   return resolveMetricCompatFace(base, bold, italic)!;
 }

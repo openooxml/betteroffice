@@ -19,7 +19,7 @@ function options(
       } as PagedEditorRef,
     },
     focusActiveEditor: () => {},
-    openSplitCellDialog: () => {},
+    runTableAction: () => {},
     editorContentRef: { current: null },
     displayListQueries: null,
     interactionPageHostRef: { current: null },

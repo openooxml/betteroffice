@@ -1416,6 +1416,17 @@ fn a_resize_keeps_a_partial_transforms_own_offset_and_rotation() {
         .resize_shape(&context(), &slide.id, &halfway.id, 5_000_000, 900_000)
         .unwrap();
 
+    let edited = session.snapshot().unwrap();
+    let resized = edited.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Halfway")
+        .unwrap();
+    assert_eq!(
+        (resized.x, resized.y, resized.rotation_deg),
+        (123_456, 654_321, 20.0)
+    );
+
     let saved = parts(&session.save().unwrap());
     let slide = part_text(&saved, "ppt/slides/slide1.xml");
     assert!(slide.contains(r#"<a:off x="123456" y="654321"/>"#));

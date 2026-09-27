@@ -4,8 +4,9 @@ pub mod context;
 pub mod foundation;
 pub mod numbering;
 pub mod paragraph;
+pub mod paragraph_ids;
 pub mod parts;
-mod raw;
+pub(crate) mod raw;
 pub mod run;
 pub mod s10;
 pub mod s11;
@@ -26,6 +27,7 @@ pub use paragraph::{
     serialize_inline_sdt, serialize_paragraph, serialize_paragraph_content,
     serialize_paragraph_formatting, synthesize_sdt_properties,
 };
+pub use paragraph_ids::{S13ParagraphId, S13ParagraphIds, S13PatchedPart};
 pub use parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_part, serialize_comments_with_info,
@@ -42,8 +44,9 @@ pub use s10::{
 pub use s11::{S11SerializeRequest, S11SerializeResponse, serialize_s11_wire};
 pub use s12::{S12SerializeRequest, S12SerializeResponse, serialize_s12_wire};
 pub use s13::{
-    S13SaveOptions, S13SaveRequest, S13SelectiveSave, build_patched_document_xml,
-    update_core_properties, write_docx_s13, write_docx_s13_parts,
+    S13SaveOptions, S13SaveRequest, S13SelectiveSave, S13SourceParagraph, S13SourceParagraphs,
+    build_patched_document_xml, element_span, update_core_properties, write_docx_s13,
+    write_docx_s13_parts,
 };
 pub use sdt::{serialize_block_content, serialize_block_sdt};
 pub use section::serialize_section_properties;

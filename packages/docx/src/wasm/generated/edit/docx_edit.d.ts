@@ -38,6 +38,10 @@ export class EditSession {
      */
     add_comment(ranges_json: string, author: string, date: string, body_json: string): string;
     /**
+     * Closes the current undo capture without adding an empty step.
+     */
+    add_undo_boundary(): void;
+    /**
      * Deletes one character at this session's collapsed selection and returns
      * the resulting binary `FrameDelta`. `direction` is `"backward"` or
      * `"forward"`; a surrogate pair is removed whole. At a paragraph boundary
@@ -55,6 +59,13 @@ export class EditSession {
      * [`EditSession::apply_input_profile_json`].
      */
     apply_delete_profiled(direction: string, expected_frame_epoch: number): Uint8Array;
+    /**
+     * Applies an edit batch all-or-nothing:
+     * `{"ok":true,"baseVersion","version","applied","source","changedStories",
+     * "receipts"}`. An applied batch commits one transaction; `history`
+     * `"separate"` makes it exactly one undo step.
+     */
+    apply_edits_json(request: string): string;
     /**
      * Applies one ordinary insertion at this session's collapsed selection
      * and returns the resulting binary `FrameDelta`. The inserted text
@@ -140,6 +151,10 @@ export class EditSession {
      */
     apply_update_with_inference(update: Uint8Array): string;
     /**
+     * Starts a new opening of the document; see [`EditingDoc::begin_opening`].
+     */
+    begin_opening(generation?: string | null): void;
+    /**
      * Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
      * a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
      * frame the caller currently holds; pass `0` for the first frame. A
@@ -168,8 +183,8 @@ export class EditSession {
     cell_selection(): string;
     /**
      * Removes the authored `value` from the content-control embed carrying
-     * `embed_id`, leaving the control itself in place. Errors when no embed
-     * has that id.
+     * `embed_id`, leaving the control and its content in place: it never
+     * erases a text control's text. Errors when no embed has that id.
      */
     clear_content_control_value(embed_id: string): void;
     /**
@@ -196,6 +211,26 @@ export class EditSession {
      * This replica's client id, as passed to the constructor.
      */
     client_id(): number;
+    /**
+     * Resolves a text target and anchors a side-map comment over it in one
+     * call (legacy agent helpers). `comment_json`:
+     * `{"id","author","date","body"?}`. Returns `{"ok":true,"version"}` or a
+     * refusal.
+     */
+    comment_text_target_json(target_json: string, comment_json: string): string;
+    /**
+     * Compares two DOCX packages into this session, which must hold no document: the original
+     * is opened here and the revised body text differences are applied as tracked changes,
+     * outside undo history.
+     *
+     * `options` is `{"author","date","granularity"?,"unsupported"?,"limits"?}`. Returns a final
+     * `{"ok":false,"diagnostics"}` or `{"ok":true,"noop":true,"changes":[],"diagnostics"}`, or
+     * `{"ok":true,"noop":false,"save"}` naming what a save of the applied changes may write:
+     * then pass the saved bytes to [`EditSession::finish_compared_docx_json`], or the save
+     * failure to [`EditSession::fail_compared_docx_json`]. Malformed options and internal
+     * failures throw.
+     */
+    compare_docx_json(original: Uint8Array, revised: Uint8Array, options: string): string;
     /**
      * Adds a story holding one paragraph with `initial_text` (which must not
      * contain paragraph breaks), `p_style` and `alignment`. Receipt:
@@ -307,6 +342,58 @@ export class EditSession {
      */
     encoded_selection(): string;
     /**
+     * [`EditSession::export_structured_json`] rendered as Markdown from the same read:
+     * `{"ok":true,"version","content":{"markdown","anchors","diagnostics","truncated"}}`.
+     */
+    export_markdown_json(options: string): string;
+    /**
+     * Lays this private session out with its own fonts and exports it with pages as a
+     * snapshot. `fonts` holds the font files back to back, `font_lengths` their byte lengths;
+     * `request` is a region layout request whose font chains name fonts by their index. The
+     * reply is `{"ok":true,"content"}` or `{"ok":false,"failure"}`; a rejected font or an
+     * unusable request throws. The module's shared measurement fonts are left untouched.
+     */
+    export_snapshot_with_private_fonts_json(fonts: Uint8Array, font_lengths: Uint32Array, request: string, options: string): string;
+    /**
+     * Structured export of the committed document state:
+     * `{"revisionView","stories"?,"includeFormatting"?,"maxBlocks"?,"maxBytes"?}` ->
+     * `{"ok":true,"version","content"}` or `{"ok":false,"version","failure"}`. Anchors are scoped
+     * to the returned version. Reads only: nothing is committed, minted or published.
+     */
+    export_structured_json(options: string): string;
+    /**
+     * [`EditSession::export_structured_json`] with the page map of the retained region
+     * layout. `options` adds `"includeGeometry"?`, `"expectLayoutVersion"?`,
+     * `"maxFragments"?` and `"maxLayoutBytes"?`; the reply is
+     * `{"ok":true,"version","content":{"structured","layout"}}` or a refusal. An editor passes
+     * the region layout request it would lay the document out with now as `current_request`,
+     * and the layout must have been computed from the same inputs. Lays nothing out and changes
+     * nothing.
+     */
+    export_structured_with_pages_json(options: string, current_request?: string | null): string;
+    /**
+     * The final comparison result when saving the applied changes failed with `message`.
+     */
+    fail_compared_docx_json(message: string): string;
+    /**
+     * [`EditSession::list_content_controls_json`] keeping the controls that match `query`
+     * (`{"kind":"id","controlId"}`, `{"kind":"tag","tag"}`, `{"kind":"ooxmlId","ooxmlId"}` or
+     * `{"kind":"alias","alias"}`) exactly.
+     */
+    find_content_controls_json(query: string, options: string): string;
+    /**
+     * Exact, case-sensitive, paragraph-local search:
+     * `{"text","within","view","limit"?}` ->
+     * `{"ok":true,"version","matches":[{"text","range"}],"truncated"}`.
+     */
+    find_text_json(request: string): string;
+    /**
+     * The final comparison result for `bytes`, the saved applied changes, verified against both
+     * inputs: `{"ok":true,"changes","diagnostics"}` or `{"ok":false,"diagnostics"}`. Throws
+     * when no comparison awaits its saved bytes.
+     */
+    finish_compared_docx_json(bytes: Uint8Array): string;
+    /**
      * Applies a set-valued, tri-state inline formatting delta over
      * `[start, end)` in one transaction. An omitted key keeps the current
      * value, `null` clears it, and any other value sets it. `delta_json`:
@@ -330,6 +417,17 @@ export class EditSession {
      * there is no receipt. Errors when a key carries a type not listed here.
      */
     format_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, delta_json: string): void;
+    /**
+     * Resolves a text target and formats it in one call (legacy agent
+     * helpers). `delta_json` is the [`EditSession::format_range`] delta.
+     * Returns `{"ok":true,"version"}` or a refusal.
+     */
+    format_text_target_json(target_json: string, delta_json: string): string;
+    /**
+     * The headings of `story` in document order, classified as the structured export
+     * classifies them: `[{"paraId","heading":{"outlineLevel","source"}}]`.
+     */
+    headings_json(story: string): string;
     /**
      * Stories changed by the latest undo or redo, sorted.
      */
@@ -408,6 +506,19 @@ export class EditSession {
      */
     layout_font_requirements_json(input: string): string;
     /**
+     * Every comment the session holds, sorted by id:
+     * `[{"id","author","date","done","parentId","body"}, …]`, `parentId`
+     * null for a top-level comment and `body` the JSON value it was given.
+     */
+    list_comments(): string;
+    /**
+     * The content controls of the committed state:
+     * `{"stories"?,"maxControls"?,"maxBytes"?}` -> `{"ok":true,"version","content"}` or
+     * `{"ok":false,"version","failure"}`. Control ids and anchors are scoped to the returned
+     * version. Reads only.
+     */
+    list_content_controls_json(options: string): string;
+    /**
      * Every pending tracked change across all stories, in deterministic
      * story-then-position order:
      * `[{"revisionId","author","date","kind","story","preview",
@@ -432,7 +543,9 @@ export class EditSession {
      * text must not contain paragraph breaks. Receipt:
      * `{storyId: [paraId, …]}` with each story's paragraphs in document
      * order. Errors when a story entry has no `storyId`, no `paragraphs`
-     * array, or an empty one, and when a story id already exists.
+     * array, or an empty one, and when a story id already exists. Seeding a
+     * document that has no opening yet starts one; see
+     * [`EditingDoc::begin_opening`].
      */
     load_json(stories_json: string): string;
     /**
@@ -481,7 +594,9 @@ export class EditSession {
     /**
      * Parses a DOCX package, optionally seeds its editable stories into this
      * replica, and retains the source bytes for
-     * [`EditSession::materialize_docx`].
+     * [`EditSession::materialize_docx`] and paragraph identity reads.
+     * Seeding starts a new opening, with `generation` or a fresh one, so its
+     * session anchors are its own; see [`EditingDoc::begin_opening`].
      *
      * Returns `{"envelope","referencedFonts":[string, …]}`. The envelope is
      * the parsed package with the parts the host does not need stripped —
@@ -491,7 +606,7 @@ export class EditSession {
      * bulk of the document stays in Rust. Errors on bytes that are not a
      * readable DOCX.
      */
-    open_docx(bytes: Uint8Array, seed_stories: boolean): string;
+    open_docx(bytes: Uint8Array, seed_stories: boolean, generation?: string | null): string;
     /**
      * One glyph outline from this session's resident font store:
      * `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
@@ -500,6 +615,20 @@ export class EditSession {
      * Errors when the glyph cannot be extracted.
      */
     outline_glyph_json(font_id: number, glyph_id: number): string;
+    /**
+     * Every paragraph's identities: `{"sessionId","packageSha256",
+     * "paragraphs":[{"session","origin","ooxmlParaId","idOrigin",
+     * "persisted","source"}]}`, session paragraphs with stories sorted and
+     * in document order, then source paragraphs outside the stories, whose
+     * `session` is `null`. Reads only.
+     */
+    paragraph_identities(): string;
+    /**
+     * The paragraph IDs a save applies, as the package writer's
+     * `paragraphIds` request field: `{"assignments":[{"part","ordinal",
+     * "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`.
+     */
+    paragraph_save_plan(): string;
     /**
      * Compact paragraph-position projection built in one story traversal:
      * `[{"paraId","length"}, …]` in document order, where `length` counts the
@@ -515,6 +644,30 @@ export class EditSession {
      * else has been set on it). Errors on an unknown story.
      */
     paragraphs(story: string): string;
+    /**
+     * Gives every paragraph that saves without a Word paragraph ID a fresh
+     * one and repairs duplicates; see [`EditingDoc::persist_paragraph_ids`].
+     * Receipt: `{"status":"applied","assignments":[{"paragraph",
+     * "replacedParaId","previousOoxmlParaId","ooxmlParaId","idOrigin",
+     * "persisted"}],"diagnostics":[…]}`, or `{"status":"refused","refusal"}`
+     * when nothing was changed.
+     */
+    persist_paragraph_ids(): string;
+    /**
+     * Versioned paragraph texts:
+     * `{"story"?,"paraIds"?,"view":"accepted"|"original"}` ->
+     * `{"ok":true,"version","view","paragraphs":[{"story","paraId","text",
+     * "styleId"?,"atoms":[{"offset","kind"}]}]}`. Each inline atom occupies one
+     * U+FFFC in `text`.
+     */
+    read_paragraphs_json(request: string): string;
+    /**
+     * Reconciles and publishes the `[owner, paraId]` pairs a save captured,
+     * an owner being a session key or a source occurrence's
+     * `{partUri}#{ordinal}`; returns the stale pairs as the same JSON shape.
+     * See [`EditingDoc::record_saved_paragraph_ids`].
+     */
+    record_saved_paragraph_ids(saved_json: string): string;
     /**
      * Reapplies the latest locally undone transaction and reports whether
      * anything was reapplied.
@@ -570,6 +723,16 @@ export class EditSession {
      */
     resolve_encoded_selection(story: string, anchor: Uint8Array, head: Uint8Array): string;
     /**
+     * Resolves a `session`, `source` or `persisted` anchor JSON against the
+     * current state: `{"status":"found","anchor"}`, `{"status":"missing"}`,
+     * `{"status":"ambiguous","candidates"}` or `{"status":"unsupported",
+     * "reason"}` with a `foreign-session`, `foreign-package` or
+     * `no-source-package` reason. A found source paragraph outside the
+     * session stories comes back as its source anchor. Errors on a malformed
+     * anchor.
+     */
+    resolve_paragraph_anchor(anchor_json: string): string;
+    /**
      * Resolves sticky bytes from [`EditSession::encode_sticky_position`] back
      * to `{"story","paraId","offset"}`. Errors when the bytes are malformed
      * or the position no longer resolves in `story`.
@@ -584,10 +747,9 @@ export class EditSession {
     /**
      * [`EditSession::open_docx`] with seeding always on.
      */
-    seed_from_docx(bytes: Uint8Array): string;
+    seed_from_docx(bytes: Uint8Array, generation?: string | null): string;
     /**
-     * Notes the story a direct operation is about to edit; a different story
-     * than the previous edit or caret closes the current undo step.
+     * Selects a story, closing capture unless manual grouping is selected.
      */
     select_story(story: string): void;
     /**
@@ -602,7 +764,9 @@ export class EditSession {
      * ```json
      * {
      *   "bold": true | false | "mixed", "italic": …, "underline": …, "strike": …,
+     *   "superscript": …, "subscript": …,
      *   "fontFamily": string|null, "fontSize": number|null, "color": string|null,
+     *   "highlight": string|null,
      *   "paraId": string, "styleId": string|null, "alignment": string|null,
      *   "paragraphProperties": {…},
      *   "hasSelection": bool, "isMultiParagraph": bool, "inTable": bool,
@@ -618,6 +782,12 @@ export class EditSession {
      * pending tracked change.
      */
     selection_context(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number): string;
+    /**
+     * Accepted-view texts around a paragraph-keyed selection:
+     * `{"paraId","selectedText","paragraphText","before","after"}`, with
+     * `\n` between paragraphs and U+FFFC for each inline atom.
+     */
+    selection_text_json(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number): string;
     /**
      * Merges the sides of the JSON object `borders_json` into every selected
      * cell's `tcPr.borders`; `insideH`/`insideV` resolve to the physical edges
@@ -660,16 +830,19 @@ export class EditSession {
     set_comment_ranges(comment_id: string, ranges_json: string): void;
     /**
      * Sets the authored `value` (any JSON) on the content-control embed
-     * carrying `embed_id`, searching every story. Errors when no embed has
-     * that id.
+     * carrying `embed_id`, searching every story. A plain- or rich-text
+     * control takes a string, which fills its content as one
+     * version-checked batch step instead. Errors when no embed has that id
+     * and when a fill is refused.
      */
     set_content_control_value(embed_id: string, value_json: string): void;
     /**
      * Sets the authored `value` on the content-control embed at
      * `(story, para_id, offset)` — the way to reach a control with no
      * authored `w:id` or tag, which
-     * [`EditSession::set_content_control_value`] cannot address. Errors when
-     * that position holds no embed.
+     * [`EditSession::set_content_control_value`] cannot address. A text
+     * control's string value fills it as that method does. Errors when that
+     * position holds no embed.
      */
     set_content_control_value_at(story: string, para_id: string, offset: number, value_json: string): void;
     /**
@@ -689,6 +862,13 @@ export class EditSession {
      * has that id.
      */
     set_image_geometry(embed_id: string, geometry_json: string): void;
+    /**
+     * [`EditSession::set_image_geometry`] for the image embed at
+     * `(story, para_id, offset)` — the way to reach one of several images
+     * sharing a relationship id, which the id variant resolves to the first.
+     * Errors when that position holds no image.
+     */
+    set_image_geometry_at(story: string, para_id: string, offset: number, geometry_json: string): void;
     /**
      * Sets one paragraph property to any JSON value on `para_id`'s pilcrow,
      * searching every story. Unlike
@@ -728,6 +908,10 @@ export class EditSession {
      * `width_twips` is finite and positive.
      */
     set_table_width(table_json: string, width_twips: number): string;
+    /**
+     * Changes grouping policy while retaining undo and redo history.
+     */
+    set_undo_capture_mode(mode: string): void;
     /**
      * Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
      * committed transaction. `update` is v1-encoded — feed it straight to
@@ -781,6 +965,11 @@ export class EditSession {
      */
     story_len(story: string): number;
     /**
+     * The Word paragraph ID each paragraph of `story` saves with, as a JSON
+     * array of strings or `null` in document order. Errors on an unknown story.
+     */
+    story_paragraph_ids(story: string): string;
+    /**
      * The story as an ordered run of formatted segments — the same view
      * lowering reads:
      *
@@ -817,6 +1006,26 @@ export class EditSession {
      * tracked-origin policy; `false` before tracking starts.
      */
     undo(): boolean;
+    /**
+     * Current undo grouping policy.
+     */
+    undo_capture_mode(): string;
+    /**
+     * Runs every check of [`EditSession::apply_edits_json`], staging included,
+     * without changing anything: `{"ok":true,"baseVersion","wouldApply","previews"}`.
+     */
+    validate_edits_json(request: string): string;
+    /**
+     * The session-scoped version token of the committed document state. It
+     * changes on every committed change, local or remote, and when the
+     * document or its retained source is replaced.
+     */
+    version(): string;
+    /**
+     * The Word paragraph IDs a DOCX package holds, as JSON mapping each XML
+     * part URI to its paragraphs' IDs in document order, in canonical form.
+     */
+    written_paragraph_ids(bytes: Uint8Array): string;
     /**
      * Lowers one story to a `LayoutBlock[]` JSON array — the block, run and
      * table vocabulary the layout engine consumes. `env_json` supplies the
@@ -856,6 +1065,22 @@ export function close_display_list(handle: number): void;
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
 
 /**
+ * [`export_docx_structured_json`] rendered as Markdown.
+ */
+export function export_docx_markdown_json(bytes: Uint8Array, options: string): string;
+
+/**
+ * Structured export of DOCX bytes as a snapshot; `options` as for
+ * [`EditSession::export_structured_json`]. No session is created.
+ */
+export function export_docx_structured_json(bytes: Uint8Array, options: string): string;
+
+/**
+ * The content controls of DOCX bytes that match `query` exactly.
+ */
+export function find_docx_content_controls_json(bytes: Uint8Array, query: string, options: string): string;
+
+/**
  * wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
  * point in, document position (or `null`) as JSON out.
  */
@@ -887,6 +1112,12 @@ export function install_panic_hook(): void;
  * wasm wrapper over [`layout_to_json`].
  */
 export function layout_document_json(input: string): string;
+
+/**
+ * The content controls of DOCX bytes as a snapshot; `options` as for
+ * [`EditSession::list_content_controls_json`]. No session is created.
+ */
+export function list_docx_content_controls_json(bytes: Uint8Array, options: string): string;
 
 /**
  * Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
@@ -1015,6 +1246,18 @@ export function register_measure_font(bytes: Uint8Array): number;
 export function register_substitute_measure_font(base: number, requested_family: string): number;
 
 /**
+ * Renders structured content as Markdown: `content` is a schema-version-1 export and
+ * `options` is `{"maxBytes"?}`.
+ */
+export function render_docx_markdown_json(content: string, options: string): string;
+
+/**
+ * Renders a paged export as Markdown: `content` is `{"structured","layout"}` from a paged
+ * export and `options` is `{"maxBytes"?,"pageMarkers"?}`.
+ */
+export function render_docx_markdown_with_pages_json(content: string, options: string): string;
+
+/**
  * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -1053,8 +1296,10 @@ export interface InitOutput {
     readonly __wbg_editsession_free: (a: number, b: number) => void;
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_add_undo_boundary: (a: number) => void;
     readonly editsession_apply_delete: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_delete_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_apply_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_apply_input: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_input_profile_json: (a: number) => [number, number];
     readonly editsession_apply_input_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1064,6 +1309,7 @@ export interface InitOutput {
     readonly editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_can_redo: (a: number) => number;
@@ -1075,6 +1321,8 @@ export interface InitOutput {
     readonly editsession_clear_update_event_observation: (a: number) => void;
     readonly editsession_clear_update_observer: (a: number) => void;
     readonly editsession_client_id: (a: number) => number;
+    readonly editsession_comment_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_compare_docx_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_create_story: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_delete_column: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_delete_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
@@ -1091,7 +1339,17 @@ export interface InitOutput {
     readonly editsession_encode_state_vector: (a: number) => [number, number];
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
+    readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_export_snapshot_with_private_fonts_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_export_structured_with_pages_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_fail_compared_docx_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_find_content_controls_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_find_text_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_finish_compared_docx_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
+    readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
@@ -1105,7 +1363,10 @@ export interface InitOutput {
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_list_comments: (a: number) => [number, number, number, number];
+    readonly editsession_list_content_controls_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
+    readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
@@ -1113,10 +1374,15 @@ export interface InitOutput {
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
-    readonly editsession_open_docx: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
+    readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
+    readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
@@ -1125,13 +1391,15 @@ export interface InitOutput {
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_select_story: (a: number, b: number, c: number) => void;
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_selection_text_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_set_cell_borders: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_set_cell_selection: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_cell_shading: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1142,10 +1410,12 @@ export interface InitOutput {
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];
     readonly editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
@@ -1153,27 +1423,22 @@ export interface InitOutput {
     readonly editsession_story_checksum: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_ids: (a: number) => [number, number];
     readonly editsession_story_len: (a: number, b: number, c: number) => [number, number, number];
+    readonly editsession_story_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;
+    readonly editsession_undo_capture_mode: (a: number) => [number, number];
+    readonly editsession_validate_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_version: (a: number) => [number, number];
+    readonly editsession_written_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly editsession_load: (a: number, b: number, c: number) => [number, number];
-    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s4: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s5: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s6: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s7: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s8: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s9: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly parse_relationships_xml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
-    readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
-    readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
-    readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly export_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly export_docx_structured_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly find_docx_content_controls_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1194,6 +1459,21 @@ export interface InitOutput {
     readonly clear_measure_fonts: () => void;
     readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
+    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s4: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s5: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s6: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s7: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s8: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s9: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly parse_relationships_xml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
+    readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
+    readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
+    readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

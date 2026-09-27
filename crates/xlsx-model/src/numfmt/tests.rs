@@ -343,6 +343,24 @@ fn unsupported_constructs_degrade() {
 }
 
 #[test]
+fn approximate_formats_are_the_ones_that_degrade() {
+    let n = CellValue::Number { value: 0.5 };
+    assert!(format_is_approximate(&n, "# ?/?"));
+    assert!(!format_is_approximate(&n, "0.00;# ??/??"));
+    assert!(format_is_approximate(
+        &CellValue::Number { value: -0.5 },
+        "0.00;# ??/??"
+    ));
+    assert!(!format_is_approximate(&n, "0.00"));
+    assert!(!format_is_approximate(&n, "General"));
+    assert!(!format_is_approximate(&n, "m/d/yyyy"));
+    assert!(!format_is_approximate(
+        &CellValue::Text { value: "x".into() },
+        "# ?/?"
+    ));
+}
+
+#[test]
 fn escaped_and_quoted_literals() {
     assert_eq!(fv(5.0, "0\" kg\""), "5 kg");
     assert_eq!(fv(5.0, "0\\ \\k\\g"), "5 kg");

@@ -15,13 +15,31 @@ export interface RustSaveDeterminism {
   now: string;
 }
 
+/** Main-document body paragraphs a save replaces by source location, guarded by the part digest. */
+export interface RustSourceParagraphs {
+  partSha256: string;
+  paragraphs: Array<{ path: number[]; block: number }>;
+}
+
 export interface RustSelectiveSave {
   changedParaIds: Iterable<string>;
+  /** Replace only these paragraphs and keep every other part's source bytes. */
+  sourceParagraphs?: RustSourceParagraphs;
 }
 
 export interface RustSaveResult {
   buffer: ArrayBuffer;
   determinism: RustSaveDeterminism;
+}
+
+/**
+ * Paragraph IDs a session save applies: IDs for source paragraphs outside
+ * the edited stories by part and `w:p` occurrence, and parts written as their
+ * source bytes with only these IDs patched in.
+ */
+export interface RustParagraphIds {
+  assignments: Array<{ part: string; ordinal: number; paraId: string }>;
+  patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -35,7 +53,8 @@ export async function writeDocumentWithRust(
   originalBuffer: ArrayBuffer,
   options: RustSaveOptions = {},
   selective?: RustSelectiveSave,
-  determinism?: RustSaveDeterminism
+  determinism?: RustSaveDeterminism,
+  paragraphIds?: RustParagraphIds
 ): Promise<RustSaveResult> {
   await preloadOpcWasm();
   await preloadParseWasm();
@@ -65,7 +84,15 @@ export async function writeDocumentWithRust(
     },
     ...(selective === undefined
       ? {}
-      : { selective: { changedParaIds: [...selective.changedParaIds] } }),
+      : {
+          selective: {
+            changedParaIds: [...selective.changedParaIds],
+            ...(selective.sourceParagraphs === undefined
+              ? {}
+              : { sourceParagraphs: selective.sourceParagraphs }),
+          },
+        }),
+    ...(paragraphIds === undefined ? {} : { paragraphIds }),
   };
   assertSafeSaveTree(request, 'save');
   const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));

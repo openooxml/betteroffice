@@ -52,6 +52,7 @@ use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
+use crate::list_marker::{ListState, compute_list_marker};
 
 mod shapes;
 
@@ -156,6 +157,70 @@ impl From<EditError> for BridgeError {
     }
 }
 
+/// Where each laid-out position of one lowered story came from, recorded by the lowering that
+/// produced the blocks so no identity is ever recovered from a block id.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LoweringMap {
+    /// The stories lowered, the root first and then every cell and control story in order.
+    pub stories: Vec<String>,
+    /// Source paragraphs: their story (an index into `stories`) and paragraph id.
+    pub paragraphs: Vec<(u32, String)>,
+    /// Paragraph blocks by start position, with their source paragraph. A paragraph that
+    /// in-flow drawings split contributes one block per segment.
+    pub paragraph_blocks: Vec<(u64, u32)>,
+    /// Inline content and drawing blocks by display position, sorted and disjoint.
+    pub spans: Vec<SourceSpan>,
+    /// Tables by start position: their story and their ordinal among its table embeds.
+    pub tables: Vec<(u64, u32, u32)>,
+}
+
+/// Display positions `[pm_start, pm_end)` and the story units `[raw_start, raw_end)` of their
+/// source paragraph's story they show. An atom's content, however wide, shows one unit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceSpan {
+    pub pm_start: u64,
+    pub pm_end: u64,
+    pub paragraph: u32,
+    pub raw_start: u32,
+    pub raw_end: u32,
+    pub atom: bool,
+}
+
+impl LoweringMap {
+    /// The span holding display position `pm`.
+    pub fn span_at(&self, pm: u64) -> Option<&SourceSpan> {
+        let index = self.spans.partition_point(|span| span.pm_start <= pm);
+        self.spans
+            .get(index.checked_sub(1)?)
+            .filter(|span| pm < span.pm_end)
+    }
+
+    /// The source paragraph of the paragraph block starting at `pm`.
+    pub fn paragraph_at(&self, pm: u64) -> Option<u32> {
+        let index = self
+            .paragraph_blocks
+            .binary_search_by_key(&pm, |(start, _)| *start)
+            .ok()?;
+        Some(self.paragraph_blocks[index].1)
+    }
+
+    /// The story and ordinal of the table starting at `pm`.
+    pub fn table_at(&self, pm: u64) -> Option<(u32, u32)> {
+        let index = self
+            .tables
+            .binary_search_by_key(&pm, |(start, ..)| *start)
+            .ok()?;
+        let (_, story, ordinal) = self.tables[index];
+        Some((story, ordinal))
+    }
+
+    fn finish(&mut self) {
+        self.spans.sort_by_key(|span| span.pm_start);
+        self.paragraph_blocks.sort_by_key(|(start, _)| *start);
+        self.tables.sort_by_key(|(start, ..)| *start);
+    }
+}
+
 /// Maps a UTF-16 story offset to its paragraph-node position.
 ///
 /// A paragraph node occupies its content plus two positions, one for each of
@@ -173,14 +238,24 @@ pub fn yrs_doc_to_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<Vec<LayoutBlock>, BridgeError> {
+    yrs_doc_to_mapped_layout_blocks(doc, story_id, env).map(|(blocks, _)| blocks)
+}
+
+/// [`yrs_doc_to_layout_blocks`] with the [`LoweringMap`] of the same walk.
+pub fn yrs_doc_to_mapped_layout_blocks(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
     if doc.yrs_doc().offset_kind() != OffsetKind::Utf16 {
         return Err(BridgeError::WrongOffsetKind);
     }
 
+    let mut list_state = ListState::new(doc.source_metadata().map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
-    let mut list_state = ListState::default();
-    lower_story(
+    let mut map = LoweringMap::default();
+    let (blocks, _) = lower_story(
         &txn,
         story_id,
         env,
@@ -188,8 +263,10 @@ pub fn yrs_doc_to_layout_blocks(
         &mut active_stories,
         &mut list_state,
         CellEdges::default(),
-    )
-    .map(|(blocks, _)| blocks)
+        &mut map,
+    )?;
+    map.finish();
+    Ok((blocks, map))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -198,6 +275,7 @@ struct CellEdges {
     after: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_story<T: ReadTxn>(
     txn: &T,
     story_id: &str,
@@ -206,10 +284,14 @@ fn lower_story<T: ReadTxn>(
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
     cell_edges: CellEdges,
+    map: &mut LoweringMap,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
     }
+    let story_slot = map.stories.len() as u32;
+    map.stories.push(story_id.to_owned());
+    let mut table_ordinal = 0_u32;
 
     let result = (|| {
         let story = story_ref(txn, story_id)?;
@@ -260,6 +342,7 @@ fn lower_story<T: ReadTxn>(
                         paragraph_pm_start,
                         paragraph_pm_units,
                         list_state,
+                        (map, story_slot),
                     );
                     let values = pilcrow_values(&pilcrow, txn);
                     suppress_cell_edge_spacing(
@@ -308,6 +391,8 @@ fn lower_story<T: ReadTxn>(
                     }
                     let hidden = shared_map_string(&table, txn, "blockId")
                         .is_some_and(|id| hidden_field_blocks.contains(&id));
+                    map.tables.push((pm_cursor, story_slot, table_ordinal));
+                    table_ordinal += 1;
                     let (lowered, node_size) = lower_table(
                         &table,
                         txn,
@@ -317,6 +402,7 @@ fn lower_story<T: ReadTxn>(
                         env,
                         active_stories,
                         list_state,
+                        map,
                     )?;
                     if !hidden {
                         blocks.push(LayoutBlock::Table(lowered));
@@ -408,6 +494,7 @@ fn lower_story<T: ReadTxn>(
                             before: cell_edges.before && story_index == 0,
                             after: cell_edges.after && story_index + 1 == story.len(txn),
                         },
+                        map,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     if !hidden_field_blocks.contains(&child_story) {
@@ -463,6 +550,7 @@ fn lower_story<T: ReadTxn>(
                         pm_end: paragraph_pm_units + 1,
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
+                        atom: true,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -504,6 +592,7 @@ fn lower_story<T: ReadTxn>(
                         pm_end: paragraph_pm_units + 1,
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
+                        atom: true,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -521,6 +610,7 @@ fn lower_story<T: ReadTxn>(
                         pm_end: paragraph_pm_units + 1,
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
+                        atom: true,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -539,6 +629,7 @@ fn lower_story<T: ReadTxn>(
                         pm_end: paragraph_pm_units + 1,
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
+                        atom: true,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -584,6 +675,7 @@ fn lower_story<T: ReadTxn>(
                         pm_end: paragraph_pm_units + 1,
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
+                        atom: true,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -612,6 +704,7 @@ fn lower_story<T: ReadTxn>(
                         pm_end: paragraph_pm_units + 1,
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
+                        atom: true,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -702,10 +795,12 @@ fn lower_story<T: ReadTxn>(
                             pm_end: pm_offset + 1,
                             inherited_hyperlink: inherited_hyperlink_style(attributes),
                             inline_sdt_widget: None,
+                            atom: true,
                         });
                     } else {
                         paragraph_drawings.push(DrawingMarker {
                             pm_offset,
+                            story_index,
                             anchored: shapes::anchored_shape(&block),
                             block: LayoutBlock::Shape(block),
                             hidden: mark_bool(attributes, "hidden") == Some(true),
@@ -732,6 +827,7 @@ fn lower_story<T: ReadTxn>(
                     };
                     paragraph_drawings.push(DrawingMarker {
                         pm_offset,
+                        story_index,
                         block: LayoutBlock::Chart(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         anchored: false,
@@ -829,6 +925,7 @@ fn lower_table<T: ReadTxn>(
     env: &RenderEnv,
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
+    map: &mut LoweringMap,
 ) -> Result<(TableBlock, u64), BridgeError> {
     let tbl_pr_value = shared_any(table, txn, "tblPr")
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
@@ -940,6 +1037,7 @@ fn lower_table<T: ReadTxn>(
                     before: true,
                     after: true,
                 },
+                map,
             )?;
 
             let width_value = map_number(tc_pr, "width");
@@ -1617,6 +1715,7 @@ fn lower_inline_sdt_values(
                         pm_end: child_pm_start + width,
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
+                        atom: true,
                     });
                 }
                 width
@@ -1631,6 +1730,7 @@ fn lower_inline_sdt_values(
                     pm_end: child_pm_start + 1,
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
+                    atom: true,
                 });
                 1
             }
@@ -1644,6 +1744,7 @@ fn lower_inline_sdt_values(
                     pm_end: child_pm_start + 1,
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
+                    atom: true,
                 });
                 1
             }
@@ -1658,6 +1759,7 @@ fn lower_inline_sdt_values(
                         pm_end: child_pm_start + 1,
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: None,
+                        atom: true,
                     });
                 }
                 1
@@ -1690,6 +1792,7 @@ fn lower_inline_sdt_values(
                     pm_end: child_pm_start + 1,
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
+                    atom: true,
                 });
                 1
             }
@@ -1712,6 +1815,7 @@ fn lower_inline_sdt_values(
                     pm_end: child_pm_start + 1,
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
+                    atom: true,
                 });
                 1
             }
@@ -1739,6 +1843,7 @@ fn lower_inline_sdt_values(
                         pm_end: child_pm_start + 1,
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
+                        atom: true,
                     });
                 }
                 1
@@ -1911,12 +2016,15 @@ struct RawRun {
     pm_end: u32,
     /// Checkbox chrome inherited from the nearest editable inline SDT.
     inline_sdt_widget: Option<Value>,
+    /// Content of an embed rather than story text.
+    atom: bool,
 }
 
 /// A paragraph's shape or chart child, at the offset it occupied.
 #[derive(Clone, Debug)]
 struct DrawingMarker {
     pm_offset: u32,
+    story_index: u32,
     block: LayoutBlock,
     hidden: bool,
     anchored: bool,
@@ -2040,6 +2148,7 @@ fn push_text_chunks(
             pm_end: chunk_pm_start + end - chunk_start,
             inherited_hyperlink: inherited_hyperlink_style(attributes),
             inline_sdt_widget: None,
+            atom: false,
         });
     }
 }
@@ -2059,7 +2168,13 @@ fn flush_paragraph_parts<T: ReadTxn>(
     paragraph_pm_start: u64,
     paragraph_pm_units: u32,
     list_state: &mut ListState,
+    (map, story_slot): (&mut LoweringMap, u32),
 ) -> Vec<LayoutBlock> {
+    let source = map.paragraphs.len() as u32;
+    map.paragraphs.push((
+        story_slot,
+        shared_map_string(pilcrow, txn, "paraId").unwrap_or_default(),
+    ));
     if env.show_hidden_text {
         for run in &mut raw_runs {
             if run.formatting.hidden == Some(true) {
@@ -2069,6 +2184,17 @@ fn flush_paragraph_parts<T: ReadTxn>(
     } else {
         raw_runs.retain(|run| run.formatting.hidden != Some(true));
         drawings.retain(|drawing| !drawing.hidden);
+    }
+    for drawing in &drawings {
+        let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
+        map.spans.push(SourceSpan {
+            pm_start,
+            pm_end: pm_start + 1,
+            paragraph: source,
+            raw_start: drawing.story_index,
+            raw_end: drawing.story_index + 1,
+            atom: true,
+        });
     }
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
@@ -2085,6 +2211,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_start,
             paragraph_pm_units,
             list_state,
+            (map, source),
         );
         if !env.show_hidden_text
             && paragraph.runs.is_empty()
@@ -2121,6 +2248,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 paragraph_pm_start + u64::from(segment_start),
                 drawing.pm_offset - segment_start,
                 list_state,
+                (map, source),
             )));
         }
         blocks.push(drawing.block);
@@ -2142,6 +2270,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_start + u64::from(segment_start),
             paragraph_pm_units - segment_start,
             list_state,
+            (map, source),
         )));
     }
     blocks
@@ -2158,6 +2287,7 @@ fn flush_paragraph<T: ReadTxn>(
     paragraph_pm_start: u64,
     paragraph_pm_units: u32,
     list_state: &mut ListState,
+    (map, source): (&mut LoweringMap, u32),
 ) -> ParagraphBlock {
     let values = pilcrow_values(pilcrow, txn);
     let para_id = value_string(values.get("paraId")).unwrap_or_default();
@@ -2178,6 +2308,17 @@ fn flush_paragraph<T: ReadTxn>(
         }
     }
     let raw_runs = coalesce_runs(raw_runs);
+    map.paragraph_blocks.push((paragraph_pm_start, source));
+    for raw in &raw_runs {
+        map.spans.push(SourceSpan {
+            pm_start: paragraph_pm_start + 1 + u64::from(raw.pm_start),
+            pm_end: paragraph_pm_start + 1 + u64::from(raw.pm_end),
+            paragraph: source,
+            raw_start: raw.story_start,
+            raw_end: raw.story_end,
+            atom: raw.atom,
+        });
+    }
     let mut attrs = lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state);
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
@@ -2362,6 +2503,7 @@ fn coalesce_runs(runs: Vec<RawRun>) -> Vec<RawRun> {
                 (RawRunKind::Text(previous_text), RawRunKind::Text(text))
                     if previous.story_end == run.story_start
                         && previous.pm_end == run.pm_start
+                        && previous.atom == run.atom
                         && formatting_equal(&previous.formatting, &run.formatting)
                         && previous.inline_sdt_widget == run.inline_sdt_widget =>
                 {
@@ -2474,207 +2616,6 @@ fn stamp_logical_order(runs: &mut [Run]) {
             Run::Image(_) | Run::LineBreak(_) | Run::Unsupported => {}
         }
     }
-}
-
-/// List numbering carried across the whole story.
-#[derive(Default)]
-struct ListState {
-    /// Live counter stack per abstract numbering id, indexed by level.
-    counters: BTreeMap<String, Vec<i64>>,
-    /// The `{numId}:{level}` pairs already numbered, so a `listStartOverride`
-    /// applies once rather than on every paragraph at that level.
-    seen_num_ids: BTreeSet<String>,
-}
-
-fn format_roman(value: i64, uppercase: bool) -> String {
-    if value <= 0 {
-        return String::new();
-    }
-    const ONES: [&str; 10] = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX"];
-    const TENS: [&str; 10] = ["", "X", "XX", "XXX", "XL", "L", "LX", "LXX", "LXXX", "XC"];
-    const HUNDREDS: [&str; 10] = ["", "C", "CC", "CCC", "CD", "D", "DC", "DCC", "DCCC", "CM"];
-    let mut result = "M".repeat((value / 1000) as usize);
-    result.push_str(HUNDREDS[((value / 100) % 10) as usize]);
-    result.push_str(TENS[((value / 10) % 10) as usize]);
-    result.push_str(ONES[(value % 10) as usize]);
-    if uppercase {
-        result
-    } else {
-        result.to_ascii_lowercase()
-    }
-}
-
-fn format_alpha(mut value: i64, uppercase: bool) -> String {
-    if value <= 0 {
-        return String::new();
-    }
-    let mut chars = Vec::new();
-    while value > 0 {
-        chars.push((b'A' + ((value - 1) % 26) as u8) as char);
-        value = (value - 1) / 26;
-    }
-    let result: String = chars.into_iter().rev().collect();
-    if uppercase {
-        result
-    } else {
-        result.to_ascii_lowercase()
-    }
-}
-
-fn format_list_counter(value: i64, format: Option<&str>) -> String {
-    if value <= 0 {
-        return String::new();
-    }
-    match format {
-        Some("upperRoman") => format_roman(value, true),
-        Some("lowerRoman") => format_roman(value, false),
-        Some("upperLetter") => format_alpha(value, true),
-        Some("lowerLetter") => format_alpha(value, false),
-        Some("decimalZero") => format!("{value:02}"),
-        Some("decimalZero3") => format!("{value:03}"),
-        Some("decimalZero4") => format!("{value:04}"),
-        Some("decimalZero5") => format!("{value:05}"),
-        Some("none") => String::new(),
-        _ => value.to_string(),
-    }
-}
-
-fn list_level_formats(values: &BTreeMap<String, Any>) -> Vec<String> {
-    let Some(Any::Array(formats)) = values.get("listLevelNumFmts") else {
-        return Vec::new();
-    };
-    formats
-        .iter()
-        .filter_map(any_str)
-        .map(str::to_owned)
-        .collect()
-}
-
-fn resolve_list_template(template: &str, counters: &[i64], formats: &[String]) -> String {
-    let chars: Vec<char> = template.chars().collect();
-    let mut result = String::new();
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] == '%' && index + 1 < chars.len() {
-            if let Some(digit) = chars[index + 1].to_digit(10) {
-                if digit == 0 {
-                    index += 2;
-                    if chars
-                        .get(index)
-                        .is_some_and(|ch| matches!(ch, '.' | ')' | ':' | ']'))
-                    {
-                        index += 1;
-                    }
-                    continue;
-                } else {
-                    let counter_index = digit as usize - 1;
-                    let value = counters.get(counter_index).copied().unwrap_or(0);
-                    let formatted =
-                        format_list_counter(value, formats.get(counter_index).map(String::as_str));
-                    index += 2;
-                    let punctuation = chars
-                        .get(index)
-                        .copied()
-                        .filter(|ch| matches!(ch, '.' | ')' | ':' | ']'));
-                    if !formatted.is_empty() {
-                        result.push_str(&formatted);
-                        if let Some(punctuation) = punctuation {
-                            result.push(punctuation);
-                        }
-                    }
-                    if punctuation.is_some() {
-                        index += 1;
-                    }
-                    continue;
-                }
-            }
-        }
-        result.push(chars[index]);
-        index += 1;
-    }
-    result
-}
-
-/// The rendered list marker for one paragraph, advancing `state`. Bullets and
-/// authored literal markers pass through; a marker containing `%` is a
-/// template resolved against the counter stack, and a paragraph with no marker
-/// at all gets the dotted counter path (`"1.2."`). Numbering a level resets
-/// every deeper level.
-fn compute_list_marker(values: &BTreeMap<String, Any>, state: &mut ListState) -> Option<String> {
-    let marker = value_string(values.get("listMarker"));
-    let Some(Any::Map(num_pr)) = values.get("numPr") else {
-        return marker;
-    };
-    let Some(num_id) = map_number(num_pr, "numId") else {
-        return marker;
-    };
-    if num_id == 0.0 {
-        return marker;
-    }
-    if values.get("listIsBullet").and_then(any_bool) == Some(true) {
-        return Some(marker.unwrap_or_default());
-    }
-
-    let level = map_number(num_pr, "ilvl").unwrap_or(0.0).max(0.0) as usize;
-    let mut formats = list_level_formats(values);
-    let level_format = formats
-        .get(level)
-        .cloned()
-        .or_else(|| value_string(values.get("listNumFmt")));
-    let counter_key = value_number(values.get("listAbstractNumId"))
-        .unwrap_or(num_id)
-        .to_string();
-    if level_format.as_deref() == Some("none") {
-        if level < 9 && formats.len() <= level {
-            formats.resize(level + 1, "decimal".to_owned());
-            formats[level] = "none".to_owned();
-        }
-        let counters = state
-            .counters
-            .get(&counter_key)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        return marker
-            .map(|template| resolve_list_template(&template, counters, &formats))
-            .filter(|value| !value.is_empty());
-    }
-
-    let counters = state
-        .counters
-        .entry(counter_key)
-        .or_insert_with(|| vec![0; 9]);
-    if counters.len() <= level {
-        counters.resize(level + 1, 0);
-    }
-    let seen_key = format!("{num_id}:{level}");
-    if state.seen_num_ids.insert(seen_key) {
-        if let Some(start) = value_number(values.get("listStartOverride")) {
-            counters[level] = start as i64 - 1;
-        }
-    }
-    counters[level] += 1;
-    for value in counters.iter_mut().skip(level + 1) {
-        *value = 0;
-    }
-
-    if let Some(marker) = marker {
-        if marker.contains('%') {
-            return Some(resolve_list_template(&marker, counters, &formats));
-        }
-        return Some(marker);
-    }
-    let mut parts = Vec::new();
-    for value in counters.iter().take(level + 1) {
-        if *value <= 0 {
-            break;
-        }
-        parts.push(value.to_string());
-    }
-    Some(if parts.is_empty() {
-        "1.".to_owned()
-    } else {
-        format!("{}.", parts.join("."))
-    })
 }
 
 fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunFormatting {
@@ -3712,14 +3653,14 @@ fn any_map(value: &Any) -> Option<&std::collections::HashMap<String, Any>> {
     }
 }
 
-fn any_str(value: &Any) -> Option<&str> {
+pub(crate) fn any_str(value: &Any) -> Option<&str> {
     match value {
         Any::String(value) => Some(value),
         _ => None,
     }
 }
 
-fn any_bool(value: &Any) -> Option<bool> {
+pub(crate) fn any_bool(value: &Any) -> Option<bool> {
     match value {
         Any::Bool(value) => Some(*value),
         Any::Number(value) => Some(*value != 0.0),
@@ -3728,7 +3669,7 @@ fn any_bool(value: &Any) -> Option<bool> {
     }
 }
 
-fn any_number(value: &Any) -> Option<f64> {
+pub(crate) fn any_number(value: &Any) -> Option<f64> {
     match value {
         Any::Number(value) => Some(*value),
         Any::BigInt(value) => Some(*value as f64),
@@ -3737,11 +3678,11 @@ fn any_number(value: &Any) -> Option<f64> {
     }
 }
 
-fn value_string(value: Option<&Any>) -> Option<String> {
+pub(crate) fn value_string(value: Option<&Any>) -> Option<String> {
     value.and_then(any_str).map(str::to_owned)
 }
 
-fn value_number(value: Option<&Any>) -> Option<f64> {
+pub(crate) fn value_number(value: Option<&Any>) -> Option<f64> {
     value.and_then(any_number)
 }
 
@@ -3753,7 +3694,7 @@ fn map_bool(map: &std::collections::HashMap<String, Any>, key: &str) -> Option<b
     map.get(key).and_then(any_bool)
 }
 
-fn map_number(map: &std::collections::HashMap<String, Any>, key: &str) -> Option<f64> {
+pub(crate) fn map_number(map: &std::collections::HashMap<String, Any>, key: &str) -> Option<f64> {
     map.get(key).and_then(any_number)
 }
 

@@ -233,6 +233,7 @@ impl EditingDoc {
                 ..Receipt::default()
             });
         }
+        crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
         let chunks = boundary_chunks(&story, &txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
@@ -313,6 +314,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
+        if !text.is_empty() {
+            crate::identity::promote_at(self, &mut txn, &range.story, &story, range.start);
+        }
 
         let chunks = snapshot_range(
             &story,
@@ -400,6 +404,9 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
+        if total > 0 {
+            crate::identity::promote_at(self, &mut txn, &range.story, &story, range.start);
+        }
         let chunks = snapshot_range(
             &story,
             &txn,
@@ -464,6 +471,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
         let chunks = boundary_chunks(&story, &txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
@@ -494,6 +502,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
         let chunks = boundary_chunks(&story, &txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)

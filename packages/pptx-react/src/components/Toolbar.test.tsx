@@ -16,6 +16,10 @@ Object.defineProperty(elementPrototype, 'clientWidth', {
 const { cleanup, fireEvent, render } = await import('@testing-library/react');
 
 afterEach(cleanup);
+
+function isDisabled(element: HTMLElement): boolean {
+  return element.getAttribute('aria-disabled') === 'true' || element.hasAttribute('disabled');
+}
 // The globals are process-wide; leaving them installed poisons every later suite.
 afterAll(async () => {
   if (clientWidth) Object.defineProperty(elementPrototype, 'clientWidth', clientWidth);
@@ -53,7 +57,7 @@ describe('Toolbar alignment controls', () => {
     );
 
     expect(getByTestId('pptx-align-center').getAttribute('aria-pressed')).toBe('true');
-    expect(getByTestId('pptx-align-left').getAttribute('aria-pressed')).toBeNull();
+    expect(getByTestId('pptx-align-left').getAttribute('aria-pressed')).toBe('false');
   });
 
   it('disables the buttons without a text selection', () => {
@@ -91,7 +95,7 @@ describe('Toolbar insert image control', () => {
       </LocaleProvider>
     );
 
-    expect(getByTestId('pptx-insert-image').hasAttribute('disabled')).toBe(true);
+    expect(isDisabled(getByTestId('pptx-insert-image'))).toBe(true);
   });
 });
 
@@ -198,8 +202,8 @@ describe('Toolbar shape controls', () => {
       </LocaleProvider>
     );
 
-    expect(getByTestId('pptx-shape-fill').hasAttribute('disabled')).toBe(true);
-    expect(getByTestId('pptx-shape-arrange').hasAttribute('disabled')).toBe(false);
+    expect(isDisabled(getByTestId('pptx-shape-fill'))).toBe(true);
+    expect(isDisabled(getByTestId('pptx-shape-arrange'))).toBe(false);
 
     fireEvent.click(getByTestId('pptx-shape-arrange'));
     fireEvent.click(getByLabelText('Send to back'));
@@ -214,7 +218,7 @@ describe('Toolbar shape controls', () => {
       </LocaleProvider>
     );
 
-    expect(getByTestId('pptx-shape-arrange').hasAttribute('disabled')).toBe(true);
+    expect(isDisabled(getByTestId('pptx-shape-arrange'))).toBe(true);
   });
 
   it('exposes the primary adjustment for non-round presets', () => {

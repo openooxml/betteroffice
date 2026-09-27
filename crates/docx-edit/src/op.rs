@@ -59,6 +59,8 @@ pub enum OpError {
     InvalidTable(String),
     InvalidComment(String),
     InvalidUpdate(String),
+    /// A plain- or rich-text content control holds its text as content, never as a `value`.
+    TextControlValue,
 }
 
 impl fmt::Display for OpError {
@@ -109,6 +111,10 @@ impl fmt::Display for OpError {
             Self::InvalidTable(message) => write!(f, "invalid table: {message}"),
             Self::InvalidComment(message) => write!(f, "invalid comment: {message}"),
             Self::InvalidUpdate(message) => write!(f, "invalid yrs update: {message}"),
+            Self::TextControlValue => write!(
+                f,
+                "a text content control holds its text as content; fill it with setContentControlText"
+            ),
         }
     }
 }

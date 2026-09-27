@@ -389,6 +389,15 @@ export function currentYrsTableTarget(session: YrsSession): YrsTableTarget | nul
   return focused ? { focused, range: { anchor: focused, head: focused } } : null;
 }
 
+/** Stable story ids of the anchor and head cells of the table selection. */
+export function yrsTableSelectionStories(session: YrsSession): [string, string] | null {
+  const target = currentYrsTableTarget(session);
+  if (!target) return null;
+  const anchor = yrsCellStory(session, target.range.anchor);
+  const head = yrsCellStory(session, target.range.head);
+  return anchor && head ? [anchor, head] : null;
+}
+
 function cellBorderColor(tcPr: Record<string, unknown> | undefined): TableContextInfo['cellBorderColor'] {
   const borders = tcPr?.borders;
   if (!borders || typeof borders !== 'object') return undefined;
@@ -574,7 +583,8 @@ export function yrsSelectionNearTable(session: YrsSession, table: YrsTableLoc) {
  */
 export interface YrsHistoryActionResult {
   changed: boolean;
-  story: string | null;
+  /** Every story the undo or redo changed, sorted; empty when nothing changed. */
+  stories: string[];
 }
 
 export function performYrsHistoryAction(
@@ -587,13 +597,13 @@ export function performYrsHistoryAction(
   if (nearby) session.setSelection(nearby);
 
   const changed = redo ? session.redo() : session.undo();
-  const story = changed ? (session.historyStories()[0] ?? null) : null;
-  if (!changed || !before || !nearby) return { changed, story };
+  const stories = changed ? session.historyStories() : [];
+  if (!changed || !before || !nearby) return { changed, stories };
 
   const restoredCell = yrsCellLocFromStory(before.head.story);
   const cellIsLive =
     !restoredCell || yrsCellStory(session, restoredCell) === before.head.story;
-  if (!cellIsLive) return { changed, story };
+  if (!cellIsLive) return { changed, stories };
   try {
     const paragraphs = session.paragraphs(before.head.story);
     const paraIds = new Set(paragraphs.map((paragraph) => paragraph.paraId));
@@ -603,7 +613,7 @@ export function performYrsHistoryAction(
   } catch {
     // The structural history operation removed the selected story.
   }
-  return { changed, story };
+  return { changed, stories };
 }
 
 function authoredId(value: unknown): string | null {

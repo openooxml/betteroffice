@@ -1,5 +1,6 @@
 import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
+import type { Document } from '@betteroffice/docx/types/document';
 import {
   createDocx,
   injectReplyRangeMarkers,
@@ -7,6 +8,12 @@ import {
   repackDocx,
 } from '@betteroffice/docx/docx';
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
+import {
+  captureSessionSave,
+  writeSessionSave,
+  type DocxSessionSave,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import { openPrintWindow } from '@betteroffice/docx';
 import {
   rasterizeDisplayListPages,
@@ -14,6 +21,8 @@ import {
   type ImageResolver,
 } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
+import type { DocxEditorProps } from '../../DocxEditor';
+import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
 
@@ -32,64 +41,63 @@ const PRINT_CANVAS_CSS =
   'img.print-page:last-child { break-after: auto; }\n' +
   '@page { margin: 0; size: auto; }';
 
-// Print once fonts + images have settled, then close. Prints as soon as
-// everything is ready (usually well under the cap) with a hard timeout so a
-// browser that never resolves `fonts.ready`/`decode()` still prints.
-function finishPrint(w: Window, images: HTMLImageElement[] = []): void {
-  let done = false;
-  const runPrint = () => {
-    if (done || w.closed) return;
-    done = true;
-    w.focus();
-    w.print();
-    w.close();
-  };
-  Promise.all([
+// Resolves once fonts + images have settled (usually well under the cap), with
+// a hard timeout so a browser that never resolves `fonts.ready`/`decode()`
+// still prints.
+function settled(w: Window, images: HTMLImageElement[]): Promise<void> {
+  const loaded = Promise.all([
     w.document.fonts?.ready ?? Promise.resolve(),
     ...images.map((img) => img.decode().catch(() => undefined)),
-  ]).then(runPrint, runPrint);
-  setTimeout(runPrint, 2000);
+  ]).then(() => undefined, () => undefined);
+  return Promise.race([loaded, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
 }
 
-/** Prints display-list pages as PNG images without interpolating data into markup. */
-function printDisplayListPages(
+/** Fills `w` with display-list pages as PNG images without interpolating data into markup. */
+async function renderDisplayListPages(
+  w: Window,
   displayList: DisplayList,
-  resolveImage: ImageResolver,
-  onPrint?: () => void
-): void {
-  const w = openPrintWindow('Print', '');
-  if (!w) {
-    window.print();
-    onPrint?.();
-    return;
-  }
+  resolveImage: ImageResolver
+): Promise<void> {
   const style = w.document.createElement('style');
   style.textContent = PRINT_CANVAS_CSS;
   w.document.head.appendChild(style);
-
-  void rasterizeDisplayListPages(displayList, { resolveImage }).then(
-    (canvases) => {
-      const images: HTMLImageElement[] = [];
-      for (const canvas of canvases) {
-        try {
-          const img = w.document.createElement('img');
-          img.className = 'print-page';
-          img.src = canvas.toDataURL('image/png');
-          w.document.body.appendChild(img);
-          images.push(img);
-        } catch {
-          // Skip an unexpectedly tainted page without exposing markup.
-        }
-      }
-      finishPrint(w, images);
-      onPrint?.();
-    },
-    () => {
-      w.close();
-      window.print();
-      onPrint?.();
+  const canvases = await rasterizeDisplayListPages(displayList, { resolveImage });
+  const images: HTMLImageElement[] = [];
+  for (const canvas of canvases) {
+    try {
+      const img = w.document.createElement('img');
+      img.className = 'print-page';
+      img.src = canvas.toDataURL('image/png');
+      w.document.body.appendChild(img);
+      images.push(img);
+    } catch {
+      // Skip an unexpectedly tainted page without exposing markup.
     }
-  );
+  }
+  await settled(w, images);
+}
+
+/** A print window opened during a user gesture, filled once the document has settled. */
+export interface DocxPrintJob {
+  /** Renders `displayList` into the reserved window and waits for its pages to load. */
+  prepare(displayList: DisplayList): Promise<void>;
+  /** Prints the prepared pages; false when the reserved window was closed first. */
+  print(): boolean;
+  cancel(): void;
+}
+
+/** Writes the editor's document, through the session save when it has one. */
+async function writeEditorDocument(
+  document: Document,
+  session: YrsSession | null,
+  capture: DocxSessionSave | null
+): Promise<ArrayBuffer> {
+  const original = document.originalBuffer;
+  if (!original) return createDocx(document);
+  if (!session || !capture) return repackDocx(document);
+  // The original buffer can be the last save rather than the session source, so none is patched.
+  const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
+  return bytes.buffer as ArrayBuffer;
 }
 
 /**
@@ -102,11 +110,11 @@ function printDisplayListPages(
  */
 export function useFileIO({
   pagedEditorRef,
-  displayList,
   resolveImage,
   comments,
   documentName,
   onSave,
+  onSaveRequest,
   downloadOnSave = true,
   onOpen,
   onError,
@@ -116,11 +124,11 @@ export function useFileIO({
   focusActiveEditor,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
-  displayList: DisplayList | null;
   resolveImage: ImageResolver;
   comments: Comment[];
   documentName: string | undefined;
   onSave: ((buffer: ArrayBuffer) => void) | undefined;
+  onSaveRequest?: DocxEditorProps['onSaveRequest'];
   downloadOnSave?: boolean;
   onOpen: ((file: File) => void | Promise<void>) | undefined;
   onError: ((error: Error) => void) | undefined;
@@ -130,13 +138,26 @@ export function useFileIO({
   focusActiveEditor: () => void;
 }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const imageInsertRef = useRef<DocxImageInsert | null>(null);
   const docxInputRef = useRef<HTMLInputElement>(null);
+  const saveRequestRef = useRef<Promise<DocxSaveOutcome> | null>(null);
 
   const handleSave = useCallback(
     async (): Promise<ArrayBuffer | null> => {
       try {
-        const document = pagedEditorRef.current?.getDocument();
+        const editor = pagedEditorRef.current;
+        if (!editor) return null;
+        const session = editor.getYrsSession();
+        await editor.flushPendingInput();
+        const assertCurrent = () => {
+          if (editor !== pagedEditorRef.current || session !== editor.getYrsSession()) {
+            throw new Error('The document changed while saving');
+          }
+        };
+        assertCurrent();
+        const document = editor.getDocument();
         if (!document) return null;
+        const capture = session && document.originalBuffer ? captureSessionSave(session) : null;
 
         // Sync React comments state (including new replies) back to the document model
         document.package.document.comments = comments;
@@ -147,9 +168,8 @@ export function useFileIO({
         // Also inject range markers for comments that reply to tracked changes.
         injectTCReplyRangeMarkers(document.package.document.content, comments);
 
-        const buffer = document.originalBuffer
-          ? await repackDocx(document)
-          : await createDocx(document);
+        const buffer = await writeEditorDocument(document, session, capture);
+        assertCurrent();
         document.originalBuffer = buffer;
 
         onSave?.(buffer);
@@ -162,29 +182,61 @@ export function useFileIO({
     [pagedEditorRef, comments, onSave, onError]
   );
 
-  const handleDirectPrint = useCallback(() => {
-    if (!displayList) {
-      window.print();
-      onPrint?.();
-      return;
-    }
-    printDisplayListPages(displayList, resolveImage, onPrint);
-  }, [displayList, resolveImage, onPrint]);
+  const reservePrint = useCallback((): DocxPrintJob => {
+    const w = openPrintWindow('Print', '');
+    return {
+      async prepare(displayList) {
+        if (w && !w.closed) await renderDisplayListPages(w, displayList, resolveImage);
+      },
+      print() {
+        if (!w) {
+          window.print();
+        } else {
+          if (w.closed) return false;
+          w.focus();
+          w.print();
+          w.close();
+        }
+        onPrint?.();
+        return true;
+      },
+      cancel() {
+        if (w && !w.closed) w.close();
+      },
+    };
+  }, [resolveImage, onPrint]);
 
-  const handleDownloadDocument = useCallback(async () => {
-    const buffer = await handleSave();
-    if (!buffer || !downloadOnSave) return;
-    const blob = new Blob([buffer], {
-      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  const handleDownloadDocument = useCallback((): Promise<DocxSaveOutcome> => {
+    if (saveRequestRef.current) return saveRequestRef.current;
+    const pending = Promise.resolve().then(async (): Promise<DocxSaveOutcome> => {
+      const editor = pagedEditorRef.current;
+      const session = editor?.getYrsSession();
+      if (onSaveRequest && (await onSaveRequest()) !== true) return 'requested';
+      if (editor !== pagedEditorRef.current || session !== editor?.getYrsSession()) {
+        throw new Error('The document changed during the save request');
+      }
+      const buffer = await handleSave();
+      if (!buffer) return 'failed';
+      if (!downloadOnSave) return 'saved';
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `${(documentName?.trim() || 'document').replace(/\.docx$/i, '')}.docx`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      return 'saved';
+    }).catch((error): DocxSaveOutcome => {
+      onError?.(toFileIOError(error, 'Failed to save document'));
+      return 'failed';
+    }).finally(() => {
+      if (saveRequestRef.current === pending) saveRequestRef.current = null;
     });
-    const url = URL.createObjectURL(blob);
-    const a = window.document.createElement('a');
-    a.href = url;
-    a.download = `${(documentName?.trim() || 'document').replace(/\.docx$/i, '')}.docx`;
-    a.click();
-    // Defer revoke so Safari has time to start the download.
-    setTimeout(() => URL.revokeObjectURL(url), 0);
-  }, [handleSave, documentName, downloadOnSave]);
+    saveRequestRef.current = pending;
+    return pending;
+  }, [handleSave, documentName, downloadOnSave, onSaveRequest, onError, pagedEditorRef]);
 
   const handleOpenDocument = useCallback(() => {
     docxInputRef.current?.click();
@@ -218,13 +270,17 @@ export function useFileIO({
     [loadBuffer, onDocumentNameChange, onError, onOpen]
   );
 
-  const handleInsertImageClick = useCallback(() => {
+  /** Opens the picker; `insert` stays with the file chosen in it through decoding. */
+  const handleInsertImageClick = useCallback((insert?: DocxImageInsert) => {
+    imageInsertRef.current = insert ?? null;
     imageInputRef.current?.click();
   }, []);
 
   const handleImageFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
+      const insert = imageInsertRef.current;
+      imageInsertRef.current = null;
       // Reset the input so the same file can be selected again
       e.target.value = '';
       if (!file) return;
@@ -242,17 +298,24 @@ export function useFileIO({
             width = INSERT_IMAGE_MAX_WIDTH_PX;
           }
           const rId = `rId_img_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
+          const picture = {
+            src: dataUrl,
+            alt: file.name,
+            width,
+            height,
+            rId,
+            wrapType: 'inline',
+            displayMode: 'inline',
+          };
+          if (insert) {
+            void insert(picture).then((result) => {
+              if (result.ok && result.status === 'executed') focusActiveEditor();
+            });
+            return;
+          }
           const inserted = pagedEditorRef.current?.applyYrsCommand({
             type: 'insertImage',
-            image: {
-              src: dataUrl,
-              alt: file.name,
-              width,
-              height,
-              rId,
-              wrapType: 'inline',
-              displayMode: 'inline',
-            },
+            image: picture,
           });
           if (inserted) focusActiveEditor();
         };
@@ -269,7 +332,7 @@ export function useFileIO({
     imageInputRef,
     docxInputRef,
     handleSave,
-    handleDirectPrint,
+    reservePrint,
     handleDownloadDocument,
     handleOpenDocument,
     handleDocxFileChange,

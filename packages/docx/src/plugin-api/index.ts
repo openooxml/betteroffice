@@ -6,6 +6,9 @@
  *
  * @experimental Plugin API is still evolving. Breaking changes may
  * happen in minor releases until plugin authors stabilize the contract.
+ * The snapshot-based `EditorPluginCore`, `PluginPanelProps`, `PanelConfig`
+ * and `SidebarItemContext` are deprecated; React hosts install plugins with
+ * `defineDocxPlugin` and the `plugins` prop of `@betteroffice/docx-react`.
  * @packageDocumentation
  * @public
  */
