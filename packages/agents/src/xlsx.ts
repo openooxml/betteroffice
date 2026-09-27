@@ -59,18 +59,22 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
     const total = width * (end.row - start.row + 1);
     const offset = integer(options.offset ?? 0, 0, total, 'offset');
     const limit = integer(options.limit ?? 50, 1, 100, 'limit');
+    const positions = [];
+    for (let index = offset; index < Math.min(total, offset + limit); index++) {
+      positions.push({ sheet: options.sheet, a1: address(start.row + Math.floor(index / width), start.col + index % width) });
+    }
+    const read = this.readTargets(positions);
+    if (!read.sheets.some(sheet => sheet.sheetId === options.sheet)) throw new DocumentToolError('UNKNOWN_STORY', 'Use a sheetId from outline.');
     const cells = [];
     let size = 0;
-    for (let index = offset; index < Math.min(total, offset + limit); index++) {
-      const a1 = address(start.row + Math.floor(index / width), start.col + index % width);
-      const target = this.cellAt(options.sheet, a1);
+    for (const target of read.targets) {
       const visible = this.visible(target);
       const cost = JSON.stringify(visible).length;
       if (cells.length && size + cost > 16000) break;
       size += cost;
       cells.push(visible);
     }
-    return { version: this.currentVersion(), sheet: options.sheet, range: options.range, cells, total, nextOffset: offset + cells.length < total ? offset + cells.length : null };
+    return { version: read.version, sheet: options.sheet, range: options.range, cells, total, nextOffset: offset + cells.length < total ? offset + cells.length : null };
   }
 
   grep(options: GrepOptions) {
@@ -78,7 +82,8 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
     if (options.caseSensitive === false) throw new DocumentToolError('UNSUPPORTED', 'XLSX search is case-sensitive. Omit caseSensitive or set it to true.');
     const found = unwrap(this.handle.findText({ text: options.query, sheetIds: options.story ? [options.story] : undefined, limit: 10000 }));
     const page = this.searchPage(options, found.matches.map(hit => ({ ref: this.ref(hit.cell.sheetId, hit.cell.a1), sheet: hit.cell.sheetId, a1: hit.cell.a1, text: hit.text.slice(0, 400), length: hit.text.length })), found.truncated);
-    return { ...page, matches: page.matches.map(hit => ({ ...hit, cell: this.hold(this.cellAt(hit.sheet, hit.a1)) })) };
+    const read = this.readTargets(page.matches);
+    return { ...page, matches: page.matches.map((hit, index) => ({ ...hit, cell: this.hold(read.targets[index]) })) };
   }
 
   read(ref: string, options: { start?: number; length?: number; field?: 'displayText' | 'formula' | 'value' } = {}) {
@@ -136,8 +141,13 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   }
 
   private cellAt(sheet: string, a1: string): CellTarget {
-    const read = unwrap(this.handle.readCells({ ranges: [{ sheetId: sheet, range: { kind: 'a1', a1 } }] }));
-    return { sheet, a1, before: read.ranges[0].cells[0][0], version: read.version };
+    return this.readTargets([{ sheet, a1 }]).targets[0];
+  }
+
+  private readTargets(positions: Array<{ sheet: string; a1: string }>) {
+    const read = unwrap(this.handle.readCells({ ranges: positions.map(({ sheet, a1 }) => ({ sheetId: sheet, range: { kind: 'a1', a1 } })) }));
+    const targets: CellTarget[] = positions.map(({ sheet, a1 }, index) => ({ sheet, a1, before: read.ranges[index].cells[0][0], version: read.version }));
+    return { version: read.version, sheets: read.sheets, targets };
   }
 
   private hold(target: CellTarget) {

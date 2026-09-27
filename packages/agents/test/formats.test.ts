@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openPptx, openXlsx } from '../src';
 import { pptxFixture, xlsxFixture } from './format-fixtures';
@@ -117,4 +117,25 @@ test('PPTX long reads and search stay bounded and reject paragraph crossings', a
     expect(() => deck.grep({ query: 'missing', story: 'missing' })).toThrow('story');
     await expect(deck.render()).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   } finally { deck.close(); }
+});
+
+
+test('XLSX pages and search hydrate cell handles with one engine read', async () => {
+  const book = await openXlsx(await xlsxFixture());
+  const internal = book as unknown as { handle: import('@betteroffice/xlsx').WorkbookHandle };
+  const reads = spyOn(internal.handle, 'readCells');
+  try {
+    const page = book.readCells({ sheet: 'sheet:0', range: 'A3:E30', offset: 3, limit: 100 });
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(reads.mock.calls[0][0].ranges).toHaveLength(100);
+    expect(page.cells[0].a1).toBe('D3');
+    expect(page.nextOffset).toBe(3 + page.cells.length);
+    expect(JSON.stringify(page).length).toBeLessThan(17000);
+    expect(new Set(page.cells.map(cell => cell.version)).size).toBe(1);
+    reads.mockClear();
+    const matches = book.grep({ query: 'Line item', limit: 20 }).matches;
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(reads.mock.calls[0][0].ranges).toHaveLength(matches.length);
+    expect(() => book.readCells({ sheet: 'missing', range: 'A1', offset: 1 })).toThrow('sheetId');
+  } finally { reads.mockRestore(); book.close(); }
 });
