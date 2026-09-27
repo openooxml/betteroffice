@@ -152,7 +152,7 @@ describe("RetainedUpdateLog", () => {
     log.retain(documentFrame());
     expect(() => log.retain(syncFrame(2, Uint8Array.of(255)))).toThrow();
     expect(log.snapshot()).toEqual([documentFrame()]);
-    expect(() => log.restore([{ seq: 0, bytes: syncFrame(2, Uint8Array.of(255)) }])).toThrow();
+    expect(log.restore([{ seq: 0, bytes: syncFrame(2, Uint8Array.of(255)) }])?.deletes).toEqual([0]);
   });
 
   test("answers state vectors and requests the seed missing from a fresh room", () => {
@@ -165,6 +165,18 @@ describe("RetainedUpdateLog", () => {
     const [response] = log.responses(syncFrame(0, Y.encodeStateVector(peer)));
     expect(decodeMessages(response)).toEqual([{ type: 'sync-step-2', update: Uint8Array.of(0, 0) }]);
     peer.destroy();
+  });
+
+  test("sync responses include edits after querying cached state", () => {
+    const log = new RetainedUpdateLog(2, 4096);
+    const query = syncFrame(0, Uint8Array.of(0));
+    log.retain(documentFrame('first', 1));
+    expect(rehydrate(log.responses(query)).getText('body').toString()).toBe('first');
+    expect(rehydrate(log.responses(query)).getText('body').toString()).toBe('first');
+    log.retain(documentFrame('second', 2));
+    expect(rehydrate(log.responses(query)).getText('body').toString()).toBe('firstsecond');
+    log.retain(documentFrame('third', 3));
+    expect(rehydrate(log.responses(query)).getText('body').toString()).toBe('firstsecondthird');
   });
 
   test("clears both checkpoint and tail", () => {

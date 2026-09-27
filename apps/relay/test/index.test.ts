@@ -280,10 +280,14 @@ describe('CollaborationRoom', () => {
       ['update:nope', Uint8Array.of(1)],
       [updateKey(1), 'invalid value'],
       [updateKey(2), documentFrame('valid')],
+      [updateKey(3), Uint8Array.of(0, 2, 1, 255)],
+      [updateKey(4), Uint8Array.of(0x80)],
     ]);
     await h.initialization;
     expect(h.rows.has('update:nope')).toBe(false);
     expect(h.rows.has(updateKey(1))).toBe(false);
+    expect(h.rows.has(updateKey(3))).toBe(false);
+    expect(h.rows.has(updateKey(4))).toBe(false);
     expect(rehydrate(frames(await join(h))).getText('body').toString()).toBe('valid');
   });
 

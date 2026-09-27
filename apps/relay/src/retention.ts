@@ -205,6 +205,7 @@ export class RetainedUpdateLog {
   private base: Checkpoint | undefined;
   private retainedBytes = 0;
   private nextSeq = 0;
+  private mergedUpdate: Uint8Array | undefined;
 
   constructor(
     private readonly maxCount: number,
@@ -228,7 +229,7 @@ export class RetainedUpdateLog {
       if (!Number.isSafeInteger(entry.seq) || entry.seq < 0) throw new Error("Invalid update sequence");
       this.nextSeq = Math.max(this.nextSeq, entry.seq + 1);
       if (this.base && entry.seq <= this.base.seq) { deletes.push(entry.seq); continue; }
-      payloads(entry.bytes);
+      try { payloads(entry.bytes); } catch { deletes.push(entry.seq); continue; }
       const retained = retainDocumentMessages(entry.bytes);
       if (!retained) { deletes.push(entry.seq); continue; }
       if (retained.byteLength > this.maxBytes) throw new RoomCapacityError("Stored update exceeds room capacity");
@@ -258,6 +259,7 @@ export class RetainedUpdateLog {
     }
     this.nextSeq++;
     this.updates.push(entry);
+    this.mergedUpdate = undefined;
     this.retainedBytes += retained.length;
     return { puts: [entry], deletes: [] };
   }
@@ -299,6 +301,7 @@ export class RetainedUpdateLog {
     this.base = undefined;
     this.retainedBytes = 0;
     this.nextSeq = 0;
+    this.mergedUpdate = undefined;
   }
 
   private needsCheckpoint(): boolean {
@@ -307,19 +310,23 @@ export class RetainedUpdateLog {
       this.updates.some(entry => entry.bytes.length > this.maxEntryBytes);
   }
 
-  private merged(entries = this.updates): Uint8Array {
+  private merged(entries: readonly RetainedEntry[] = this.updates): Uint8Array {
+    if (entries === this.updates && this.mergedUpdate) return this.mergedUpdate;
     const updates = [...(this.base ? payloads(this.base.bytes) : []), ...entries.flatMap(entry => payloads(entry.bytes))];
-    return updates.length ? mergeUpdates(updates) : Uint8Array.of(0, 0);
+    const merged = updates.length ? mergeUpdates(updates) : Uint8Array.of(0, 0);
+    if (entries === this.updates) this.mergedUpdate = merged;
+    return merged;
   }
 
   private compact(entries: readonly RetainedEntry[]): LogMutation {
-    const bytes = syncFrame(1, this.merged([...entries]));
+    const bytes = syncFrame(1, this.merged(entries));
     if (bytes.length > this.maxBytes) throw new RoomCapacityError("Checkpoint exceeds room capacity; export the document before continuing");
     return { puts: [], deletes: entries.map(entry => entry.seq), checkpoint: { version: 1, seq: entries.at(-1)!.seq, bytes } };
   }
 
   private adoptCheckpoint(checkpoint: Checkpoint): void {
     this.base = checkpoint;
+    this.mergedUpdate = undefined;
     this.updates = [];
     this.retainedBytes = 0;
     this.nextSeq = checkpoint.seq + 1;
