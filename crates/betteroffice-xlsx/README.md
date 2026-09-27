@@ -29,6 +29,24 @@ Saving preserves the source package: parts and sheets an edit did not touch are
 copied through byte for byte, and only what changed is reserialized.
 `0.2.x`: the API may change before `1.0`.
 
+## Edit batches
+
+`read_cells` and `find_text` return cells with the session version they were
+read at. `apply_edits` resolves every step of an `EditRequest` against its
+`expect_version` and commits them as one recalculated change and one undo step,
+publishing the update only after recalculation, or returns an `EditRefusal`
+with the workbook, history and proposals untouched. `validate_edits` stages and
+rehearses the same batch without adopting it. Steps set cell inputs, formulas,
+number formats and style patches; they do not insert or delete rows, columns or
+sheets, and refuse writes to merged-cell followers, array-formula cells and
+protected sheets. The request and outcome types serialize to the JSON the
+JavaScript and Python bindings share; `read_cells_json`, `find_text_json`,
+`validate_edits_json` and `apply_edits_json` are those bindings' entry points,
+refusing requests over `MAX_REQUEST_BYTES` and results over
+`MAX_RESPONSE_BYTES` with `limit-exceeded`. A `recalculate_all` that changes
+values moves `version()` and notifies observers with an empty
+`UpdateOrigin::Recalculation` event, which carries no update for peers.
+
 ## Collaboration
 
 Every replica needs an explicit client ID, assigned by the host. Yrs cannot
@@ -109,6 +127,7 @@ writes back.
 | Chart references and anchors follow structural edits | Yes | Yes |
 | Undo/redo | Yes | Local user origin only |
 | Agent proposals | Yes | Yes; acceptance is not locally undoable |
+| Version-checked edit batches | Yes | Yes |
 | Yrs v1 vectors, diffs, updates, and observers | Encode/observe only | Yes |
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

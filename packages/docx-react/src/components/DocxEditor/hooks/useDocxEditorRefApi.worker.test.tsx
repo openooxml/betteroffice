@@ -92,6 +92,7 @@ function Harness({ session, layout, overrides, pagedRef, docxRef, display }: Har
     runLayoutPipeline: () => {},
     getLayoutRequest: () => null,
     scrollToPositionImpl: () => {},
+    revealPositionImpl: () => 'layout-unavailable',
     scrollToParaIdImpl: () => false,
     scrollToPageImpl: () => {},
     setIsFocused: () => {},
