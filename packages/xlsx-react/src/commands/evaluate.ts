@@ -86,6 +86,10 @@ const REASON_KEYS: Record<XlsxCommandFailureCode, TranslationKey> = {
   'host-disabled': 'commands.reasons.hostDisabled',
   'unsupported-command': 'commands.reasons.unsupportedCommand',
   'invalid-arguments': 'commands.reasons.invalidArguments',
+  'permission-denied': 'commands.reasons.permissionDenied',
+  'unsupported-policy': 'commands.reasons.unsupportedPolicy',
+  'plugin-unavailable': 'commands.reasons.pluginUnavailable',
+  aborted: 'commands.reasons.aborted',
   'input-failed': 'commands.reasons.inputFailed',
   'document-replaced': 'commands.reasons.documentReplaced',
   'target-changed': 'commands.reasons.targetChanged',
@@ -470,6 +474,16 @@ function evaluateSession<K extends XlsxCommandId>(
     default:
       return { gate: null };
   }
+}
+
+/** The editor's gate for a contributed command; null when it passes. */
+export function contributedCommandGate(
+  mutatesDocument: boolean,
+  env: XlsxCommandEnvironment | null
+): CommandReason<XlsxCommandDisabledCode> | null {
+  if (!env) return commandReason('editor-unavailable', null);
+  const gate = lifecycle(env) ?? (mutatesDocument && env.readOnly ? 'read-only' : null);
+  return gate ? commandReason(gate, env) : null;
 }
 
 /** Whether `id` acts on the selected cells. */

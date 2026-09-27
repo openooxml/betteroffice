@@ -1,10 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { XlsxEditor } from "@betteroffice/xlsx-react";
-import type { XlsxEditorApi } from "@betteroffice/xlsx-react";
+import type {
+  XlsxEditorApi,
+  XlsxPlugin,
+  XlsxPluginGrant,
+} from "@betteroffice/xlsx-react";
 import { isProposalsAvailable } from "@betteroffice/xlsx";
 import { CollaborationProvider } from "@betteroffice/xlsx/collaboration";
 import type { CollaborationUserOptions } from "@betteroffice/xlsx/collaboration";
@@ -120,6 +124,21 @@ export function XlsxDemoClient() {
   const [loading, setLoading] = useState(!bootEmpty);
   const [error, setError] = useState<string | null>(null);
   const [compact, setCompact] = useState(false);
+  const [reviewPlugin, setReviewPlugin] = useState<XlsxPlugin | null>(null);
+  const [reviewEnabled, setReviewEnabled] = useState(false);
+  const [reviewWrites, setReviewWrites] = useState(false);
+  const [readOnly, setReadOnly] = useState(false);
+  const plugins = useMemo(
+    () => (reviewEnabled && reviewPlugin ? [reviewPlugin] : []),
+    [reviewEnabled, reviewPlugin],
+  );
+  const pluginGrants = useMemo<Record<string, XlsxPluginGrant> | undefined>(
+    () =>
+      reviewWrites && reviewPlugin
+        ? { [reviewPlugin.id]: { document: "write", editBatches: true } }
+        : undefined,
+    [reviewPlugin, reviewWrites],
+  );
   const apiRef = useRef<XlsxEditorApi | null>(null);
   // set once the user opens their own document, so the async showcase auto-load
   // can't clobber that choice if it resolves afterwards.
@@ -127,6 +146,16 @@ export function XlsxDemoClient() {
   const autoloadedRef = useRef(false);
 
   const proposalsAvailable = isProposalsAvailable();
+
+  useEffect(() => {
+    let cancelled = false;
+    void import("./ReviewPlugin").then((module) => {
+      if (!cancelled) setReviewPlugin(module.reviewPlugin);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const onReady = useCallback((api: XlsxEditorApi) => {
     apiRef.current = api;
@@ -304,6 +333,32 @@ export function XlsxDemoClient() {
             >
               Compact toolbar
             </button>
+            <button
+              type="button"
+              className={cn(btnGhost, "aria-pressed:bg-surface aria-pressed:text-fg")}
+              aria-pressed={reviewEnabled}
+              disabled={!reviewPlugin}
+              onClick={() => setReviewEnabled((value) => !value)}
+            >
+              Review plugin
+            </button>
+            <button
+              type="button"
+              className={cn(btnGhost, "aria-pressed:bg-surface aria-pressed:text-fg")}
+              aria-pressed={reviewWrites}
+              disabled={!reviewEnabled}
+              onClick={() => setReviewWrites((value) => !value)}
+            >
+              Plugin write access
+            </button>
+            <button
+              type="button"
+              className={cn(btnGhost, "aria-pressed:bg-surface aria-pressed:text-fg")}
+              aria-pressed={readOnly}
+              onClick={() => setReadOnly((value) => !value)}
+            >
+              Read-only
+            </button>
             <OpenFileLabel className={btn} testId="file-input" onPick={onPick} />
             <button
               className={btn}
@@ -407,6 +462,15 @@ export function XlsxDemoClient() {
                 : undefined
             }
             onReady={onReady}
+            readOnly={readOnly}
+            plugins={plugins}
+            pluginGrants={pluginGrants}
+            onPluginError={(failure) =>
+              console.error(
+                `Plugin ${failure.pluginId} failed (${failure.phase})`,
+                failure.error,
+              )
+            }
             toolbar={
               compact ? (
                 <CompactToolbar

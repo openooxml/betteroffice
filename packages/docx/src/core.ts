@@ -42,9 +42,12 @@ export {
   DocxExportError,
   exportDocxMarkdown,
   exportDocxStructured,
+  exportDocxStructuredWithPages,
   renderDocxMarkdown,
+  renderDocxMarkdownWithPages,
 } from './docx/structuredExport';
 export type * from './yrs/structuredExport';
+export type * from './yrs/pagedExport';
 export type * from './yrs/readTypes';
 
 // ============================================================================

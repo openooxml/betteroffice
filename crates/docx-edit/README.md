@@ -33,6 +33,15 @@ ranges, table and control ids, `sourcePart` locations in retained XML, or
 `unlocated` with the reason there is no location), and
 everything omitted or not represented is diagnosed. `read_types` holds the
 anchor, story-selection and content-control types shared by the read APIs.
+`EngineSession::export_structured_with_pages` attaches a page map read from the
+region layout the session retains (physical and displayed page numbers, header,
+footer and note occurrences, per-page text ranges, table row windows and optional
+geometry), refusing a layout older than the document, lowered from other stories,
+section, settings or note metadata, or measured with other or missing fonts or
+options; `export_structured_with_pages_for` also requires the inputs an editor
+would lay out with now, and `export_snapshot_with_private_fonts` lays a private
+session out with fonts registered in a store of its own.
+`render_docx_markdown_with_pages` adds optional page markers.
 
 Used by [betteroffice-docx](https://crates.io/crates/betteroffice-docx).
 

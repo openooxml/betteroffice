@@ -92,6 +92,8 @@
   is checked against its grant, the editor mode and document policy when it runs.
 
 - **Host-owned PPTX plugins.** PPTX React supports host-owned plugins with
+
+- **Host-owned XLSX plugins.** XLSX React supports host-owned plugins with
   panels, overlays, lifecycle events, and explicitly granted commands and edit
   batches. Plugins read and navigate by default; every write is checked against
   its grant and `readOnly` when it runs.
@@ -102,7 +104,9 @@
 
 - **Structured DOCX export.** DOCX exports read-only structured JSON and
   Markdown with source anchors, explicit story and revision options, and
-  omission diagnostics. Page fragments are not yet included.
+  omission diagnostics. JavaScript and React can attach version-checked page
+  fragments from configured layout, with optional page geometry. Native Rust
+  and Python structured exports do not yet generate page maps automatically.
 
 - **Structured XLSX export.** XLSX exports bounded sparse worksheet content and
   Markdown with positional anchors, formulas, stored values, formatted text,

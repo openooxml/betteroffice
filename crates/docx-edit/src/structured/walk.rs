@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use serde::Serialize;
 use serde_json::Value;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
 
@@ -53,26 +52,6 @@ const PROJECTION_SLACK: usize = 1 << 20;
 const SUMMARY_MESSAGE: &str = "Further diagnostics with this code were omitted.";
 
 type Payload = HashMap<String, Any>;
-
-/// Counts written bytes without keeping them.
-struct Counter(usize);
-
-impl std::io::Write for Counter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 += bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// The compact JSON size of `value`, measured without building the JSON.
-fn json_len<T: Serialize + ?Sized>(value: &T) -> usize {
-    let mut counter = Counter(0);
-    serde_json::to_writer(&mut counter, value).map_or(0, |_| counter.0)
-}
 
 fn diagnostic(
     code: DiagnosticCode,

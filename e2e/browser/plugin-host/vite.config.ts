@@ -32,6 +32,16 @@ export default defineConfig({
       },
       { find: /^@betteroffice\/pptx$/, replacement: resolve(root, 'packages/pptx/src/index.ts') },
       { find: /^@betteroffice\/pptx\/(.*)$/, replacement: resolve(root, 'packages/pptx/src/$1') },
+      {
+        find: /^@betteroffice\/xlsx-react$/,
+        replacement: resolve(root, 'packages/xlsx-react/src/index.ts'),
+      },
+      {
+        find: /^@betteroffice\/xlsx-i18n$/,
+        replacement: resolve(root, 'packages/xlsx-i18n/src/index.ts'),
+      },
+      { find: /^@betteroffice\/xlsx$/, replacement: resolve(root, 'packages/xlsx/src/index.ts') },
+      { find: /^@betteroffice\/xlsx\/(.*)$/, replacement: resolve(root, 'packages/xlsx/src/$1') },
     ],
   },
   css: {

@@ -33,7 +33,9 @@ as read-only structured content or Markdown with source anchors, and
 `render_docx_markdown` renders exported content. `ExportOptions` requires a
 `RevisionView` and selects stories (the body by default); omitted and
 unsupported content is listed in the content's diagnostics, and options out of
-range return `Error::Export`. Page fragments are not included yet.
+range return `Error::Export`. `Document` exports do not yet generate page maps;
+`betteroffice-docx-edit`'s `EngineSession` attaches one to a layout it computed
+itself.
 
 ## Rendering
 
