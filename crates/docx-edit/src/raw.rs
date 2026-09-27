@@ -12,6 +12,7 @@ use yrs::{
 
 use docx_parse::paragraph_identity::parse_paragraph_id;
 
+use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::identity::{OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC};
 use crate::op::{OpError, OpResult};
 use crate::{
@@ -83,6 +84,19 @@ fn embed_at<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32) -> OpResult<M
     })
 }
 
+/// Refuses inserting a text content control that carries an authored value.
+fn guard_inserted_values(ops: &[RawOp]) -> OpResult<()> {
+    for op in ops {
+        if let RawOp::InsertEmbed { kind, payload, .. } = op {
+            guard_embed_insert(
+                kind,
+                payload.iter().map(|(key, value)| (key.as_str(), value)),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl EditingDoc {
     /// Applies raw story operations in one transaction. A pilcrow they insert
     /// or re-key is a new paragraph, never the one whose identity it carries:
@@ -92,6 +106,7 @@ impl EditingDoc {
     /// into an editor-only paragraph promote it, as typed edits do; content
     /// they insert into it and delete again does not.
     pub fn apply_raw_ops(&self, story_id: &str, ops: Vec<RawOp>, ctx: &EditCtx) -> OpResult<()> {
+        guard_inserted_values(&ops)?;
         let rekeys = ops.iter().any(|op| match op {
             RawOp::InsertEmbed { kind, .. } => kind == PILCROW_KIND,
             RawOp::SetEmbedAttr { key, .. } => key == PARA_ID,
@@ -120,6 +135,9 @@ impl EditingDoc {
         batches: Vec<(String, Vec<RawOp>)>,
         ctx: &EditCtx,
     ) -> OpResult<()> {
+        for (_, ops) in &batches {
+            guard_inserted_values(ops)?;
+        }
         {
             let mut txn = self.transact_for(ctx);
             for (story_id, ops) in batches {
@@ -515,7 +533,11 @@ fn apply_raw_op_absolute(
                     rekeyed.push(embed.clone());
                 }
             }
+            let retyped = guard_embed_write(&embed, txn, [(key.as_str(), &value)])?;
             embed.insert(txn, key, value);
+            if retyped {
+                embed.remove(txn, "value");
+            }
         }
         RawOp::SetComment {
             id,

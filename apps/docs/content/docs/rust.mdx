@@ -129,6 +129,25 @@ An `EngineSession` in `betteroffice-docx-edit` that lays a document out itself
 attaches one with `export_structured_with_pages`, refusing a stale or incomplete
 layout as the JavaScript API does.
 
+`Document::list_content_controls` lists the content controls of the current model
+in document order, with the structured export's control metadata plus placement,
+anchor, parent control, current text and effective lock; `find_content_controls`
+keeps the exact matches of an id, tag, authored `w:id` or alias:
+
+```rust
+use betteroffice_docx::{ContentControlQuery, ContentControlsOptions, Document};
+
+let document = Document::open(&docx_bytes)?;
+let controls = document.list_content_controls(&ContentControlsOptions::default())?;
+let query = ContentControlQuery::Tag { tag: "customer.name".to_owned() };
+let named = document.find_content_controls(&query, &ContentControlsOptions::default())?;
+```
+
+Ids and anchors address the returned snapshot. A live `EditingDoc` lists the same
+controls with its version and fills plain- and rich-text ones through
+`setContentControlText` steps of `apply_edits`; the `Document` facade has no
+fill yet.
+
 PPTX edits can also run as version-checked batches. `Presentation::read_content`
 and `find_text` return story text with the session version, and `apply_edits`
 applies every step against that version as one transaction and one undo step.

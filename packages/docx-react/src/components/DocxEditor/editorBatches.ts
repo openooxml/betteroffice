@@ -73,7 +73,7 @@ export function modeRefusal(
   if (mode === 'viewing') {
     return refusal(session, { code: 'read-only', message: 'The editor is read-only' });
   }
-  const direct = request.steps.findIndex((step) => !step.suggest);
+  const direct = request.steps.findIndex((step) => !('suggest' in step && step.suggest));
   if (mode === 'suggesting' && direct >= 0) {
     return refusal(session, {
       code: 'invalid-step',

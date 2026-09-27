@@ -43,6 +43,23 @@ would lay out with now, and `export_snapshot_with_private_fonts` lays a private
 session out with fonts registered in a store of its own.
 `render_docx_markdown_with_pages` adds optional page markers.
 
+`content_controls` lists every content control in document order with the
+export's control metadata, placement, anchor, parent, canonical text and
+effective lock: `EditingDoc::list_content_controls` and `find_content_controls`
+read a live session with its version, and `list_docx_content_controls` and
+`list_package_content_controls` read bytes and parsed packages. A
+`SetContentControlText` batch step fills a plain- or rich-text control by engine
+id (valid for the version it was read at), unique tag or unique authored `w:id`
+(`ooxml_id`, which survives save and reopen), replacing inline control content or
+a block control's child story and clearing its placeholder state in the same
+transaction; locked, bound, nested and non-text controls and ambiguous tags or
+`w:id`s are refused as data. Text
+controls hold their text as content: local embed and raw writes never introduce,
+replace or move an authored text `value`, retyping a valued control drops it,
+and a fill drops it outside undo history. Collaboration updates integrate
+whatever values they carry; saving ignores a text control's value, and
+discovery reads its content and flags the value with `legacy-control-value`.
+
 Used by [betteroffice-docx](https://crates.io/crates/betteroffice-docx).
 
 Measure DOCX parsing, seeding, and body lowering with:

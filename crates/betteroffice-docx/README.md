@@ -37,6 +37,11 @@ range return `Error::Export`. `Document` exports do not yet generate page maps;
 `betteroffice-docx-edit`'s `EngineSession` attaches one to a layout it computed
 itself.
 
+`list_content_controls` and `find_content_controls` list the content controls of
+the current model, edits included, with their tag, alias, type, lock, placement,
+anchor and current text; ids and anchors address the returned snapshot. Filling
+controls needs an `EditingDoc` session; the facade does not fill them yet.
+
 ## Rendering
 
 The `raster` feature is opt-in; the raster backend is server-side only and the

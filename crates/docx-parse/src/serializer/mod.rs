@@ -6,7 +6,7 @@ pub mod numbering;
 pub mod paragraph;
 pub mod paragraph_ids;
 pub mod parts;
-mod raw;
+pub(crate) mod raw;
 pub mod run;
 pub mod s10;
 pub mod s11;

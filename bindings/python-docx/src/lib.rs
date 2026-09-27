@@ -10,10 +10,11 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyInt};
 use python_common::map_io_error;
 
 use betteroffice_docx::{
-    BlockContent, DisplayList, Document as CoreDocument, DocxStructuredContent, EditCtx,
-    EditOrigin, Error as CoreError, ExportOptions, HeaderFooter, ImageScope, InlineNode,
-    LayoutInput, MarkdownOptions, NoteKind, Paragraph, ParagraphContent, ParseLimits, Receipt,
-    RevisionView, Run, RunContent, SaveOptions, Section, StorySelection, Table, get_paragraph_text,
+    BlockContent, ContentControlQuery, ContentControlsOptions, DisplayList,
+    Document as CoreDocument, DocxStructuredContent, EditCtx, EditOrigin, Error as CoreError,
+    ExportOptions, HeaderFooter, ImageScope, InlineNode, LayoutInput, MarkdownOptions, NoteKind,
+    Paragraph, ParagraphContent, ParseLimits, Receipt, RevisionView, Run, RunContent, SaveOptions,
+    Section, StorySelection, Table, get_paragraph_text,
 };
 
 /// The engine builds and discards an editing document per call, so one client
@@ -60,7 +61,7 @@ create_exception!(
     _betteroffice_docx,
     ExportError,
     DocxError,
-    "The engine refused a structured export's options."
+    "The engine refused a structured export's or a content-control listing's options."
 );
 
 fn map_error(error: CoreError) -> PyErr {
@@ -181,6 +182,20 @@ fn export_options(
             .transpose()?,
         include_formatting: Some(include_formatting),
         max_blocks: Some(max_blocks),
+        max_bytes: Some(max_bytes),
+    })
+}
+
+fn controls_options(
+    stories: Option<Vec<String>>,
+    max_controls: u32,
+    max_bytes: u32,
+) -> PyResult<ContentControlsOptions> {
+    Ok(ContentControlsOptions {
+        stories: stories
+            .map(|stories| stories.iter().map(|story| parse_story(story)).collect())
+            .transpose()?,
+        max_controls: Some(max_controls),
         max_bytes: Some(max_bytes),
     })
 }
@@ -1220,6 +1235,47 @@ impl PyDocument {
             .detach(|| self.inner.export_markdown(&options))
             .map_err(|error| map_export_error(py, error))?;
         to_dict(py, serde_json::to_string(&content))
+    }
+
+    /// The content controls of the current model in document order, as the
+    /// camelCase snapshot dict. Ids and anchors address this snapshot.
+    #[pyo3(signature = (*, stories = None, max_controls = 10_000, max_bytes = 8_388_608))]
+    fn list_content_controls<'py>(
+        &self,
+        py: Python<'py>,
+        stories: Option<Vec<String>>,
+        max_controls: u32,
+        max_bytes: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = controls_options(stories, max_controls, max_bytes)?;
+        let snapshot = py
+            .detach(|| self.inner.list_content_controls(&options))
+            .map_err(|error| map_export_error(py, error))?;
+        to_dict(py, serde_json::to_string(&snapshot))
+    }
+
+    /// The content controls matching `query` exactly: `{"kind": "id", "controlId"}`,
+    /// `{"kind": "tag", "tag"}` or `{"kind": "alias", "alias"}`.
+    #[pyo3(signature = (query, *, stories = None, max_controls = 10_000, max_bytes = 8_388_608))]
+    fn find_content_controls<'py>(
+        &self,
+        py: Python<'py>,
+        query: &Bound<'py, PyAny>,
+        stories: Option<Vec<String>>,
+        max_controls: u32,
+        max_bytes: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let text = py
+            .import("json")?
+            .call_method1("dumps", (query,))?
+            .extract::<String>()?;
+        let query: ContentControlQuery = serde_json::from_str(&text)
+            .map_err(|error| PyValueError::new_err(format!("invalid query: {error}")))?;
+        let options = controls_options(stories, max_controls, max_bytes)?;
+        let snapshot = py
+            .detach(|| self.inner.find_content_controls(&query, &options))
+            .map_err(|error| map_export_error(py, error))?;
+        to_dict(py, serde_json::to_string(&snapshot))
     }
 
     /// Paginate a `{"measured": [...], "options": {...}}` envelope.
