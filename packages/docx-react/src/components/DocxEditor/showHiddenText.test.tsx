@@ -50,6 +50,7 @@ afterAll(async () => {
 function yrsCore(): YrsCoreSession {
   return {
     session,
+    sessionGeneration: 0,
     storyBlocks: () => null,
     bodyBlocks: () => null,
     inputPositionMap: () => null,
