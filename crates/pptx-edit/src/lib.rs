@@ -236,11 +236,13 @@ impl DeckSession {
         )?;
         deck::import_source_ole_pictures(&session.doc, import.source)?;
         effects::import_source(&mut import);
-        source_run_properties::import_source(
-            &session,
-            &mut import,
+        for property in [
             source_run_properties::SourceProperty::Spacing,
-        )?;
+            source_run_properties::SourceProperty::Caps,
+            source_run_properties::SourceProperty::Color,
+        ] {
+            source_run_properties::import_source(&session, &mut import, property)?;
+        }
         story::import_source_numbering_restarts(&session.doc, import.source)?;
         outline_gradients::import_source(&session, &mut import)?;
         import.sync_package_json(&session.doc, session.package())?;

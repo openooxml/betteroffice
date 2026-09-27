@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ooxml_drawingml::{
-    ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
+    ColorMap, ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
 use pptx_parse::{
@@ -1372,7 +1372,7 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
 }
 
 /// Rewrites the stored package so media bytes ride as base64 strings rather
-/// than the integer arrays 2.1 wrote.
+/// than the integer arrays 2.1 wrote, and carries the 2.1 seed forward.
 fn migrate_doc_to_v2_2(doc: &Doc) -> EditResult<()> {
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
@@ -1384,14 +1384,119 @@ fn migrate_doc_to_v2_2(doc: &Doc) -> EditResult<()> {
         "packageJson",
         Any::Buffer(Arc::from(package_json)),
     );
+    migrate_seed_to_v2_2(&mut txn, &meta, &package)?;
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(())
 }
 
+/// Moves the preset adjust defaults a pre-2.2 seed stored onto the current
+/// ones, and defers to the source the run caps it lacked and the run colours
+/// it resolved without the slide colour map.
+fn migrate_seed_to_v2_2(
+    txn: &mut TransactionMut<'_>,
+    meta: &MapRef,
+    package: &PptxPackage,
+) -> EditResult<()> {
+    meta.insert(txn, "capsPendingSource", true);
+    meta.insert(txn, "colorsPendingSource", true);
+    let shapes = required_map(txn, SHAPES)?;
+    for (index, (slide, reference)) in package
+        .slides
+        .iter()
+        .zip(&package.presentation.slides)
+        .enumerate()
+    {
+        let slide_id = seeded_slide_id(index, reference.id);
+        for (index, node) in slide.shapes.iter().enumerate() {
+            restore_preset_defaults(txn, &shapes, &slide_id, &index.to_string(), node)?;
+        }
+    }
+    Ok(())
+}
+
+/// Replaces each stored adjust value that is still a pre-2.2 default the
+/// source never authored with the current default.
+fn restore_preset_defaults(
+    txn: &mut TransactionMut<'_>,
+    shapes: &MapRef,
+    slide_id: &str,
+    path: &str,
+    node: &ShapeNode,
+) -> EditResult<()> {
+    match node {
+        ShapeNode::Shape(source) => {
+            let Some(shape) = shapes
+                .get(txn, &seeded_shape_id(slide_id, path))
+                .and_then(|value| value.cast::<MapRef>().ok())
+            else {
+                return Ok(());
+            };
+            let legacy: BTreeMap<_, _> = legacy_preset_defaults(&source.geometry)
+                .iter()
+                .copied()
+                .collect();
+            let current = preset_geometry_default_adjustments(&source.geometry);
+            let mut values: BTreeMap<String, f64> =
+                optional_json(&shape, txn, "adjustValuesJson")?.unwrap_or_default();
+            let mut changed = false;
+            for name in legacy
+                .keys()
+                .copied()
+                .chain(current.keys().map(String::as_str))
+            {
+                let (before, after) = (legacy.get(name).copied(), current.get(name).copied());
+                if before == after
+                    || source.adjust_values.contains_key(name)
+                    || values.get(name).copied() != before
+                {
+                    continue;
+                }
+                match after {
+                    Some(value) => values.insert(name.to_owned(), value),
+                    None => values.remove(name),
+                };
+                changed = true;
+            }
+            if changed {
+                insert_json(&shape, txn, "adjustValuesJson", Some(&values))?;
+            }
+        }
+        ShapeNode::Group(group) => {
+            for (index, child) in group.children.iter().enumerate() {
+                restore_preset_defaults(
+                    txn,
+                    shapes,
+                    slide_id,
+                    &seeded_child_path(path, index),
+                    child,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The preset adjust defaults seeds before schema 2.2 stored.
+fn legacy_preset_defaults(geometry: &str) -> &'static [(&'static str, f64)] {
+    match geometry {
+        "roundRect" => &[("adj", 0.166_67)],
+        "plus" | "parallelogram" | "hexagon" => &[("adj", 0.25)],
+        "triangle" | "isosTriangle" | "chevron" | "homePlate" => &[("adj", 0.5)],
+        "trapezoid" => &[("adj", 0.2)],
+        "octagon" => &[("adj", 0.292_89)],
+        "rightArrow" | "leftArrow" | "upArrow" | "downArrow" => &[("adj1", 0.5), ("adj2", 0.5)],
+        "star4" | "star5" | "star6" | "star7" | "star8" | "star10" | "star12" | "star16"
+        | "star24" | "star32" => &[("adj", 0.45)],
+        _ => &[],
+    }
+}
+
 /// Applies every schema change made since 2.0 in one transaction: the package is
 /// rewritten through the current model, hidden flags and bitmap effects are
-/// backfilled, the comment flavour is recorded, and everything a stored package
-/// cannot carry -- baselines, outline gradients, character spacing, OLE picture
+/// backfilled, the comment flavour is recorded, preset defaults are moved as in
+/// 2.2, and everything a stored package cannot carry -- baselines, outline
+/// gradients, character spacing, caps, colour-mapped run colours, OLE picture
 /// previews, chart and paragraph properties, table geometry -- is deferred to
 /// [`import_source_render_data`] until the source is reattached.
 fn migrate_doc_to_v2_1(doc: &Doc) -> EditResult<()> {
@@ -1415,6 +1520,7 @@ fn migrate_doc_to_v2_1(doc: &Doc) -> EditResult<()> {
     if package_needs_ole_source(&package) {
         meta.insert(&mut txn, "olePicturesPendingSource", true);
     }
+    migrate_seed_to_v2_2(&mut txn, &meta, &package)?;
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(())
 }
@@ -1914,6 +2020,16 @@ pub(crate) fn shape_parts<T: ReadTxn>(
 /// The seed state `snapshot_doc` reads back for `package`, computed without
 /// materializing a scratch document. `save` diffs the live doc against this.
 pub(crate) fn baseline_snapshot(package: &PptxPackage) -> EditResult<DeckSnapshot> {
+    seeded_snapshot(package, true)
+}
+
+/// [`baseline_snapshot`] as seeds before schema 2.2 resolved run colours:
+/// without the slide colour map.
+pub(crate) fn legacy_baseline_snapshot(package: &PptxPackage) -> EditResult<DeckSnapshot> {
+    seeded_snapshot(package, false)
+}
+
+fn seeded_snapshot(package: &PptxPackage, color_map: bool) -> EditResult<DeckSnapshot> {
     let mut slide_id_by_part = HashMap::new();
     let mut slides = Vec::with_capacity(package.slides.len());
     for (slide_index, slide) in package.slides.iter().enumerate() {
@@ -1931,7 +2047,7 @@ pub(crate) fn baseline_snapshot(package: &PptxPackage) -> EditResult<DeckSnapsho
                 .id,
         );
         slide_id_by_part.insert(slide.part_path.clone(), slide_id.clone());
-        slides.push(baseline_slide(package, slide, slide_id)?);
+        slides.push(baseline_slide(package, slide, slide_id, color_map)?);
     }
     Ok(DeckSnapshot {
         width_emu: baseline_integer("widthEmu", package.presentation.width_emu)?,
@@ -1946,12 +2062,16 @@ fn baseline_slide(
     package: &PptxPackage,
     slide: &Slide,
     slide_id: String,
+    color_map: bool,
 ) -> EditResult<SlideSnapshot> {
-    let theme = pptx_parse::slide_theme(
+    let mut theme = pptx_parse::slide_theme(
         package,
         Some(&slide.part_path),
         slide.layout_part_path.as_deref(),
     );
+    if !color_map {
+        theme.color_map = ColorMap::default();
+    }
     let mut shapes = Vec::with_capacity(slide.shapes.len());
     for (shape_index, shape) in slide.shapes.iter().enumerate() {
         shapes.push(baseline_shape(

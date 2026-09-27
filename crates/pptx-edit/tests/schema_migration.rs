@@ -2,8 +2,11 @@
 //! `betteroffice-demo.pptx`, adds a text box and edits its story, then persists
 //! `encode_state_as_update_v1()`.
 
+use std::collections::BTreeMap;
+
 use pptx_edit::{
-    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, EditError, ShapeSnapshot, TextStyle,
+    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, EditError, ShapeSnapshot, TextCaps,
+    TextStyle,
 };
 use yrs::updates::decoder::Decode;
 use yrs::{Any, Doc, Map, MapRef, Out, ReadTxn, StateVector, Transact, Update};
@@ -18,6 +21,8 @@ const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-de
 const NUMBERED_FIXTURE: &[u8] =
     include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
 const V2_HIDDEN_UPDATE: &[u8] = include_bytes!("fixtures/deck-schema-v2-hidden.update.bin");
+const V2_1_DEFAULTS_SOURCE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-defaults.pptx");
+const V2_1_DEFAULTS_UPDATE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-defaults.update.bin");
 const SHAPES: &str = "pptx:shapes";
 const V2_STORY_ID: &str = "story:shape:4343:0:0";
 const V2_HIDDEN_SHAPE_IDS: [&str; 4] = [
@@ -899,4 +904,120 @@ fn a_2_1_deck_with_integer_media_arrays_migrates_to_base64() {
     assert!(migrated_json.contains("\"bytes\":\"BwYF\""));
     assert!(!migrated_json.contains("[7,6,5]"));
     assert!(migrated_json.contains("betteroffice-mark.png"));
+}
+
+#[test]
+fn a_released_update_reopened_with_its_source_saves_an_unedited_deck_byte_identically() {
+    assert_eq!(stamped_version(V2_1_DEFAULTS_UPDATE), Some(2.1));
+    let fresh = DeckSession::open(V2_1_DEFAULTS_SOURCE, 42200).unwrap();
+    for (client_id, update) in [
+        (42210, V2_1_DEFAULTS_UPDATE.to_vec()),
+        (42220, restamped(V2_1_DEFAULTS_UPDATE, Some(2.0))),
+    ] {
+        let migrated = DeckSession::open_from_update(&update, client_id).unwrap();
+        assert_eq!(
+            adjust_values(&migrated.snapshot().unwrap()),
+            adjust_values(&fresh.snapshot().unwrap())
+        );
+        let attached = DeckSession::open_from_update_with_source(
+            &migrated.encode_state_as_update_v1(),
+            V2_1_DEFAULTS_SOURCE,
+            client_id + 1,
+        )
+        .unwrap();
+        assert_eq!(attached.snapshot().unwrap(), fresh.snapshot().unwrap());
+        assert_eq!(attached.save().unwrap(), V2_1_DEFAULTS_SOURCE);
+        let carried = attached.encode_state_as_update_v1();
+        let sourceless = DeckSession::open_from_update(&carried, client_id + 2).unwrap();
+        assert_eq!(sourceless.snapshot().unwrap(), fresh.snapshot().unwrap());
+        assert_eq!(
+            sourceless.package().masters[0].color_map,
+            fresh.package().masters[0].color_map
+        );
+        let reattached = DeckSession::open_from_update_with_source(
+            &carried,
+            V2_1_DEFAULTS_SOURCE,
+            client_id + 3,
+        )
+        .unwrap();
+        assert_eq!(reattached.save().unwrap(), V2_1_DEFAULTS_SOURCE);
+    }
+}
+
+#[test]
+fn edits_made_after_migrating_a_released_update_survive_the_source_import() {
+    let migrated = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 42230).unwrap();
+    let context = EditCtx::local("fixture");
+    let snapshot = migrated.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = |name: &str| {
+        slide
+            .shapes
+            .iter()
+            .find(|shape| shape.name == name)
+            .unwrap()
+    };
+    migrated
+        .set_shape_adjust(
+            &context,
+            &slide.id,
+            &shape("Default star").id,
+            &BTreeMap::from([("adj".to_owned(), 0.45)]),
+        )
+        .unwrap();
+    migrated
+        .insert_text(
+            &context,
+            &shape("Direct all caps").text_stories[0].id,
+            0,
+            "QZ",
+            &TextStyle {
+                font_size_pt: Some(32.0),
+                color: Some("#101828".to_owned()),
+                caps: Some(TextCaps::Small),
+                ..TextStyle::default()
+            },
+        )
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        42231,
+    )
+    .unwrap();
+    let saved = attached.save().unwrap();
+    let parts: BTreeMap<_, _> = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let slide = String::from_utf8(parts["ppt/slides/slide1.xml"].clone()).unwrap();
+    let shape_xml = |name: &str| {
+        let start = slide.find(&format!("name=\"{name}\"")).unwrap();
+        &slide[start..start + slide[start..].find("</p:sp>").unwrap()]
+    };
+    assert!(shape_xml("Default star").contains(r#"<a:gd fmla="val 45000" name="adj"/>"#));
+    let caps = shape_xml("Direct all caps");
+    assert!(caps.contains(concat!(
+        r#"<a:rPr cap="small" lang="en-US" sz="3200"><a:solidFill><a:srgbClr val="101828"/>"#,
+        r#"</a:solidFill></a:rPr><a:t>QZ</a:t>"#
+    )));
+    assert!(caps.contains(concat!(
+        r#"<a:rPr cap="all" lang="en-US" sz="3200"><a:solidFill><a:schemeClr val="tx1"/>"#,
+        r#"</a:solidFill><a:latin typeface="Arial"/></a:rPr><a:t>Mixed Case Title</a:t>"#
+    )));
+    assert!(!shape_xml("Default trapezoid").contains("<a:gd "));
+}
+
+fn adjust_values(snapshot: &DeckSnapshot) -> Vec<BTreeMap<String, f64>> {
+    fn collect(shapes: &[ShapeSnapshot], values: &mut Vec<BTreeMap<String, f64>>) {
+        for shape in shapes {
+            values.push(shape.adjust_values.clone());
+            collect(&shape.children, values);
+        }
+    }
+    let mut values = Vec::new();
+    for slide in &snapshot.slides {
+        collect(&slide.shapes, &mut values);
+    }
+    values
 }

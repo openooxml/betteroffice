@@ -13,20 +13,31 @@ use crate::{
 pub(crate) enum SourceProperty {
     Baseline,
     Spacing,
+    Caps,
+    Color,
 }
 
 impl SourceProperty {
-    fn keys(self) -> (&'static str, &'static str, &'static str) {
+    /// The pending flag, the package keys the source restores, and the run attribute.
+    fn keys(self) -> (&'static str, &'static [&'static str], &'static str) {
         match self {
-            Self::Baseline => ("baselinesPendingSource", "baselinePct", "baseline"),
-            Self::Spacing => ("spacingPendingSource", "spacingPt", "spacing"),
+            Self::Baseline => ("baselinesPendingSource", &["baselinePct"], "baseline"),
+            Self::Spacing => ("spacingPendingSource", &["spacingPt"], "spacing"),
+            Self::Caps => ("capsPendingSource", &["caps"], "caps"),
+            Self::Color => (
+                "colorsPendingSource",
+                &["colorMap", "colorMapOverride"],
+                "color",
+            ),
         }
     }
 
-    fn value(self, style: &crate::TextStyle) -> Option<f64> {
+    fn value(self, style: &crate::TextStyle) -> Option<Any> {
         match self {
-            Self::Baseline => style.baseline_pct,
-            Self::Spacing => style.spacing_pt,
+            Self::Baseline => style.baseline_pct.map(Any::Number),
+            Self::Spacing => style.spacing_pt.map(Any::Number),
+            Self::Caps => style.caps.map(|caps| Any::from(caps.as_attribute())),
+            Self::Color => style.color.as_deref().map(Any::from),
         }
     }
 }
@@ -36,7 +47,7 @@ pub(crate) fn import_source(
     import: &mut SourceImport<'_>,
     property: SourceProperty,
 ) -> EditResult<()> {
-    let (pending_key, json_key, attribute) = property.keys();
+    let (pending_key, json_keys, attribute) = property.keys();
     let pending = {
         let txn = session.doc.transact();
         txn.get_map(META)
@@ -47,8 +58,16 @@ pub(crate) fn import_source(
     }
     let source_json =
         serde_json::to_value(import.source).map_err(|error| EditError::Json(error.to_string()))?;
-    if !has_property(&source_json, json_key) {
+    if !json_keys.iter().any(|key| has_property(&source_json, key)) {
         return Ok(());
+    }
+    let legacy_snapshot = match property {
+        SourceProperty::Color => Some(crate::deck::legacy_baseline_snapshot(import.source)?),
+        _ => None,
+    };
+    let mut legacy = HashMap::new();
+    for slide in legacy_snapshot.iter().flat_map(|snapshot| &snapshot.slides) {
+        collect_stories(&slide.shapes, &mut legacy);
     }
     let mut sources = HashMap::new();
     {
@@ -68,7 +87,18 @@ pub(crate) fn import_source(
             continue;
         };
         let source_tokens = tokens(source, property);
-        if !source_tokens.iter().any(|(_, baseline)| baseline.is_some()) {
+        let legacy_values: Vec<_> = match legacy.get(id) {
+            Some(story) => tokens(story, property)
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect(),
+            None => vec![None; source_tokens.len()],
+        };
+        if source_tokens
+            .iter()
+            .zip(&legacy_values)
+            .all(|((_, value), legacy)| value == legacy)
+        {
             continue;
         }
         let target_tokens = tokens(target, property);
@@ -83,24 +113,26 @@ pub(crate) fn import_source(
             })
             .collect();
         for (source_index, target_index) in pairs {
-            if target_tokens[target_index].1.is_none()
-                && let Some(baseline) = source_tokens[source_index].1
-            {
+            let value = &source_tokens[source_index].1;
+            let legacy = &legacy_values[source_index];
+            if value != legacy && target_tokens[target_index].1 == *legacy {
                 let (start, end) = positions[target_index];
-                patches.push((id, start, end, baseline));
+                patches.push((id, start, end, value.clone().unwrap_or(Any::Null)));
             }
         }
     }
     let mut package = serde_json::to_value(&import.package)
         .map_err(|error| EditError::Json(error.to_string()))?;
-    merge_property(&mut package, &source_json, json_key);
+    for key in json_keys {
+        merge_property(&mut package, &source_json, key);
+    }
     import.package =
         serde_json::from_value(package).map_err(|error| EditError::Json(error.to_string()))?;
     let mut txn = session.doc.transact_mut_with(MIGRATE_ORIGIN);
     let stories = txn
         .get_map(crate::STORIES)
         .ok_or_else(|| EditError::InvalidState("missing stories".into()))?;
-    for (id, start, end, baseline) in patches {
+    for (id, start, end, value) in patches {
         let story = stories
             .get(&txn, id)
             .and_then(|value| value.cast::<TextRef>().ok())
@@ -109,7 +141,7 @@ pub(crate) fn import_source(
             &mut txn,
             start,
             end - start,
-            Attrs::from([(attribute.into(), Any::Number(baseline))]),
+            Attrs::from([(attribute.into(), value)]),
         );
     }
     let meta = txn
@@ -131,15 +163,12 @@ fn collect_stories<'a>(
     }
 }
 
-fn tokens(story: &StorySnapshot, property: SourceProperty) -> Vec<(char, Option<f64>)> {
+fn tokens(story: &StorySnapshot, property: SourceProperty) -> Vec<(char, Option<Any>)> {
     let mut tokens = Vec::new();
     for paragraph in &story.paragraphs {
         for run in &paragraph.runs {
-            tokens.extend(
-                run.text
-                    .chars()
-                    .map(|unit| (unit, property.value(&run.style))),
-            );
+            let value = property.value(&run.style);
+            tokens.extend(run.text.chars().map(|unit| (unit, value.clone())));
         }
         tokens.push(('\0', None));
     }
@@ -147,8 +176,8 @@ fn tokens(story: &StorySnapshot, property: SourceProperty) -> Vec<(char, Option<
 }
 
 fn unchanged_pairs(
-    source: &[(char, Option<f64>)],
-    target: &[(char, Option<f64>)],
+    source: &[(char, Option<Any>)],
+    target: &[(char, Option<Any>)],
 ) -> EditResult<Vec<(usize, usize)>> {
     let mut prefix = 0;
     while prefix < source.len().min(target.len()) && source[prefix].0 == target[prefix].0 {
