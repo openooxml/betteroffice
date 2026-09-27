@@ -241,6 +241,11 @@ impl DeckSession {
             &mut import,
             source_run_properties::SourceProperty::Spacing,
         )?;
+        source_run_properties::import_source(
+            &session,
+            &mut import,
+            source_run_properties::SourceProperty::Kern,
+        )?;
         story::import_source_numbering_restarts(&session.doc, import.source)?;
         outline_gradients::import_source(&session, &mut import)?;
         import.sync_package_json(&session.doc, session.package())?;

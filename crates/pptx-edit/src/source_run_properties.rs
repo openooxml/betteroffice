@@ -13,6 +13,7 @@ use crate::{
 pub(crate) enum SourceProperty {
     Baseline,
     Spacing,
+    Kern,
 }
 
 impl SourceProperty {
@@ -20,6 +21,7 @@ impl SourceProperty {
         match self {
             Self::Baseline => ("baselinesPendingSource", "baselinePct", "baseline"),
             Self::Spacing => ("spacingPendingSource", "spacingPt", "spacing"),
+            Self::Kern => ("kernPendingSource", "kernPt", "kern"),
         }
     }
 
@@ -27,6 +29,7 @@ impl SourceProperty {
         match self {
             Self::Baseline => style.baseline_pct,
             Self::Spacing => style.spacing_pt,
+            Self::Kern => style.kern_pt,
         }
     }
 }
