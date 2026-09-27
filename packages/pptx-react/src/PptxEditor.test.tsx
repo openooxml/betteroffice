@@ -1473,10 +1473,18 @@ describe('PptxEditor commands', () => {
         await act(async () => {
           expect(api.goToSlide(2)).toBe(true);
         });
+        const handle = api.handle;
+        const layoutSlide = handle.layoutSlide.bind(handle);
+        const laidOut: number[] = [];
+        handle.layoutSlide = (index) => {
+          laidOut.push(index);
+          return layoutSlide(index);
+        };
         await act(async () => images.pending[0].load());
         await api.flushPendingInput();
         expect(added(0)).toEqual(['queued.png', name]);
         expect(added(1)).toEqual([]);
+        expect(laidOut.filter((index) => index === 0)).toHaveLength(2);
       } finally {
         images.restore();
       }

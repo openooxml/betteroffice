@@ -648,6 +648,12 @@ function PptxEditorContent({
     refreshAt(undefined, false, true);
   }, [refreshAt]);
 
+  /** An insert on a slide the user has left relays that slide's thumbnail too. */
+  const refreshAfterInsert = (slideId: string) => {
+    const current = modelRef.current;
+    return refreshAt(undefined, true, current?.snapshot.slides[current.slideIndex]?.id !== slideId);
+  };
+
   /** The editor's batch path, after pending input: `authorize`, read-only, apply, one refresh. */
   const applyBatch = useCallback(
     <Refusal,>(
@@ -1203,7 +1209,7 @@ function PptxEditorContent({
         text: '',
         style: textStyleRef.current,
       });
-      const next = refreshAt(undefined, true);
+      const next = refreshAfterInsert(slide.id);
       setActiveTool('select');
       setShapeSelection(null);
       setDragPreview(null);
@@ -1275,7 +1281,7 @@ function PptxEditorContent({
         },
         fill: '#d9eaf7',
       });
-      const next = refreshAt(undefined, true);
+      const next = refreshAfterInsert(slide.id);
       setActiveTool('select');
       setSelection(null);
       setShapeSelection(
@@ -1344,7 +1350,7 @@ function PptxEditorContent({
         contentType,
         mediaBase64,
       });
-      const next = refreshAt(undefined, true);
+      const next = refreshAfterInsert(slide.id);
       setActiveTool('select');
       setDragPreview(null);
       setTextBoxPreview(null);
