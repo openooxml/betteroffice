@@ -13,6 +13,7 @@ use crate::paragraph::HexIdAllocator;
 use crate::smart_art::SmartArtContext;
 use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml};
 
+use super::comment_references::normalize_comment_references;
 use super::context::SerializerContext;
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
@@ -89,17 +90,23 @@ pub fn serialize_s12_wire(
     let determinism = request.determinism().clone();
     let mut context = SerializerContext::new(&determinism)?;
     let (family, xml) = match request {
-        S12SerializeRequest::Document { body, .. } => {
+        S12SerializeRequest::Document { mut body, .. } => {
+            normalize_comment_references(&mut [&mut body.content], |_| true);
             ("document", serialize_document_part(&body, &mut context)?)
         }
-        S12SerializeRequest::HeaderFooter { story, .. } => (
-            "headerFooter",
-            serialize_header_footer_part(&story, &mut context)?,
-        ),
-        S12SerializeRequest::Footnotes { notes, .. } => {
+        S12SerializeRequest::HeaderFooter { mut story, .. } => {
+            normalize_comment_references(&mut [&mut story.content], |_| true);
+            (
+                "headerFooter",
+                serialize_header_footer_part(&story, &mut context)?,
+            )
+        }
+        S12SerializeRequest::Footnotes { mut notes, .. } => {
+            normalize_note_comment_references(&mut notes);
             ("footnotes", serialize_footnotes_part(&notes, &mut context)?)
         }
-        S12SerializeRequest::Endnotes { notes, .. } => {
+        S12SerializeRequest::Endnotes { mut notes, .. } => {
+            normalize_note_comment_references(&mut notes);
             ("endnotes", serialize_endnotes_part(&notes, &mut context)?)
         }
         S12SerializeRequest::Comments { comments, .. } => (
@@ -129,6 +136,16 @@ pub fn serialize_s12_wire(
         parse_back: parse_back(family, &xml, &determinism.seed)?,
         xml,
     })
+}
+
+/// Normalizes the comment references of the notes a part writes from their model, not verbatim.
+fn normalize_note_comment_references(notes: &mut [Note]) {
+    let written: Vec<bool> = notes
+        .iter()
+        .map(|note| note.verbatim_xml.is_none())
+        .collect();
+    let mut blocks: Vec<_> = notes.iter_mut().map(|note| &mut note.content).collect();
+    normalize_comment_references(&mut blocks, |location| written[location.story]);
 }
 
 fn parse_back(family: &str, xml: &str, seed: &str) -> Result<serde_json::Value, ParseError> {

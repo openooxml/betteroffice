@@ -287,35 +287,55 @@ fn references_of_a_comment_without_a_range_end_stay() {
 }
 
 #[test]
-fn a_moved_reference_leaves_a_note_written_verbatim() {
+fn a_note_kept_verbatim_keeps_its_references_and_a_serialized_note_loses_strays() {
     let (original, mut request) = comment_request(json!([paragraph("11111111", comment_range())]));
-    request.footnotes = serde_json::from_value(json!([{
-        "type": "footnote", "id": 1, "noteType": "normal",
-        "content": [paragraph("33333333", json!([reference(7)]))],
-        "verbatimXml": r#"<w:footnote w:id="1"><w:p><w:r><w:commentReference w:id="7"/></w:r></w:p></w:footnote>"#
-    }]))
+    let verbatim =
+        r#"<w:footnote w:id="1"><w:p><w:r><w:commentReference w:id="7"/></w:r></w:p></w:footnote>"#;
+    request.footnotes = serde_json::from_value(json!([
+        {
+            "type": "footnote", "id": 1, "noteType": "normal",
+            "content": [paragraph("33333333", json!([reference(7)]))],
+            "verbatimXml": verbatim
+        },
+        {
+            "type": "footnote", "id": 2, "noteType": "normal",
+            "content": [paragraph("44444444", json!([text_run("Note"), reference(7)]))]
+        }
+    ]))
     .unwrap();
     let saved = write_docx_s13(request, &original).unwrap();
-    assert_reference_after_end(&saved);
-    assert!(element_ids(&saved, "word/footnotes.xml", b"w:commentReference").is_empty());
+    assert_document_reference_after_end(&saved);
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let notes = String::from_utf8(
+        parts
+            .iter()
+            .find(|(path, _)| path == "word/footnotes.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
+    assert!(notes.contains(verbatim));
+    assert_eq!(notes.matches("<w:commentReference ").count(), 1);
 }
 
 #[test]
-fn a_part_patched_from_source_bytes_is_serialized_once_its_references_move() {
-    let original = package(
-        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:commentRangeStart w:id="7"/><w:r><w:t>Hello</w:t></w:r><w:commentRangeEnd w:id="7"/></w:p><w:p><w:r><w:commentReference w:id="7"/></w:r><w:r><w:t>World</w:t></w:r></w:p></w:body></w:document>"#,
-    );
+fn a_part_kept_as_source_bytes_keeps_them_with_a_stray_reference_and_a_hyperlink_field() {
+    let source = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:commentRangeStart w:id="7"/><w:r><w:t>Hello</w:t></w:r><w:commentRangeEnd w:id="7"/></w:p><w:p><w:r><w:commentReference w:id="7"/></w:r><w:r><w:t>World</w:t></w:r></w:p><w:p><w:hyperlink w:anchor="target"><w:r><w:t>Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>7</w:t></w:r></w:fldSimple></w:hyperlink></w:p></w:body></w:document>"#;
+    let original = package(source);
     let (_, mut request) = comment_request(json!([
         { "type": "paragraph", "sourceOrdinal": 0, "content": comment_range() },
         { "type": "paragraph", "sourceOrdinal": 1, "content": [reference(7), text_run("World")] },
+        { "type": "paragraph", "sourceOrdinal": 2, "content": [
+            { "type": "hyperlink", "anchor": "target", "children": [text_run("Page ")] }
+        ] },
     ]));
     request.paragraph_ids = serde_json::from_value(json!({
-        "patchedParts": [{ "part": "word/document.xml", "paraIds": [[0, "1A2B3C4D"]] }]
+        "patchedParts": [{ "part": "word/document.xml", "paraIds": [] }]
     }))
     .unwrap();
     let saved = write_docx_s13(request, &original).unwrap();
-    assert_reference_after_end(&saved);
-    assert!(document_xml(&saved).contains(r#"w14:paraId="1A2B3C4D""#));
+    assert_eq!(document_xml(&saved), source);
 }
 
 fn selective_original() -> Vec<u8> {
@@ -334,21 +354,39 @@ fn selective_request(range_id: Value) -> S13SaveRequest {
 }
 
 #[test]
-fn a_selective_save_rewrites_the_range_end_paragraph_a_reference_moves_to() {
+fn a_selective_save_of_the_stray_reference_paragraph_keeps_one_reference() {
     let original = selective_original();
     let mut request = selective_request(json!("11111111"));
     request.selective = serde_json::from_value(json!({ "changedParaIds": ["22222222"] })).unwrap();
     let saved = write_docx_s13(request, &original).unwrap();
-    assert_reference_after_end(&saved);
-    assert!(document_xml(&saved).contains("World!"));
+    let xml = document_xml(&saved);
+    assert_eq!(
+        element_ids(&saved, "word/document.xml", b"w:commentReference"),
+        ["7"]
+    );
+    assert!(xml.contains("<w:t>World!</w:t></w:r><w:r><w:commentReference w:id=\"7\"/>"));
 
-    let mut request = selective_request(Value::Null);
+    let original = package(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:commentRangeStart w:id="7"/><w:r><w:t>Hello</w:t></w:r><w:commentRangeEnd w:id="7"/><w:r><w:commentReference w:id="7"/></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>World</w:t></w:r><w:r><w:commentReference w:id="7"/></w:r></w:p></w:body></w:document>"#,
+    );
+    let (_, mut request) = comment_request(json!([
+        paragraph(
+            "11111111",
+            json!([
+                { "type": "commentRangeStart", "id": 7 }, text_run("Hello"),
+                { "type": "commentRangeEnd", "id": 7 }, reference(7)
+            ])
+        ),
+        paragraph("22222222", json!([text_run("World!"), reference(7)])),
+    ]));
     request.selective = serde_json::from_value(json!({ "changedParaIds": ["22222222"] })).unwrap();
-    assert!(write_docx_s13(request, &original).is_err());
+    let saved = write_docx_s13(request, &original).unwrap();
+    assert_document_reference_after_end(&saved);
+    assert!(document_xml(&saved).contains("World!"));
 }
 
 #[test]
-fn a_source_paragraph_save_refuses_moving_references_it_does_not_replace() {
+fn a_source_paragraph_save_keeps_one_reference_whichever_paragraphs_it_replaces() {
     let original = selective_original();
     let digest = format!("{:x}", Sha256::digest(document_xml(&original).as_bytes()));
     let replaced = |blocks: Value| {
@@ -357,14 +395,18 @@ fn a_source_paragraph_save_refuses_moving_references_it_does_not_replace() {
             "sourceParagraphs": { "partSha256": digest, "paragraphs": blocks }
         }))
         .unwrap();
-        write_docx_s13(request, &original)
+        write_docx_s13(request, &original).unwrap()
     };
-    assert!(replaced(json!([{ "path": [0, 1], "block": 1 }])).is_err());
+    let saved = replaced(json!([{ "path": [0, 1], "block": 1 }]));
+    assert_eq!(
+        element_ids(&saved, "word/document.xml", b"w:commentReference"),
+        ["7"]
+    );
+    assert!(document_xml(&saved).contains("World!"));
     let saved = replaced(json!([
         { "path": [0, 0], "block": 0 },
         { "path": [0, 1], "block": 1 }
-    ]))
-    .unwrap();
+    ]));
     assert_document_reference_after_end(&saved);
 }
 

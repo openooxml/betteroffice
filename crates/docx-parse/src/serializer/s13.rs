@@ -27,13 +27,13 @@ use crate::table::{Table, TableCell};
 use crate::vml::Watermark;
 use crate::xml::ParseError;
 
-use super::comment_references::{NormalizedParagraph, normalize_comment_references};
+use super::comment_references::{ParagraphLocation, normalize_comment_references};
 use super::context::SerializerContext;
 use super::numbering::serialize_numbering_xml;
 use super::paragraph::serialize_paragraph;
 use super::paragraph_ids::{
-    COMMENTS_PART, S13ParagraphId, S13ParagraphIds, apply_assignments, comment_companions,
-    model_paragraph_ids, patch_comment_parts, patch_part,
+    COMMENTS_PART, S13ParagraphIds, apply_assignments, comment_companions, model_paragraph_ids,
+    patch_comment_parts, patch_part,
 };
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
@@ -166,7 +166,6 @@ pub fn write_docx_s13_parts(
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
-    let normalized = normalize_request_comment_references(&mut request);
     if let Some(sources) = request
         .selective
         .as_ref()
@@ -186,14 +185,15 @@ pub fn write_docx_s13_parts(
             .iter()
             .map(|source| source.block)
             .collect();
-        let inside = |(story, paragraph): &(SavedStory, NormalizedParagraph)| {
-            *story == SavedStory::Body && !paragraph.nested && replaced.contains(&paragraph.block)
-        };
-        if normalized.iter().any(inside) && !normalized.iter().all(inside) {
-            return Err(save_error(
-                "the comment references this save moves lie outside the replaced paragraphs",
-            ));
-        }
+        normalize_saved_comment_references(&mut request, |_, story| match story {
+            SavedStory::Body => Written::Blocks(replaced.clone()),
+            _ => Written::Nothing,
+        });
+        let sources = request
+            .selective
+            .as_ref()
+            .and_then(|selective| selective.source_paragraphs.as_ref())
+            .expect("source paragraphs were just read");
         let original = package
             .bytes("word/document.xml")
             .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
@@ -205,15 +205,8 @@ pub fn write_docx_s13_parts(
         return rezip_package(&package, source);
     }
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
-    let mut paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
+    let paragraph_ids = request.paragraph_ids.take().unwrap_or_default();
     paragraph_ids.validate()?;
-    serialize_normalized_stories(
-        &mut request,
-        &normalized,
-        &mut paragraph_ids,
-        &relationships,
-        &package,
-    )?;
     apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
     let patched: HashMap<&str, &[(u32, String)]> = paragraph_ids
         .patched_parts
@@ -228,6 +221,55 @@ pub fn write_docx_s13_parts(
                 .and_then(|bytes| patch_part(bytes, ids))
         })
     };
+
+    let preserved = |path: &str| patched.contains_key(package.resolve_path(path));
+    let changed: Option<HashSet<String>> = request
+        .selective
+        .as_ref()
+        .map(|selective| selective.changed_para_ids.iter().cloned().collect());
+    normalize_saved_comment_references(&mut request, |request, story| {
+        let part = |entries: &[(String, HeaderFooter)], index: usize, kind: &str| {
+            relationships
+                .get(&entries[index].0)
+                .filter(|relationship| {
+                    relationship.relationship_type == kind
+                        && !relationship.target.is_empty()
+                        && relationship.target_mode != Some(TargetMode::External)
+                })
+                .and_then(|relationship| {
+                    resolve_relative_path(&package.document_path, &relationship.target).ok()
+                })
+                .filter(|path| !preserved(path))
+                .map_or(Written::Nothing, |_| Written::Everything)
+        };
+        let note = |note: &Note, path: &str| {
+            if changed.is_some() || preserved(path) || note.verbatim_xml.is_some() {
+                Written::Nothing
+            } else {
+                Written::Everything
+            }
+        };
+        match story {
+            SavedStory::Body if preserved("word/document.xml") => Written::Nothing,
+            SavedStory::Body => changed
+                .clone()
+                .map_or(Written::Everything, Written::Paragraphs),
+            SavedStory::Header(index) => {
+                part(&request.header_entries, index, relationship_types::HEADER)
+            }
+            SavedStory::Footer(index) => {
+                part(&request.footer_entries, index, relationship_types::FOOTER)
+            }
+            SavedStory::Footnote(index) => note(&request.footnotes[index], "word/footnotes.xml"),
+            SavedStory::FootnoteSeparator(index) => {
+                note(&request.footnote_separators[index], "word/footnotes.xml")
+            }
+            SavedStory::Endnote(index) => note(&request.endnotes[index], "word/endnotes.xml"),
+            SavedStory::EndnoteSeparator(index) => {
+                note(&request.endnote_separators[index], "word/endnotes.xml")
+            }
+        }
+    });
 
     if request.selective.is_some() {
         validate_selective_header_footer_parts(&package, &relationships)?;
@@ -505,124 +547,69 @@ enum SavedStory {
     EndnoteSeparator(usize),
 }
 
-/// Normalizes the comment references of every story the request saves, together, and returns
-/// the paragraphs whose saved content that changes.
-fn normalize_request_comment_references(
-    request: &mut S13SaveRequest,
-) -> Vec<(SavedStory, NormalizedParagraph)> {
-    let mut stories = vec![SavedStory::Body];
-    let mut blocks = vec![&mut request.document.content];
-    for (index, (_, story)) in request.header_entries.iter_mut().enumerate() {
-        stories.push(SavedStory::Header(index));
-        blocks.push(&mut story.content);
-    }
-    for (index, (_, story)) in request.footer_entries.iter_mut().enumerate() {
-        stories.push(SavedStory::Footer(index));
-        blocks.push(&mut story.content);
-    }
-    for (notes, story) in [
-        (
-            &mut request.footnotes,
-            SavedStory::Footnote as fn(usize) -> SavedStory,
-        ),
-        (&mut request.endnotes, SavedStory::Endnote),
-        (
-            &mut request.footnote_separators,
-            SavedStory::FootnoteSeparator,
-        ),
-        (
-            &mut request.endnote_separators,
-            SavedStory::EndnoteSeparator,
-        ),
-    ] {
-        for (index, note) in notes.iter_mut().enumerate() {
-            stories.push(story(index));
-            blocks.push(&mut note.content);
-        }
-    }
-    normalize_comment_references(&mut blocks)
-        .into_iter()
-        .map(|paragraph| (stories[paragraph.story], paragraph))
-        .collect()
+/// What a save writes of a story from its model rather than its source bytes.
+enum Written {
+    Nothing,
+    Everything,
+    /// The paragraphs with these Word paragraph IDs.
+    Paragraphs(HashSet<String>),
+    /// The top-level paragraphs at these blocks.
+    Blocks(HashSet<usize>),
 }
 
-/// Makes the save write the stories a normalization changed from their model: their parts are
-/// serialized rather than patched from source bytes, keeping the patched paragraph IDs as
-/// assignments, and their notes lose their verbatim XML. A selective save also replaces the
-/// changed body paragraphs, and refuses what it cannot rewrite.
-fn serialize_normalized_stories(
-    request: &mut S13SaveRequest,
-    normalized: &[(SavedStory, NormalizedParagraph)],
-    paragraph_ids: &mut S13ParagraphIds,
-    relationships: &IndexMap<String, Relationship>,
-    package: &Package,
-) -> Result<(), ParseError> {
-    let mut parts = HashSet::new();
-    for (story, paragraph) in normalized {
-        let story_path = |entries: &[(String, HeaderFooter)], index: usize| {
-            relationships
-                .get(&entries[index].0)
-                .filter(|relationship| relationship.target_mode != Some(TargetMode::External))
-                .and_then(|relationship| {
-                    resolve_relative_path(&package.document_path, &relationship.target).ok()
-                })
-        };
-        let path = match *story {
-            SavedStory::Body => Some(package.document_path.clone()),
-            SavedStory::Header(index) => story_path(&request.header_entries, index),
-            SavedStory::Footer(index) => story_path(&request.footer_entries, index),
-            SavedStory::Footnote(index) => {
-                request.footnotes[index].verbatim_xml = None;
-                Some("word/footnotes.xml".to_owned())
-            }
-            SavedStory::FootnoteSeparator(index) => {
-                request.footnote_separators[index].verbatim_xml = None;
-                Some("word/footnotes.xml".to_owned())
-            }
-            SavedStory::Endnote(index) => {
-                request.endnotes[index].verbatim_xml = None;
-                Some("word/endnotes.xml".to_owned())
-            }
-            SavedStory::EndnoteSeparator(index) => {
-                request.endnote_separators[index].verbatim_xml = None;
-                Some("word/endnotes.xml".to_owned())
-            }
-        };
-        parts.extend(path);
-        if let Some(selective) = request.selective.as_mut() {
-            match (story, &paragraph.para_id) {
-                (SavedStory::Body, Some(id)) => {
-                    if !selective.changed_para_ids.contains(id) {
-                        selective.changed_para_ids.push(id.clone());
-                    }
-                }
-                (SavedStory::Header(_) | SavedStory::Footer(_), _) => {}
-                _ => {
-                    return Err(save_error(
-                        "a selective save cannot move the comment references this document needs",
-                    ));
-                }
-            }
+impl Written {
+    fn holds(&self, location: &ParagraphLocation) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Everything => true,
+            Self::Paragraphs(ids) => location.para_id.as_ref().is_some_and(|id| ids.contains(id)),
+            Self::Blocks(blocks) => !location.nested && blocks.contains(&location.block),
         }
     }
-    let (serialized, patched) = std::mem::take(&mut paragraph_ids.patched_parts)
-        .into_iter()
-        .partition(|part| parts.contains(package.resolve_path(&part.part)));
-    paragraph_ids.patched_parts = patched;
-    for part in serialized {
-        paragraph_ids
-            .assignments
-            .extend(
-                part.para_ids
-                    .into_iter()
-                    .map(|(ordinal, para_id)| S13ParagraphId {
-                        part: part.part.clone(),
-                        ordinal,
-                        para_id,
-                    }),
-            );
+}
+
+/// Normalizes, across the request's stories, the comment references of what the save writes
+/// from its model, which `written` gives for each story.
+fn normalize_saved_comment_references(
+    request: &mut S13SaveRequest,
+    written: impl Fn(&S13SaveRequest, SavedStory) -> Written,
+) {
+    let stories: Vec<SavedStory> = std::iter::once(SavedStory::Body)
+        .chain((0..request.header_entries.len()).map(SavedStory::Header))
+        .chain((0..request.footer_entries.len()).map(SavedStory::Footer))
+        .chain((0..request.footnotes.len()).map(SavedStory::Footnote))
+        .chain((0..request.endnotes.len()).map(SavedStory::Endnote))
+        .chain((0..request.footnote_separators.len()).map(SavedStory::FootnoteSeparator))
+        .chain((0..request.endnote_separators.len()).map(SavedStory::EndnoteSeparator))
+        .collect();
+    let writes: Vec<Written> = stories
+        .iter()
+        .map(|story| written(request, *story))
+        .collect();
+    let mut blocks = vec![&mut request.document.content];
+    blocks.extend(
+        request
+            .header_entries
+            .iter_mut()
+            .map(|(_, story)| &mut story.content),
+    );
+    blocks.extend(
+        request
+            .footer_entries
+            .iter_mut()
+            .map(|(_, story)| &mut story.content),
+    );
+    for notes in [
+        &mut request.footnotes,
+        &mut request.endnotes,
+        &mut request.footnote_separators,
+        &mut request.endnote_separators,
+    ] {
+        blocks.extend(notes.iter_mut().map(|note| &mut note.content));
     }
-    Ok(())
+    normalize_comment_references(&mut blocks, |location| {
+        writes[location.story].holds(location)
+    });
 }
 
 fn apply_paragraph_id_assignments(

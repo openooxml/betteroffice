@@ -48,7 +48,7 @@ const BODY =
   `<w:p w14:paraId="0C000006">${t('Go to ')}<w:hyperlink w:anchor="target">${t('page ')}` +
   `<w:fldSimple w:instr=" PAGE ">${t('7')}</w:fldSimple>${t(' of the text')}</w:hyperlink>${t(' now')}</w:p>`;
 
-function docx(): Uint8Array {
+function docx(body = BODY): Uint8Array {
   const parts: Record<string, string> = {
     '[Content_Types].xml':
       '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -58,7 +58,7 @@ function docx(): Uint8Array {
       '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>',
     '_rels/.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`,
     'word/_rels/document.xml.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdC" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rIdH" Type="${REL}/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>`,
-    'word/document.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>${BODY}<w:sectPr/></w:body></w:document>`,
+    'word/document.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>${body}<w:sectPr/></w:body></w:document>`,
     'word/comments.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments ${NS}><w:comment w:id="1" w:author="Reviewer"><w:p w14:paraId="0D000001">${t('Check')}</w:p></w:comment></w:comments>`,
   };
   return new Uint8Array(
@@ -414,6 +414,18 @@ it('splits a hyperlink holding a field where a comment range ends inside it', as
     'e text',
     ' now',
   ]);
+});
+
+it('keeps a reference away from its range end and a field inside a hyperlink on a no-op save', async () => {
+  const bytes = docx(
+    `<w:p w14:paraId="0E000001"><w:commentRangeStart w:id="1"/>${t('Intro')}<w:commentRangeEnd w:id="1"/></w:p>` +
+      `<w:p w14:paraId="0E000002"><w:r><w:commentReference w:id="1"/></w:r>${t('Next')}</w:p>` +
+      `<w:p w14:paraId="0E000003"><w:hyperlink w:anchor="target">${t('Page ')}` +
+      `<w:fldSimple w:instr=" PAGE ">${t('7')}</w:fldSimple></w:hyperlink></w:p>`
+  );
+  const saved = unzipContainer((await saveYrsDocx(await open(bytes, 91021))).bytes);
+  expect(saved).toEqual(unzipContainer(bytes));
+  expect(new TextDecoder().decode(saved['word/document.xml'])).toContain('<w:fldSimple w:instr=" PAGE ">');
 });
 
 it('keeps a commented document byte-identical on a no-op save', async () => {

@@ -1,4 +1,4 @@
-//! One comment reference per paragraph that ends a comment's range.
+//! One comment reference per paragraph that ends a comment's range, in what a save writes.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -7,11 +7,10 @@ use crate::block::BlockContent;
 use crate::inline::{InlineNode, Run, RunContent};
 use crate::paragraph::{Paragraph, ParagraphContent};
 
-/// A paragraph whose saved content a normalization changed: a reference it removed, or the
-/// reference the serializer now writes after the comment range end it holds.
+/// Where a paragraph sits in the stories given to [`normalize_comment_references`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NormalizedParagraph {
-    /// The story's index in the slice given to [`normalize_comment_references`].
+pub(crate) struct ParagraphLocation {
+    /// The story's index in the slice.
     pub story: usize,
     /// The story's top-level block holding the paragraph.
     pub block: usize,
@@ -20,75 +19,71 @@ pub(crate) struct NormalizedParagraph {
     pub para_id: Option<String>,
 }
 
-/// For every comment with a range end in `stories`, keeps the first reference of each paragraph
-/// holding one of its range ends, wherever in that paragraph it sits, and removes its other
-/// references; the serializer writes one after the range end of a paragraph left without.
-/// References of a comment without a range end stay. Returns the paragraphs whose saved content
-/// changes, in document order.
+/// Normalizes the comment references of the paragraphs a save writes from `stories`, those
+/// `serialized` holds for; the others keep their source bytes and are left alone. For every
+/// comment with a range end, a written paragraph holding one keeps its first reference of the
+/// comment, wherever in the paragraph it sits, and loses the others. A written paragraph without
+/// a range end loses the comment's references when the saved output holds one anyway: after a
+/// written range end, where the serializer writes it, or in a paragraph kept as source bytes.
+/// Otherwise the first such reference stays. References of a comment without a range end stay.
 pub(crate) fn normalize_comment_references(
     stories: &mut [&mut Vec<BlockContent>],
-) -> Vec<NormalizedParagraph> {
+    serialized: impl Fn(&ParagraphLocation) -> bool,
+) {
     let mut paragraphs = Vec::new();
     for (story, blocks) in stories.iter().enumerate() {
         for (block, content) in blocks.iter().enumerate() {
             collect_block(content, story, block, false, &mut paragraphs);
         }
     }
-    let mut ends: HashMap<u64, HashSet<usize>> = HashMap::new();
+    let written: Vec<bool> = paragraphs
+        .iter()
+        .map(|paragraph| serialized(&paragraph.location))
+        .collect();
+    let mut ends: HashMap<u64, Vec<usize>> = HashMap::new();
     for (index, paragraph) in paragraphs.iter().enumerate() {
         for &id in &paragraph.ends {
-            ends.entry(id).or_default().insert(index);
+            ends.entry(id).or_default().push(index);
         }
     }
+    let mut held: HashSet<u64> = HashSet::new();
+    for (paragraph, &written) in paragraphs.iter().zip(&written) {
+        held.extend(if written {
+            &paragraph.ends
+        } else {
+            &paragraph.references
+        });
+    }
+    let mut stray_kept = HashSet::new();
     let mut drops: Vec<Vec<bool>> = Vec::with_capacity(paragraphs.len());
-    let mut moved = HashSet::new();
     for (index, paragraph) in paragraphs.iter().enumerate() {
         let mut kept = HashSet::new();
-        let flags: Vec<bool> = paragraph
+        let flags = paragraph
             .references
             .iter()
             .map(|id| {
-                let drop = ends
-                    .get(id)
-                    .is_some_and(|ends| !ends.contains(&index) || !kept.insert(*id));
-                if drop {
-                    moved.insert(*id);
+                let Some(indices) = ends.get(id).filter(|_| written[index]) else {
+                    return false;
+                };
+                if indices.contains(&index) {
+                    !kept.insert(*id)
+                } else {
+                    held.contains(id) || !stray_kept.insert(*id)
                 }
-                drop
             })
             .collect();
         drops.push(flags);
     }
-    if moved.is_empty() {
-        return Vec::new();
-    }
-    let changed: Vec<bool> = paragraphs
-        .iter()
-        .zip(&drops)
-        .map(|(paragraph, flags)| {
-            flags.contains(&true)
-                || paragraph
-                    .ends
-                    .iter()
-                    .any(|id| moved.contains(id) && !paragraph.references.contains(id))
-        })
-        .collect();
     let mut cursor = 0;
     for blocks in stories.iter_mut() {
         for content in blocks.iter_mut() {
             remove_in_block(content, &drops, &mut cursor);
         }
     }
-    paragraphs
-        .into_iter()
-        .zip(changed)
-        .filter(|(_, changed)| *changed)
-        .map(|(paragraph, _)| paragraph.location)
-        .collect()
 }
 
 struct CollectedParagraph {
-    location: NormalizedParagraph,
+    location: ParagraphLocation,
     ends: Vec<u64>,
     references: Vec<u64>,
 }
@@ -109,7 +104,7 @@ fn collect_block(
             let mut references = Vec::new();
             each_reference(paragraph, &mut |id| references.push(comment_key(id)));
             out.push(CollectedParagraph {
-                location: NormalizedParagraph {
+                location: ParagraphLocation {
                     story,
                     block: index,
                     nested,
