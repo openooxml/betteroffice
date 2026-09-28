@@ -51,7 +51,7 @@ impl EvaluationBudget {
         }
     }
 
-    fn consume(&self, count: u64) -> bool {
+    pub(crate) fn consume(&self, count: u64) -> bool {
         take(&self.remaining, count)
     }
 }

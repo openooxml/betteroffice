@@ -131,16 +131,17 @@ fn run_recalc(
                     }
                 }
                 Some(NodeValue::Spill(spill)) => {
-                    spilled.extend(write_spill(wb, *u, spill, &mut changed));
-                }
-                Some(NodeValue::Refused) => {
-                    let refused = CellValue::Error {
-                        value: ErrorValue::Num,
-                    };
-                    if write_if_changed(wb, *u, refused) {
-                        changed.push((u.0, cell_of(*u)));
+                    match write_spill(wb, *u, spill, &budget, &mut changed) {
+                        Some(moved) => spilled.extend(moved),
+                        None => {
+                            if !limited {
+                                limited_cells.push((u.0, cell_of(*u)));
+                            }
+                            refuse(wb, *u, &mut changed);
+                        }
                     }
                 }
+                Some(NodeValue::Refused) => refuse(wb, *u, &mut changed),
                 None => {}
             }
         }
@@ -280,6 +281,13 @@ fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>
         .collect();
     cycle.sort();
     (order, cycle)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// seeks retiring spilled cells took, so a test can see the search skip
+    /// the empty positions of a rectangle.
+    static RETIREMENT_SEEKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// what a formula node produced: one value, or a rectangle an array formula
@@ -491,15 +499,30 @@ fn circular_value(wb: &Workbook, u: Key) -> CellValue {
     }
 }
 
+/// show an array formula the budget refused: an uncached anchor shows `#NUM!`,
+/// and a cached one, like the rest of its rectangle, keeps what it had.
+fn refuse(wb: &mut Workbook, u: Key, changed: &mut Vec<(SheetId, CellRef)>) {
+    let refused = CellValue::Error {
+        value: ErrorValue::Num,
+    };
+    if matches!(wb.value_cow(u.0, cell_of(u)).as_ref(), CellValue::Empty)
+        && write_if_changed(wb, u, refused)
+    {
+        changed.push((u.0, cell_of(u)));
+    }
+}
+
 /// lay a spilled result out from its anchor: retire the cells the previous
 /// result reached and no longer fills, then write the new ones. returns the
-/// spilled cells whose value moved, so their readers can be rescheduled.
+/// spilled cells whose value moved, so their readers can be rescheduled, or
+/// `None`, having written nothing, when the budget refuses the retirement.
 fn write_spill(
     wb: &mut Workbook,
     u: Key,
     spill: Spill,
+    budget: &EvaluationBudget,
     changed: &mut Vec<(SheetId, CellRef)>,
-) -> Vec<(SheetId, CellRef)> {
+) -> Option<Vec<(SheetId, CellRef)>> {
     let anchor = cell_of(u);
     let previous = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(anchor));
     let (range, values) = if blocked(wb, u.0, anchor, spill.range, previous) {
@@ -512,15 +535,19 @@ fn write_spill(
     } else {
         (spill.range, spill.values)
     };
+    let retired = match (previous, wb.sheet(u.0)) {
+        (Some(previous), Some(sheet)) => retired_cells(sheet, previous, anchor, range, budget)?,
+        _ => Vec::new(),
+    };
     let mut moved = Vec::new();
-    if let Some(previous) = previous {
-        for (row, col) in cells_of(previous) {
-            let at = CellRef::new(row, col);
-            if at.row == anchor.row && at.col == anchor.col || range.contains(at) {
-                continue;
-            }
-            write_spilled_cell(wb, (u.0, row, col), CellValue::Empty, changed, &mut moved);
-        }
+    for at in retired {
+        write_spilled_cell(
+            wb,
+            (u.0, at.row, at.col),
+            CellValue::Empty,
+            changed,
+            &mut moved,
+        );
     }
     for ((row, col), value) in cells_of(range).zip(values) {
         if row == anchor.row && col == anchor.col {
@@ -534,7 +561,43 @@ fn write_spill(
     if let Some(sheet) = wb.sheet_mut(u.0) {
         sheet.set_array_formula(anchor, range);
     }
-    moved
+    Some(moved)
+}
+
+/// the stored cells of `previous` a result over `range` from `anchor` no
+/// longer covers. the search seeks stored cells rather than walking every
+/// position, and pays before it starts for the two seeks each row of
+/// `previous` may take, then for each cell it finds; `None` once the budget
+/// refuses.
+fn retired_cells(
+    sheet: &xlsx_model::Sheet,
+    previous: CellRange,
+    anchor: CellRef,
+    range: CellRange,
+    budget: &EvaluationBudget,
+) -> Option<Vec<CellRef>> {
+    if range.contains(previous.start) && range.contains(previous.end) {
+        return Some(Vec::new());
+    }
+    let rows = u64::from(previous.end.row - previous.start.row) + 1;
+    if !budget.consume(2 * rows + 1) {
+        return None;
+    }
+    let mut cells = sheet.cells_in_range(previous);
+    let mut retired = Vec::new();
+    let mut paid = true;
+    for (at, _) in cells.by_ref() {
+        if !budget.consume(1) {
+            paid = false;
+            break;
+        }
+        if (at.row, at.col) != (anchor.row, anchor.col) && !range.contains(at) {
+            retired.push(at);
+        }
+    }
+    #[cfg(test)]
+    RETIREMENT_SEEKS.with(|seeks| seeks.set(seeks.get() + cells.seeks()));
+    paid.then_some(retired)
 }
 
 /// whether anything the author put in the way stops a result spilling. only
@@ -810,7 +873,121 @@ mod tests {
         }
     }
 
+    /// an array formula at `anchor` recorded over `range`.
+    fn put_recorded(wb: &mut Workbook, s: SheetId, anchor: &str, formula: &str, range: &str) {
+        put_formula(wb, s, anchor, formula);
+        wb.sheet_mut(s)
+            .unwrap()
+            .set_array_formula(a1(anchor), xlsx_model::CellRange::parse_a1(range).unwrap());
+    }
+
+    /// an engine gap whose small result fits the budget, but whose report
+    /// over the recorded rectangle does not, is refused like any other.
+    #[test]
+    fn a_recovery_the_budget_refuses_keeps_the_rectangle() {
+        let (mut wb, s) = one_sheet();
+        for row in 1..=10 {
+            put_formula(
+                &mut wb,
+                s,
+                &format!("A{row}"),
+                "ROWS(_xlfn.SEQUENCE(990000))",
+            );
+        }
+        put_recorded(&mut wb, s, "C20", "{1;2}+WEBSERVICE(1)", "C20:C262163");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.limited_cells.contains(&(s, a1("C20"))));
+        assert_eq!(
+            value(&wb, s, "C20"),
+            CellValue::Error {
+                value: xlsx_model::ErrorValue::Num
+            }
+        );
+        assert_eq!(value(&wb, s, "C21"), CellValue::Empty);
+        assert_eq!(
+            wb.sheet(s).unwrap().array_formula(a1("C20")),
+            Some(xlsx_model::CellRange::parse_a1("C20:C262163").unwrap())
+        );
+    }
+
+    /// a result that shrinks retires its old rectangle by seeking the cells
+    /// the sheet stores there, however tall the rectangle is.
+    #[test]
+    fn a_shrinking_spill_seeks_only_stored_cells() {
+        let (mut wb, s) = one_sheet();
+        for row in 1..=1000 {
+            put_num(&mut wb, s, &format!("A{row}"), 1.0);
+        }
+        put_recorded(&mut wb, s, "C1", "_xlfn.SEQUENCE(2)", "C1:C262144");
+        put_num(&mut wb, s, "C3", 5.0);
+        put_num(&mut wb, s, "C262144", 6.0);
+        RETIREMENT_SEEKS.with(|seeks| seeks.set(0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.limited_cells.is_empty());
+        assert_eq!(value(&wb, s, "C2"), num(2.0));
+        assert_eq!(value(&wb, s, "C3"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "C262144"), CellValue::Empty);
+        assert_eq!(
+            wb.sheet(s).unwrap().array_formula(a1("C1")),
+            Some(xlsx_model::CellRange::parse_a1("C1:C2").unwrap())
+        );
+        let seeks = RETIREMENT_SEEKS.with(|seeks| seeks.get());
+        assert!((1..=2 * 1000 + 8).contains(&seeks), "{seeks} seeks");
+    }
+
+    /// retiring the rectangles of shrinking results shares the recalculation
+    /// budget, whether the result shrank or an obstruction cut it to
+    /// `#SPILL!`; a retirement it refuses leaves the rectangle as it was.
+    #[test]
+    fn shrinking_spills_share_the_recalculation_budget() {
+        for (formula, obstructed) in [("_xlfn.SEQUENCE(2)", false), ("_xlfn.SEQUENCE(2,2)", true)] {
+            let (mut wb, s) = one_sheet();
+            let anchors: Vec<CellRef> = (0..40).map(|index| CellRef::new(0, index * 2)).collect();
+            for &at in &anchors {
+                let sheet = wb.sheet_mut(s).unwrap();
+                sheet.set_cell(
+                    at,
+                    Cell {
+                        formula: Some(formula.into()),
+                        ..Cell::default()
+                    },
+                );
+                sheet.set_array_formula(
+                    at,
+                    xlsx_model::CellRange::new(at, CellRef::new(262_143, at.col)),
+                );
+                if obstructed {
+                    sheet.set_cell(
+                        CellRef::new(0, at.col + 1),
+                        Cell {
+                            value: num(1.0),
+                            ..Cell::default()
+                        },
+                    );
+                }
+            }
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            let mut kept = 0;
+            for &at in &anchors {
+                let range = wb.sheet(s).unwrap().array_formula(at).unwrap();
+                if range.end.row == 262_143 {
+                    kept += 1;
+                    assert!(result.limited_cells.contains(&(s, at)), "{formula}");
+                    assert_eq!(
+                        wb.value(s, at),
+                        CellValue::Error {
+                            value: xlsx_model::ErrorValue::Num
+                        },
+                        "{formula}"
+                    );
+                }
+            }
+            assert!(kept > 0 && kept < anchors.len(), "{formula}: {kept} kept");
+        }
+    }
+
     /// `WEBSERVICE` stands in for any function the engine does not implement,
+    /// and is one it never will.    /// `WEBSERVICE` stands in for any function the engine does not implement,
     /// and is one it never will.
     #[test]
     fn an_unimplemented_function_keeps_the_cached_value() {
