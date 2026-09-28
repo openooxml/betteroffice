@@ -114,7 +114,7 @@ fn fill_uncached(wb: &mut Workbook) {
                     at,
                     Cell {
                         value,
-                        formula: if anchored { stored.formula } else { None },
+                        formula: stored.formula,
                         style: stored.style,
                     },
                 );
