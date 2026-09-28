@@ -221,6 +221,11 @@ describe('a reanchored comment', () => {
         mover.setCommentRanges('1', [range(mover, 2, 0, 7)]);
         const [first, second] = peerFirst ? [peer, source] : [source, peer];
         first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
+        const received = anchored(first, '1');
+        for (const [path, bytes] of await saves(first)) {
+          expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+          expect(anchored(await open(bytes, 91043), '1')).toBe(received);
+        }
         second.applyUpdate(first.encodeStateAsUpdate(second.encodeStateVector()));
         first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
         const expected = anchored(source, '1');

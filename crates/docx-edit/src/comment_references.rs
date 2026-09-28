@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
-use yrs::types::{Attrs, EntryChange, Event, PathSegment};
+use yrs::types::{Attrs, Delta, EntryChange, Event, PathSegment};
 use yrs::{
     Any, DeepObservable, Map, MapPrelim, MapRef, Out, ReadTxn, Subscription, Text, TextRef,
     Transact, TransactionMut,
@@ -13,17 +13,23 @@ use yrs::{
 use crate::{COMMENTS, EditingDoc, STORIES, decode_anchor, map_string, out_len};
 
 /// Records the comments an update changes while it integrates, and which of them it reanchors:
-/// a replaced comment or changed anchors, never a comment the update first brings in.
+/// a replaced comment, changed anchors, or a reference the update inserts into an existing story
+/// (a losing concurrent move changes no anchors here but still moves its reference), never a
+/// comment or story the update first brings in.
 pub(crate) struct CommentWatch {
     changed: Arc<Mutex<(BTreeSet<String>, BTreeSet<String>)>>,
-    _subscription: Option<Subscription>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl CommentWatch {
     pub(crate) fn new(doc: &EditingDoc) -> Self {
         let changed = Arc::new(Mutex::new((BTreeSet::new(), BTreeSet::new())));
-        let comments = doc.yrs_doc().transact().get_map(COMMENTS);
-        let subscription = comments.map(|comments| {
+        let (comments, stories) = {
+            let txn = doc.yrs_doc().transact();
+            (txn.get_map(COMMENTS), txn.get_map(STORIES))
+        };
+        let mut subscriptions = Vec::new();
+        subscriptions.extend(comments.map(|comments| {
             let changed = Arc::clone(&changed);
             comments.observe_deep(move |txn, events| {
                 let (changed, reanchored) = &mut *changed.lock().unwrap();
@@ -50,10 +56,29 @@ impl CommentWatch {
                     }
                 }
             })
-        });
+        }));
+        subscriptions.extend(stories.map(|stories| {
+            let changed = Arc::clone(&changed);
+            stories.observe_deep(move |txn, events| {
+                let (changed, reanchored) = &mut *changed.lock().unwrap();
+                for event in events.iter() {
+                    let Event::Text(event) = event else {
+                        continue;
+                    };
+                    for delta in event.delta(txn) {
+                        if let Delta::Inserted(Out::YMap(map), _) = delta
+                            && let Some(id) = referenced_comment(map, txn)
+                        {
+                            changed.insert(id.clone());
+                            reanchored.insert(id);
+                        }
+                    }
+                }
+            })
+        }));
         Self {
             changed,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         }
     }
 

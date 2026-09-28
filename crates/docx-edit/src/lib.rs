@@ -1651,6 +1651,17 @@ mod tests {
                 first
                     .apply_update_v1(&second.encode_state_as_update_v1())
                     .unwrap();
+                let received = resolved(first, "1");
+                let stale: Vec<_> = ["body", HEADER]
+                    .into_iter()
+                    .flat_map(|story| {
+                        reference_offsets(first, story)
+                            .into_iter()
+                            .map(move |offset| (story.to_owned(), offset))
+                    })
+                    .filter(|(story, offset)| *story != received.story || *offset != received.end)
+                    .collect();
+                assert!(stale.is_empty(), "one-way delivery left {stale:?}");
                 second
                     .apply_update_v1(&first.encode_state_as_update_v1())
                     .unwrap();
