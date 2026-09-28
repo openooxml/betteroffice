@@ -6,8 +6,8 @@ use xlsx_ops::Op;
 
 use super::{
     PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
-    retain_array_formulas, retain_formula_caches, settle_projection, validate_collaboration_size,
-    validate_collaboration_state, written_cells,
+    retain_formula_caches, validate_collaboration_size, validate_collaboration_state,
+    written_cells,
 };
 use crate::Result;
 use crate::authority::{LocalHistory, StagedLocalUpdate, SyncOrigin};
@@ -67,8 +67,7 @@ impl Workbook {
                 )?;
                 let mut model = std::mem::take(&mut authority.model);
                 retain_formula_caches(&self.model, &mut model);
-                retain_array_formulas(&self.model, &mut model);
-                settle_projection(&self.model, &self.model, &mut model, &written_cells(&ops));
+                self.settle_projection(&mut model, &written_cells(&ops));
                 model
             }
             WorkbookMode::Standalone => staged.model,

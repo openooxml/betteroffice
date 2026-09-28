@@ -20,8 +20,9 @@ use xlsx_render::display_text;
 use super::staging::CommitHistory;
 use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved, cell_target};
 use super::{
-    StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
-    current_cell_state, edit_cell_state, validate_cell_state, validate_model_sheets, validate_op,
+    StagedApply, Workbook, array_footprint, authority_error, calculation_result,
+    cell_states_semantically_equal, current_cell_state, edit_cell_state, settled_changes,
+    validate_cell_state, validate_model_sheets, validate_op, written_cells,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
 use crate::{Error, Result};
@@ -1034,13 +1035,15 @@ impl Workbook {
             .filter(|(planned, _)| planned.claims.content)
             .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))
             .collect::<Vec<_>>();
+        let footprint = array_footprint(&self.model, &written_cells(&prepared.ops));
         let mut graph = DepGraph::build(&prepared.model);
-        let recalculated = recalc_after(
+        let mut recalculated = recalc_after(
             &mut prepared.model,
             &mut graph,
             &seeds,
             request.calculation.now_serial,
         );
+        settled_changes(&prepared.model, footprint, &mut recalculated.changed);
         let changed_sheets = steps
             .iter()
             .zip(&changed)

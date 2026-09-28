@@ -3,8 +3,8 @@
 
 use betteroffice_xlsx::{
     CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, EditRequest,
-    ErrorValue, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch, Workbook,
-    WorkbookModel,
+    ErrorValue, MutationResult, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch,
+    Workbook, WorkbookModel,
 };
 use serde_json::json;
 
@@ -64,13 +64,42 @@ fn package(rows: &str, dynamic: bool) -> Vec<u8> {
 }
 
 /// `SORT(A1:A3)` over 3, 1, 2, spilled into C1:C3 by excel.
+const SORTED: &str = concat!(
+    r#"<row r="1"><c r="A1"><v>3</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">_xlfn._xlws.SORT(A1:A3)</f><v>1</v></c></row>"#,
+    r#"<row r="2"><c r="A2"><v>1</v></c><c r="C2"><v>2</v></c></row>"#,
+    r#"<row r="3"><c r="A3"><v>2</v></c><c r="C3"><v>3</v></c></row>"#,
+);
+
 fn sorted() -> Workbook {
-    let rows = concat!(
-        r#"<row r="1"><c r="A1"><v>3</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">_xlfn._xlws.SORT(A1:A3)</f><v>1</v></c></row>"#,
-        r#"<row r="2"><c r="A2"><v>1</v></c><c r="C2"><v>2</v></c></row>"#,
-        r#"<row r="3"><c r="A3"><v>2</v></c><c r="C3"><v>3</v></c></row>"#,
-    );
-    Workbook::open_recalculated(&package(rows, true), options()).unwrap()
+    Workbook::open_recalculated(&package(SORTED, true), options()).unwrap()
+}
+
+fn replica(client_id: u64) -> Workbook {
+    Workbook::open_collaborative_recalculated(&package(SORTED, true), client_id, options()).unwrap()
+}
+
+/// hands `to` everything `from` holds that `to` has not seen, as one update.
+fn sync(from: &Workbook, to: &mut Workbook) {
+    let update = from.encode_diff_v1(&to.encode_state_vector_v1()).unwrap();
+    to.apply_update_v1(&update, options()).unwrap();
+}
+
+fn changed(result: &MutationResult) -> Vec<String> {
+    result
+        .changed
+        .iter()
+        .map(|address| address.cell.to_a1())
+        .collect()
+}
+
+fn edit(workbook: &mut Workbook, address: &str, input: &str) -> MutationResult {
+    workbook
+        .edit_cell(SheetId(0), cell(address), input, options())
+        .unwrap()
+}
+
+fn cleared(workbook: &Workbook) -> bool {
+    column(workbook, &["C1", "C2", "C3"]) == [CellValue::Empty, CellValue::Empty, CellValue::Empty]
 }
 
 fn value(workbook: &Workbook, address: &str) -> CellValue {
@@ -399,28 +428,235 @@ fn a_dynamic_array_from_a_model_saves_as_one() {
     );
 }
 
+/// what settling a write changes beside the cell written is reported with what
+/// recalculation moved.
+#[test]
+fn a_mutation_reports_what_settling_its_write_changed() {
+    let mut workbook = sorted();
+    assert_eq!(changed(&edit(&mut workbook, "C2", "manual")), ["C1", "C3"]);
+    let undone = workbook.undo(options()).unwrap();
+    assert_eq!(changed(&undone), ["C1", "C2", "C3"]);
+    assert_eq!(changed(&edit(&mut workbook, "C1", "")), ["C2", "C3"]);
+
+    let mut shared = replica(21);
+    assert_eq!(changed(&edit(&mut shared, "C2", "manual")), ["C1", "C3"]);
+
+    let mut batched = sorted();
+    let request = batch(&batched, "C2", "batched");
+    let application = batched.apply_edits(&request).unwrap().unwrap();
+    let reported: Vec<_> = application
+        .calculation
+        .changed
+        .iter()
+        .map(|target| target.a1.as_str())
+        .collect();
+    assert_eq!(reported, ["C1", "C3"]);
+}
+
+/// a formula written back where an array was retired spills afresh, so what
+/// was typed into its old rectangle meanwhile obstructs it.
+#[test]
+fn a_formula_written_back_at_a_cleared_anchor_yields_to_what_was_typed_since() {
+    for mut workbook in [sorted(), replica(22)] {
+        edit(&mut workbook, "C1", "");
+        assert!(cleared(&workbook));
+        edit(&mut workbook, "C2", "manual");
+        edit(&mut workbook, "C1", "=_xlfn._xlws.SORT(A1:A3)");
+        assert!(obstructed_by(&workbook, text("manual")));
+        for _ in 0..3 {
+            workbook.undo(options()).unwrap();
+        }
+        assert!(spilled(&workbook));
+    }
+}
+
+/// every value an author pastes over a spill is kept, whether it reaches a
+/// replica as one update or as several.
+#[test]
+fn values_pasted_over_a_spill_are_all_kept_on_every_replica() {
+    let mut writer = replica(31);
+    let mut follower = replica(32);
+    let mut late = replica(33);
+    writer
+        .edit_cells(
+            SheetId(0),
+            &[
+                CellInput {
+                    cell: cell("C2"),
+                    input: "a".into(),
+                },
+                CellInput {
+                    cell: cell("C3"),
+                    input: "b".into(),
+                },
+            ],
+            options(),
+        )
+        .unwrap();
+    sync(&writer, &mut follower);
+    for replica in [&writer, &follower] {
+        assert_eq!(
+            column(replica, &["C1", "C2", "C3"]),
+            [error(ErrorValue::Spill), text("a"), text("b")]
+        );
+    }
+    edit(&mut writer, "C2", "c");
+    sync(&writer, &mut follower);
+    edit(&mut writer, "C3", "");
+    sync(&writer, &mut follower);
+    sync(&writer, &mut late);
+    for replica in [&writer, &follower, &late] {
+        assert!(obstructed_by(replica, text("c")));
+    }
+}
+
+/// two separate edits by one replica settle alike on a replica that receives
+/// them as one update.
+#[test]
+fn separate_edits_and_their_combined_update_settle_alike() {
+    let mut writer = replica(41);
+    let mut follower = replica(42);
+    let mut late = replica(43);
+    edit(&mut writer, "C2", "a");
+    sync(&writer, &mut follower);
+    edit(&mut writer, "C3", "b");
+    sync(&writer, &mut follower);
+    sync(&writer, &mut late);
+    for replica in [&writer, &follower, &late] {
+        assert_eq!(
+            column(replica, &["C1", "C2", "C3"]),
+            [error(ErrorValue::Spill), text("a"), text("b")]
+        );
+    }
+}
+
+/// the shared document holds what the spill filled at open; undoing a write
+/// over it restores that as the spill's own value, not as an obstruction.
+#[test]
+fn collaborative_undo_and_redo_of_a_write_into_a_spill() {
+    let mut writer = replica(51);
+    let mut follower = replica(52);
+    edit(&mut writer, "C2", "manual");
+    sync(&writer, &mut follower);
+    for replica in [&writer, &follower] {
+        assert!(obstructed_by(replica, text("manual")));
+    }
+    writer.undo(options()).unwrap();
+    sync(&writer, &mut follower);
+    let mut late = replica(53);
+    sync(&writer, &mut late);
+    for replica in [&writer, &follower, &late] {
+        assert!(spilled(replica));
+    }
+    writer.redo(options()).unwrap();
+    sync(&writer, &mut follower);
+    sync(&writer, &mut late);
+    for replica in [&writer, &follower, &late] {
+        assert!(obstructed_by(replica, text("manual")));
+    }
+}
+
+/// clearing a shared anchor clears its spill on every replica and in the
+/// saved file, and undoing it restores the dynamic array.
+#[test]
+fn clearing_a_shared_anchor_clears_its_spill_until_undone() {
+    let mut writer = replica(61);
+    let mut follower = replica(62);
+    edit(&mut writer, "C1", "");
+    sync(&writer, &mut follower);
+    for replica in [&writer, &follower] {
+        assert!(cleared(replica));
+        let xml = sheet_xml(&replica.save().unwrap());
+        assert!(
+            !xml.contains(r#"r="C2""#) && !xml.contains(r#"r="C3""#),
+            "{xml}"
+        );
+    }
+    writer.undo(options()).unwrap();
+    sync(&writer, &mut follower);
+    for replica in [&writer, &follower] {
+        assert!(spilled(replica));
+        let saved = replica.save().unwrap();
+        let xml = sheet_xml(&saved);
+        assert!(
+            xml.contains(r#"<c r="C1" cm="1"><f t="array" ref="C1:C3">"#),
+            "{xml}"
+        );
+        assert!(spilled(
+            &Workbook::open_recalculated(&saved, options()).unwrap()
+        ));
+    }
+}
+
 /// the shared document carries the written cell, and each replica replays what
-/// it does to the spill.
+/// it does to the spill, whatever is recalculated afterwards.
 #[test]
 fn a_collaborator_writing_into_a_spill_obstructs_it_on_every_replica() {
-    let rows = concat!(
-        r#"<row r="1"><c r="A1"><v>3</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">_xlfn._xlws.SORT(A1:A3)</f><v>1</v></c></row>"#,
-        r#"<row r="2"><c r="A2"><v>1</v></c><c r="C2"><v>2</v></c></row>"#,
-        r#"<row r="3"><c r="A3"><v>2</v></c><c r="C3"><v>3</v></c></row>"#,
-    );
-    let bytes = package(rows, true);
-    let mut writer = Workbook::open_collaborative_recalculated(&bytes, 11, options()).unwrap();
-    let mut reader = Workbook::open_collaborative_recalculated(&bytes, 12, options()).unwrap();
-    writer
-        .edit_cell(SheetId(0), cell("C2"), "manual", options())
-        .unwrap();
-    writer
-        .edit_cell(SheetId(0), cell("A1"), "0", options())
-        .unwrap();
-    reader
-        .apply_update_v1(&writer.encode_state_as_update_v1(), options())
-        .unwrap();
+    let mut writer = replica(11);
+    let mut reader = replica(12);
+    edit(&mut writer, "C2", "manual");
+    edit(&mut writer, "A1", "0");
+    sync(&writer, &mut reader);
     for replica in [&writer, &reader] {
         assert!(obstructed_by(replica, text("manual")));
     }
+}
+
+/// a legacy array whose anchor is cleared comes back over the rectangle it
+/// was entered in.
+#[test]
+fn undoing_a_cleared_legacy_anchor_restores_its_rectangle() {
+    let rows = concat!(
+        r#"<row r="1"><c r="A1"><v>1</v></c><c r="C1"><f t="array" ref="C1:C3">A1:A2*2</f><v>2</v></c></row>"#,
+        r#"<row r="2"><c r="A2"><v>2</v></c><c r="C2"><v>4</v></c></row>"#,
+        r#"<row r="3"><c r="C3" t="e"><v>#N/A</v></c></row>"#,
+    );
+    let bytes = package(rows, false);
+    for mut workbook in [
+        Workbook::open_recalculated(&bytes, options()).unwrap(),
+        Workbook::open_collaborative_recalculated(&bytes, 71, options()).unwrap(),
+    ] {
+        edit(&mut workbook, "C1", "");
+        assert!(cleared(&workbook));
+        workbook.undo(options()).unwrap();
+        assert_eq!(
+            column(&workbook, &["C1", "C2", "C3"]),
+            [number(2.0), number(4.0), error(ErrorValue::NA)]
+        );
+        let xml = sheet_xml(&workbook.save().unwrap());
+        assert!(
+            xml.contains(r#"<c r="C1"><f t="array" ref="C1:C3">"#),
+            "{xml}"
+        );
+    }
+}
+
+/// a spill that shrinks saves the smaller rectangle and nothing beyond it,
+/// and reopens spilling the same way.
+#[test]
+fn a_shrunk_spill_saves_and_reopens_at_its_new_size() {
+    let rows = concat!(
+        r#"<row r="1"><c r="A1"><v>3</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">_xlfn.SEQUENCE(A1)</f><v>1</v></c></row>"#,
+        r#"<row r="2"><c r="C2"><v>2</v></c></row>"#,
+        r#"<row r="3"><c r="C3"><v>3</v></c></row>"#,
+    );
+    let mut workbook = Workbook::open_recalculated(&package(rows, true), options()).unwrap();
+    edit(&mut workbook, "A1", "2");
+    let saved = workbook.save().unwrap();
+    let xml = sheet_xml(&saved);
+    assert!(
+        xml.contains(r#"<c r="C1" cm="1"><f t="array" ref="C1:C2">_xlfn.SEQUENCE(A1)</f>"#),
+        "{xml}"
+    );
+    assert!(!xml.contains(r#"r="C3""#), "{xml}");
+    let mut reopened = Workbook::open_recalculated(&saved, options()).unwrap();
+    assert_eq!(
+        column(&reopened, &["C1", "C2", "C3"]),
+        [number(1.0), number(2.0), CellValue::Empty]
+    );
+    edit(&mut reopened, "A1", "3");
+    assert_eq!(
+        column(&reopened, &["C1", "C2", "C3"]),
+        [number(1.0), number(2.0), number(3.0)]
+    );
 }

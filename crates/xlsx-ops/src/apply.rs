@@ -455,19 +455,31 @@ fn apply_range_formats(
     Ok(InvertedOp(inverse))
 }
 
-/// what writing `cell` over `old` at `at` does to the arrays around it: a value
-/// or formula of its own written into a dynamic array's spill obstructs it, and
-/// an anchor that loses its formula clears what it filled. returns whether the
-/// write obstructed a spill, whose value was never the cell's own, so undoing
-/// the write clears the cell.
+/// what writing `cell` over `old` at `at` does to the arrays around it: an
+/// anchor that loses its formula clears what it filled and retires, one whose
+/// formula returns revives, and a value or formula of its own written into a
+/// dynamic array's spill obstructs it. returns whether the write obstructed a
+/// spill, whose value was never the cell's own, so undoing the write clears
+/// the cell.
 pub fn settle_array_write(
     sheet: &mut Sheet,
     at: CellRef,
     old: &CellState,
     cell: &CellState,
 ) -> bool {
-    if old.formula.is_some() && cell.formula.is_none() {
-        sheet.clear_array_result(at);
+    let owned = |state: &CellState| {
+        state
+            .formula
+            .as_deref()
+            .is_some_and(|formula| !formula.trim().is_empty())
+    };
+    if owned(old) && !owned(cell) {
+        sheet.retire_array(at, |_| false);
+    }
+    if owned(cell) && !owned(old) {
+        sheet.revive_array(at, |_, stored| {
+            stored.formula.is_some() || !matches!(stored.value, CellValue::Empty)
+        });
     }
     (cell.formula.is_some() || !matches!(cell.value, CellValue::Empty))
         && (cell.value != old.value || cell.formula != old.formula)
@@ -1200,10 +1212,12 @@ mod tests {
         );
     }
 
+    /// the anchor stops filling anything, and undoing the write brings the
+    /// dynamic array back, spilling afresh from its anchor.
     #[test]
     fn an_array_anchor_that_loses_its_formula_clears_what_it_filled() {
         let mut wb = spilled();
-        apply(
+        let inverse = apply(
             &mut wb,
             &Op::SetCell {
                 sheet: SheetId(0),
@@ -1214,6 +1228,15 @@ mod tests {
         .unwrap();
         assert_eq!(wb.value(SheetId(0), r("C2")), CellValue::Empty);
         assert_eq!(wb.value(SheetId(0), r("C3")), CellValue::Empty);
+        assert_eq!(wb.sheets[0].array_formula(r("C1")), None);
+        assert_eq!(wb.sheets[0].spill_anchor(r("C2")), None);
+
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(
+            wb.sheets[0].array_formula(r("C1")),
+            Some(CellRange::parse_a1("C1").unwrap())
+        );
+        assert!(wb.sheets[0].is_dynamic_array(r("C1")));
     }
 
     #[test]
