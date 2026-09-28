@@ -39,7 +39,7 @@ describe('font network policy', () => {
 
   test('blocks unpinned versions and query strings', () => {
     const blocked = [
-      'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.3.0/assets/Carlito-Regular.ttf',
+      'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.0/assets/Carlito-Regular.ttf',
       'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.2.1/assets/Carlito-Regular.ttf',
       'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@1.0.0/assets/Carlito-Regular.ttf',
       'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@latest/assets/Carlito-Regular.ttf',
