@@ -241,7 +241,7 @@ documents genuinely proceed in parallel.
 
 ## Status
 
-`0.0.x`, and the API may change before `0.1.0`. Editing covers paragraph text on
+Pre-1.0: the API may change between minor versions. Editing covers paragraph text on
 plain single-run paragraphs; richer edits land on the Rust facade first.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
