@@ -1,10 +1,7 @@
 # Deck schema fixtures
 
-Deck schema 2.1 replaces the never-released 3–21 chain: `migrate_doc` carries a
-released 1.0 or 2.0 snapshot forward in a single transaction. Only snapshots at
-those released versions are kept here; the intermediate `v3`–`v21` seeds and the
-generators that produced them were removed with that chain and remain in git
-history.
+Deck schema 2.2 migrates released 1.0, 2.0 and 2.1 snapshots. These fixtures
+cover those released versions.
 
 `deck-schema-v1.update.bin` was produced by release `4bdccdd` and is documented
 in `../schema_migration.rs`. `deck-schema-v2*.update.bin` and
@@ -61,7 +58,7 @@ The generator asserts that main seeds schema 6 before restamping.
 
 ## Released 2.1 defaults
 
-`deck-schema-v2.1-defaults.pptx` is `../../pptx-render/tests/fixtures/run-caps.pptx`
+`deck-schema-v2.1-defaults.pptx` is `../../../pptx-render/tests/fixtures/run-caps.pptx`
 with its master's `p:clrMap` inverted (`bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2"`), its
 first two runs coloured `tx1`, and seven preset shapes added: a default `star5` and one
 authoring `adj` 45000, a default trapezoid and one authoring 30000, a default `arc`, and a

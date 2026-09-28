@@ -23,8 +23,7 @@ semantics. No GPL/AGPL or proprietary spreadsheet source was consulted.
 
 Every builtin has the signature `fn(&[Expr], &EvalContext) -> CellValue` and
 receives its arguments **unevaluated**, so control-flow functions (`IF`, `IFS`,
-`SWITCH`, `IFERROR`, `IFNA`, `CHOOSE`, `AND`, `OR`) evaluate only the branches
-they take.
+`SWITCH`, `IFERROR`, `IFNA`, `CHOOSE`) evaluate only the branches they take.
 
 Whole-column references (`S:V`, `$S:$V`, `'Data Sheet'!S:V`) retain their anchors
 and full-height dependencies. Lookups read cells on demand; the existing
@@ -85,12 +84,12 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 |---|---|
 | `LEN`, `UPPER`, `LOWER`, `TRIM` | `TRIM` collapses runs of the ASCII space only. |
 | `LEFT`/`RIGHT(text, [n])`, `MID(text, start, count)` | 1-based; positions counted in Unicode scalar values (see below). |
-| `FIND` / `SEARCH` | `FIND` case-sensitive, `SEARCH` case-insensitive; not found → `#VALUE!`. **No wildcards in `SEARCH`.** |
+| `FIND` / `SEARCH` | `FIND` case-sensitive, `SEARCH` case-insensitive; not found → `#VALUE!`. |
 | `SUBSTITUTE(text, old, new, [instance])` | Empty `old` returns the text unchanged. |
 | `REPLACE(old, start, count, new)` | Positional. |
 | `REPT`, `EXACT`, `PROPER`, `CLEAN` | `CLEAN` strips control characters. |
 | `T` | Text passes through, everything else → `""`. |
-| `CHAR(n)` / `CODE(text)` | `CHAR` for code points 1..=255; `CODE` returns the first char's code point (Unicode, not a code page). |
+| `CHAR(n)` / `CODE(text)` | `CHAR` for code points 1..=255; `CODE` returns the first char's code point (Unicode). |
 | `VALUE`, `NUMBERVALUE(text, [dec], [grp])` | `VALUE` handles a trailing `%`. |
 | `TEXT(value, format)` | Formats through the number-format interpreter, dates in the workbook's date system. |
 | `TEXTJOIN(delim, ignore_empty, …)` | `ignore_empty` also skips empty strings; ranges flatten row-major. |
@@ -129,11 +128,11 @@ workbook's date system reaches the evaluator as `EvalContext::date_system`, and
 
 | Name | Notes / deviations |
 |---|---|
-| `VLOOKUP` / `HLOOKUP(value, table, index, [range_lookup])` | `range_lookup` defaults to TRUE (approximate on a sorted first column/row); index out of range → `#REF!`. **No wildcards in exact mode.** |
-| `MATCH(value, area, [type])` | Types 1 (default, ascending), 0 (exact), -1 (descending). **No wildcards in type 0.** |
+| `VLOOKUP` / `HLOOKUP(value, table, index, [range_lookup])` | `range_lookup` defaults to TRUE (approximate on a sorted first column/row); index out of range → `#REF!`. |
+| `MATCH(value, area, [type])` | Types 1 (default, ascending), 0 (exact), -1 (descending). |
 | `INDEX(area, row, [col])` | Single-row/column areas accept one index; out of range → `#REF!`. |
 | `OFFSET(reference, rows, cols, [height], [width])` | Returns a reference, so it feeds the area-taking functions. Sizes default to the reference's own; a negative size extends back from the shifted corner; a zero size or a rectangle off the sheet → `#REF!`. A multi-cell result in scalar context is `#VALUE!` (see below). |
-| `XLOOKUP(value, lookup, return, [if_not_found], …)` | **Exact match only**; match/search modes beyond exact are not yet implemented. |
+| `XLOOKUP(value, lookup, return, [if_not_found], …)` | Scalar: exact, forward. Array evaluation: exact, approximate or wildcard, either direction. |
 | `CHOOSE(index, …)` | Only the chosen argument is evaluated. |
 | `TRANSPOSE(array)` | Swaps rows and columns of an array or range; blanks transpose to `0`. |
 | `ROW` / `COLUMN([ref])` | The reference's top-left position; with no reference, the calling cell's own. |
@@ -168,12 +167,9 @@ numbers; everything else compares as case-insensitive text. For `=`/`<>` the
 text may contain the wildcards `*` (any run) and `?` (any single character),
 with `~` escaping a literal `*`, `?`, or `~`.
 
-## Deviations & boundaries (summary)
+## Evaluation behavior
 
-- **Text positions** are counted in Unicode scalar values; Excel counts UTF-16
-  code units. This differs only for astral (supplementary-plane) characters.
-- **`SEARCH`, and `VLOOKUP` / `HLOOKUP` / `MATCH` in exact mode**, do not
-  implement wildcards yet.
+- **Text positions** count Unicode scalar values.
 - **`RANDBETWEEN`** draws from
   `EvalContext::rand_seed` — pin it before the first draw and the sequence
   replays exactly. Left `None`, each context takes a fresh stream from a
@@ -200,8 +196,7 @@ with `~` escaping a literal `*`, `?`, or `~`.
 - **`OFFSET`'s dependencies** are exact — the resolved rectangle is a graph edge
   — whenever its offsets and sizes are literal numbers over a literal anchor.
   When any of them is computed, the target is unknowable before evaluation, so
-  the calling cell is marked volatile and re-evaluates on every recalc (Excel
-  treats *every* `OFFSET` this way). Volatility guarantees the cell is never
-  skipped.
+  the calling cell is marked volatile and re-evaluates on every recalc.
+  Volatility guarantees the cell is never skipped.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

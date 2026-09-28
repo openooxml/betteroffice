@@ -30,16 +30,15 @@ GOLDEN_UPDATE=1 cargo test -p betteroffice-pptx-raster
 
 ## Fonts
 
-Nothing is embedded. Text is painted from the `PositionedGlyph` runs the layout
-pass already placed, so this crate shapes nothing — it resolves each run's
-`font_id` against the `FontStore` you hand it and fills the outline. Register
-faces on the `SlideRenderer` (or the `Presentation`) before laying the slide out.
+Text is painted from the `PositionedGlyph` runs the layout pass already placed,
+so this crate shapes nothing — it resolves each run's `font_id` against the
+`FontStore` you hand it and fills the outline. Register faces on the
+`SlideRenderer` (or the `Presentation`) before laying the slide out.
 
-## Never in the wasm build
+## Native targets
 
-Decoding pictures needs the `image` crate, so `src/lib.rs` refuses to compile for
-`wasm32`. The browser gets its PNG from `slideToPng` in `@betteroffice/pptx`,
-which drives the canvas replayer and `canvas.toBlob()` instead.
+Build this crate for native targets; browser PNG export uses `slideToPng` in
+`@betteroffice/pptx`.
 
 ## SVG pictures
 
@@ -111,24 +110,8 @@ A refused document is a skipped image like any other and carries nothing from
 the document. A tiled SVG repeats at its intrinsic size, as a raster repeats at
 its pixel size.
 
-## What the display list does not carry
+## What the display list carries
 
-These are gaps upstream of this crate, in the contract `pptx-render` emits, so
-the PNG can only be as faithful as what the canvas backend already draws:
-
-- **Picture crops.** `PictureCrop` (`srcRect`) is parsed but dropped by the
-  layout pass, so a cropped picture paints stretched to its frame.
-- **Tables.** They arrive as dashed `Placeholder` boxes labelled `"Table"`; the
-  parsed cell content is never laid out.
-- **Effects and alpha.** There is no shadow, glow, reflection, soft edge, or
-  opacity in the contract, and colors resolve to `#rrggbb` with no alpha.
-- **Pattern and picture fills.** `Paint` is only `Solid` or `Gradient`.
-- **Dash patterns.** A stroke's dash collapses to one boolean, so the specific
-  OOXML pattern is lost; this crate synthesizes the same dashes the canvas
-  backend does, keeping the two in agreement.
-
-Unlike `docx-raster`, which errors on anything it cannot reproduce faithfully,
-these are absences in the input rather than fields being refused, so this crate
-paints what is there. Only images degrade at render time: one that is missing,
-undecodable, or over budget is skipped and counted in
-`RenderedSlide::skipped_images`.
+The display list carries picture crops and masks, table content, alpha, picture
+fills and outer shadows. `render_slide` returns PNG bytes, dimensions and
+`skipped_images`.

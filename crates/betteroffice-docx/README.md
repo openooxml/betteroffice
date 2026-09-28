@@ -57,8 +57,7 @@ betteroffice-docx = { version = "0.3", features = ["raster"] }
 ```
 
 `render_png` takes a `DisplayList`, which `layout` returns alongside the typed
-layout. `layout_input` is the measured projection the caller supplies; see
-Limits below for why.
+layout. `layout_input` is the measured projection the caller supplies.
 
 ```rust
 use betteroffice_docx::{Document, ImageScope};
@@ -114,33 +113,18 @@ resolves one face per family, DOCX resolves a chain.
 
 Most embedded media arrives on the display list as a `data:` URL that
 `docx-parse` already resolved against its owning part, and needs nothing
-further. Media the parser could not resolve does not: an external (`r:link`)
-or dangling relationship, an image outside `word/media/`, and a picture
-watermark's bare `rId` all reach the backend unresolved.
+further. `register_image` supplies bytes keyed by owning part and relationship
+ID. `render_png` reports unresolved references in `skipped_images`. Missing font
+chains return an error.
 
-An image the backend will not draw is skipped, matching the canvas backend's
-resolver — one missing linked image, or one past a budget, must not blank
-the page around it. `render_png` reports how many references it skipped, so a
-caller that wants a whole page can reject on it. `register_image` supplies the
-bytes where skipping is not what you want. It is keyed by owning part, because
-a header and the body can both use `rId9` for different media.
+## Editing and layout
 
-Images skip and fonts do not, deliberately. An image is one element of a page
-and its absence is a bounded hole a caller can see in `skipped_images` and act
-on. A missing font chain is not bounded: every run in that family disappears,
-and a page of invisible text reports the same success as a page of text. The
-asymmetry is which failures leave a signal a caller can act on.
-
-## Limits
-
-- `replace_paragraph_text` takes single-run paragraphs. Richer editing goes
-  through the re-exported `EditingDoc` and its typed operation vocabulary.
-- Pagination takes an already-measured `LayoutInput` and returns the typed
-  layout plus the body display list. The lower crates do not yet expose
-  DOCX-model lowering and measurement, so callers supply that projection.
-- `render_png` takes a `DisplayList` for that same reason: it is the last
-  artifact on the pipeline the Rust crates can produce end to end. `DisplayList`
-  deserializes, so a binding hands over the JSON its layout pass already emits.
+- `replace_paragraph_text` rewrites a single-run paragraph, or returns
+  `Error::UnsupportedParagraphEdit`; the re-exported `EditingDoc` exposes typed
+  editing operations.
+- Pagination accepts a measured `LayoutInput` and returns layout and a display
+  list. `docx_edit::EngineSession` provides document lowering, measurement and
+  retained layout.
 
 Pre-1.0: the API may change between minor versions.
 

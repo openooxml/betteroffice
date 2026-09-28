@@ -48,15 +48,14 @@ the same engine operations without its JSON argument and result wrappers.
 
 Pre-1.0: the API may change between minor versions.
 
-## Limits
+## Saving
 
 `save` writes Yrs edits back into PresentationML. Parts an edit did not touch
 keep their exact source bytes; edited slides, notes, and comment parts are
 patched at the XML level, so unmodeled markup — transitions, timing, hyperlinks,
 fields, unknown attributes — survives; inserted and removed slides rewrite
-`presentation.xml`, its relationships, and `[Content_Types].xml`. The ZIP
-container is rebuilt, so the output is not byte-identical to the input even
-without edits.
+`presentation.xml`, its relationships, and `[Content_Types].xml`. Saving
+rebuilds the ZIP container.
 
 ## Support matrix
 

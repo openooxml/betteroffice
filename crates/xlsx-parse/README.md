@@ -20,8 +20,7 @@ and mixed references. Expansion is limited to 32 KiB per formula and 32 MiB per
 worksheet; missing or invalid shared groups are rejected. Cached values remain
 unchanged until recalculation.
 
-`serialize_workbook` writes the model back out. It regenerates the parts the
-model represents; package parts the model does not cover are not retained.
+`serialize_workbook` regenerates modeled package parts.
 
 Used by [betteroffice-xlsx](https://crates.io/crates/betteroffice-xlsx).
 

@@ -129,26 +129,17 @@ hold, when a string cache covers cells that are not text, when a cache would
 hold more points than a chart can carry, or when the cache carries content this
 crate does not model, such as an `extLst` or a per-point `formatCode`.
 
-Charts are preserved, never created. A model carrying charts with no source
+Charts retain their source package. A model carrying charts with no source
 package is refused, as is a chart that appeared on or vanished from a sheet
 between open and save, and an anchor change beyond the row and column a save
 writes back.
 
-## Support matrix
+## Capabilities
 
-| Capability | Standalone | Collaborative |
-| --- | --- | --- |
-| Cell content and formatting | Yes | Yes |
-| Column widths and row heights | Yes | Yes |
-| Formula recalculation and cached save values | Yes | Local projection only |
-| Row/column insert and delete | Yes | No |
-| Merge and unmerge | Yes | No |
-| Add, remove, rename, and restore sheets | Yes | No |
-| Chart references and anchors follow structural edits | Yes | Yes |
-| Undo/redo | Yes | Local user origin only |
-| Agent proposals | Yes | Yes; acceptance is not locally undoable |
-| Version-checked edit batches | Yes | Yes |
-| Structured JSON and Markdown export | Yes | Yes |
-| Yrs v1 vectors, diffs, updates, and observers | Encode/observe only | Yes |
+Standalone and collaborative workbooks support cell content, formatting, row
+heights, column widths, edit batches, structured export and proposals.
+Collaborative replicas exchange Yrs updates and track local user edits for undo.
+Standalone workbooks additionally support structural edits and remap chart
+references and anchors.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.
