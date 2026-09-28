@@ -385,6 +385,6 @@ export function createRenderedDomContext(
   pagesContainer: HTMLElement,
   zoom: number = 1,
   options?: RenderedDomContextOptions
-): RenderedDomContext {
+): RenderedDomContext & Required<Pick<RenderedDomContext, 'getPositionAtPoint'>> {
   return new RenderedDomContextImpl(pagesContainer, zoom, options);
 }
