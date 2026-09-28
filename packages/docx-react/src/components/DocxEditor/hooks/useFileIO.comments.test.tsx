@@ -202,6 +202,7 @@ for (const [where, paraId, text] of [
       const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
       const paragraph = xml.match(new RegExp(`<w:p [^>]*${paraId}.*?</w:p>`))![0];
       expect(paragraph).toContain('<w:commentRangeStart w:id="2"/>');
+      expect(paragraph).toContain('<w:commentRangeEnd w:id="2"/>');
       expect(paragraph).toContain('<w:commentReference w:id="2"/>');
       const reopened = await open(bytes, 12);
       const ids = reopened.materializeDocx()!.package.document.comments!.map(({ id }) => id);
