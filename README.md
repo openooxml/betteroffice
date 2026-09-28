@@ -89,7 +89,7 @@ What to install for which language, with a first example each:
 
 ### DOCX
 
-Page agreement is reported on its own because a document either paginates as Word does or it does not; SSIM cannot express that.
+Page agreement is reported separately from SSIM.
 
 <table>
 <tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e8ce123fa9f8e9efc5096811fb98f6f0c17d2e48">e8ce123f</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
