@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
-use yrs::types::{Attrs, Event, PathSegment};
+use yrs::types::{Attrs, EntryChange, Event, PathSegment};
 use yrs::{
     Any, DeepObservable, Map, MapPrelim, MapRef, Out, ReadTxn, Subscription, Text, TextRef,
     Transact, TransactionMut,
@@ -12,7 +12,8 @@ use yrs::{
 
 use crate::{COMMENTS, EditingDoc, STORIES, decode_anchor, map_string, out_len};
 
-/// Records the comments an update changes while it integrates, and which of them it reanchors.
+/// Records the comments an update changes while it integrates, and which of them it reanchors:
+/// a replaced comment or changed anchors, never a comment the update first brings in.
 pub(crate) struct CommentWatch {
     changed: Arc<Mutex<(BTreeSet<String>, BTreeSet<String>)>>,
     _subscription: Option<Subscription>,
@@ -39,10 +40,12 @@ impl CommentWatch {
                             }
                         }
                         _ => {
-                            let ids: Vec<String> =
-                                event.keys(txn).keys().map(|id| id.to_string()).collect();
-                            changed.extend(ids.iter().cloned());
-                            reanchored.extend(ids);
+                            for (id, change) in event.keys(txn).iter() {
+                                changed.insert(id.to_string());
+                                if matches!(change, EntryChange::Updated(..)) {
+                                    reanchored.insert(id.to_string());
+                                }
+                            }
                         }
                     }
                 }

@@ -1584,6 +1584,54 @@ mod tests {
     }
 
     #[test]
+    fn loading_and_metadata_updates_keep_a_lone_reference_away_from_its_range() {
+        let doc = EditingDoc::new(809);
+        doc.create_story("body", "first second", "Normal", "left")
+            .unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::InsertEmbed {
+                    index: 12,
+                    kind: "field".into(),
+                    payload: vec![
+                        ("modelKind".into(), Any::from("commentReference")),
+                        ("commentId".into(), Any::from(1.0)),
+                    ],
+                    attrs: Attrs::new(),
+                },
+                RawOp::SetComment {
+                    id: "1".into(),
+                    ranges: vec![(0, 5)],
+                    author: "Ada".into(),
+                    date: DATE.into(),
+                    body: Any::Null,
+                },
+            ],
+            &local("Ada"),
+        )
+        .unwrap();
+        let peer = EditingDoc::new(810);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(reference_offsets(&peer, "body"), [12]);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let Some(Out::YMap(comment)) = txn
+                .get_map(COMMENTS)
+                .and_then(|comments| comments.get(&txn, "1"))
+            else {
+                panic!("comment");
+            };
+            comment.insert(&mut txn, "done", true);
+        }
+        sync(&doc, &peer);
+        for replica in [&doc, &peer] {
+            assert_eq!(reference_offsets(replica, "body"), [12]);
+        }
+    }
+
+    #[test]
     fn a_winning_start_only_reanchor_drops_the_losing_moves_reference() {
         let start_only = StoryRange::new("body", 2, 5);
         let moved = StoryRange::new(HEADER, 0, 4);
