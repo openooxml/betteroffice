@@ -77,6 +77,14 @@ impl Array {
         copied(&self.values[row * self.cols + col])
     }
 
+    /// the element a broadcast position reads, or `None` past the block,
+    /// where excel pads with `#N/A`.
+    fn broadcast_source(&self, row: usize, col: usize) -> Option<&CellValue> {
+        let row = if self.rows == 1 { 0 } else { row };
+        let col = if self.cols == 1 { 0 } else { col };
+        (row < self.rows && col < self.cols).then(|| &self.values[row * self.cols + col])
+    }
+
     /// value for a broadcast position: a single row repeats down, a single
     /// column repeats across.
     fn broadcast(&self, row: usize, col: usize) -> CellValue {
@@ -3137,24 +3145,42 @@ fn spill_range(anchor: CellRef, value: &Value, authored: Option<CellRange>) -> C
 
 /// fill a legacy array's rectangle as ctrl-shift-enter does: a single row or
 /// column repeats across it, and positions the result does not reach show
-/// `#N/A`.
-pub fn fill_at(range: CellRange, value: Value) -> Spill {
+/// `#N/A`. the budget pays for every cell past the ones the value holds, and
+/// for each cell's text before it is copied; `None` once it refuses.
+pub fn fill_at(ctx: &EvalContext<'_>, range: CellRange, value: Value) -> Option<Spill> {
     let height = (range.end.row - range.start.row + 1) as usize;
     let width = (range.end.col - range.start.col + 1) as usize;
-    if height
+    let Some(count) = height
         .checked_mul(width)
-        .is_none_or(|cells| cells > MAX_SPILL_CELLS)
-    {
-        return spill_at(range.start, None, Value::error(ErrorValue::Num));
-    }
-    let values = match value {
-        Value::Array(array) => (0..height)
-            .flat_map(|row| (0..width).map(move |col| (row, col)))
-            .map(|(row, col)| crate::engine::computed(array.broadcast(row, col)))
-            .collect(),
-        value => vec![crate::engine::computed(value.into_scalar()); height * width],
+        .filter(|cells| *cells <= MAX_SPILL_CELLS)
+    else {
+        return Some(spill_at(range.start, None, Value::error(ErrorValue::Num)));
     };
-    Spill { range, values }
+    let held = match &value {
+        Value::Array(array) => array.values.len(),
+        _ => 1,
+    };
+    if !ctx.consume_cells(count.saturating_sub(held) as u64) {
+        return None;
+    }
+    let mut values = Vec::with_capacity(count);
+    for row in 0..height {
+        for col in 0..width {
+            let source = match &value {
+                Value::Array(array) => array.broadcast_source(row, col),
+                Value::Scalar(value) => Some(value),
+                Value::Lambda(_) => None,
+            };
+            let copy = match source {
+                Some(source) if ctx.keep_text(source) => copied(source),
+                Some(_) => return None,
+                None if matches!(value, Value::Lambda(_)) => err(ErrorValue::Value),
+                None => err(ErrorValue::NA),
+            };
+            values.push(crate::engine::computed(copy));
+        }
+    }
+    Some(Spill { range, values })
 }
 
 /// charge laying `value` out over `range` before any of it is written: every
@@ -3186,12 +3212,6 @@ pub(crate) fn charged_spill(
         .then(|| spill_at(anchor, authored, value))
 }
 
-/// [`fill_at`] once the budget has paid for filling `range`, or `None` when
-/// the budget refuses it.
-pub(crate) fn charged_fill(ctx: &EvalContext<'_>, range: CellRange, value: Value) -> Option<Spill> {
-    charge_layout(ctx, &value, range).then(|| fill_at(range, value))
-}
-
 /// evaluate a formula as an array formula: a dynamic array lays its result out
 /// from `anchor` at the result's size, a legacy one fills the rectangle it was
 /// `entered` in. a layout the budget refuses is only its anchor's `#NUM!`,
@@ -3204,7 +3224,7 @@ pub fn evaluate_spill(
 ) -> Spill {
     let value = evaluate_array(expr, ctx);
     match entered {
-        Some(range) => charged_fill(ctx, range, value),
+        Some(range) => fill_at(ctx, range, value),
         None => charged_spill(ctx, anchor, None, value),
     }
     .unwrap_or_else(|| spill_at(anchor, None, Value::error(ErrorValue::Num)))

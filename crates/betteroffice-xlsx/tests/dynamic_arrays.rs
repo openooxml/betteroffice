@@ -1051,23 +1051,20 @@ fn clearing_an_opaque_anchor_clears_its_cells_through_history() {
     same_replicas(&[&writer, &follower, &late]);
 }
 
-/// an opaque array whose file cached no result shows what the engine makes
-/// of it over its recorded rectangle, `#NAME?` for the function it lacks or
-/// a branch it can compute, as Excel does, and holds it as stored cells that
-/// no input changes: an edit among them undoes like any other, on every
-/// replica, through a save.
+/// an opaque array whose file cached no result shows `#NAME?` over its
+/// recorded rectangle, as Excel shows an array it cannot evaluate, without
+/// evaluating anything: a branch the engine could compute, a random number or
+/// the clock read the same on every open, so replicas opened from the same
+/// bytes agree. those cells are stored, so an edit among them undoes like any
+/// other, on every replica, through a save.
 #[test]
-fn an_uncached_opaque_array_is_stored_as_the_engine_first_shows_it() {
+fn an_uncached_opaque_array_is_stored_as_name_errors() {
     let name = error(ErrorValue::Name);
-    for (formula, shown) in [
-        (
-            r#"WEBSERVICE("https://example.com")"#,
-            [name.clone(), name.clone(), name.clone()],
-        ),
-        (
-            r#"IF(A1,WEBSERVICE("https://example.com"),_xlfn.SEQUENCE(3,1,7))"#,
-            [number(7.0), number(8.0), number(9.0)],
-        ),
+    let shown = [name.clone(), name.clone(), name.clone()];
+    for formula in [
+        r#"WEBSERVICE("https://example.com")"#,
+        r#"IF(A1,WEBSERVICE("https://example.com"),_xlfn.SEQUENCE(3,1,7))"#,
+        r#"IF(A1,WEBSERVICE("https://example.com"),RAND()+NOW())"#,
     ] {
         let rows = format!(
             r#"<row r="1"><c r="A1" t="b"><v>0</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">{}</f></c></row><row r="2"><c r="C2"><f/></c></row><row r="3"><c r="C3"><f/></c></row>"#,
@@ -1099,6 +1096,49 @@ fn an_uncached_opaque_array_is_stored_as_the_engine_first_shows_it() {
             assert_eq!(column(&reopened, &["C1", "C2", "C3"]), shown, "{formula}");
         }
     }
+}
+
+/// a `LET` binding that shadows a workbook name the engine cannot evaluate
+/// makes the array evaluable, so it follows its inputs.
+#[test]
+fn a_let_binding_shadows_a_workbook_name() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: number(2.0),
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("C1"),
+        Cell {
+            formula: Some("_xlfn.LET(Remote,A1,Remote*_xlfn.SEQUENCE(3))".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_dynamic_array_formula(cell("C1"), CellRange::parse_a1("C1").unwrap());
+    model.sheets.push(sheet);
+    model.defined_names.push(betteroffice_xlsx::DefinedName {
+        name: "Remote".into(),
+        formula: r#"WEBSERVICE("https://example.com")"#.into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook.recalculate_all(options());
+    assert!(
+        !workbook.model().sheets[0]
+            .array_definition(cell("C1"))
+            .unwrap()
+            .is_opaque()
+    );
+    edit(&mut workbook, "A1", "3");
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3"]),
+        [number(3.0), number(6.0), number(9.0)]
+    );
 }
 
 /// deleting a row or column inside an opaque array shrinks its rectangle

@@ -423,7 +423,11 @@ fn a_dynamic_single_value_retires_the_rest_of_its_rectangle() {
 /// rather than allocating a cell for every position.
 #[test]
 fn an_oversized_legacy_rectangle_is_refused_before_allocation() {
-    let spill = xlsx_calc::array::fill_at(range("A1:XFD1048576"), Value::Scalar(n(1.0)));
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(Sheet::new("Sheet1"));
+    let ctx = xlsx_calc::EvalContext::new(&workbook, SheetId(0));
+    let spill =
+        xlsx_calc::array::fill_at(&ctx, range("A1:XFD1048576"), Value::Scalar(n(1.0))).unwrap();
     assert_eq!(spill.range, range("A1"));
     assert_eq!(
         spill.values,

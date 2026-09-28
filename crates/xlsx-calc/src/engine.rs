@@ -877,6 +877,34 @@ mod tests {
         );
     }
 
+    /// a legacy rectangle a short, wide text result is broadcast down pays
+    /// for the text of every copy it makes, so a row of long strings repeated
+    /// down 262,144 rows is refused after a few megabytes rather than copied.
+    #[test]
+    fn a_broadcast_legacy_fill_pays_for_each_copy() {
+        let (mut wb, s) = one_sheet();
+        wb.sheet_mut(s).unwrap().set_cell(
+            a1("C1"),
+            Cell {
+                formula: Some(r#"_xlfn.HSTACK(REPT("x",32767),_xlfn.SEQUENCE(1,999))"#.into()),
+                ..Cell::default()
+            },
+        );
+        wb.sheet_mut(s).unwrap().set_array_formula(
+            a1("C1"),
+            xlsx_model::CellRange::parse_a1("C1:C262144").unwrap(),
+        );
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.limited_cells.contains(&(s, a1("C1"))));
+        assert_eq!(
+            value(&wb, s, "C1"),
+            CellValue::Error {
+                value: xlsx_model::ErrorValue::Num
+            }
+        );
+        assert_eq!(value(&wb, s, "C2"), CellValue::Empty);
+    }
+
     /// an array formula the budget refuses keeps its rectangle and what it
     /// holds, its anchor showing `#NUM!`, and fills in full once it fits.
     #[test]

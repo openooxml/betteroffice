@@ -4,15 +4,15 @@
 use std::collections::HashMap;
 
 use xlsx_model::{
-    ArrayDefinition, ArrayKind, Cell, CellProvider, CellRange, CellRef, CellValue, SheetId,
-    Workbook,
+    ArraySize, Cell, CellProvider, CellRange, CellRef, CellValue, ErrorValue, MAX_SPILL_CELLS,
+    SheetId, Workbook,
 };
 
 use crate::parser::{Expr, parse_formula};
 
-/// defined-name expansions one [`Capability`] performs before it answers no
-/// for whatever still needs more.
-const MAX_EXPANSIONS: usize = 1 << 22;
+/// name references one [`Capability`] visits before it answers no for
+/// whatever still needs more.
+const MAX_VISITS: usize = 1 << 22;
 
 /// whether the engine implements everything `formula`, on `sheet`, could
 /// run: it parses, and every function it calls, in every branch and in every
@@ -25,10 +25,8 @@ pub fn evaluable(wb: &Workbook, sheet: SheetId, formula: &str) -> bool {
 /// Decides, once, which of a workbook's arrays the engine can evaluate. Each
 /// such array takes the cells its file cached beside its anchor for its
 /// result; every other array is opaque and keeps them as stored cells. An
-/// opaque array whose anchor holds no cached value is evaluated once over its
-/// recorded rectangle, and what that shows is stored there too, so the
-/// workbook reads as Excel shows it without the engine ever owning those
-/// cells.
+/// opaque array whose anchor holds no cached value shows `#NAME?` over its
+/// recorded rectangle, stored the same way.
 pub fn classify_arrays(wb: &mut Workbook) {
     let mut capability = Capability::new(wb);
     let mut decisions = Vec::new();
@@ -55,69 +53,55 @@ pub fn classify_arrays(wb: &mut Workbook) {
     fill_uncached(wb);
 }
 
-/// what the engine shows for each opaque array whose anchor holds no cached
-/// value, evaluated over its recorded rectangle as a legacy array would be,
-/// written into those cells as stored values.
+/// Shows each opaque array whose anchor holds no cached value as Excel shows
+/// an array it cannot evaluate, `#NAME?` over its recorded rectangle, in
+/// stored cells. Nothing is evaluated, so identical bytes always read the
+/// same. At most [`MAX_SPILL_CELLS`] cells are filled per workbook; anchors
+/// past that show it in the anchor alone.
 fn fill_uncached(wb: &mut Workbook) {
-    let uncached: Vec<(usize, CellRef, ArrayDefinition)> = wb
-        .sheets
-        .iter()
-        .enumerate()
-        .flat_map(|(index, sheet)| {
-            sheet
-                .array_definitions()
-                .filter(|(anchor, definition, _)| {
-                    definition.is_opaque()
-                        && sheet.cell(*anchor).is_some_and(|cell| {
-                            cell.formula.is_some() && matches!(cell.value, CellValue::Empty)
-                        })
-                })
-                .map(move |(anchor, definition, _)| (index, anchor, definition))
-        })
-        .collect();
-    if uncached.is_empty() {
-        return;
-    }
-    let mut evaluated = wb.clone();
-    for &(index, anchor, definition) in &uncached {
-        let Some(size) = definition.opaque else {
-            continue;
-        };
-        let entered = ArrayDefinition {
-            kind: ArrayKind::Legacy {
-                rows: size.rows,
-                cols: size.cols,
-            },
-            opaque: None,
-            ..definition
-        };
-        evaluated.sheets[index].set_array_definition(anchor, Some(entered));
-    }
-    crate::rebuild_and_recalc_all(&mut evaluated, None);
-    for (index, anchor, definition) in uncached {
-        let rectangle: CellRange = definition.entered(anchor);
-        let values: Vec<(CellRef, CellValue)> = evaluated.sheets[index]
-            .cells_in_range(rectangle)
-            .map(|(at, cell)| (at, cell.value.clone()))
+    let name = CellValue::Error {
+        value: ErrorValue::Name,
+    };
+    let mut room = MAX_SPILL_CELLS;
+    for sheet in &mut wb.sheets {
+        let uncached: Vec<(CellRef, CellRange)> = sheet
+            .array_definitions()
+            .filter(|(anchor, definition, _)| {
+                definition.is_opaque()
+                    && sheet.cell(*anchor).is_some_and(|cell| {
+                        cell.formula.is_some() && matches!(cell.value, CellValue::Empty)
+                    })
+            })
+            .map(|(anchor, definition, _)| (anchor, definition.entered(anchor)))
             .collect();
-        let sheet = &mut wb.sheets[index];
-        for (at, value) in values {
-            let stored = sheet.cell(at).cloned().unwrap_or_default();
-            let anchored = (at.row, at.col) == (anchor.row, anchor.col);
-            let free = matches!(stored.value, CellValue::Empty)
-                && stored
-                    .formula
-                    .as_deref()
-                    .is_none_or(|formula| formula.trim().is_empty());
-            if anchored || free {
-                sheet.set_cell(
-                    at,
-                    Cell {
-                        value,
-                        formula: stored.formula,
-                        style: stored.style,
-                    },
-                );
+        for (anchor, rectangle) in uncached {
+            let size = ArraySize::of(rectangle);
+            let cells = size.rows as usize * size.cols as usize;
+            let rectangle = if cells <= room {
+                room -= cells;
+                rectangle
+            } else {
+                CellRange::new(anchor, anchor)
+            };
+            for row in rectangle.start.row..=rectangle.end.row {
+                for col in rectangle.start.col..=rectangle.end.col {
+                    let at = CellRef::new(row, col);
+                    let stored = sheet.cell(at).cloned().unwrap_or_default();
+                    let free = matches!(stored.value, CellValue::Empty)
+                        && stored
+                            .formula
+                            .as_deref()
+                            .is_none_or(|formula| formula.trim().is_empty());
+                    if (row, col) == (anchor.row, anchor.col) || free {
+                        sheet.set_cell(
+                            at,
+                            Cell {
+                                value: name.clone(),
+                                ..stored
+                            },
+                        );
+                    }
+                }
             }
         }
     }
@@ -130,7 +114,7 @@ pub struct Capability<'a> {
     names: HashMap<(Option<SheetId>, String), usize>,
     parsed: HashMap<usize, Option<Parsed>>,
     decided: HashMap<Name, bool>,
-    expansions: usize,
+    visits: usize,
 }
 
 /// a defined name, by its index, with the sheet its unqualified references
@@ -144,11 +128,12 @@ struct Parsed {
 }
 
 /// one defined name being expanded: the names its formula reads, how far
-/// through them the walk is, and the earliest name still being expanded that
-/// it reaches back to.
+/// through them the walk is, where it sits among the names not yet settled,
+/// and the earliest name still being expanded that it reaches back to.
 struct Frame {
     name: Name,
     order: usize,
+    start: usize,
     names: Vec<(Option<String>, String)>,
     next: usize,
     low: usize,
@@ -167,7 +152,7 @@ impl<'a> Capability<'a> {
             names,
             parsed: HashMap::new(),
             decided: HashMap::new(),
-            expansions: 0,
+            visits: 0,
         }
     }
 
@@ -219,6 +204,7 @@ impl<'a> Capability<'a> {
         let mut root = Frame {
             name: (usize::MAX, sheet),
             order: usize::MAX,
+            start: 0,
             names,
             next: 0,
             low: usize::MAX,
@@ -229,6 +215,10 @@ impl<'a> Capability<'a> {
             if frame.next < frame.names.len() {
                 let (scope, name) = &frame.names[frame.next];
                 frame.next += 1;
+                self.visits += 1;
+                if self.visits > MAX_VISITS {
+                    return false;
+                }
                 let from = frame.name.1;
                 let Some(name) = self.resolve(from, scope, name) else {
                     continue;
@@ -243,10 +233,6 @@ impl<'a> Capability<'a> {
                     frame.low = frame.low.min(seen);
                     continue;
                 }
-                self.expansions += 1;
-                if self.expansions > MAX_EXPANSIONS {
-                    return false;
-                }
                 let Some(parsed) = self.parsed(name.0) else {
                     self.decided.insert(name, false);
                     return self.refuse(&stack);
@@ -258,10 +244,12 @@ impl<'a> Capability<'a> {
                 let names = parsed.names.clone();
                 let at = order.len();
                 order.insert(name, at);
+                let start = pending.len();
                 pending.push(name);
                 stack.push(Frame {
                     name,
                     order: at,
+                    start,
                     names,
                     next: 0,
                     low: at,
@@ -272,11 +260,7 @@ impl<'a> Capability<'a> {
                 break;
             };
             if done.low >= done.order {
-                let start = pending
-                    .iter()
-                    .position(|name| *name == done.name)
-                    .expect("an expanded name is pending");
-                for name in pending.drain(start..) {
+                for name in pending.drain(done.start..) {
                     self.decided.insert(name, true);
                 }
             } else {
@@ -300,30 +284,74 @@ impl<'a> Capability<'a> {
 }
 
 /// whether `expr` calls only functions the engine evaluates, and the names
-/// it reads.
+/// it reads that no `LET` or `LAMBDA` around them binds.
 fn gather(expr: &Expr) -> Parsed {
     let mut parsed = Parsed {
         supported: true,
         names: Vec::new(),
     };
-    let mut pending = vec![expr];
-    while let Some(expr) = pending.pop() {
+    let mut bindings: Vec<(Option<usize>, &str)> = Vec::new();
+    let mut pending = vec![(expr, None)];
+    while let Some((expr, scope)) = pending.pop() {
         match expr {
             Expr::FuncCall { func, name, args } => {
                 if func.is_none() && !crate::array::is_array_builtin(name) {
                     parsed.supported = false;
                 }
-                pending.extend(args);
+                let binder = crate::functions::bare_name(name).to_ascii_uppercase();
+                let binds = match binder.as_str() {
+                    "LET" => args.len() >= 3 && args.len() % 2 == 1,
+                    "LAMBDA" => !args.is_empty(),
+                    _ => false,
+                };
+                let Some((body, heads)) = args.split_last().filter(|_| binds) else {
+                    pending.extend(args.iter().map(|arg| (arg, scope)));
+                    continue;
+                };
+                let mut inner = scope;
+                let step = if binder == "LET" { 2 } else { 1 };
+                for head in heads.chunks(step) {
+                    if let Some(value) = head.get(1) {
+                        pending.push((value, inner));
+                    }
+                    match &head[0] {
+                        Expr::Name { scope: None, name } => {
+                            bindings.push((inner, name));
+                            inner = Some(bindings.len() - 1);
+                        }
+                        other => pending.push((other, inner)),
+                    }
+                }
+                pending.push((body, inner));
             }
+            Expr::Name { scope: None, name } if bound(&bindings, scope, name) => {}
             Expr::Name { scope, name } => parsed.names.push((scope.clone(), name.clone())),
-            Expr::ArrayLiteral { values, .. } => pending.extend(values),
-            Expr::Unary { expr, .. } | Expr::Percent(expr) => pending.push(expr),
-            Expr::Binary { lhs, rhs, .. } => pending.extend([lhs.as_ref(), rhs.as_ref()]),
-            Expr::RangeJoin { start, end } => pending.extend([start.as_ref(), end.as_ref()]),
+            Expr::ArrayLiteral { values, .. } => {
+                pending.extend(values.iter().map(|value| (value, scope)))
+            }
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => pending.push((expr, scope)),
+            Expr::Binary { lhs, rhs, .. } => {
+                pending.extend([(lhs.as_ref(), scope), (rhs.as_ref(), scope)])
+            }
+            Expr::RangeJoin { start, end } => {
+                pending.extend([(start.as_ref(), scope), (end.as_ref(), scope)])
+            }
             _ => {}
         }
     }
     parsed
+}
+
+/// whether a `LET` or `LAMBDA` enclosing `scope` binds `name`.
+fn bound(bindings: &[(Option<usize>, &str)], mut scope: Option<usize>, name: &str) -> bool {
+    while let Some(at) = scope {
+        let (parent, bound) = bindings[at];
+        if bound.eq_ignore_ascii_case(name) {
+            return true;
+        }
+        scope = parent;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -370,6 +398,11 @@ mod tests {
             ("Loop", true),
             ("Back", false),
             ("LET(x,2,x*_xlfn.SEQUENCE(2))", true),
+            ("LET(Remote,A1,Remote*_xlfn.SEQUENCE(3))", true),
+            ("LET(x,Remote,x)", false),
+            ("LET(Remote,Remote,Remote)", false),
+            ("_xlfn.MAP(A1:A2,_xlfn.LAMBDA(Remote,Remote+1))", true),
+            ("_xlfn.MAP(A1:A2,_xlfn.LAMBDA(x,Remote+x))", false),
             ("SUM(", false),
         ] {
             assert_eq!(evaluable(&wb, SheetId(0), formula), expected, "{formula}");
@@ -402,37 +435,44 @@ mod tests {
                     questions[index]
                 );
             }
-            let expansions = capability.expansions;
+            let visits = capability.visits;
             for (question, answer) in questions.iter().zip(answers) {
                 assert_eq!(capability.evaluable(SheetId(0), question), answer);
             }
-            assert_eq!(capability.expansions, expansions);
+            assert!(capability.visits - visits <= 6);
         }
     }
 
     /// a chain of names as long as a workbook may hold is walked without
-    /// recursion, once.
+    /// recursion, in time linear in its length, whether it ends in a function
+    /// the engine has or one it lacks, and once only.
     #[test]
     fn a_long_chain_of_names_is_walked_once() {
         const LENGTH: usize = 60_000;
-        let names: Vec<(String, String)> = (0..LENGTH)
-            .map(|index| {
-                let formula = if index + 1 == LENGTH {
-                    "WEBSERVICE(\"x\")".to_owned()
-                } else {
-                    format!("step_{}+1", index + 1)
-                };
-                (format!("step_{index}"), formula)
-            })
-            .collect();
-        let names: Vec<(&str, &str)> = names
-            .iter()
-            .map(|(name, formula)| (name.as_str(), formula.as_str()))
-            .collect();
-        let wb = workbook(&names);
-        let mut capability = Capability::new(&wb);
-        assert!(!capability.evaluable(SheetId(0), "step_0"));
-        assert!(!capability.evaluable(SheetId(0), "step_30000"));
-        assert_eq!(capability.expansions, LENGTH);
+        for last in ["1", "WEBSERVICE(\"x\")"] {
+            let names: Vec<(String, String)> = (0..LENGTH)
+                .map(|index| {
+                    let formula = if index + 1 == LENGTH {
+                        last.to_owned()
+                    } else {
+                        format!("step_{}+1", index + 1)
+                    };
+                    (format!("step_{index}"), formula)
+                })
+                .collect();
+            let names: Vec<(&str, &str)> = names
+                .iter()
+                .map(|(name, formula)| (name.as_str(), formula.as_str()))
+                .collect();
+            let wb = workbook(&names);
+            let mut capability = Capability::new(&wb);
+            let start = std::time::Instant::now();
+            let supported = last == "1";
+            assert_eq!(capability.evaluable(SheetId(0), "step_0"), supported);
+            assert_eq!(capability.evaluable(SheetId(0), "step_30000"), supported);
+            let elapsed = start.elapsed();
+            assert_eq!(capability.visits, LENGTH + 1, "{last}");
+            assert!(elapsed.as_secs_f64() < 5.0, "{last}: {elapsed:?}");
+        }
     }
 }

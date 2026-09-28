@@ -656,13 +656,6 @@ fn delete_rows(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
-    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
-    let restores = remap_formulas(wb, op)?;
-    let defined_name_restore = remap_defined_names(wb, op)?;
-    let chart_restores = remap_charts(wb, op)?;
-    let hyperlink_restores = remap_hyperlink_locations(wb, op);
-    let s = sheet_mut(wb, sheet)?;
-    let old_hyperlinks = s.hyperlinks.clone();
     let span = CellRange::new(
         CellRef::new(at, 0),
         CellRef::new(
@@ -670,7 +663,17 @@ fn delete_rows(
             MAX_COLS - 1,
         ),
     );
-    let cut = cut_opaque_arrays(s, span, true);
+    let cut = cut_opaque_arrays(
+        wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?,
+        span,
+        true,
+    );
+    let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op)?;
+    let chart_restores = remap_charts(wb, op)?;
+    let hyperlink_restores = remap_hyperlink_locations(wb, op);
+    let s = sheet_mut(wb, sheet)?;
+    let old_hyperlinks = s.hyperlinks.clone();
     let deleted = shift_cells(s, op);
     let resized = shrink_opaque_arrays(s, sheet, cut);
     let dropped_heights = shift_row_heights_down(s, at, count);
@@ -760,14 +763,6 @@ fn delete_cols(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
-    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
-    let restores = remap_formulas(wb, op)?;
-    let defined_name_restore = remap_defined_names(wb, op)?;
-    let chart_restores = remap_charts(wb, op)?;
-    let hyperlink_restores = remap_hyperlink_locations(wb, op);
-    let s = sheet_mut(wb, sheet)?;
-    let old_hyperlinks = s.hyperlinks.clone();
-    let old_col_styles = s.col_styles.clone();
     let span = CellRange::new(
         CellRef::new(0, at),
         CellRef::new(
@@ -775,7 +770,18 @@ fn delete_cols(
             at.saturating_add(count.saturating_sub(1)).min(MAX_COLS - 1),
         ),
     );
-    let cut = cut_opaque_arrays(s, span, false);
+    let cut = cut_opaque_arrays(
+        wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?,
+        span,
+        false,
+    );
+    let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op)?;
+    let chart_restores = remap_charts(wb, op)?;
+    let hyperlink_restores = remap_hyperlink_locations(wb, op);
+    let s = sheet_mut(wb, sheet)?;
+    let old_hyperlinks = s.hyperlinks.clone();
+    let old_col_styles = s.col_styles.clone();
     let deleted = shift_cells(s, op);
     let resized = shrink_opaque_arrays(s, sheet, cut);
     let dropped_widths = shift_col_widths_down(s, at, count);
@@ -1479,7 +1485,8 @@ mod tests {
 
     /// deleting rows or columns inside an opaque array shrinks the rectangle
     /// its definition records, so ending the array afterwards clears only
-    /// what the rectangle still holds; undo gives the rectangle back.
+    /// what the rectangle still holds; undo gives the rectangle back with the
+    /// formula as it was before the deletion rewrote it.
     #[test]
     fn a_deletion_inside_an_opaque_array_shrinks_what_it_records() {
         for op in [
@@ -1512,6 +1519,14 @@ mod tests {
                     }),
                 );
             }
+            let referenced = if rows {
+                "WEBSERVICE(A3)"
+            } else {
+                "WEBSERVICE(F2)"
+            };
+            if let Some(anchor) = wb.sheets[0].cell_mut(r("C1")) {
+                anchor.formula = Some(referenced.into());
+            }
             let keep = if rows { r("C4") } else { r("F1") };
             wb.sheets[0].set_cell(
                 keep,
@@ -1534,6 +1549,15 @@ mod tests {
             let moved = if rows { r("C3") } else { r("E1") };
             let clears = opaque_follower_clears(sheet, r("C1"), &CellState::default());
             assert!(clears.iter().all(|(at, _)| *at != moved), "{op:?}");
+            let shifted = if rows {
+                "WEBSERVICE(A2)"
+            } else {
+                "WEBSERVICE(E2)"
+            };
+            assert_eq!(
+                sheet.cell(r("C1")).and_then(|cell| cell.formula.as_deref()),
+                Some(shifted)
+            );
             apply_ops(&mut wb, &inverse.0).unwrap();
             assert_eq!(wb, before, "{op:?}");
         }
