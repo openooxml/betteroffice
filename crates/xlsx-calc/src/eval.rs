@@ -1594,20 +1594,9 @@ mod tests {
     fn superlinear_array_work_is_charged() {
         let ones = vec!["1"; 2000].join(",");
         let lifted = vec!["FALSE,0"; 1000].join(",");
-        // SUMPRODUCT pairs operands of one shape, so it never broadcasts
         for formula in [
             "SUMPRODUCT(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(1,2000))".to_string(),
             format!("SUMPRODUCT(_xlfn.SEQUENCE(1000000),{ones})"),
-        ] {
-            for formula in [formula.clone(), format!("_xlfn.LET(_xlpm.s,0,{formula})")] {
-                assert_eq!(
-                    lambda_calls(&formula).0,
-                    err(ErrorValue::Value),
-                    "{formula}"
-                );
-            }
-        }
-        for formula in [
             "SUM(MATCH(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000,1,-1),0))".to_string(),
             "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000,1,-1)))".to_string(),
             "SUM(MMULT(_xlfn.SEQUENCE(200,500),_xlfn.SEQUENCE(500,200)))".to_string(),
@@ -1636,17 +1625,6 @@ mod tests {
                 format!("_xlfn.LET(_xlpm.s,0,{formula})"),
             ] {
                 assert_eq!(lambda_calls(&formula).0, num(2000.0), "{formula}");
-            }
-        }
-        for formula in [
-            "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(1000,1,1,0),_xlfn.SEQUENCE(100000),0))",
-            "SUM(MATCH(_xlfn.SEQUENCE(1000,1,1,0),_xlfn.SEQUENCE(100000),0))",
-        ] {
-            for formula in [
-                formula.to_string(),
-                format!("_xlfn.LET(_xlpm.s,0,{formula})"),
-            ] {
-                assert_eq!(lambda_calls(&formula).0, num(1000.0), "{formula}");
             }
         }
     }
@@ -1702,7 +1680,7 @@ mod tests {
         );
     }
 
-    /// the default limits stop the reviewer's 16 GB `REPT` block after a few
+    /// the default limits stop a 16 GB `REPT` block after a few
     /// megabytes, and a spill charges the copies it lays out.
     #[test]
     fn a_text_bomb_stops_at_the_default_limits() {
@@ -1764,33 +1742,120 @@ mod tests {
         }
     }
 
-    /// `SORT`, `SORTBY` and `UNIQUE` pay for their output and, the sorts, for
-    /// their comparisons before any of that work is done.
-    #[test]
-    fn sorting_is_charged_before_it_runs() {
+    /// the value, the stepped work and the cells spent evaluating `formula`
+    /// on a budget of `cells`.
+    fn stepped(formula: &str, cells: u64) -> (CellValue, u64, u64) {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
-        let spent = |formula: &str| {
-            let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
-            let context = EvalContext::with_budget(&workbook, SheetId(0), Rc::clone(&budget));
-            evaluate(&parse_formula(formula).unwrap(), &context);
-            MAX_RECALCULATION_CELL_VISITS - budget.remaining.get()
-        };
-        let reading = spent("ROWS(_xlfn.SEQUENCE(4096,1,4096,-1))");
-        let comparisons = 4096 * 13 / 16;
+        crate::array::STEPS.with(|steps| steps.set(0));
+        let budget = Rc::new(EvaluationBudget::new(cells));
+        let context = EvalContext::with_budget(&workbook, SheetId(0), Rc::clone(&budget));
+        let value = evaluate(&parse_formula(formula).unwrap(), &context);
+        let steps = crate::array::STEPS.with(|steps| steps.get());
+        (value, steps, cells - budget.remaining.get())
+    }
+
+    /// a charge the budget refuses stops its work before any of it runs: a
+    /// lifted call, a broadcast product, and a sort's output or comparisons.
+    #[test]
+    fn refused_work_never_starts() {
+        let lifted = vec!["FALSE,0"; 1000].join(",");
         for formula in [
-            "ROWS(_xlfn._xlws.SORT(_xlfn.SEQUENCE(4096,1,4096,-1)))",
-            "ROWS(_xlfn.SORTBY(_xlfn.SEQUENCE(4096,1,4096,-1),_xlfn.SEQUENCE(4096)))",
+            format!("SUM(_xlfn.IFS(_xlfn.SEQUENCE(1000)<0,0,{lifted},TRUE,1))"),
+            "SUMPRODUCT(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(1,2000))".to_string(),
         ] {
-            assert!(spent(formula) >= 2 * reading + comparisons, "{formula}");
+            let (value, steps, _) = stepped(&formula, MAX_RECALCULATION_CELL_VISITS);
+            assert_eq!((value, steps), (err(ErrorValue::Num), 0), "{formula}");
         }
-        let context =
-            EvalContext::with_budget(&workbook, SheetId(0), Rc::new(EvaluationBudget::new(6000)));
-        let formula = "ROWS(_xlfn._xlws.SORT(_xlfn.SEQUENCE(4096,1,4096,-1)))";
-        assert_eq!(
-            evaluate(&parse_formula(formula).unwrap(), &context),
-            err(ErrorValue::Num)
+        let (_, _, reading) = stepped(
+            "ROWS(_xlfn.SEQUENCE(4096,1,4096,-1))",
+            MAX_RECALCULATION_CELL_VISITS,
         );
+        let comparisons = 4096 * 13 / 16;
+        for (formula, keys) in [
+            ("ROWS(_xlfn._xlws.SORT(_xlfn.SEQUENCE(4096,1,4096,-1)))", 0),
+            (
+                "ROWS(_xlfn.SORTBY(_xlfn.SEQUENCE(4096,1,4096,-1),_xlfn.SEQUENCE(4096)))",
+                4096,
+            ),
+        ] {
+            let output = reading + keys + 4096;
+            let (value, steps, spent) = stepped(formula, MAX_RECALCULATION_CELL_VISITS);
+            assert_eq!(
+                (value, spent),
+                (num(4096.0), output + comparisons),
+                "{formula}"
+            );
+            assert!(steps > 0, "{formula}");
+            for cells in [output - 1, output + comparisons - 1] {
+                let (value, steps, _) = stepped(formula, cells);
+                assert_eq!(
+                    (value, steps),
+                    (err(ErrorValue::Num), 0),
+                    "{formula} on {cells}"
+                );
+            }
+        }
+    }
+
+    /// a lookup pays for the values each key's search visits as it visits
+    /// them: keys found at once cost one visit each, from either end, and a
+    /// block of misses stops once its visits outrun the formula's budget.
+    #[test]
+    fn lookups_visit_only_what_they_pay_for() {
+        for (formula, total) in [
+            (
+                "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(100000,1,1,0),_xlfn.SEQUENCE(500000)))",
+                100_000.0,
+            ),
+            (
+                "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(100000,1,500000,0),_xlfn.SEQUENCE(500000),0,-1))",
+                5e10,
+            ),
+            (
+                "SUM(MATCH(_xlfn.SEQUENCE(100000,1,1,0),_xlfn.SEQUENCE(500000),0))",
+                100_000.0,
+            ),
+            (
+                "SUM(_xlfn.XLOOKUP(_xlfn.SEQUENCE(100000,1,1,0),_xlfn.SEQUENCE(300000),_xlfn.SEQUENCE(300000)))",
+                100_000.0,
+            ),
+        ] {
+            let (value, steps, _) = stepped(formula, MAX_RECALCULATION_CELL_VISITS);
+            assert_eq!((value, steps), (num(total), 100_000), "{formula}");
+        }
+        let (value, steps, _) = stepped(
+            "SUM(MATCH(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000,1,-1),0))",
+            MAX_RECALCULATION_CELL_VISITS,
+        );
+        assert_eq!(value, err(ErrorValue::Num));
+        assert!(steps <= MAX_EVALUATION_CELL_VISITS + 2000, "{steps}");
+    }
+
+    /// numeric spills share the recalculation's budget however many anchors
+    /// a workbook holds, and a spill the budget refuses writes only its anchor.
+    #[test]
+    fn numeric_spills_share_the_recalculation_budget() {
+        let workbook = Workbook::default();
+        let budget = Rc::new(EvaluationBudget::new(1_000_000));
+        let formula = parse_formula("1").unwrap();
+        let mut written = Vec::new();
+        for col in 0..10 {
+            let range =
+                xlsx_model::CellRange::new(CellRef::new(0, col), CellRef::new(262_143, col));
+            let context = EvalContext::with_budget(&workbook, SheetId(0), Rc::clone(&budget));
+            let spill = crate::array::evaluate_spill(&formula, &context, range.start, Some(range));
+            if spill.values == [err(ErrorValue::Num)] {
+                assert_eq!(
+                    spill.range,
+                    xlsx_model::CellRange::new(range.start, range.start)
+                );
+            } else {
+                assert!(spill.values.iter().all(|value| *value == num(1.0)));
+                written.push(spill.values.len());
+            }
+        }
+        assert_eq!(written, [262_144; 3]);
     }
 
     /// an array builtin that falls back to its scalar form evaluates its
@@ -1834,7 +1899,7 @@ mod tests {
             ),
             ("B6", "_xlfn.XLOOKUP(99999,A:A,A:A)"),
             ("B7", "SUMPRODUCT(--(A1:A100000>99990))"),
-            ("B8", "_xlfn.LET(_xlpm.s,0,SUMPRODUCT(A:A,Other!A:A))"),
+            ("B8", "SUMPRODUCT(A:A,Other!A:A)"),
             ("B9", "MATCH(100001,A1:A100000,0)"),
             ("B10", "_xlfn.XLOOKUP(100001,A:A,A:A,\"none\")"),
             ("B11", "VLOOKUP(100001,A:A,1,FALSE)"),

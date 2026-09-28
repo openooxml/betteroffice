@@ -618,7 +618,7 @@ pub(crate) fn argument_cells(
     }
     let cells = crate::array::evaluate_array(arg, ctx)
         .into_array()
-        .spelled_out(ctx)?;
+        .into_values();
     let from_sheet = cells.len() > 1;
     Ok((cells, from_sheet))
 }
@@ -634,11 +634,7 @@ pub(crate) fn collect_numbers_deep(
         let (cells, from_sheet) = argument_cells(arg, ctx)?;
         for value in cells {
             if from_sheet {
-                match value {
-                    CellValue::Number { value } => nums.push(value),
-                    CellValue::Error { value } => return Err(value),
-                    _ => {}
-                }
+                push_reference_number(&mut nums, &value)?;
                 continue;
             }
             match value {
@@ -683,85 +679,26 @@ pub(crate) fn collect_numbers_anytype(
     Ok(nums)
 }
 
-/// the numbers an aggregate reads: each one it saw, and for the cells past a
-/// cut whole reference one number standing for all of them.
-#[derive(Default)]
-pub(crate) struct Numbers {
-    values: Vec<f64>,
-    repeated: Vec<(f64, u64)>,
-}
-
-impl Numbers {
-    pub(crate) fn push(&mut self, value: f64) {
-        self.values.push(value);
-    }
-
-    pub(crate) fn repeat(&mut self, value: f64, times: u64) {
-        self.repeated.push((value, times));
-    }
-
-    pub(crate) fn count(&self) -> u64 {
-        self.values.len() as u64 + self.repeated.iter().map(|(_, times)| times).sum::<u64>()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.count() == 0
-    }
-
-    pub(crate) fn sum(&self) -> f64 {
-        self.values.iter().sum::<f64>()
-            + self
-                .repeated
-                .iter()
-                .map(|(value, times)| value * *times as f64)
-                .sum::<f64>()
-    }
-
-    pub(crate) fn product(&self) -> f64 {
-        self.values.iter().product::<f64>()
-            * self
-                .repeated
-                .iter()
-                .map(|(value, times)| value.powf(*times as f64))
-                .product::<f64>()
-    }
-
-    pub(crate) fn fold(&self, init: f64, f: fn(f64, f64) -> f64) -> f64 {
-        let seen = self.values.iter().copied().fold(init, f);
-        self.repeated.iter().map(|(value, _)| *value).fold(seen, f)
-    }
-
-    /// every number spelled out, the repeats charged as the cells they stand for.
-    pub(crate) fn expanded(mut self, ctx: &EvalContext<'_>) -> Result<Vec<f64>, ErrorValue> {
-        for (value, times) in std::mem::take(&mut self.repeated) {
-            if !ctx.consume_cells(times) {
-                return Err(ErrorValue::Num);
-            }
-            self.values
-                .extend(std::iter::repeat_n(value, times as usize));
-        }
-        Ok(self.values)
-    }
-}
-
 /// collect numbers for aggregation: referenced cells contribute only numeric
 /// values, literal/computed arguments coerce, errors propagate.
-pub(crate) fn collect_numbers(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Numbers, ErrorValue> {
-    let mut nums = Numbers::default();
+pub(crate) fn collect_numbers(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+) -> Result<Vec<f64>, ErrorValue> {
+    let mut nums = Vec::new();
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
                 for value in area.values_ref(ctx)? {
-                    push_reference_number(&mut nums, &value, 1)?;
+                    push_reference_number(&mut nums, &value)?;
                 }
             }
             None => match crate::array::evaluate_array(arg, ctx) {
                 crate::array::Value::Array(array) => {
-                    for value in array.cells() {
-                        push_reference_number(&mut nums, value, 1)?;
-                    }
-                    if let Some((times, tail)) = array.past() {
-                        push_reference_number(&mut nums, tail, times)?;
+                    for row in 0..array.rows() {
+                        for col in 0..array.cols() {
+                            push_reference_number(&mut nums, &array.at(row, col))?;
+                        }
                     }
                 }
                 value => match value.into_scalar() {
@@ -782,14 +719,9 @@ pub(crate) fn collect_numbers(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Nu
 
 /// a referenced cell contributes to aggregation only when numeric; errors
 /// propagate, text/bool/blank are silently skipped.
-pub(crate) fn push_reference_number(
-    nums: &mut Numbers,
-    v: &CellValue,
-    times: u64,
-) -> Result<(), ErrorValue> {
+fn push_reference_number(nums: &mut Vec<f64>, v: &CellValue) -> Result<(), ErrorValue> {
     match v {
-        CellValue::Number { value } if times == 1 => nums.push(*value),
-        CellValue::Number { value } => nums.repeat(*value, times),
+        CellValue::Number { value } => nums.push(*value),
         CellValue::Error { value } => return Err(*value),
         _ => {}
     }

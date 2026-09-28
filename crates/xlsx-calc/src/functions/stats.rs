@@ -16,7 +16,7 @@ use super::{
 pub(crate) fn average(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
         Ok(nums) if nums.is_empty() => err(ErrorValue::Div0),
-        Ok(nums) => num(nums.sum() / nums.count() as f64),
+        Ok(nums) => num(nums.iter().sum::<f64>() / nums.len() as f64),
         Err(e) => err(e),
     }
 }
@@ -24,7 +24,7 @@ pub(crate) fn average(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn min(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
         Ok(nums) if nums.is_empty() => num(0.0),
-        Ok(nums) => num(nums.fold(f64::INFINITY, f64::min)),
+        Ok(nums) => num(nums.iter().copied().fold(f64::INFINITY, f64::min)),
         Err(e) => err(e),
     }
 }
@@ -32,7 +32,7 @@ pub(crate) fn min(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn max(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
         Ok(nums) if nums.is_empty() => num(0.0),
-        Ok(nums) => num(nums.fold(f64::NEG_INFINITY, f64::max)),
+        Ok(nums) => num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
         Err(e) => err(e),
     }
 }
@@ -43,11 +43,66 @@ fn pairs(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Vec<f64>, Vec<f64>), E
     if args.len() != 2 {
         return Err(ErrorValue::Value);
     }
-    let (ys, xs) = crate::array::paired_numbers(&args[0], &args[1], ctx)?;
+    let mut areas = [as_area(&args[0], ctx), as_area(&args[1], ctx)];
+    if let [Some(y), Some(x)] = &areas
+        && y.cell_count() != x.cell_count()
+    {
+        return Err(ErrorValue::NA);
+    }
+    // two references are cut to one extent, so a whole column on each of two
+    // sheets still pairs row for row
+    criteria::cut_references(&mut areas, ctx);
+    let ys = positioned(&args[0], areas[0], ctx)?;
+    let xs = positioned(&args[1], areas[1], ctx)?;
+    if xs.len() != ys.len() {
+        return Err(ErrorValue::NA);
+    }
+    // a coordinate counts only where both sides are numeric, so dropping one
+    // side's blank cannot slide every later pair onto the wrong partner
+    let (ys, xs): (Vec<f64>, Vec<f64>) = ys
+        .into_iter()
+        .zip(xs)
+        .filter_map(|(y, x)| Some((y?, x?)))
+        .unzip();
     if xs.is_empty() {
         return Err(ErrorValue::NA);
     }
     Ok((ys, xs))
+}
+
+/// every cell of an argument in order, `None` where it is not a number, so two
+/// ranges stay aligned by position.
+fn positioned(
+    arg: &Expr,
+    area: Option<Area>,
+    ctx: &EvalContext<'_>,
+) -> Result<Vec<Option<f64>>, ErrorValue> {
+    match area {
+        Some(area) => area
+            .cells_ref(ctx)?
+            .into_iter()
+            .map(|value| match value.as_ref() {
+                CellValue::Number { value } => Ok(Some(*value)),
+                CellValue::Error { value } => Err(*value),
+                _ => Ok(None),
+            })
+            .collect(),
+        None => match crate::array::evaluate_array(arg, ctx) {
+            crate::array::Value::Array(array) => (0..array.rows())
+                .flat_map(|row| (0..array.cols()).map(move |col| (row, col)))
+                .map(|(row, col)| match array.at(row, col) {
+                    CellValue::Number { value } => Ok(Some(value)),
+                    CellValue::Error { value } => Err(value),
+                    _ => Ok(None),
+                })
+                .collect(),
+            value => match value.into_scalar() {
+                CellValue::Error { value } => Err(value),
+                CellValue::Number { value } => Ok(vec![Some(value)]),
+                _ => Ok(vec![None]),
+            },
+        },
+    }
 }
 
 /// sums a linear fit needs: n, mean x, mean y, Sxx, Syy, Sxy.
@@ -140,7 +195,7 @@ pub(crate) fn percentile(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
-    let mut nums = match collect_numbers(&args[..1], ctx).and_then(|nums| nums.expanded(ctx)) {
+    let mut nums = match collect_numbers(&args[..1], ctx) {
         Ok(n) => n,
         Err(e) => return err(e),
     };
@@ -155,7 +210,7 @@ pub(crate) fn quartile(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
-    let mut nums = match collect_numbers(&args[..1], ctx).and_then(|nums| nums.expanded(ctx)) {
+    let mut nums = match collect_numbers(&args[..1], ctx) {
         Ok(n) => n,
         Err(e) => return err(e),
     };
@@ -268,9 +323,11 @@ fn numeric_literals(args: &[Expr], ctx: &EvalContext<'_>) -> Vec<f64> {
             // exist to drop
             None => match crate::array::evaluate_array(arg, ctx) {
                 crate::array::Value::Array(array) => {
-                    for value in array.spelled_out(ctx).unwrap_or_default() {
-                        if let CellValue::Number { value } = value {
-                            nums.push(value);
+                    for row in 0..array.rows() {
+                        for col in 0..array.cols() {
+                            if let CellValue::Number { value } = array.at(row, col) {
+                                nums.push(value);
+                            }
                         }
                     }
                 }
@@ -378,7 +435,7 @@ fn mode_of(nums: &[f64]) -> CellValue {
 }
 
 pub(crate) fn median(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    match collect_numbers(args, ctx).and_then(|nums| nums.expanded(ctx)) {
+    match collect_numbers(args, ctx) {
         Ok(nums) if nums.is_empty() => err(ErrorValue::Num),
         Ok(mut nums) => {
             nums.sort_by(f64::total_cmp);
@@ -396,7 +453,7 @@ pub(crate) fn median(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// MODE.SNGL: the most frequent value; the earliest-appearing one wins ties.
 /// no repeats -> #N/A.
 pub(crate) fn mode(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    let nums = match collect_numbers(args, ctx).and_then(|nums| nums.expanded(ctx)) {
+    let nums = match collect_numbers(args, ctx) {
         Ok(n) => n,
         Err(e) => return err(e),
     };
@@ -521,9 +578,6 @@ pub(crate) fn count(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                         .iter()
                         .filter(|v| matches!(v, CellValue::Number { .. }))
                         .count() as i64;
-                    if let Some((times, CellValue::Number { .. })) = array.past() {
-                        count += times as i64;
-                    }
                 }
                 value => match value.into_scalar() {
                     CellValue::Number { .. } | CellValue::Bool { .. } => count += 1,
@@ -553,25 +607,11 @@ pub(crate) fn counta(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                     .filter(|v| !matches!(v.as_ref(), CellValue::Empty))
                     .count() as i64;
             }
-            None => match crate::array::evaluate_array(arg, ctx) {
-                crate::array::Value::Array(array) => {
-                    count += array
-                        .cells()
-                        .iter()
-                        .filter(|v| !matches!(v, CellValue::Empty))
-                        .count() as i64;
-                    if let Some((times, tail)) = array.past()
-                        && !matches!(tail, CellValue::Empty)
-                    {
-                        count += times as i64;
-                    }
+            None => {
+                if !matches!(evaluate(arg, ctx), CellValue::Empty) {
+                    count += 1;
                 }
-                value => {
-                    if !matches!(value.into_scalar(), CellValue::Empty) {
-                        count += 1;
-                    }
-                }
-            },
+            }
         }
     }
     num(count as f64)
@@ -716,7 +756,7 @@ fn matching_numbers(
 
 /// sample (n-1) or population (n) variance; too few values -> #DIV/0!.
 fn variance(args: &[Expr], ctx: &EvalContext<'_>, sample: bool) -> Result<f64, ErrorValue> {
-    let nums = collect_numbers(args, ctx)?.expanded(ctx)?;
+    let nums = collect_numbers(args, ctx)?;
     let n = nums.len();
     let denom_ok = if sample { n >= 2 } else { n >= 1 };
     if !denom_ok {
@@ -732,7 +772,7 @@ fn nth_order(args: &[Expr], ctx: &EvalContext<'_>, largest: bool) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
-    let mut nums = match collect_numbers(&args[..1], ctx).and_then(|nums| nums.expanded(ctx)) {
+    let mut nums = match collect_numbers(&args[..1], ctx) {
         Ok(n) => n,
         Err(e) => return err(e),
     };

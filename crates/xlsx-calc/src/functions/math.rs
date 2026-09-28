@@ -3,7 +3,7 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, to_text};
+use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, to_number, to_text};
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
@@ -11,7 +11,7 @@ use super::{collect_numbers, finite, nth_int, nth_number};
 
 pub(crate) fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) => num(nums.sum()),
+        Ok(nums) => num(nums.iter().sum()),
         Err(e) => err(e),
     }
 }
@@ -20,7 +20,7 @@ pub(crate) fn sum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn product(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
         Ok(nums) if nums.is_empty() => num(0.0),
-        Ok(nums) => num(nums.product()),
+        Ok(nums) => num(nums.iter().product()),
         Err(e) => err(e),
     }
 }
@@ -85,9 +85,76 @@ fn sum_matching(
     num(total)
 }
 
-/// SUMPRODUCT(array1, [array2], ...), the same in either evaluator.
+/// SUMPRODUCT(array1, [array2], ...). element-wise product summed; non-numeric
+/// cells count as 0. all arrays must share the same length.
 pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    crate::array::sumproduct_value(args, ctx)
+    if args.is_empty() {
+        return err(ErrorValue::Value);
+    }
+    let areas: Vec<Option<Area>> = args.iter().map(|arg| as_area(arg, ctx)).collect();
+    // references on different sheets are cut to one extent, so their cells
+    // still pair up by position
+    let mut cut = areas.clone();
+    criteria::cut_references(&mut cut, ctx);
+    let mut arrays: Vec<((usize, usize), Vec<f64>)> = Vec::with_capacity(args.len());
+    for ((arg, area), cut) in args.iter().zip(areas).zip(cut) {
+        match area.zip(cut) {
+            Some((area, cut)) => {
+                let values = match cut.cells_ref(ctx) {
+                    Ok(values) => values,
+                    Err(error) => return err(error),
+                };
+                let mut col = Vec::with_capacity(values.len());
+                for v in values {
+                    match v.as_ref() {
+                        CellValue::Number { value } => col.push(*value),
+                        CellValue::Error { value } => return err(*value),
+                        _ => col.push(0.0),
+                    }
+                }
+                arrays.push(((area.rows, area.cols), col));
+            }
+            // `--(range=key)` and the other computed operands are arrays, not
+            // references, so they are read as blocks rather than coerced
+            None => match crate::array::evaluate_array(arg, ctx) {
+                crate::array::Value::Array(array) => {
+                    let mut col = Vec::with_capacity(array.rows() * array.cols());
+                    for row in 0..array.rows() {
+                        for c in 0..array.cols() {
+                            match array.at(row, c) {
+                                CellValue::Number { value } => col.push(value),
+                                CellValue::Error { value } => return err(value),
+                                _ => col.push(0.0),
+                            }
+                        }
+                    }
+                    arrays.push(((array.rows(), array.cols()), col));
+                }
+                value => match to_number(&value.into_scalar()) {
+                    Ok(n) => arrays.push(((1, 1), vec![n])),
+                    Err(e) => return err(e),
+                },
+            },
+        }
+    }
+    // excel pairs the operands by position, so they must share a shape: a
+    // column and a row of the same length are not the same operand
+    let shape = arrays[0].0;
+    if arrays.iter().any(|(dims, _)| *dims != shape) {
+        return err(ErrorValue::Value);
+    }
+    // past the extent a reference was cut to its cells are blank, so their
+    // products are zero
+    let len = arrays.iter().map(|(_, a)| a.len()).min().unwrap_or(0);
+    let mut total = 0.0;
+    for i in 0..len {
+        let mut prod = 1.0;
+        for (_, a) in &arrays {
+            prod *= a[i];
+        }
+        total += prod;
+    }
+    num(total)
 }
 
 /// MMULT(array1, array2): the matrix product; `cols(array1)` must equal

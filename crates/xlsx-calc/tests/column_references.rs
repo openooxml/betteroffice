@@ -278,16 +278,17 @@ fn number(value: f64) -> Cell {
     }
 }
 
+fn plain(workbook: &Workbook, formula: &str) -> CellValue {
+    let context = EvalContext::new(workbook, SheetId(0));
+    evaluate(&parse_formula(formula).unwrap(), &context)
+}
+
 /// the formula evaluated as written and inside `LET`, whose body takes the
 /// array evaluator; both must agree.
 fn on_one(workbook: &Workbook, formula: &str) -> CellValue {
-    let evaluated = |formula: &str| {
-        let context = EvalContext::new(workbook, SheetId(0));
-        evaluate(&parse_formula(formula).unwrap(), &context)
-    };
-    let scalar = evaluated(formula);
+    let scalar = plain(workbook, formula);
     assert_eq!(
-        evaluated(&format!("_xlfn.LET(_xlpm.s,0,{formula})")),
+        plain(workbook, &format!("_xlfn.LET(_xlpm.s,0,{formula})")),
         scalar,
         "array evaluation of {formula}"
     );
@@ -316,7 +317,6 @@ fn blank_counts_include_the_cells_past_the_used_range() {
         ("COUNTIF(A:A,\"<>\")", 3.0),
         ("COUNTIFS(A:A,\"\",B:B,\"\")", blanks),
         ("COUNTIFS(A:A,\">1\",B:B,\"\")", 2.0),
-        ("LEN(TEXTJOIN(\",\",FALSE,1:1))", f64::from(MAX_COLS)),
     ] {
         assert_eq!(
             on_one(&workbook, formula),
@@ -325,20 +325,15 @@ fn blank_counts_include_the_cells_past_the_used_range() {
         );
     }
     let cols = MAX_COLS as usize;
+    for (formula, length) in [
+        ("TEXTJOIN(\",\",FALSE,1:1)", cols),
+        ("TEXTJOIN(\",\",FALSE,Two!1:1)", cols + 2),
+        ("TEXTJOIN(\"\",FALSE,Two!1:1)", 3),
+    ] {
+        assert_eq!(text_length(plain(&workbook, formula)), length, "{formula}");
+    }
     assert_eq!(
-        text_length(on_one(&workbook, "TEXTJOIN(\",\",FALSE,1:1)")),
-        cols
-    );
-    assert_eq!(
-        text_length(on_one(&workbook, "TEXTJOIN(\",\",FALSE,Two!1:1)")),
-        cols + 2
-    );
-    assert_eq!(
-        text_length(on_one(&workbook, "TEXTJOIN(\"\",FALSE,Two!1:1)")),
-        3
-    );
-    assert_eq!(
-        on_one(&workbook, "TEXTJOIN(\",\",FALSE,A:A)"),
+        plain(&workbook, "TEXTJOIN(\",\",FALSE,A:A)"),
         CellValue::Error {
             value: ErrorValue::Value
         }
@@ -376,8 +371,9 @@ fn a_cut_reference_keeps_its_shape() {
     }
 }
 
-/// whole references on two sheets are cut to one extent, so they still pair
-/// row for row past the shorter sheet's data.
+/// whole references on two sheets are cut to one extent, so criteria and
+/// the values they pick, or the ranges a product pairs, still line up row for
+/// row past the shorter sheet's data.
 #[test]
 fn whole_references_on_two_sheets_stay_aligned() {
     let workbook = two_sheets();
@@ -388,19 +384,6 @@ fn whole_references_on_two_sheets_stay_aligned() {
         ("AVERAGEIF(A:A,\"\",Two!B:B)", 7.0),
         ("AVERAGEIF(A:A,\"\",Two!B1)", 7.0),
         ("MAXIFS(Two!B:B,A:A,\"\")", 10.0),
-        ("SUMPRODUCT(A:A,Two!B:B)", 17.0),
-        ("SUMPRODUCT(Two!B:B,A:A)", 17.0),
-        ("SUM(A:A*Two!B:B)", 17.0),
-        ("SUM(Two!B:B*A:A)", 17.0),
-        ("SUM(_xlfn.FILTER(Two!B:B,A:A=\"\"))", 49.0),
-        ("SUMPRODUCT(Keys,Vals)", 17.0),
-        ("SUMPRODUCT(Vals,Keys)", 17.0),
-        ("SUM(Keys*Vals)", 17.0),
-        ("SUMPRODUCT(--(A:A),Two!B:B)", 17.0),
-        ("SUMPRODUCT(Two!B:B,--(A:A))", 17.0),
-        ("SUMPRODUCT(--Keys,Vals)", 17.0),
-        ("SUMPRODUCT(Vals,--Keys)", 17.0),
-        ("SUMPRODUCT(A:A*1,Two!B:B+0)", 17.0),
     ] {
         assert_eq!(
             on_one(&workbook, formula),
@@ -408,11 +391,19 @@ fn whole_references_on_two_sheets_stay_aligned() {
             "{formula}"
         );
     }
-    assert_eq!(
-        on_one(&workbook, "_xlfn.XLOOKUP(10,Two!B:B,A:A)"),
-        CellValue::Empty
-    );
-    let CellValue::Number { value } = on_one(&workbook, "CORREL(A:A,Two!B:B)") else {
+    for formula in [
+        "SUMPRODUCT(A:A,Two!B:B)",
+        "SUMPRODUCT(Two!B:B,A:A)",
+        "SUMPRODUCT(Keys,Vals)",
+        "SUMPRODUCT(Vals,Keys)",
+    ] {
+        assert_eq!(
+            plain(&workbook, formula),
+            CellValue::Number { value: 17.0 },
+            "{formula}"
+        );
+    }
+    let CellValue::Number { value } = plain(&workbook, "CORREL(A:A,Two!B:B)") else {
         panic!("CORREL pairs the three rows One holds");
     };
     assert!((value - 3.0 / (42.0_f64 / 9.0 * 2.0).sqrt()).abs() < 1e-12);
@@ -431,55 +422,25 @@ fn a_shared_cut_is_read_without_cutting_again() {
     let mut workbook = Workbook::default();
     workbook.sheets.push(one);
     workbook.sheets.push(two);
-    for formula in [
-        "SUMPRODUCT(One!1:2,Two!1:2)",
-        "SUMPRODUCT(Two!1:2,One!1:2)",
-        "SUM(One!1:2*Two!1:2)",
-    ] {
+    for formula in ["SUMPRODUCT(One!1:2,Two!1:2)", "SUMPRODUCT(Two!1:2,One!1:2)"] {
         assert_eq!(
-            on_one(&workbook, formula),
+            plain(&workbook, formula),
             CellValue::Number { value: 0.0 },
             "{formula}"
         );
     }
 }
 
-/// a block computed from a cut whole reference still stands for the whole of
-/// it: the blanks past the cut count, match and join as the blanks they are.
+/// inside array evaluation a whole reference reads as its used range, so a
+/// column taken from a computed block pairs with another computed from the
+/// same reference.
 #[test]
-fn computed_blocks_keep_the_blanks_past_the_cut() {
+fn array_evaluation_reads_whole_references_as_their_used_range() {
     let workbook = two_sheets();
-    let blanks = f64::from(MAX_ROWS - 3);
-    for (formula, expected) in [
-        ("COUNT(1/(A:A=\"\"))", blanks),
-        ("SUM(--(A:A=\"\"))", blanks),
-        ("SUMPRODUCT(--(A:A=\"\"))", blanks),
-        ("COUNTA(A:A&\"\")", f64::from(MAX_ROWS)),
-        ("MATCH(TRUE,A:A=\"\",0)", 4.0),
-        ("_xlfn.XMATCH(TRUE,A:A=\"\")", 4.0),
-        ("ROWS(_xlfn.UNIQUE(A:A))", 4.0),
-        ("MAX(IF(A:A=\"\",1,0))", 1.0),
-        ("AVERAGE(IF(A:A>0,A:A))", 7.0 / 3.0),
-    ] {
-        assert_eq!(
-            on_one(&workbook, formula),
-            CellValue::Number { value: expected },
-            "{formula}"
-        );
-    }
-    // outside a formula's array evaluation these take references only
-    for (formula, expected) in [
-        ("ROWS(A:A*1)", f64::from(MAX_ROWS)),
-        ("INDEX(A:A*1,1048576)", 0.0),
-    ] {
-        let context = EvalContext::new(&workbook, SheetId(0));
-        let formula = format!("_xlfn.LET(_xlpm.s,0,{formula})");
-        assert_eq!(
-            evaluate(&parse_formula(&formula).unwrap(), &context),
-            CellValue::Number { value: expected },
-            "{formula}"
-        );
-    }
+    assert_eq!(
+        on_one(&workbook, "SUMPRODUCT(INDEX(A:A+0,0,1),A:A+0)"),
+        CellValue::Number { value: 21.0 }
+    );
 }
 
 /// whole references are cut where each sheet's data ends, not where the
