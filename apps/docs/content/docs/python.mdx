@@ -108,7 +108,7 @@ result = wb.export_structured(scope=[{"sheet": 0, "range": "A1:H40"}], max_cells
 if result["ok"]:
     cells = result["content"]["sheets"][0]["cells"]
 
-print(export_xlsx_markdown(data, markdown_options={"maxRows": 100})["markdown"])
+print(export_xlsx_markdown(wb.save(), markdown_options={"maxRows": 100})["markdown"])
 ```
 
 See the [package README](https://pypi.org/project/betteroffice-xlsx/) for the full
@@ -124,11 +124,13 @@ DOCX files while preserving unsupported package content.
 `render_png` renders a page from that layout. Register the required fonts before
 rendering; a missing font produces an error.
 
-`export_structured` returns the document as read-only structured content, a dict
-in the same camelCase schema the JavaScript and Rust APIs produce, and
-`export_markdown` renders it as Markdown with source anchors:
+`export_structured` returns anchored content in the shared camelCase schema;
+`export_markdown` renders Markdown:
 
 ```python
+from betteroffice_docx import Document
+
+document = Document.open_path("contract.docx")
 content = document.export_structured(revision_view="accepted", stories=["body", "footnotes"])
 markdown = document.export_markdown(revision_view="markup")["markdown"]
 ```

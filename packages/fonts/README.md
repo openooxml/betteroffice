@@ -8,8 +8,7 @@ Beyond the core replacements it also ships the families PowerPoint decks are
 commonly drawn with — Inter, Roboto, Source Sans 3, DM Sans, DM Serif Display,
 Open Sans, Montserrat, Poppins, Oswald and Heebo, the fonts themselves — plus
 Gelasio for Georgia and Comic Relief for Comic Sans MS, both metric-compatible.
-A deck naming a family nobody has falls back to Calibri, which is what Office
-substitutes.
+Unknown families resolve to a related, monospace, serif or Calibri face.
 
 ## Why it matters
 
@@ -44,7 +43,7 @@ Add [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/font
 | `@betteroffice/fonts`     | 65    | 14.2 MB      | Latin metric-compatible set, deck families + Hebrew/Arabic |
 | `@betteroffice/fonts-cjk` | 5     | 33 MB        | Noto Sans SC/TC/JP/KR, Noto Serif SC                       |
 
-Faces are fetched per face, lazily. A typical English document using regular and bold Calibri pulls Carlito Regular + Bold plus the chain's always-appended Liberation Sans Regular + Bold: 2,135,668 bytes (2.04 MiB) raw.
+Faces load lazily. Regular and bold Calibri use Carlito Regular and Bold.
 
 ## Metric-compatibility mapping (Latin)
 
@@ -58,7 +57,7 @@ Faces are fetched per face, lazily. A typical English document using regular and
 
 Gelasio 1.008 is metric-compatible with Georgia, and Comic Relief 1.200 with Comic Sans MS; both are OFL 1.1. Each of these seven families ships Regular, Bold, Italic and BoldItalic, except Comic Relief, which has no italics.
 
-The deck families (Inter, Roboto, Source Sans 3 for Source Sans Pro, DM Sans, Open Sans, Montserrat, Poppins) ship the same four faces. Oswald and Heebo ship Regular and Bold, DM Serif Display ships Regular and Italic. Styles a family does not ship fall back through the font chain.
+The deck families (Inter, Roboto, Source Sans 3 for Source Sans Pro, DM Sans, Open Sans, Montserrat, Poppins) ship the same four faces. Oswald and Heebo ship Regular and Bold, DM Serif Display ships Regular and Italic.
 
 ## Script-coverage mapping (CJK + RTL)
 
@@ -75,7 +74,7 @@ For the bundled entry, the CJK rows below require **`@betteroffice/fonts-cjk` in
 | Noto Sans KR      | Malgun Gothic, Gulim, Dotum, Batang, Gungsuh (맑은 고딕, 굴림, 돋움, 바탕, 궁서)                                  | `cjk-kr`      | OFL 1.1 | 2.004   |
 | Noto Sans Hebrew  | — (script fallback only)                                                                                          | `hebrew`      | OFL 1.1 | 3.001   |
 | Noto Sans Arabic  | — (script fallback only)                                                                                          | `arabic`      | OFL 1.1 | 2.013   |
-| Noto Naskh Arabic | — (script fallback only; serif Arabic, addressable as a family)                                                   | `arabic`      | OFL 1.1 | 2.021   |
+| Noto Naskh Arabic | — (serif Arabic face)                                                                                             | `arabic`      | OFL 1.1 | 2.021   |
 
 Notes:
 

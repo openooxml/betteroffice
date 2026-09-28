@@ -200,16 +200,22 @@ function CompactToolbar({ onShare }: { onShare(): void }) {
 `showToolbar={false}` hides either. The default chrome is hidden for `readOnly`;
 chrome you supply still renders, with its writing controls disabled.
 
-To place the toolbar outside the editor, capture the ref in state and provide it.
-Until the editor attaches, `commands={null}` reports every command unavailable:
+To place the toolbar outside the editor, capture its commands in state;
+`commands={null}` reports every command unavailable:
 
 ```tsx
-const [commands, setCommands] = useState<DocxCommandStore | null>(null);
+import { useState } from 'react';
+import { DocxCommandProvider, type DocxCommandStore } from '@betteroffice/docx-react';
 
-<DocxCommandProvider commands={commands}>
-  <CompactToolbar onShare={share} />
-</DocxCommandProvider>
-<DocxEditor ref={(editor) => setCommands(editor?.commands ?? null)} toolbar={null} />
+function Editor() {
+  const [commands, setCommands] = useState<DocxCommandStore | null>(null);
+  return <>
+    <DocxCommandProvider commands={commands}>
+      <CompactToolbar onShare={share} />
+    </DocxCommandProvider>
+    <DocxEditor ref={(editor) => setCommands(editor?.commands ?? null)} toolbar={null} />
+  </>;
+}
 ```
 
 Outside the editor, `EditorToolbar` supplies its own styling root and the
@@ -225,9 +231,9 @@ editor's locale, and its keyboard shortcuts reach that editor only.
   a disabled command always carries `disabledReason: { code, message }`, and
   controls expose that message as their accessible description. Marks report
   `'mixed'` for mixed selections.
-- **Results.** `execute(id, args)` resolves to `executed`, `noop`, `opened` (a
-  dialog or picker), `requested` (handed to the host, such as a controlled mode
-  or `onSaveRequest`), or `{ ok: false, failure }`. Commands run after input
+- **Results.** `execute(id, args)` resolves to `{ ok: true, status }` (`executed`,
+  `noop`, `opened` for a dialog or picker, `requested` when handed to the host)
+  or `{ ok: false, failure }`. Commands run after input
   accepted before the call and check availability again first, so a stale
   enabled state never authorizes a change. A dialog or picker a command opens
   applies to the document and selection it opened with, or fails with

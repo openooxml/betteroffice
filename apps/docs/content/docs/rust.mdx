@@ -74,7 +74,7 @@ if let Ok(export) = workbook.export_structured(&XlsxExportOptions::default())? {
         println!("{:?} {:?} {}", cell.anchor, cell.formula, cell.display_text);
     }
 }
-let markdown = export_xlsx_markdown(&bytes, &XlsxExportOptions::default(), &XlsxMarkdownOptions::default())?;
+let markdown = export_xlsx_markdown(&xlsx_bytes, &XlsxExportOptions::default(), &XlsxMarkdownOptions::default())?;
 ```
 
 `Workbook::edit_cell_profiled` and `apply_ops_profiled` return the usual edit
@@ -206,7 +206,7 @@ let read = presentation.export_structured(&options)?.expect("usable options");
 for slide in &read.content.slides {
     println!("slide {}: {} shapes", slide.index, slide.shapes.len());
 }
-let markdown = betteroffice_pptx::export_pptx_markdown(&bytes, &options)?;
+let markdown = betteroffice_pptx::export_pptx_markdown(&pptx_bytes, &options)?;
 ```
 
 ## PowerPoint comments

@@ -102,8 +102,8 @@ import {
   `usePptxCommand` and `usePptxCommandState` bind custom controls.
 - **Ordering.** `execute(id, args)` waits for input accepted before it, such as
   a picture still decoding, keeps later typing behind it, checks availability
-  again and resolves to `executed`, `noop`, `opened`, `requested` or a coded
-  failure (`input-failed`, `document-replaced`, `target-changed`,
+  again and resolves to `{ ok: true, status }` or `{ ok: false, failure }`
+  (`input-failed`, `document-replaced`, `target-changed`,
   `gesture-active`, `command-failed`). Keystrokes typed meanwhile land in the
   text they were typed into, and a picture on the slide the picker opened on;
   input queued for a replaced document is dropped. Save runs the host's `onSaveRequest` outside that queue, so the request
@@ -280,8 +280,8 @@ const review = definePptxPlugin<State>({
   of the unscaled overlay layer, which sits on the slide canvas below selection
   handles and proposal controls and ignores the pointer unless an element sets
   `pointer-events: auto`. `getShapeRect(shapeId)` returns the rendered bounds of
-  a shape and its group descendants, and `getPositionAtPoint` adds the layout's
-  `version` and `id` to a hit. Every method returns null once its layout is gone.
+  a shape and its group descendants, and `getPositionAtPoint` adds `version` and
+  `layoutId` to a hit. Every method returns null once its layout is gone.
 - **Panels** dock left, right or bottom of the slide, beside the thumbnail rail
   and outside the slide's keyboard handling, with tabs when several share a
   side. `preferredSize` is clamped to 40% of the workspace. In a narrow editor

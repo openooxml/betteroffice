@@ -166,16 +166,11 @@ flushes editor input or changes anything. `exportPptxStructured(bytes)`,
 headless, with anchors that address the returned snapshot only.
 
 ```ts
+import { exportPptxMarkdown } from '@betteroffice/pptx';
+
 const read = deck.exportStructured({ includeNotes: true });
 if (!read.ok) throw new Error(read.failure.message);
-for (const slide of read.content.slides) {
-  for (const shape of slide.shapes) {
-    for (const paragraph of shape.stories.flatMap((story) => story.paragraphs)) {
-      console.log(slide.index, paragraph.list?.kind, paragraph.anchor);
-    }
-  }
-}
-
+console.log(read.content.slides);
 const { markdown, anchors } = await exportPptxMarkdown(bytes);
 ```
 

@@ -33,8 +33,8 @@ The spreadsheet and presentation editors take a `Uint8Array`:
 import { XlsxEditor } from "@betteroffice/xlsx-react";
 import { PptxEditor } from "@betteroffice/pptx-react";
 
-<XlsxEditor file={bytes} fileName="report.xlsx" />
-<PptxEditor file={bytes} fonts={[{ family: "Inter", bytes: fontBytes }]} />
+<XlsxEditor file={bytes} fileName="report.xlsx" />;
+<PptxEditor file={bytes} fonts={[{ family: "Inter", bytes: fontBytes }]} />;
 ```
 
 `PptxEditor` requires at least one font face in `fonts` before it can lay out text.
@@ -79,8 +79,8 @@ parts outside the editor inside `<DocxCommandProvider commands={commands}>`, wit
 Controls keep their active and `'mixed'` states, shortcuts, and read-only,
 viewing and suggesting restrictions. A disabled command always states why
 (`disabledReason.code` and a localized `message`), and `execute(id, args)` checks
-availability again after preceding input, resolving to `executed`, `noop`,
-`opened`, `requested` or a typed failure. Dialogs a command opens apply to the
+availability again after preceding input, resolving to `{ ok: true, status }`
+or `{ ok: false, failure }`. Dialogs a command opens apply to the
 document and selection they opened with. At narrow widths, groups move into an
 accessible More menu that keeps every built-in choice; wrap other host content
 in `ToolbarOverflow` to give it an entry there.
@@ -257,8 +257,8 @@ Omit `toolbar` for the default controls or pass `null` for none;
 `onReady` (it may be `null` until then). A disabled command always states why
 (`disabledReason.code` and a localized `message`); mixed selections report
 `'mixed'`. `execute(id, args)` runs after input accepted before it, such as a
-picture still decoding, checks availability again, and resolves to `executed`,
-`noop`, `opened`, `requested` or a typed failure. Commands enforce read-only
+picture still decoding, checks availability again, and resolves to
+`{ ok: true, status }` or `{ ok: false, failure }`. Commands enforce read-only
 mode for the UI; `api.handle` stays direct host access. The prop-based
 `EditorToolbar` and `Toolbar` remain supported but deprecated: without `mode`
 they bind to their props, and `useEditorToolbar()` inside a command-mode toolbar
@@ -356,7 +356,7 @@ painted frame of the current version, and not during proposal review.
 converts `slide-emu` (9,525 EMU per pixel) or `slide-px` rectangles into pixels
 of the unscaled overlay layer on the slide, `getShapeRect(shapeId)` returns a
 shape's rendered bounds including group descendants, and `getPositionAtPoint`
-hit-tests client coordinates with the layout's `version` and `id`. The layer
+hit-tests client coordinates with `version` and `layoutId`. The layer
 sits below selection handles and proposal controls and ignores the pointer
 unless an element sets `pointer-events: auto`. Panels dock left, right or bottom
 of the slide beside the thumbnail rail, and become drawers in a narrow editor.
@@ -408,8 +408,8 @@ none, or set `showToolbar={false}`. Outside the editor, render the same parts
 inside `<XlsxCommandProvider commands={commands}>`, with `commands` captured from
 `onReady` (`null` until then). `execute(id, args)` runs in order with pastes
 and cell entries accepted before it, writes the cell or formula text typed so
-far, checks availability again, and resolves to `executed`, `noop`, `opened`,
-`requested` or a typed failure such as `target-changed`; a disabled command
+far, checks availability again, and resolves to `{ ok: true, status }` or
+`{ ok: false, failure }`; a disabled command
 states why in `disabledReason`. The synchronous `api.save()` throws
 `XlsxSaveRefusedError` (`input-pending` or `input-failed`) instead of returning
 bytes without accepted input; `execute("save", null)` waits for it and saves.
@@ -831,7 +831,7 @@ painted.
 - The map carries its own `schemaVersion` (1): additive fields keep it, and a
   change existing readers would misread bumps it.
 
-Native Rust and Python structured exports do not yet generate page maps.
+Rust's `EngineSession` also attaches page maps; Python structured exports carry none.
 
 ## Export XLSX content with anchors
 
@@ -967,8 +967,8 @@ interaction separately when investigating input-to-paint latency.
 
 A DOCX `YrsSession` addresses paragraphs by session keys, which are never saved as Word
 paragraph IDs (`w14:paraId`); a session anchor resolves on every replica of one
-collaborative session, and each seeding open (`openDocx`, `seedFromDocx`) starts a new
-session. `saveYrsDocx(session)` from `@betteroffice/docx/yrs` returns the
+collaborative session, and seeding opens start a new session unless given a fixed
+`generation`. `saveYrsDocx(session)` from `@betteroffice/docx/yrs` returns the
 saved bytes and a persisted anchor for each saved paragraph that has a Word paragraph ID,
 qualified by its package part. Resolve it after reopening:
 

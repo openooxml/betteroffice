@@ -31,7 +31,7 @@ the output is _correct_ — only that it must not change unintentionally.
 ## Regenerating
 
 A normal test run never writes files. To (re)write the goldens, gate on the env
-var (from `packages/core`):
+var (from `packages/xlsx`):
 
 ```bash
 GOLDEN_UPDATE=1 bun test src/display-list/__golden__

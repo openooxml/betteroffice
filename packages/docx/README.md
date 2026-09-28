@@ -53,9 +53,9 @@ provider.connect();
 
 `replica` can be a direct `YrsSession`, the worker-aware adapter returned by
 `createWorkerCollaborationReplica`, or the value published by the React
-editor's `collaboration.onReplica` callback. The provider speaks Yjs sync-v1;
-room routing, authentication, awareness, and reconnection policy remain
-transport concerns. Pass a persisted Yrs update as `collaboration.initialUpdate`
+editor's `collaboration.onReplica` callback. The provider handles Yjs sync-v1 and
+awareness; room routing, authentication, and reconnection remain transport
+concerns. Pass a persisted Yrs update as `collaboration.initialUpdate`
 when a React editor joins an existing room so it hydrates the shared history
 instead of independently importing the same DOCX.
 
