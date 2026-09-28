@@ -66,6 +66,21 @@ enum Pending {
     Only(Unresolved),
 }
 
+/// The run attribute, baseline or spacing, whose recovery from the source left
+/// characters unresolved that a save would strip it from. Caps and colours were
+/// never kept before, so their unresolved characters save as they are.
+pub(crate) fn unrecovered_attribute(doc: &Doc) -> Option<&'static str> {
+    let txn = doc.transact();
+    let meta = txn.get_map(META)?;
+    [SourceProperty::Baseline, SourceProperty::Spacing]
+        .into_iter()
+        .map(SourceProperty::keys)
+        .find(|(pending_key, ..)| {
+            matches!(meta.get(&txn, pending_key), Some(Out::Any(Any::String(_))))
+        })
+        .map(|(_, _, attribute)| attribute)
+}
+
 pub(crate) fn import_source(
     session: &DeckSession,
     import: &mut SourceImport<'_>,
@@ -586,25 +601,38 @@ fn recover_gap(
     }
 }
 
-/// The longest common subsequence of tokens, `None` past four million cells.
+/// The longest common subsequence of tokens: equal ends pair directly, and
+/// the rest is diffed, `None` past four million cells.
 fn common_pairs(window: &[SourceToken], stretch: &[&Unit]) -> Option<Vec<(usize, usize)>> {
-    let (rows, cols) = (window.len() + 1, stretch.len() + 1);
+    let same = |i: usize, j: usize| window[i].token == stretch[j].token;
+    let mut prefix = 0;
+    while prefix < window.len().min(stretch.len()) && same(prefix, prefix) {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < window.len().min(stretch.len()) - prefix
+        && same(window.len() - suffix - 1, stretch.len() - suffix - 1)
+    {
+        suffix += 1;
+    }
+    let rows = window.len() - prefix - suffix + 1;
+    let cols = stretch.len() - prefix - suffix + 1;
     let cells = rows.checked_mul(cols).filter(|cells| *cells <= 4_000_000)?;
     let mut lengths = vec![0u32; cells];
     for i in (0..rows - 1).rev() {
         for j in (0..cols - 1).rev() {
-            lengths[i * cols + j] = if window[i].token == stretch[j].token {
+            lengths[i * cols + j] = if same(prefix + i, prefix + j) {
                 lengths[(i + 1) * cols + j + 1] + 1
             } else {
                 lengths[(i + 1) * cols + j].max(lengths[i * cols + j + 1])
             };
         }
     }
-    let mut pairs = Vec::new();
+    let mut pairs: Vec<_> = (0..prefix).map(|i| (i, i)).collect();
     let (mut i, mut j) = (0, 0);
     while i + 1 < rows && j + 1 < cols {
-        if window[i].token == stretch[j].token {
-            pairs.push((i, j));
+        if same(prefix + i, prefix + j) {
+            pairs.push((prefix + i, prefix + j));
             i += 1;
             j += 1;
         } else if lengths[(i + 1) * cols + j] >= lengths[i * cols + j + 1] {
@@ -613,6 +641,7 @@ fn common_pairs(window: &[SourceToken], stretch: &[&Unit]) -> Option<Vec<(usize,
             j += 1;
         }
     }
+    pairs.extend((0..suffix).map(|i| (window.len() - suffix + i, stretch.len() - suffix + i)));
     Some(pairs)
 }
 

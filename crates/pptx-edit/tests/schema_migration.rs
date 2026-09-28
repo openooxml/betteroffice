@@ -1727,3 +1727,113 @@ fn a_released_update_edited_across_runs_and_surrogates_recovers_by_its_clocks() 
         assert!(!meta_has(&carried, key), "{key}");
     }
 }
+
+#[test]
+fn baseline_and_spacing_recover_a_long_paragraph_restored_by_undo() {
+    let (source, story) = long_formatted_paragraph();
+    for (client_id, replayable) in [(45000, true), (45100, false)] {
+        let migrated = DeckSession::open_from_update(
+            &long_paragraph_seed(&source, client_id, replayable),
+            client_id + 1,
+        )
+        .unwrap();
+        migrated
+            .delete_text(&EditCtx::local("fixture"), &story, 0, LONG_PARAGRAPH)
+            .unwrap();
+        assert!(migrated.undo());
+        let attached = DeckSession::open_from_update_with_source(
+            &migrated.encode_state_as_update_v1(),
+            &source,
+            client_id + 2,
+        )
+        .unwrap();
+        let fresh = DeckSession::open(&source, client_id + 3).unwrap();
+        assert_eq!(
+            attached.story(&story).unwrap(),
+            fresh.story(&story).unwrap()
+        );
+        assert_eq!(attached.save().unwrap(), source);
+    }
+}
+
+#[test]
+fn a_save_refuses_to_drop_baseline_or_spacing_it_could_not_recover() {
+    let (source, story) = long_formatted_paragraph();
+    let migrated =
+        DeckSession::open_from_update(&long_paragraph_seed(&source, 45200, true), 45201).unwrap();
+    let context = EditCtx::local("fixture");
+    migrated
+        .delete_text(&context, &story, 0, LONG_PARAGRAPH)
+        .unwrap();
+    migrated
+        .insert_text(
+            &context,
+            &story,
+            0,
+            &"Z".repeat(2100),
+            &TextStyle::default(),
+        )
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        &source,
+        45202,
+    )
+    .unwrap();
+    let carried = attached.encode_state_as_update_v1();
+    meta_string(&carried, "baselinesPendingSource");
+    match attached.save() {
+        Err(EditError::Write(message)) => assert!(message.contains("could not be recovered")),
+        other => panic!("{other:?}"),
+    }
+}
+
+const LONG_PARAGRAPH: u32 = 2000;
+
+/// The defaults deck with a 2,000-character raised, tracked run, and its story.
+fn long_formatted_paragraph() -> (Vec<u8>, String) {
+    let text: String = "Mixed Case Title "
+        .repeat(120)
+        .chars()
+        .take(LONG_PARAGRAPH as usize)
+        .collect();
+    let source = defaults_variant(&[
+        (
+            DEFAULTS_SLIDE,
+            r#"<a:rPr lang="en-US" sz="3200" cap="all">"#,
+            r#"<a:rPr lang="en-US" sz="3200" cap="all" spc="300" baseline="30000">"#,
+        ),
+        (
+            DEFAULTS_SLIDE,
+            "<a:t>Mixed Case Title</a:t>",
+            &format!("<a:t>{text}</a:t>"),
+        ),
+    ]);
+    let story = defaults_story(
+        &DeckSession::open(&source, 44999).unwrap(),
+        "Direct all caps",
+    );
+    (source, story)
+}
+
+/// A 2.0 seed of `source` without baselines or spacing; unless `replayable`,
+/// its stored package no longer reproduces the seed.
+fn long_paragraph_seed(source: &[u8], client_id: u64, replayable: bool) -> Vec<u8> {
+    let seeded = stored_2_0(source, client_id, |value| {
+        without_keys(value, &["baselinePct", "spacingPt"])
+    });
+    if replayable {
+        return seeded;
+    }
+    let doc = hydrated(&seeded);
+    let mut package: serde_json::Value = serde_json::from_str(&package_json(&seeded)).unwrap();
+    without_keys(&mut package, &["fontSizePt"]);
+    let stored_meta = meta(&doc);
+    stored_meta.insert(
+        &mut doc.transact_mut(),
+        "packageJson",
+        Any::Buffer(serde_json::to_vec(&package).unwrap().into()),
+    );
+    doc.transact()
+        .encode_state_as_update_v1(&StateVector::default())
+}
