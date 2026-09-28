@@ -1597,6 +1597,45 @@ fn diverged_copies_of_a_header_part_refuse_fills() {
     );
 }
 
+#[test]
+fn a_fill_that_only_normalizes_a_header_copy_reports_the_change() {
+    let header = format!(
+        r#"<w:hdr {}><w:sdt><w:sdtPr><w:tag w:val="lines"/><w:text w:multiLine="1"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}</w:hdr>"#,
+        fixture::namespaces(),
+        para("0D000011", r#"<w:r><w:t>a</w:t><w:br/><w:t>b</w:t></w:r>"#),
+        para("0D000012", "")
+    );
+    let body = format!(
+        r#"<w:p w14:paraId="0D000002"><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdA"/></w:sectPr></w:pPr>{}</w:p>{}<w:sectPr><w:headerReference w:type="default" r:id="rIdB"/></w:sectPr>"#,
+        run("One"),
+        para("0D000003", &run("Two"))
+    );
+    let doc = open(
+        &Package::new(&body)
+            .part("header1.xml", "rIdA", "header", "header", &header)
+            .rel("rIdB", "header", "header1.xml")
+            .bytes(),
+    );
+    let ctx = docx_edit::EditCtx::local("", "");
+    doc.delete_range(&ctx, docx_edit::StoryRange::new("hf:rIdB:sdt0", 1, 2))
+        .unwrap();
+    doc.split_paragraph(&ctx, docx_edit::Position::new("hf:rIdB:sdt0", 1), None)
+        .unwrap();
+    assert_eq!(doc.paragraphs("hf:rIdB:sdt0").unwrap().len(), 2);
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "a\nb");
+
+    let steps = || vec![by_tag_step("lines", "a\nb")];
+    let validation = doc
+        .validate_edits(&request(&doc, steps()))
+        .unwrap()
+        .unwrap();
+    assert!(validation.previews[0].would_change);
+    let applied = apply(&doc, &UndoSession::new(), steps());
+    assert!(applied.receipts[0].changed);
+    assert_eq!(doc.paragraphs("hf:rIdB:sdt0").unwrap().len(), 1);
+    assert!(!apply(&doc, &UndoSession::new(), steps()).receipts[0].changed);
+}
+
 fn block_sdt(tag: &str, content: &str) -> String {
     format!(
         r#"<w:sdt><w:sdtPr><w:tag w:val="{tag}"/><w:richText/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#

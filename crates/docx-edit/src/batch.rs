@@ -2398,6 +2398,12 @@ fn receipts<T: ReadTxn>(
     steps: &[Planned],
     executed: &[Option<Executed>],
 ) -> Vec<EditReceipt> {
+    let companion_changes: BTreeSet<u32> = steps
+        .iter()
+        .zip(executed)
+        .filter(|(planned, outcome)| planned.companion && outcome.is_some())
+        .map(|(planned, _)| planned.index)
+        .collect();
     steps
         .iter()
         .zip(executed)
@@ -2448,7 +2454,7 @@ fn receipts<T: ReadTxn>(
             };
             EditReceipt {
                 step_index: planned.index,
-                changed: outcome.is_some(),
+                changed: outcome.is_some() || companion_changes.contains(&planned.index),
                 range,
                 new_paragraphs: outcome
                     .as_ref()
@@ -2630,7 +2636,12 @@ impl EditingDoc {
                 .map(|planned| EditPreview {
                     step_index: planned.index,
                     target: planned.target.clone(),
-                    would_change: planned.effect.is_some(),
+                    would_change: planned.effect.is_some()
+                        || plan.steps.iter().any(|other| {
+                            other.companion
+                                && other.index == planned.index
+                                && other.effect.is_some()
+                        }),
                     new_paragraph_count: planned.new_paragraph_count,
                     would_create_revisions: planned.suggest && planned.effect.is_some(),
                     control: planned.control.clone(),
