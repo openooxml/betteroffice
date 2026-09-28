@@ -250,9 +250,8 @@ const review = definePptxPlugin<State>({
   and `editBatches`, and `history: 'none'` also `untrackedHistory`. The grant
   and `readOnly` are checked again right before each change, so a revoked grant,
   `readOnly` or a replaced presentation refuses even through a client obtained
-  earlier. Mutating built-in commands have no authoritative lock policy yet and
-  refuse plugins with `unsupported-policy`; plugins change presentations through
-  edit batches.
+  earlier. Mutating built-in commands refuse plugins with `unsupported-policy`;
+  plugins change presentations through edit batches.
 - **Contributed commands** register as `plugin:<pluginId>/<id>` on
   `api.commands`. They always run with their own plugin's clients, even when the
   toolbar, a shortcut or the host invokes them. `execute` returns

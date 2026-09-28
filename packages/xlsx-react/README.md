@@ -156,7 +156,7 @@ import {
   after them, even in the same handler, act on the new selection and sheet.
 - The store enforces read-only mode, the selection a command needs and its
   arguments for the editor's UI. `api.handle` stays unrestricted host
-  authority, and the store is not workbook protection.
+  authority, and workbook protection is separate from the store.
 - Narrow toolbars move trailing groups into a keyboard-accessible More menu. Host
   `ToolbarButton`s get an entry there; wrap other content in `ToolbarOverflow`.
   A group holding content without an entry stays in the row, which scrolls
@@ -312,9 +312,9 @@ const review = defineXlsxPlugin<State>({
   and `editBatches`, and `history: "none"` also `untrackedHistory`. The grant
   and `readOnly` are checked again right before each change, so a revoked grant,
   `readOnly` or a replaced workbook refuses even through a client obtained
-  earlier. Mutating built-in commands have no authoritative policy yet and
-  refuse plugins with `unsupported-policy`; plugins change workbooks through
-  edit batches. Grants are not spreadsheet protection.
+  earlier. Mutating built-in commands refuse plugins with `unsupported-policy`;
+  plugins change workbooks through edit batches. Grants govern the plugin API,
+  separately from sheet and workbook protection.
 - **Contributed commands** register as `plugin:<pluginId>/<id>` on
   `api.commands`. They always run with their own plugin's clients, even when the
   toolbar, a shortcut or the host invokes them. `execute` returns

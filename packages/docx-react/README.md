@@ -356,11 +356,10 @@ const review = defineDocxPlugin<State>({
   and `editBatches`, and `history: 'none'` also `untrackedHistory`. Grants,
   editor mode and document policy are checked again right before each change,
   so a revoked grant, viewing mode, `readOnly` or a replaced document refuses
-  even through a client obtained earlier. Mutating built-in commands have no
-  authoritative lock policy yet and refuse plugins with `unsupported-policy`;
-  plugins change documents through edit batches, whose Rust policy refuses
-  locked content. Suggesting mode follows each operation's own rules; a batch
-  step needs `suggest` there.
+  even through a client obtained earlier. Mutating built-in commands refuse
+  plugins with `unsupported-policy`; plugins change documents through edit
+  batches, whose Rust policy refuses locked content. Suggesting mode follows
+  each operation's own rules; a batch step needs `suggest` there.
 - **Contributed commands** register as `plugin:<pluginId>/<id>` on
   `ref.commands`. They always run with their own plugin's clients, even when the
   host's toolbar, shortcuts or `ref.commands` invoke them, and outside the input

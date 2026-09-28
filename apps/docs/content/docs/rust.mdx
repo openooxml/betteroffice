@@ -57,6 +57,9 @@ match workbook.apply_edits(&request)? {
 }
 ```
 
+Batches do not insert or delete rows, columns or sheets, and refuse writes to
+merged-cell followers, array-formula cells and protected sheets.
+
 `Workbook::export_structured` and `export_markdown` read the committed workbook
 with its version as sparse cells, sheet metadata and diagnostics, or as bounded
 Markdown with anchor markers; `export_xlsx_structured`, `export_xlsx_markdown`
@@ -78,6 +81,17 @@ let markdown = export_xlsx_markdown(&bytes, &XlsxExportOptions::default(), &Xlsx
 outcome with an `EditProfile`. Supply a monotonic clock reporting milliseconds
 to collect validate, apply, recalculation, and result-building durations. Normal
 edit methods do not read a profiling clock.
+
+Formula evaluation in `betteroffice-xlsx-calc` computes the date functions in the
+1900 date system; only `TEXT` formats dates in a workbook's 1904 system. `RAND` is
+not implemented, and the `RANDBETWEEN` seed is set on `EvalContext::rand_seed`, not
+through `CalculationOptions`. `ROW()` and `COLUMN()` without a reference return
+`#VALUE!` in a context built by `EvalContext::new`, which has no calling cell. A
+defined name under `ROW`, `COLUMN`, `ROWS` or `COLUMNS` counts as a direct
+reference, so a name bound to a computed reference keeps no dependency edge to
+the cells that reference reads, and an `OFFSET` with a computed target
+re-evaluates on every recalculation but may read a same-pass write to that target
+one recalculation late.
 
 Open and save DOCX and PPTX files through their format APIs:
 
@@ -233,7 +247,10 @@ cargo add betteroffice-pptx --features raster
 
 `render_slide` returns a display list and hit-test metadata. Register at least
 one font face before rendering. With the `raster` feature enabled, `render_png`
-produces PNG bytes and reads embedded images from the presentation.
+produces PNG bytes and reads embedded images from the presentation. SVG pictures
+are drawn without text, embedded raster images, markers, filters, masks or
+patterns: a hyperlink or an embedded image leaves the rest of the picture drawn,
+and any other element outside the drawn set leaves the picture undrawn.
 
 PPTX saves preserve untouched parts and patch edited slides to retain unsupported
 XML. The ZIP container is rebuilt, so the complete file may differ byte for byte.

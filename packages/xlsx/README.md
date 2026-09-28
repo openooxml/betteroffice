@@ -129,16 +129,13 @@ if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
   in a minor release. `source` records provenance only. Volatile functions see
   only `calculation.nowSerial`.
 - Versions and sheet ids are session-scoped; standalone sheet ids are
-  positional, so each is valid only for the version it was read at. Batches do
-  not insert or delete rows, columns or sheets, merge cells or move charts, and
-  refuse writes to merged-cell followers, array-formula cells and protected
-  sheets.
+  positional, so each is valid only for the version it was read at.
 
 ## Structured export
 
 XLSX exports bounded sparse worksheet content and Markdown with positional
 anchors, formulas, stored values, formatted text, explicit hidden-content
-options, and omission diagnostics. Export does not recalculate formulas:
+options, and omission diagnostics. Export reads stored values:
 
 ```ts
 const result = workbook.exportStructured({ scope: [{ sheet: 0, range: "A1:D20" }] });
@@ -176,8 +173,6 @@ const fromBytes = await exportXlsxStructured(bytes); // no session, no clock
   `includeHiddenNames`), with a `hidden-content-excluded` diagnostic. A sheet
   whose visibility is unknown, such as one from a model handed in without its
   package, counts as hidden.
-  Comments, rich-text runs, conditional formatting, pivot tables and unreadable
-  charts are diagnosed, not exported.
 - `maxCells` (default 100,000) and `maxBytes` (default 8 MiB) stop at a complete
   record with `truncated: true` and a `truncated` diagnostic; an absent cell is
   empty only before that point. Scope refusals (`invalid-scope`,

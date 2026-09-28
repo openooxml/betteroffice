@@ -154,16 +154,8 @@ out of undo history and existing undo and redo entries in place;
 Refusals carry a `code` (`stale-version`, `missing-target`, `ambiguous-target`,
 `content-mismatch`, `overlapping-steps`, `unsupported`, `invalid-step`,
 `limit-exceeded`), the failing `stepIndex` and the target; malformed requests
-throw, and so do NaN or infinite numbers. Current limits: text steps leave
-fields and soft line breaks whole, and a batch refuses when saving could turn a
-field into plain text, which it can rule out only while every field is non-empty
-and sits in the paragraph's unchanged leading or trailing text; a paragraph's alignment and its
-text cannot change in one batch; slides, shapes and paragraphs are neither
-created nor removed; a batch holds at most 128 steps and 1,048,576 inserted
-UTF-16 units; requests hold at most 16 MiB of JSON and reads and searches return
-at most 64 MiB, searches marking the cut with `truncated`. Slide, shape, story and paragraph
-ids anchor targets within one session only, and versions from one session
-never match another.
+throw, and so do NaN or infinite numbers. Slide, shape, story and paragraph
+ids and versions are session-scoped.
 
 ## Structured export
 
@@ -198,8 +190,9 @@ zero-width placeholders for inline content such as equations. Tables keep their
 grid, spans and merge continuations with each cell's current story. Pictures,
 video, audio, charts, SmartArt, embedded objects and shape-tree elements the
 deck model does not hold become placeholders with their alternative text and
-relationships; their data is never exported. Layout and master content is not
-exported, and an empty placeholder never shows its prompt text.
+relationships; their data is never exported. Each slide exports its own shapes,
+an empty placeholder as empty; layout and master shapes drawn on it are reported
+with an `inherited-content-omitted` diagnostic.
 
 Every record carries an anchor: `range` anchors are batch text targets in the
 story offsets of `readContent()`, so a session export's `range` anchor can be a
@@ -302,7 +295,7 @@ and operation types until `handle.addUndoBoundary()`. The getter
 the current group and preserves history; setting the same mode is a no-op.
 Auto preserves the existing policy (500 ms capture on native targets, separate
 transactions in the browser). Remote and agent origins remain outside local
-undo. These controls group history; they do not make edits atomic.
+undo. These controls group history; edit batches make edits atomic.
 
 `handle.anchorCaret(storyId, index)` returns a caret anchor, plain data that
 later edits, undo, redo and remote updates carry along with the text;

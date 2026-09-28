@@ -46,10 +46,7 @@ which drives the canvas replayer and `canvas.toBlob()` instead.
 A picture whose bytes are SVG is rasterized natively with resvg/usvg instead of
 the `image` crate. It draws shapes, paths, fills, strokes, linear and radial
 gradients, clip paths, `<use>` and `<symbol>` instances, and stylesheets of
-plain type, class and id rules. It does not draw text (`usvg`'s text feature is
-off), embedded raster images (both href resolvers return `None`), markers,
-filters, masks or patterns. A hyperlink or an embedded image leaves the rest of
-the picture drawn; any other element outside that set declines the document.
+plain type, class and id rules.
 
 The sandbox holds every decode to one envelope, `SVG_MEMORY_ENVELOPE` (100 MiB
 beyond the output raster and its layers) and `SVG_TIME_ENVELOPE` (about a

@@ -37,12 +37,10 @@ read at. `apply_edits` resolves every step of an `EditRequest` against its
 publishing the update only after recalculation, or returns an `EditRefusal`
 with the workbook, history and proposals untouched. `validate_edits` stages and
 rehearses the same batch without adopting it. Steps set cell inputs, formulas,
-number formats and style patches; they do not insert or delete rows, columns or
-sheets, and refuse writes to merged-cell followers, array-formula cells and
-protected sheets. The request and outcome types serialize to the JSON the
-JavaScript and Python bindings share; `read_cells_json`, `find_text_json`,
-`validate_edits_json` and `apply_edits_json` are those bindings' entry points,
-refusing requests over `MAX_REQUEST_BYTES` and results over
+number formats and style patches. The request and outcome types serialize to
+the JSON the JavaScript and Python bindings share; `read_cells_json`,
+`find_text_json`, `validate_edits_json` and `apply_edits_json` are those
+bindings' entry points, refusing requests over `MAX_REQUEST_BYTES` and results over
 `MAX_RESPONSE_BYTES` with `limit-exceeded`. A `recalculate_all` that changes
 values, or what a structured export reports about results, moves `version()` and
 notifies observers with an empty `UpdateOrigin::Recalculation` event, which

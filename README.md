@@ -75,7 +75,7 @@
 
 ### Diagrams (`.vsdx`, source preview)
 
-VSDX support is available from source and is not yet published.
+VSDX packages build from this repository; see the [VSDX guide](https://docs.betteroffice.dev/docs/vsdx).
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
@@ -123,7 +123,7 @@ Page agreement is reported on its own because a document either paginates as Wor
 <tr><td>Parse success</td><td align="right">99.52%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
-For scoring, timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
+For how scores, timings and coverage are measured, see the [benchmark methodology](scripts/office-quality/README.md).
 
 <!-- END GENERATED VISUAL FIDELITY -->
 

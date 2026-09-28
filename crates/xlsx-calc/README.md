@@ -111,9 +111,8 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 
 Serial ↔ calendar math is the Excel **1900 system including the deliberate leap
 bug** (serial 60 = the phantom 1900-02-29), matching `xlsx_model::date`. The
-workbook's date system reaches the evaluator as `EvalContext::date_system`;
-`TEXT` formats dates in it, while the date functions above still compute in the
-1900 system.
+workbook's date system reaches the evaluator as `EvalContext::date_system`, and
+`TEXT` formats dates in it.
 
 ### Logical
 
@@ -137,7 +136,7 @@ workbook's date system reaches the evaluator as `EvalContext::date_system`;
 | `XLOOKUP(value, lookup, return, [if_not_found], …)` | **Exact match only**; match/search modes beyond exact are not yet implemented. |
 | `CHOOSE(index, …)` | Only the chosen argument is evaluated. |
 | `TRANSPOSE(array)` | Swaps rows and columns of an array or range; blanks transpose to `0`. |
-| `ROW` / `COLUMN([ref])` | The reference's top-left position; with no reference, the calling cell's own. A context built without a calling cell (`EvalContext::new`) still answers `#VALUE!` to the no-arg form. |
+| `ROW` / `COLUMN([ref])` | The reference's top-left position; with no reference, the calling cell's own. |
 | `ROWS` / `COLUMNS(area)` | Dimension counts; the area is required. |
 
 ### Information
@@ -175,31 +174,24 @@ with `~` escaping a literal `*`, `?`, or `~`.
   code units. This differs only for astral (supplementary-plane) characters.
 - **`SEARCH`, and `VLOOKUP` / `HLOOKUP` / `MATCH` in exact mode**, do not
   implement wildcards yet.
-- **1904 date system**: only `TEXT` honours it; the date functions compute in
-  the 1900 system (see Date & time).
-- **`RAND`** is not implemented; **`RANDBETWEEN`** is, and draws from
+- **`RANDBETWEEN`** draws from
   `EvalContext::rand_seed` — pin it before the first draw and the sequence
   replays exactly. Left `None`, each context takes a fresh stream from a
   process-local counter, so sibling cells differ and every recalc re-draws,
-  while a process that evaluates in the same order replays the same draws. The
-  seed is not reachable through `CalculationOptions` yet, so a render harness
-  that needs pinned output has to construct its own `EvalContext`. Volatility
-  itself is handled generically by the dependency graph.
+  while a process that evaluates in the same order replays the same draws.
+  Volatility itself is handled generically by the dependency graph.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
 - **Array results** spill from a dynamic-array anchor into the cells beside
   it and report `#SPILL!` when an authored value or formula is in the way.
   Array evaluation is charged against the recalculation budget, and a formula
   that exceeds it keeps its cached value.
-- **`ROW` / `COLUMN`** with no reference answer the calling cell's own position.
-  Recalculation supplies it; a context built directly by `EvalContext::new`
-  leaves `cell` unset and those forms stay `#VALUE!`.
+- **`ROW` / `COLUMN`** with no reference answer the calling cell's own position,
+  which recalculation supplies.
 - **`ROW` / `COLUMN` / `ROWS` / `COLUMNS` of a direct reference** are positional
   queries, not value reads, so they contribute no dependency edge: `ROW($X$1)`
   written in `$X$1` is not a cycle. A computed argument
-  (`ROW(OFFSET(A1,B1,0))`) is still walked for the cells it reads. A **defined
-  name** counts as a direct reference, so `ROW(MyName)` is not expanded: a name
-  bound to a computed reference keeps no edge to what that reference reads.
+  (`ROW(OFFSET(A1,B1,0))`) is still walked for the cells it reads.
 - **`OFFSET` in scalar context** follows the evaluator's no-implicit-intersection
   rule: a multi-cell result is `#VALUE!`, exactly as a bare `A1:A5` would be.
 - **`OFFSET`'s anchor** gives coordinates, never a value, so it is no more a
@@ -210,7 +202,6 @@ with `~` escaping a literal `*`, `?`, or `~`.
   When any of them is computed, the target is unknowable before evaluation, so
   the calling cell is marked volatile and re-evaluates on every recalc (Excel
   treats *every* `OFFSET` this way). Volatility guarantees the cell is never
-  skipped; it does not order the cell after a target it has no static edge to,
-  so a same-pass write to that target may be read one recalc late.
+  skipped.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

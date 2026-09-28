@@ -234,7 +234,7 @@ impl Document {
 
     /// Lists the content controls of the current model in document order. Control ids and
     /// anchors address the returned snapshot; controls whose source content no longer matches
-    /// the opened package cannot be shown fillable. Filling needs an editing session.
+    /// the opened package cannot be shown fillable. An editing session fills them.
     pub fn list_content_controls(
         &self,
         options: &ContentControlsOptions,

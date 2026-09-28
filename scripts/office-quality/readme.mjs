@@ -176,7 +176,7 @@ ${table('pptx')}
 
 ${table('xlsx')}
 
-For scoring, timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
+For how scores, timings and coverage are measured, see the [benchmark methodology](scripts/office-quality/README.md).
 
 ${END}`;
 }

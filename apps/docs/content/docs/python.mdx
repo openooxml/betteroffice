@@ -91,6 +91,9 @@ if not result["ok"]:
     print(result["failure"]["code"])   # e.g. "stale-version"
 ```
 
+Batches do not insert or delete rows, columns or sheets, and refuse writes to
+merged-cell followers, array-formula cells and protected sheets.
+
 ## Structured export
 
 `export_structured` and `export_markdown` return a workbook's sparse cells,

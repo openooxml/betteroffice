@@ -66,8 +66,7 @@ paragraphs with the bounded LCS from
 [betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff),
 and applies each supported difference to the original's session as a rich
 tracked replacement in one batch; anything else is diagnosed and refuses the
-comparison. The saved result is verified against both inputs. It has no native
-entry point yet.
+comparison. The saved result is verified against both inputs.
 
 Used by [betteroffice-docx](https://crates.io/crates/betteroffice-docx).
 

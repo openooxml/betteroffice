@@ -414,7 +414,7 @@ export interface ShapePrimitive extends PrimitiveBase {
   name: string;
   geometry: string;
   path: GeometryPathCommand[];
-  /** An unsupported outline or clip was replaced by a rectangle. */
+  /** The authored outline or clip draws as a rectangle. */
   geometryFallback?: boolean;
   clip?: GeometryPathCommand[];
   evenOdd?: boolean;
@@ -451,7 +451,7 @@ export interface ImagePrimitive extends PrimitiveBase {
   tile?: { scaleX: number; scaleY: number };
   /** Outline the picture is masked to, when its `spPr` gives it one. */
   path?: GeometryPathCommand[];
-  /** The authored mask is unsupported and uses a rectangle fallback. */
+  /** The authored mask draws as a rectangle. */
   geometryFallback?: boolean;
   stroke?: Stroke;
   shadow?: Shadow;

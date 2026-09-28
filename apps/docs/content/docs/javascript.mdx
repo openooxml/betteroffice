@@ -598,7 +598,14 @@ and `applyEdits` on its ref, flushing pending input first. Paragraph and style
 steps need a session opened from DOCX bytes, inline atoms cannot be replaced, and
 list numbering is a v1 limitation: numbered paragraphs and styles that define or
 inherit numbering refuse with `unsupported` until a follow-up retains numbering
-definitions.
+definitions. Steps also refuse content-locked controls, existing tracked changes
+they would touch (tracked run formatting included) and pending paragraph-mark
+revisions; paragraph and style steps cannot be suggested, and an inserted
+paragraph takes only its style's defaults, so it is never numbered. Deleting a
+span that holds tables, controls, section breaks, opaque XML, fields' cached
+results, or comments and bookmarks crossing it refuses, as does a step after
+which saving would move an opaque XML block; a batch holds at most 128 steps,
+1,048,576 inserted UTF-16 units and 1,024 new paragraphs.
 
 ## Edit PPTX in version-checked batches
 
@@ -637,7 +644,13 @@ outline. Fields and soft line breaks are never replaced or deleted. Ids and
 versions belong to one open session. `PptxEditor` exposes the same
 `readContent`, `findText`, `validateEdits` and `applyEdits` on its editor API,
 flushing pending input first. The Rust `Presentation` and the Python binding
-take the same requests.
+take the same requests. A batch refuses when saving could turn a field into
+plain text, which it rules out only while every field is non-empty and sits in
+its paragraph's unchanged leading or trailing text; a paragraph's alignment and
+text cannot change in one batch, and slides, shapes and paragraphs are neither
+created nor removed. A batch holds at most 128 steps and 1,048,576 inserted
+UTF-16 units, requests at most 16 MiB of JSON, and reads and searches return at
+most 64 MiB, searches marking the cut with `truncated`.
 
 ### PPTX structured export
 
@@ -737,6 +750,8 @@ const { markdown, anchors } = await exportDocxMarkdown(bytes, {
 selects headers, footers, footnotes, endnotes or comments; omitted stories,
 formatting and revision content are listed in `diagnostics`. Ranges use the edit
 batch offsets (UTF-16, one U+FFFC per inline atom) in the view they name.
+A list number its format cannot write, such as a Roman numeral past 3,999, is
+drawn and exported without a marker, with an `unsupported-numbering` diagnostic.
 Fields export their cached result and are never evaluated; images export alt
 text and relationship metadata, not image data. On a live session,
 `session.exportStructured(options)` and `session.exportMarkdown(options)` return
@@ -850,7 +865,10 @@ the number format and merge membership; formula results are stored values
 marked `unverified`, `missing` (the file stored none and nothing has calculated
 since), `uncertain`, `cycle` or `limited`. Sheets also list merges,
 tables, hyperlinks, hidden row and column spans, and drawing objects as
-placeholders; defined names are listed read-only. Anchors are sheet index, sheet
+placeholders; defined names are listed read-only. Comments, rich-text formatting
+runs (the text is exported), sheet features such as conditional formatting, data
+validation and pivot tables, and unreadable charts, which stay placeholders, are
+diagnosed rather than exported. Anchors are sheet index, sheet
 name and A1 in that version or snapshot, not identities that survive structural
 edits. `maxCells` and `maxBytes` stop at a complete record with `truncated`.
 Markdown renders one labelled grid per sheet (200 rows, 50 columns and 10,000
@@ -895,7 +913,9 @@ tags are the template author's names. Checkbox, dropdown and date controls keep
 `setContentControlValue`; passing a string to it fills a text control the same
 way. The React editor exposes `listContentControls` and `findContentControls` on
 its ref. Filling needs a session opened from DOCX bytes; rich-text run input is
-not supported yet.
+not supported yet. Controls the session does not hold as controls, such as those
+in text boxes, are left out as a coverage gap (`complete: false`), and while one
+exists, tag and `ooxmlId` fills refuse with `provenance-unavailable`.
 
 ## Compare DOCX files into tracked changes
 

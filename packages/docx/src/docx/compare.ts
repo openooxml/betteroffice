@@ -3,7 +3,7 @@
  * structure is compared; anything else refuses with diagnostics, never a partial redline.
  */
 
-/** Bounds a comparison enforces. The defaults are the v1 ceilings; callers may only tighten them. */
+/** Bounds a comparison enforces. The defaults are the largest values allowed; callers may tighten them. */
 export interface DocxCompareLimits {
   /** Bytes of each input package. Default 32 MiB. */
   maxInputBytes: number;

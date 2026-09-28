@@ -39,14 +39,13 @@ as read-only structured content or Markdown with source anchors, and
 `render_docx_markdown` renders exported content. `ExportOptions` requires a
 `RevisionView` and selects stories (the body by default); omitted and
 unsupported content is listed in the content's diagnostics, and options out of
-range return `Error::Export`. `Document` exports do not yet generate page maps;
-`betteroffice-docx-edit`'s `EngineSession` attaches one to a layout it computed
-itself.
+range return `Error::Export`. `betteroffice-docx-edit`'s `EngineSession`
+attaches a page map to a layout it computed itself.
 
 `list_content_controls` and `find_content_controls` list the content controls of
 the current model, edits included, with their tag, alias, type, lock, placement,
 anchor and current text; ids and anchors address the returned snapshot. Filling
-controls needs an `EditingDoc` session; the facade does not fill them yet.
+controls needs an `EditingDoc` session.
 
 ## Rendering
 

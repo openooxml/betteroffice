@@ -137,8 +137,7 @@ an ambiguous comment reference. The change is replicated, stays out of undo hist
 and later saves keep it; a save whose stories are otherwise unchanged patches the IDs
 into the source bytes. `session.paragraphIdentities()` lists each paragraph's session,
 persisted and exact-source anchors. A persisted anchor is scoped to the document the
-host chose, repeated source IDs resolve as `ambiguous`, and table, cell and
-content-control identities are not persisted.
+host chose, and repeated source IDs resolve as `ambiguous`.
 
 ### Selection state
 
@@ -215,21 +214,8 @@ An applied batch is exactly one undo step in both capture modes; pass
 and redo entries. `source: 'agent'` records provenance only. Add
 `suggest: { author, date }` to a text step to record it as a tracked change.
 
-Current limits: text targets stay within one paragraph; inline atoms cannot be
-replaced or deleted; content-locked controls, existing tracked changes a step
-would touch (including tracked run formatting), and pending paragraph-mark
-revisions refuse. Paragraph and style steps need a session opened from DOCX
-bytes (`openDocx`/`seedFromDocx`) and cannot be suggested. Inserting or
-restyling a paragraph with a style that defines or inherits list numbering
-refuses with `unsupported`, as does restyling a paragraph that is already numbered. An
-inserted paragraph takes only its style's defaults, so it is not numbered even
-next to a list item numbered by direct formatting. Deleting spans that hold tables,
-controls, section breaks, opaque XML, fields' cached results, or comments and
-bookmarks crossing the span refuses, as does any step after which saving would
-move an opaque XML block, such as one that precedes a table. A batch holds at most 128 steps,
-1,048,576 inserted UTF-16 units and 1,024 new paragraphs. Paragraph ids are
-session keys; inserted paragraphs get Word paragraph IDs as typed ones do, so
-`saveYrsDocx` returns persisted anchors for them.
+Paragraph ids are session keys; inserted paragraphs get Word paragraph IDs as
+typed ones do, so `saveYrsDocx` returns persisted anchors for them.
 
 ### Structured export
 
@@ -267,11 +253,10 @@ of paragraphs, headings (outline level and whether it came from direct formattin
 the style chain, document defaults or a `HeadingN` style id), list items (numbering
 format and the rendered marker, counted as Word counts them: numbering instances of
 one abstract definition continue each other unless one overrides a start and so
-begins its own list, levels begin at `w:start` and restart as `w:lvlRestart` says,
-and a number a format cannot write, such as a Roman numeral past 3,999, is left
-unresolved with a diagnostic), tables on the source grid with spans, skipped grid columns
-and vertical-merge continuations, content controls, section breaks, and
-placeholders for content v1 does not represent. Inlines cover text, tabs, line,
+begins its own list, levels begin at `w:start` and restart as `w:lvlRestart` says),
+tables on the source grid with spans, skipped grid columns and vertical-merge
+continuations, content controls, section breaks, and placeholders naming the
+source element of other content. Inlines cover text, tabs, line,
 page and column breaks where the source has them, note and comment references,
 fields with their cached result in result order, hyperlinks and nested fields
 included, all anchored to the field (never evaluated; a numeric field's result
@@ -375,13 +360,13 @@ fragments list their row window with `continuedFromPrevious`, `continuedOnNext`
 and `repeatedHeader`, and each cell paragraph has fragments of its own for the lines
 its cell shows (a line the cell cuts through is listed with a `clipped-content`
 diagnostic). Pages are
-laid out with revision markup, so `accepted` and `original` are refused with
-`unsupported-revision-layout` while any laid-out story holds pending revisions.
-Refusals also cover `stale-document`, `stale-layout` (stale section, settings or
-note metadata, fonts, options or `expectLayoutVersion`), `layout-unavailable`,
-`layout-not-converged` and `unsupported` for a footnote the layout places away from
-its reference in a split table row; a note too tall for its page's note area is
-diagnosed `unsupported-note-layout` rather than placed.
+laid out with revision markup, so while a laid-out story holds pending revisions a
+paged export reads the `markup` view, and `accepted` or `original` return
+`unsupported-revision-layout`. The other refusal codes are `stale-document`,
+`stale-layout` (stale section, settings or note metadata, fonts, options or
+`expectLayoutVersion`), `layout-unavailable`, `layout-not-converged` and
+`unsupported`; a note taller than its page's note area carries an
+`unsupported-note-layout` diagnostic.
 Geometry is off by default; rectangles are unzoomed CSS pixels (96 per inch) from
 the physical page's top-left corner. `maxFragments` (100,000 by default) and
 `maxLayoutBytes` bound the map separately and mark it `truncated`; mapping stops a
@@ -461,8 +446,7 @@ was not opened from DOCX bytes), `unsupported-story` (a control kept only in
 source XML, such as a comment body), `multiline-not-allowed` and `invalid-text`.
 Checkbox, dropdown and date controls keep `setContentControlValue`; a
 string passed to it fills a text control through the same step, and
-`clearContentControlValue` never erases a text control's text. Explicit rich-text
-runs are not supported yet.
+`clearContentControlValue` never erases a text control's text.
 
 ### Compare documents into tracked changes
 
@@ -486,7 +470,7 @@ if (result.ok) {
 }
 ```
 
-Only text inside body paragraphs whose structure is unchanged is compared. Both
+`compareDocx` compares the text of body paragraphs whose structure is unchanged. Both
 packages are inspected in full before anything is authored, and any blocking
 difference refuses the comparison with `{ ok: false, diagnostics }`; no partial
 redline is ever returned. `unsupported: 'report'` keeps inspecting and returns
@@ -537,8 +521,7 @@ counted across every story while the parts are read, 250,000 alignment cells,
 4,000,000 diff cells, 128 changes, 256 diagnostics, 64 MiB of staged state,
 8 MiB of result JSON without the output package (at least 1 KiB) and a 64 MiB
 output, the no-op included.
-Review in BetterOffice is tested; Word validation is reported separately.
-Native Rust and Python comparison is not available yet.
+Review in BetterOffice is tested.
 
 ### Editor plugin contract (deprecated)
 
@@ -622,4 +605,4 @@ check; passing a number to it retains body mapping.
 
 Text runs and their editable content boxes are accepted. Page margins, images,
 page gaps, points outside pages, and queries without ready canvas geometry return
-`null`. The accessibility mirror backend does not support this query.
+`null`.

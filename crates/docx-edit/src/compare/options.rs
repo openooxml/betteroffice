@@ -1,4 +1,4 @@
-//! Comparison options and the limits a caller may tighten below the v1 ceilings.
+//! Comparison options and the limits a caller may tighten below their defaults.
 
 use serde::{Deserialize, Serialize};
 
@@ -71,7 +71,7 @@ pub(crate) struct CompareLimits {
 
 const MIB: usize = 1024 * 1024;
 
-/// The v1 ceilings, which are also the defaults.
+/// The default limits, which a caller may only tighten.
 pub(crate) const CEILINGS: CompareLimits = CompareLimits {
     max_input_bytes: 32 * MIB,
     max_expanded_bytes: 128 * MIB,
