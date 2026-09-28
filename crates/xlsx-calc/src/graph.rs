@@ -38,7 +38,7 @@ impl NodeKey {
 /// edit; cells calling them re-evaluate on every recalc. OFFSET joins them per
 /// call site, but only where its target is not statically resolvable; INDIRECT
 /// always does, since its target is a string the graph cannot read.
-const VOLATILE_FNS: [&str; 5] = ["TODAY", "NOW", "RAND", "RANDBETWEEN", "INDIRECT"];
+pub(crate) const VOLATILE_FNS: [&str; 5] = ["TODAY", "NOW", "RAND", "RANDBETWEEN", "INDIRECT"];
 
 pub struct DepGraph {
     /// sheet name -> id, snapshot at build time.

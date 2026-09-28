@@ -2,12 +2,15 @@
 //! from the formula alone so that no input changes the answer.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use xlsx_model::{
     ArraySize, Cell, CellProvider, CellRange, CellRef, CellValue, ErrorValue, MAX_SPILL_CELLS,
     SheetId, Workbook,
 };
 
+use crate::array::evaluate_spill;
+use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS};
 use crate::parser::{Expr, parse_formula};
 
 /// name references one [`Capability`] visits before it answers no for
@@ -25,8 +28,8 @@ pub fn evaluable(wb: &Workbook, sheet: SheetId, formula: &str) -> bool {
 /// Decides, once, which of a workbook's arrays the engine can evaluate. Each
 /// such array takes the cells its file cached beside its anchor for its
 /// result; every other array is opaque and keeps them as stored cells. An
-/// opaque array whose anchor holds no cached value shows `#NAME?` over its
-/// recorded rectangle, stored the same way.
+/// opaque array whose anchor holds no cached value gets what it shows stored
+/// over its recorded rectangle the same way.
 pub fn classify_arrays(wb: &mut Workbook) {
     let mut capability = Capability::new(wb);
     let mut decisions = Vec::new();
@@ -53,55 +56,74 @@ pub fn classify_arrays(wb: &mut Workbook) {
     fill_uncached(wb);
 }
 
-/// Shows each opaque array whose anchor holds no cached value as Excel shows
-/// an array it cannot evaluate, `#NAME?` over its recorded rectangle, in
-/// stored cells. Nothing is evaluated, so identical bytes always read the
-/// same. At most [`MAX_SPILL_CELLS`] cells are filled per workbook; anchors
-/// past that show it in the anchor alone.
+/// Stores what each opaque array whose anchor holds no cached value shows,
+/// over its recorded rectangle. A formula that can read neither the clock nor
+/// a random number, in any branch or name, is evaluated once against the
+/// workbook as read, within one recalculation's budget and with its date
+/// system, a function the engine lacks yielding `#NAME?` as it would at
+/// runtime; identical bytes therefore always read the same. Any other, and
+/// one the budget refuses, shows `#NAME?`, as Excel shows an array it cannot
+/// evaluate. At most [`MAX_SPILL_CELLS`] cells are filled per workbook;
+/// anchors past that fill the anchor alone.
 fn fill_uncached(wb: &mut Workbook) {
-    let name = CellValue::Error {
-        value: ErrorValue::Name,
-    };
     let mut room = MAX_SPILL_CELLS;
-    for sheet in &mut wb.sheets {
-        let uncached: Vec<(CellRef, CellRange)> = sheet
-            .array_definitions()
-            .filter(|(anchor, definition, _)| {
-                definition.is_opaque()
-                    && sheet.cell(*anchor).is_some_and(|cell| {
-                        cell.formula.is_some() && matches!(cell.value, CellValue::Empty)
-                    })
-            })
-            .map(|(anchor, definition, _)| (anchor, definition.entered(anchor)))
-            .collect();
-        for (anchor, rectangle) in uncached {
-            let size = ArraySize::of(rectangle);
+    let mut capability = Capability::new(wb);
+    let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
+    let mut fills: Vec<(usize, CellRef, CellRange, Vec<CellValue>)> = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        for (anchor, definition, _) in sheet.array_definitions() {
+            let Some(formula) = sheet
+                .cell(anchor)
+                .filter(|cell| matches!(cell.value, CellValue::Empty))
+                .and_then(|cell| cell.formula.as_deref())
+                .filter(|_| definition.is_opaque())
+            else {
+                continue;
+            };
+            let recorded = definition.entered(anchor);
+            let size = ArraySize::of(recorded);
             let cells = size.rows as usize * size.cols as usize;
             let rectangle = if cells <= room {
                 room -= cells;
-                rectangle
+                recorded
             } else {
                 CellRange::new(anchor, anchor)
             };
-            for row in rectangle.start.row..=rectangle.end.row {
-                for col in rectangle.start.col..=rectangle.end.col {
-                    let at = CellRef::new(row, col);
-                    let stored = sheet.cell(at).cloned().unwrap_or_default();
-                    let free = matches!(stored.value, CellValue::Empty)
-                        && stored
-                            .formula
-                            .as_deref()
-                            .is_none_or(|formula| formula.trim().is_empty());
-                    if (row, col) == (anchor.row, anchor.col) || free {
-                        sheet.set_cell(
-                            at,
-                            Cell {
-                                value: name.clone(),
-                                ..stored
-                            },
-                        );
-                    }
-                }
+            let sheet_id = SheetId(index as u32);
+            let evaluated = capability
+                .deterministic(sheet_id, formula)
+                .then(|| parse_formula(formula).ok())
+                .flatten()
+                .and_then(|expr| {
+                    let mut ctx = EvalContext::with_budget(&*wb, sheet_id, Rc::clone(&budget));
+                    ctx.cell = Some(anchor);
+                    ctx.date_system = wb.date_system;
+                    let spill = evaluate_spill(&expr, &ctx, anchor, Some(rectangle));
+                    (!ctx.has_unhandled_budget_error()).then_some(spill.values)
+                });
+            let name = CellValue::Error {
+                value: ErrorValue::Name,
+            };
+            let positions = ArraySize::of(rectangle);
+            let values = evaluated
+                .unwrap_or_else(|| vec![name; positions.rows as usize * positions.cols as usize]);
+            fills.push((index, anchor, rectangle, values));
+        }
+    }
+    for (index, anchor, rectangle, values) in fills {
+        let sheet = &mut wb.sheets[index];
+        let positions = (rectangle.start.row..=rectangle.end.row).flat_map(|row| {
+            (rectangle.start.col..=rectangle.end.col).map(move |col| CellRef::new(row, col))
+        });
+        for (at, value) in positions.zip(values) {
+            let stored = sheet.cell(at).cloned().unwrap_or_default();
+            let free = matches!(stored.value, CellValue::Empty)
+                && stored
+                    .formula
+                    .as_deref()
+                    .is_none_or(|formula| formula.trim().is_empty());
+            if (at.row, at.col) == (anchor.row, anchor.col) || free {
+                sheet.set_cell(at, Cell { value, ..stored });
             }
         }
     }
@@ -113,8 +135,27 @@ pub struct Capability<'a> {
     wb: &'a Workbook,
     names: HashMap<(Option<SheetId>, String), usize>,
     parsed: HashMap<usize, Option<Parsed>>,
-    decided: HashMap<Name, bool>,
+    decided: [HashMap<Name, bool>; 2],
     visits: usize,
+}
+
+/// what a walk over a formula and the names it reaches asks of each.
+#[derive(Clone, Copy)]
+enum Check {
+    /// every function is one the engine evaluates.
+    Supported = 0,
+    /// no function reads the clock, draws a random number or is otherwise
+    /// volatile to the engine.
+    Deterministic = 1,
+}
+
+impl Check {
+    fn holds(self, parsed: &Parsed) -> bool {
+        match self {
+            Check::Supported => parsed.supported,
+            Check::Deterministic => !parsed.volatile,
+        }
+    }
 }
 
 /// a defined name, by its index, with the sheet its unqualified references
@@ -124,6 +165,7 @@ type Name = (usize, SheetId);
 /// what a formula calls and names, gathered once.
 struct Parsed {
     supported: bool,
+    volatile: bool,
     names: Vec<(Option<String>, String)>,
 }
 
@@ -151,16 +193,28 @@ impl<'a> Capability<'a> {
             wb,
             names,
             parsed: HashMap::new(),
-            decided: HashMap::new(),
+            decided: [HashMap::new(), HashMap::new()],
             visits: 0,
         }
     }
 
     pub fn evaluable(&mut self, sheet: SheetId, formula: &str) -> bool {
+        self.check(sheet, formula, Check::Supported)
+    }
+
+    /// whether nothing `formula`, on `sheet`, could run, in any branch or
+    /// defined name it reaches, reads the clock, draws a random number or is
+    /// otherwise volatile to the engine, so evaluating it twice over the same
+    /// cells gives the same result.
+    pub fn deterministic(&mut self, sheet: SheetId, formula: &str) -> bool {
+        self.check(sheet, formula, Check::Deterministic)
+    }
+
+    fn check(&mut self, sheet: SheetId, formula: &str, check: Check) -> bool {
         match parse_formula(formula) {
             Ok(expr) => {
                 let parsed = gather(&expr);
-                parsed.supported && self.names_evaluable(sheet, parsed.names)
+                check.holds(&parsed) && self.names_hold(sheet, parsed.names, check)
             }
             Err(_) => false,
         }
@@ -194,11 +248,17 @@ impl<'a> Capability<'a> {
             .as_ref()
     }
 
-    /// whether every defined name reachable from `names`, read on `sheet`, is
-    /// evaluable: a walk without recursion that settles each group of names
-    /// reaching one another once all of it is known, as Tarjan's algorithm
-    /// does, so a later formula reading any of them costs nothing.
-    fn names_evaluable(&mut self, sheet: SheetId, names: Vec<(Option<String>, String)>) -> bool {
+    /// whether every defined name reachable from `names`, read on `sheet`,
+    /// passes `check`: a walk without recursion that settles each group of
+    /// names reaching one another once all of it is known, as Tarjan's
+    /// algorithm does, so a later formula reading any of them costs nothing.
+    fn names_hold(
+        &mut self,
+        sheet: SheetId,
+        names: Vec<(Option<String>, String)>,
+        check: Check,
+    ) -> bool {
+        let decided = check as usize;
         let mut order: HashMap<Name, usize> = HashMap::new();
         let mut pending: Vec<Name> = Vec::new();
         let mut root = Frame {
@@ -223,9 +283,9 @@ impl<'a> Capability<'a> {
                 let Some(name) = self.resolve(from, scope, name) else {
                     continue;
                 };
-                match self.decided.get(&name) {
+                match self.decided[decided].get(&name) {
                     Some(true) => continue,
-                    Some(false) => return self.refuse(&stack),
+                    Some(false) => return self.refuse(&stack, decided),
                     None => {}
                 }
                 if let Some(&seen) = order.get(&name) {
@@ -233,14 +293,10 @@ impl<'a> Capability<'a> {
                     frame.low = frame.low.min(seen);
                     continue;
                 }
-                let Some(parsed) = self.parsed(name.0) else {
-                    self.decided.insert(name, false);
-                    return self.refuse(&stack);
+                let Some(parsed) = self.parsed(name.0).filter(|parsed| check.holds(parsed)) else {
+                    self.decided[decided].insert(name, false);
+                    return self.refuse(&stack, decided);
                 };
-                if !parsed.supported {
-                    self.decided.insert(name, false);
-                    return self.refuse(&stack);
-                }
                 let names = parsed.names.clone();
                 let at = order.len();
                 order.insert(name, at);
@@ -261,7 +317,7 @@ impl<'a> Capability<'a> {
             };
             if done.low >= done.order {
                 for name in pending.drain(done.start..) {
-                    self.decided.insert(name, true);
+                    self.decided[decided].insert(name, true);
                 }
             } else {
                 let parent = stack.last_mut().unwrap_or(&mut root);
@@ -269,15 +325,15 @@ impl<'a> Capability<'a> {
             }
         }
         for name in pending {
-            self.decided.insert(name, true);
+            self.decided[decided].insert(name, true);
         }
         true
     }
 
-    /// every name being expanded reaches what the engine lacks.
-    fn refuse(&mut self, stack: &[Frame]) -> bool {
+    /// every name being expanded reaches what fails the check.
+    fn refuse(&mut self, stack: &[Frame], decided: usize) -> bool {
         for frame in stack {
-            self.decided.insert(frame.name, false);
+            self.decided[decided].insert(frame.name, false);
         }
         false
     }
@@ -288,6 +344,7 @@ impl<'a> Capability<'a> {
 fn gather(expr: &Expr) -> Parsed {
     let mut parsed = Parsed {
         supported: true,
+        volatile: false,
         names: Vec::new(),
     };
     let mut bindings: Vec<(Option<usize>, &str)> = Vec::new();
@@ -299,6 +356,11 @@ fn gather(expr: &Expr) -> Parsed {
                     parsed.supported = false;
                 }
                 let binder = crate::functions::bare_name(name).to_ascii_uppercase();
+                if crate::graph::VOLATILE_FNS.contains(&binder.as_str())
+                    || matches!(binder.as_str(), "RANDARRAY" | "OFFSET")
+                {
+                    parsed.volatile = true;
+                }
                 let binds = match binder.as_str() {
                     "LET" => args.len() >= 3 && args.len() % 2 == 1,
                     "LAMBDA" => !args.is_empty(),
@@ -334,6 +396,7 @@ fn gather(expr: &Expr) -> Parsed {
                 pending.extend([(lhs.as_ref(), scope), (rhs.as_ref(), scope)])
             }
             Expr::RangeJoin { start, end } => {
+                parsed.volatile = true;
                 pending.extend([(start.as_ref(), scope), (end.as_ref(), scope)])
             }
             _ => {}
@@ -406,6 +469,30 @@ mod tests {
             ("SUM(", false),
         ] {
             assert_eq!(evaluable(&wb, SheetId(0), formula), expected, "{formula}");
+        }
+    }
+
+    /// a formula is deterministic only if nothing it could run, in a branch
+    /// no input takes or a name it reads, reads the clock, draws a random
+    /// number or is otherwise volatile to the engine.
+    #[test]
+    fn a_formula_is_deterministic_only_if_every_branch_is() {
+        let wb = workbook(&[("Clock", "NOW()"), ("Fixed", "SEQUENCE(3)")]);
+        let mut capability = Capability::new(&wb);
+        for (formula, expected) in [
+            ("IFERROR(_xlfn.FILTERXML(\"<a/>\",\"//b\"),\"\")", true),
+            ("Fixed*2", true),
+            ("IF(FALSE,RAND(),1)", false),
+            ("IF(FALSE,TODAY(),1)", false),
+            ("_xlfn.RANDARRAY(3)", false),
+            ("Clock+1", false),
+            ("LET(Clock,1,Clock)", true),
+        ] {
+            assert_eq!(
+                capability.deterministic(SheetId(0), formula),
+                expected,
+                "{formula}"
+            );
         }
     }
 

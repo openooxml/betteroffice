@@ -1051,24 +1051,46 @@ fn clearing_an_opaque_anchor_clears_its_cells_through_history() {
     same_replicas(&[&writer, &follower, &late]);
 }
 
-/// an opaque array whose file cached no result shows `#NAME?` over its
-/// recorded rectangle, as Excel shows an array it cannot evaluate, without
-/// evaluating anything: a branch the engine could compute, a random number or
-/// the clock read the same on every open, so replicas opened from the same
-/// bytes agree. those cells are stored, so an edit among them undoes like any
-/// other, on every replica, through a save.
+/// an opaque array whose file cached no result shows what it would show in
+/// Excel over its recorded rectangle, stored there: a formula that reads
+/// neither the clock nor a random number is evaluated once, a function the
+/// engine lacks giving `#NAME?` that `IFERROR` catches, and any other formula,
+/// or one the budget refuses, shows `#NAME?`. Replicas opened from the same
+/// bytes agree, and an edit among those cells undoes like any other, on every
+/// replica, through a save.
 #[test]
-fn an_uncached_opaque_array_is_stored_as_name_errors() {
+fn an_uncached_opaque_array_is_stored_as_it_first_shows() {
     let name = error(ErrorValue::Name);
-    let shown = [name.clone(), name.clone(), name.clone()];
-    for formula in [
-        r#"WEBSERVICE("https://example.com")"#,
-        r#"IF(A1,WEBSERVICE("https://example.com"),_xlfn.SEQUENCE(3,1,7))"#,
-        r#"IF(A1,WEBSERVICE("https://example.com"),RAND()+NOW())"#,
+    let empty = text("");
+    for (formula, shown) in [
+        (
+            r#"WEBSERVICE("https://example.com")"#,
+            [name.clone(), name.clone(), name.clone()],
+        ),
+        (
+            r#"IF(A1,WEBSERVICE("https://example.com"),_xlfn.SEQUENCE(3,1,7))"#,
+            [number(7.0), number(8.0), number(9.0)],
+        ),
+        (
+            r#"IFERROR(_xlfn.FILTERXML("<a/>","//b"),"")"#,
+            [empty.clone(), empty.clone(), empty.clone()],
+        ),
+        (
+            r#"IF(A1,WEBSERVICE("https://example.com"),RAND()+NOW())"#,
+            [name.clone(), name.clone(), name.clone()],
+        ),
+        (
+            r#"IF(A1,WEBSERVICE("https://example.com"),SUM(_xlfn.MAKEARRAY(10000,1,_xlfn.LAMBDA(r,c,SUM(_xlfn.SEQUENCE(1000000))))))"#,
+            [name.clone(), name.clone(), name.clone()],
+        ),
     ] {
         let rows = format!(
             r#"<row r="1"><c r="A1" t="b"><v>0</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">{}</f></c></row><row r="2"><c r="C2"><f/></c></row><row r="3"><c r="C3"><f/></c></row>"#,
-            formula.replace('"', "&quot;")
+            formula
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
         );
         for dynamic in [true, false] {
             let bytes = package(&rows, dynamic);
