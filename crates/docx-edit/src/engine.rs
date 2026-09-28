@@ -2514,7 +2514,8 @@ impl EngineSession {
 
     /// Build the retained display list and return a binary FrameDelta v1.
     /// `expected_frame_epoch` is the last frame the host actually applied. A
-    /// mismatch automatically widens to a full recovery frame.
+    /// mismatch automatically widens to a full recovery frame, and the new
+    /// frame's epoch always exceeds it, so a host switching engines can apply it.
     pub fn build_display_list_frame(
         &self,
         extras_json: &str,
@@ -2594,7 +2595,10 @@ impl EngineSession {
         };
         observe_display_phase();
         let mut display = self.display.borrow_mut();
-        display.frame_epoch = display.frame_epoch.wrapping_add(1);
+        display.frame_epoch = display
+            .frame_epoch
+            .max(expected_frame_epoch)
+            .wrapping_add(1);
         display.display_builds = display.display_builds.wrapping_add(1);
         display.incremental_display_builds = display
             .incremental_display_builds
@@ -4620,6 +4624,23 @@ mod tests {
             Vec::<(usize, String)>::new(),
             "absolute positions inside a table cell are ignored too"
         );
+    }
+
+    #[test]
+    fn recovery_frames_are_newer_than_the_frame_the_caller_holds() {
+        let engine = EngineSession::new(18);
+        engine
+            .layout_document_json(
+                r#"{"measured": [], "options": {"pageSize": {"w": 816, "h": 1056},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}}}"#,
+            )
+            .unwrap();
+        engine.build_display_list_frame("{}", 7).unwrap();
+        assert_eq!(engine.display.borrow().binary_frame_epoch, 8);
+        engine.build_display_list_frame("{}", 8).unwrap();
+        assert_eq!(engine.display.borrow().binary_frame_epoch, 9);
+        engine.build_display_list_frame("{}", 3).unwrap();
+        assert_eq!(engine.display.borrow().binary_frame_epoch, 10);
     }
 
     #[test]

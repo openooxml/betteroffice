@@ -26,7 +26,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-test('starts a fresh frame and query history after a worker with a higher epoch fails', async () => {
+test('continues the frame epochs after a worker with a higher epoch fails', async () => {
   const native = createEditSession(9101);
   native.create_story('body', 'Fallback text', 'Normal', 'left');
   const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
@@ -91,8 +91,8 @@ test('starts a fresh frame and query history after a worker with a higher epoch 
     });
     await waitFor(() => expect(expectedEpochs.length).toBeGreaterThan(0));
     await waitFor(() => expect(result.current.error).toBeNull());
-    expect(expectedEpochs[0]).toBe(0);
-    expect(result.current.frame?.frameEpoch).toBeLessThan(100);
+    expect(expectedEpochs[0]).toBe(100);
+    expect(result.current.frame?.frameEpoch).toBe(101);
     expect(result.current.loading).toBe(false);
     expect(result.current.workerSurfacesActive).toBe(false);
     expect(
@@ -230,6 +230,76 @@ test('falls back to the main thread and keeps the keystroke when the worker cras
     expect(
       errors.mock.calls.some(([message]) => String(message).includes('falling back to the main-thread engine'))
     ).toBe(true);
+    unmount();
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
+
+test('a layout after a worker crash the host cannot absorb as input still renders', async () => {
+  const native = createEditSession(9205);
+  native.create_story('body', 'Fallback text', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  const frame = native.build_display_list_frame(JSON.stringify(inputs), 0);
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setBigUint64(32, 100n, true);
+  let worker: InputFakeWorker | null = null;
+  class FakeWorker extends InputFakeWorker {
+    constructor() {
+      super(frame);
+      worker = this;
+    }
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const selection: YrsSelection = {
+    anchor: { story: 'body', paraId: 'p', offset: 0 },
+    head: { story: 'body', paraId: 'p', offset: 0 },
+  };
+  const engine = {
+    buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    buildDisplayListFrame: (input: string, epoch: number) =>
+      native.build_display_list_frame(input, epoch),
+    applyInput: () => {
+      throw new Error('resident input state is not ready for this paragraph');
+    },
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    onUpdate: () => () => {},
+    selection: () => selection,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const overrides = { getInputs: () => inputs };
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    await act(async () => {
+      worker!.replyBootstrap();
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(100));
+    let outcome: ResidentFrameApplyResult | null | undefined;
+    await act(async () => {
+      const pending = result.current.applyInput('QUACK');
+      await flushInputRequest(worker!);
+      worker!.crash();
+      outcome = await pending;
+    });
+    expect(outcome).toBeNull();
+    await act(async () => {
+      rerender({ layout: { ...inputs.layout } });
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBeGreaterThan(100));
+    expect(result.current.error).toBeNull();
+    expect(
+      errors.mock.calls.some(([message]) => String(message).includes('Rust display-list build failed'))
+    ).toBe(false);
     unmount();
   } finally {
     errors.mockRestore();

@@ -798,8 +798,13 @@ export interface YrsSession extends CollaborationReplica {
   residentCaretSnapshot(): YrsResidentCaretSnapshot;
   /** Apply a collapsed plain-text insertion and return its resident FrameDelta. */
   applyInput(text: string, expectedFrameEpoch: number): Uint8Array;
-  /** Apply a collapsed character deletion/paragraph merge and return its resident FrameDelta. */
-  applyDelete(direction: 'backward' | 'forward', expectedFrameEpoch: number): Uint8Array;
+  /**
+   * Apply up to `count` (default 1) collapsed character deletions/paragraph
+   * merges, lay out once, and return the resident FrameDelta.
+   */
+  applyDelete(direction: 'backward' | 'forward', expectedFrameEpoch: number, count?: number): Uint8Array;
+  /** Characters the last resident deletion removed; fewer than asked at a document boundary. */
+  residentDeletedUnits(): number;
   /** Instrumented apply used only by opt-in browser performance traces. */
   applyInputProfiled(
     text: string,
@@ -808,7 +813,8 @@ export interface YrsSession extends CollaborationReplica {
   /** Instrumented deletion used only by opt-in browser performance traces. */
   applyDeleteProfiled(
     direction: 'backward' | 'forward',
-    expectedFrameEpoch: number
+    expectedFrameEpoch: number,
+    count?: number
   ): { frame: Uint8Array; profile: YrsEngineApplyProfile };
   /** Snapshot the inputs needed to move resident layout ownership to a worker. */
   residentWorkerSnapshot(options?: YrsResidentWorkerSyncOptions): YrsResidentWorkerSnapshot | null;
@@ -1502,11 +1508,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty(selectionStory());
       return mutate(() => session.apply_input(text, expectedFrameEpoch));
     },
-    applyDelete: (direction, expectedFrameEpoch) => {
+    applyDelete: (direction, expectedFrameEpoch, count = 1) => {
       ensureUndo();
       markDirty(selectionStory());
-      return mutate(() => session.apply_delete(direction, expectedFrameEpoch));
+      return mutate(() => session.apply_delete(direction, expectedFrameEpoch, count));
     },
+    residentDeletedUnits: () => session.resident_deleted_units(),
     applyInputProfiled: (text, expectedFrameEpoch) => {
       ensureUndo();
       markDirty(selectionStory());
@@ -1514,10 +1521,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
-    applyDeleteProfiled: (direction, expectedFrameEpoch) => {
+    applyDeleteProfiled: (direction, expectedFrameEpoch, count = 1) => {
       ensureUndo();
       markDirty(selectionStory());
-      const frame = mutate(() => session.apply_delete_profiled(direction, expectedFrameEpoch));
+      const frame = mutate(() =>
+        session.apply_delete_profiled(direction, expectedFrameEpoch, count)
+      );
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },

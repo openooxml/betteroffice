@@ -42,23 +42,26 @@ export class EditSession {
      */
     add_undo_boundary(): void;
     /**
-     * Deletes one character at this session's collapsed selection and returns
-     * the resulting binary `FrameDelta`. `direction` is `"backward"` or
-     * `"forward"`; a surrogate pair is removed whole. At a paragraph boundary
-     * this merges with the neighbouring paragraph instead.
+     * Deletes up to `count` characters at this session's collapsed selection,
+     * lays out once, and returns the resulting binary `FrameDelta`.
+     * `direction` is `"backward"` or `"forward"`; a surrogate pair is removed
+     * whole. At a paragraph boundary a deletion merges with the neighbouring
+     * paragraph instead. Deleting stops early at the document start or end, or
+     * at a paragraph the resident state cannot absorb;
+     * [`EditSession::resident_deleted_units`] reports how many were removed.
      *
-     * Errors on an unknown `direction`, when `expected_frame_epoch` is not a
-     * non-negative safe integer, under the same selection and readiness
-     * conditions as [`EditSession::apply_input`], and when there is no
-     * character to delete in that direction (document start or end).
+     * Errors on an unknown `direction`, a zero `count`, when
+     * `expected_frame_epoch` is not a non-negative safe integer, under the
+     * same selection and readiness conditions as [`EditSession::apply_input`],
+     * and when there is no character to delete in that direction.
      */
-    apply_delete(direction: string, expected_frame_epoch: number): Uint8Array;
+    apply_delete(direction: string, expected_frame_epoch: number, count: number): Uint8Array;
     /**
      * Instrumented twin of [`EditSession::apply_delete`]: identical arguments,
      * result and error contract, but it also records stage timings for
      * [`EditSession::apply_input_profile_json`].
      */
-    apply_delete_profiled(direction: string, expected_frame_epoch: number): Uint8Array;
+    apply_delete_profiled(direction: string, expected_frame_epoch: number, count: number): Uint8Array;
     /**
      * Applies an edit batch all-or-nothing:
      * `{"ok":true,"baseVersion","version","applied","source","changedStories",
@@ -158,7 +161,8 @@ export class EditSession {
      * Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
      * a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
      * frame the caller currently holds; pass `0` for the first frame. A
-     * mismatch makes the engine emit a full frame instead of a delta. Errors
+     * mismatch makes the engine emit a full frame instead of a delta, and the
+     * returned frame's epoch is always greater than `expected_frame_epoch`. Errors
      * unless the epoch is a non-negative safe integer, and on build failure.
      */
     build_display_list_frame(input: string, expected_frame_epoch: number): Uint8Array;
@@ -709,6 +713,10 @@ export class EditSession {
      * geometry for it. `frameEpoch` identifies the frame the rect belongs to.
      */
     resident_caret_snapshot_json(): string;
+    /**
+     * Characters the last [`EditSession::apply_delete`] removed.
+     */
+    resident_deleted_units(): number;
     /**
      * Where a comment's sticky anchors currently sit:
      * `[{"story","start","end"}, …]`, one entry per anchored range, in
@@ -1297,8 +1305,8 @@ export interface InitOutput {
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_add_undo_boundary: (a: number) => void;
-    readonly editsession_apply_delete: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly editsession_apply_delete_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_apply_delete: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_apply_delete_profiled: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_apply_edits_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_apply_input: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_input_profile_json: (a: number) => [number, number];
@@ -1389,6 +1397,7 @@ export interface InitOutput {
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
+    readonly editsession_resident_deleted_units: (a: number) => number;
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
