@@ -131,12 +131,13 @@ fn fill_uncached(wb: &mut Workbook) {
 }
 
 /// [`evaluable`] for many formulas of one workbook, looking its defined names
-/// up by index and deciding each name, for the sheet it is read from, once.
+/// up by index and deciding each name, for the sheet it is read from and the
+/// bindings around it, once.
 pub struct Capability<'a> {
     wb: &'a Workbook,
     names: HashMap<(Option<SheetId>, String), usize>,
-    parsed: HashMap<usize, Option<Parsed>>,
-    decided: [HashMap<Name, bool>; 2],
+    parsed: HashMap<usize, Option<Rc<Parsed>>>,
+    decided: [HashMap<Node, bool>; 2],
     work: usize,
     limit: usize,
 }
@@ -160,24 +161,36 @@ impl Check {
     }
 }
 
-/// a defined name, by its index, with the sheet its unqualified references
-/// resolve against.
-type Name = (usize, SheetId);
+/// a defined name as the walk expands it: its index, the sheet its
+/// unqualified references resolve against, and the names bound where it is
+/// read, which the evaluator keeps bound inside it.
+type Node = (usize, SheetId, Rc<[String]>);
+
+/// a name a formula reads: the sheet qualifying it, if any, and the
+/// innermost of the formula's bindings around it.
+#[derive(Clone)]
+struct Reference {
+    scope: Option<String>,
+    name: String,
+    within: Option<usize>,
+}
 
 /// what a formula calls and names, gathered once: the names no `LET` or
-/// `LAMBDA` around them binds, and every name it reads, bound or not.
+/// `LAMBDA` in it binds, every name it reads, bound or not, and its bindings,
+/// each with the one around it.
 struct Parsed {
     supported: bool,
     volatile: bool,
-    names: Vec<(Option<String>, String)>,
-    every: Vec<(Option<String>, String)>,
+    names: Vec<Reference>,
+    every: Vec<Reference>,
+    bindings: Vec<(Option<usize>, String)>,
 }
 
 impl Parsed {
     /// the names `check` follows: a binding shadows a workbook name for
     /// evaluation, but whether a `LAMBDA` sees the binding around it depends
     /// on where it is called, so determinism follows every name.
-    fn names(&self, check: Check) -> &[(Option<String>, String)] {
+    fn names(&self, check: Check) -> &[Reference] {
         match check {
             Check::Supported => &self.names,
             Check::Deterministic => &self.every,
@@ -185,14 +198,14 @@ impl Parsed {
     }
 }
 
-/// one defined name being expanded: the names its formula reads, how far
-/// through them the walk is, where it sits among the names not yet settled,
-/// and the earliest name still being expanded that it reaches back to.
+/// one defined name being expanded: what its formula reads, how far through
+/// that the walk is, where it sits among the names not yet settled, and the
+/// earliest name still being expanded that it reaches back to.
 struct Frame {
-    name: Name,
+    node: Node,
     order: usize,
     start: usize,
-    names: Vec<(Option<String>, String)>,
+    parsed: Rc<Parsed>,
     next: usize,
     low: usize,
 }
@@ -234,12 +247,17 @@ impl<'a> Capability<'a> {
         else {
             return false;
         };
-        check.holds(&parsed) && self.names_hold(sheet, parsed.names(check).to_vec(), check)
+        check.holds(&parsed) && self.names_hold(sheet, Rc::new(parsed), check)
     }
 
     /// the index of the name `name` reads as from `sheet`, local before
     /// global and matched ignoring ASCII case, as the evaluator looks it up.
-    fn resolve(&self, sheet: SheetId, scope: &Option<String>, name: &str) -> Option<Name> {
+    fn resolve(
+        &self,
+        sheet: SheetId,
+        scope: &Option<String>,
+        name: &str,
+    ) -> Option<(usize, SheetId)> {
         let lookup = match scope {
             Some(scope) => self.wb.sheet_id(scope)?,
             None => sheet,
@@ -254,7 +272,7 @@ impl<'a> Capability<'a> {
         Some((index, scope))
     }
 
-    fn parsed(&mut self, index: usize) -> Option<&Parsed> {
+    fn parsed(&mut self, index: usize) -> Option<Rc<Parsed>> {
         let (wb, work, limit) = (self.wb, &mut self.work, self.limit);
         self.parsed
             .entry(index)
@@ -264,69 +282,114 @@ impl<'a> Capability<'a> {
                 parse_formula(formula)
                     .ok()
                     .and_then(|expr| gather(&expr, work, limit))
+                    .map(Rc::new)
             })
-            .as_ref()
+            .clone()
     }
 
-    /// whether every defined name reachable from `names`, read on `sheet`,
+    /// the names bound where `reference` sits in `parsed`, beside the ones
+    /// `outer` already holds, sorted; each is charged, `None` past the bound.
+    fn bound_around(
+        &mut self,
+        outer: &[String],
+        parsed: &Parsed,
+        reference: &Reference,
+    ) -> Option<Rc<[String]>> {
+        let mut names = outer.to_vec();
+        let mut within = reference.within;
+        while let Some(at) = within {
+            let (parent, name) = &parsed.bindings[at];
+            names.push(name.clone());
+            within = *parent;
+        }
+        self.work += names.len();
+        if self.work > self.limit {
+            return None;
+        }
+        names.sort_unstable();
+        names.dedup();
+        Some(names.into())
+    }
+
+    /// whether every defined name reachable from `parsed`, read on `sheet`,
     /// passes `check`: a walk without recursion that settles each group of
     /// names reaching one another once all of it is known, as Tarjan's
-    /// algorithm does, so a later formula reading any of them costs nothing.
-    fn names_hold(
-        &mut self,
-        sheet: SheetId,
-        names: Vec<(Option<String>, String)>,
-        check: Check,
-    ) -> bool {
+    /// algorithm does, so a later formula reading any of them within the same
+    /// bindings costs nothing. for evaluability, a name bound where a defined
+    /// name is read stays bound inside it, as the evaluator expands a name
+    /// within its caller's bindings.
+    fn names_hold(&mut self, sheet: SheetId, parsed: Rc<Parsed>, check: Check) -> bool {
         let decided = check as usize;
-        let mut order: HashMap<Name, usize> = HashMap::new();
-        let mut pending: Vec<Name> = Vec::new();
+        let unbound: Rc<[String]> = Rc::from(Vec::new());
+        let mut order: HashMap<Node, usize> = HashMap::new();
+        let mut pending: Vec<Node> = Vec::new();
         let mut root = Frame {
-            name: (usize::MAX, sheet),
+            node: (usize::MAX, sheet, Rc::clone(&unbound)),
             order: usize::MAX,
             start: 0,
-            names,
+            parsed,
             next: 0,
             low: usize::MAX,
         };
         let mut stack: Vec<Frame> = Vec::new();
         loop {
             let frame = stack.last_mut().unwrap_or(&mut root);
-            if frame.next < frame.names.len() {
-                let (scope, name) = &frame.names[frame.next];
+            if frame.next < frame.parsed.names(check).len() {
+                let reference = frame.parsed.names(check)[frame.next].clone();
                 frame.next += 1;
+                let (from, outer, parsed) = (
+                    frame.node.1,
+                    Rc::clone(&frame.node.2),
+                    Rc::clone(&frame.parsed),
+                );
                 self.work += 1;
                 if self.work > self.limit {
                     return false;
                 }
-                let from = frame.name.1;
-                let Some(name) = self.resolve(from, scope, name) else {
+                let caller_binds = reference.scope.is_none()
+                    && outer
+                        .binary_search(&reference.name.to_ascii_lowercase())
+                        .is_ok();
+                if caller_binds {
+                    continue;
+                }
+                let Some((index, scope)) = self.resolve(from, &reference.scope, &reference.name)
+                else {
                     continue;
                 };
-                match self.decided[decided].get(&name) {
+                let around = match check {
+                    Check::Supported if !outer.is_empty() || reference.within.is_some() => {
+                        match self.bound_around(&outer, &parsed, &reference) {
+                            Some(around) => around,
+                            None => return false,
+                        }
+                    }
+                    _ => Rc::clone(&unbound),
+                };
+                let node = (index, scope, around);
+                match self.decided[decided].get(&node) {
                     Some(true) => continue,
                     Some(false) => return self.refuse(&stack, decided),
                     None => {}
                 }
-                if let Some(&seen) = order.get(&name) {
+                if let Some(&seen) = order.get(&node) {
                     let frame = stack.last_mut().unwrap_or(&mut root);
                     frame.low = frame.low.min(seen);
                     continue;
                 }
-                let Some(parsed) = self.parsed(name.0).filter(|parsed| check.holds(parsed)) else {
-                    self.decided[decided].insert(name, false);
+                let Some(parsed) = self.parsed(index).filter(|parsed| check.holds(parsed)) else {
+                    self.decided[decided].insert(node, false);
                     return self.refuse(&stack, decided);
                 };
-                let names = parsed.names(check).to_vec();
                 let at = order.len();
-                order.insert(name, at);
+                order.insert(node.clone(), at);
                 let start = pending.len();
-                pending.push(name);
+                pending.push(node.clone());
                 stack.push(Frame {
-                    name,
+                    node,
                     order: at,
                     start,
-                    names,
+                    parsed,
                     next: 0,
                     low: at,
                 });
@@ -336,16 +399,16 @@ impl<'a> Capability<'a> {
                 break;
             };
             if done.low >= done.order {
-                for name in pending.drain(done.start..) {
-                    self.decided[decided].insert(name, true);
+                for node in pending.drain(done.start..) {
+                    self.decided[decided].insert(node, true);
                 }
             } else {
                 let parent = stack.last_mut().unwrap_or(&mut root);
                 parent.low = parent.low.min(done.low);
             }
         }
-        for name in pending {
-            self.decided[decided].insert(name, true);
+        for node in pending {
+            self.decided[decided].insert(node, true);
         }
         true
     }
@@ -353,7 +416,7 @@ impl<'a> Capability<'a> {
     /// every name being expanded reaches what fails the check.
     fn refuse(&mut self, stack: &[Frame], decided: usize) -> bool {
         for frame in stack {
-            self.decided[decided].insert(frame.name, false);
+            self.decided[decided].insert(frame.node.clone(), false);
         }
         false
     }
@@ -376,8 +439,10 @@ fn gather(expr: &Expr, work: &mut usize, limit: usize) -> Option<Parsed> {
         volatile: false,
         names: Vec::new(),
         every: Vec::new(),
+        bindings: Vec::new(),
     };
     let mut bound: HashMap<String, usize> = HashMap::new();
+    let mut within: Option<usize> = None;
     let mut pending = vec![Step::Visit(expr)];
     while let Some(step) = pending.pop() {
         *work += 1;
@@ -387,13 +452,17 @@ fn gather(expr: &Expr, work: &mut usize, limit: usize) -> Option<Parsed> {
         let expr = match step {
             Step::Visit(expr) => expr,
             Step::Bind(name) => {
-                *bound.entry(name.to_ascii_lowercase()).or_default() += 1;
+                let name = name.to_ascii_lowercase();
+                *bound.entry(name.clone()).or_default() += 1;
+                parsed.bindings.push((within, name));
+                within = Some(parsed.bindings.len() - 1);
                 continue;
             }
             Step::Unbind(name) => {
                 if let Some(count) = bound.get_mut(&name.to_ascii_lowercase()) {
                     *count -= 1;
                 }
+                within = within.and_then(|at| parsed.bindings[at].0);
                 continue;
             }
         };
@@ -435,14 +504,19 @@ fn gather(expr: &Expr, work: &mut usize, limit: usize) -> Option<Parsed> {
                 }
             }
             Expr::Name { scope, name } => {
-                parsed.every.push((scope.clone(), name.clone()));
+                let reference = Reference {
+                    scope: scope.clone(),
+                    name: name.clone(),
+                    within,
+                };
                 let shadowed = scope.is_none()
                     && bound
                         .get(&name.to_ascii_lowercase())
                         .is_some_and(|count| *count > 0);
                 if !shadowed {
-                    parsed.names.push((scope.clone(), name.clone()));
+                    parsed.names.push(reference.clone());
                 }
+                parsed.every.push(reference);
             }
             Expr::ArrayLiteral { values, .. } => pending.extend(values.iter().map(Step::Visit)),
             Expr::Unary { expr, .. } | Expr::Percent(expr) => pending.push(Step::Visit(expr)),
@@ -544,6 +618,39 @@ mod tests {
                 expected,
                 "{formula}"
             );
+        }
+    }
+
+    /// the evaluator expands a defined name within the bindings where it is
+    /// read, so a name a `LET` or `LAMBDA` binds there stays bound inside
+    /// the definition, through any chain of aliases; the same name read
+    /// unbound still reaches the workbook name, whichever is asked first.
+    #[test]
+    fn a_defined_name_is_read_within_the_bindings_around_it() {
+        let wb = workbook(&[
+            ("Remote", "WEBSERVICE(\"x\")"),
+            ("Alias", "Remote"),
+            ("Chain", "Alias+1"),
+        ]);
+        let questions = [
+            ("LET(Remote,A1,Alias*_xlfn.SEQUENCE(3))", true),
+            ("_xlfn.MAP(A1:A2,_xlfn.LAMBDA(Remote,Alias*2))", true),
+            ("LET(Remote,1,Chain)", true),
+            ("Alias", false),
+            ("Chain", false),
+            ("LET(Remote,1,Alias)+Alias", false),
+            ("LET(Other,1,Alias)", false),
+        ];
+        for rotation in 0..questions.len() {
+            let mut capability = Capability::new(&wb);
+            for step in 0..questions.len() {
+                let (formula, expected) = questions[(rotation + step) % questions.len()];
+                assert_eq!(
+                    capability.evaluable(SheetId(0), formula),
+                    expected,
+                    "{formula} after rotation {rotation}"
+                );
+            }
         }
     }
 

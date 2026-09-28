@@ -1216,6 +1216,78 @@ fn a_let_binding_shadows_a_workbook_name() {
     );
 }
 
+/// a name a `LET` or `LAMBDA` binds where a workbook name is read stays bound
+/// inside that name's definition, as the evaluator expands it, so an array
+/// reading an alias of a name the engine cannot evaluate, shadowed, stays
+/// evaluable and follows its inputs.
+#[test]
+fn a_binding_reaches_through_an_alias() {
+    for (formula, before, after) in [
+        (
+            "_xlfn.LET(Remote,A1,Alias*_xlfn.SEQUENCE(3))",
+            [2.0, 4.0, 6.0],
+            [3.0, 6.0, 9.0],
+        ),
+        (
+            "_xlfn.MAP(A1:A3,_xlfn.LAMBDA(Remote,Alias*2))",
+            [4.0, 2.0, 2.0],
+            [6.0, 2.0, 2.0],
+        ),
+    ] {
+        let mut model = WorkbookModel::default();
+        let mut sheet = Sheet::new("Sheet1");
+        for (address, value) in [("A1", 2.0), ("A2", 1.0), ("A3", 1.0)] {
+            sheet.set_cell(
+                cell(address),
+                Cell {
+                    value: number(value),
+                    ..Cell::default()
+                },
+            );
+        }
+        sheet.set_cell(
+            cell("C1"),
+            Cell {
+                formula: Some(formula.into()),
+                ..Cell::default()
+            },
+        );
+        sheet.set_dynamic_array_formula(cell("C1"), CellRange::parse_a1("C1").unwrap());
+        model.sheets.push(sheet);
+        for (name, definition) in [
+            ("Remote", r#"WEBSERVICE("https://example.com")"#),
+            ("Alias", "Remote"),
+        ] {
+            model.defined_names.push(DefinedName {
+                name: name.into(),
+                formula: definition.into(),
+                local_sheet: None,
+                hidden: false,
+            });
+        }
+        let mut workbook = Workbook::from_model(model).unwrap();
+        workbook.recalculate_all(options());
+        assert!(
+            !workbook.model().sheets[0]
+                .array_definition(cell("C1"))
+                .unwrap()
+                .is_opaque(),
+            "{formula}"
+        );
+        assert_eq!(
+            column(&workbook, &["C1", "C2", "C3"]),
+            before.map(number),
+            "{formula}"
+        );
+        edit(&mut workbook, "A1", "3");
+        assert_eq!(
+            column(&workbook, &["C1", "C2", "C3"]),
+            after.map(number),
+            "{formula}"
+        );
+    }
+}
+
 /// deleting a row or column inside an opaque array shrinks its rectangle
 /// with it, so clearing the anchor afterwards leaves what moved up beside it
 /// alone; undo gives the rectangle back.
