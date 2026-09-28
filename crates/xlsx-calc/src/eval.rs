@@ -2,7 +2,7 @@
 //! coercion follows excel; errors propagate leftmost-first.
 
 use std::borrow::Cow;
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +17,9 @@ use crate::reference::table_rect;
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
+/// bytes of text one formula may create or copy, and one recalculation.
+pub const MAX_EVALUATION_TEXT_BYTES: u64 = 64 << 20;
+pub const MAX_RECALCULATION_TEXT_BYTES: u64 = 512 << 20;
 pub const MAX_CELL_TEXT_CHARS: usize = 32_767;
 const MAX_DEFINED_NAME_DEPTH: usize = 256;
 /// names one formula may have bound at once across nested `LET`/`LAMBDA`.
@@ -33,23 +36,34 @@ thread_local! {
 
 pub(crate) struct EvaluationBudget {
     remaining: Cell<u64>,
+    text: Cell<u64>,
 }
 
 impl EvaluationBudget {
     pub(crate) fn new(limit: u64) -> Self {
+        Self::with_text(limit, MAX_RECALCULATION_TEXT_BYTES)
+    }
+
+    pub(crate) fn with_text(cells: u64, bytes: u64) -> Self {
         Self {
-            remaining: Cell::new(limit),
+            remaining: Cell::new(cells),
+            text: Cell::new(bytes),
         }
     }
 
     fn consume(&self, count: u64) -> bool {
-        let remaining = self.remaining.get();
-        if count > remaining {
-            return false;
-        }
-        self.remaining.set(remaining - count);
-        true
+        take(&self.remaining, count)
     }
+}
+
+/// take `count` from what is left, or nothing when that is not enough.
+fn take(left: &Cell<u64>, count: u64) -> bool {
+    let remaining = left.get();
+    if count > remaining {
+        return false;
+    }
+    left.set(remaining - count);
+    true
 }
 
 /// evaluation environment: the cell source, the sheet unqualified refs resolve
@@ -69,6 +83,7 @@ pub struct EvalContext<'a> {
     pub date_system: DateSystem,
     random_state: Rc<Cell<Option<u64>>>,
     remaining_cell_visits: Rc<Cell<u64>>,
+    remaining_text_bytes: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
@@ -77,10 +92,6 @@ pub struct EvalContext<'a> {
     bindings: Rc<RefCell<Vec<Binding>>>,
     lambda_depth: Rc<Cell<usize>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
-    /// the rows and columns the formula's whole references on different
-    /// sheets are cut to in array evaluation, fixed by the first expression
-    /// this context evaluates.
-    whole_extent: Rc<OnceCell<(u32, u32)>>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
 }
@@ -96,6 +107,7 @@ impl<'a> EvalContext<'a> {
             date_system: DateSystem::V1900,
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
+            remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
@@ -104,7 +116,6 @@ impl<'a> EvalContext<'a> {
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
-            whole_extent: Rc::new(OnceCell::new()),
             parse_cache: None,
         }
     }
@@ -119,6 +130,7 @@ impl<'a> EvalContext<'a> {
             date_system: DateSystem::V1900,
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
+            remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
@@ -127,7 +139,6 @@ impl<'a> EvalContext<'a> {
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
-            whole_extent: Rc::new(OnceCell::new()),
             parse_cache: None,
         }
     }
@@ -146,6 +157,7 @@ impl<'a> EvalContext<'a> {
             date_system: DateSystem::V1900,
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
+            remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
@@ -154,7 +166,6 @@ impl<'a> EvalContext<'a> {
             bindings: Rc::new(RefCell::new(Vec::new())),
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: Some(budget),
-            whole_extent: Rc::new(OnceCell::new()),
             parse_cache: None,
         }
     }
@@ -169,6 +180,7 @@ impl<'a> EvalContext<'a> {
             date_system: self.date_system,
             random_state: Rc::clone(&self.random_state),
             remaining_cell_visits: Rc::clone(&self.remaining_cell_visits),
+            remaining_text_bytes: Rc::clone(&self.remaining_text_bytes),
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
@@ -177,7 +189,6 @@ impl<'a> EvalContext<'a> {
             bindings: Rc::clone(&self.bindings),
             lambda_depth: Rc::clone(&self.lambda_depth),
             shared_budget: self.shared_budget.clone(),
-            whole_extent: Rc::clone(&self.whole_extent),
             parse_cache: self.parse_cache,
         }
     }
@@ -200,6 +211,32 @@ impl<'a> EvalContext<'a> {
         true
     }
 
+    /// charge `bytes` of text created or copied, as `consume_cells` charges
+    /// cells: text a formula builds is memory the cell budget does not see.
+    pub(crate) fn consume_text(&self, bytes: usize) -> bool {
+        let bytes = bytes as u64;
+        let remaining = self.remaining_text_bytes.get();
+        if bytes > remaining
+            || self
+                .shared_budget
+                .as_ref()
+                .is_some_and(|budget| !take(&budget.text, bytes))
+        {
+            self.record_budget_error();
+            return false;
+        }
+        self.remaining_text_bytes.set(remaining - bytes);
+        true
+    }
+
+    /// charge a value's text before it is kept.
+    pub(crate) fn keep_text(&self, value: &CellValue) -> bool {
+        match value {
+            CellValue::Text { value } => self.consume_text(value.len()),
+            _ => true,
+        }
+    }
+
     /// next draw in [0, 1) from this context's stream; advances it.
     pub(crate) fn next_random_unit(&self) -> f64 {
         let seed = self
@@ -217,17 +254,6 @@ impl<'a> EvalContext<'a> {
 
     pub(crate) fn exhausted(&self) -> bool {
         self.exhausted.get()
-    }
-
-    /// see `whole_extent`; `(0, 0)` when the formula names at most one sheet.
-    pub(crate) fn whole_extent(&self) -> (u32, u32) {
-        self.whole_extent.get().copied().unwrap_or((0, 0))
-    }
-
-    pub(crate) fn fix_whole_extent(&self, formula: &Expr) {
-        if self.whole_extent.get().is_none() {
-            let _ = self.whole_extent.set(formula_extent(formula, self));
-        }
     }
 
     /// `#NUM!`, recorded as a budget error, once this evaluation has been
@@ -378,8 +404,18 @@ pub(crate) fn num(value: f64) -> CellValue {
     }
 }
 
-pub(crate) fn text(value: impl Into<String>) -> CellValue {
+/// text a formula built, charged to the text budget.
+pub(crate) fn text(ctx: &EvalContext<'_>, value: impl Into<String>) -> CellValue {
     let value = value.into();
+    if value.chars().count() > MAX_CELL_TEXT_CHARS {
+        err(ErrorValue::Value)
+    } else {
+        kept(ctx, CellValue::Text { value })
+    }
+}
+
+/// text whose bytes were charged before it was built.
+pub(crate) fn text_unmetered(value: String) -> CellValue {
     if value.chars().count() > MAX_CELL_TEXT_CHARS {
         err(ErrorValue::Value)
     } else {
@@ -387,76 +423,24 @@ pub(crate) fn text(value: impl Into<String>) -> CellValue {
     }
 }
 
+/// `value` once its text is charged, or the budget error in its place.
+pub(crate) fn kept(ctx: &EvalContext<'_>, value: CellValue) -> CellValue {
+    if ctx.keep_text(&value) {
+        value
+    } else {
+        err(ErrorValue::Num)
+    }
+}
+
 pub(crate) fn boolean(value: bool) -> CellValue {
     CellValue::Bool { value }
 }
 
-/// the rows and columns a formula's whole-column and whole-row references
-/// share when they name more than one sheet: the furthest any of those sheets
-/// reaches, so each is cut alike and they still pair cell for cell.
-fn formula_extent(formula: &Expr, ctx: &EvalContext<'_>) -> (u32, u32) {
-    let (mut tall, mut wide) = (Vec::new(), Vec::new());
-    whole_references(formula, &mut tall, &mut wide);
-    let reach = |sheets: Vec<&Option<String>>, used: &dyn Fn(SheetId) -> u32| {
-        let mut ids: Vec<SheetId> = sheets
-            .into_iter()
-            .filter_map(|sheet| resolve_sheet(sheet, ctx))
-            .collect();
-        ids.sort();
-        ids.dedup();
-        if ids.len() < 2 {
-            return 0;
-        }
-        ids.into_iter().map(used).max().unwrap_or(0)
-    };
-    (
-        reach(tall, &|sheet| ctx.provider.used_rows(sheet)),
-        reach(wide, &|sheet| ctx.provider.used_cols(sheet)),
-    )
-}
-
-/// the sheets of a formula's whole-column (`tall`) and whole-row (`wide`)
-/// references, as written.
-fn whole_references<'e>(
-    expr: &'e Expr,
-    tall: &mut Vec<&'e Option<String>>,
-    wide: &mut Vec<&'e Option<String>>,
-) {
-    match expr {
-        Expr::ColumnRange { sheet, .. } => tall.push(sheet),
-        Expr::RowRange { sheet, .. } => wide.push(sheet),
-        Expr::Range { sheet, range } => {
-            if range.start.row == 0 && range.end.row + 1 >= xlsx_model::MAX_ROWS {
-                tall.push(sheet);
-            }
-            if range.start.col == 0 && range.end.col + 1 >= xlsx_model::MAX_COLS {
-                wide.push(sheet);
-            }
-        }
-        Expr::ArrayLiteral { values: args, .. } | Expr::FuncCall { args, .. } => {
-            for arg in args {
-                whole_references(arg, tall, wide);
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Percent(expr) => whole_references(expr, tall, wide),
-        Expr::Binary { lhs, rhs, .. }
-        | Expr::RangeJoin {
-            start: lhs,
-            end: rhs,
-        } => {
-            whole_references(lhs, tall, wide);
-            whole_references(rhs, tall, wide);
-        }
-        _ => {}
-    }
-}
-
 /// evaluate an expression against a cell provider.
 pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
-    ctx.fix_whole_extent(expr);
     match expr {
         Expr::Number(n) => num(*n),
-        Expr::Text(s) => CellValue::Text { value: s.clone() },
+        Expr::Text(s) => kept(ctx, CellValue::Text { value: s.clone() }),
         Expr::Bool(b) => CellValue::Bool { value: *b },
         Expr::Error(e) => err(*e),
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
@@ -481,13 +465,13 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             Err(error) => err(error),
         },
         Expr::Name { scope, name } => match bound(scope, name, ctx) {
-            Some(binding) => binding.scalar(),
+            Some(binding) => kept(ctx, binding.scalar()),
             None => evaluate_defined_name(scope, name, ctx),
         },
         Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),
         Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, ctx),
         Expr::Percent(inner) => apply_percent(&evaluate(inner, ctx)),
-        Expr::Literal(value) => normalize_provider_value(value.clone()),
+        Expr::Literal(value) => kept(ctx, normalize_provider_value(value.clone())),
         Expr::ArrayLiteral { .. } => crate::array::evaluate_array(expr, ctx).into_scalar(),
         Expr::FuncCall { func, name, args } => match func {
             Some(_)
@@ -622,7 +606,10 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
-    normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned()
+    kept(
+        ctx,
+        normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned(),
+    )
 }
 
 /// resolve a possibly sheet-qualified name to its sheet id (`None` -> the
@@ -666,12 +653,17 @@ fn eval_binary(op: BinaryOp, lhs: &Expr, rhs: &Expr, ctx: &EvalContext<'_>) -> C
     if let CellValue::Error { value } = rv {
         return err(value);
     }
-    apply_binary(op, &lv, &rv)
+    apply_binary(op, &lv, &rv, ctx)
 }
 
 /// the operator itself, over values already evaluated; errors propagate
 /// leftmost-first.
-pub(crate) fn apply_binary(op: BinaryOp, lv: &CellValue, rv: &CellValue) -> CellValue {
+pub(crate) fn apply_binary(
+    op: BinaryOp,
+    lv: &CellValue,
+    rv: &CellValue,
+    ctx: &EvalContext<'_>,
+) -> CellValue {
     if let CellValue::Error { value } = lv {
         return err(*value);
     }
@@ -699,7 +691,10 @@ pub(crate) fn apply_binary(op: BinaryOp, lv: &CellValue, rv: &CellValue) -> Cell
                 Ok(s) => s,
                 Err(e) => return err(e),
             };
-            text(a + &b)
+            if !ctx.consume_text(a.len() + b.len()) {
+                return err(ErrorValue::Num);
+            }
+            text_unmetered(a + &b)
         }
         _ => compare(op, lv, rv),
     }
@@ -950,7 +945,11 @@ impl Area {
         row: usize,
         col: usize,
     ) -> Result<CellValue, ErrorValue> {
-        self.get_ref(ctx, row, col).map(Cow::into_owned)
+        let value = self.get_ref(ctx, row, col)?;
+        if !ctx.keep_text(&value) {
+            return Err(ErrorValue::Num);
+        }
+        Ok(value.into_owned())
     }
 
     /// borrowed variant of `get` for callers that only inspect the value.
@@ -1595,9 +1594,20 @@ mod tests {
     fn superlinear_array_work_is_charged() {
         let ones = vec!["1"; 2000].join(",");
         let lifted = vec!["FALSE,0"; 1000].join(",");
+        // SUMPRODUCT pairs operands of one shape, so it never broadcasts
         for formula in [
             "SUMPRODUCT(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(1,2000))".to_string(),
-            format!("SUMPRODUCT(_xlfn.SEQUENCE(1000),{ones})"),
+            format!("SUMPRODUCT(_xlfn.SEQUENCE(1000000),{ones})"),
+        ] {
+            for formula in [formula.clone(), format!("_xlfn.LET(_xlpm.s,0,{formula})")] {
+                assert_eq!(
+                    lambda_calls(&formula).0,
+                    err(ErrorValue::Value),
+                    "{formula}"
+                );
+            }
+        }
+        for formula in [
             "SUM(MATCH(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000,1,-1),0))".to_string(),
             "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000,1,-1)))".to_string(),
             "SUM(MMULT(_xlfn.SEQUENCE(200,500),_xlfn.SEQUENCE(500,200)))".to_string(),
@@ -1628,6 +1638,159 @@ mod tests {
                 assert_eq!(lambda_calls(&formula).0, num(2000.0), "{formula}");
             }
         }
+        for formula in [
+            "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(1000,1,1,0),_xlfn.SEQUENCE(100000),0))",
+            "SUM(MATCH(_xlfn.SEQUENCE(1000,1,1,0),_xlfn.SEQUENCE(100000),0))",
+        ] {
+            for formula in [
+                formula.to_string(),
+                format!("_xlfn.LET(_xlpm.s,0,{formula})"),
+            ] {
+                assert_eq!(lambda_calls(&formula).0, num(1000.0), "{formula}");
+            }
+        }
+    }
+
+    fn with_text_budget(workbook: &Workbook, formula: &str, bytes: u64) -> (CellValue, bool) {
+        let budget = Rc::new(EvaluationBudget::with_text(
+            MAX_RECALCULATION_CELL_VISITS,
+            bytes,
+        ));
+        let context = EvalContext::with_budget(workbook, SheetId(0), budget);
+        let value = evaluate(&parse_formula(formula).unwrap(), &context);
+        (value, context.has_unhandled_budget_error())
+    }
+
+    /// text an array builds or copies counts against a byte budget as it is
+    /// kept: generated strings, broadcasts, binding reads, reference reads
+    /// and concatenations all stop at the limit, where their element counts
+    /// alone are cheap.
+    #[test]
+    fn text_arrays_stay_within_the_text_budget() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "x".repeat(32_767),
+                },
+                ..Cell::default()
+            },
+        );
+        workbook.sheets.push(sheet);
+        for formula in [
+            "SUM(LEN(REPT(\"x\",_xlfn.SEQUENCE(1000,1,32767,0))))",
+            "ROWS(IF(_xlfn.SEQUENCE(1000)>0,REPT(\"x\",32767)))",
+            "SUM(LEN(_xlfn.SEQUENCE(1000)&REPT(\"x\",30000)))",
+            "ROWS(_xlfn.LET(_xlpm.x,REPT(\"x\",32767),_xlfn.MAKEARRAY(1000,1,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.x))))",
+            "ROWS(IF(_xlfn.SEQUENCE(1000)>0,A1))",
+            "ROWS(_xlfn.VSTACK(A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1))",
+        ] {
+            for formula in [
+                formula.to_string(),
+                format!("_xlfn.LET(_xlpm.s,0,{formula})"),
+            ] {
+                let (value, refused) = with_text_budget(&workbook, &formula, 1 << 20);
+                assert_eq!(value, err(ErrorValue::Num), "{formula}");
+                assert!(refused, "{formula}");
+            }
+        }
+        assert_eq!(
+            with_text_budget(&workbook, "ROWS(IF(_xlfn.SEQUENCE(100)>0,\"ab\"))", 1 << 20),
+            (num(100.0), false)
+        );
+    }
+
+    /// the default limits stop the reviewer's 16 GB `REPT` block after a few
+    /// megabytes, and a spill charges the copies it lays out.
+    #[test]
+    fn a_text_bomb_stops_at_the_default_limits() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        let context = EvalContext::new(&workbook, SheetId(0));
+        let formula = "SUM(REPT(\"x\",_xlfn.SEQUENCE(500000,1,32767,0)))";
+        assert_eq!(
+            evaluate(&parse_formula(formula).unwrap(), &context),
+            err(ErrorValue::Num)
+        );
+        assert!(context.has_unhandled_budget_error());
+
+        let budget = Rc::new(EvaluationBudget::with_text(
+            MAX_RECALCULATION_CELL_VISITS,
+            1 << 20,
+        ));
+        let context = EvalContext::with_budget(&workbook, SheetId(0), budget);
+        let range = xlsx_model::CellRange::parse_a1("A1:A1000").unwrap();
+        let spill = crate::array::evaluate_spill(
+            &parse_formula("REPT(\"x\",32767)").unwrap(),
+            &context,
+            range.start,
+            Some(range),
+        );
+        assert!(
+            spill
+                .values
+                .iter()
+                .all(|value| *value == err(ErrorValue::Num))
+        );
+        assert!(context.has_unhandled_budget_error());
+    }
+
+    /// a formula whose text outgrows the recalculation's byte budget keeps its
+    /// cached value, as a formula over the cell budget does.
+    #[test]
+    fn a_text_bomb_keeps_the_cached_values() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        for col in 0..12 {
+            sheet.set_cell(
+                CellRef::new(0, col),
+                Cell {
+                    value: CellValue::Number { value: 7.0 },
+                    formula: Some("SUM(LEN(REPT(\"x\",_xlfn.SEQUENCE(500000,1,32767,0))))".into()),
+                    style: None,
+                },
+            );
+        }
+        workbook.sheets.push(sheet);
+        let (_, result) = crate::rebuild_and_recalc_all(&mut workbook, None);
+        assert_eq!(result.limited_cells.len(), 12);
+        for col in 0..12 {
+            assert_eq!(
+                workbook.value(SheetId(0), CellRef::new(0, col)),
+                CellValue::Number { value: 7.0 }
+            );
+        }
+    }
+
+    /// `SORT`, `SORTBY` and `UNIQUE` pay for their output and, the sorts, for
+    /// their comparisons before any of that work is done.
+    #[test]
+    fn sorting_is_charged_before_it_runs() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        let spent = |formula: &str| {
+            let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
+            let context = EvalContext::with_budget(&workbook, SheetId(0), Rc::clone(&budget));
+            evaluate(&parse_formula(formula).unwrap(), &context);
+            MAX_RECALCULATION_CELL_VISITS - budget.remaining.get()
+        };
+        let reading = spent("ROWS(_xlfn.SEQUENCE(4096,1,4096,-1))");
+        let comparisons = 4096 * 13 / 16;
+        for formula in [
+            "ROWS(_xlfn._xlws.SORT(_xlfn.SEQUENCE(4096,1,4096,-1)))",
+            "ROWS(_xlfn.SORTBY(_xlfn.SEQUENCE(4096,1,4096,-1),_xlfn.SEQUENCE(4096)))",
+        ] {
+            assert!(spent(formula) >= 2 * reading + comparisons, "{formula}");
+        }
+        let context =
+            EvalContext::with_budget(&workbook, SheetId(0), Rc::new(EvaluationBudget::new(6000)));
+        let formula = "ROWS(_xlfn._xlws.SORT(_xlfn.SEQUENCE(4096,1,4096,-1)))";
+        assert_eq!(
+            evaluate(&parse_formula(formula).unwrap(), &context),
+            err(ErrorValue::Num)
+        );
     }
 
     /// an array builtin that falls back to its scalar form evaluates its
@@ -1650,7 +1813,7 @@ mod tests {
     }
 
     /// legitimate large formulas over a stale cache recalculate in full, on
-    /// open and again after an input they read changes.
+    /// open and again after an input they read or look up changes.
     #[test]
     fn large_formulas_recalculate_over_a_populated_cache() {
         let mut data = Sheet::new("Data");
@@ -1672,6 +1835,13 @@ mod tests {
             ("B6", "_xlfn.XLOOKUP(99999,A:A,A:A)"),
             ("B7", "SUMPRODUCT(--(A1:A100000>99990))"),
             ("B8", "_xlfn.LET(_xlpm.s,0,SUMPRODUCT(A:A,Other!A:A))"),
+            ("B9", "MATCH(100001,A1:A100000,0)"),
+            ("B10", "_xlfn.XLOOKUP(100001,A:A,A:A,\"none\")"),
+            ("B11", "VLOOKUP(100001,A:A,1,FALSE)"),
+            (
+                "B12",
+                "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(50,1,100001,0),A1:A2000))",
+            ),
         ];
         for (address, formula) in formulas {
             data.set_cell(
@@ -1703,17 +1873,24 @@ mod tests {
             "{:?}",
             result.limited_cells
         );
+        let missing = err(ErrorValue::NA);
         let opened = [
-            333_338_333_350_000.0,
-            50_000.0,
-            948_576.0,
-            2_000.0,
-            20_000_100_000.0,
-            99_999.0,
-            10.0,
-            55.0,
+            num(333_338_333_350_000.0),
+            num(50_000.0),
+            num(948_576.0),
+            num(2_000.0),
+            num(20_000_100_000.0),
+            num(99_999.0),
+            num(10.0),
+            num(55.0),
+            missing.clone(),
+            CellValue::Text {
+                value: "none".into(),
+            },
+            missing.clone(),
+            missing,
         ];
-        assert_eq!(values(&workbook), opened.map(num).to_vec());
+        assert_eq!(values(&workbook), opened.to_vec());
 
         let first = CellRef::new(0, 0);
         workbook
@@ -1735,6 +1912,10 @@ mod tests {
             99_999.0,
             11.0,
             100_055.0,
+            1.0,
+            100_001.0,
+            100_001.0,
+            50.0,
         ];
         assert_eq!(values(&workbook), edited.map(num).to_vec());
     }

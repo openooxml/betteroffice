@@ -330,15 +330,6 @@ pub(crate) fn bound_together(areas: &mut [Area], ctx: &EvalContext<'_>) {
     }
 }
 
-/// `bound_together` over the arguments that are references.
-pub(crate) fn cut_references(areas: &mut [Option<Area>], ctx: &EvalContext<'_>) {
-    let mut cut: Vec<Area> = areas.iter().flatten().copied().collect();
-    bound_together(&mut cut, ctx);
-    for (area, cut) in areas.iter_mut().flatten().zip(cut) {
-        *area = cut;
-    }
-}
-
 /// the values a `...IF`/`...IFS` aggregates, cut to the criteria rectangle: a
 /// whole-column range simply takes the criteria shape.
 pub(crate) fn aligned(mut area: Area, rows: usize, cols: usize) -> Option<Area> {

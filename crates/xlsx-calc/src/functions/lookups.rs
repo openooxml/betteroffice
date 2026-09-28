@@ -134,14 +134,20 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         1
     };
-    let values = match block_values(&args[1], ctx) {
+    let (values, tail) = match block_values(&args[1], ctx) {
         Ok(values) => values,
         Err(error) => return err(error),
     };
     let pos = match match_type {
+        // past a cut whole reference every cell holds the tail, so the first
+        // of them is the first match there
         0 => values
             .iter()
-            .position(|v| cmp_values(v.as_ref(), &target) == Ordering::Equal),
+            .position(|v| cmp_values(v.as_ref(), &target) == Ordering::Equal)
+            .or_else(|| {
+                tail.filter(|tail| cmp_values(tail, &target) == Ordering::Equal)
+                    .map(|_| values.len())
+            }),
         1 => approximate_row(values.len(), &target, |i| values[i].clone()),
         _ => {
             let mut found = None;
@@ -162,20 +168,25 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 }
 
 /// the cells a lookup argument offers: a reference reads through to the sheet,
-/// anything else is evaluated as a block, so `MATCH(k, a:a&b:b, 0)` works.
-fn block_values<'p>(
-    arg: &Expr,
-    ctx: &EvalContext<'p>,
-) -> Result<Vec<Cow<'p, CellValue>>, ErrorValue> {
+/// anything else is evaluated as a block, so `MATCH(k, a:a&b:b, 0)` works. a
+/// block computed from a cut whole reference also offers the value its cells
+/// past the cut hold.
+type Block<'p> = (Vec<Cow<'p, CellValue>>, Option<CellValue>);
+
+fn block_values<'p>(arg: &Expr, ctx: &EvalContext<'p>) -> Result<Block<'p>, ErrorValue> {
     if let Some(area) = as_area(arg, ctx) {
-        return area.values_ref(ctx);
+        return Ok((area.values_ref(ctx)?, None));
     }
     match crate::array::evaluate_array(arg, ctx) {
         crate::array::Value::Array(array) => {
-            Ok(array.into_values().into_iter().map(Cow::Owned).collect())
+            let tail = array.past().map(|(_, tail)| tail.clone());
+            Ok((
+                array.into_values().into_iter().map(Cow::Owned).collect(),
+                tail,
+            ))
         }
         crate::array::Value::Scalar(CellValue::Error { value }) => Err(value),
-        crate::array::Value::Scalar(value) => Ok(vec![Cow::Owned(value)]),
+        crate::array::Value::Scalar(value) => Ok((vec![Cow::Owned(value)], None)),
         crate::array::Value::Lambda(_) => Err(ErrorValue::Value),
     }
 }
@@ -187,14 +198,14 @@ pub(crate) fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 2 || args.len() > 4 {
         return err(ErrorValue::Value);
     }
+    // a computed lookup vector is the array evaluator's
+    let Some(area) = as_area(&args[1], ctx) else {
+        return crate::array::xmatch_value(args, ctx);
+    };
     let target = evaluate(&args[0], ctx);
     if let CellValue::Error { value } = target {
         return err(value);
     }
-    let area = match crate::eval::required_area(&args[1], ctx) {
-        Ok(area) => area,
-        Err(error) => return err(error),
-    };
     let mode = match args.get(2) {
         Some(_) => match nth_int(args, ctx, 2) {
             Ok(m) => m,
@@ -729,8 +740,8 @@ pub(crate) fn address(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         )
     };
     match sheet {
-        Some(name) => crate::eval::text(format!("{}!{}", quoted_sheet(&name), body)),
-        None => crate::eval::text(body),
+        Some(name) => crate::eval::text(ctx, format!("{}!{}", quoted_sheet(&name), body)),
+        None => crate::eval::text(ctx, body),
     }
 }
 
@@ -776,7 +787,7 @@ pub(crate) fn hyperlink(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     match shown {
         CellValue::Error { value } => err(value),
-        CellValue::Empty => crate::eval::text(""),
+        CellValue::Empty => crate::eval::text(ctx, ""),
         value => value,
     }
 }

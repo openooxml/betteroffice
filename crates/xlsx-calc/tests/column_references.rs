@@ -396,6 +396,11 @@ fn whole_references_on_two_sheets_stay_aligned() {
         ("SUMPRODUCT(Keys,Vals)", 17.0),
         ("SUMPRODUCT(Vals,Keys)", 17.0),
         ("SUM(Keys*Vals)", 17.0),
+        ("SUMPRODUCT(--(A:A),Two!B:B)", 17.0),
+        ("SUMPRODUCT(Two!B:B,--(A:A))", 17.0),
+        ("SUMPRODUCT(--Keys,Vals)", 17.0),
+        ("SUMPRODUCT(Vals,--Keys)", 17.0),
+        ("SUMPRODUCT(A:A*1,Two!B:B+0)", 17.0),
     ] {
         assert_eq!(
             on_one(&workbook, formula),
@@ -434,6 +439,78 @@ fn a_shared_cut_is_read_without_cutting_again() {
         assert_eq!(
             on_one(&workbook, formula),
             CellValue::Number { value: 0.0 },
+            "{formula}"
+        );
+    }
+}
+
+/// a block computed from a cut whole reference still stands for the whole of
+/// it: the blanks past the cut count, match and join as the blanks they are.
+#[test]
+fn computed_blocks_keep_the_blanks_past_the_cut() {
+    let workbook = two_sheets();
+    let blanks = f64::from(MAX_ROWS - 3);
+    for (formula, expected) in [
+        ("COUNT(1/(A:A=\"\"))", blanks),
+        ("SUM(--(A:A=\"\"))", blanks),
+        ("SUMPRODUCT(--(A:A=\"\"))", blanks),
+        ("COUNTA(A:A&\"\")", f64::from(MAX_ROWS)),
+        ("MATCH(TRUE,A:A=\"\",0)", 4.0),
+        ("_xlfn.XMATCH(TRUE,A:A=\"\")", 4.0),
+        ("ROWS(_xlfn.UNIQUE(A:A))", 4.0),
+        ("MAX(IF(A:A=\"\",1,0))", 1.0),
+        ("AVERAGE(IF(A:A>0,A:A))", 7.0 / 3.0),
+    ] {
+        assert_eq!(
+            on_one(&workbook, formula),
+            CellValue::Number { value: expected },
+            "{formula}"
+        );
+    }
+    // outside a formula's array evaluation these take references only
+    for (formula, expected) in [
+        ("ROWS(A:A*1)", f64::from(MAX_ROWS)),
+        ("INDEX(A:A*1,1048576)", 0.0),
+    ] {
+        let context = EvalContext::new(&workbook, SheetId(0));
+        let formula = format!("_xlfn.LET(_xlpm.s,0,{formula})");
+        assert_eq!(
+            evaluate(&parse_formula(&formula).unwrap(), &context),
+            CellValue::Number { value: expected },
+            "{formula}"
+        );
+    }
+}
+
+/// whole references are cut where each sheet's data ends, not where the
+/// furthest sheet the formula names does, so a branch never taken or a range
+/// on another sheet costs its own operands nothing.
+#[test]
+fn a_far_sheet_does_not_stretch_other_references() {
+    let mut one = Sheet::new("One");
+    for (row, value) in [1.0, 2.0, 4.0].into_iter().enumerate() {
+        one.set_cell(CellRef::new(row as u32, 0), number(value));
+    }
+    one.set_cell(CellRef::new(0, 1), number(10.0));
+    let mut two = Sheet::new("Two");
+    two.set_cell(CellRef::new(599_999, 0), number(1.0));
+    let mut other = Sheet::new("Other");
+    other.set_cell(CellRef::new(MAX_ROWS - 1, 0), number(1.0));
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(one);
+    workbook.sheets.push(two);
+    workbook.sheets.push(other);
+    for (formula, expected) in [
+        ("IF(TRUE,SUMPRODUCT(One!A:A,One!A:A),SUM(Two!A:A))", 21.0),
+        (
+            "_xlfn.LET(_xlpm.x,IF(FALSE,Other!A:A,0),SUM(One!A:A,One!B:B))",
+            17.0,
+        ),
+        ("SUMPRODUCT(One!A:A,One!A:A)+SUM(Two!A:A)", 22.0),
+    ] {
+        assert_eq!(
+            on_one(&workbook, formula),
+            CellValue::Number { value: expected },
             "{formula}"
         );
     }
