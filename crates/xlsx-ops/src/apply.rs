@@ -6,7 +6,8 @@ use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{
-    ArrayDefinition, Cell, CellRange, CellRef, ColId, DefinedName, RowId, Sheet, SheetId, Workbook,
+    ArrayDefinition, ArrayKind, ArraySize, Cell, CellRange, CellRef, ColId, DefinedName, RowId,
+    Sheet, SheetId, Workbook,
 };
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
@@ -662,7 +663,16 @@ fn delete_rows(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let span = CellRange::new(
+        CellRef::new(at, 0),
+        CellRef::new(
+            at.saturating_add(count.saturating_sub(1)).min(MAX_ROWS - 1),
+            MAX_COLS - 1,
+        ),
+    );
+    let cut = cut_opaque_arrays(s, span, true);
     let deleted = shift_cells(s, op);
+    let resized = shrink_opaque_arrays(s, sheet, cut);
     let dropped_heights = shift_row_heights_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
@@ -693,6 +703,7 @@ fn delete_rows(
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
+    inv.extend(resized);
     Ok(InvertedOp(inv))
 }
 
@@ -757,7 +768,16 @@ fn delete_cols(
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
     let old_col_styles = s.col_styles.clone();
+    let span = CellRange::new(
+        CellRef::new(0, at),
+        CellRef::new(
+            MAX_ROWS - 1,
+            at.saturating_add(count.saturating_sub(1)).min(MAX_COLS - 1),
+        ),
+    );
+    let cut = cut_opaque_arrays(s, span, false);
     let deleted = shift_cells(s, op);
+    let resized = shrink_opaque_arrays(s, sheet, cut);
     let dropped_widths = shift_col_widths_down(s, at, count);
     shift_col_styles_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
@@ -795,7 +815,71 @@ fn delete_cols(
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
+    inv.extend(resized);
     Ok(InvertedOp(inv))
+}
+
+/// The opaque arrays a deletion of `span`, rows or columns, cuts into while
+/// sparing their anchors, each with the state its anchor held before and the
+/// definition it keeps once the rectangle loses what the deletion takes.
+fn cut_opaque_arrays(
+    s: &Sheet,
+    span: CellRange,
+    rows: bool,
+) -> Vec<(CellRef, CellState, ArrayDefinition)> {
+    s.array_definitions()
+        .filter_map(|(anchor, definition, extent)| {
+            let size = definition.opaque?;
+            if span.contains(anchor) || !ranges_intersect(extent, span) {
+                return None;
+            }
+            let shrunk = if rows {
+                let cut = extent.end.row.min(span.end.row) - span.start.row + 1;
+                ArraySize {
+                    rows: size.rows - cut,
+                    ..size
+                }
+            } else {
+                let cut = extent.end.col.min(span.end.col) - span.start.col + 1;
+                ArraySize {
+                    cols: size.cols - cut,
+                    ..size
+                }
+            };
+            let kind = match definition.kind {
+                ArrayKind::Legacy { .. } => ArrayKind::Legacy {
+                    rows: shrunk.rows,
+                    cols: shrunk.cols,
+                },
+                ArrayKind::Dynamic => ArrayKind::Dynamic,
+            };
+            let shrunk = ArrayDefinition {
+                kind,
+                opaque: Some(shrunk),
+                ..definition
+            };
+            Some((anchor, CellState::authored(s, anchor), shrunk))
+        })
+        .collect()
+}
+
+/// Gives each array `cut` names its shrunk definition, returning the writes
+/// that put the rectangles it had back.
+fn shrink_opaque_arrays(
+    s: &mut Sheet,
+    sheet: SheetId,
+    cut: Vec<(CellRef, CellState, ArrayDefinition)>,
+) -> Vec<Op> {
+    cut.into_iter()
+        .map(|(anchor, before, shrunk)| {
+            s.set_array_definition(anchor, Some(shrunk));
+            Op::SetCell {
+                sheet,
+                at: anchor,
+                cell: before,
+            }
+        })
+        .collect()
 }
 
 /// remap every occupied cell through `op` in place. returns the cells whose
@@ -1390,6 +1474,68 @@ mod tests {
             for address in ["C2", "C3"] {
                 assert_eq!(wb.sheets[0].result_anchor(r(address)), None, "{op:?}");
             }
+        }
+    }
+
+    /// deleting rows or columns inside an opaque array shrinks the rectangle
+    /// its definition records, so ending the array afterwards clears only
+    /// what the rectangle still holds; undo gives the rectangle back.
+    #[test]
+    fn a_deletion_inside_an_opaque_array_shrinks_what_it_records() {
+        for op in [
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 1,
+            },
+        ] {
+            let mut wb = opaque();
+            let rows = matches!(op, Op::DeleteRows { .. });
+            if !rows {
+                let sheet = &mut wb.sheets[0];
+                for address in ["C2", "C3"] {
+                    sheet.set_cell(r(address), Cell::default());
+                }
+                sheet.set_cell(r("D1"), Cell::from(num(2.0)));
+                sheet.set_cell(r("E1"), Cell::from(num(3.0)));
+                let definition = sheet.array_definition(r("C1")).unwrap();
+                sheet.set_array_definition(
+                    r("C1"),
+                    Some(ArrayDefinition {
+                        opaque: Some(ArraySize { rows: 1, cols: 3 }),
+                        ..definition
+                    }),
+                );
+            }
+            let keep = if rows { r("C4") } else { r("F1") };
+            wb.sheets[0].set_cell(
+                keep,
+                Cell {
+                    value: CellValue::Text {
+                        value: "keep".into(),
+                    },
+                    ..Cell::default()
+                },
+            );
+            let before = wb.clone();
+            let inverse = apply(&mut wb, &op).unwrap();
+            let sheet = &wb.sheets[0];
+            let shrunk = if rows { "C1:C2" } else { "C1:D1" };
+            assert_eq!(
+                sheet.array_formula(r("C1")),
+                Some(CellRange::parse_a1(shrunk).unwrap()),
+                "{op:?}"
+            );
+            let moved = if rows { r("C3") } else { r("E1") };
+            let clears = opaque_follower_clears(sheet, r("C1"), &CellState::default());
+            assert!(clears.iter().all(|(at, _)| *at != moved), "{op:?}");
+            apply_ops(&mut wb, &inverse.0).unwrap();
+            assert_eq!(wb, before, "{op:?}");
         }
     }
 

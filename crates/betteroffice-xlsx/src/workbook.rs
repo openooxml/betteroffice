@@ -377,8 +377,10 @@ impl Workbook {
                 return Err(Error::DuplicatePart(name.clone()));
             }
         }
-        let parsed =
-            xlsx_parse::parse_workbook_with_owned_package_classified(parts, &xlsx_calc::evaluable)?;
+        let parsed = xlsx_parse::parse_workbook_with_owned_package_classified(
+            parts,
+            &xlsx_calc::classify_arrays,
+        )?;
         let mut workbook = Self::from_source(
             parsed.workbook,
             Some(parsed.package),
@@ -447,7 +449,7 @@ impl Workbook {
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
-        classify_arrays(&mut model);
+        xlsx_calc::classify_arrays(&mut model);
         let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
             active_sheet
         } else {
@@ -3767,25 +3769,30 @@ fn edit_cell_state(
     };
     state.style = style;
     if let Some(formula) = state.formula.as_deref() {
-        let anchor = workbook.sheet(sheet);
-        let unchanged = anchor
-            .and_then(|anchor| anchor.cell(cell))
-            .and_then(|cell| cell.formula.as_deref())
-            == Some(formula);
-        state.array = anchor
-            .and_then(|anchor| anchor.array_definition(cell))
-            .map(|definition| {
-                if unchanged {
-                    return definition;
-                }
-                let retyped = ArrayDefinition {
-                    opaque: None,
-                    ..definition
-                };
-                classified(workbook, sheet, Some(formula), retyped)
-            });
+        state.array = anchor_definition(workbook, sheet, cell, formula);
     }
     state
+}
+
+/// The definition an array anchor at `cell` carries once `formula` is typed
+/// there: the one it has while the formula stays, and otherwise that kind of
+/// array classified afresh for the new formula.
+pub(crate) fn anchor_definition(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    formula: &str,
+) -> Option<ArrayDefinition> {
+    let anchor = workbook.sheet(sheet)?;
+    let definition = anchor.array_definition(cell)?;
+    if anchor.cell(cell).and_then(|cell| cell.formula.as_deref()) == Some(formula) {
+        return Some(definition);
+    }
+    let retyped = ArrayDefinition {
+        opaque: None,
+        ..definition
+    };
+    Some(classified(workbook, sheet, Some(formula), retyped))
 }
 
 /// `definition` for an anchor holding `formula`: an array whose formula the
@@ -3810,31 +3817,6 @@ fn classified(
     ArrayDefinition {
         opaque: Some(recorded),
         ..definition
-    }
-}
-
-/// Makes each array whose formula the engine cannot evaluate opaque before
-/// anything seeds, migrates or fingerprints `model`, so its cached result
-/// stays stored cells.
-fn classify_arrays(model: &mut WorkbookModel) {
-    for index in 0..model.sheets.len() {
-        let sheet = &model.sheets[index];
-        let opaque: Vec<CellRef> = sheet
-            .array_definitions()
-            .filter(|(at, definition, _)| {
-                !definition.is_opaque()
-                    && sheet
-                        .cell(*at)
-                        .and_then(|cell| cell.formula.as_deref())
-                        .is_some_and(|formula| {
-                            !xlsx_calc::evaluable(model, SheetId(index as u32), formula)
-                        })
-            })
-            .map(|(at, _, _)| at)
-            .collect();
-        for at in opaque {
-            model.sheets[index].set_opaque(at);
-        }
     }
 }
 

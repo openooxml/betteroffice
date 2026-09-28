@@ -448,17 +448,23 @@ fn eval_node_with(
         return (None, false);
     };
     let cell = cell_of(u);
-    let definition = wb.sheet(u.0).and_then(|sheet| sheet.array_definition(cell));
-    // an array the engine cannot evaluate keeps what its cells store; one
-    // whose anchor holds nothing yet, freshly typed or never cached, fills
-    // its recorded rectangle once, as a legacy array would.
-    if definition.is_some_and(|definition| definition.is_opaque())
-        && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty)
-    {
+    let opaque = wb
+        .sheet(u.0)
+        .and_then(|sheet| sheet.array_definition(cell))
+        .is_some_and(|definition| definition.is_opaque());
+    // an array the engine cannot evaluate keeps what its cells store; an
+    // anchor of one that holds nothing yet, freshly typed, shows what its
+    // formula evaluates to there and nowhere else.
+    if opaque && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
         return (None, false);
     }
-    let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
-    let dynamic = definition.is_some_and(spills);
+    let authored = wb
+        .sheet(u.0)
+        .and_then(|sheet| sheet.array_formula(cell))
+        .filter(|_| !opaque);
+    let dynamic = wb
+        .sheet(u.0)
+        .is_some_and(|sheet| sheet.is_dynamic_array(cell));
     let mut ctx = EvalContext::with_budget(provider, u.0, budget);
     ctx.cell = Some(cell);
     ctx.now_serial = now_serial;
@@ -534,7 +540,7 @@ fn write_spill(
     let Some(previous) = sheet.array_formula(anchor) else {
         return Vec::new();
     };
-    let dynamic = sheet.array_definition(anchor).is_some_and(spills);
+    let dynamic = sheet.is_dynamic_array(anchor);
     let attempted = spill.range;
     let (range, values) = if blocked(sheet, anchor, spill.range) {
         (
@@ -575,12 +581,6 @@ fn write_spill(
         sheet.set_array_extent(anchor, extent, attempted);
     }
     moved
-}
-
-/// whether an array spills to its result's size rather than filling the
-/// rectangle it was entered in or recorded.
-fn spills(definition: xlsx_model::ArrayDefinition) -> bool {
-    definition.is_dynamic() && !definition.is_opaque()
 }
 
 /// whether anything but this anchor's own result stops it filling `range`:

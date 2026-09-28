@@ -1051,31 +1051,160 @@ fn clearing_an_opaque_anchor_clears_its_cells_through_history() {
     same_replicas(&[&writer, &follower, &late]);
 }
 
-/// an opaque array whose file cached no result fills its recorded rectangle
-/// with the engine's error, as Excel does, whether dynamic or entered with
-/// ctrl-shift-enter, and a save caches it there.
+/// an opaque array whose file cached no result shows what the engine makes
+/// of it over its recorded rectangle, `#NAME?` for the function it lacks or
+/// a branch it can compute, as Excel does, and holds it as stored cells that
+/// no input changes: an edit among them undoes like any other, on every
+/// replica, through a save.
 #[test]
-fn an_uncached_opaque_array_reports_its_error_over_its_rectangle() {
-    let rows = concat!(
-        r#"<row r="1"><c r="C1" cm="1"><f t="array" ref="C1:C3">WEBSERVICE("https://example.com")</f></c></row>"#,
-        r#"<row r="2"><c r="C2"><f/></c></row>"#,
-        r#"<row r="3"><c r="C3"><f/></c></row>"#,
-    );
+fn an_uncached_opaque_array_is_stored_as_the_engine_first_shows_it() {
     let name = error(ErrorValue::Name);
-    for dynamic in [true, false] {
-        let workbook = Workbook::open_recalculated(&package(rows, dynamic), options()).unwrap();
-        let sheet = &workbook.model().sheets[0];
-        assert!(sheet.array_definition(cell("C1")).unwrap().is_opaque());
-        assert_eq!(
-            column(&workbook, &["C1", "C2", "C3"]),
-            [name.clone(), name.clone(), name.clone()]
+    for (formula, shown) in [
+        (
+            r#"WEBSERVICE("https://example.com")"#,
+            [name.clone(), name.clone(), name.clone()],
+        ),
+        (
+            r#"IF(A1,WEBSERVICE("https://example.com"),_xlfn.SEQUENCE(3,1,7))"#,
+            [number(7.0), number(8.0), number(9.0)],
+        ),
+    ] {
+        let rows = format!(
+            r#"<row r="1"><c r="A1" t="b"><v>0</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">{}</f></c></row><row r="2"><c r="C2"><f/></c></row><row r="3"><c r="C3"><f/></c></row>"#,
+            formula.replace('"', "&quot;")
         );
-        let reopened = Workbook::open_recalculated(&workbook.save().unwrap(), options()).unwrap();
-        assert_eq!(
-            column(&reopened, &["C1", "C2", "C3"]),
-            [name.clone(), name.clone(), name.clone()]
-        );
+        for dynamic in [true, false] {
+            let bytes = package(&rows, dynamic);
+            let open = |client| {
+                Workbook::open_collaborative_recalculated(&bytes, client, options()).unwrap()
+            };
+            let mut solo = Workbook::open_recalculated(&bytes, options()).unwrap();
+            let mut writer = open(211);
+            let mut peer = open(212);
+            for workbook in [&mut solo, &mut writer] {
+                assert!(opaque(workbook), "{formula}");
+                assert_eq!(column(workbook, &["C1", "C2", "C3"]), shown, "{formula}");
+                edit(workbook, "A1", "TRUE");
+                if dynamic {
+                    edit(workbook, "C2", "x");
+                    assert_eq!(value(workbook, "C3"), shown[2], "{formula}");
+                    workbook.undo(options()).unwrap();
+                }
+                workbook.undo(options()).unwrap();
+                assert_eq!(column(workbook, &["C1", "C2", "C3"]), shown, "{formula}");
+            }
+            sync(&writer, &mut peer);
+            same_replicas(&[&writer, &peer]);
+            let reopened = Workbook::open_recalculated(&solo.save().unwrap(), options()).unwrap();
+            assert_eq!(column(&reopened, &["C1", "C2", "C3"]), shown, "{formula}");
+        }
     }
+}
+
+/// deleting a row or column inside an opaque array shrinks its rectangle
+/// with it, so clearing the anchor afterwards leaves what moved up beside it
+/// alone; undo gives the rectangle back.
+#[test]
+fn a_deletion_inside_an_opaque_array_shrinks_its_rectangle() {
+    let bytes = package(UNSUPPORTED, true);
+    let mut workbook = Workbook::open_recalculated(&bytes, options()).unwrap();
+    edit(&mut workbook, "C4", "keep");
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            }],
+            options(),
+        )
+        .unwrap();
+    let sheet = &workbook.model().sheets[0];
+    assert_eq!(
+        sheet.array_formula(cell("C1")),
+        Some(CellRange::parse_a1("C1:C2").unwrap())
+    );
+    edit(&mut workbook, "C1", "");
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3"]),
+        [CellValue::Empty, CellValue::Empty, text("keep")]
+    );
+    workbook.undo(options()).unwrap();
+    workbook.undo(options()).unwrap();
+    assert!(spilled(&workbook) && opaque(&workbook));
+    assert_eq!(value(&workbook, "C4"), text("keep"));
+    assert_eq!(
+        workbook.model().sheets[0].array_formula(cell("C1")),
+        Some(CellRange::parse_a1("C1:C3").unwrap())
+    );
+    edit(&mut workbook, "C1", "");
+    assert_eq!(value(&workbook, "C4"), text("keep"));
+}
+
+fn request(workbook: &Workbook, steps: serde_json::Value) -> EditRequest {
+    serde_json::from_value(json!({ "expectVersion": workbook.version(), "steps": steps })).unwrap()
+}
+
+/// a batch that clears an opaque anchor keeps every cell it names among the
+/// array's, a value it asks for that the cell already holds included.
+#[test]
+fn a_batch_keeps_the_opaque_cells_it_names() {
+    let bytes = package(UNSUPPORTED, true);
+    let mut workbook = Workbook::open_recalculated(&bytes, options()).unwrap();
+    let steps = json!([{
+        "op": "setCellInputs",
+        "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "C1:C2" } },
+        "inputs": [[""], ["2"]],
+    }]);
+    let batch = request(&workbook, steps);
+    workbook.apply_edits(&batch).unwrap().unwrap();
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3"]),
+        [CellValue::Empty, number(2.0), CellValue::Empty]
+    );
+}
+
+/// `setFormulas` classifies what it writes over an array anchor the way
+/// typing does: a formula the engine evaluates spills and follows its inputs,
+/// and one it cannot evaluate is opaque.
+#[test]
+fn set_formulas_reclassifies_an_anchor() {
+    let set = |workbook: &mut Workbook, formula: &str| {
+        let steps = json!([{
+            "op": "setFormulas",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "C1" } },
+            "formulas": [[formula]],
+        }]);
+        let batch = request(workbook, steps);
+        workbook.apply_edits(&batch).unwrap().unwrap();
+    };
+    let mut workbook = Workbook::open_recalculated(&package(UNSUPPORTED, true), options()).unwrap();
+    edit(&mut workbook, "A1", "3");
+    set(&mut workbook, "_xlfn.SEQUENCE(A1)");
+    assert!(
+        !workbook.model().sheets[0]
+            .array_definition(cell("C1"))
+            .unwrap()
+            .is_opaque()
+    );
+    edit(&mut workbook, "A1", "4");
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3", "C4"]),
+        [number(1.0), number(2.0), number(3.0), number(4.0)]
+    );
+
+    let mut workbook = sorted();
+    set(&mut workbook, r#"WEBSERVICE("https://example.com")"#);
+    assert!(
+        workbook.model().sheets[0]
+            .array_definition(cell("C1"))
+            .unwrap()
+            .is_opaque()
+    );
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3"]),
+        [error(ErrorValue::Name), CellValue::Empty, CellValue::Empty]
+    );
 }
 
 /// an edit that ends an opaque array keeps what it writes among the array's

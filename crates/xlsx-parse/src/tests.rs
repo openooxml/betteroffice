@@ -6401,11 +6401,13 @@ fn an_array_the_engine_cannot_evaluate_is_read_opaque() {
         CellRef::parse_a1("B1").unwrap(),
         CellRef::parse_a1("B2").unwrap(),
     );
-    let parsed = crate::parse_workbook_with_owned_package_classified(
-        owned_parts(&parts),
-        &|_, _, formula| !formula.contains("REMOTE"),
-    )
-    .unwrap();
+    let parsed =
+        crate::parse_workbook_with_owned_package_classified(owned_parts(&parts), &|workbook| {
+            let sheet = &mut workbook.sheets[0];
+            sheet.set_opaque(CellRef::parse_a1("A1").unwrap());
+            sheet.adopt_results(CellRef::parse_a1("B1").unwrap());
+        })
+        .unwrap();
     let sheet = &parsed.workbook.sheets[0];
     assert_eq!(
         sheet.array_definition(a1).unwrap().opaque,

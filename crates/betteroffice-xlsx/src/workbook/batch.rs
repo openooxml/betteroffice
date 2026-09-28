@@ -747,7 +747,7 @@ impl Workbook {
                         value: CellValue::Empty,
                         formula: Some(source.clone()),
                         style: current.style,
-                        array: current.array,
+                        array: super::anchor_definition(&self.model, resolved.sheet, cell, source),
                     };
                     if !cell_states_semantically_equal(&current, &state) {
                         states.push((cell, state));
@@ -871,11 +871,14 @@ impl Workbook {
         let mut preview = self.model.clone();
         let mut changed: Vec<BTreeSet<(u32, u32)>> = vec![BTreeSet::new(); steps.len()];
         let mut per_op = Vec::with_capacity(ops.len());
-        let written: HashSet<_> = ops
+        let written: HashSet<_> = steps
             .iter()
-            .filter_map(|(_, op)| match op {
-                Op::SetCell { sheet, at, .. } => Some((*sheet, *at)),
-                _ => None,
+            .filter(|planned| matches!(planned.effect, Effect::Content(_)))
+            .flat_map(|planned| {
+                planned
+                    .resolved
+                    .iter()
+                    .map(|cell| (planned.resolved.sheet, cell))
             })
             .collect();
         let mut index = 0;
