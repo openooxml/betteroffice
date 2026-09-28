@@ -8,6 +8,10 @@
  * - Font availability detection
  */
 
+import {
+  hasDefaultFontSource,
+  resolveDefaultFontProvider,
+} from '../layout/measure/defaultFontProvider';
 import { resolveFontFamily } from './fontResolver';
 
 // Track loaded fonts to avoid duplicate requests
@@ -38,7 +42,9 @@ let isLoadingAny = false;
 // setGoogleFontsEnabled(false) to suppress the redundant remote fetches at the
 // source. Embedded faces (loadFontFromBuffer) and consumer-hosted faces
 // (loadFontFromUrl / the `fonts` prop) are unaffected — only the implicit
-// Google Fonts lookup in loadFont / loadFontWithMapping is gated.
+// Google Fonts lookup in loadFont / loadFontWithMapping is gated. With a
+// bundled font source configured (configureDefaultFonts), faces come from it
+// and the Google lookup is never made.
 let googleFontsEnabled = true;
 
 // Families registered through this module's face loaders — raw buffers
@@ -101,6 +107,55 @@ function faceKey(
 // sets. The first positive probe also fires onFontsLoaded (microtask,
 // matching the fetch path's async timing) — consumers gate ready-state UI
 // on that callback, and before the skip existed the fetch guaranteed it.
+const DEFAULT_FACE_STYLES: Array<[boolean, boolean]> = [
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+];
+
+/**
+ * Registers the configured bundled faces for `family` under its own name.
+ * Only families the bundle carries (directly or as a metric-compatible clone)
+ * are registered; others stay with their CSS fallback stack.
+ */
+async function registerBundledFamily(
+  family: string,
+  weights?: number[],
+  styles?: ('normal' | 'italic')[]
+): Promise<boolean> {
+  if (typeof FontFace === 'undefined' || document.fonts === undefined) return false;
+  const provider = await resolveDefaultFontProvider();
+  if (!provider) return false;
+  const faces =
+    weights || styles
+      ? (weights ?? [400, 700]).flatMap((weight) =>
+          (styles ?? ['normal', 'italic']).map(
+            (style): [boolean, boolean] => [weight >= 600, style === 'italic']
+          )
+        )
+      : DEFAULT_FACE_STYLES;
+  const registered = await Promise.all(
+    faces.map(async ([bold, italic]) => {
+      const load = provider.resolve(family, bold, italic);
+      if (!load) return false;
+      try {
+        const face = new FontFace(family, await load(), {
+          weight: bold ? '700' : '400',
+          style: italic ? 'italic' : 'normal',
+        });
+        await face.load();
+        document.fonts.add(face);
+        return true;
+      } catch (error) {
+        reportFontError(error, `failed to register bundled "${family}"`);
+        return false;
+      }
+    })
+  );
+  return registered.some(Boolean);
+}
+
 function satisfiedBySystemFont(family: string): boolean {
   if (registeredFamilies.has(family)) {
     return false;
@@ -227,7 +282,8 @@ export async function loadFont(
   // Remote disabled, not locally satisfied, and no in-flight registration
   // that could change the answer — statically false. Skip the promise
   // machinery instead of re-paying it on every loadDocumentFonts pass.
-  if (!googleFontsEnabled && pendingFaces.length === 0) {
+  const bundled = hasDefaultFontSource();
+  if (!googleFontsEnabled && !bundled && pendingFaces.length === 0) {
     return false;
   }
 
@@ -248,6 +304,15 @@ export async function loadFont(
         if (!options && satisfiedBySystemFont(normalizedFamily)) {
           return true;
         }
+      }
+
+      if (bundled) {
+        if (!(await registerBundledFamily(normalizedFamily, options?.weights, options?.styles))) {
+          return false;
+        }
+        loadedFonts.add(normalizedFamily);
+        notifyCallbacks([normalizedFamily]);
+        return true;
       }
 
       // Remote fetch disabled (no-egress embedder). The font is not locally
