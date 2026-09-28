@@ -13,9 +13,10 @@ use crate::array::evaluate_spill;
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS};
 use crate::parser::{Expr, parse_formula};
 
-/// name references one [`Capability`] visits before it answers no for
-/// whatever still needs more.
-const MAX_VISITS: usize = 1 << 22;
+/// analysis steps one [`Capability`] takes, each expression node, binding
+/// and name reference it visits, before it answers no for whatever still
+/// needs more.
+const MAX_WORK: usize = 1 << 22;
 
 /// whether the engine implements everything `formula`, on `sheet`, could
 /// run: it parses, and every function it calls, in every branch and in every
@@ -136,7 +137,8 @@ pub struct Capability<'a> {
     names: HashMap<(Option<SheetId>, String), usize>,
     parsed: HashMap<usize, Option<Parsed>>,
     decided: [HashMap<Name, bool>; 2],
-    visits: usize,
+    work: usize,
+    limit: usize,
 }
 
 /// what a walk over a formula and the names it reaches asks of each.
@@ -162,11 +164,25 @@ impl Check {
 /// resolve against.
 type Name = (usize, SheetId);
 
-/// what a formula calls and names, gathered once.
+/// what a formula calls and names, gathered once: the names no `LET` or
+/// `LAMBDA` around them binds, and every name it reads, bound or not.
 struct Parsed {
     supported: bool,
     volatile: bool,
     names: Vec<(Option<String>, String)>,
+    every: Vec<(Option<String>, String)>,
+}
+
+impl Parsed {
+    /// the names `check` follows: a binding shadows a workbook name for
+    /// evaluation, but whether a `LAMBDA` sees the binding around it depends
+    /// on where it is called, so determinism follows every name.
+    fn names(&self, check: Check) -> &[(Option<String>, String)] {
+        match check {
+            Check::Supported => &self.names,
+            Check::Deterministic => &self.every,
+        }
+    }
 }
 
 /// one defined name being expanded: the names its formula reads, how far
@@ -186,7 +202,7 @@ impl<'a> Capability<'a> {
         let mut names = HashMap::new();
         for (index, defined) in wb.defined_names.iter().enumerate() {
             names
-                .entry((defined.local_sheet, defined.name.to_lowercase()))
+                .entry((defined.local_sheet, defined.name.to_ascii_lowercase()))
                 .or_insert(index);
         }
         Self {
@@ -194,7 +210,8 @@ impl<'a> Capability<'a> {
             names,
             parsed: HashMap::new(),
             decided: [HashMap::new(), HashMap::new()],
-            visits: 0,
+            work: 0,
+            limit: MAX_WORK,
         }
     }
 
@@ -211,23 +228,23 @@ impl<'a> Capability<'a> {
     }
 
     fn check(&mut self, sheet: SheetId, formula: &str, check: Check) -> bool {
-        match parse_formula(formula) {
-            Ok(expr) => {
-                let parsed = gather(&expr);
-                check.holds(&parsed) && self.names_hold(sheet, parsed.names, check)
-            }
-            Err(_) => false,
-        }
+        let Some(parsed) = parse_formula(formula)
+            .ok()
+            .and_then(|expr| gather(&expr, &mut self.work, self.limit))
+        else {
+            return false;
+        };
+        check.holds(&parsed) && self.names_hold(sheet, parsed.names(check).to_vec(), check)
     }
 
     /// the index of the name `name` reads as from `sheet`, local before
-    /// global.
+    /// global and matched ignoring ASCII case, as the evaluator looks it up.
     fn resolve(&self, sheet: SheetId, scope: &Option<String>, name: &str) -> Option<Name> {
         let lookup = match scope {
             Some(scope) => self.wb.sheet_id(scope)?,
             None => sheet,
         };
-        let key = name.to_lowercase();
+        let key = name.to_ascii_lowercase();
         let index = self
             .names
             .get(&(Some(lookup), key.clone()))
@@ -238,12 +255,15 @@ impl<'a> Capability<'a> {
     }
 
     fn parsed(&mut self, index: usize) -> Option<&Parsed> {
+        let (wb, work, limit) = (self.wb, &mut self.work, self.limit);
         self.parsed
             .entry(index)
             .or_insert_with(|| {
-                let formula = &self.wb.defined_names[index].formula;
+                let formula = &wb.defined_names[index].formula;
                 let formula = formula.strip_prefix('=').unwrap_or(formula);
-                parse_formula(formula).ok().map(|expr| gather(&expr))
+                parse_formula(formula)
+                    .ok()
+                    .and_then(|expr| gather(&expr, work, limit))
             })
             .as_ref()
     }
@@ -275,8 +295,8 @@ impl<'a> Capability<'a> {
             if frame.next < frame.names.len() {
                 let (scope, name) = &frame.names[frame.next];
                 frame.next += 1;
-                self.visits += 1;
-                if self.visits > MAX_VISITS {
+                self.work += 1;
+                if self.work > self.limit {
                     return false;
                 }
                 let from = frame.name.1;
@@ -297,7 +317,7 @@ impl<'a> Capability<'a> {
                     self.decided[decided].insert(name, false);
                     return self.refuse(&stack, decided);
                 };
-                let names = parsed.names.clone();
+                let names = parsed.names(check).to_vec();
                 let at = order.len();
                 order.insert(name, at);
                 let start = pending.len();
@@ -339,17 +359,44 @@ impl<'a> Capability<'a> {
     }
 }
 
-/// whether `expr` calls only functions the engine evaluates, and the names
-/// it reads that no `LET` or `LAMBDA` around them binds.
-fn gather(expr: &Expr) -> Parsed {
+/// one step of [`gather`]'s walk: an expression to visit, or a `LET` or
+/// `LAMBDA` name coming into or going out of scope.
+enum Step<'e> {
+    Visit(&'e Expr),
+    Bind(&'e str),
+    Unbind(&'e str),
+}
+
+/// whether `expr` calls only functions the engine evaluates, whether it calls
+/// a volatile one, and the names it reads. each step is charged to `work`,
+/// and the walk gives up once `work` passes `limit`.
+fn gather(expr: &Expr, work: &mut usize, limit: usize) -> Option<Parsed> {
     let mut parsed = Parsed {
         supported: true,
         volatile: false,
         names: Vec::new(),
+        every: Vec::new(),
     };
-    let mut bindings: Vec<(Option<usize>, &str)> = Vec::new();
-    let mut pending = vec![(expr, None)];
-    while let Some((expr, scope)) = pending.pop() {
+    let mut bound: HashMap<String, usize> = HashMap::new();
+    let mut pending = vec![Step::Visit(expr)];
+    while let Some(step) = pending.pop() {
+        *work += 1;
+        if *work > limit {
+            return None;
+        }
+        let expr = match step {
+            Step::Visit(expr) => expr,
+            Step::Bind(name) => {
+                *bound.entry(name.to_ascii_lowercase()).or_default() += 1;
+                continue;
+            }
+            Step::Unbind(name) => {
+                if let Some(count) = bound.get_mut(&name.to_ascii_lowercase()) {
+                    *count -= 1;
+                }
+                continue;
+            }
+        };
         match expr {
             Expr::FuncCall { func, name, args } => {
                 if func.is_none() && !crate::array::is_array_builtin(name) {
@@ -367,54 +414,47 @@ fn gather(expr: &Expr) -> Parsed {
                     _ => false,
                 };
                 let Some((body, heads)) = args.split_last().filter(|_| binds) else {
-                    pending.extend(args.iter().map(|arg| (arg, scope)));
+                    pending.extend(args.iter().rev().map(Step::Visit));
                     continue;
                 };
-                let mut inner = scope;
-                let step = if binder == "LET" { 2 } else { 1 };
-                for head in heads.chunks(step) {
-                    if let Some(value) = head.get(1) {
-                        pending.push((value, inner));
-                    }
-                    match &head[0] {
-                        Expr::Name { scope: None, name } => {
-                            bindings.push((inner, name));
-                            inner = Some(bindings.len() - 1);
-                        }
-                        other => pending.push((other, inner)),
+                let width = if binder == "LET" { 2 } else { 1 };
+                for head in heads.chunks(width) {
+                    if let Expr::Name { scope: None, name } = &head[0] {
+                        pending.push(Step::Unbind(name));
                     }
                 }
-                pending.push((body, inner));
+                pending.push(Step::Visit(body));
+                for head in heads.chunks(width).rev() {
+                    match &head[0] {
+                        Expr::Name { scope: None, name } => pending.push(Step::Bind(name)),
+                        other => pending.push(Step::Visit(other)),
+                    }
+                    if let Some(value) = head.get(1) {
+                        pending.push(Step::Visit(value));
+                    }
+                }
             }
-            Expr::Name { scope: None, name } if bound(&bindings, scope, name) => {}
-            Expr::Name { scope, name } => parsed.names.push((scope.clone(), name.clone())),
-            Expr::ArrayLiteral { values, .. } => {
-                pending.extend(values.iter().map(|value| (value, scope)))
+            Expr::Name { scope, name } => {
+                parsed.every.push((scope.clone(), name.clone()));
+                let shadowed = scope.is_none()
+                    && bound
+                        .get(&name.to_ascii_lowercase())
+                        .is_some_and(|count| *count > 0);
+                if !shadowed {
+                    parsed.names.push((scope.clone(), name.clone()));
+                }
             }
-            Expr::Unary { expr, .. } | Expr::Percent(expr) => pending.push((expr, scope)),
-            Expr::Binary { lhs, rhs, .. } => {
-                pending.extend([(lhs.as_ref(), scope), (rhs.as_ref(), scope)])
-            }
+            Expr::ArrayLiteral { values, .. } => pending.extend(values.iter().map(Step::Visit)),
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => pending.push(Step::Visit(expr)),
+            Expr::Binary { lhs, rhs, .. } => pending.extend([Step::Visit(lhs), Step::Visit(rhs)]),
             Expr::RangeJoin { start, end } => {
                 parsed.volatile = true;
-                pending.extend([(start.as_ref(), scope), (end.as_ref(), scope)])
+                pending.extend([Step::Visit(start), Step::Visit(end)])
             }
             _ => {}
         }
     }
-    parsed
-}
-
-/// whether a `LET` or `LAMBDA` enclosing `scope` binds `name`.
-fn bound(bindings: &[(Option<usize>, &str)], mut scope: Option<usize>, name: &str) -> bool {
-    while let Some(at) = scope {
-        let (parent, bound) = bindings[at];
-        if bound.eq_ignore_ascii_case(name) {
-            return true;
-        }
-        scope = parent;
-    }
-    false
+    Some(parsed)
 }
 
 #[cfg(test)]
@@ -474,10 +514,16 @@ mod tests {
 
     /// a formula is deterministic only if nothing it could run, in a branch
     /// no input takes or a name it reads, reads the clock, draws a random
-    /// number or is otherwise volatile to the engine.
+    /// number or is otherwise volatile to the engine. a name reached through
+    /// a binding still counts, since a `LAMBDA` does not keep the bindings
+    /// around it once it is called elsewhere.
     #[test]
     fn a_formula_is_deterministic_only_if_every_branch_is() {
-        let wb = workbook(&[("Clock", "NOW()"), ("Fixed", "SEQUENCE(3)")]);
+        let wb = workbook(&[
+            ("Clock", "NOW()"),
+            ("Fixed", "SEQUENCE(3)"),
+            ("x", "RAND()"),
+        ]);
         let mut capability = Capability::new(&wb);
         for (formula, expected) in [
             ("IFERROR(_xlfn.FILTERXML(\"<a/>\",\"//b\"),\"\")", true),
@@ -486,7 +532,12 @@ mod tests {
             ("IF(FALSE,TODAY(),1)", false),
             ("_xlfn.RANDARRAY(3)", false),
             ("Clock+1", false),
-            ("LET(Clock,1,Clock)", true),
+            ("LET(Clock,1,Clock)", false),
+            (
+                "IF(FALSE,WEBSERVICE(\"x\"),_xlfn.MAP({1},_xlfn.LET(x,0,_xlfn.LAMBDA(y,x))))",
+                false,
+            ),
+            ("LET(y,1,y)", true),
         ] {
             assert_eq!(
                 capability.deterministic(SheetId(0), formula),
@@ -494,6 +545,56 @@ mod tests {
                 "{formula}"
             );
         }
+    }
+
+    /// a name resolves as the evaluator resolves it: local before global,
+    /// and ignoring ASCII case only, so a local `Ö` does not stand in for a
+    /// global `ö`.
+    #[test]
+    fn names_resolve_as_the_evaluator_resolves_them() {
+        let mut wb = workbook(&[("ö", "RAND()")]);
+        wb.defined_names.push(DefinedName {
+            name: "Ö".into(),
+            formula: "1".into(),
+            local_sheet: Some(SheetId(0)),
+            hidden: false,
+        });
+        let formula = "IF(FALSE,WEBSERVICE(\"x\"),ö)";
+        assert_eq!(
+            wb.defined_name(SheetId(0), "ö")
+                .map(|name| name.formula.as_str()),
+            Some("RAND()")
+        );
+        assert!(!Capability::new(&wb).deterministic(SheetId(0), formula));
+        let mut wb = workbook(&[("Mixed", "RAND()")]);
+        wb.defined_names.push(DefinedName {
+            name: "MIXED".into(),
+            formula: "1".into(),
+            local_sheet: Some(SheetId(0)),
+            hidden: false,
+        });
+        assert!(Capability::new(&wb).deterministic(SheetId(0), "mixed"));
+    }
+
+    /// every step of the walk, each binding and each name it looks up, is
+    /// charged to one bound, so a `LET` as long as the parser admits costs
+    /// work linear in its size, and a formula past the bound is neither
+    /// evaluable nor deterministic.
+    #[test]
+    fn a_long_let_is_charged_as_it_is_walked() {
+        const PAIRS: usize = 2_400;
+        let formula = format!("_xlfn.LET(x,1,{}x)", "y,x,".repeat(PAIRS));
+        let wb = workbook(&[]);
+        let mut capability = Capability::new(&wb);
+        let start = std::time::Instant::now();
+        assert!(capability.evaluable(SheetId(0), &formula));
+        assert!(capability.deterministic(SheetId(0), &formula));
+        assert!(start.elapsed().as_secs_f64() < 5.0);
+        assert!(capability.work <= 2 * 8 * PAIRS, "{}", capability.work);
+        let mut capability = Capability::new(&wb);
+        capability.limit = PAIRS;
+        assert!(!capability.evaluable(SheetId(0), &formula));
+        assert!(!capability.deterministic(SheetId(0), &formula));
     }
 
     /// deciding a name settles every name it reaches, cycles included, so
@@ -522,11 +623,11 @@ mod tests {
                     questions[index]
                 );
             }
-            let visits = capability.visits;
+            let work = capability.work;
             for (question, answer) in questions.iter().zip(answers) {
                 assert_eq!(capability.evaluable(SheetId(0), question), answer);
             }
-            assert!(capability.visits - visits <= 6);
+            assert!(capability.work - work <= 6 * 4);
         }
     }
 
@@ -558,7 +659,7 @@ mod tests {
             assert_eq!(capability.evaluable(SheetId(0), "step_0"), supported);
             assert_eq!(capability.evaluable(SheetId(0), "step_30000"), supported);
             let elapsed = start.elapsed();
-            assert_eq!(capability.visits, LENGTH + 1, "{last}");
+            assert!(capability.work <= 8 * LENGTH, "{last}");
             assert!(elapsed.as_secs_f64() < 5.0, "{last}: {elapsed:?}");
         }
     }

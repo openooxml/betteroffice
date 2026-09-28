@@ -3,8 +3,8 @@
 
 use betteroffice_xlsx::{
     ArraySize, CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue,
-    EditRequest, ErrorValue, MutationResult, Op, ProposalEditInput, ProposalRequest, Sheet,
-    SheetId, StylePatch, Workbook, WorkbookModel,
+    DefinedName, EditRequest, ErrorValue, MutationResult, Op, ProposalEditInput, ProposalRequest,
+    Sheet, SheetId, StylePatch, Workbook, WorkbookModel,
 };
 use serde_json::json;
 
@@ -58,8 +58,14 @@ fn options() -> CalculationOptions {
 /// a one-sheet package holding `rows`, with the cell metadata excel writes for
 /// dynamic arrays when `dynamic`.
 fn package(rows: &str, dynamic: bool) -> Vec<u8> {
+    package_named(rows, dynamic, Vec::new())
+}
+
+/// [`package`] with `names` defined in its workbook part.
+fn package_named(rows: &str, dynamic: bool, names: Vec<DefinedName>) -> Vec<u8> {
     let mut model = WorkbookModel::default();
     model.sheets.push(Sheet::new("Sheet1"));
+    model.defined_names = names;
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
     let sheet = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>"#
@@ -1076,7 +1082,7 @@ fn an_uncached_opaque_array_is_stored_as_it_first_shows() {
             [empty.clone(), empty.clone(), empty.clone()],
         ),
         (
-            r#"IF(A1,WEBSERVICE("https://example.com"),RAND()+NOW())"#,
+            r#"IF(A1,WEBSERVICE("https://example.com"),RANDBETWEEN(1,1000000000)+NOW())"#,
             [name.clone(), name.clone(), name.clone()],
         ),
         (
@@ -1120,6 +1126,53 @@ fn an_uncached_opaque_array_is_stored_as_it_first_shows() {
     }
 }
 
+/// an uncached opaque array whose formula can reach a random number, directly,
+/// through a name spelled with another case or through a binding a `LAMBDA`
+/// no longer sees, shows `#NAME?`: two replicas opened from the same bytes
+/// read the same cells and seed the same room.
+#[test]
+fn uncached_opaque_arrays_that_can_reach_randomness_seed_identical_rooms() {
+    let name = |name: &str, formula: &str, local: bool| DefinedName {
+        name: name.into(),
+        formula: formula.into(),
+        local_sheet: local.then_some(SheetId(0)),
+        hidden: false,
+    };
+    let shown = [
+        error(ErrorValue::Name),
+        error(ErrorValue::Name),
+        error(ErrorValue::Name),
+    ];
+    let random = "RANDBETWEEN(1,1000000000)";
+    for (branch, names) in [
+        (random, Vec::new()),
+        ("ö", vec![name("Ö", "1", true), name("ö", random, false)]),
+        (
+            "_xlfn.MAP({1},_xlfn.LET(x,0,_xlfn.LAMBDA(y,x)))",
+            vec![name("x", random, false)],
+        ),
+    ] {
+        let formula = format!(r#"IF(A1,WEBSERVICE("https://example.com"),{branch})"#);
+        let rows = format!(
+            r#"<row r="1"><c r="A1" t="b"><v>0</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">{}</f></c></row><row r="2"><c r="C2"><f/></c></row><row r="3"><c r="C3"><f/></c></row>"#,
+            formula.replace('"', "&quot;")
+        );
+        let bytes = package_named(&rows, true, names);
+        assert_eq!(
+            Workbook::open(&bytes).unwrap().model(),
+            Workbook::open(&bytes).unwrap().model(),
+            "{branch}"
+        );
+        let open =
+            |client| Workbook::open_collaborative_recalculated(&bytes, client, options()).unwrap();
+        let writer = open(221);
+        let mut peer = open(222);
+        assert_eq!(column(&writer, &["C1", "C2", "C3"]), shown, "{branch}");
+        sync(&writer, &mut peer);
+        same_replicas(&[&writer, &peer]);
+    }
+}
+
 /// a `LET` binding that shadows a workbook name the engine cannot evaluate
 /// makes the array evaluable, so it follows its inputs.
 #[test]
@@ -1142,7 +1195,7 @@ fn a_let_binding_shadows_a_workbook_name() {
     );
     sheet.set_dynamic_array_formula(cell("C1"), CellRange::parse_a1("C1").unwrap());
     model.sheets.push(sheet);
-    model.defined_names.push(betteroffice_xlsx::DefinedName {
+    model.defined_names.push(DefinedName {
         name: "Remote".into(),
         formula: r#"WEBSERVICE("https://example.com")"#.into(),
         local_sheet: None,
