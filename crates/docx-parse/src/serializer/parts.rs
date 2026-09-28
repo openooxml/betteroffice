@@ -11,6 +11,7 @@ use crate::paragraph::{Paragraph, ParagraphContent};
 use crate::paragraph_identity::parse_paragraph_id;
 use crate::xml::ParseError;
 
+use super::comment_references::normalize_comment_references;
 use super::context::SerializerContext;
 use super::paragraph::is_safe_attribute_name;
 use super::raw::validate_raw_subtree;
@@ -174,8 +175,10 @@ pub fn serialize_document_body(
     body: &DocumentBody,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    let mut blocks = body.content.clone();
+    normalize_comment_references(&mut [&mut blocks]);
     let mut output = String::new();
-    for block in &body.content {
+    for block in &blocks {
         output.push_str(&serialize_block_content(block, context)?);
     }
     if let Some(properties) = body.final_section_properties.as_ref() {
@@ -204,7 +207,9 @@ pub fn serialize_header_footer_part(
     if let Some(watermark) = story.watermark.as_ref() {
         content.push_str(&serialize_watermark(watermark));
     }
-    for block in &story.content {
+    let mut blocks = story.content.clone();
+    normalize_comment_references(&mut [&mut blocks]);
+    for block in &blocks {
         content.push_str(&serialize_block_content(block, context)?);
     }
     if content.is_empty() {
@@ -277,7 +282,9 @@ fn serialize_notes_part(
             content.push_str(&story_ignorable(&note.custom_root_bindings));
         }
         content.push('>');
-        for block in &note.content {
+        let mut blocks = note.content.clone();
+        normalize_comment_references(&mut [&mut blocks]);
+        for block in &blocks {
             content.push_str(&serialize_block_content(block, context)?);
         }
         content.push_str("</w:");

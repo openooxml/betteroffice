@@ -239,6 +239,35 @@ describe('a reanchored comment', () => {
     }
   });
 
+  it('saves one reference in a replica that only receives a losing move', async () => {
+    for (const newStory of [false, true]) {
+      const keeper = await open(docx(), 91051);
+      const mover = await createYrsSession({ clientId: 91050 });
+      sessions.push(mover);
+      mover.openDocx(docx(), false);
+      mover.loadState(keeper.encodeState());
+      keeper.setCommentRanges('1', [range(keeper, 0, 2, 5)]);
+      if (newStory) {
+        const at = { story: 'body', paraId: mover.paragraphs('body')[2]!.paraId, offset: 0 };
+        const [cell] = mover.insertTable(at, 1, 1).createdStoryIds;
+        const { paraId } = mover.paragraphs(cell!)[0]!;
+        mover.insertText({ story: cell!, paraId, offset: 0 }, 'Fresh cell');
+        mover.setCommentRanges('1', [
+          { story: cell!, start: { paraId, offset: 0 }, end: { paraId, offset: 5 } },
+        ]);
+      } else {
+        mover.setCommentRanges('1', [range(mover, 2, 0, 7)]);
+      }
+      keeper.applyUpdate(mover.encodeStateAsUpdate(keeper.encodeStateVector()));
+      expect(anchored(keeper, '1')).toBe('tro');
+      for (const [path, bytes] of await saves(keeper)) {
+        expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+        expect(paragraphXml(bytes, '0C000001')).toContain('<w:commentReference w:id="1"/>');
+        expect(anchored(await open(bytes, 91052), '1')).toBe('tro');
+      }
+    }
+  });
+
   it('saves once from a replica that received the reanchor', async () => {
     const source = await open(docx(), 91004);
     const peer = await createYrsSession({ clientId: 91005 });
