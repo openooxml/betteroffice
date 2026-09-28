@@ -6,7 +6,12 @@ import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/
 import { unzipContainer } from '@betteroffice/docx/docx/wasm';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, yrsToDocument, type YrsSession } from '@betteroffice/docx/yrs';
+import {
+  createYrsSession,
+  saveYrsDocx,
+  yrsToDocument,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from '../PagedEditor';
 import { useFileIO } from './useFileIO';
 
@@ -19,7 +24,10 @@ const FIXTURE = resolve(
   '../../../../../../crates/docx-edit/tests/fixtures/paragraph-identities'
 );
 
-/** The identity fixture with its "Lower" paragraph holding an internal hyperlink. */
+/**
+ * The identity fixture with its "Lower" paragraph holding an internal
+ * hyperlink and a block content control before its last paragraph.
+ */
 function fixture(): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   const add = (dir: string, prefix: string) => {
@@ -27,10 +35,15 @@ function fixture(): Uint8Array {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) add(path, `${prefix}${entry.name}/`);
       else {
-        const xml = readFileSync(path, 'utf8').replace(
-          '<w:r><w:t>Lower</w:t></w:r>',
-          '<w:r><w:t xml:space="preserve">See </w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>the linked text</w:t></w:r></w:hyperlink>'
-        );
+        const xml = readFileSync(path, 'utf8')
+          .replace(
+            '<w:r><w:t>Lower</w:t></w:r>',
+            '<w:r><w:t xml:space="preserve">See </w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>the linked text</w:t></w:r></w:hyperlink>'
+          )
+          .replace(
+            '<w:p w14:paraId="0A0B0C0D"',
+            '<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:p w14:paraId="3A3B3C3D"><w:r><w:t>Controlled</w:t></w:r></w:p></w:sdtContent></w:sdt><w:p w14:paraId="0A0B0C0D"'
+          );
         parts.set(`${prefix}${entry.name}`, toBytes(xml));
       }
     }
@@ -63,8 +76,15 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-/** Saves through the editor's Save, projecting the session with its host's comments as the editor does. */
-async function editorSave(live: YrsSession, comments: Comment[]): Promise<Uint8Array> {
+/**
+ * Saves `times` through the editor's Save, projecting the session with its
+ * host's comments as the editor does; each save's bytes.
+ */
+async function editorSave(
+  live: YrsSession,
+  comments: Comment[],
+  times = 1
+): Promise<Uint8Array[]> {
   const base = live.materializeDocx()!;
   const editor = {
     getYrsSession: () => live,
@@ -89,11 +109,14 @@ async function editorSave(live: YrsSession, comments: Comment[]): Promise<Uint8A
       focusActiveEditor: () => {},
     })
   );
-  await act(async () => {
-    await result.current.handleSave();
-  });
+  for (let index = 0; index < times; index += 1) {
+    await act(async () => {
+      await result.current.handleSave();
+    });
+  }
   expect(errors).toEqual([]);
-  return new Uint8Array(saved[0]!);
+  expect(saved).toHaveLength(times);
+  return saved.map((buffer) => new Uint8Array(buffer));
 }
 
 function markers(bytes: Uint8Array, id: number): string[] {
@@ -132,9 +155,9 @@ test('the editor Save writes the range of a comment added inside a hyperlink', a
   live.applyRawOps('body', [
     { op: 'setComment', id: '2', ranges: [[start, start + 7]], author: 'Ada', date: added.date },
   ]);
-  const bytes = await editorSave(live, [...comments, added]);
-  expect(markers(bytes, 2)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
-  expect(anchored(await open(bytes, 8), '2')).toBe('See the');
+  const [bytes] = await editorSave(live, [...comments, added]);
+  expect(markers(bytes!, 2)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+  expect(anchored(await open(bytes!, 8), '2')).toBe('See the');
 });
 
 test('the editor Save writes a reanchored comment once, where it now is', async () => {
@@ -147,7 +170,47 @@ test('the editor Save writes a reanchored comment once, where it now is', async 
       end: { paraId: 'body:p1', offset: 4 },
     },
   ]);
-  const bytes = await editorSave(live, comments);
-  expect(markers(bytes, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
-  expect(anchored(await open(bytes, 10), '1')).toBe('Miss');
+  const [bytes] = await editorSave(live, comments);
+  expect(markers(bytes!, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+  expect(anchored(await open(bytes!, 10), '1')).toBe('Miss');
 });
+
+for (const [where, paraId, text] of [
+  ['a table cell', '2B3C4D5E', 'Cell'],
+  ['a block content control', '3A3B3C3D', 'Controlled'],
+] as const) {
+  test(`the editor Save writes a comment added in ${where}, save after save`, async () => {
+    const live = await open(fixture(), 11);
+    const comments = live.materializeDocx()!.package.document.comments!;
+    const story = live.storyIds().find((id) =>
+      live.paragraphs(id).some((paragraph) => paragraph.paraId === paraId)
+    )!;
+    expect(story).not.toBe('body');
+    const added: Comment = {
+      id: 2,
+      author: 'Ada',
+      date: '2026-09-28T00:00:00Z',
+      content: [{ type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Note' }] }] }],
+    };
+    const result = live.commentTextTarget(
+      { kind: 'search', text, within: { kind: 'paragraph', story, paraId }, view: 'accepted' },
+      { id: '2', author: 'Ada', date: added.date!, body: added.content }
+    );
+    expect(result.ok).toBe(true);
+    for (const bytes of await editorSave(live, [...comments, added], 2)) {
+      expect(markers(bytes, 2)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+      const paragraph = xml.match(new RegExp(`<w:p [^>]*${paraId}.*?</w:p>`))![0];
+      expect(paragraph).toContain('<w:commentRangeStart w:id="2"/>');
+      expect(paragraph).toContain('<w:commentReference w:id="2"/>');
+      const reopened = await open(bytes, 12);
+      const ids = reopened.materializeDocx()!.package.document.comments!.map(({ id }) => id);
+      expect(ids).toContain(2);
+      expect(markers((await saveYrsDocx(reopened)).bytes, 2)).toEqual([
+        'RangeStart',
+        'RangeEnd',
+        'Reference',
+      ]);
+    }
+  });
+}

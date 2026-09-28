@@ -2211,6 +2211,8 @@ class SaveContext {
   private readonly baseParagraphs: Map<string, Paragraph>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
+  /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
+  private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
 
   constructor(
@@ -2224,6 +2226,19 @@ class SaveContext {
     this.baseParagraphs = collectBaseParagraphs(this.baseStories);
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.memo = sessionProjectionMemo(session);
+    for (const [story, ranges] of this.comments) {
+      const seen = new Set<string>();
+      for (
+        let owner: string | undefined = story;
+        owner !== undefined && !seen.has(owner);
+        owner = this.memo.parents.get(owner) ?? NESTED_STORY_ID.exec(owner)?.[1]
+      ) {
+        seen.add(owner);
+        const nested = this.subtreeComments.get(owner) ?? new Map<string, unknown>();
+        nested.set(story, ranges);
+        this.subtreeComments.set(owner, nested);
+      }
+    }
   }
 
   private storyIsClean(storyId: string): boolean {
@@ -2250,7 +2265,8 @@ class SaveContext {
   storyToBlocks(storyId: string): BlockContent[] {
     const baseBlocks = this.baseStories.get(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
-    const commentsKey = storyComments.length === 0 ? '' : stableStringify(storyComments);
+    const nestedComments = this.subtreeComments.get(storyId);
+    const commentsKey = nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '';
     const priorStory = this.memo.stories.get(storyId);
     // Nested stories are mapped positionally, so a different array means
     // drift, not divergence — mutation paths mark them dirty anyway. A root
