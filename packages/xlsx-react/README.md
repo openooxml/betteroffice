@@ -343,8 +343,8 @@ const review = defineXlsxPlugin<State>({
   and `getRangeRect({ sheetId, range })` return pixels of the overlay layer,
   zoomed and clipped to the visible grid with frozen panes placed as painted;
   cells scrolled out of view or on another sheet return null. `getCellRect` is
-  one grid cell; address a merged area as a range. Every method returns null once
-  its layout is gone. The overlay layer sits on the grid below the editor's
+  one grid cell; address a merged area as a range. `getPositionAtPoint` is null;
+  check it before calling. Every method returns null once its layout is gone. The overlay layer sits on the grid below the editor's
   selection and cell editor, and ignores the pointer unless an element sets
   `pointer-events: auto`.
 - **Panels** dock left, right or bottom of the grid, below the toolbar and
