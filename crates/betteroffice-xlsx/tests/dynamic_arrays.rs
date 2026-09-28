@@ -2,9 +2,9 @@
 //! legacy ctrl-shift-enter arrays keep the rectangle they were entered in.
 
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, EditRequest,
-    ErrorValue, MutationResult, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch,
-    Workbook, WorkbookModel,
+    ArraySize, CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue,
+    EditRequest, ErrorValue, MutationResult, Op, ProposalEditInput, ProposalRequest, Sheet,
+    SheetId, StylePatch, Workbook, WorkbookModel,
 };
 use serde_json::json;
 
@@ -977,127 +977,132 @@ const UNSUPPORTED: &str = concat!(
     r#"<row r="3"><c r="C3"><v>3</v></c></row>"#,
 );
 
-/// undoing what took an unevaluable array's cached result brings it back,
-/// through a save, since the engine could never compute it again.
+fn opaque(workbook: &Workbook) -> bool {
+    let sheet = &workbook.model().sheets[0];
+    sheet
+        .array_definition(cell("C1"))
+        .is_some_and(|definition| definition.is_opaque())
+        && ["C2", "C3"]
+            .iter()
+            .all(|address| sheet.result_anchor(cell(address)).is_none())
+}
+
+/// an array the engine cannot evaluate is opaque: its cached cells are
+/// stored values, so a value typed among them replaces that cell alone and
+/// undoes like any other edit, and the array saves over its rectangle.
 #[test]
-fn undo_restores_a_cached_result_the_engine_cannot_recompute() {
+fn an_opaque_array_keeps_its_cached_cells_as_stored_values() {
     let bytes = package(UNSUPPORTED, true);
     for mut workbook in [
         Workbook::open_recalculated(&bytes, options()).unwrap(),
         Workbook::open_collaborative_recalculated(&bytes, 141, options()).unwrap(),
     ] {
-        assert!(spilled(&workbook));
-        edit(&mut workbook, "C1", "");
-        assert!(cleared(&workbook));
-        workbook.undo(options()).unwrap();
-        assert!(spilled(&workbook));
+        assert!(spilled(&workbook) && opaque(&workbook));
         edit(&mut workbook, "C2", "x");
-        assert!(obstructed_by(&workbook, text("x")));
+        assert_eq!(
+            column(&workbook, &["C1", "C2", "C3"]),
+            [number(1.0), text("x"), number(3.0)]
+        );
         workbook.undo(options()).unwrap();
-        assert!(spilled(&workbook));
-        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
-        assert!(spilled(&reopened));
+        assert!(spilled(&workbook) && opaque(&workbook));
+        let saved = workbook.save().unwrap();
+        assert!(sheet_xml(&saved).contains(r#"ref="C1:C3""#));
+        let reopened = Workbook::open_recalculated(&saved, options()).unwrap();
+        assert!(spilled(&reopened) && opaque(&reopened));
     }
 }
 
-/// replicas agree on an unevaluable array's cached result whether they see
-/// what took it and its undo one by one or together.
+/// clearing an opaque anchor clears its stored cells in the same edit, so
+/// undo and redo move them with the anchor on every replica, whether it sees
+/// each step or all of them at once.
 #[test]
-fn replicas_agree_on_a_restored_cache_however_it_arrives() {
+fn clearing_an_opaque_anchor_clears_its_cells_through_history() {
     let bytes = package(UNSUPPORTED, true);
     let open =
         |client| Workbook::open_collaborative_recalculated(&bytes, client, options()).unwrap();
+    let mut solo = Workbook::open_recalculated(&bytes, options()).unwrap();
     let mut writer = open(151);
     let mut follower = open(152);
     let mut late = open(153);
-    for input in ["", "x"] {
-        let address = if input.is_empty() { "C1" } else { "C2" };
-        edit(&mut writer, address, input);
+    for workbook in [&mut solo, &mut writer] {
+        edit(workbook, "C1", "");
+        assert!(cleared(workbook));
+    }
+    sync(&writer, &mut follower);
+    assert!(cleared(&follower));
+    for step in 0..3 {
+        for workbook in [&mut solo, &mut writer] {
+            if step == 1 {
+                workbook.redo(options()).unwrap();
+            } else {
+                workbook.undo(options()).unwrap();
+            }
+        }
         sync(&writer, &mut follower);
-        writer.undo(options()).unwrap();
-        sync(&writer, &mut follower);
+        for workbook in [&solo, &writer, &follower] {
+            assert_eq!(cleared(workbook), step == 1);
+        }
     }
     sync(&writer, &mut late);
-    for replica in [&writer, &follower, &late] {
-        assert!(spilled(replica));
+    for workbook in [&solo, &writer, &follower, &late] {
+        assert!(spilled(workbook) && opaque(workbook));
+        assert!(spilled(&Workbook::open(&workbook.save().unwrap()).unwrap()));
     }
     same_replicas(&[&writer, &follower, &late]);
 }
 
-/// undoing a row or column deletion that cut into an unevaluable array brings
-/// its cached result back as the array's, through a redo and a save.
+/// an opaque array whose file cached no result fills its recorded rectangle
+/// with the engine's error, as Excel does, whether dynamic or entered with
+/// ctrl-shift-enter, and a save caches it there.
 #[test]
-fn undoing_a_deletion_restores_a_cut_cache_the_engine_cannot_recompute() {
-    let bytes = package(UNSUPPORTED, true);
-    for op in [
-        Op::DeleteRows {
-            sheet: SheetId(0),
-            at: 1,
-            count: 1,
-        },
-        Op::DeleteRows {
-            sheet: SheetId(0),
-            at: 0,
-            count: 1,
-        },
-        Op::DeleteCols {
-            sheet: SheetId(0),
-            at: 2,
-            count: 1,
-        },
-    ] {
-        let mut workbook = Workbook::open_recalculated(&bytes, options()).unwrap();
-        workbook.apply_ops(vec![op.clone()], options()).unwrap();
-        assert!(!spilled(&workbook), "{op:?}");
-        workbook.undo(options()).unwrap();
-        workbook.redo(options()).unwrap();
-        workbook.undo(options()).unwrap();
-        assert!(spilled(&workbook), "{op:?}");
-        let sheet = workbook.sheet(SheetId(0)).unwrap();
-        for address in ["C2", "C3"] {
-            assert_eq!(
-                sheet.result_anchor(cell(address)),
-                Some(cell("C1")),
-                "{op:?}"
-            );
-        }
-        let saved = workbook.save().unwrap();
-        assert!(sheet_xml(&saved).contains(r#"ref="C1:C3""#), "{op:?}");
-        assert!(spilled(&Workbook::open(&saved).unwrap()), "{op:?}");
+fn an_uncached_opaque_array_reports_its_error_over_its_rectangle() {
+    let rows = concat!(
+        r#"<row r="1"><c r="C1" cm="1"><f t="array" ref="C1:C3">WEBSERVICE("https://example.com")</f></c></row>"#,
+        r#"<row r="2"><c r="C2"><f/></c></row>"#,
+        r#"<row r="3"><c r="C3"><f/></c></row>"#,
+    );
+    let name = error(ErrorValue::Name);
+    for dynamic in [true, false] {
+        let workbook = Workbook::open_recalculated(&package(rows, dynamic), options()).unwrap();
+        let sheet = &workbook.model().sheets[0];
+        assert!(sheet.array_definition(cell("C1")).unwrap().is_opaque());
+        assert_eq!(
+            column(&workbook, &["C1", "C2", "C3"]),
+            [name.clone(), name.clone(), name.clone()]
+        );
+        let reopened = Workbook::open_recalculated(&workbook.save().unwrap(), options()).unwrap();
+        assert_eq!(
+            column(&reopened, &["C1", "C2", "C3"]),
+            [name.clone(), name.clone(), name.clone()]
+        );
     }
 }
 
-/// what puts an array's result back is internal to undo.
+/// an edit that ends an opaque array keeps what it writes among the array's
+/// cells itself, wherever in the edit that write comes.
 #[test]
-fn restoring_an_array_result_is_internal() {
+fn ending_an_opaque_array_keeps_what_the_same_edit_writes() {
     let bytes = package(UNSUPPORTED, true);
-    for mut workbook in [
-        Workbook::open_recalculated(&bytes, options()).unwrap(),
-        Workbook::open_collaborative_recalculated(&bytes, 181, options()).unwrap(),
-    ] {
-        let before = workbook.model().clone();
-        let error = workbook
-            .apply_ops(
-                vec![Op::RestoreArrayResult {
-                    sheet: SheetId(0),
-                    anchor: cell("C1"),
-                    extent: CellRange::parse_a1("C1:C2").unwrap(),
-                    results: vec![(cell("C2"), number(9.0))],
-                }],
-                options(),
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains("internal"), "{error}");
-        assert_eq!(workbook.model(), &before);
-    }
+    let mut workbook = Workbook::open_recalculated(&bytes, options()).unwrap();
+    let inputs = [("C2", "k"), ("C1", "")].map(|(address, input)| CellInput {
+        cell: cell(address),
+        input: input.to_owned(),
+    });
+    workbook.edit_cells(SheetId(0), &inputs, options()).unwrap();
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3"]),
+        [CellValue::Empty, text("k"), CellValue::Empty]
+    );
+    workbook.undo(options()).unwrap();
+    assert!(spilled(&workbook) && opaque(&workbook));
 }
 
-/// retyping an unevaluable array as one the engine computes and undoing that
-/// brings back the cache it replaced, and redoing it the computed result, on
-/// its own, on a replica following each step and on one seeing them all at
-/// once, and the restored cache survives a save.
+/// retyping an opaque anchor as a formula the engine evaluates clears the
+/// stored cells in the same edit and spills the new result as the array's
+/// own; undo and redo move between the two on every replica, and the
+/// restored cache survives a save.
 #[test]
-fn undo_and_redo_of_a_retyped_unevaluable_array_keep_both_results() {
+fn undo_and_redo_of_a_retyped_opaque_array_keep_both_results() {
     let bytes = package(UNSUPPORTED, true);
     let sequence = [number(10.0), number(11.0), number(12.0)];
     let open =
@@ -1109,6 +1114,9 @@ fn undo_and_redo_of_a_retyped_unevaluable_array_keep_both_results() {
     for workbook in [&mut solo, &mut writer] {
         edit(workbook, "C1", "=_xlfn.SEQUENCE(3,1,10)");
         assert_eq!(column(workbook, &["C1", "C2", "C3"]), sequence);
+        let sheet = &workbook.model().sheets[0];
+        assert!(!sheet.array_definition(cell("C1")).unwrap().is_opaque());
+        assert_eq!(sheet.result_anchor(cell("C2")), Some(cell("C1")));
     }
     sync(&writer, &mut follower);
     for step in 0..3 {
@@ -1124,15 +1132,171 @@ fn undo_and_redo_of_a_retyped_unevaluable_array_keep_both_results() {
             if step == 1 {
                 assert_eq!(column(workbook, &["C1", "C2", "C3"]), sequence);
             } else {
-                assert!(spilled(workbook));
+                assert!(spilled(workbook) && opaque(workbook));
             }
         }
     }
     sync(&writer, &mut late);
-    assert!(spilled(&late));
+    assert!(spilled(&late) && opaque(&late));
     same_replicas(&[&writer, &follower, &late]);
     for workbook in [&solo, &writer, &late] {
         assert!(spilled(&Workbook::open(&workbook.save().unwrap()).unwrap()));
+    }
+}
+
+/// a formula the engine evaluates, typed over an opaque anchor, spills into
+/// the rectangle the stored cells left and is obstructed by what an author
+/// wrote beyond it; retyping an evaluable anchor as one the engine cannot
+/// evaluate retires its result and makes it opaque over its anchor alone.
+#[test]
+fn retyping_moves_an_array_between_opaque_and_evaluable() {
+    let bytes = package(UNSUPPORTED, true);
+    let mut workbook = Workbook::open_recalculated(&bytes, options()).unwrap();
+    edit(&mut workbook, "C4", "z");
+    edit(&mut workbook, "C1", "=_xlfn.SEQUENCE(4)");
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3", "C4"]),
+        [
+            error(ErrorValue::Spill),
+            CellValue::Empty,
+            CellValue::Empty,
+            text("z")
+        ]
+    );
+    edit(&mut workbook, "C4", "");
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3", "C4"]),
+        [number(1.0), number(2.0), number(3.0), number(4.0)]
+    );
+
+    let mut workbook = sorted();
+    edit(&mut workbook, "C1", "=WEBSERVICE(\"https://example.com\")");
+    let sheet = &workbook.model().sheets[0];
+    assert_eq!(
+        sheet.array_definition(cell("C1")).unwrap().opaque,
+        Some(ArraySize { rows: 1, cols: 1 })
+    );
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3"]),
+        [error(ErrorValue::Name), CellValue::Empty, CellValue::Empty]
+    );
+    workbook.undo(options()).unwrap();
+    assert!(spilled(&workbook));
+}
+
+/// a function the engine lacks makes an array opaque even in a branch no
+/// input takes: an `IF` or `IFERROR` around it keeps the cached cells
+/// whichever way the inputs go.
+#[test]
+fn a_conditional_around_an_unsupported_function_stays_opaque() {
+    for formula in [
+        r#"IF(A1,WEBSERVICE("https://example.com"),_xlfn.SEQUENCE(3,1,7))"#,
+        r#"IFERROR(WEBSERVICE("https://example.com"),_xlfn.SEQUENCE(3,1,7))"#,
+    ] {
+        let rows = format!(
+            r#"<row r="1"><c r="A1" t="b"><v>0</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">{}</f><v>1</v></c></row><row r="2"><c r="C2"><v>2</v></c></row><row r="3"><c r="C3"><v>3</v></c></row>"#,
+            formula.replace('"', "&quot;")
+        );
+        let bytes = package(&rows, true);
+        for mut workbook in [
+            Workbook::open_recalculated(&bytes, options()).unwrap(),
+            Workbook::open_collaborative_recalculated(&bytes, 191, options()).unwrap(),
+        ] {
+            assert!(spilled(&workbook) && opaque(&workbook), "{formula}");
+            for input in ["TRUE", "FALSE"] {
+                edit(&mut workbook, "A1", input);
+                assert!(spilled(&workbook) && opaque(&workbook), "{formula}");
+            }
+        }
+    }
+}
+
+/// an opaque array's cached cells come back through a row or column deletion
+/// and its undo and redo as the stored cells they are, including one an
+/// author retyped before the deletion.
+#[test]
+fn structural_undo_keeps_an_opaque_arrays_stored_cells() {
+    let bytes = package(UNSUPPORTED, true);
+    for (typed, op) in [
+        (
+            false,
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+        ),
+        (
+            false,
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        ),
+        (
+            false,
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+        ),
+        (
+            true,
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+        ),
+        (
+            true,
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+        ),
+    ] {
+        let mut workbook = Workbook::open_recalculated(&bytes, options()).unwrap();
+        if typed {
+            edit(&mut workbook, "C2", "x");
+        }
+        workbook.apply_ops(vec![op.clone()], options()).unwrap();
+        workbook.undo(options()).unwrap();
+        workbook.redo(options()).unwrap();
+        workbook.undo(options()).unwrap();
+        if typed {
+            assert_eq!(value(&workbook, "C2"), text("x"), "{op:?}");
+            workbook.undo(options()).unwrap();
+        }
+        assert!(spilled(&workbook) && opaque(&workbook), "{op:?}");
+        let saved = workbook.save().unwrap();
+        assert!(sheet_xml(&saved).contains(r#"ref="C1:C3""#), "{op:?}");
+        assert!(spilled(&Workbook::open(&saved).unwrap()), "{op:?}");
+    }
+}
+
+/// retyping an opaque anchor and undoing it, again and again, leaves the
+/// workbook exactly as it was: nothing a retyped formula held is kept aside.
+#[test]
+fn repeated_retypes_and_undos_leave_nothing_behind() {
+    let bytes = package(UNSUPPORTED, true);
+    for mut workbook in [
+        Workbook::open_recalculated(&bytes, options()).unwrap(),
+        Workbook::open_collaborative_recalculated(&bytes, 201, options()).unwrap(),
+    ] {
+        let before = format!("{:?}", workbook.model());
+        for start in 0..20 {
+            edit(
+                &mut workbook,
+                "C1",
+                &format!("=_xlfn.SEQUENCE(1000,1,{start})"),
+            );
+            workbook.undo(options()).unwrap();
+            assert_eq!(format!("{:?}", workbook.model()), before);
+        }
     }
 }
 
@@ -1189,6 +1353,7 @@ fn made_dynamic(bytes: &[u8]) -> Workbook {
                     array: Some(betteroffice_xlsx::ArrayDefinition {
                         kind: betteroffice_xlsx::ArrayKind::Dynamic,
                         metadata: None,
+                        opaque: None,
                     }),
                     ..CellState::default()
                 },

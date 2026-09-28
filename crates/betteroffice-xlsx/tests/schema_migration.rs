@@ -1,5 +1,5 @@
-//! `workbook-0.2.1-arrays-*.update.bin` are described beside them in
-//! `workbook-0.2.1-arrays.update.md`.
+//! `workbook-0.2.1-arrays-*.update.bin` and `workbook-0.2.1-opaque-array-*.update.bin`
+//! are described beside them in `workbook-0.2.1-arrays.update.md`.
 //!
 //! The `workbook-schema-v5-*.update.bin` fixtures were produced by release
 //! 4bdccdd: it opens the matching workbook collaboratively, writes a cell, and
@@ -25,6 +25,9 @@ const ARRAYS_UNTOUCHED: &[u8] =
 const ARRAYS_EDITED: &[u8] = include_bytes!("fixtures/workbook-0.2.1-arrays-edited.update.bin");
 const ANCHORS_EDITED: &[u8] =
     include_bytes!("fixtures/workbook-b153acd5b-arrays-anchors-edited.update.bin");
+const OPAQUE: &[u8] = include_bytes!("fixtures/opaque-array.xlsx");
+const OPAQUE_UNTOUCHED: &[u8] =
+    include_bytes!("fixtures/workbook-0.2.1-opaque-array-untouched.update.bin");
 
 fn a1(workbook: &Workbook) -> CellValue {
     workbook
@@ -484,6 +487,39 @@ fn an_untouched_released_array_room_upgrades_to_computed_results() {
     );
     let mut peer =
         Workbook::open_collaborative_recalculated(ARRAYS, 7_101, CalculationOptions::default())
+            .unwrap();
+    peer.apply_update_v1(
+        &workbook.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(peer.model(), workbook.model());
+}
+
+/// An array the engine cannot evaluate is opaque, so even in a room that
+/// holds nothing but its seed the upgrade leaves its cached cells in the
+/// shared document as the stored values they are, and every replica keeps
+/// showing them.
+#[test]
+fn an_untouched_released_room_keeps_an_opaque_arrays_cached_cells() {
+    let workbook = restored(OPAQUE, OPAQUE_UNTOUCHED, 7_500);
+    assert_eq!(
+        values(&workbook, &["C1", "C2", "C3"]),
+        [number(1.0), number(2.0), number(3.0)]
+    );
+    let sheet = &workbook.model().sheets[0];
+    let anchor = CellRef::parse_a1("C1").unwrap();
+    assert!(
+        sheet
+            .array_definition(anchor)
+            .is_some_and(|definition| definition.is_opaque())
+    );
+    assert_eq!(sheet.result_anchor(CellRef::parse_a1("C2").unwrap()), None);
+    let (version, cells) = shared_contents(&workbook.encode_state_as_update_v1());
+    assert_eq!(version, 7);
+    assert_eq!(cells, ["0:2", "1:2", "2:2"]);
+    let mut peer =
+        Workbook::open_collaborative_recalculated(OPAQUE, 7_501, CalculationOptions::default())
             .unwrap();
     peer.apply_update_v1(
         &workbook.encode_state_as_update_v1(),

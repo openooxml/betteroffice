@@ -3044,7 +3044,8 @@ impl ArrayMetadata {
 
 /// A legacy array an author's content sits inside is written over its anchor
 /// alone: its rectangle cannot hold both, and reading the file back must not
-/// take that content for the array's result.
+/// take that content for the array's result. An opaque array's rectangle holds
+/// stored cells by design and keeps its rectangle.
 pub(crate) fn array_markup(
     sheet: &Sheet,
     at: CellRef,
@@ -3054,6 +3055,7 @@ pub(crate) fn array_markup(
     let fallback = metadata.dynamic.filter(|_| definition.is_dynamic());
     let mut range = sheet.array_formula(at)?;
     let conflicted = !definition.is_dynamic()
+        && !definition.is_opaque()
         && sheet
             .cells_in_range(range)
             .any(|(cell, _)| (cell.row, cell.col) != (at.row, at.col) && sheet.authored_at(cell));

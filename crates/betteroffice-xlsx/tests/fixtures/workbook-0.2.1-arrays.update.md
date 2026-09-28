@@ -21,3 +21,10 @@ let snapshot = edited.encode_state_as_update_v1();
 ```
 
 That release drops an anchor's array once its formula is edited collaboratively, on the editing replica and on every replica restoring the snapshot, so both anchors are plain formulas in it.
+
+`workbook-0.2.1-opaque-array-untouched.update.bin` was produced the same way at cf3d220f7 from `opaque-array.xlsx`, a dynamic `WEBSERVICE` array over C1:C3 whose cached result the engine cannot compute, left untouched:
+
+```rust
+let untouched = Workbook::open_collaborative(&source, 7_401)?;
+let snapshot = untouched.encode_state_as_update_v1();
+```

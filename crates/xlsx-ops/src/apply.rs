@@ -156,24 +156,6 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 styles: old,
             }]))
         }
-        Op::RestoreArrayResult {
-            sheet,
-            anchor,
-            extent,
-            results,
-        } => {
-            let s = sheet_mut(wb, *sheet)?;
-            let Some((old_extent, old_results)) = s.array_result(*anchor) else {
-                return Ok(InvertedOp(Vec::new()));
-            };
-            s.restore_array_result(*anchor, *extent, results);
-            Ok(InvertedOp(vec![Op::RestoreArrayResult {
-                sheet: *sheet,
-                anchor: *anchor,
-                extent: old_extent,
-                results: old_results,
-            }]))
-        }
         Op::SetCharts { sheet, charts } => {
             let sheet_ref = sheet_mut(wb, *sheet)?;
             let old = std::mem::replace(&mut sheet_ref.charts, charts.clone());
@@ -482,12 +464,7 @@ pub fn write_state(sheet: &mut Sheet, at: CellRef, state: &CellState) -> Vec<Cel
         changed = sheet.obstruct_array(anchor);
         changed.retain(|cell| *cell != at);
     }
-    let definition = sheet.array_definition(at);
-    let formula = sheet.cell(at).and_then(|cell| cell.formula.clone());
-    if definition.is_some() && (definition != state.array || formula != state.formula) {
-        sheet.suspend(at);
-    }
-    if definition != state.array {
+    if sheet.array_definition(at) != state.array {
         changed.extend(sheet.set_array_definition(at, None));
     }
     sheet.set_cell(
@@ -499,16 +476,51 @@ pub fn write_state(sheet: &mut Sheet, at: CellRef, state: &CellState) -> Vec<Cel
         },
     );
     if state.array.is_some() {
-        if sheet.array_definition(at) != state.array {
-            changed.extend(sheet.set_array_definition(at, state.array));
-        } else if formula != state.formula {
-            changed.extend(sheet.restore_suspended(at));
-        }
-    }
-    if !state.has_content() {
-        changed.extend(sheet.restore_suspended_at(at));
+        changed.extend(sheet.set_array_definition(at, state.array));
     }
     changed
+}
+
+/// The writes that clear what an opaque array anchored at `at` stores beside
+/// its anchor, when `state` retypes or clears that anchor. Those cells are the
+/// cached result the engine could not produce, stored like any other, so the
+/// edit that ends the array clears them in its own transaction; cells with a
+/// formula of their own are an author's and stay.
+pub fn opaque_follower_clears(
+    sheet: &Sheet,
+    at: CellRef,
+    state: &CellState,
+) -> Vec<(CellRef, CellState)> {
+    let Some(definition) = sheet
+        .array_definition(at)
+        .filter(ArrayDefinition::is_opaque)
+    else {
+        return Vec::new();
+    };
+    let formula = sheet.cell(at).and_then(|cell| cell.formula.as_ref());
+    if state.array == Some(definition) && state.formula.as_ref() == formula {
+        return Vec::new();
+    }
+    sheet
+        .cells_in_range(definition.entered(at))
+        .filter(|(cell, stored)| {
+            (cell.row, cell.col) != (at.row, at.col)
+                && !matches!(stored.value, xlsx_model::CellValue::Empty)
+                && stored
+                    .formula
+                    .as_deref()
+                    .is_none_or(|formula| formula.trim().is_empty())
+        })
+        .map(|(cell, stored)| {
+            (
+                cell,
+                CellState {
+                    style: stored.style,
+                    ..CellState::default()
+                },
+            )
+        })
+        .collect()
 }
 
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
@@ -650,14 +662,6 @@ fn delete_rows(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
-    let span = CellRange::new(
-        CellRef::new(at, 0),
-        CellRef::new(
-            at.saturating_add(count.saturating_sub(1)).min(MAX_ROWS - 1),
-            MAX_COLS - 1,
-        ),
-    );
-    let cut = cut_results(s, sheet, span);
     let deleted = shift_cells(s, op);
     let dropped_heights = shift_row_heights_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
@@ -689,7 +693,6 @@ fn delete_rows(
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
-    inv.extend(cut);
     Ok(InvertedOp(inv))
 }
 
@@ -754,14 +757,6 @@ fn delete_cols(
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
     let old_col_styles = s.col_styles.clone();
-    let span = CellRange::new(
-        CellRef::new(0, at),
-        CellRef::new(
-            MAX_ROWS - 1,
-            at.saturating_add(count.saturating_sub(1)).min(MAX_COLS - 1),
-        ),
-    );
-    let cut = cut_results(s, sheet, span);
     let deleted = shift_cells(s, op);
     let dropped_widths = shift_col_widths_down(s, at, count);
     shift_col_styles_down(s, at, count);
@@ -800,25 +795,7 @@ fn delete_cols(
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
-    inv.extend(cut);
     Ok(InvertedOp(inv))
-}
-
-/// the results of every array a deletion of `span` cuts into, for its inverse
-/// to put back as results rather than as what authors wrote.
-fn cut_results(s: &Sheet, sheet: SheetId, span: CellRange) -> Vec<Op> {
-    s.array_formulas()
-        .filter(|(_, extent)| ranges_intersect(*extent, span))
-        .filter_map(|(anchor, _)| {
-            let (extent, results) = s.array_result(anchor)?;
-            (!results.is_empty()).then_some(Op::RestoreArrayResult {
-                sheet,
-                anchor,
-                extent,
-                results,
-            })
-        })
-        .collect()
 }
 
 /// remap every occupied cell through `op` in place. returns the cells whose
@@ -1302,8 +1279,8 @@ mod tests {
         assert_eq!(wb.sheets[0].result_anchor(r("C2")), Some(r("C1")));
     }
 
-    /// the anchor's definition leaves with its formula, and undo brings it
-    /// back with the result it filled.
+    /// the anchor's definition leaves with its formula and comes back with it
+    /// on undo, for the engine to fill again; the result it filled is gone.
     #[test]
     fn an_array_anchor_that_loses_its_formula_clears_what_it_filled() {
         let mut wb = spilled();
@@ -1332,21 +1309,59 @@ mod tests {
         apply_ops(&mut wb, &inverse.0).unwrap();
         assert_eq!(
             wb.sheets[0].array_formula(r("C1")),
-            Some(CellRange::parse_a1("C1:C3").unwrap())
+            Some(CellRange::parse_a1("C1").unwrap())
         );
         assert!(wb.sheets[0].is_dynamic_array(r("C1")));
-        assert_eq!(
-            wb.value(SheetId(0), r("C3")),
-            CellValue::Number { value: 3.0 }
-        );
-        assert_eq!(wb.sheets[0].result_anchor(r("C3")), Some(r("C1")));
     }
 
-    /// deleting a row or column an array's result runs through drops what
-    /// it cut, and undoing the delete brings back the definition with the
-    /// formula and the result as the array's, not as what an author wrote.
+    /// deleting the row an anchor sits on drops its array, and undoing the
+    /// delete brings the definition back with the formula, for the engine to
+    /// fill again.
     #[test]
-    fn a_deletion_cutting_into_an_array_restores_its_result_on_undo() {
+    fn a_deleted_anchor_row_restores_its_array_on_undo() {
+        let mut wb = spilled();
+        let inverse = apply(
+            &mut wb,
+            &Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.sheets[0].array_formulas().count(), 0);
+        assert!(wb.sheets[0].iter_cells().next().is_none());
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert!(wb.sheets[0].is_dynamic_array(r("C1")));
+        assert_eq!(wb.value(SheetId(0), r("C2")), CellValue::Empty);
+    }
+
+    /// C1:C3 holding what an array the engine cannot evaluate cached, as
+    /// stored cells.
+    fn opaque() -> Workbook {
+        let mut wb = wb_one_sheet();
+        let sheet = &mut wb.sheets[0];
+        sheet.set_cell(
+            r("C1"),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                formula: Some("WEBSERVICE(\"https://example.com\")".into()),
+                style: None,
+            },
+        );
+        for (address, value) in [("C2", 2.0), ("C3", 3.0)] {
+            sheet.set_cell(r(address), Cell::from(num(value)));
+        }
+        sheet.set_dynamic_array_formula(r("C1"), CellRange::parse_a1("C1:C3").unwrap());
+        sheet.set_opaque(r("C1"));
+        wb
+    }
+
+    /// an opaque array's cached cells are ordinary content: a deletion
+    /// through them and its undo and redo keep every one, and the recorded
+    /// rectangle travels with the definition.
+    #[test]
+    fn deletions_through_an_opaque_array_undo_as_stored_cells() {
         for op in [
             Op::DeleteRows {
                 sheet: SheetId(0),
@@ -1364,28 +1379,52 @@ mod tests {
                 count: 1,
             },
         ] {
-            let mut wb = spilled();
+            let mut wb = opaque();
             let before = wb.clone();
             let inverse = apply(&mut wb, &op).unwrap();
             let redo = apply_ops(&mut wb, &inverse.0).unwrap();
-            let sheet = &wb.sheets[0];
-            assert!(sheet.is_dynamic_array(r("C1")), "{op:?}");
-            assert_eq!(
-                sheet.array_formula(r("C1")),
-                before.sheets[0].array_formula(r("C1"))
-            );
-            for (address, value) in [("C1", 1.0), ("C2", 2.0), ("C3", 3.0)] {
-                assert_eq!(wb.value(SheetId(0), r(address)), num(value).value, "{op:?}");
-            }
-            for address in ["C2", "C3"] {
-                assert_eq!(sheet.result_anchor(r(address)), Some(r("C1")), "{op:?}");
-            }
+            assert_eq!(wb, before, "{op:?}");
             let undo = apply_ops(&mut wb, &redo).unwrap();
             apply_ops(&mut wb, &undo).unwrap();
-            assert_eq!(
-                wb.sheets[0].array_result(r("C1")),
-                before.sheets[0].array_result(r("C1"))
-            );
+            assert_eq!(wb, before, "{op:?}");
+            for address in ["C2", "C3"] {
+                assert_eq!(wb.sheets[0].result_anchor(r(address)), None, "{op:?}");
+            }
+        }
+    }
+
+    /// retyping or clearing an opaque anchor clears what it stored beside
+    /// itself, apart from a formula an author wrote there; restyling it does
+    /// not.
+    #[test]
+    fn ending_an_opaque_array_clears_its_stored_cells() {
+        let mut wb = opaque();
+        wb.sheets[0].set_cell(
+            r("C3"),
+            Cell {
+                value: CellValue::Number { value: 3.0 },
+                formula: Some("1+2".into()),
+                style: None,
+            },
+        );
+        let sheet = &wb.sheets[0];
+        let current = CellState::authored(sheet, r("C1"));
+        let restyled = CellState {
+            style: Some(1),
+            ..current.clone()
+        };
+        assert!(opaque_follower_clears(sheet, r("C1"), &restyled).is_empty());
+        let retyped = CellState {
+            formula: Some("_xlfn.SEQUENCE(3)".into()),
+            array: current.array.map(|definition| ArrayDefinition {
+                opaque: None,
+                ..definition
+            }),
+            ..CellState::default()
+        };
+        for state in [CellState::default(), retyped] {
+            let clears = opaque_follower_clears(sheet, r("C1"), &state);
+            assert_eq!(clears, [(r("C2"), CellState::default())]);
         }
     }
 

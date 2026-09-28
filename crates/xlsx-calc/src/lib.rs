@@ -13,6 +13,7 @@
 //! ```
 
 pub mod array;
+mod capability;
 pub mod deps;
 pub mod engine;
 pub mod eval;
@@ -24,6 +25,7 @@ pub mod printer;
 mod reference;
 
 pub use array::{Array, MAX_ARRAY_CELLS, Spill, Value, evaluate_array, evaluate_spill};
+pub use capability::evaluable;
 pub use deps::references;
 pub use engine::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 pub use eval::{EvalContext, evaluate};

@@ -21,7 +21,9 @@ pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
-pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
+pub use read::{
+    Evaluable, LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook,
+};
 pub use reference::UnpatchableReference;
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
@@ -57,7 +59,18 @@ pub fn parse_workbook_with_package(
 pub fn parse_workbook_with_owned_package(
     parts: Vec<(String, Vec<u8>)>,
 ) -> Result<ParsedWorkbook, ParseError> {
-    let parsed = read::parse_workbook_indexed(&parts)?;
+    parse_workbook_with_owned_package_classified(parts, &|_, _, _| true)
+}
+
+/// [`parse_workbook_with_owned_package`] asking `evaluable` about each array
+/// anchor's formula before the array takes the cells its file cached for its
+/// result: an array whose formula the engine cannot evaluate is opaque, and
+/// those cells stay stored values.
+pub fn parse_workbook_with_owned_package_classified(
+    parts: Vec<(String, Vec<u8>)>,
+    evaluable: Evaluable<'_>,
+) -> Result<ParsedWorkbook, ParseError> {
+    let parsed = read::parse_workbook_indexed(&parts, evaluable)?;
     let mut package = PreservedPackage::capture(
         parts,
         &parsed.workbook,

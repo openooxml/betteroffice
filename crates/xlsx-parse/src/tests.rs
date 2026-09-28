@@ -6364,6 +6364,7 @@ fn an_array_definition_change_rewrites_its_anchor() {
         xlsx_model::ArrayDefinition {
             kind: xlsx_model::ArrayKind::Legacy { rows: 2, cols: 1 },
             metadata: None,
+            opaque: None,
         },
     ] {
         let mut workbook = parsed.workbook.clone();
@@ -6381,6 +6382,57 @@ fn an_array_definition_change_rewrites_its_anchor() {
             "{sheet}"
         );
     }
+}
+
+/// an array whose formula the engine cannot evaluate is opaque from the
+/// moment it is read: the cells its file cached stay stored values, which a
+/// save writes back inside its rectangle, while any other array takes them
+/// for its result.
+#[test]
+fn an_array_the_engine_cannot_evaluate_is_read_opaque() {
+    let body = r#"<sheetData>
+      <row r="1"><c r="A1"><f t="array" ref="A1:A2">REMOTE()</f><v>1</v></c><c r="B1"><f t="array" ref="B1:B2">SEQUENCE(2)</f><v>1</v></c></row>
+      <row r="2"><c r="A2"><v>2</v></c><c r="B2"><v>2</v></c></row>
+    </sheetData>"#;
+    let parts = package(body, &[], false);
+    let (a1, a2, b1, b2) = (
+        CellRef::parse_a1("A1").unwrap(),
+        CellRef::parse_a1("A2").unwrap(),
+        CellRef::parse_a1("B1").unwrap(),
+        CellRef::parse_a1("B2").unwrap(),
+    );
+    let parsed = crate::parse_workbook_with_owned_package_classified(
+        owned_parts(&parts),
+        &|_, _, formula| !formula.contains("REMOTE"),
+    )
+    .unwrap();
+    let sheet = &parsed.workbook.sheets[0];
+    assert_eq!(
+        sheet.array_definition(a1).unwrap().opaque,
+        Some(xlsx_model::ArraySize { rows: 2, cols: 1 })
+    );
+    assert_eq!(sheet.result_anchor(a2), None);
+    assert!(sheet.authored_at(a2));
+    assert_eq!(sheet.result_anchor(b2), Some(b1));
+    assert_eq!(
+        parse_workbook_with_package(&parts).unwrap().workbook.sheets[0].result_anchor(a2),
+        Some(a1)
+    );
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("D1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let sheet = sheet_text(&saved, "xl/worksheets/sheet1.xml");
+    assert!(
+        sheet.contains(r#"<f t="array" ref="A1:A2">REMOTE()</f>"#),
+        "{sheet}"
+    );
+    assert!(sheet.contains(r#"<c r="A2"><v>2</v></c>"#), "{sheet}");
 }
 
 /// `<f t="array" ref>` records the rectangle the result occupies; a shared

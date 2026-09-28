@@ -10,9 +10,10 @@ use ooxml_drawingml::chart::ChartSpace;
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
-    Border, BorderEdge, BorderStyle, CellFormat, CellProvider, CellRange, CellRef, CellValue,
-    ChartAnchor, Fill, FormatCode, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat,
-    Sheet, SheetChart, SheetId, Stylesheet, VAlign, Workbook as WorkbookModel,
+    ArrayDefinition, ArrayKind, ArraySize, Border, BorderEdge, BorderStyle, CellFormat,
+    CellProvider, CellRange, CellRef, CellValue, ChartAnchor, Fill, FormatCode, FreezePane, HAlign,
+    Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId, Stylesheet, VAlign,
+    Workbook as WorkbookModel,
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
@@ -34,6 +35,7 @@ use xlsx_render::{
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
     StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
+    validate_array,
 };
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -375,7 +377,8 @@ impl Workbook {
                 return Err(Error::DuplicatePart(name.clone()));
             }
         }
-        let parsed = xlsx_parse::parse_workbook_with_owned_package(parts)?;
+        let parsed =
+            xlsx_parse::parse_workbook_with_owned_package_classified(parts, &xlsx_calc::evaluable)?;
         let mut workbook = Self::from_source(
             parsed.workbook,
             Some(parsed.package),
@@ -434,7 +437,7 @@ impl Workbook {
     }
 
     fn from_source(
-        model: WorkbookModel,
+        mut model: WorkbookModel,
         source_package: Option<xlsx_parse::PreservedPackage>,
         active_sheet: SheetId,
         build_graph: bool,
@@ -444,6 +447,7 @@ impl Workbook {
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
+        classify_arrays(&mut model);
         let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
             active_sheet
         } else {
@@ -1267,20 +1271,24 @@ impl Workbook {
         mark(EditStage::Validated);
         self.ensure_graph();
         let formula = state.formula.clone();
-        let footprint = array_footprint(&self.model, &[(sheet, cell)]);
-        let ops = vec![Op::SetCell {
-            sheet,
-            at: cell,
-            cell: state,
-        }];
-        let update = self.commit_user(&ops)?;
-        self.graph.as_mut().expect("graph initialized").set_formula(
-            sheet,
-            cell,
-            formula.as_deref(),
+        let mut ops = opaque_follower_ops(&self.model, sheet, cell, &state, &HashSet::new());
+        ops.insert(
+            0,
+            Op::SetCell {
+                sheet,
+                at: cell,
+                cell: state,
+            },
         );
+        let written = written_cells(&ops);
+        let footprint = array_footprint(&self.model, &written);
+        let update = self.commit_user(&ops)?;
+        let graph = self.graph.as_mut().expect("graph initialized");
+        graph.set_formula(sheet, cell, formula.as_deref());
+        for &(sheet, cleared) in &written[1..] {
+            graph.set_formula(sheet, cleared, None);
+        }
         mark(EditStage::Applied);
-        let written = [(sheet, cell)];
         let settled = settled_cells(&self.model, footprint);
         let mut result = recalc_after(
             &mut self.model,
@@ -1309,6 +1317,7 @@ impl Workbook {
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
         let mut per_op = Vec::with_capacity(edits.len());
+        let edited: HashSet<_> = edits.iter().map(|edit| (sheet, edit.cell)).collect();
         for edit in edits {
             self.validate_cell(edit.cell)?;
             let state = edit_cell_state(&preview, sheet, edit.cell, &edit.input);
@@ -1318,14 +1327,22 @@ impl Workbook {
                 continue;
             }
             refuse_array_interior(&preview, sheet, edit.cell, &state)?;
+            let clears = opaque_follower_ops(&preview, sheet, edit.cell, &state, &edited);
             touched.push((sheet, edit.cell, state.formula.clone()));
             let op = Op::SetCell {
                 sheet,
                 at: edit.cell,
                 cell: state,
             };
-            per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
-            ops.push(op);
+            for op in std::iter::once(op).chain(clears) {
+                if let Op::SetCell { at, .. } = &op
+                    && *at != edit.cell
+                {
+                    touched.push((sheet, *at, None));
+                }
+                per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+                ops.push(op);
+            }
         }
         if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
             return Ok(MutationResult::default());
@@ -1402,21 +1419,36 @@ impl Workbook {
         let mut preview = self.model.clone();
         let mut names = self.sheet_names();
         let mut per_op = Vec::with_capacity(ops.len());
-        for op in &ops {
-            if let Some(sheet) = worksheet_edit_target(op) {
+        let written: HashSet<_> = written_cells(&ops).into_iter().collect();
+        let mut expanded = Vec::with_capacity(ops.len());
+        for mut op in ops {
+            if let Some(sheet) = worksheet_edit_target(&op) {
                 self.ensure_worksheet_sheet(sheet)?;
             }
-            self.ensure_references_stay_valid(&names, op)?;
-            validate_op(&preview, op)?;
-            if let Op::SetCell { sheet, at, cell } = op
-                && !cell_states_semantically_equal(&current_cell_state(&preview, *sheet, *at), cell)
-            {
-                refuse_array_interior(&preview, *sheet, *at, cell)?;
+            self.ensure_references_stay_valid(&names, &op)?;
+            validate_op(&preview, &op)?;
+            let mut clears = Vec::new();
+            if let Op::SetCell { sheet, at, cell } = &mut op {
+                if let Some(definition) = cell.array {
+                    let definition =
+                        classified(&preview, *sheet, cell.formula.as_deref(), definition);
+                    validate_array(*at, &definition).map_err(Error::InvalidOperation)?;
+                    cell.array = Some(definition);
+                }
+                if !cell_states_semantically_equal(&current_cell_state(&preview, *sheet, *at), cell)
+                {
+                    refuse_array_interior(&preview, *sheet, *at, cell)?;
+                }
+                clears = opaque_follower_ops(&preview, *sheet, *at, cell, &written);
             }
-            validate_insert_capacity(&preview, op)?;
-            per_op.push(xlsx_ops::apply_in_place(&mut preview, op)?.0);
-            rename_sheet_view(&mut names, op);
+            validate_insert_capacity(&preview, &op)?;
+            for op in std::iter::once(op).chain(clears) {
+                per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+                rename_sheet_view(&mut names, &op);
+                expanded.push(op);
+            }
         }
+        let ops = expanded;
         validate_model_sheets(&preview)?;
         validate_shared_drawings(&preview)?;
         if preview == self.model {
@@ -1661,6 +1693,11 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<Proposal> {
         let mut preview = self.model.clone();
+        let edited: HashSet<_> = request
+            .edits
+            .iter()
+            .map(|edit| (edit.sheet, edit.cell))
+            .collect();
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
             let state = edit_cell_state(&preview, edit.sheet, edit.cell, &edit.input);
@@ -1671,12 +1708,15 @@ impl Workbook {
             ) {
                 refuse_array_interior(&preview, edit.sheet, edit.cell, &state)?;
             }
+            let clears = opaque_follower_ops(&preview, edit.sheet, edit.cell, &state, &edited);
             let op = Op::SetCell {
                 sheet: edit.sheet,
                 at: edit.cell,
                 cell: state,
             };
-            xlsx_ops::apply_in_place(&mut preview, &op)?;
+            for op in std::iter::once(op).chain(clears) {
+                xlsx_ops::apply_in_place(&mut preview, &op)?;
+            }
             if let Some(format) = &edit.number_format {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
@@ -1755,6 +1795,11 @@ impl Workbook {
         let mut ops = Vec::with_capacity(proposal.edits.len());
         let mut per_op = Vec::with_capacity(proposal.edits.len());
         let mut preview = self.model.clone();
+        let edited: HashSet<_> = proposal
+            .edits
+            .iter()
+            .map(|edit| (SheetId(edit.sheet), CellRef::new(edit.row, edit.col)))
+            .collect();
         for edit in &proposal.edits {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
@@ -1763,14 +1808,22 @@ impl Workbook {
             validate_cell_state(&state)?;
             if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
                 refuse_array_interior(&preview, sheet, cell, &state)?;
+                let clears = opaque_follower_ops(&preview, sheet, cell, &state, &edited);
                 touched.push((sheet, cell, state.formula.clone()));
                 let op = Op::SetCell {
                     sheet,
                     at: cell,
                     cell: state,
                 };
-                per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
-                ops.push(op);
+                for op in std::iter::once(op).chain(clears) {
+                    if let Op::SetCell { at, .. } = &op
+                        && *at != cell
+                    {
+                        touched.push((sheet, *at, None));
+                    }
+                    per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+                    ops.push(op);
+                }
             }
             if let Some(format) = &edit.number_format {
                 let op = Op::SetRangeNumberFormat {
@@ -2407,7 +2460,6 @@ impl Workbook {
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
-                | Op::RestoreArrayResult { sheet, .. }
                 | Op::MergeCells { sheet, .. }
                 | Op::UnmergeCells { sheet, .. }
                 | Op::PatchRangeStyle { sheet, .. }
@@ -2820,14 +2872,6 @@ fn array_footprint(
         let Some(sheet) = model.sheets.get(index as usize) else {
             continue;
         };
-        for &(row, col) in &cells {
-            footprint.extend(
-                sheet
-                    .suspended_cells(CellRef::new(row, col))
-                    .into_iter()
-                    .map(|at| (SheetId(index), at, model.value(SheetId(index), at))),
-            );
-        }
         for (_, range) in sheet.array_formulas() {
             let covers = cells
                 .range((range.start.row, 0)..=(range.end.row, u32::MAX))
@@ -3148,7 +3192,6 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
-        | Op::RestoreArrayResult { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
@@ -3294,8 +3337,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetCharts { .. }
-        | Op::RestoreColStyles { .. }
-        | Op::RestoreArrayResult { .. } => {
+        | Op::RestoreColStyles { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
             ));
@@ -3724,12 +3766,100 @@ fn edit_cell_state(
         cell_state_for_input_no_eval(input)
     };
     state.style = style;
-    if state.formula.is_some() {
-        state.array = workbook
-            .sheet(sheet)
-            .and_then(|sheet| sheet.array_definition(cell));
+    if let Some(formula) = state.formula.as_deref() {
+        let anchor = workbook.sheet(sheet);
+        let unchanged = anchor
+            .and_then(|anchor| anchor.cell(cell))
+            .and_then(|cell| cell.formula.as_deref())
+            == Some(formula);
+        state.array = anchor
+            .and_then(|anchor| anchor.array_definition(cell))
+            .map(|definition| {
+                if unchanged {
+                    return definition;
+                }
+                let retyped = ArrayDefinition {
+                    opaque: None,
+                    ..definition
+                };
+                classified(workbook, sheet, Some(formula), retyped)
+            });
     }
     state
+}
+
+/// `definition` for an anchor holding `formula`: an array whose formula the
+/// engine cannot evaluate is opaque over the rectangle the definition records,
+/// or else over the one it was entered in.
+fn classified(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    formula: Option<&str>,
+    definition: ArrayDefinition,
+) -> ArrayDefinition {
+    if formula.is_some_and(|formula| xlsx_calc::evaluable(workbook, sheet, formula)) {
+        return ArrayDefinition {
+            opaque: None,
+            ..definition
+        };
+    }
+    let recorded = match definition.kind {
+        ArrayKind::Legacy { rows, cols } => ArraySize { rows, cols },
+        ArrayKind::Dynamic => definition.opaque.unwrap_or(ArraySize { rows: 1, cols: 1 }),
+    };
+    ArrayDefinition {
+        opaque: Some(recorded),
+        ..definition
+    }
+}
+
+/// Makes each array whose formula the engine cannot evaluate opaque before
+/// anything seeds, migrates or fingerprints `model`, so its cached result
+/// stays stored cells.
+fn classify_arrays(model: &mut WorkbookModel) {
+    for index in 0..model.sheets.len() {
+        let sheet = &model.sheets[index];
+        let opaque: Vec<CellRef> = sheet
+            .array_definitions()
+            .filter(|(at, definition, _)| {
+                !definition.is_opaque()
+                    && sheet
+                        .cell(*at)
+                        .and_then(|cell| cell.formula.as_deref())
+                        .is_some_and(|formula| {
+                            !xlsx_calc::evaluable(model, SheetId(index as u32), formula)
+                        })
+            })
+            .map(|(at, _, _)| at)
+            .collect();
+        for at in opaque {
+            model.sheets[index].set_opaque(at);
+        }
+    }
+}
+
+/// The writes an edit of `cell` to `state` brings with it when it retypes or
+/// clears an opaque array's anchor: clearing what that array stored beside the
+/// anchor, apart from cells in `written`, which the edit writes itself.
+fn opaque_follower_ops(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    state: &CellState,
+    written: &HashSet<(SheetId, CellRef)>,
+) -> Vec<Op> {
+    workbook
+        .sheet(sheet)
+        .map(|anchor| xlsx_ops::opaque_follower_clears(anchor, cell, state))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(at, _)| !written.contains(&(sheet, *at)))
+        .map(|(at, cleared)| Op::SetCell {
+            sheet,
+            at,
+            cell: cleared,
+        })
+        .collect()
 }
 
 /// what an author wrote at `cell`, which an array's result never is.

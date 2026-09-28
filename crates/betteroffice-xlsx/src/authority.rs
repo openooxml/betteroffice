@@ -6,10 +6,10 @@ use std::sync::Arc;
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
-    AnchorEditAs, AnchorExtent, AnchorPos, ArrayDefinition, ArrayKind, Cell, CellFormat, CellRange,
-    CellRef, CellValue, ChartAnchor, ChartRef, ColStyle, DateSystem, DefinedName, ErrorValue,
-    FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, MAX_SPILL_CELLS, Sheet, SheetChart, SheetFormat,
-    SheetId, Stylesheet, Table, Workbook as WorkbookModel,
+    AnchorEditAs, AnchorExtent, AnchorPos, ArrayDefinition, ArrayKind, ArraySize, Cell, CellFormat,
+    CellRange, CellRef, CellValue, ChartAnchor, ChartRef, ColStyle, DateSystem, DefinedName,
+    ErrorValue, FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, MAX_SPILL_CELLS, Sheet, SheetChart,
+    SheetFormat, SheetId, Stylesheet, Table, Workbook as WorkbookModel,
 };
 use xlsx_ops::{CellState, Op};
 use yrs::block::{
@@ -2607,7 +2607,6 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
-        | Op::RestoreArrayResult { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
@@ -3458,20 +3457,26 @@ fn content_from_any(value: &Any, version: i64) -> Result<Content, String> {
 }
 
 /// `[0, metadata]` for a dynamic array and `[1, rows, cols, metadata]` for a
-/// legacy one; `metadata` is null where the anchor has no `cm`.
+/// legacy one, followed by the rows and columns an opaque array recorded;
+/// `metadata` is null where the anchor has no `cm`.
 fn array_to_any(definition: &ArrayDefinition) -> Any {
     let metadata = definition
         .metadata
         .map_or(Any::Null, |cm| Any::BigInt(i64::from(cm)));
-    match definition.kind {
-        ArrayKind::Dynamic => any_array(vec![Any::BigInt(0), metadata]),
-        ArrayKind::Legacy { rows, cols } => any_array(vec![
+    let mut payload = match definition.kind {
+        ArrayKind::Dynamic => vec![Any::BigInt(0), metadata],
+        ArrayKind::Legacy { rows, cols } => vec![
             Any::BigInt(1),
             Any::BigInt(i64::from(rows)),
             Any::BigInt(i64::from(cols)),
             metadata,
-        ]),
+        ],
+    };
+    if let Some(size) = definition.opaque {
+        payload.push(Any::BigInt(i64::from(size.rows)));
+        payload.push(Any::BigInt(i64::from(size.cols)));
     }
+    any_array(payload)
 }
 
 fn array_from_any(value: &Any) -> Result<ArrayDefinition, String> {
@@ -3488,35 +3493,53 @@ fn array_from_any(value: &Any) -> Result<ArrayDefinition, String> {
             .filter(|size| *size > 0)
             .ok_or_else(|| format!("{label} is out of range"))
     };
-    match values
+    let (kind, metadata, rest) = match values
         .first()
         .map(|kind| any_i64(kind, "array kind"))
         .transpose()?
     {
-        Some(0) if values.len() == 2 => Ok(ArrayDefinition {
-            kind: ArrayKind::Dynamic,
-            metadata: metadata(&values[1])?,
-        }),
-        Some(1) if values.len() == 4 => Ok(ArrayDefinition {
-            kind: ArrayKind::Legacy {
+        Some(0) if values.len() >= 2 => (ArrayKind::Dynamic, metadata(&values[1])?, &values[2..]),
+        Some(1) if values.len() >= 4 => (
+            ArrayKind::Legacy {
                 rows: size(&values[1], "array rows")?,
                 cols: size(&values[2], "array columns")?,
             },
-            metadata: metadata(&values[3])?,
+            metadata(&values[3])?,
+            &values[4..],
+        ),
+        _ => return Err("array definition has an unsupported shape".to_string()),
+    };
+    let opaque = match rest {
+        [] => None,
+        [rows, cols] => Some(ArraySize {
+            rows: size(rows, "opaque array rows")?,
+            cols: size(cols, "opaque array columns")?,
         }),
-        _ => Err("array definition has an unsupported shape".to_string()),
-    }
+        _ => return Err("array definition has an unsupported shape".to_string()),
+    };
+    Ok(ArrayDefinition {
+        kind,
+        metadata,
+        opaque,
+    })
 }
 
-/// a legacy rectangle must fit the grid and the spill limit from its anchor.
-fn validate_array(at: CellRef, definition: &ArrayDefinition) -> Result<(), String> {
-    let ArrayKind::Legacy { rows, cols } = definition.kind else {
-        return Ok(());
+/// the rectangle an array fills from its anchor must fit the grid and the
+/// spill limit, and an opaque legacy array records the one it was entered in.
+pub(crate) fn validate_array(at: CellRef, definition: &ArrayDefinition) -> Result<(), String> {
+    let legacy = match definition.kind {
+        ArrayKind::Legacy { rows, cols } => Some(ArraySize { rows, cols }),
+        ArrayKind::Dynamic => None,
     };
-    let fits = u64::from(at.row) + u64::from(rows) <= u64::from(MAX_ROWS)
-        && u64::from(at.col) + u64::from(cols) <= u64::from(MAX_COLS)
-        && u64::from(rows) * u64::from(cols) <= MAX_SPILL_CELLS as u64;
-    if fits {
+    let consistent = legacy
+        .zip(definition.opaque)
+        .is_none_or(|(entered, recorded)| entered == recorded);
+    let fits = definition.opaque.or(legacy).is_none_or(|size| {
+        u64::from(at.row) + u64::from(size.rows) <= u64::from(MAX_ROWS)
+            && u64::from(at.col) + u64::from(size.cols) <= u64::from(MAX_COLS)
+            && u64::from(size.rows) * u64::from(size.cols) <= MAX_SPILL_CELLS as u64
+    });
+    if consistent && fits {
         Ok(())
     } else {
         Err(format!("array at {} is out of bounds", cell_key(at)))
@@ -3529,10 +3552,15 @@ fn array_to_bytes(definition: &ArrayDefinition) -> Vec<u8> {
         ArrayKind::Dynamic => (0_u8, 0, 0),
         ArrayKind::Legacy { rows, cols } => (1, rows, cols),
     };
+    let opaque = definition
+        .opaque
+        .map_or((0, 0), |size| (size.rows, size.cols));
     let mut bytes = vec![kind];
     bytes.extend(rows.to_le_bytes());
     bytes.extend(cols.to_le_bytes());
     bytes.extend(metadata.to_le_bytes());
+    bytes.extend(opaque.0.to_le_bytes());
+    bytes.extend(opaque.1.to_le_bytes());
     bytes
 }
 
@@ -4597,10 +4625,26 @@ mod tests {
         let legacy = |rows, cols| ArrayDefinition {
             kind: ArrayKind::Legacy { rows, cols },
             metadata: None,
+            opaque: None,
+        };
+        let opaque = |kind, rows, cols| ArrayDefinition {
+            kind,
+            metadata: None,
+            opaque: Some(ArraySize { rows, cols }),
         };
         assert!(validate_array(CellRef::new(0, 0), &legacy(3, 2)).is_ok());
         assert!(validate_array(CellRef::new(0, 0), &legacy(MAX_ROWS, MAX_COLS)).is_err());
         assert!(validate_array(CellRef::new(MAX_ROWS - 1, 0), &legacy(2, 1)).is_err());
+        let entered = ArrayKind::Legacy { rows: 3, cols: 2 };
+        assert!(validate_array(CellRef::new(0, 0), &opaque(entered, 3, 2)).is_ok());
+        assert!(validate_array(CellRef::new(0, 0), &opaque(entered, 3, 1)).is_err());
+        assert!(
+            validate_array(
+                CellRef::new(MAX_ROWS - 1, 0),
+                &opaque(ArrayKind::Dynamic, 2, 1)
+            )
+            .is_err()
+        );
         assert!(
             array_from_any(&any_array(vec![
                 Any::BigInt(1),
@@ -4629,10 +4673,22 @@ mod tests {
             ArrayDefinition {
                 kind: ArrayKind::Dynamic,
                 metadata: Some(3),
+                opaque: None,
             },
             ArrayDefinition {
                 kind: ArrayKind::Legacy { rows: 3, cols: 2 },
                 metadata: None,
+                opaque: None,
+            },
+            ArrayDefinition {
+                kind: ArrayKind::Dynamic,
+                metadata: None,
+                opaque: Some(ArraySize { rows: 3, cols: 1 }),
+            },
+            ArrayDefinition {
+                kind: ArrayKind::Legacy { rows: 3, cols: 2 },
+                metadata: Some(1),
+                opaque: Some(ArraySize { rows: 3, cols: 2 }),
             },
         ] {
             let payload = content_to_any(&formula, Some(array)).unwrap();

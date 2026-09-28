@@ -28,8 +28,12 @@ const MAX_ROW_HEIGHT_PT: f64 = 409.5;
 /// parse a full workbook from opc parts, resolving sheets through the
 /// workbook relationships.
 pub fn parse_workbook(parts: &[(String, Vec<u8>)]) -> Result<Workbook, ParseError> {
-    parse_workbook_indexed(parts).map(|parsed| parsed.workbook)
+    parse_workbook_indexed(parts, &|_, _, _| true).map(|parsed| parsed.workbook)
 }
+
+/// Answers whether the engine can evaluate an array anchor's formula on a
+/// sheet of the workbook it was read into.
+pub type Evaluable<'a> = &'a dyn Fn(&Workbook, SheetId, &str) -> bool;
 
 /// Source shared-string indices keyed by `(row, column)`.
 #[doc(hidden)]
@@ -67,6 +71,7 @@ pub struct LegacySheetDimensions {
 
 pub(crate) fn parse_workbook_indexed(
     parts: &[(String, Vec<u8>)],
+    evaluable: Evaluable<'_>,
 ) -> Result<IndexedWorkbook, ParseError> {
     let wb_xml = find_part(parts, "xl/workbook.xml")
         .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
@@ -137,15 +142,17 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
+    let mut workbook = Workbook {
+        sheets,
+        date_system: meta.date_system,
+        defined_names: meta.defined_names,
+        shared_strings,
+        styles,
+        tables,
+    };
+    classify_arrays(&mut workbook, evaluable);
     Ok(IndexedWorkbook {
-        workbook: Workbook {
-            sheets,
-            date_system: meta.date_system,
-            defined_names: meta.defined_names,
-            shared_strings,
-            styles,
-            tables,
-        },
+        workbook,
         active_sheet: meta.active_sheet,
         shared_string_cells,
         cell_facts,
@@ -155,6 +162,32 @@ pub(crate) fn parse_workbook_indexed(
         rich_shared_strings,
         dynamic_array_cm: dynamic_arrays.first().copied(),
     })
+}
+
+/// Takes the cells each array's file cached beside its anchor for its result
+/// where the engine can evaluate the array's formula; any other array is
+/// opaque, and those cells stay stored values.
+fn classify_arrays(workbook: &mut Workbook, evaluable: Evaluable<'_>) {
+    for index in 0..workbook.sheets.len() {
+        let sheet = &workbook.sheets[index];
+        let anchors: Vec<(CellRef, bool)> = sheet
+            .array_formulas()
+            .map(|(anchor, _)| {
+                let formula = sheet.cell(anchor).and_then(|cell| cell.formula.as_deref());
+                let known = formula
+                    .is_none_or(|formula| evaluable(workbook, SheetId(index as u32), formula));
+                (anchor, known)
+            })
+            .collect();
+        let sheet = &mut workbook.sheets[index];
+        for (anchor, known) in anchors {
+            if known {
+                sheet.adopt_results(anchor);
+            } else {
+                sheet.set_opaque(anchor);
+            }
+        }
+    }
 }
 
 /// bound on the metadata blocks and records read from `xl/metadata.xml`.
@@ -710,6 +743,7 @@ fn parse_worksheet(
                                 let definition = ArrayDefinition {
                                     kind,
                                     metadata: c.metadata,
+                                    opaque: None,
                                 };
                                 sheet.define_array(origin, definition, range);
                             }
@@ -777,10 +811,6 @@ fn parse_worksheet(
         }
     }
     shared_formulas.resolve(&mut sheet)?;
-    let anchors: Vec<CellRef> = sheet.array_formulas().map(|(anchor, _)| anchor).collect();
-    for anchor in anchors {
-        sheet.adopt_results(anchor);
-    }
     normalize_merges(&mut sheet.merges);
     Ok(sheet)
 }

@@ -871,7 +871,25 @@ impl Workbook {
         let mut preview = self.model.clone();
         let mut changed: Vec<BTreeSet<(u32, u32)>> = vec![BTreeSet::new(); steps.len()];
         let mut per_op = Vec::with_capacity(ops.len());
-        for (step, op) in &ops {
+        let written: HashSet<_> = ops
+            .iter()
+            .filter_map(|(_, op)| match op {
+                Op::SetCell { sheet, at, .. } => Some((*sheet, *at)),
+                _ => None,
+            })
+            .collect();
+        let mut index = 0;
+        while index < ops.len() {
+            if let (step, Op::SetCell { sheet, at, cell }) = &ops[index] {
+                let step = *step;
+                let clears = super::opaque_follower_ops(&preview, *sheet, *at, cell, &written);
+                ops.splice(
+                    index + 1..index + 1,
+                    clears.into_iter().map(|clear| (step, clear)),
+                );
+            }
+            let (step, op) = &ops[index];
+            index += 1;
             validate_op(&preview, op)?;
             let formats = preview.styles.cell_xfs.len();
             let inverse = match xlsx_ops::apply_in_place(&mut preview, op) {
