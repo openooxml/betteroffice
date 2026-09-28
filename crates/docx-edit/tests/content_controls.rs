@@ -643,6 +643,17 @@ fn plain_text_block_fills_break_lines_within_one_paragraph() {
     assert_eq!(paragraphs.len(), 1);
     assert_eq!(paragraphs[0].para_id, "0E000010");
     assert_eq!(text(by_tag(&list(&doc), "lines")), "c\nd");
+
+    let doc = open(&authored);
+    let undo = UndoSession::new();
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "a\nb");
+    let applied = apply(&doc, &undo, vec![by_tag_step("lines", "a\nb")]);
+    assert!(applied.receipts[0].changed);
+    assert_eq!(applied.receipts[0].removed_paragraphs.len(), 1);
+    assert_eq!(doc.paragraphs("body:sdt0").unwrap().len(), 1);
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "a\nb");
+    let again = apply(&doc, &undo, vec![by_tag_step("lines", "a\nb")]);
+    assert!(!again.receipts[0].changed);
 }
 
 #[test]

@@ -537,6 +537,36 @@ describe('content controls', () => {
     }
   });
 
+  it('collapses a split plain-text control filled with its own text', async () => {
+    const paragraph = (id: string, text: string) => `<w:p w14:paraId="${id}"><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const session = await open(
+      bodyPackage(
+        `<w:sdt><w:sdtPr><w:tag w:val="lines"/><w:text w:multiLine="1"/></w:sdtPr><w:sdtContent>${paragraph('0E000010', 'a')}${paragraph('0E000011', 'b')}</w:sdtContent></w:sdt>`
+      )
+    );
+    const reopened = await createYrsSession({ clientId: nextClientId++ });
+    try {
+      const fill = (target: YrsSession) =>
+        applied(
+          target.applyEdits({
+            expectVersion: target.version(),
+            steps: [{ op: 'setContentControlText', target: { kind: 'tag', tag: 'lines' }, text: 'a\nb' }],
+          })
+        );
+      expect(fill(session).receipts[0]!.changed).toBe(true);
+      const saved = new Uint8Array((await saveYrsDocx(session)).bytes);
+      const lines = controlsInXml(part(saved, 'word/document.xml')).find((control) => control.tag === 'lines')!;
+      expect(lines.paragraphs).toEqual(['a\nb']);
+
+      reopened.openDocx(saved, true);
+      expect(byTag(snapshot(reopened.listContentControls()), 'lines').value).toEqual({ kind: 'text', text: 'a\nb' });
+      expect(fill(reopened).receipts[0]!.changed).toBe(false);
+    } finally {
+      reopened.destroy();
+      session.destroy();
+    }
+  });
+
   it('keeps block controls in table cells through fills, edits, saves and reopen', async () => {
     const control = (tag: string, id: number, kind: string, content: string, binding = '') =>
       `<w:sdt><w:sdtPr><w:alias w:val="${tag} alias"/><w:tag w:val="${tag}"/><w:id w:val="${id}"/><w:lock w:val="sdtLocked"/>${binding}${kind}</w:sdtPr><w:sdtEndPr><w:rPr><w:b/></w:rPr></w:sdtEndPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;

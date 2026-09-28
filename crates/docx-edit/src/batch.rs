@@ -2103,7 +2103,8 @@ fn plan_block_fill<T: ReadTxn>(
     let (Some(first), Some(last)) = (view.paragraphs.first(), view.paragraphs.last()) else {
         return Err(unsupported("the control's story holds no paragraph"));
     };
-    let lines: Vec<&str> = if fill.record.control.metadata.control_type == "richText" {
+    let rich = fill.record.control.metadata.control_type == "richText";
+    let lines: Vec<&str> = if rich {
         fill.text.split('\n').collect()
     } else {
         vec![fill.text.as_str()]
@@ -2134,7 +2135,8 @@ fn plan_block_fill<T: ReadTxn>(
     let mut insert = None;
     let mut removed = Vec::new();
     let mut new_paragraph_count = 0;
-    if !fill.unchanged {
+    // A plain-text control holds one paragraph, so equal text still collapses a split one.
+    if !fill.unchanged || (!rich && view.paragraphs.len() > 1) {
         for (paragraph, line) in view.paragraphs.iter().zip(&lines) {
             if paragraph.embeds.is_empty() && paragraph.text == *line {
                 continue;
