@@ -47,7 +47,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `SUMIF(range, criteria, [sum_range])` | `sum_range` is anchored at its top-left with the criteria shape. |
 | `SUMIFS(sum_range, crit_range, crit, …)` | All ranges must share dimensions. |
 | `SUMPRODUCT(array1, [array2], …)` | Element-wise product summed; non-numeric cells = 0; arrays must match length. |
-| `MMULT(array1, array2)` | `cols(array1)` must equal `rows(array2)`; any non-numeric operand cell → `#VALUE!`. Returns the whole product as an array (see Dynamic arrays). |
+| `MMULT(array1, array2)` | `cols(array1)` must equal `rows(array2)`. The scalar evaluator gives `#VALUE!` for any non-numeric operand cell; array evaluation reads blanks, logicals and numeric text as numbers. Returns the whole product as an array (see Dynamic arrays). |
 | `PRODUCT` | No numbers → 0. |
 | `ABS`, `SIGN` | — |
 | `ROUND` | Half away from zero. |
