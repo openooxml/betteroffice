@@ -213,40 +213,50 @@ impl DeckSession {
         client_id: u64,
     ) -> EditResult<Self> {
         let session = Self::open_from_update(update, client_id)?;
-        let recorded = deck::fingerprint_from_doc(&session.doc)?;
-        let actual = format!("{:x}", Sha256::digest(source));
-        if recorded != actual {
+        if !session.seeded_from(source)? {
             return Err(EditError::Parse(
                 "source bytes do not match the fingerprint recorded in the update".to_owned(),
             ));
         }
-        let package = if session.package.models_connectors() {
+        session.attach_source(source)
+    }
+
+    /// Whether `source` hashes to the fingerprint recorded in the update.
+    pub(crate) fn seeded_from(&self, source: &[u8]) -> EditResult<bool> {
+        Ok(deck::fingerprint_from_doc(&self.doc)? == format!("{:x}", Sha256::digest(source)))
+    }
+
+    /// Re-attaches the matching source, importing what the stored package lacks.
+    pub(crate) fn attach_source(self, source: &[u8]) -> EditResult<Self> {
+        let package = if self.package.models_connectors() {
             pptx_parse::parse_pptx(source)
         } else {
             pptx_parse::parse_pptx_without_connectors(source)
         }
         .map_err(|error| EditError::Parse(error.to_string()))?;
-        let mut import = deck::SourceImport::new(session.package().clone(), &package);
-        comments::import_source_comments(&session, &mut import)?;
-        deck::import_source_render_data(&session.doc, &mut import)?;
+        let mut import = deck::SourceImport::new(self.package().clone(), &package);
+        comments::import_source_comments(&self, &mut import)?;
+        deck::import_source_render_data(&self.doc, &mut import)?;
         source_run_properties::import_source(
-            &session,
+            &self,
             &mut import,
             source_run_properties::SourceProperty::Baseline,
         )?;
-        deck::import_source_ole_pictures(&session.doc, import.source)?;
+        deck::import_source_ole_pictures(&self.doc, import.source)?;
         effects::import_source(&mut import);
-        source_run_properties::import_source(
-            &session,
-            &mut import,
+        for property in [
             source_run_properties::SourceProperty::Spacing,
-        )?;
-        story::import_source_numbering_restarts(&session.doc, import.source)?;
-        outline_gradients::import_source(&session, &mut import)?;
-        import.sync_package_json(&session.doc, session.package())?;
+            source_run_properties::SourceProperty::Caps,
+            source_run_properties::SourceProperty::Color,
+        ] {
+            source_run_properties::import_source(&self, &mut import, property)?;
+        }
+        story::import_source_numbering_restarts(&self.doc, import.source)?;
+        outline_gradients::import_source(&self, &mut import)?;
+        import.sync_package_json(&self.doc, self.package())?;
         Ok(Self {
             package: Arc::new(package),
-            ..session
+            ..self
         })
     }
 

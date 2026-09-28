@@ -443,12 +443,14 @@ refuses with `provenance-unavailable` rather than pick one.
 `setContentControlText` replaces the content of a plain- or rich-text control
 with plain text and clears its placeholder flag everywhere it is recorded,
 leaving tags, aliases, ids, bindings and every other property as captured. CRLF
-becomes LF; LF is a line break in an inline control and a paragraph in a block
-control, where surviving paragraphs keep their ids and properties and new ones
-take the first paragraph's style defaults. A plain-text control accepts LF only
-when its `w:text` sets `w:multiLine`. The text takes the formatting of the
-control's first text run, or the control's own run properties while it shows its
-placeholder. Equal text is a no-op unless the placeholder still shows. Refusals
+becomes LF; LF is a line break, except in a rich-text block control, where it
+starts a paragraph: surviving paragraphs keep their ids and properties and new
+ones take the first paragraph's style defaults. A plain-text control accepts LF
+only when its `w:text` sets `w:multiLine` and keeps its lines in one paragraph.
+The text takes the formatting of the control's first text run, or the control's
+own run properties while it shows its placeholder. Equal text is a no-op unless
+the placeholder still shows or a plain-text control holds several paragraphs,
+which the fill joins into one. Refusals
 carry the batch code and a `reason`: `missing-control`, `missing-tag` or
 `missing-ooxml-id`, `ambiguous-control-id`, `ambiguous-tag` or
 `ambiguous-ooxml-id`, `content-locked`, `bound-control`,

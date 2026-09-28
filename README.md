@@ -26,8 +26,6 @@
 - **Agent editing with human review.** Review attributed agent edits through
   tracked changes, inline diffs, and before-and-after previews. Accept or
   reject changes directly in the editor.
-  DOCX hosts can reanchor existing comments while preserving identity, review
-  metadata, undo/redo, and exported ranges.
 
 - **Real-time collaboration.** People and agents edit the same file together,
   with live cursors and selections. Concurrent changes merge automatically,
@@ -35,101 +33,13 @@
 
 - **Undo and redo.** Navigate editing history and undo accepted agent
   proposals as a single step.
-  DOCX hosts can place explicit undo boundaries and choose automatic typing
-  coalescence or manual grouping across multiple edits.
 
 - **Embed or automate.** Drop React editors into your app, build on the
   framework-free JavaScript cores, or use Rust and Python APIs for headless
   processing and agent workflows.
-  DOCX hosts can query the text position under a pointer for drops and hover
-  tools, including body, header, footer, and note locations.
-
-- **Host-controlled PPTX editing.** PPTX hosts can intercept saving, flush accepted input, query slide content
-  under the pointer, group undo with explicit boundaries, reposition comments, and anchor carets that
-  follow later edits.
 
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
-
-- **Host-controlled DOCX saving.** Intercept Save before export and await pending
-  editor input before reading, changing, or persisting the document.
-
-- **DOCX paragraph anchors that survive saving.** Paragraphs authored in a session
-  save with valid Word paragraph IDs, and each saved paragraph's anchor, qualified by
-  its package part, resolves again after reopening. Source paragraphs without an ID
-  gain one only when the host opts in.
-
-- **Composable DOCX toolbars.** Arrange built-in controls in your own order next
-  to host actions, inside or outside the editor. Controls keep their state,
-  shortcuts, disabled reasons, and read-only rules through one command store.
-
-- **Composable PPTX toolbars.** Arrange built-in slide controls in your own order
-  next to host actions, inside or outside the editor, through one command store
-  with disabled reasons, platform-aware shortcuts, and ordered execution.
-
-- **Composable XLSX toolbars.** Replace the spreadsheet toolbar with built-in
-  controls and the formula bar in your own order. Commands run after pending
-  cell input and state why they are unavailable.
-
-- **Version-checked DOCX edit batches.** DOCX JavaScript and React hosts read
-  paragraphs with a session version, then apply atomic text and paragraph
-  batches that commit as one undo step or return a typed refusal with nothing
-  changed. Text steps stay within one paragraph and paragraph steps need a
-  document opened from DOCX bytes.
-
-- **Version-checked PPTX edit batches.** PPTX JavaScript, React, Rust and
-  Python hosts read slides and story text with a session version, then apply
-  atomic text, speaker-notes and shape batches that commit as one undo step or
-  return a typed refusal with nothing changed. Text steps stay within one
-  paragraph and leave fields and line breaks whole.
-
-- **Version-checked XLSX edit batches.** XLSX hosts in JavaScript, React, Rust
-  and Python read cells with a session version, then apply atomic cell input,
-  formula, number-format and style batches that commit as one recalculated undo
-  step or return a typed refusal with nothing changed. Batches do not insert or
-  delete rows, columns or sheets, and refuse writes to merged-cell followers,
-  array-formula cells and protected sheets.
-
-- **Host-owned DOCX plugins.** DOCX React supports host-owned plugins with
-  panels, overlays, sidebar items, lifecycle events, and explicitly granted
-  commands and edit batches. Plugins read and navigate by default; every write
-  is checked against its grant, the editor mode and document policy when it runs.
-
-- **Host-owned PPTX plugins.** PPTX React supports host-owned plugins with
-  panels, overlays, lifecycle events, and explicitly granted commands and edit
-  batches. Plugins read and navigate by default; every write is checked against
-  its grant and `readOnly` when it runs.
-
-- **Host-owned XLSX plugins.** XLSX React supports host-owned plugins with
-  panels, overlays, lifecycle events, and explicitly granted commands and edit
-  batches. Plugins read and navigate by default; every write is checked against
-  its grant and `readOnly` when it runs.
-
-- **Structured PPTX export.** PPTX JavaScript, Rust and Python hosts export
-  structured slide content and Markdown with session or snapshot anchors,
-  explicit hidden-content and notes/comment options, and omission diagnostics.
-
-- **Structured DOCX export.** DOCX exports read-only structured JSON and
-  Markdown with source anchors, explicit story and revision options, and
-  omission diagnostics. JavaScript and React can attach version-checked page
-  fragments from configured layout, with optional page geometry. Native Rust
-  and Python structured exports do not yet generate page maps automatically.
-
-- **Structured XLSX export.** XLSX exports bounded sparse worksheet content and
-  Markdown with positional anchors, formulas, stored values, formatted text,
-  explicit hidden-content options, and omission diagnostics. Export does not
-  recalculate formulas.
-
-- **DOCX content controls.** List DOCX content controls in JavaScript, Rust, and
-  Python. JavaScript and React hosts fill plain- and rich-text controls
-  atomically through version-checked edit batches. Native and Python filling and
-  explicit rich-text run input are not yet supported.
-
-- **DOCX comparison into tracked changes.** Compare body paragraph text in two
-  DOCX files with unchanged paragraph structure and emit attributed tracked
-  insertions and deletions. Unsupported or ambiguous comparisons return
-  diagnostics. The headless JavaScript API supports BetterOffice review; Word
-  validation is reported separately.
 
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.

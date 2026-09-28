@@ -133,8 +133,9 @@ Overlapping UI save requests share one workflow. Errors reach `onError`.
 `DocxEditorRef.flushPendingInput()` and `PagedEditorRef.flushPendingInput()` wait
 until input accepted before the call and its selection are authoritative in Yrs.
 They wait for active IME composition to end, and reject on input failure, unmount,
-or document replacement. A failed input queue remains failed until a new session
-is loaded. The promise does not wait for browser painting.
+or document replacement. An input failure rejects only the flushes, saves and
+commands that waited for that input; later ones proceed. The promise does not wait
+for browser painting.
 
 ```tsx
 <DocxEditor

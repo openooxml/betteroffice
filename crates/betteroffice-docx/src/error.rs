@@ -9,6 +9,8 @@ pub enum Error {
     Layout(docx_layout::LayoutError),
     DisplayList(String),
     ParagraphNotFound(String),
+    /// More than one body paragraph has the ID.
+    AmbiguousParagraph(String),
     UnsupportedParagraphEdit(String),
     Font(String),
     Image(String),
@@ -37,6 +39,9 @@ impl fmt::Display for Error {
             Self::Layout(error) => error.fmt(formatter),
             Self::DisplayList(error) => formatter.write_str(error),
             Self::ParagraphNotFound(id) => write!(formatter, "paragraph {id:?} was not found"),
+            Self::AmbiguousParagraph(id) => {
+                write!(formatter, "more than one paragraph has the ID {id:?}")
+            }
             Self::UnsupportedParagraphEdit(id) => {
                 write!(
                     formatter,
@@ -74,6 +79,7 @@ impl std::error::Error for Error {
             Self::Export(failure) => Some(failure),
             Self::DisplayList(_)
             | Self::ParagraphNotFound(_)
+            | Self::AmbiguousParagraph(_)
             | Self::UnsupportedParagraphEdit(_)
             | Self::Font(_)
             | Self::Image(_)

@@ -31,6 +31,24 @@ fn template() -> Vec<u8> {
     .unwrap()
 }
 
+/// The template with its multi-line plain-text address control turned into a rich-text one.
+fn rich_address_template() -> Vec<u8> {
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(&template())
+        .unwrap()
+        .into_iter()
+        .map(|(path, bytes)| match path.as_str() {
+            "word/document.xml" => {
+                let xml = String::from_utf8(bytes).unwrap();
+                let rich = xml.replace(r#"<w:text w:multiLine="1"/>"#, "<w:richText/>");
+                assert_ne!(rich, xml);
+                (path, rich.into_bytes())
+            }
+            _ => (path, bytes),
+        })
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn open(bytes: &[u8]) -> EditingDoc {
     let doc = EditingDoc::new(4242);
     seed_from_docx(&doc, bytes).unwrap();
@@ -513,7 +531,7 @@ fn fills_two_controls_by_id_as_one_undo_step() {
         applied.receipts[0].control.as_ref().unwrap().control_id,
         "body|10000002|0"
     );
-    assert_eq!(applied.receipts[1].new_paragraphs.len(), 1);
+    assert!(applied.receipts[1].new_paragraphs.is_empty());
     assert_eq!(
         applied.receipts[1].control.as_ref().unwrap().anchor,
         Anchor::Control {
@@ -557,7 +575,7 @@ fn fills_two_controls_by_id_as_one_undo_step() {
         !attrs.contains_key("runStyle"),
         "placeholder formatting is not inherited"
     );
-    assert_eq!(doc.paragraphs("body:sdt0").unwrap().len(), 2);
+    assert_eq!(doc.paragraphs("body:sdt0").unwrap().len(), 1);
 
     assert!(undo.undo());
     let undone = list(&doc);
@@ -565,6 +583,77 @@ fn fills_two_controls_by_id_as_one_undo_step() {
         serde_json::to_value(&undone.controls).unwrap(),
         serde_json::to_value(&before.controls).unwrap()
     );
+}
+
+#[test]
+fn plain_text_block_fills_break_lines_within_one_paragraph() {
+    let doc = open(&template());
+    let undo = UndoSession::new();
+    let applied = apply(
+        &doc,
+        &undo,
+        vec![by_id("body:sdt0", "Line one\n\nLine two")],
+    );
+    assert!(applied.receipts[0].new_paragraphs.is_empty());
+    let paragraphs = doc.paragraphs("body:sdt0").unwrap();
+    assert_eq!(paragraphs.len(), 1);
+    assert_eq!(paragraphs[0].para_id, "10000006");
+    let kinds: Vec<String> = doc
+        .story_segments("body:sdt0")
+        .unwrap()
+        .into_iter()
+        .map(|segment| match segment.content {
+            SegmentContent::Text(text) => text,
+            SegmentContent::OtherEmbed { kind, .. } => kind,
+            SegmentContent::Pilcrow(_) => "pilcrow".to_owned(),
+        })
+        .collect();
+    assert_eq!(kinds, ["Line one", "break", "break", "Line two", "pilcrow"]);
+    assert_eq!(
+        text(by_tag(&list(&doc), "customer.address")),
+        "Line one\n\nLine two"
+    );
+    let again = apply(
+        &doc,
+        &undo,
+        vec![by_id("body:sdt0", "Line one\n\nLine two")],
+    );
+    assert!(!again.receipts[0].changed);
+
+    let authored = package(&format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="lines"/><w:text w:multiLine="1"/></w:sdtPr><w:sdtContent>{}{}</w:sdtContent></w:sdt>"#,
+        para("0E000010", &run("a")),
+        para("0E000011", &run("b"))
+    ));
+    let doc = open(&authored);
+    let applied = apply(
+        &doc,
+        &UndoSession::new(),
+        vec![by_tag_step("lines", "c\nd")],
+    );
+    assert_eq!(
+        applied.receipts[0]
+            .removed_paragraphs
+            .iter()
+            .map(|paragraph| paragraph.para_id.as_str())
+            .collect::<Vec<_>>(),
+        ["0E000011"]
+    );
+    let paragraphs = doc.paragraphs("body:sdt0").unwrap();
+    assert_eq!(paragraphs.len(), 1);
+    assert_eq!(paragraphs[0].para_id, "0E000010");
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "c\nd");
+
+    let doc = open(&authored);
+    let undo = UndoSession::new();
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "a\nb");
+    let applied = apply(&doc, &undo, vec![by_tag_step("lines", "a\nb")]);
+    assert!(applied.receipts[0].changed);
+    assert_eq!(applied.receipts[0].removed_paragraphs.len(), 1);
+    assert_eq!(doc.paragraphs("body:sdt0").unwrap().len(), 1);
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "a\nb");
+    let again = apply(&doc, &undo, vec![by_tag_step("lines", "a\nb")]);
+    assert!(!again.receipts[0].changed);
 }
 
 #[test]
@@ -763,7 +852,7 @@ fn equal_text_is_a_no_op_unless_the_placeholder_shows() {
 
 #[test]
 fn shrinks_blocks_and_empties_controls() {
-    let doc = open(&template());
+    let doc = open(&rich_address_template());
     let undo = UndoSession::new();
     apply(&doc, &undo, vec![by_id("body:sdt0", "one\ntwo\nthree")]);
     let ids: Vec<String> = doc
@@ -795,7 +884,7 @@ fn shrinks_blocks_and_empties_controls() {
 
 #[test]
 fn refusals_are_data_and_change_nothing() {
-    let doc = open(&template());
+    let doc = open(&rich_address_template());
     let state = doc.encode_state_as_update_v1();
     let version = doc.version();
     let cases: Vec<(Vec<Value>, EditFailureCode, Option<EditFailureReason>)> = vec![
@@ -890,7 +979,7 @@ fn refusals_are_data_and_change_nothing() {
         .unwrap()
         .unwrap_err();
     assert_eq!(refusal.failure.code, EditFailureCode::StaleVersion);
-    let fresh = open(&template());
+    let fresh = open(&rich_address_template());
     apply(
         &fresh,
         &UndoSession::new(),
@@ -936,7 +1025,7 @@ fn conflicts_reserve_the_control_and_its_paragraph() {
 
 #[test]
 fn validation_previews_the_resolved_control_and_reserves_nothing() {
-    let doc = open(&template());
+    let doc = open(&rich_address_template());
     let state = doc.encode_state_as_update_v1();
     let validation = doc
         .validate_edits(&request(
@@ -1506,6 +1595,45 @@ fn diverged_copies_of_a_header_part_refuse_fills() {
         reason(&doc, vec![by_tag_step("header.title", "Final")]).1,
         Some(EditFailureReason::ProvenanceUnavailable)
     );
+}
+
+#[test]
+fn a_fill_that_only_normalizes_a_header_copy_reports_the_change() {
+    let header = format!(
+        r#"<w:hdr {}><w:sdt><w:sdtPr><w:tag w:val="lines"/><w:text w:multiLine="1"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}</w:hdr>"#,
+        fixture::namespaces(),
+        para("0D000011", r#"<w:r><w:t>a</w:t><w:br/><w:t>b</w:t></w:r>"#),
+        para("0D000012", "")
+    );
+    let body = format!(
+        r#"<w:p w14:paraId="0D000002"><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdA"/></w:sectPr></w:pPr>{}</w:p>{}<w:sectPr><w:headerReference w:type="default" r:id="rIdB"/></w:sectPr>"#,
+        run("One"),
+        para("0D000003", &run("Two"))
+    );
+    let doc = open(
+        &Package::new(&body)
+            .part("header1.xml", "rIdA", "header", "header", &header)
+            .rel("rIdB", "header", "header1.xml")
+            .bytes(),
+    );
+    let ctx = docx_edit::EditCtx::local("", "");
+    doc.delete_range(&ctx, docx_edit::StoryRange::new("hf:rIdB:sdt0", 1, 2))
+        .unwrap();
+    doc.split_paragraph(&ctx, docx_edit::Position::new("hf:rIdB:sdt0", 1), None)
+        .unwrap();
+    assert_eq!(doc.paragraphs("hf:rIdB:sdt0").unwrap().len(), 2);
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "a\nb");
+
+    let steps = || vec![by_tag_step("lines", "a\nb")];
+    let validation = doc
+        .validate_edits(&request(&doc, steps()))
+        .unwrap()
+        .unwrap();
+    assert!(validation.previews[0].would_change);
+    let applied = apply(&doc, &UndoSession::new(), steps());
+    assert!(applied.receipts[0].changed);
+    assert_eq!(doc.paragraphs("hf:rIdB:sdt0").unwrap().len(), 1);
+    assert!(!apply(&doc, &UndoSession::new(), steps()).receipts[0].changed);
 }
 
 fn block_sdt(tag: &str, content: &str) -> String {

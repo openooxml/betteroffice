@@ -314,7 +314,7 @@ raises `KeyError`.
 
 ## Status
 
-`0.0.x`, and the API may change before `0.1.0`.
+Pre-1.0: the API may change between minor versions.
 
 `save` keeps the parts the model does not represent — charts, drawings, pivot
 tables, comments, macros, custom XML, and their relationships — rather than

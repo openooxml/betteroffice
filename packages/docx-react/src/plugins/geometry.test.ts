@@ -5,6 +5,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
+import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import {
   createCanvasHostProjector,
   createRenderedDomContext,
@@ -97,6 +98,18 @@ describe('plugin overlay geometry', () => {
       current = false;
       expect(geometry.toOverlayRect(rect)).toBeNull();
     }
+  });
+
+  test('answers point queries with null through a context without getPositionAtPoint', () => {
+    const pages = document.createElement('div');
+    const layer = document.createElement('div');
+    const dom = createRenderedDomContext(pages);
+    const custom: Omit<RenderedDomContext, 'getPositionAtPoint'> = new Proxy(dom, {
+      get: (target, key) => (key === 'getPositionAtPoint' ? undefined : Reflect.get(target, key)),
+    });
+    const layout = { id: 'layout', version: 'v', zoom: 1, pageCount: 1 };
+    const geometry = createPluginGeometry(layout, custom, layer, () => true, () => null);
+    expect(geometry.getPositionAtPoint(1, 1)).toBeNull();
   });
 
   test('measures origins when called, so moved pages move the overlay', () => {

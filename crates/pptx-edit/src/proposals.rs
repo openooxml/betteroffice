@@ -134,8 +134,9 @@ pub type ProposalResult<T> = Result<T, ProposalError>;
 pub(crate) struct ProposalStore {
     next_id: u64,
     pending: Vec<Proposal>,
-    /// Memoized previews keyed on proposal id and the doc's epoch; a preview
-    /// is a pure function of the proposal's edits and the doc state.
+    /// Memoized previews of pending proposals, keyed on proposal id and the
+    /// doc's epoch; a preview is a pure function of the proposal's edits and
+    /// the doc state.
     pub(crate) previews: HashMap<String, (u64, ProposalPreview)>,
 }
 
@@ -198,13 +199,14 @@ impl DeckSession {
     }
 
     pub fn preview_proposal(&self, id: &str) -> ProposalResult<ProposalPreview> {
+        let mut proposal = self.pending_proposal(id)?;
         let epoch = self.epoch();
         if let Some((cached_epoch, preview)) = self.proposals.borrow().previews.get(id)
             && *cached_epoch == epoch
         {
             return Ok(preview.clone());
         }
-        let mut proposal = self.pending_proposal(id)?;
+        self.proposals.borrow_mut().previews.remove(id);
         let before = self.snapshot()?;
         let (_, snapshot) = self.preview_edits(&before, &proposal.edits)?;
         proposal.stale_targets = stale_targets(&before, &proposal);
@@ -246,6 +248,7 @@ impl DeckSession {
 
     pub fn reject_proposal(&self, id: &str) -> bool {
         let mut store = self.proposals.borrow_mut();
+        store.previews.remove(id);
         let before = store.pending.len();
         store.pending.retain(|proposal| proposal.id != id);
         before != store.pending.len()
@@ -514,4 +517,77 @@ fn stale_targets(snapshot: &DeckSnapshot, proposal: &Proposal) -> Vec<String> {
         })
         .map(ProposalChange::key)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{DeckSession, EditCtx, ProposalEdit, ProposalError, ProposalRequest};
+
+    const DECK: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+
+    fn request(edit: ProposalEdit) -> ProposalRequest {
+        ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![edit],
+        }
+    }
+
+    fn notes(slide_id: &str, text: &str) -> ProposalRequest {
+        request(ProposalEdit::SetSlideNotes {
+            slide_id: slide_id.into(),
+            text: text.into(),
+        })
+    }
+
+    #[test]
+    fn previews_leave_the_cache_with_their_proposal() {
+        let session = DeckSession::open(DECK, 97).unwrap();
+        let slide = session.snapshot().unwrap().slides[0].clone();
+        let cached = || session.proposals.borrow().previews.len();
+        let missing = |id: &str| {
+            matches!(
+                session.preview_proposal(id),
+                Err(ProposalError::NotFound(_))
+            )
+        };
+        let accept = |id: &str| session.accept_proposal(id, false).unwrap().applied;
+
+        let rejected = session.propose(notes(&slide.id, "Rejected")).unwrap();
+        session.preview_proposal(&rejected.id).unwrap();
+        assert!(session.reject_proposal(&rejected.id));
+        assert!(missing(&rejected.id));
+        let unchanged = session.propose(notes(&slide.id, &slide.notes)).unwrap();
+        assert!(!accept(&unchanged.id));
+        assert!(missing(&unchanged.id));
+        let accepted = session.propose(notes(&slide.id, "Accepted")).unwrap();
+        assert!(accept(&accepted.id));
+        assert!(missing(&accepted.id));
+        assert_eq!(cached(), 0);
+
+        for cycle in 0..50 {
+            let proposal = session
+                .propose(notes(&slide.id, &format!("Cycle {cycle}")))
+                .unwrap();
+            session.preview_proposal(&proposal.id).unwrap();
+            assert!(session.reject_proposal(&proposal.id));
+        }
+        assert_eq!(cached(), 0);
+
+        let shape = &slide.shapes[0];
+        let removed = session
+            .propose(request(ProposalEdit::SetShapeFill {
+                slide_id: slide.id.clone(),
+                shape_id: shape.id.clone(),
+                color: Some("#FF0000".into()),
+            }))
+            .unwrap();
+        assert_eq!(cached(), 1);
+        session
+            .remove_shape(&EditCtx::local("human"), &slide.id, &shape.id)
+            .unwrap();
+        assert!(session.preview_proposal(&removed.id).is_err());
+        assert_eq!(session.proposals().unwrap().len(), 1);
+        assert_eq!(cached(), 0);
+    }
 }

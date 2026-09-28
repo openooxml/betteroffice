@@ -267,6 +267,76 @@ test('a command after lost input is refused as input-failed', async () => {
   }
 });
 
+test('input and commands after lost input still apply', async () => {
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    let fail = true;
+    const { session, input } = await mount(async () => {
+      if (!fail) return null;
+      fail = false;
+      throw new Error('resident failure');
+    });
+    act(() => input.current!.insertText(' lost'));
+    await expect(input.current!.flushPendingInput()).rejects.toThrow('resident failure');
+    act(() => input.current!.insertText(' kept'));
+    let ran: unknown;
+    await act(async () => {
+      await input.current!.flushPendingInput();
+      ran = await input.current!.runAfterPendingInput(() => 'ran');
+    });
+    expect(ran).toBe('ran');
+    expect(text(session)).toBe('Seed kept');
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('a flush or command waiting on composition fails when earlier input fails meanwhile', async () => {
+  const originalError = console.error;
+  let reported!: () => void;
+  const failureReported = new Promise<void>((resolve) => {
+    reported = resolve;
+  });
+  console.error = () => reported();
+  try {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let fail = true;
+    const { session, input, view } = await mount(async () => {
+      if (!fail) return null;
+      fail = false;
+      await blocked;
+      throw new Error('resident failure');
+    });
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    act(() => input.current!.insertText(' lost'));
+    fireEvent.compositionStart(textarea);
+    const flush = input.current!.flushPendingInput().catch((cause) => cause);
+    const command = input.current!.runAfterPendingInput(() => 'ran').catch((cause) => cause);
+    release();
+    await failureReported;
+    textarea.value = '日本';
+    let outcomes: unknown[] = [];
+    await act(async () => {
+      fireEvent.compositionEnd(textarea, { data: '日本' });
+      outcomes = [await flush, admissionCode(await command)];
+    });
+    expect(outcomes).toEqual([new Error('resident failure'), 'input-failed']);
+    let ran: unknown;
+    await act(async () => {
+      await input.current!.flushPendingInput();
+      ran = await input.current!.runAfterPendingInput(() => 'ran');
+    });
+    expect(ran).toBe('ran');
+    expect(text(session)).toBe('Seed日本');
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test('a command admitted before the document was replaced is refused', async () => {
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => {

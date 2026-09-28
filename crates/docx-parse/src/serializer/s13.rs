@@ -1782,27 +1782,9 @@ impl<'a> SelectiveParagraphIndex<'a> {
     }
 
     fn cell(&mut self, cell: &TableCell) -> Option<()> {
-        // Mirrors `serialize_table_cell`: block SDTs emit nothing and an
-        // otherwise empty cell still emits a `<w:p/>` fallback.
-        let mut emitted = false;
-        for block in &cell.content {
-            match block {
-                BlockContent::Paragraph(paragraph) => {
-                    self.paragraph(paragraph)?;
-                    emitted = true;
-                }
-                BlockContent::Table(table) => {
-                    self.table(table)?;
-                    emitted = true;
-                }
-                BlockContent::BlockSdt(_) => {}
-                BlockContent::RawXml(raw) => {
-                    self.fragment(&raw.xml)?;
-                    emitted = true;
-                }
-            }
-        }
-        if !emitted {
+        // Mirrors `serialize_table_cell`: an empty cell emits a `<w:p/>` fallback.
+        self.story(&cell.content)?;
+        if cell.content.is_empty() {
             self.count += 1;
         }
         Some(())
@@ -2677,6 +2659,42 @@ mod tests {
         assert!(document.contains("<w:t>edited</w:t>"));
         assert!(!document.contains("model copy"));
         assert_eq!(parts["custom/opaque.dat"], b"opaque\0bytes");
+    }
+
+    #[test]
+    fn selective_save_counts_block_controls_in_table_cells() {
+        let document = concat!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:body>",
+            "<w:tbl><w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc>",
+            "<w:sdt><w:sdtPr><w:tag w:val=\"cell\"/><w:text/></w:sdtPr><w:sdtContent>",
+            "<w:p w14:paraId=\"AAAAAAAA\"><w:r><w:t>control</w:t></w:r></w:p>",
+            "</w:sdtContent></w:sdt><w:p w14:paraId=\"CCCCCCCC\"/></w:tc></w:tr></w:tbl>",
+            "<!-- opaque authored gap -->",
+            "<w:p w14:paraId=\"BBBBBBBB\"><w:r><w:t>old</w:t></w:r></w:p>",
+            "<w:sectPr/></w:body></w:document>"
+        );
+        let parsed =
+            crate::parse_docx_s9_wire(&base_package(document), Default::default()).expect("parse");
+        let table = serde_json::to_value(&parsed.document.package.document.content[0]).unwrap();
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [table, text_paragraph("edited", Some("BBBBBBBB"))] },
+            "options": { "updateModifiedDate": false },
+            "selective": { "changedParaIds": ["BBBBBBBB"] }
+        }))
+        .expect("request");
+        let mut context = SerializerContext::new(&request.determinism).unwrap();
+        let patched = build_selective_document_xml(
+            &request.document,
+            document,
+            &["BBBBBBBB".to_owned()],
+            &mut context,
+        )
+        .unwrap()
+        .expect("the census counts the control's paragraph");
+        let unchanged = &document[..document.find("<w:p w14:paraId=\"BBBBBBBB\">").unwrap()];
+        assert!(patched.starts_with(unchanged));
+        assert!(patched.contains("<w:t>edited</w:t>"));
     }
 
     #[test]

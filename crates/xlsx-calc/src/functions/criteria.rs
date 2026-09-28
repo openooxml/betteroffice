@@ -222,12 +222,38 @@ pub(crate) fn criterion_from_arg(arg: &Expr, ctx: &EvalContext<'_>) -> Criterion
     Criterion::from_value(&evaluate(arg, ctx))
 }
 
-/// parse a `range, criteria, ...` tail into aligned (area, criterion) pairs;
-/// `None` on an odd count, a non-reference range, or a shape mismatch.
+/// the criteria of a `...IFS` call, cut to the extent the data reaches.
+pub(crate) struct Criteria {
+    pub pairs: Vec<(Area, Criterion)>,
+    /// the range the call aggregates, cut and aligned with the criteria.
+    pub values: Option<Area>,
+    /// cells each criteria range holds past the cut, all of them blank.
+    pub unread: u64,
+}
+
+impl Criteria {
+    /// how many of the unread blanks satisfy every criterion: all or none.
+    pub(crate) fn unread_matches(&self) -> u64 {
+        if self
+            .pairs
+            .iter()
+            .all(|(_, criterion)| criterion.matches(&CellValue::Empty))
+        {
+            self.unread
+        } else {
+            0
+        }
+    }
+}
+
+/// parse a `range, criteria, ...` tail into aligned (area, criterion) pairs,
+/// with `values` aligned to them when given; `None` on an odd count, a
+/// non-reference range, or a shape mismatch.
 pub(crate) fn collect_pairs(
     specs: &[Expr],
+    values: Option<&Expr>,
     ctx: &EvalContext<'_>,
-) -> Option<Vec<(Area, Criterion)>> {
+) -> Option<Criteria> {
     if specs.is_empty() || !specs.len().is_multiple_of(2) {
         return None;
     }
@@ -235,18 +261,44 @@ pub(crate) fn collect_pairs(
     for chunk in specs.chunks(2) {
         areas.push(as_area(&chunk[0], ctx)?);
     }
-    bound_together(&mut areas, ctx);
-    let dims = (areas[0].rows, areas[0].cols);
-    if areas.iter().any(|area| (area.rows, area.cols) != dims) {
+    let first = areas[0];
+    if areas
+        .iter()
+        .any(|area| (area.rows, area.cols) != (first.rows, first.cols))
+    {
         return None;
     }
-    Some(
-        areas
-            .into_iter()
-            .zip(specs.chunks(2))
-            .map(|(area, chunk)| (area, criterion_from_arg(&chunk[1], ctx)))
-            .collect(),
-    )
+    let count = areas.len();
+    if let Some(values) = values {
+        areas.push(aligned(as_area(values, ctx)?, first.rows, first.cols)?);
+    }
+    bound_together(&mut areas, ctx);
+    let values = values.map(|_| areas[count]);
+    areas.truncate(count);
+    let unread = first.unread(areas[0].cell_count().unwrap_or(0));
+    let pairs = areas
+        .into_iter()
+        .zip(specs.chunks(2))
+        .map(|(area, chunk)| (area, criterion_from_arg(&chunk[1], ctx)))
+        .collect();
+    Some(Criteria {
+        pairs,
+        values,
+        unread,
+    })
+}
+
+/// the range and value range of a `SUMIF`/`AVERAGEIF`, cut together. the value
+/// range keeps its top-left and takes the range's shape, as excel resizes it.
+pub(crate) fn single_pair(range: Area, values: Area, ctx: &EvalContext<'_>) -> (Area, Area) {
+    let values = Area {
+        rows: range.rows,
+        cols: range.cols,
+        ..values
+    };
+    let mut areas = [range, values];
+    bound_together(&mut areas, ctx);
+    (areas[0], areas[1])
 }
 
 /// cut whole-column and whole-row criteria to the data they cover, giving
@@ -278,15 +330,18 @@ pub(crate) fn bound_together(areas: &mut [Area], ctx: &EvalContext<'_>) {
     }
 }
 
+/// `bound_together` over the arguments that are references.
+pub(crate) fn cut_references(areas: &mut [Option<Area>], ctx: &EvalContext<'_>) {
+    let mut cut: Vec<Area> = areas.iter().flatten().copied().collect();
+    bound_together(&mut cut, ctx);
+    for (area, cut) in areas.iter_mut().flatten().zip(cut) {
+        *area = cut;
+    }
+}
+
 /// the values a `...IF`/`...IFS` aggregates, cut to the criteria rectangle: a
 /// whole-column range simply takes the criteria shape.
-pub(crate) fn aligned_area(
-    expr: &Expr,
-    ctx: &EvalContext<'_>,
-    rows: usize,
-    cols: usize,
-) -> Option<Area> {
-    let mut area = as_area(expr, ctx)?;
+pub(crate) fn aligned(mut area: Area, rows: usize, cols: usize) -> Option<Area> {
     if area.rows >= xlsx_model::MAX_ROWS as usize {
         area.rows = rows;
     }

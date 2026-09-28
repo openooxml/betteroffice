@@ -3,8 +3,8 @@ use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
     CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
-    DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, FreezePane, GridGeometry,
-    Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, ErrorValue, FreezePane,
+    GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
     ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, Stylesheet,
     UpdateOrigin, Viewport, Workbook, WorkbookModel,
@@ -2336,6 +2336,64 @@ fn reports_recalculation_limits_without_overwriting_cached_values() {
         CellValue::Number { value: 123.0 }
     );
     assert_eq!(workbook.last_calculation().limited_cells.len(), 1);
+}
+
+/// an array formula the recalculation budget refuses keeps its rectangle and
+/// its cached cells through a save and a reopen; only its uncached anchor
+/// shows the refusal.
+#[test]
+fn a_refused_array_formula_saves_its_rectangle() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    for row in 1..=11 {
+        sheet.set_cell(
+            cell(&format!("A{row}")),
+            Cell {
+                value: CellValue::Number { value: 1e6 },
+                formula: Some("ROWS(_xlfn.SEQUENCE(1000000))".into()),
+                ..Cell::default()
+            },
+        );
+    }
+    sheet.set_cell(
+        cell("C20"),
+        Cell {
+            formula: Some("1".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("D25"),
+        Cell {
+            value: CellValue::Number { value: 7.0 },
+            ..Cell::default()
+        },
+    );
+    let rectangle = CellRange::parse_a1("C20:D29").unwrap();
+    sheet.set_array_formula(cell("C20"), rectangle);
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let workbook = Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap();
+    assert!(
+        workbook
+            .last_calculation()
+            .limited_cells
+            .iter()
+            .any(|address| address.cell == cell("C20"))
+    );
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    let sheet = &reopened.model().sheets[0];
+    assert_eq!(sheet.array_formula(cell("C20")), Some(rectangle));
+    assert_eq!(
+        sheet.cell(cell("C20")).unwrap().value,
+        CellValue::Error {
+            value: ErrorValue::Num
+        }
+    );
+    assert_eq!(
+        sheet.cell(cell("D25")).unwrap().value,
+        CellValue::Number { value: 7.0 }
+    );
 }
 
 #[test]

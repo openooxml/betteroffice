@@ -47,7 +47,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `SUMIF(range, criteria, [sum_range])` | `sum_range` is anchored at its top-left with the criteria shape. |
 | `SUMIFS(sum_range, crit_range, crit, …)` | All ranges must share dimensions. |
 | `SUMPRODUCT(array1, [array2], …)` | Element-wise product summed; non-numeric cells = 0; arrays must match length. |
-| `MMULT(array1, array2)` | `cols(array1)` must equal `rows(array2)`; any non-numeric operand cell → `#VALUE!`. Returns the top-left product element (see Deviations). |
+| `MMULT(array1, array2)` | `cols(array1)` must equal `rows(array2)`. The scalar evaluator gives `#VALUE!` for any non-numeric operand cell; array evaluation reads blanks, logicals and numeric text as numbers. Returns the whole product as an array (see Dynamic arrays). |
 | `PRODUCT` | No numbers → 0. |
 | `ABS`, `SIGN` | — |
 | `ROUND` | Half away from zero. |
@@ -92,7 +92,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `T` | Text passes through, everything else → `""`. |
 | `CHAR(n)` / `CODE(text)` | `CHAR` for code points 1..=255; `CODE` returns the first char's code point (Unicode, not a code page). |
 | `VALUE`, `NUMBERVALUE(text, [dec], [grp])` | `VALUE` handles a trailing `%`. |
-| `TEXT(value, format)` | **Minimal**: only `0`, `0.00`, `#,##0`, `#,##0.00`, `0%`; any other code → `#VALUE!`. |
+| `TEXT(value, format)` | Formats through the number-format interpreter, dates in the workbook's date system. |
 | `TEXTJOIN(delim, ignore_empty, …)` | `ignore_empty` also skips empty strings; ranges flatten row-major. |
 | `CONCAT` / `CONCATENATE` | Ranges flatten row-major. |
 
@@ -111,8 +111,9 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 
 Serial ↔ calendar math is the Excel **1900 system including the deliberate leap
 bug** (serial 60 = the phantom 1900-02-29), matching `xlsx_model::date`. The
-workbook date system is not reachable through `CellProvider`, so the 1904 epoch
-is not yet wired — a follow-up.
+workbook's date system reaches the evaluator as `EvalContext::date_system`;
+`TEXT` formats dates in it, while the date functions above still compute in the
+1900 system.
 
 ### Logical
 
@@ -135,9 +136,7 @@ is not yet wired — a follow-up.
 | `OFFSET(reference, rows, cols, [height], [width])` | Returns a reference, so it feeds the area-taking functions. Sizes default to the reference's own; a negative size extends back from the shifted corner; a zero size or a rectangle off the sheet → `#REF!`. A multi-cell result in scalar context is `#VALUE!` (see below). |
 | `XLOOKUP(value, lookup, return, [if_not_found], …)` | **Exact match only**; match/search modes beyond exact are not yet implemented. |
 | `CHOOSE(index, …)` | Only the chosen argument is evaluated. |
-| `ROW` / `COLUMN([ref])` | **A reference is required** — the evaluator has no notion of the calling cell, so the no-arg form is `#VALUE!`. |
-| `ROWS` / `COLUMNS(area)` | Dimension counts. |
-| `TRANSPOSE(array)` | **1x1 only** — the evaluator has no array value, so a multi-cell argument is `#VALUE!`. Blanks transpose to `0`. |
+| `TRANSPOSE(array)` | Swaps rows and columns of an array or range; blanks transpose to `0`. |
 | `ROW` / `COLUMN([ref])` | The reference's top-left position; with no reference, the calling cell's own. A context built without a calling cell (`EvalContext::new`) still answers `#VALUE!` to the no-arg form. |
 | `ROWS` / `COLUMNS(area)` | Dimension counts; the area is required. |
 
@@ -149,6 +148,17 @@ is not yet wired — a follow-up.
 | `ISERROR`, `ISERR`, `ISNA` | `ISERR` excludes `#N/A`. |
 | `NA` | The `#N/A` literal. |
 | `N` | Numbers/bools → numbers, text → 0, errors pass through. |
+
+### Dynamic arrays
+
+Array-aware evaluation covers `SEQUENCE`, `FILTER`, `SORT`, `SORTBY`,
+`UNIQUE`, `TRANSPOSE`, `MMULT`, `LINEST`, `TREND`, `FREQUENCY`, `TAKE`,
+`DROP`, `EXPAND`, `CHOOSEROWS`, `CHOOSECOLS`, `HSTACK`, `VSTACK`, `TOCOL`,
+`TOROW`, `WRAPROWS`, `WRAPCOLS`, `TEXTSPLIT`, `XLOOKUP`, `XMATCH`, `INDEX`,
+`LET`, `LAMBDA`, `MAP`, `REDUCE`, `SCAN`, `BYROW`, `MAKEARRAY`, plus element-wise
+`IF`, `IFERROR`, `IFNA` and the aggregates that read arrays (`SUM`,
+`SUMPRODUCT`, `AVERAGE`, `COUNT`, `COUNTA`, `MIN`, `MAX`, `PRODUCT`,
+`TEXTJOIN`, `CONCAT`).
 
 ## Criteria strings
 
@@ -165,9 +175,8 @@ with `~` escaping a literal `*`, `?`, or `~`.
   code units. This differs only for astral (supplementary-plane) characters.
 - **`SEARCH`, and `VLOOKUP` / `HLOOKUP` / `MATCH` in exact mode**, do not
   implement wildcards yet.
-- **`TEXT`** implements only the five format codes listed above; the full
-  §18.8.31 number-format interpreter is a separate PR.
-- **1904 date system** is not yet wired (see Date & time).
+- **1904 date system**: only `TEXT` honours it; the date functions compute in
+  the 1900 system (see Date & time).
 - **`RAND`** is not implemented; **`RANDBETWEEN`** is, and draws from
   `EvalContext::rand_seed` — pin it before the first draw and the sequence
   replays exactly. Left `None`, each context takes a fresh stream from a
@@ -178,15 +187,10 @@ with `~` escaping a literal `*`, `?`, or `~`.
   itself is handled generically by the dependency graph.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
-- **Array results** have no representation: `CellValue` is scalar and recalc
-  writes one value per cell, so `TRANSPOSE` (and any future `MMULT`) can only
-  answer the 1x1 case. Anything larger is `#VALUE!`, the same answer a bare
-  range gets in scalar context.
-- **Array results** have no representation: `CellValue` is a single scalar and
-  the model records no array-formula range, so `MMULT` returns the top-left
-  element of its product. That is the value Excel caches in the anchor cell of
-  the array formula that entered it; the remaining cells of a legacy CSE range
-  carry no formula and keep their stored values.
+- **Array results** spill from a dynamic-array anchor into the cells beside
+  it and report `#SPILL!` when an authored value or formula is in the way.
+  Array evaluation is charged against the recalculation budget, and a formula
+  that exceeds it keeps its cached value.
 - **`ROW` / `COLUMN`** with no reference answer the calling cell's own position.
   Recalculation supplies it; a context built directly by `EvalContext::new`
   leaves `cell` unset and those forms stay `#VALUE!`.

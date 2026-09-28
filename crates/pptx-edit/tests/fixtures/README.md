@@ -59,6 +59,31 @@ CARGO_TARGET_DIR=/absolute/path/to/main-target cargo run --locked -p betteroffic
 
 The generator asserts that main seeds schema 6 before restamping.
 
+## Released 2.1 defaults
+
+`deck-schema-v2.1-defaults.pptx` is `../../pptx-render/tests/fixtures/run-caps.pptx`
+with its master's `p:clrMap` inverted (`bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2"`), its
+first two runs coloured `tx1`, and seven preset shapes added: a default `star5` and one
+authoring `adj` 45000, a default trapezoid and one authoring 30000, a default `arc`, and a
+default `star8` inside a group. It is repacked with `ooxml_opc::rezip_parts`, so a no-op
+save reproduces its bytes. `deck-schema-v2.1-defaults.update.bin` is its seed by release
+0.1.1 (`cf3d220f7`, schema 2.1, client ID 2101), which stored the old star and trapezoid
+defaults, no caps and colours resolved without the colour map.
+
+`deck-schema-v2.1-edits.pptx` is the same deck with the `Direct all caps` text box
+replaced by two paragraphs of differently capped and coloured runs holding supplementary
+characters (`𝐁`, `😀`). `deck-schema-v2.1-edits.update.bin` is its 0.1.1 seed (client ID
+2102) after that release deleted within and across runs, including a surrogate pair,
+and inserted `NEW` and `𝐂`; `schema_migration.rs` applies the same edits to a fresh
+open and expects the recovered story to match it.
+
+The generator `generate_v2_1_defaults_snapshot.rs` writes both updates. Copy it into
+that checkout's `crates/pptx-edit/examples/`, then run from that checkout:
+
+```sh
+CARGO_TARGET_DIR=/absolute/path/to/release-target cargo run --locked -p betteroffice-pptx-edit --example generate_v2_1_defaults_snapshot -- /absolute/path/to/this/branch
+```
+
 ## Connectors and comments
 
 `connectors.md` documents the connector decks and

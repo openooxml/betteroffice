@@ -16,7 +16,7 @@ npm has no partial-tarball fetch: a subpath export inside `@betteroffice/fonts` 
 
 | Package                   | Faces | Size on disk |
 | ------------------------- | ----- | ------------ |
-| `@betteroffice/fonts`     | 25    | 7.9 MB       |
+| `@betteroffice/fonts`     | 65    | 14.2 MB      |
 | `@betteroffice/fonts-cjk` | 5     | 33 MB        |
 
 The overwhelming majority of documents need only the base package. Measured over 100 real-world English documents, Calibri appears in 91%, Times New Roman in 79%, Arial in 56% and Cambria in 52% — all covered by the base package's metric-compatible Latin set.

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use docx_edit::content_controls::{
@@ -14,6 +15,9 @@ use docx_parse::block::BlockContent;
 use docx_parse::document::{DocumentBody, Section, get_paragraph_text};
 use docx_parse::inline::{InlineNode, Run, RunContent, RunType};
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
+use docx_parse::paragraph_identity::{
+    allocate_paragraph_id, format_paragraph_id, package_paragraph_ids,
+};
 use docx_parse::s9::{
     S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions, S9SectionWire,
     S9WireEnvelope,
@@ -33,6 +37,10 @@ pub struct Document {
     original_parts: Vec<(String, Vec<u8>)>,
     seed: String,
     model: DocumentModel,
+    /// By body paragraph ordinal, the fresh ID handed to a paragraph that
+    /// repeats an earlier paragraph's ID and the authored ID it saves with
+    /// until it is edited or the model is changed.
+    authored_ids: BTreeMap<usize, (String, String)>,
     #[cfg(feature = "raster")]
     pub(crate) fonts: crate::render::FontRegistry,
     #[cfg(feature = "raster")]
@@ -52,7 +60,9 @@ impl Document {
             S9ParseOptions::default(),
             limits,
         )?;
-        let document = parsed.document;
+        let mut document = parsed.document;
+        let authored_ids =
+            address_repeated_paragraphs(&mut document.package.document.content, &original_parts);
         let model = model_from_package(
             document.package,
             document.template_variables.unwrap_or_default(),
@@ -62,6 +72,7 @@ impl Document {
             original_parts,
             seed: format!("{:x}", Sha256::digest(bytes)),
             model,
+            authored_ids,
             #[cfg(feature = "raster")]
             fonts: crate::render::FontRegistry::default(),
             #[cfg(feature = "raster")]
@@ -73,7 +84,10 @@ impl Document {
         &self.model
     }
 
+    /// The model, for any change. Paragraphs that repeat an earlier
+    /// paragraph's ID then save with the fresh IDs they read with.
     pub fn model_mut(&mut self) -> &mut DocumentModel {
+        self.authored_ids.clear();
         &mut self.model
     }
 
@@ -97,6 +111,9 @@ impl Document {
         self.model.body.sections.as_deref().unwrap_or_default()
     }
 
+    /// Every body paragraph in document order, table cells and content controls
+    /// included. One that repeats an earlier paragraph's ID carries a fresh ID,
+    /// which a save writes once the paragraph is edited.
     pub fn paragraphs(&self) -> Vec<&Paragraph> {
         let mut paragraphs = Vec::new();
         collect_paragraphs(&self.model.body.content, &mut paragraphs);
@@ -109,10 +126,23 @@ impl Document {
         tables
     }
 
+    /// The body paragraph with `para_id`; `None` when no paragraph or several have it.
     pub fn paragraph(&self, para_id: &str) -> Option<&Paragraph> {
-        self.paragraphs()
+        self.unique_paragraph(para_id).ok()
+    }
+
+    fn unique_paragraph(&self, para_id: &str) -> Result<&Paragraph> {
+        let mut matches = self
+            .paragraphs()
             .into_iter()
-            .find(|paragraph| paragraph.para_id.as_deref() == Some(para_id))
+            .filter(|paragraph| paragraph.para_id.as_deref() == Some(para_id));
+        let found = matches
+            .next()
+            .ok_or_else(|| Error::ParagraphNotFound(para_id.to_owned()))?;
+        match matches.next() {
+            Some(_) => Err(Error::AmbiguousParagraph(para_id.to_owned())),
+            None => Ok(found),
+        }
     }
 
     pub fn structure(&self) -> DocumentStructure {
@@ -139,6 +169,7 @@ impl Document {
         client_id: u64,
         context: &EditCtx,
     ) -> Result<Receipt> {
+        self.unique_paragraph(para_id)?;
         let paragraph = find_paragraph_mut(&mut self.model.body.content, para_id)
             .ok_or_else(|| Error::ParagraphNotFound(para_id.to_owned()))?;
         let template = plain_run_template(paragraph)
@@ -176,6 +207,7 @@ impl Document {
                 }
             }
         }
+        self.authored_ids.retain(|_, (fresh, _)| fresh != para_id);
         Ok(receipt)
     }
 
@@ -235,7 +267,7 @@ impl Document {
             wire_version: 1,
             document: S9DocumentWire {
                 package: S9PackageWire {
-                    document: S9DocumentBodyWire::from(model.body),
+                    document: S9DocumentBodyWire::from(self.with_authored_ids(model.body)),
                     styles: model.styles,
                     theme: model.theme,
                     numbering: model.numbering,
@@ -281,7 +313,7 @@ impl Document {
                 seed: self.seed.clone(),
                 now: options.now,
             },
-            document: self.model.body.clone(),
+            document: self.with_authored_ids(self.model.body.clone()),
             header_entries: self.model.headers.clone(),
             footer_entries: self.model.footers.clone(),
             footnotes: self.model.footnotes.clone(),
@@ -298,6 +330,75 @@ impl Document {
             paragraph_ids: None,
         };
         write_docx_s13_parts(request, &self.original_parts, None).map_err(Error::from)
+    }
+
+    /// `body` as it saves: a paragraph still at its ordinal with its fresh ID
+    /// keeps its authored ID.
+    fn with_authored_ids(&self, mut body: DocumentBody) -> DocumentBody {
+        if !self.authored_ids.is_empty() {
+            let mut ordinal = 0usize;
+            visit_paragraphs_mut(&mut body.content, &mut |paragraph| {
+                ordinal += 1;
+                let Some((fresh, authored)) = self.authored_ids.get(&(ordinal - 1)) else {
+                    return;
+                };
+                if paragraph.para_id.as_ref() == Some(fresh) {
+                    let paragraph = Arc::make_mut(paragraph);
+                    paragraph.para_id = Some(authored.clone());
+                    paragraph.repeated_para_id = Some(true);
+                }
+            });
+        }
+        body
+    }
+}
+
+/// Gives each paragraph that repeats an earlier paragraph's ID a fresh one no
+/// package part uses, returning the fresh and authored IDs by paragraph ordinal.
+fn address_repeated_paragraphs(
+    blocks: &mut [BlockContent],
+    parts: &[(String, Vec<u8>)],
+) -> BTreeMap<usize, (String, String)> {
+    let mut authored_ids = BTreeMap::new();
+    let mut occupied = None;
+    let mut next_ordinal = 0usize;
+    visit_paragraphs_mut(blocks, &mut |paragraph| {
+        let ordinal = next_ordinal;
+        next_ordinal += 1;
+        if paragraph.repeated_para_id != Some(true) {
+            return;
+        }
+        let occupied = occupied.get_or_insert_with(|| package_paragraph_ids(parts));
+        let Some(id) = allocate_paragraph_id(&format!("body#{ordinal}"), occupied) else {
+            return;
+        };
+        occupied.insert(id);
+        let paragraph = Arc::make_mut(paragraph);
+        let fresh = format_paragraph_id(id);
+        if let Some(authored) = paragraph.para_id.replace(fresh.clone()) {
+            authored_ids.insert(ordinal, (fresh, authored));
+        }
+        paragraph.repeated_para_id = None;
+    });
+    authored_ids
+}
+
+fn visit_paragraphs_mut(blocks: &mut [BlockContent], visit: &mut impl FnMut(&mut Arc<Paragraph>)) {
+    for block in blocks {
+        match block {
+            BlockContent::Paragraph(paragraph) => visit(paragraph),
+            BlockContent::Table(table) => {
+                for row in &mut Arc::make_mut(table).rows {
+                    for cell in &mut row.cells {
+                        visit_paragraphs_mut(&mut cell.content, visit);
+                    }
+                }
+            }
+            BlockContent::BlockSdt(sdt) => {
+                visit_paragraphs_mut(&mut Arc::make_mut(sdt).content, visit)
+            }
+            BlockContent::RawXml(_) => {}
+        }
     }
 }
 

@@ -199,7 +199,8 @@ pub enum EditOperation {
         style_id: String,
     },
     /// Replaces the content of a plain- or rich-text content control with plain text and clears
-    /// its placeholder state. LF breaks lines inline and paragraphs in a block control.
+    /// its placeholder state. LF is a line break, or a paragraph break in a rich-text block
+    /// control.
     SetContentControlText {
         target: ContentControlSelector,
         text: String,
@@ -2043,7 +2044,8 @@ fn plan_inline_fill<T: ReadTxn>(
 }
 
 /// A block fill rewrites the control's child story: surviving paragraphs keep their ids and
-/// properties, extra ones take the first paragraph's style defaults.
+/// properties, extra ones take the first paragraph's style defaults. A rich-text control takes a
+/// paragraph per line; a plain-text control holds its lines as line breaks in one paragraph.
 fn plan_block_fill<T: ReadTxn>(
     views: &mut Views<'_, T>,
     fill: Fill<'_>,
@@ -2101,7 +2103,12 @@ fn plan_block_fill<T: ReadTxn>(
     let (Some(first), Some(last)) = (view.paragraphs.first(), view.paragraphs.last()) else {
         return Err(unsupported("the control's story holds no paragraph"));
     };
-    let lines: Vec<&str> = fill.text.split('\n').collect();
+    let rich = fill.record.control.metadata.control_type == "richText";
+    let lines: Vec<&str> = if rich {
+        fill.text.split('\n').collect()
+    } else {
+        vec![fill.text.as_str()]
+    };
     if lines.len().saturating_sub(view.paragraphs.len()) > MAX_INSERTED_PARAGRAPHS {
         return Err(failure(
             EditFailureCode::LimitExceeded,
@@ -2128,7 +2135,8 @@ fn plan_block_fill<T: ReadTxn>(
     let mut insert = None;
     let mut removed = Vec::new();
     let mut new_paragraph_count = 0;
-    if !fill.unchanged {
+    // A plain-text control holds one paragraph, so equal text still collapses a split one.
+    if !fill.unchanged || (!rich && view.paragraphs.len() > 1) {
         for (paragraph, line) in view.paragraphs.iter().zip(&lines) {
             if paragraph.embeds.is_empty() && paragraph.text == *line {
                 continue;
@@ -2390,6 +2398,12 @@ fn receipts<T: ReadTxn>(
     steps: &[Planned],
     executed: &[Option<Executed>],
 ) -> Vec<EditReceipt> {
+    let companion_changes: BTreeSet<u32> = steps
+        .iter()
+        .zip(executed)
+        .filter(|(planned, outcome)| planned.companion && outcome.is_some())
+        .map(|(planned, _)| planned.index)
+        .collect();
     steps
         .iter()
         .zip(executed)
@@ -2440,7 +2454,7 @@ fn receipts<T: ReadTxn>(
             };
             EditReceipt {
                 step_index: planned.index,
-                changed: outcome.is_some(),
+                changed: outcome.is_some() || companion_changes.contains(&planned.index),
                 range,
                 new_paragraphs: outcome
                     .as_ref()
@@ -2622,7 +2636,12 @@ impl EditingDoc {
                 .map(|planned| EditPreview {
                     step_index: planned.index,
                     target: planned.target.clone(),
-                    would_change: planned.effect.is_some(),
+                    would_change: planned.effect.is_some()
+                        || plan.steps.iter().any(|other| {
+                            other.companion
+                                && other.index == planned.index
+                                && other.effect.is_some()
+                        }),
                     new_paragraph_count: planned.new_paragraph_count,
                     would_create_revisions: planned.suggest && planned.effect.is_some(),
                     control: planned.control.clone(),

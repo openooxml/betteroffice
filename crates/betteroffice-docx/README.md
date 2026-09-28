@@ -19,6 +19,12 @@ assert_eq!(
 let saved = document.save()?;
 ```
 
+Each paragraph ID addresses one body paragraph. A paragraph whose `w14:paraId`
+repeats an earlier paragraph's carries a fresh ID that no part of the package
+uses, which `save` writes once that paragraph is edited or the model is taken
+through `model_mut`; until then it saves with its authored ID. A lookup that
+still matches several paragraphs returns `None` or `Error::AmbiguousParagraph`.
+
 `DocumentModel` exposes the body, sections, headers, footers, notes, styles,
 numbering, relationships, media, and charts. `save` rewrites the parts the
 engine owns and reuses the original package for the rest, so untouched parts
@@ -48,7 +54,7 @@ The `raster` feature is opt-in; the raster backend is server-side only and the
 default build still targets `wasm32-unknown-unknown`.
 
 ```toml
-betteroffice-docx = { version = "0.0.4", features = ["raster"] }
+betteroffice-docx = { version = "0.3", features = ["raster"] }
 ```
 
 `render_png` takes a `DisplayList`, which `layout` returns alongside the typed
@@ -137,6 +143,6 @@ asymmetry is which failures leave a signal a caller can act on.
   artifact on the pipeline the Rust crates can produce end to end. `DisplayList`
   deserializes, so a binding hands over the JSON its layout pass already emits.
 
-`0.2.x`: the API may change before `1.0`.
+Pre-1.0: the API may change between minor versions.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 
 import manifest from '../package.json' with { type: 'json' };
 import {
@@ -113,6 +113,8 @@ describe('loading', () => {
     const provider = createFontProvider();
     const bytes = await provider.resolveScriptFallback('cjk-sc', false, false)!();
     expect(new DataView(bytes).getUint32(0)).toBe(SFNT_CFF);
+    const { script: _script, ...withoutScript } = resolveScriptFallbackFace('cjk-sc', false, false)!;
+    expect(new DataView(await loadBundledFontBytes(withoutScript)).getUint32(0)).toBe(SFNT_CFF);
   });
 
   test('caches per face, handing out one buffer identity', async () => {
@@ -196,6 +198,12 @@ describe('loading', () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  test('loads every manifest face from the package without a base URL', async () => {
+    for (const face of BUNDLED_FONTS) {
+      expect((await loadBundledFontBytes(face)).byteLength).toBe(face.byteLength);
+    }
+  });
 });
 
 // Plain Node refuses to type-strip TypeScript under node_modules.
@@ -227,6 +235,23 @@ describe('published shape', () => {
     for (const face of cjk) {
       expect(existsSync(new URL(`../assets/${face.file}`, import.meta.url))).toBe(false);
     }
+  });
+
+  test('gives every shipped asset a literal URL a bundler can emit', async () => {
+    const source = await Bun.file(new URL('./index.ts', import.meta.url)).text();
+    const rows = [
+      ...source.matchAll(/'([^']+)': \(\) =>\s+new URL\('\.\.\/assets\/([^']+)', import\.meta\.url\)/g),
+    ];
+    const assets = readdirSync(new URL('../assets/', import.meta.url))
+      .filter((file) => /\.(ttf|otf)$/.test(file))
+      .sort();
+    expect(rows.map(([, file]) => file).sort()).toEqual(assets);
+    expect(rows.filter(([, file, target]) => file !== target).map(([row]) => row)).toEqual([]);
+    expect(
+      BUNDLED_FONTS.filter((face) => !face.script?.startsWith('cjk-'))
+        .map((face) => face.file)
+        .sort()
+    ).toEqual(assets);
   });
 
   test('records the exact byte length of every vendored face', () => {

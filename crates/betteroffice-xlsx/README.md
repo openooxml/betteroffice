@@ -27,7 +27,7 @@ let saved = workbook.save()?;
 
 Saving preserves the source package: parts and sheets an edit did not touch are
 copied through byte for byte, and only what changed is reserialized.
-`0.2.x`: the API may change before `1.0`.
+Pre-1.0: the API may change between minor versions.
 
 ## Edit batches
 
