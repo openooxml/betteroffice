@@ -766,6 +766,7 @@ impl EditingDoc {
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }
+        move_comment_references(&mut txn, comment_id, ranges);
         comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
         Ok(())
     }
@@ -1070,6 +1071,84 @@ fn next_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T, from: u32) -> Option<(u32,
     None
 }
 
+fn is_comment_reference<T: ReadTxn>(map: &MapRef, txn: &T, comment_id: &str) -> bool {
+    map_string(map, txn, "modelKind").as_deref() == Some("commentReference")
+        && match map.get(txn, "commentId") {
+            Some(Out::Any(Any::Number(id))) => id.to_string() == comment_id,
+            Some(Out::Any(Any::BigInt(id))) => id.to_string() == comment_id,
+            Some(Out::Any(Any::String(id))) => &*id == comment_id,
+            _ => false,
+        }
+}
+
+/// Moves the comment's reference embeds to right after its ranges, one per story holding a range.
+fn move_comment_references(
+    txn: &mut yrs::TransactionMut<'_>,
+    comment_id: &str,
+    ranges: &[StoryRange],
+) {
+    let stories: Vec<(String, TextRef)> = txn
+        .get_map(STORIES)
+        .expect("stories root is declared by EditingDoc::new")
+        .iter(txn)
+        .filter_map(|(id, value)| Some((id.to_owned(), value.cast::<TextRef>().ok()?)))
+        .collect();
+    let mut payload = None;
+    let mut missing = Vec::new();
+    for (story_id, story) in &stories {
+        let Some(mut end) = ranges
+            .iter()
+            .filter(|range| &range.story == story_id)
+            .map(|range| range.end)
+            .max()
+        else {
+            continue;
+        };
+        let mut placed = false;
+        let mut offset = 0;
+        let mut moved = Vec::new();
+        for diff in story.diff(txn, YChange::identity) {
+            if let Out::YMap(map) = &diff.insert
+                && is_comment_reference(map, txn, comment_id)
+            {
+                payload.get_or_insert_with(|| {
+                    map.iter(txn)
+                        .filter_map(|(key, value)| match value {
+                            Out::Any(value) => Some((key.to_owned(), value)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                });
+                if offset == end && !placed {
+                    placed = true;
+                } else {
+                    moved.push(offset);
+                }
+            }
+            offset += out_len(&diff.insert);
+        }
+        for offset in moved.into_iter().rev() {
+            story.remove_range(txn, offset, 1);
+            if offset < end {
+                end -= 1;
+            }
+        }
+        if !placed {
+            missing.push((story, end));
+        }
+    }
+    let Some(payload) = payload else {
+        return;
+    };
+    for (story, end) in missing {
+        let embed =
+            story.insert_embed_with_attributes(txn, end, MapPrelim::default(), Attrs::new());
+        for (key, value) in &payload {
+            embed.insert(txn, key.as_str(), value.clone());
+        }
+    }
+}
+
 fn out_len(value: &Out) -> u32 {
     match value {
         Out::Any(Any::String(value)) => value.encode_utf16().count() as u32,
@@ -1362,6 +1441,116 @@ mod tests {
             assert_eq!(undo.changed_stories(), ["body"]);
             assert!(undo.redo());
         }
+    }
+
+    /// Seeds comment 1 over "first" with its reference right after it, and a synced peer.
+    fn referenced(doc: &EditingDoc) -> EditingDoc {
+        doc.create_story("body", "first second", "Normal", "left")
+            .unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::InsertEmbed {
+                    index: 5,
+                    kind: "field".into(),
+                    payload: vec![
+                        ("modelKind".into(), Any::from("commentReference")),
+                        ("commentId".into(), Any::from(1.0)),
+                    ],
+                    attrs: Attrs::new(),
+                },
+                RawOp::SetComment {
+                    id: "1".into(),
+                    ranges: vec![(0, 5)],
+                    author: "Ada".into(),
+                    date: DATE.into(),
+                    body: Any::Null,
+                },
+            ],
+            &local("Ada"),
+        )
+        .unwrap();
+        let peer = EditingDoc::new(doc.client_id + 1);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        peer
+    }
+
+    fn reference_offsets(doc: &EditingDoc) -> Vec<u32> {
+        let mut offset = 0;
+        let mut found = Vec::new();
+        for segment in doc.story_segments("body").unwrap() {
+            match segment.content {
+                SegmentContent::Text(text) => offset += text.encode_utf16().count() as u32,
+                SegmentContent::OtherEmbed { payload, .. } => {
+                    if payload.get("modelKind") == Some(&Any::from("commentReference")) {
+                        found.push(offset);
+                    }
+                    offset += 1;
+                }
+                SegmentContent::Pilcrow(_) => offset += 1,
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn comment_reanchoring_moves_its_reference_with_undo() {
+        let doc = EditingDoc::new(803);
+        referenced(&doc);
+        let mut undo = doc.undo_manager();
+        doc.set_comment_ranges("1", &[StoryRange::new("body", 7, 13)])
+            .unwrap();
+        for _ in 0..3 {
+            assert_eq!(reference_offsets(&doc), [12]);
+            let anchor = resolved(&doc, "1");
+            assert_eq!((anchor.start, anchor.end), (6, 12));
+            assert!(undo.undo());
+            assert_eq!(reference_offsets(&doc), [5]);
+            let anchor = resolved(&doc, "1");
+            assert_eq!((anchor.start, anchor.end), (0, 5));
+            assert!(undo.redo());
+        }
+    }
+
+    #[test]
+    fn comment_reanchoring_keeps_a_reference_already_after_the_range() {
+        let doc = EditingDoc::new(804);
+        referenced(&doc);
+        doc.set_comment_ranges("1", &[StoryRange::new("body", 1, 5)])
+            .unwrap();
+        assert_eq!(reference_offsets(&doc), [5]);
+        doc.set_comment_ranges(
+            "1",
+            &[StoryRange::new("body", 0, 2), StoryRange::new("body", 3, 5)],
+        )
+        .unwrap();
+        assert_eq!(reference_offsets(&doc), [5]);
+    }
+
+    #[test]
+    fn comment_reanchoring_converges_with_a_concurrent_edit() {
+        let doc = EditingDoc::new(805);
+        let peer = referenced(&doc);
+        doc.set_comment_ranges("1", &[StoryRange::new("body", 7, 13)])
+            .unwrap();
+        peer.apply_raw_ops(
+            "body",
+            vec![RawOp::Insert {
+                index: 0,
+                text: "xx".into(),
+                attrs: Attrs::new(),
+            }],
+            &local("Ada"),
+        )
+        .unwrap();
+        sync(&doc, &peer);
+        for replica in [&doc, &peer] {
+            assert_eq!(reference_offsets(replica), [14]);
+            let anchor = resolved(replica, "1");
+            assert_eq!((anchor.start, anchor.end), (8, 14));
+        }
+        assert_eq!(doc.story_segments("body"), peer.story_segments("body"));
     }
 
     #[test]

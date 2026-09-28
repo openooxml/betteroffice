@@ -1,0 +1,212 @@
+import { afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { parseDocx } from '../docx';
+import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
+import { unzipContainer } from '../docx/wasm';
+import { preloadEditWasm } from '../wasm/edit';
+import {
+  captureSessionSave,
+  createYrsSession,
+  saveYrsDocx,
+  writeSessionSave,
+  yrsToDocument,
+  type YrsSession,
+} from './index';
+import { documentToYrs } from './documentToYrs';
+
+beforeAll(() =>
+  preloadEditWasm(
+    new Uint8Array(
+      readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))
+    )
+  )
+);
+
+const sessions: YrsSession[] = [];
+afterEach(() => {
+  for (const session of sessions.splice(0)) session.destroy();
+});
+
+const NS =
+  'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+  'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+  'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const t = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+const BODY =
+  `<w:p w14:paraId="0C000001"><w:commentRangeStart w:id="1"/>${t('Intro')}<w:commentRangeEnd w:id="1"/>` +
+  `<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="1"/></w:r>${t(' paragraph')}</w:p>` +
+  `<w:p w14:paraId="0C000002">${t('See ')}<w:hyperlink r:id="rIdH">${t('the linked text')}</w:hyperlink>` +
+  `${t(' then ')}<w:ins w:id="9" w:author="A" w:date="2026-01-01T00:00:00Z">${t('inserted')}</w:ins>${t(', ')}` +
+  `<w:sdt><w:sdtPr><w:id w:val="5"/></w:sdtPr><w:sdtContent>${t('control')}</w:sdtContent></w:sdt>` +
+  `<w:fldSimple w:instr=" PAGE ">${t('1')}</w:fldSimple>${t(' tail')}</w:p>` +
+  `<w:p w14:paraId="0C000003">${t('Closing words')}</w:p>` +
+  `<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0C000004">${t('Cell')}</w:p></w:tc></w:tr></w:tbl>` +
+  `<w:p w14:paraId="0C000005">${t('After the table')}</w:p>`;
+
+function docx(): Uint8Array {
+  const parts: Record<string, string> = {
+    '[Content_Types].xml':
+      '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>',
+    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`,
+    'word/_rels/document.xml.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdC" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rIdH" Type="${REL}/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>`,
+    'word/document.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>${BODY}<w:sectPr/></w:body></w:document>`,
+    'word/comments.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments ${NS}><w:comment w:id="1" w:author="Reviewer"><w:p w14:paraId="0D000001">${t('Check')}</w:p></w:comment></w:comments>`,
+  };
+  return new Uint8Array(
+    rezipPartsToArrayBuffer(new Map(Object.entries(parts).map(([name, xml]) => [name, toBytes(xml)])))
+  );
+}
+
+async function open(bytes: Uint8Array, clientId: number): Promise<YrsSession> {
+  const session = await createYrsSession({ clientId });
+  sessions.push(session);
+  session.openDocx(bytes, true);
+  return session;
+}
+
+/** A session seeded from the parsed document rather than from the bytes. */
+async function seeded(bytes: Uint8Array, clientId: number): Promise<YrsSession> {
+  const session = await createYrsSession({ clientId });
+  sessions.push(session);
+  documentToYrs(session, await parseDocx(bytes.slice().buffer, { preloadFonts: false }));
+  return session;
+}
+
+/** The saved document as `saveYrsDocx` and as the editor's Save write it. */
+async function saves(session: YrsSession): Promise<Array<[string, Uint8Array]>> {
+  const yrs = (await saveYrsDocx(session)).bytes;
+  const base = session.materializeDocx()!;
+  const capture = captureSessionSave(session);
+  const editor = await writeSessionSave(
+    session,
+    yrsToDocument(session, base),
+    capture,
+    base.originalBuffer!,
+    {},
+    () => false
+  );
+  return [
+    ['saveYrsDocx', yrs],
+    ['editor', editor.bytes],
+  ];
+}
+
+function documentXml(bytes: Uint8Array): string {
+  return new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+}
+
+/** The comment's markers, in document order. */
+function markers(bytes: Uint8Array, id: number): string[] {
+  return [
+    ...documentXml(bytes).matchAll(
+      new RegExp(`<w:comment(RangeStart|RangeEnd|Reference) w:id="${id}"/>`, 'g')
+    ),
+  ].map((match) => match[1]!);
+}
+
+function paragraphXml(bytes: Uint8Array, paraId: string): string {
+  return documentXml(bytes).match(new RegExp(`<w:p [^>]*${paraId}.*?</w:p>`))![0];
+}
+
+/** The text a comment's first anchor covers. */
+function anchored(session: YrsSession, commentId: string): string {
+  const [anchor] = session.resolveComment(commentId);
+  let offset = 0;
+  let text = '';
+  for (const segment of session.storySegments(anchor!.story)) {
+    if (segment.kind === 'text') {
+      text += segment.text.slice(
+        Math.max(0, anchor!.start - offset),
+        Math.max(0, anchor!.end - offset)
+      );
+      offset += segment.text.length;
+    } else offset += 1;
+  }
+  return text;
+}
+
+function range(session: YrsSession, paraIndex: number, start: number, end: number) {
+  const { paraId } = session.paragraphs('body')[paraIndex]!;
+  return { story: 'body', start: { paraId, offset: start }, end: { paraId, offset: end } };
+}
+
+describe('a reanchored comment', () => {
+  it('saves one range and one reference where it now is', async () => {
+    const session = await open(docx(), 91001);
+    session.beginUndoCapture();
+    session.setCommentRanges('1', [range(session, 2, 0, 7)]);
+    for (let round = 0; round < 2; round += 1) {
+      for (const [path, bytes] of await saves(session)) {
+        expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+        expect(paragraphXml(bytes, '0C000003')).toContain('<w:commentReference w:id="1"/>');
+        expect(anchored(await open(bytes, 91002), '1')).toBe('Closing');
+      }
+      expect(session.undo()).toBe(true);
+      for (const [path, bytes] of await saves(session)) {
+        expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+        expect(anchored(await open(bytes, 91003), '1')).toBe('Intro');
+      }
+      expect(session.redo()).toBe(true);
+    }
+  });
+
+  it('saves once from a replica that received the reanchor', async () => {
+    const source = await open(docx(), 91004);
+    const peer = await createYrsSession({ clientId: 91005 });
+    sessions.push(peer);
+    peer.openDocx(docx(), false);
+    peer.loadState(source.encodeState());
+    source.setCommentRanges('1', [range(source, 2, 8, 13)]);
+    peer.applyUpdate(source.encodeStateAsUpdate(peer.encodeStateVector()));
+    for (const [path, bytes] of await saves(peer)) {
+      expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+      expect(anchored(await open(bytes, 91006), '1')).toBe('words');
+    }
+  });
+});
+
+describe('an added comment range', () => {
+  const cases: Array<[string, number, number, number]> = [
+    ['See the', 1, 0, 7],
+    ['he l', 1, 5, 9],
+    ['inked text then ins', 1, 9, 28],
+    ['nse', 1, 26, 29],
+    ['erted, ', 1, 28, 35],
+    [' tail', 1, 37, 42],
+    // The table before this paragraph is its first story unit.
+    ['After', 3, 1, 6],
+  ];
+  for (const [expected, paragraph, start, end] of cases) {
+    it(`saves paired markers and a reference around "${expected}"`, async () => {
+      const session = await open(docx(), 91010);
+      const { commentId } = session.addComment(
+        [range(session, paragraph, start, end)],
+        'Ada',
+        '2026-09-28T00:00:00Z',
+        'Note'
+      );
+      expect(anchored(session, commentId)).toBe(expected);
+      const bytes = (await saveYrsDocx(session)).bytes;
+      expect(markers(bytes, 2)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      expect(markers(bytes, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      for (const reopened of [await open(bytes, 91011), await seeded(bytes, 91012)]) {
+        expect(anchored(reopened, '2')).toBe(expected);
+        expect(reopened.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(
+          session.paragraphs('body').map((paragraph) => paragraph.text)
+        );
+      }
+    });
+  }
+});
+
+it('keeps a commented document byte-identical on a no-op save', async () => {
+  const bytes = docx();
+  const saved = unzipContainer((await saveYrsDocx(await open(bytes, 91020))).bytes);
+  expect(saved).toEqual(unzipContainer(bytes));
+});
