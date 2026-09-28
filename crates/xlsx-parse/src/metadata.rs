@@ -27,11 +27,19 @@ struct Child {
     dynamic_type: Option<usize>,
 }
 
+/// The part's root element.
+struct Root {
+    name: String,
+    attributes: Vec<XmlAttribute>,
+    tag: Range<usize>,
+    empty: bool,
+}
+
 /// `source` with a cell metadata record marking a dynamic array, reusing a
 /// dynamic-array type or future-metadata block it already declares. Returns
 /// the part and the `cm` index of the added record.
 pub(crate) fn with_dynamic_array_record(source: &[u8]) -> Result<(Vec<u8>, u32), ParseError> {
-    let (root_end, prefix, children) = scan(source)?;
+    let (root, prefix, children) = scan(source)?;
     let named = |local: &str| children.iter().find(|child| child.local == local);
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     let mut insert_after_types = String::new();
@@ -99,8 +107,16 @@ pub(crate) fn with_dynamic_array_record(source: &[u8]) -> Result<(Vec<u8>, u32),
             })
             .map(|child| child.close)
             .max()
-            .unwrap_or(root_end);
-        edits.push((at..at, insert_after_types));
+            .unwrap_or(root.tag.end);
+        if root.empty {
+            let open = start_tag(&root.name, &root.attributes);
+            edits.push((
+                root.tag,
+                format!("{open}{insert_after_types}</{}>", root.name),
+            ));
+        } else {
+            edits.push((at..at, insert_after_types));
+        }
     }
     edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
     let mut out = source.to_vec();
@@ -126,11 +142,7 @@ fn append(child: &Child, element: &str) -> Result<Vec<(Range<usize>, String)>, P
             (child.entries + 1).to_string(),
         );
     }
-    let mut start = BytesStart::new(child.name.as_str());
-    for attribute in &attributes {
-        start.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
-    }
-    let open = format!("<{}>", String::from_utf8_lossy(&start));
+    let open = start_tag(&child.name, &attributes);
     Ok(if child.empty {
         vec![(
             child.tag.clone(),
@@ -144,13 +156,22 @@ fn append(child: &Child, element: &str) -> Result<Vec<(Range<usize>, String)>, P
     })
 }
 
-/// The root's start-tag end, its namespace prefix, and its children.
-fn scan(source: &[u8]) -> Result<(usize, String, Vec<Child>), ParseError> {
+/// An element's start tag, open even where the source closed it.
+fn start_tag(name: &str, attributes: &[XmlAttribute]) -> String {
+    let mut start = BytesStart::new(name);
+    for attribute in attributes {
+        start.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+    }
+    format!("<{}>", String::from_utf8_lossy(&start))
+}
+
+/// The root, its namespace prefix, and its children.
+fn scan(source: &[u8]) -> Result<(Root, String, Vec<Child>), ParseError> {
     let mut reader = Reader::from_reader(source);
     reader.config_mut().expand_empty_elements = false;
     reader.config_mut().check_end_names = true;
     let mut depth = 0_usize;
-    let mut root_end = None;
+    let mut root = None;
     let mut prefix = String::new();
     let mut children: Vec<Child> = Vec::new();
     let mut open: Option<Child> = None;
@@ -177,11 +198,16 @@ fn scan(source: &[u8]) -> Result<(usize, String, Vec<Child>), ParseError> {
         };
         match depth {
             0 => {
-                root_end = Some(after);
                 let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                 if let Some((head, _)) = name.split_once(':') {
                     prefix = format!("{head}:");
                 }
+                root = Some(Root {
+                    name,
+                    attributes: attributes(&element)?,
+                    tag: before..after,
+                    empty,
+                });
             }
             1 => {
                 let child = Child {
@@ -225,9 +251,9 @@ fn scan(source: &[u8]) -> Result<(usize, String, Vec<Child>), ParseError> {
             }
         }
     }
-    let root_end = root_end
-        .ok_or_else(|| ParseError::Malformed("cell metadata part has no root".to_owned()))?;
-    Ok((root_end, prefix, children))
+    let root =
+        root.ok_or_else(|| ParseError::Malformed("cell metadata part has no root".to_owned()))?;
+    Ok((root, prefix, children))
 }
 
 #[cfg(test)]
@@ -241,12 +267,23 @@ mod tests {
     const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
     const DYNAMIC: &str = "http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray";
 
-    /// every element of `part` with the namespace it resolves to.
+    /// every element of `part` with the namespace it resolves to, checking
+    /// that each one after the first sits inside it.
     fn resolved(part: &[u8]) -> Vec<(String, String)> {
         let mut reader = NsReader::from_reader(part);
         let mut out = Vec::new();
+        let mut depth = 0_usize;
         loop {
-            match reader.read_resolved_event().unwrap() {
+            let event = reader.read_resolved_event().unwrap();
+            if let (_, Event::Start(_) | Event::Empty(_)) = &event {
+                assert!(out.is_empty() || depth > 0, "an element outside the root");
+            }
+            match event {
+                (_, Event::End(_)) => depth -= 1,
+                (_, Event::Start(_)) => depth += 1,
+                _ => {}
+            }
+            match event {
                 (namespace, Event::Start(element) | Event::Empty(element)) => {
                     let namespace = match namespace {
                         ResolveResult::Bound(namespace) => {
@@ -319,6 +356,38 @@ mod tests {
         assert!(
             part.contains(
                 r#"<x:cellMetadata count="3"><x:bk/><x:bk/><x:bk><x:rc t="1" v="1"/></x:bk></x:cellMetadata>"#
+            ),
+            "{part}"
+        );
+    }
+
+    /// a root, a future-metadata block or a cell-metadata list that closes
+    /// itself opens to take what is added, and nothing lands outside the root.
+    #[test]
+    fn self_closing_elements_open_for_the_record() {
+        for source in [
+            &br#"<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#[..],
+            br#"<x:metadata xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" />"#,
+        ] {
+            let (part, cm) = with_dynamic_array_record(source).unwrap();
+            assert_eq!(cm, 1);
+            assert_namespaces(&part);
+            let locals: Vec<String> = resolved(&part).into_iter().map(|(local, _)| local).collect();
+            assert_eq!(locals[0], "metadata");
+            assert!(locals.contains(&"cellMetadata".to_owned()), "{locals:?}");
+        }
+        let source = br#"<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><metadataTypes count="1"><metadataType name="XLDAPR"/></metadataTypes><futureMetadata name="XLDAPR" count="0"/><cellMetadata count="0"/><extLst/></metadata>"#;
+        let (part, cm) = with_dynamic_array_record(source).unwrap();
+        assert_eq!(cm, 1);
+        assert_namespaces(&part);
+        let part = String::from_utf8(part).unwrap();
+        assert!(
+            part.contains(r#"<futureMetadata name="XLDAPR" count="1"><bk><extLst><ext "#),
+            "{part}"
+        );
+        assert!(
+            part.ends_with(
+                r#"<cellMetadata count="1"><bk><rc t="1" v="0"/></bk></cellMetadata><extLst/></metadata>"#
             ),
             "{part}"
         );
