@@ -1629,6 +1629,28 @@ mod tests {
         for replica in [&doc, &peer] {
             assert_eq!(reference_offsets(replica, "body"), [12]);
         }
+
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::Delete { index: 12, len: 1 },
+                RawOp::InsertEmbed {
+                    index: 8,
+                    kind: "field".into(),
+                    payload: vec![
+                        ("modelKind".into(), Any::from("commentReference")),
+                        ("commentId".into(), Any::from(1.0)),
+                    ],
+                    attrs: Attrs::new(),
+                },
+            ],
+            &local("Ada"),
+        )
+        .unwrap();
+        sync(&doc, &peer);
+        for replica in [&doc, &peer] {
+            assert_eq!(reference_offsets(replica, "body"), [8]);
+        }
     }
 
     #[test]
