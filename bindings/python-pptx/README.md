@@ -184,7 +184,9 @@ for slide in read["content"]["slides"]:
             for paragraph in story["paragraphs"]:
                 print(slide["index"], paragraph["list"], paragraph["anchor"])
 
-markdown = bo.export_pptx_markdown(data)["markdown"]
+from betteroffice_pptx import export_pptx_markdown
+
+markdown = export_pptx_markdown(data)["markdown"]
 ```
 
 The dictionaries are the
@@ -424,7 +426,7 @@ The heavy operations release the GIL while they run — `open`, `open_path`,
 
 ## Status
 
-`0.1.x`: the API may change before `1.0`. `save` writes edits back at the
+Pre-1.0: the API may change between minor versions. `save` writes edits back at the
 XML level and copies untouched parts through byte for byte; the container is
 rebuilt, so output is not byte-identical to the source — see *Writing*.
 
