@@ -987,7 +987,6 @@ mod tests {
     }
 
     /// `WEBSERVICE` stands in for any function the engine does not implement,
-    /// and is one it never will.    /// `WEBSERVICE` stands in for any function the engine does not implement,
     /// and is one it never will.
     #[test]
     fn an_unimplemented_function_keeps_the_cached_value() {
