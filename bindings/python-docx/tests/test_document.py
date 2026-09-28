@@ -1,3 +1,5 @@
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -167,6 +169,41 @@ def test_replace_text_refuses_what_it_cannot_rebuild(minimal_bytes: bytes) -> No
     assert Document.open(document.save()).paragraph("44444444").text == (
         "Plain and italic"
     )
+
+
+def test_a_repeated_paragraph_id_addresses_its_own_paragraph(
+    duplicate_id_bytes: bytes,
+) -> None:
+    document = Document.open(duplicate_id_bytes)
+    ids = document.paragraph_ids
+
+    assert (ids[0], ids[3]) == ("1A2B3C4D", "0B000003")
+    assert len(set(ids)) == 4
+    assert document[ids[1]].text == "second"
+
+    assert document.replace_text(ids[1], "replacement").para_id == ids[1]
+
+    reopened = Document.open(document.save())
+    assert [(paragraph.id, paragraph.text) for paragraph in reopened.paragraphs()] == [
+        ("1A2B3C4D", "first"),
+        (ids[1], "replacement"),
+        (ids[2], "cell"),
+        ("0B000003", "third"),
+    ]
+
+
+def test_an_unedited_repeated_paragraph_id_saves_as_authored(
+    duplicate_id_bytes: bytes,
+) -> None:
+    document = Document.open(duplicate_id_bytes)
+    ids = document.paragraph_ids
+    assert document.paragraph(ids[2]).text == "cell"
+
+    saved = document.save()
+    assert saved == Document.open(duplicate_id_bytes).save()
+    xml = zipfile.ZipFile(io.BytesIO(saved)).read("word/document.xml").decode()
+    assert xml.count('w14:paraId="1A2B3C4D"') == 3
+    assert ids[1] not in xml and ids[2] not in xml
 
 
 def test_save_is_deterministic_and_save_path_writes_a_readable_file(

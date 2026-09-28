@@ -103,6 +103,23 @@ def nested_table_bytes() -> bytes:
 
 
 @pytest.fixture(scope="session")
+def duplicate_id_bytes() -> bytes:
+    """Three body paragraphs, one in a table cell, share the ID `1A2B3C4D`."""
+
+    def paragraph(para_id: str, text: str) -> str:
+        return f'<w:p w14:paraId="{para_id}"><w:r><w:t>{text}</w:t></w:r></w:p>'
+
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W}" xmlns:w14="{W14}"><w:body>'
+        f'{paragraph("1A2B3C4D", "first")}{paragraph("1A2B3C4D", "second")}'
+        f'<w:tbl><w:tr><w:tc>{paragraph("1A2B3C4D", "cell")}</w:tc></w:tr></w:tbl>'
+        f'{paragraph("0B000003", "third")}<w:sectPr/></w:body></w:document>'
+    )
+    return _package({**PARTS, "word/document.xml": document})
+
+
+@pytest.fixture(scope="session")
 def sample_path() -> Path:
     path = FIXTURES / "betteroffice-demo.docx"
     if not path.exists():

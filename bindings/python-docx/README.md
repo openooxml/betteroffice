@@ -59,7 +59,9 @@ run, so a paragraph that mixes runs — half bold, a hyperlink, a field — rais
 to touch. An unknown `w14:paraId` raises `KeyError`.
 
 Only paragraphs Word stamped with a `w14:paraId` can be addressed:
-`document.paragraph_ids` reports `None` for the rest.
+`document.paragraph_ids` reports `None` for the rest. Each ID addresses one
+paragraph: one whose `w14:paraId` repeats an earlier paragraph's reads with a
+fresh ID, which `save()` writes once that paragraph is edited.
 
 ## Write
 

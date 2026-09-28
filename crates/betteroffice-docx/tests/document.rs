@@ -600,3 +600,128 @@ fn mixed_unit_indents_keep_the_direction_each_unit_was_authored_with() {
     let resaved = saved_document(&Document::open(&package).unwrap().save().unwrap());
     assert_eq!(resaved, xml);
 }
+
+/// Written exactly as a save serializes it, so an unedited save reproduces it.
+const DUPLICATE_ID_DOCUMENT: &str = concat!(
+    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+    r#"<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w16se="http://schemas.microsoft.com/office/word/2015/wordml/symex" xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid" xmlns:w16="http://schemas.microsoft.com/office/word/2018/wordml" xmlns:w16cex="http://schemas.microsoft.com/office/word/2018/wordml/cex" xmlns:w16sdtdh="http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 w15 w16se w16cid w16 w16cex w16sdtdh wp14">"#,
+    r#"<w:body><w:p w14:paraId="1A2B3C4D"><w:r><w:t>first</w:t></w:r></w:p>"#,
+    r#"<w:p w14:paraId="1A2B3C4D"><w:r><w:t>second</w:t></w:r></w:p>"#,
+    r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>"#,
+    r#"<w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>"#,
+    r#"<w:p w14:paraId="1A2B3C4D"><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    r#"<w:p w14:paraId="0B000003"><w:r><w:t>third</w:t></w:r></w:p>"#,
+    r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#,
+);
+
+/// Three body paragraphs, one in a table cell, share the source ID `1A2B3C4D`.
+fn duplicate_id_docx() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&story_docx("", None)).unwrap();
+    for (name, bytes) in &mut parts {
+        if name == "word/document.xml" {
+            *bytes = DUPLICATE_ID_DOCUMENT.as_bytes().to_vec();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn identified_texts(document: &Document) -> Vec<(String, String)> {
+    document
+        .paragraphs()
+        .into_iter()
+        .map(|paragraph| {
+            (
+                paragraph.para_id.clone().unwrap_or_default(),
+                get_paragraph_text(paragraph),
+            )
+        })
+        .collect()
+}
+
+fn paragraph_ids(document: &Document) -> Vec<String> {
+    identified_texts(document)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+#[test]
+fn a_repeated_paragraph_id_addresses_its_own_paragraph() {
+    let mut document = Document::open(&duplicate_id_docx()).unwrap();
+    let ids = paragraph_ids(&document);
+    assert_eq!((ids[0].as_str(), ids[3].as_str()), ("1A2B3C4D", "0B000003"));
+    assert_eq!(
+        ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        4,
+        "{ids:?}"
+    );
+    assert_eq!(
+        get_paragraph_text(document.paragraph(&ids[1]).unwrap()),
+        "second"
+    );
+
+    let receipt = document
+        .replace_paragraph_text(&ids[1], "replacement")
+        .unwrap();
+    assert_eq!(receipt.range.unwrap().start.para, ids[1]);
+    let section_texts: Vec<String> = document.sections()[0]
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            BlockContent::Paragraph(paragraph) => Some(get_paragraph_text(paragraph)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(section_texts, ["first", "replacement", "third"]);
+
+    let saved = document.save().unwrap();
+    let xml = saved_part(
+        &ooxml_opc::unzip_parts(&saved).unwrap(),
+        "word/document.xml",
+    );
+    assert_eq!(xml.matches(r#"w14:paraId="1A2B3C4D""#).count(), 2);
+    assert_eq!(
+        identified_texts(&Document::open(&saved).unwrap()),
+        [
+            ("1A2B3C4D", "first"),
+            (ids[1].as_str(), "replacement"),
+            (ids[2].as_str(), "cell"),
+            ("0B000003", "third"),
+        ]
+        .map(|(id, text)| (id.to_owned(), text.to_owned()))
+    );
+}
+
+#[test]
+fn an_unedited_repeated_paragraph_id_saves_as_authored() {
+    let document = Document::open(&duplicate_id_docx()).unwrap();
+    let ids = paragraph_ids(&document);
+    assert_eq!(
+        get_paragraph_text(document.paragraph(&ids[2]).unwrap()),
+        "cell"
+    );
+
+    let saved = document.save().unwrap();
+    assert_eq!(
+        saved_part(
+            &ooxml_opc::unzip_parts(&saved).unwrap(),
+            "word/document.xml"
+        ),
+        DUPLICATE_ID_DOCUMENT
+    );
+}
+
+#[test]
+fn an_ambiguous_paragraph_id_is_refused() {
+    let mut document = Document::open(&duplicate_id_docx()).unwrap();
+    let BlockContent::Paragraph(last) = &mut document.model_mut().body.content[3] else {
+        panic!("paragraph")
+    };
+    std::sync::Arc::make_mut(last).para_id = Some("1A2B3C4D".to_owned());
+
+    assert!(document.paragraph("1A2B3C4D").is_none());
+    assert!(matches!(
+        document.replace_paragraph_text("1A2B3C4D", "replacement"),
+        Err(betteroffice_docx::Error::AmbiguousParagraph(_))
+    ));
+}
