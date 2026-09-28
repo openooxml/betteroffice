@@ -1,12 +1,16 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
 use serde_json::Value;
 use yrs::types::Attrs;
-use yrs::{Any, Map, Out, ReadTxn, Text, TextRef, Transact};
+use yrs::types::text::YChange;
+use yrs::{Any, Assoc, ClientID, IndexedSequence, Map, Out, ReadTxn, Text, TextRef, Transact};
 
-use crate::deck::SourceImport;
+use crate::deck::{SourceImport, map_string};
+use crate::story::style_from_attrs;
 use crate::{
-    DeckSession, EditError, EditResult, META, MIGRATE_ORIGIN, ShapeSnapshot, StorySnapshot,
+    BOOTSTRAP_CLIENT_ID, DeckSession, EditError, EditResult, META, MIGRATE_ORIGIN, PARA_ID,
+    ShapeSnapshot, StorySnapshot,
 };
 
 #[derive(Clone, Copy)]
@@ -69,57 +73,9 @@ pub(crate) fn import_source(
     for slide in legacy_snapshot.iter().flat_map(|snapshot| &snapshot.slides) {
         collect_stories(&slide.shapes, &mut legacy);
     }
-    let mut sources = HashMap::new();
-    {
-        let original = import.source_snapshot()?;
-        for slide in &original.slides {
-            collect_stories(&slide.shapes, &mut sources);
-        }
-    }
-    let current = session.snapshot()?;
-    let mut targets = HashMap::new();
-    for slide in &current.slides {
-        collect_stories(&slide.shapes, &mut targets);
-    }
-    let mut patches = Vec::new();
-    for (id, target) in targets {
-        let Some(source) = sources.get(id) else {
-            continue;
-        };
-        let source_tokens = tokens(source, property);
-        let legacy_values: Vec<_> = match legacy.get(id) {
-            Some(story) => tokens(story, property)
-                .into_iter()
-                .map(|(_, value)| value)
-                .collect(),
-            None => vec![None; source_tokens.len()],
-        };
-        if source_tokens
-            .iter()
-            .zip(&legacy_values)
-            .all(|((_, value), legacy)| value == legacy)
-        {
-            continue;
-        }
-        let target_tokens = tokens(target, property);
-        let pairs = unchanged_pairs(&source_tokens, &target_tokens)?;
-        let mut offset = 0u32;
-        let positions: Vec<_> = target_tokens
-            .iter()
-            .map(|(ch, _)| {
-                let start = offset;
-                offset += ch.len_utf16() as u32;
-                (start, offset)
-            })
-            .collect();
-        for (source_index, target_index) in pairs {
-            let value = &source_tokens[source_index].1;
-            let legacy = &legacy_values[source_index];
-            if value != legacy && target_tokens[target_index].1 == *legacy {
-                let (start, end) = positions[target_index];
-                patches.push((id, start, end, value.clone().unwrap_or(Any::Null)));
-            }
-        }
+    let mut sources = Vec::new();
+    for slide in &import.source_snapshot()?.slides {
+        collect_source_tokens(&slide.shapes, &legacy, property, &mut sources);
     }
     let mut package = serde_json::to_value(&import.package)
         .map_err(|error| EditError::Json(error.to_string()))?;
@@ -128,15 +84,27 @@ pub(crate) fn import_source(
     }
     import.package =
         serde_json::from_value(package).map_err(|error| EditError::Json(error.to_string()))?;
+    let mut patches = Vec::new();
+    {
+        let txn = session.doc.transact();
+        let stories = txn
+            .get_map(crate::STORIES)
+            .ok_or_else(|| EditError::InvalidState("missing stories".into()))?;
+        for (id, source) in &sources {
+            let Some(story) = stories
+                .get(&txn, id)
+                .and_then(|value| value.cast::<TextRef>().ok())
+            else {
+                continue;
+            };
+            let seeded = seeded_tokens(&story, &txn, id, property);
+            for (start, end, value) in recovered(source, &seeded) {
+                patches.push((story.clone(), start, end, value));
+            }
+        }
+    }
     let mut txn = session.doc.transact_mut_with(MIGRATE_ORIGIN);
-    let stories = txn
-        .get_map(crate::STORIES)
-        .ok_or_else(|| EditError::InvalidState("missing stories".into()))?;
-    for (id, start, end, value) in patches {
-        let story = stories
-            .get(&txn, id)
-            .and_then(|value| value.cast::<TextRef>().ok())
-            .ok_or_else(|| EditError::StoryNotFound(id.into()))?;
+    for (story, start, end, value) in patches {
         story.format(
             &mut txn,
             start,
@@ -151,6 +119,25 @@ pub(crate) fn import_source(
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Token {
+    Char(char),
+    Paragraph(usize),
+}
+
+struct SourceToken {
+    token: Token,
+    value: Option<Any>,
+    legacy: Option<Any>,
+}
+
+struct SeededToken {
+    token: Token,
+    start: u32,
+    end: u32,
+    value: Option<Any>,
+}
+
 fn collect_stories<'a>(
     shapes: &'a [ShapeSnapshot],
     stories: &mut HashMap<&'a str, &'a StorySnapshot>,
@@ -163,65 +150,207 @@ fn collect_stories<'a>(
     }
 }
 
-fn tokens(story: &StorySnapshot, property: SourceProperty) -> Vec<(char, Option<Any>)> {
-    let mut tokens = Vec::new();
+/// Tokenizes each source story whose values differ anywhere from what a legacy seed stored.
+fn collect_source_tokens(
+    shapes: &[ShapeSnapshot],
+    legacy: &HashMap<&str, &StorySnapshot>,
+    property: SourceProperty,
+    sources: &mut Vec<(String, Vec<SourceToken>)>,
+) {
+    for shape in shapes {
+        for story in &shape.text_stories {
+            let values = token_values(story, property);
+            let legacy = match legacy.get(story.id.as_str()) {
+                Some(legacy) => token_values(legacy, property),
+                None => vec![None; values.len()],
+            };
+            if values == legacy {
+                continue;
+            }
+            let tokens = story
+                .paragraphs
+                .iter()
+                .enumerate()
+                .flat_map(|(index, paragraph)| {
+                    paragraph
+                        .runs
+                        .iter()
+                        .flat_map(|run| run.text.chars().map(Token::Char))
+                        .chain([Token::Paragraph(index)])
+                })
+                .zip(values.into_iter().zip(legacy))
+                .map(|(token, (value, legacy))| SourceToken {
+                    token,
+                    value,
+                    legacy,
+                })
+                .collect();
+            sources.push((story.id.clone(), tokens));
+        }
+        collect_source_tokens(&shape.children, legacy, property, sources);
+    }
+}
+
+fn token_values(story: &StorySnapshot, property: SourceProperty) -> Vec<Option<Any>> {
+    let mut values = Vec::new();
     for paragraph in &story.paragraphs {
         for run in &paragraph.runs {
             let value = property.value(&run.style);
-            tokens.extend(run.text.chars().map(|unit| (unit, value.clone())));
+            values.extend(run.text.chars().map(|_| value.clone()));
         }
-        tokens.push(('\0', None));
+        values.push(None);
+    }
+    values
+}
+
+/// The story's characters the seed wrote, told apart from later insertions by
+/// the CRDT client that inserted them, and the seeded paragraph ends.
+fn seeded_tokens<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    story_id: &str,
+    property: SourceProperty,
+) -> Vec<SeededToken> {
+    let prefix = format!("para:{story_id}:");
+    let bootstrap = ClientID::new(BOOTSTRAP_CLIENT_ID);
+    let mut tokens = Vec::new();
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        match &diff.insert {
+            Out::Any(Any::String(text)) => {
+                let value = property.value(&style_from_attrs(diff.attributes.as_deref()));
+                for unit in text.chars() {
+                    let end = offset + unit.len_utf16() as u32;
+                    if story
+                        .sticky_index(txn, offset, Assoc::After)
+                        .and_then(|index| index.id().map(|id| id.client == bootstrap))
+                        .unwrap_or(false)
+                    {
+                        tokens.push(SeededToken {
+                            token: Token::Char(unit),
+                            start: offset,
+                            end,
+                            value: value.clone(),
+                        });
+                    }
+                    offset = end;
+                }
+            }
+            Out::YMap(pilcrow) => {
+                if let Some(index) = map_string(pilcrow, txn, PARA_ID)
+                    .and_then(|id| id.strip_prefix(&prefix)?.parse().ok())
+                {
+                    tokens.push(SeededToken {
+                        token: Token::Paragraph(index),
+                        start: offset,
+                        end: offset + 1,
+                        value: None,
+                    });
+                }
+                offset += 1;
+            }
+            _ => offset += 1,
+        }
     }
     tokens
 }
 
-fn unchanged_pairs(
-    source: &[(char, Option<Any>)],
-    target: &[(char, Option<Any>)],
-) -> EditResult<Vec<(usize, usize)>> {
-    let mut prefix = 0;
-    while prefix < source.len().min(target.len()) && source[prefix].0 == target[prefix].0 {
-        prefix += 1;
+/// The ranges of seeded characters still holding their legacy value, with the
+/// source value to write. Seeded paragraph ends pin each stretch of characters
+/// to its source paragraphs.
+fn recovered(source: &[SourceToken], seeded: &[SeededToken]) -> Vec<(u32, u32, Any)> {
+    let mut paragraphs = HashMap::new();
+    let mut changes = Vec::with_capacity(source.len());
+    let mut previous = None;
+    let mut count = 0;
+    for (position, token) in source.iter().enumerate() {
+        match token.token {
+            Token::Paragraph(index) => {
+                paragraphs.insert(index, position);
+            }
+            Token::Char(_) => {
+                let values = (&token.value, &token.legacy);
+                count += usize::from(previous.is_some_and(|previous| previous != values));
+                previous = Some(values);
+            }
+        }
+        changes.push(count);
     }
-    let mut suffix = 0;
-    while suffix < source.len().min(target.len()) - prefix
-        && source[source.len() - suffix - 1].0 == target[target.len() - suffix - 1].0
-    {
-        suffix += 1;
-    }
-    let rows = source.len() - prefix - suffix + 1;
-    let cols = target.len() - prefix - suffix + 1;
-    let cells = rows
-        .checked_mul(cols)
-        .filter(|cells| *cells <= 4_000_000)
-        .ok_or_else(|| {
-            EditError::InvalidState("source run property recovery exceeds text diff limit".into())
-        })?;
-    let mut lengths = vec![0u32; cells];
-    for i in (0..rows - 1).rev() {
-        for j in (0..cols - 1).rev() {
-            lengths[i * cols + j] = if source[prefix + i].0 == target[prefix + j].0 {
-                lengths[(i + 1) * cols + j + 1] + 1
-            } else {
-                lengths[(i + 1) * cols + j].max(lengths[i * cols + j + 1])
-            };
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    let mut stretch = Vec::new();
+    for token in seeded {
+        match token.token {
+            Token::Char(_) => stretch.push(token),
+            Token::Paragraph(index) => {
+                if let Some(&until) = paragraphs.get(&index).filter(|until| **until >= from) {
+                    recover_stretch(source, &changes, from..until, &stretch, &mut ranges);
+                    from = until + 1;
+                    stretch.clear();
+                }
+            }
         }
     }
-    let mut pairs: Vec<_> = (0..prefix).map(|i| (i, i)).collect();
-    let (mut i, mut j) = (0, 0);
-    while i + 1 < rows && j + 1 < cols {
-        if source[prefix + i].0 == target[prefix + j].0 {
-            pairs.push((prefix + i, prefix + j));
-            i += 1;
-            j += 1;
-        } else if lengths[(i + 1) * cols + j] >= lengths[i * cols + j + 1] {
-            i += 1;
-        } else {
-            j += 1;
+    recover_stretch(source, &changes, from..source.len(), &stretch, &mut ranges);
+    ranges
+}
+
+/// A character's candidate source positions run from its earliest to its latest
+/// in-order match within `window`; it is written only when they all carry the
+/// same values.
+fn recover_stretch(
+    source: &[SourceToken],
+    changes: &[usize],
+    window: Range<usize>,
+    stretch: &[&SeededToken],
+    ranges: &mut Vec<(u32, u32, Any)>,
+) {
+    let from = window.start;
+    let window = &source[window];
+    let (Some(earliest), Some(latest)) = (earliest(window, stretch), latest(window, stretch))
+    else {
+        return;
+    };
+    for ((token, earliest), latest) in stretch.iter().zip(earliest).zip(latest) {
+        let (earliest, latest) = (from + earliest, from + latest);
+        let candidate = &source[earliest];
+        if changes[earliest] != changes[latest]
+            || candidate.value == candidate.legacy
+            || token.value != candidate.legacy
+        {
+            continue;
+        }
+        let value = candidate.value.clone().unwrap_or(Any::Null);
+        match ranges.last_mut() {
+            Some((_, end, last)) if *end == token.start && *last == value => *end = token.end,
+            _ => ranges.push((token.start, token.end, value)),
         }
     }
-    pairs.extend((0..suffix).map(|i| (source.len() - suffix + i, target.len() - suffix + i)));
-    Ok(pairs)
+}
+
+fn earliest(window: &[SourceToken], stretch: &[&SeededToken]) -> Option<Vec<usize>> {
+    let mut positions = Vec::with_capacity(stretch.len());
+    let mut next = 0;
+    for token in stretch {
+        next += window[next..]
+            .iter()
+            .position(|source| source.token == token.token)?;
+        positions.push(next);
+        next += 1;
+    }
+    Some(positions)
+}
+
+fn latest(window: &[SourceToken], stretch: &[&SeededToken]) -> Option<Vec<usize>> {
+    let mut positions = vec![0; stretch.len()];
+    let mut end = window.len();
+    for (position, token) in positions.iter_mut().zip(stretch).rev() {
+        end = window[..end]
+            .iter()
+            .rposition(|source| source.token == token.token)?;
+        *position = end;
+    }
+    Some(positions)
 }
 
 fn merge_property(target: &mut Value, source: &Value, key: &str) {

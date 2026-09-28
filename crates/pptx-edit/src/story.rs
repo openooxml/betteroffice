@@ -838,7 +838,7 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
     }
 }
 
-fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
+pub(crate) fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
     TextStyle {
         bold: attrs.and_then(|attrs| any_bool(attrs.get("bold"))),
         italic: attrs.and_then(|attrs| any_bool(attrs.get("italic"))),

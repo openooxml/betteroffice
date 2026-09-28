@@ -1021,3 +1021,247 @@ fn adjust_values(snapshot: &DeckSnapshot) -> Vec<BTreeMap<String, f64>> {
     }
     values
 }
+
+const DEFAULTS_SLIDE: &str = "ppt/slides/slide1.xml";
+const DEFAULTS_LAYOUT: &str = "ppt/slideLayouts/slideLayout1.xml";
+const DEFAULTS_MASTER: &str = "ppt/slideMasters/slideMaster1.xml";
+const INVERTED_MAP: &str = r#"bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2""#;
+const IDENTITY_MAP: &str = r#"bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2""#;
+
+type RunLook = (String, Option<TextCaps>, Option<String>);
+
+#[test]
+fn a_repeated_character_inserted_before_recovery_stays_the_inserted_text() {
+    let migrated = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 42500).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    migrated
+        .insert_text(&EditCtx::local("fixture"), &story, 1, "i", &small_caps())
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        42501,
+    )
+    .unwrap();
+    assert_eq!(
+        pending_flag(&attached.encode_state_as_update_v1(), "capsPendingSource"),
+        None
+    );
+    let expected = [
+        look("M", Some(TextCaps::All), "#FFFFFF"),
+        look("i", Some(TextCaps::Small), "#101828"),
+        look("ixed Case Title", Some(TextCaps::All), "#FFFFFF"),
+    ];
+    assert_eq!(run_looks(&attached, &story), expected);
+    let saved = DeckSession::open(&attached.save().unwrap(), 42502).unwrap();
+    assert_eq!(run_looks(&saved, &story), expected);
+}
+
+#[test]
+fn a_long_story_with_separated_edits_recovers_its_source_runs() {
+    let text = "Mixed Case Title ".repeat(180);
+    let text = text.trim_end();
+    let source = defaults_variant(&[(
+        DEFAULTS_SLIDE,
+        "<a:t>Mixed Case Title</a:t>",
+        &format!("<a:t>{text}</a:t>"),
+    )]);
+    let migrated = DeckSession::open_from_update(&legacy_seed(&source, 42600), 42601).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    let context = EditCtx::local("fixture");
+    let length = text.len() as u32;
+    migrated.delete_text(&context, &story, 0, 1).unwrap();
+    migrated
+        .insert_text(&context, &story, 0, "X", &TextStyle::default())
+        .unwrap();
+    migrated
+        .delete_text(&context, &story, length - 1, length)
+        .unwrap();
+    migrated
+        .insert_text(&context, &story, length - 1, "Y", &TextStyle::default())
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        &source,
+        42602,
+    )
+    .unwrap();
+    assert_eq!(
+        run_looks(&attached, &story),
+        [
+            ("X".to_owned(), None, None),
+            look(&text[1..text.len() - 1], Some(TextCaps::All), "#FFFFFF"),
+            ("Y".to_owned(), None, None),
+        ]
+    );
+    attached.save().unwrap();
+}
+
+#[test]
+fn a_released_update_recovers_run_colours_through_every_colour_map() {
+    let mapping = format!(
+        "<a:overrideClrMapping {INVERTED_MAP} accent1=\"accent1\" accent2=\"accent2\" \
+         accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" \
+         hlink=\"hlink\" folHlink=\"folHlink\"/>"
+    );
+    let slide_override = format!("</p:cSld><p:clrMapOvr>{mapping}</p:clrMapOvr>");
+    for (client_id, source) in [
+        (
+            42700,
+            defaults_variant(&[(
+                DEFAULTS_SLIDE,
+                r#"<a:schemeClr val="tx1"/>"#,
+                r#"<a:schemeClr val="bg1"/>"#,
+            )]),
+        ),
+        (
+            42710,
+            defaults_variant(&[
+                (DEFAULTS_MASTER, INVERTED_MAP, IDENTITY_MAP),
+                (DEFAULTS_SLIDE, "</p:cSld>", &slide_override),
+            ]),
+        ),
+        (
+            42720,
+            defaults_variant(&[
+                (DEFAULTS_MASTER, INVERTED_MAP, IDENTITY_MAP),
+                (DEFAULTS_LAYOUT, "<a:masterClrMapping/>", &mapping),
+            ]),
+        ),
+    ] {
+        let fresh = DeckSession::open(&source, client_id).unwrap();
+        let migrated =
+            DeckSession::open_from_update(&legacy_seed(&source, client_id + 1), client_id + 2)
+                .unwrap();
+        assert_ne!(migrated.snapshot().unwrap(), fresh.snapshot().unwrap());
+        let attached = DeckSession::open_from_update_with_source(
+            &migrated.encode_state_as_update_v1(),
+            &source,
+            client_id + 3,
+        )
+        .unwrap();
+        assert_eq!(attached.snapshot().unwrap(), fresh.snapshot().unwrap());
+        assert_eq!(attached.save().unwrap(), source);
+        let sourceless =
+            DeckSession::open_from_update(&attached.encode_state_as_update_v1(), client_id + 4)
+                .unwrap();
+        assert_eq!(sourceless.snapshot().unwrap(), fresh.snapshot().unwrap());
+        let (package, expected) = (sourceless.package(), fresh.package());
+        assert_eq!(package.masters[0].color_map, expected.masters[0].color_map);
+        assert_eq!(
+            package.layouts[0].color_map_override,
+            expected.layouts[0].color_map_override
+        );
+        assert_eq!(
+            package.slides[0].color_map_override,
+            expected.slides[0].color_map_override
+        );
+    }
+}
+
+#[test]
+fn peers_recovering_the_same_released_update_converge() {
+    let fresh = DeckSession::open(V2_1_DEFAULTS_SOURCE, 42800).unwrap();
+    let left = DeckSession::open_from_update_with_source(
+        V2_1_DEFAULTS_UPDATE,
+        V2_1_DEFAULTS_SOURCE,
+        42801,
+    )
+    .unwrap();
+    let right = DeckSession::open_from_update_with_source(
+        V2_1_DEFAULTS_UPDATE,
+        V2_1_DEFAULTS_SOURCE,
+        42802,
+    )
+    .unwrap();
+    left.apply_update_v1(&right.encode_state_as_update_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&left.encode_state_as_update_v1())
+        .unwrap();
+    for session in [&left, &right] {
+        assert_eq!(session.snapshot().unwrap(), fresh.snapshot().unwrap());
+        assert_eq!(session.save().unwrap(), V2_1_DEFAULTS_SOURCE);
+    }
+}
+
+#[test]
+fn recovery_concurrent_with_a_peer_edit_converges_and_keeps_the_inserted_text() {
+    let editor = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 42900).unwrap();
+    let story = defaults_story(&editor, "Direct all caps");
+    editor
+        .insert_text(&EditCtx::local("fixture"), &story, 1, "i", &small_caps())
+        .unwrap();
+    let recovering = DeckSession::open_from_update_with_source(
+        V2_1_DEFAULTS_UPDATE,
+        V2_1_DEFAULTS_SOURCE,
+        42901,
+    )
+    .unwrap();
+    editor
+        .apply_update_v1(&recovering.encode_state_as_update_v1())
+        .unwrap();
+    recovering
+        .apply_update_v1(&editor.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(editor.snapshot().unwrap(), recovering.snapshot().unwrap());
+    let looks = run_looks(&recovering, &story);
+    assert_eq!(looks[0], look("M", Some(TextCaps::All), "#FFFFFF"));
+    assert_eq!(
+        (looks[1].0.as_str(), looks[1].1),
+        ("i", Some(TextCaps::Small))
+    );
+}
+
+fn small_caps() -> TextStyle {
+    TextStyle {
+        font_size_pt: Some(32.0),
+        color: Some("#101828".to_owned()),
+        caps: Some(TextCaps::Small),
+        ..TextStyle::default()
+    }
+}
+
+fn look(text: &str, caps: Option<TextCaps>, color: &str) -> RunLook {
+    (text.to_owned(), caps, Some(color.to_owned()))
+}
+
+fn defaults_story(session: &DeckSession, shape: &str) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|candidate| candidate.name == shape)
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+fn run_looks(session: &DeckSession, story: &str) -> Vec<RunLook> {
+    session.story(story).unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.style.caps, run.style.color.clone()))
+        .collect()
+}
+
+/// The defaults deck with each `(part, from, to)` replacement applied once.
+fn defaults_variant(edits: &[(&str, &str, &str)]) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(V2_1_DEFAULTS_SOURCE).unwrap();
+    for (part, from, to) in edits {
+        let (_, bytes) = parts.iter_mut().find(|(name, _)| name == part).unwrap();
+        let xml = String::from_utf8(bytes.clone()).unwrap();
+        assert!(xml.contains(from), "{part} lacks {from}");
+        *bytes = xml.replacen(from, to, 1).into_bytes();
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Seeds `source` the way a release before schema 2.2 stored it: no caps, and
+/// run colours resolved without the slide colour map.
+fn legacy_seed(source: &[u8], client_id: u64) -> Vec<u8> {
+    let stored = stored_2_0(source, client_id, |value| {
+        without_keys(value, &["caps", "colorMap", "colorMapOverride"])
+    });
+    restamped(&stored, Some(2.1))
+}
