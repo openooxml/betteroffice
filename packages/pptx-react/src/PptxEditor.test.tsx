@@ -1485,6 +1485,7 @@ describe('PptxEditor commands', () => {
         expect(added(0)).toEqual(['queued.png', name]);
         expect(added(1)).toEqual([]);
         expect(laidOut.filter((index) => index === 0)).toHaveLength(2);
+        expect(new Set(laidOut)).toEqual(new Set([0, 1]));
       } finally {
         images.restore();
       }

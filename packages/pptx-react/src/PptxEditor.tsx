@@ -580,7 +580,12 @@ function PptxEditorContent({
   }, []);
 
   const refreshAt = useCallback(
-    (requestedIndex?: number, notify = false, refreshAll = false): EditorModel | null => {
+    (
+      requestedIndex?: number,
+      notify = false,
+      refreshAll = false,
+      editedSlideId?: string
+    ): EditorModel | null => {
       const handle = handleRef.current;
       if (!handle) return null;
       try {
@@ -594,7 +599,8 @@ function PptxEditorContent({
         for (let slideIndex = 0; slideIndex < snapshot.slides.length; slideIndex += 1) {
           const slide = snapshot.slides[slideIndex];
           const cached = modelRef.current?.thumbnails.get(slide.id);
-          if (slideIndex !== index && cached && !refreshAll) thumbnails.set(slide.id, cached);
+          if (slideIndex !== index && cached && !refreshAll && slide.id !== editedSlideId)
+            thumbnails.set(slide.id, cached);
           else if (slideIndex !== index) thumbnails.set(slide.id, handle.layoutSlide(slideIndex));
         }
         const frame = snapshot.slides.length > 0 ? handle.layoutSlide(index) : null;
@@ -647,12 +653,6 @@ function PptxEditorContent({
   const refresh = useCallback(() => {
     refreshAt(undefined, false, true);
   }, [refreshAt]);
-
-  /** An insert on a slide the user has left relays that slide's thumbnail too. */
-  const refreshAfterInsert = (slideId: string) => {
-    const current = modelRef.current;
-    return refreshAt(undefined, true, current?.snapshot.slides[current.slideIndex]?.id !== slideId);
-  };
 
   /** The editor's batch path, after pending input: `authorize`, read-only, apply, one refresh. */
   const applyBatch = useCallback(
@@ -1209,7 +1209,7 @@ function PptxEditorContent({
         text: '',
         style: textStyleRef.current,
       });
-      const next = refreshAfterInsert(slide.id);
+      const next = refreshAt(undefined, true, false, slide.id);
       setActiveTool('select');
       setShapeSelection(null);
       setDragPreview(null);
@@ -1281,7 +1281,7 @@ function PptxEditorContent({
         },
         fill: '#d9eaf7',
       });
-      const next = refreshAfterInsert(slide.id);
+      const next = refreshAt(undefined, true, false, slide.id);
       setActiveTool('select');
       setSelection(null);
       setShapeSelection(
@@ -1350,7 +1350,7 @@ function PptxEditorContent({
         contentType,
         mediaBase64,
       });
-      const next = refreshAfterInsert(slide.id);
+      const next = refreshAt(undefined, true, false, slide.id);
       setActiveTool('select');
       setDragPreview(null);
       setTextBoxPreview(null);
