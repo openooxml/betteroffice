@@ -768,7 +768,12 @@ impl EditingDoc {
             anchors.push(anchor_value(&range.story, &start, &end));
         }
         comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
-        comment_references::reconcile(&mut txn, &BTreeSet::from([comment_id.to_owned()]), true);
+        comment_references::reconcile(
+            &mut txn,
+            &BTreeSet::from([comment_id.to_owned()]),
+            &BTreeSet::new(),
+            true,
+        );
         Ok(())
     }
 
@@ -913,10 +918,10 @@ impl EditingDoc {
             drop(watch);
             self.repair_paragraph_identities();
         }
-        let moved = moved.take();
+        let (moved, reanchored) = moved.take();
         if !moved.is_empty() {
             let mut txn = self.transact_for(&EditCtx::system(""));
-            comment_references::reconcile(&mut txn, &moved, false);
+            comment_references::reconcile(&mut txn, &moved, &reanchored, false);
         }
         Ok(())
     }
@@ -1569,6 +1574,56 @@ mod tests {
                         })
                         .collect();
                     assert_eq!(references, [(anchor.story.clone(), anchor.end)]);
+                    assert_eq!(resolved(replica, "1"), anchor);
+                }
+                for story in ["body", HEADER] {
+                    assert_eq!(doc.story_segments(story), peer.story_segments(story));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_winning_start_only_reanchor_drops_the_losing_moves_reference() {
+        let start_only = StoryRange::new("body", 2, 5);
+        let moved = StoryRange::new(HEADER, 0, 4);
+        for peer_first in [false, true] {
+            for (left, right) in [(&start_only, &moved), (&moved, &start_only)] {
+                let doc = EditingDoc::new(808);
+                let peer = referenced(&doc);
+                doc.set_comment_ranges("1", std::slice::from_ref(left))
+                    .unwrap();
+                peer.set_comment_ranges("1", std::slice::from_ref(right))
+                    .unwrap();
+                let (first, second) = if peer_first {
+                    (&peer, &doc)
+                } else {
+                    (&doc, &peer)
+                };
+                first
+                    .apply_update_v1(&second.encode_state_as_update_v1())
+                    .unwrap();
+                second
+                    .apply_update_v1(&first.encode_state_as_update_v1())
+                    .unwrap();
+                sync(&doc, &peer);
+                let anchor = resolved(&doc, "1");
+                for replica in [&doc, &peer] {
+                    let references: Vec<_> = ["body", HEADER]
+                        .into_iter()
+                        .flat_map(|story| {
+                            reference_offsets(replica, story)
+                                .into_iter()
+                                .map(move |offset| (story.to_owned(), offset))
+                        })
+                        .collect();
+                    assert!(references.len() <= 1, "{references:?}");
+                    assert!(
+                        references
+                            .iter()
+                            .all(|(story, offset)| *story == anchor.story && *offset == anchor.end),
+                        "{references:?} vs {anchor:?}"
+                    );
                     assert_eq!(resolved(replica, "1"), anchor);
                 }
                 for story in ["body", HEADER] {

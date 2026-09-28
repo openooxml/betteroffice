@@ -134,7 +134,7 @@ impl EditingDoc {
         let mut rekeyed = Vec::new();
         apply_raw_ops_to_story(&mut txn, story_id, ops, false, &mut rekeyed)?;
         if !reanchored.is_empty() {
-            crate::comment_references::reconcile(&mut txn, &reanchored, true);
+            crate::comment_references::reconcile(&mut txn, &reanchored, &BTreeSet::new(), true);
         }
         if authors_last {
             crate::identity::promote_story(self, &mut txn, story_id);

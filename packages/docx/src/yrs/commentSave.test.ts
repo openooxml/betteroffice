@@ -208,6 +208,37 @@ describe('a reanchored comment', () => {
     }
   });
 
+  it('saves one reference when a start-only reanchor races a move, whichever wins', async () => {
+    for (const peerFirst of [false, true]) {
+      for (const sourceMoves of [false, true]) {
+        const source = await open(docx(), 91040);
+        const peer = await createYrsSession({ clientId: 91041 });
+        sessions.push(peer);
+        peer.openDocx(docx(), false);
+        peer.loadState(source.encodeState());
+        const [mover, keeper] = sourceMoves ? [source, peer] : [peer, source];
+        keeper.setCommentRanges('1', [range(keeper, 0, 2, 5)]);
+        mover.setCommentRanges('1', [range(mover, 2, 0, 7)]);
+        const [first, second] = peerFirst ? [peer, source] : [source, peer];
+        first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
+        second.applyUpdate(first.encodeStateAsUpdate(second.encodeStateVector()));
+        first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
+        const expected = anchored(source, '1');
+        expect(['tro', 'Closing']).toContain(expected);
+        const written: string[] = [];
+        for (const replica of [source, peer]) {
+          expect(anchored(replica, '1')).toBe(expected);
+          for (const [path, bytes] of await saves(replica)) {
+            expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+            expect(anchored(await open(bytes, 91042), '1')).toBe(expected);
+            written.push(documentXml(bytes));
+          }
+        }
+        expect(new Set(written).size).toBe(1);
+      }
+    }
+  });
+
   it('saves once from a replica that received the reanchor', async () => {
     const source = await open(docx(), 91004);
     const peer = await createYrsSession({ clientId: 91005 });
