@@ -32,9 +32,8 @@ workbook.editCell(0, 9, 2, "=SUM(C1:C9)"); // recalcs dependents
 const bytes = workbook.save();
 ```
 
-`initWasm()` fetches the packaged wasm asset once in browsers. Pass wasm bytes
-or a precompiled `WebAssembly.Module` explicitly in runtimes that cannot fetch
-the asset URL.
+`initWasm()` fetches the packaged wasm asset once in browsers; other runtimes
+pass wasm bytes or a precompiled `WebAssembly.Module`.
 
 Around the handle, the package exports the helpers a custom grid needs:
 `cellAtPoint` / `cellRect` / `rangeRect` (hit-testing), the viewport math,
@@ -78,9 +77,8 @@ if (isProposalsAvailable()) {
 ```
 
 The React editor paints pending proposals as in-cell tracked-change ghosts with
-an accept/reject panel. Guard with `isProposalsAvailable()` against cores built
-without the feature. `StaleProposalError.targets` names each drifted cell's sheet
-beside `cells`.
+an accept/reject panel. `isProposalsAvailable()` reports proposal availability.
+`StaleProposalError.targets` names each drifted cell's sheet beside `cells`.
 
 ## Version-checked edit batches
 
@@ -125,9 +123,8 @@ if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
 - Requests over 16 MiB and results over 64 MiB refuse with `limit-exceeded`;
   calculation diagnostics stop at 10,000 cells per list and set `truncated`.
 - `history: "none"` keeps a batch out of undo; standalone undo still replays
-  older steps over its cells. It is experimental: that interaction may change
-  in a minor release. `source` records provenance only. Volatile functions see
-  only `calculation.nowSerial`.
+  older steps over its cells. `source` records provenance only. Volatile
+  functions see only `calculation.nowSerial`.
 - Versions and sheet ids are session-scoped; standalone sheet ids are
   positional, so each is valid only for the version it was read at.
 

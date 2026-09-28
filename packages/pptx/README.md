@@ -33,7 +33,7 @@ sizeCanvasForSlide(canvas, frame, devicePixelRatio);
 await paintSlide(canvas.getContext('2d')!, frame, devicePixelRatio);
 ```
 
-`initWasm()` with no argument only works where `fetch` of a same-origin URL works (browsers); Node and SSR must pass the wasm bytes.
+Browsers can call `initWasm()`; Node and SSR pass wasm bytes to `initWasm(bytes)`.
 
 All parsing, edits, collaboration state, text shaping, layout, hit-testing, and
 display-list emission stay in Rust. The package decodes the typed boundary and
@@ -93,8 +93,7 @@ unchanged words as context and retaining fonts and emphasis. Pass its
 `textChanges` to `paintSlide()` for red highlights and strikethrough on deletions,
 and green highlights and underlines on insertions. Its snapshot and UTF-16
 ranges describe a temporary review layout; use the live handle for editing and
-the ordinary proposed layout for the result after acceptance. Review rendering
-does not replace the live hit-test state or add markup to saved presentations.
+the ordinary proposed layout for the result after acceptance.
 
 Supported edits replace text within one paragraph, format text, align paragraphs,
 set shape geometry/fill/stroke/adjustments, and replace speaker notes. Text offsets
@@ -108,8 +107,7 @@ with target IDs. Review a fresh preview before calling
 Unrelated peer edits survive acceptance and Undo. Up to 64 proposals, each with
 1–256 edits, may be pending.
 
-Pending proposals belong to this open session: they are excluded from PPTX
-exports and collaboration updates. Accepted edits save and sync normally.
+Pending proposals live in the open session; accepted edits save and synchronize.
 `isProposalsAvailable()` supports hosts that load an older WASM build.
 
 ## Version-checked edit batches
@@ -183,18 +181,17 @@ and text styles and numbered as the renderer numbers them); runs carry
 formatting marks, links, soft line breaks, fields with their cached result and
 zero-width placeholders for inline content such as equations. Tables keep their
 grid, spans and merge continuations with each cell's current story. Pictures,
-video, audio, charts, SmartArt, embedded objects and shape-tree elements the
-deck model does not hold become placeholders with their alternative text and
-relationships; their data is never exported. Each slide exports its own shapes,
-an empty placeholder as empty; layout and master shapes drawn on it are reported
-with an `inherited-content-omitted` diagnostic.
+video, audio, charts, SmartArt, embedded objects and unmodelled shape-tree
+elements become placeholders with their alternative text and relationships.
+Each slide exports its own shapes, with an `inherited-content-omitted`
+diagnostic for layout and master shapes drawn on it.
 
 Every record carries an anchor: `range` anchors are batch text targets in the
 story offsets of `readContent()`, so a session export's `range` anchor can be a
 step's `target` at the version it was read at; `notes` and `comment` ranges
 index their plain text, and records seeded from the file carry `provenance`
 (part, SHA-256, element path, `sldId`, `cNvPr` id). Session anchors belong to
-the returned version and do not survive save and reopen. A collaboration
+the returned version. A collaboration
 session opened from an update seeded by an older release, without its source
 file, may not know which slides are hidden:
 those slides are exported with `hidden: null` and a `visibility-unknown`
@@ -218,7 +215,7 @@ each block that `anchors` maps back to its source.
 
 PowerPoint has two comment systems and a file only ever uses one: `legacy`
 reads in every version of PowerPoint plus LibreOffice and Google Slides, while
-`modern` carries replies and a resolved state but only shows in PowerPoint 365.
+`modern` carries replies and resolution for PowerPoint 365.
 A deck commits to one at its first comment, so `setCommentFlavor` only works
 while `comments()` is empty, and `replyToComment` / `setCommentStatus` throw on
 a legacy deck.
