@@ -1786,6 +1786,8 @@ fn a_save_refuses_to_drop_baseline_or_spacing_it_could_not_recover() {
         Err(EditError::Write(message)) => assert!(message.contains("could not be recovered")),
         other => panic!("{other:?}"),
     }
+    attached.delete_text(&context, &story, 0, 2100).unwrap();
+    attached.save().unwrap();
 }
 
 const LONG_PARAGRAPH: u32 = 2000;

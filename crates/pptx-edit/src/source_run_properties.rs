@@ -67,18 +67,39 @@ enum Pending {
 }
 
 /// The run attribute, baseline or spacing, whose recovery from the source left
-/// characters unresolved that a save would strip it from. Caps and colours were
-/// never kept before, so their unresolved characters save as they are.
+/// characters unresolved, still in the deck, that a save would strip it from.
+/// Caps and colours were never kept before, so their unresolved characters save
+/// as they are.
 pub(crate) fn unrecovered_attribute(doc: &Doc) -> Option<&'static str> {
     let txn = doc.transact();
     let meta = txn.get_map(META)?;
     [SourceProperty::Baseline, SourceProperty::Spacing]
         .into_iter()
         .map(SourceProperty::keys)
-        .find(|(pending_key, ..)| {
-            matches!(meta.get(&txn, pending_key), Some(Out::Any(Any::String(_))))
+        .find(|(pending_key, ..)| match meta.get(&txn, pending_key) {
+            Some(Out::Any(Any::String(json))) => {
+                serde_json::from_str::<Unresolved>(&json).map_or(true, |stories| {
+                    stories
+                        .values()
+                        .flatten()
+                        .any(|&(client, clock)| alive(&txn, ID::new(ClientID::new(client), clock)))
+                })
+            }
+            _ => false,
         })
         .map(|(_, _, attribute)| attribute)
+}
+
+/// Whether the character `id` is still in its story rather than deleted.
+fn alive<T: ReadTxn>(txn: &T, id: ID) -> bool {
+    StickyIndex::from_id(id, Assoc::After)
+        .get_offset(txn)
+        .is_some_and(|offset| {
+            TextRef::from(offset.branch)
+                .sticky_index(txn, offset.index, Assoc::After)
+                .and_then(|index| index.id().copied())
+                == Some(id)
+        })
 }
 
 pub(crate) fn import_source(
