@@ -1,6 +1,6 @@
 //! Raw story mutations using UTF-16 story indices.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use yrs::types::text::YChange;
@@ -119,8 +119,23 @@ impl EditingDoc {
         }
         let authors_last = story_ref(&txn, story_id)
             .is_ok_and(|story| authors_last_paragraph(&ops, story.len(&txn)));
+        let comments = txn
+            .get_map(COMMENTS)
+            .expect("comments root is declared by EditingDoc::new");
+        let reanchored: BTreeSet<String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                RawOp::SetComment { id, .. } if comments.get(&txn, id).is_some() => {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect();
         let mut rekeyed = Vec::new();
         apply_raw_ops_to_story(&mut txn, story_id, ops, false, &mut rekeyed)?;
+        if !reanchored.is_empty() {
+            crate::comment_references::reconcile(&mut txn, &reanchored, true);
+        }
         if authors_last {
             crate::identity::promote_story(self, &mut txn, story_id);
         }

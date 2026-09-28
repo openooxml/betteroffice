@@ -13,6 +13,7 @@ import {
   yrsToDocument,
   type YrsSession,
 } from './index';
+import type { Paragraph, Run } from '../types/document';
 import { documentToYrs } from './documentToYrs';
 
 beforeAll(() =>
@@ -43,7 +44,9 @@ const BODY =
   `<w:fldSimple w:instr=" PAGE ">${t('1')}</w:fldSimple>${t(' tail')}</w:p>` +
   `<w:p w14:paraId="0C000003">${t('Closing words')}</w:p>` +
   `<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0C000004">${t('Cell')}</w:p></w:tc></w:tr></w:tbl>` +
-  `<w:p w14:paraId="0C000005">${t('After the table')}</w:p>`;
+  `<w:p w14:paraId="0C000005">${t('After the table')}</w:p>` +
+  `<w:p w14:paraId="0C000006">${t('Go to ')}<w:hyperlink w:anchor="target">${t('page ')}` +
+  `<w:fldSimple w:instr=" PAGE ">${t('7')}</w:fldSimple>${t(' of the text')}</w:hyperlink>${t(' now')}</w:p>`;
 
 function docx(): Uint8Array {
   const parts: Record<string, string> = {
@@ -156,6 +159,55 @@ describe('a reanchored comment', () => {
     }
   });
 
+  it('saves one reference once moved into a table cell', async () => {
+    const session = await open(docx(), 91007);
+    const cell = session.storyIds().find((story) => story !== 'body' && story.startsWith('body'))!;
+    const { paraId } = session.paragraphs(cell)[0]!;
+    session.setCommentRanges('1', [{ story: cell, start: { paraId, offset: 0 }, end: { paraId, offset: 4 } }]);
+    for (const [path, bytes] of await saves(session)) {
+      expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+      expect(paragraphXml(bytes, '0C000004')).toContain('<w:commentReference w:id="1"/>');
+    }
+  });
+
+  it('saves one reference once replaced by a raw setComment', async () => {
+    const session = await open(docx(), 91008);
+    const start = session.locateParagraph('body', session.paragraphs('body')[2]!.paraId).start;
+    session.applyRawOps('body', [{ op: 'setComment', id: '1', ranges: [[start + 8, start + 13]] }]);
+    for (const [path, bytes] of await saves(session)) {
+      expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+      expect(anchored(await open(bytes, 91009), '1')).toBe('words');
+    }
+  });
+
+  it('saves one reference after replicas reanchor it concurrently, in either sync order', async () => {
+    for (const peerFirst of [false, true]) {
+      const source = await open(docx(), 91030);
+      const peer = await createYrsSession({ clientId: 91031 });
+      sessions.push(peer);
+      peer.openDocx(docx(), false);
+      peer.loadState(source.encodeState());
+      source.setCommentRanges('1', [range(source, 2, 0, 7)]);
+      peer.setCommentRanges('1', [range(peer, 3, 1, 6)]);
+      const [first, second] = peerFirst ? [peer, source] : [source, peer];
+      first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
+      second.applyUpdate(first.encodeStateAsUpdate(second.encodeStateVector()));
+      first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
+      const expected = anchored(source, '1');
+      expect(['Closing', 'After']).toContain(expected);
+      const written: string[] = [];
+      for (const replica of [source, peer]) {
+        expect(anchored(replica, '1')).toBe(expected);
+        for (const [path, bytes] of await saves(replica)) {
+          expect([path, markers(bytes, 1)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+          expect(anchored(await open(bytes, 91032), '1')).toBe(expected);
+          written.push(documentXml(bytes));
+        }
+      }
+      expect(new Set(written).size).toBe(1);
+    }
+  });
+
   it('saves once from a replica that received the reanchor', async () => {
     const source = await open(docx(), 91004);
     const peer = await createYrsSession({ clientId: 91005 });
@@ -181,6 +233,10 @@ describe('an added comment range', () => {
     [' tail', 1, 37, 42],
     // The table before this paragraph is its first story unit.
     ['After', 3, 1, 6],
+    ['to page', 4, 3, 10],
+    ['age', 4, 7, 10],
+    ['e  of', 4, 9, 15],
+    ['of th', 4, 13, 18],
   ];
   for (const [expected, paragraph, start, end] of cases) {
     it(`saves paired markers and a reference around "${expected}"`, async () => {
@@ -203,6 +259,37 @@ describe('an added comment range', () => {
       }
     });
   }
+});
+
+it('splits a hyperlink holding a field where a comment range ends inside it', async () => {
+  const session = await open(docx(), 91040);
+  session.setCommentRanges('1', [range(session, 4, 13, 18)]);
+  const document = yrsToDocument(session, session.materializeDocx()!);
+  const paragraph = document.package.document.content.find(
+    (block) => block.type === 'paragraph' && block.paraId === '0C000006'
+  ) as Paragraph;
+  const text = (run: Run) =>
+    run.content.map((entry) => (entry.type === 'text' ? entry.text : entry.type)).join('');
+  expect(
+    paragraph.content.map((child) =>
+      child.type === 'hyperlink'
+        ? (child.structuredChildren ?? child.children)
+            .map((entry) => (entry.type === 'run' ? text(entry) : entry.type))
+            .join('|')
+        : child.type === 'run'
+          ? text(child)
+          : child.type
+    )
+  ).toEqual([
+    'Go to ',
+    'page |simpleField| ',
+    'commentRangeStart',
+    'of th',
+    'commentRangeEnd',
+    'commentReference',
+    'e text',
+    ' now',
+  ]);
 });
 
 it('keeps a commented document byte-identical on a no-op save', async () => {

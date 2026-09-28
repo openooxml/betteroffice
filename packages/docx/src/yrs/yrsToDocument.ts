@@ -29,6 +29,7 @@ import type {
   HorizontalRuleContent,
   TextFormatting,
   Hyperlink,
+  HyperlinkContent,
   TrackedChangeInfo,
   Table,
   TableRow,
@@ -998,27 +999,26 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): Parag
     : { type: 'deletion', info, content: [run] };
 }
 
+/**
+ * Adds an item to a hyperlink: a run to its children, and every child, in
+ * order, to its structured children once it has them.
+ */
 function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
-  if (item.kind === 'text') {
-    hyperlink.children.push(createTextRun(item.text, item.attributes));
-    return;
-  }
-  if (item.embedKind === 'break') {
-    hyperlink.children.push({
-      type: 'run',
-      content: [{ type: 'break', breakType: 'textWrapping' }],
-    });
-  } else if (item.embedKind === 'tab') {
-    hyperlink.children.push({ type: 'run', content: [{ type: 'tab' }] });
-  } else if (item.embedKind === 'horizontalRule') {
-    hyperlink.children.push(horizontalRuleRun(item.payload, item.attributes));
+  let child: HyperlinkContent | undefined;
+  if (item.kind === 'text') child = createTextRun(item.text, item.attributes);
+  else if (item.embedKind === 'break') {
+    child = { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+  } else if (item.embedKind === 'tab') child = { type: 'run', content: [{ type: 'tab' }] };
+  else if (item.embedKind === 'horizontalRule') {
+    child = horizontalRuleRun(item.payload, item.attributes);
   } else if (item.embedKind === 'field') {
-    const child =
+    child =
       commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
-    if (child.type === 'run') hyperlink.children.push(child);
-    else (hyperlink.structuredChildren ??= [...hyperlink.children]).push(child);
-  } else if (item.embedKind === 'math') {
-    (hyperlink.structuredChildren ??= [...hyperlink.children]).push(mathFromPayload(item.payload));
+  } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
+  if (!child) return;
+  if (child.type === 'run') hyperlink.children.push(child);
+  if (child.type !== 'run' || hyperlink.structuredChildren) {
+    (hyperlink.structuredChildren ??= [...hyperlink.children]).push(child);
   }
 }
 
@@ -1356,9 +1356,15 @@ function runTextLength(run: Run): number {
   return run.content.reduce((length, content) => length + runContentLength(content), 0);
 }
 
-/** Hyperlink children seeded as one embed each. */
-const isLinkEmbed = (child: { type: string }): boolean =>
-  child.type === 'simpleField' || child.type === 'complexField' || child.type === 'mathEquation';
+/** The story units a hyperlink child spans: its text, or one for a field or an equation. */
+function linkChildLength(child: HyperlinkContent): number {
+  if (child.type === 'run') return runTextLength(child);
+  return child.type === 'simpleField' ||
+    child.type === 'complexField' ||
+    child.type === 'mathEquation'
+    ? 1
+    : 0;
+}
 
 /**
  * The story units projected content spans. Fields, controls and equations
@@ -1370,11 +1376,9 @@ function paragraphContentLength(content: ParagraphContent): number {
     case 'run':
       return runTextLength(content);
     case 'hyperlink':
-      return (
-        content.children.reduce(
-          (sum, child) => sum + (child.type === 'run' ? runTextLength(child) : 0),
-          0
-        ) + (content.structuredChildren?.filter(isLinkEmbed).length ?? 0)
+      return (content.structuredChildren ?? content.children).reduce(
+        (sum, child) => sum + linkChildLength(child),
+        0
       );
     case 'complexField':
       return [
@@ -1432,10 +1436,22 @@ function splitRunContent(content: RunContent, at: number): Split<RunContent> | n
   ];
 }
 
+/** One side of a split hyperlink, holding `children` in order. */
+function linkPart(link: Hyperlink, children: HyperlinkContent[]): Hyperlink | null {
+  if (children.length === 0) return null;
+  const legacy = children.filter(
+    (child): child is Hyperlink['children'][number] =>
+      child.type === 'run' || child.type === 'bookmarkStart' || child.type === 'bookmarkEnd'
+  );
+  return link.structuredChildren
+    ? { ...link, children: legacy, structuredChildren: children }
+    : { ...link, children: legacy };
+}
+
 /**
  * Splits content `at` story units in: runs between their units, hyperlinks
- * and tracked changes into two with the same properties. Null for content
- * that holds no position there, such as a field.
+ * and tracked changes into two halves. Null for content that holds no
+ * position there, such as a field.
  */
 function splitContent(content: ParagraphContent, at: number): Split<ParagraphContent> | null {
   if (content.type === 'run') {
@@ -1445,17 +1461,12 @@ function splitContent(content: ParagraphContent, at: number): Split<ParagraphCon
       parts[1].length > 0 ? { ...content, content: parts[1] } : null,
     ];
   }
-  if (content.type === 'hyperlink' && !content.structuredChildren) {
-    const parts = splitItems(
-      content.children,
-      at,
-      paragraphContentLength,
-      (child, offset) => splitContent(child, offset) as Split<Run> | null
+  if (content.type === 'hyperlink') {
+    const children: readonly HyperlinkContent[] = content.structuredChildren ?? content.children;
+    const parts = splitItems(children, at, linkChildLength, (child, offset) =>
+      child.type === 'run' ? (splitContent(child, offset) as Split<Run> | null) : null
     );
-    return parts && [
-      parts[0].length > 0 ? { ...content, children: parts[0] } : null,
-      parts[1].length > 0 ? { ...content, children: parts[1] } : null,
-    ];
+    return parts && [linkPart(content, parts[0]), linkPart(content, parts[1])];
   }
   if (isTrackedWrapper(content)) {
     const parts = splitItems(

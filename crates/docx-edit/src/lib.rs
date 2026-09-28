@@ -49,7 +49,7 @@
 //! must be minted only while serializing OOXML. A paragraph's Word `w14:paraId` is a separate
 //! binding on its pilcrow, never derived from its internal ID; see [`ParagraphIdentity`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -65,6 +65,7 @@ use yrs::{
 };
 
 mod batch;
+mod comment_references;
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 mod compare;
 pub mod content_controls;
@@ -766,8 +767,8 @@ impl EditingDoc {
                 .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
             anchors.push(anchor_value(&range.story, &start, &end));
         }
-        move_comment_references(&mut txn, comment_id, ranges);
         comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
+        comment_references::reconcile(&mut txn, &BTreeSet::from([comment_id.to_owned()]), true);
         Ok(())
     }
 
@@ -899,6 +900,7 @@ impl EditingDoc {
     /// Applies an update, then repairs any paragraph identities it duplicated.
     pub(crate) fn integrate_update(&self, update: Update, local: bool) -> EditResult<()> {
         let watch = identity::IdentityWatch::new(self);
+        let moved = comment_references::CommentWatch::new(self);
         let result = if local {
             self.doc
                 .transact_mut_with(self.client_id)
@@ -910,6 +912,11 @@ impl EditingDoc {
         if watch.changed() {
             drop(watch);
             self.repair_paragraph_identities();
+        }
+        let moved = moved.take();
+        if !moved.is_empty() {
+            let mut txn = self.transact_for(&EditCtx::system(""));
+            comment_references::reconcile(&mut txn, &moved, false);
         }
         Ok(())
     }
@@ -1069,84 +1076,6 @@ fn next_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T, from: u32) -> Option<(u32,
         offset += len;
     }
     None
-}
-
-fn is_comment_reference<T: ReadTxn>(map: &MapRef, txn: &T, comment_id: &str) -> bool {
-    map_string(map, txn, "modelKind").as_deref() == Some("commentReference")
-        && match map.get(txn, "commentId") {
-            Some(Out::Any(Any::Number(id))) => id.to_string() == comment_id,
-            Some(Out::Any(Any::BigInt(id))) => id.to_string() == comment_id,
-            Some(Out::Any(Any::String(id))) => &*id == comment_id,
-            _ => false,
-        }
-}
-
-/// Moves the comment's reference embeds to right after its ranges, one per story holding a range.
-fn move_comment_references(
-    txn: &mut yrs::TransactionMut<'_>,
-    comment_id: &str,
-    ranges: &[StoryRange],
-) {
-    let stories: Vec<(String, TextRef)> = txn
-        .get_map(STORIES)
-        .expect("stories root is declared by EditingDoc::new")
-        .iter(txn)
-        .filter_map(|(id, value)| Some((id.to_owned(), value.cast::<TextRef>().ok()?)))
-        .collect();
-    let mut payload = None;
-    let mut missing = Vec::new();
-    for (story_id, story) in &stories {
-        let Some(mut end) = ranges
-            .iter()
-            .filter(|range| &range.story == story_id)
-            .map(|range| range.end)
-            .max()
-        else {
-            continue;
-        };
-        let mut placed = false;
-        let mut offset = 0;
-        let mut moved = Vec::new();
-        for diff in story.diff(txn, YChange::identity) {
-            if let Out::YMap(map) = &diff.insert
-                && is_comment_reference(map, txn, comment_id)
-            {
-                payload.get_or_insert_with(|| {
-                    map.iter(txn)
-                        .filter_map(|(key, value)| match value {
-                            Out::Any(value) => Some((key.to_owned(), value)),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                });
-                if offset == end && !placed {
-                    placed = true;
-                } else {
-                    moved.push(offset);
-                }
-            }
-            offset += out_len(&diff.insert);
-        }
-        for offset in moved.into_iter().rev() {
-            story.remove_range(txn, offset, 1);
-            if offset < end {
-                end -= 1;
-            }
-        }
-        if !placed {
-            missing.push((story, end));
-        }
-    }
-    let Some(payload) = payload else {
-        return;
-    };
-    for (story, end) in missing {
-        let embed =
-            story.insert_embed_with_attributes(txn, end, MapPrelim::default(), Attrs::new());
-        for (key, value) in &payload {
-            embed.insert(txn, key.as_str(), value.clone());
-        }
-    }
 }
 
 fn out_len(value: &Out) -> u32 {
@@ -1443,9 +1372,11 @@ mod tests {
         }
     }
 
-    /// Seeds comment 1 over "first" with its reference right after it, and a synced peer.
+    /// Seeds comment 1 over "first" with its reference right after it, a header, and a synced peer.
     fn referenced(doc: &EditingDoc) -> EditingDoc {
         doc.create_story("body", "first second", "Normal", "left")
+            .unwrap();
+        doc.create_story(HEADER, "Header", "Header", "left")
             .unwrap();
         doc.apply_raw_ops(
             "body",
@@ -1476,10 +1407,10 @@ mod tests {
         peer
     }
 
-    fn reference_offsets(doc: &EditingDoc) -> Vec<u32> {
+    fn reference_offsets(doc: &EditingDoc, story: &str) -> Vec<u32> {
         let mut offset = 0;
         let mut found = Vec::new();
-        for segment in doc.story_segments("body").unwrap() {
+        for segment in doc.story_segments(story).unwrap() {
             match segment.content {
                 SegmentContent::Text(text) => offset += text.encode_utf16().count() as u32,
                 SegmentContent::OtherEmbed { payload, .. } => {
@@ -1502,11 +1433,11 @@ mod tests {
         doc.set_comment_ranges("1", &[StoryRange::new("body", 7, 13)])
             .unwrap();
         for _ in 0..3 {
-            assert_eq!(reference_offsets(&doc), [12]);
+            assert_eq!(reference_offsets(&doc, "body"), [12]);
             let anchor = resolved(&doc, "1");
             assert_eq!((anchor.start, anchor.end), (6, 12));
             assert!(undo.undo());
-            assert_eq!(reference_offsets(&doc), [5]);
+            assert_eq!(reference_offsets(&doc, "body"), [5]);
             let anchor = resolved(&doc, "1");
             assert_eq!((anchor.start, anchor.end), (0, 5));
             assert!(undo.redo());
@@ -1519,13 +1450,13 @@ mod tests {
         referenced(&doc);
         doc.set_comment_ranges("1", &[StoryRange::new("body", 1, 5)])
             .unwrap();
-        assert_eq!(reference_offsets(&doc), [5]);
+        assert_eq!(reference_offsets(&doc, "body"), [5]);
         doc.set_comment_ranges(
             "1",
             &[StoryRange::new("body", 0, 2), StoryRange::new("body", 3, 5)],
         )
         .unwrap();
-        assert_eq!(reference_offsets(&doc), [5]);
+        assert_eq!(reference_offsets(&doc, "body"), [5]);
     }
 
     #[test]
@@ -1546,11 +1477,105 @@ mod tests {
         .unwrap();
         sync(&doc, &peer);
         for replica in [&doc, &peer] {
-            assert_eq!(reference_offsets(replica), [14]);
+            assert_eq!(reference_offsets(replica, "body"), [14]);
             let anchor = resolved(replica, "1");
             assert_eq!((anchor.start, anchor.end), (8, 14));
         }
         assert_eq!(doc.story_segments("body"), peer.story_segments("body"));
+    }
+
+    const HEADER: &str = "header:rId7";
+
+    #[test]
+    fn comment_reanchoring_into_another_story_leaves_no_reference_behind() {
+        let doc = EditingDoc::new(806);
+        referenced(&doc);
+        let mut undo = doc.undo_manager();
+        doc.set_comment_ranges("1", &[StoryRange::new(HEADER, 0, 4)])
+            .unwrap();
+        for _ in 0..2 {
+            assert!(reference_offsets(&doc, "body").is_empty());
+            assert_eq!(reference_offsets(&doc, HEADER), [4]);
+            assert!(undo.undo());
+            assert_eq!(reference_offsets(&doc, "body"), [5]);
+            assert!(reference_offsets(&doc, HEADER).is_empty());
+            assert!(undo.redo());
+        }
+    }
+
+    #[test]
+    fn raw_comment_replacement_moves_its_reference() {
+        let doc = EditingDoc::new(807);
+        referenced(&doc);
+        let replace = |story: &str, ranges| {
+            doc.apply_raw_ops(
+                story,
+                vec![RawOp::SetComment {
+                    id: "1".into(),
+                    ranges,
+                    author: "Ada".into(),
+                    date: DATE.into(),
+                    body: Any::Null,
+                }],
+                &local("Ada"),
+            )
+            .unwrap();
+        };
+        replace("body", vec![(7, 13)]);
+        assert_eq!(reference_offsets(&doc, "body"), [12]);
+        assert_eq!(
+            (resolved(&doc, "1").start, resolved(&doc, "1").end),
+            (6, 12)
+        );
+        replace(HEADER, vec![(0, 4)]);
+        assert!(reference_offsets(&doc, "body").is_empty());
+        assert_eq!(reference_offsets(&doc, HEADER), [4]);
+    }
+
+    #[test]
+    fn concurrent_comment_reanchors_keep_one_reference_in_either_sync_order() {
+        let moves = [
+            StoryRange::new("body", 7, 13),
+            StoryRange::new(HEADER, 0, 4),
+        ];
+        for peer_first in [false, true] {
+            for (left, right) in [(&moves[0], &moves[1]), (&moves[0], &moves[0])] {
+                let doc = EditingDoc::new(808);
+                let peer = referenced(&doc);
+                doc.set_comment_ranges("1", std::slice::from_ref(left))
+                    .unwrap();
+                peer.set_comment_ranges("1", std::slice::from_ref(right))
+                    .unwrap();
+                let (first, second) = if peer_first {
+                    (&peer, &doc)
+                } else {
+                    (&doc, &peer)
+                };
+                first
+                    .apply_update_v1(&second.encode_state_as_update_v1())
+                    .unwrap();
+                second
+                    .apply_update_v1(&first.encode_state_as_update_v1())
+                    .unwrap();
+                sync(&doc, &peer);
+                let anchor = resolved(&doc, "1");
+                for replica in [&doc, &peer] {
+                    let references: Vec<_> = ["body", HEADER]
+                        .into_iter()
+                        .flat_map(|story| {
+                            reference_offsets(replica, story)
+                                .into_iter()
+                                .map(move |offset| (story.to_owned(), offset))
+                        })
+                        .collect();
+                    assert_eq!(references, [(anchor.story.clone(), anchor.end)]);
+                    assert_eq!(resolved(replica, "1"), anchor);
+                }
+                for story in ["body", HEADER] {
+                    assert_eq!(doc.story_segments(story), peer.story_segments(story));
+                }
+            }
+        }
     }
 
     #[test]
