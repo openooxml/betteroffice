@@ -24,6 +24,16 @@ export interface ResidentEngineWorkerFrame {
   replayMs: number;
   replayedPages: number;
   layoutRevision: number;
+  /** The region layout the worker ran, when the request handed it the layout. */
+  layoutJson?: string;
+}
+
+/** A bootstrap/sync whose snapshot layout the worker runs as the only layout. */
+export interface ResidentEngineWorkerLayoutOptions {
+  /** Display extras minus the header/footer payload the worker's layout supplies. */
+  layoutExtras?: string;
+  /** The host state vector the snapshot brings the worker to. */
+  stateVector?: Uint8Array;
 }
 
 export interface ResidentEngineOffscreenPage {
@@ -80,6 +90,7 @@ export class ResidentEngineWorkerClient {
   private revision = 0;
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
+  private bootstrapped = false;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
@@ -124,15 +135,30 @@ export class ResidentEngineWorkerClient {
     return this.appliedFontsRevision;
   }
 
+  /** A bootstrap was sent; later snapshots go as syncs queued behind it. */
+  bootstrapSent(): boolean {
+    return this.bootstrapped;
+  }
+
   async bootstrap(
     snapshot: YrsResidentWorkerSnapshot,
-    extras: string
+    extras: string,
+    options: ResidentEngineWorkerLayoutOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
-    const response = await this.request(
-      { type: 'bootstrap', snapshot, extras, expectedFrameEpoch: 0 },
+    this.bootstrapped = true;
+    const pending = this.request(
+      {
+        type: 'bootstrap',
+        snapshot,
+        extras,
+        expectedFrameEpoch: 0,
+        ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+      },
       snapshotTransfers(snapshot)
     );
+    this.recordSent(options.stateVector, fontsRevision);
+    const response = await pending;
     const result = frameResult(response);
     this.recordSync(response, fontsRevision);
     this.ready = true;
@@ -144,13 +170,23 @@ export class ResidentEngineWorkerClient {
     snapshot: YrsResidentWorkerSnapshot,
     extras: string,
     expectedFrameEpoch: number,
-    paintCaret = false
+    paintCaret = false,
+    options: ResidentEngineWorkerLayoutOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
-    const response = await this.request(
-      { type: 'sync', snapshot, extras, expectedFrameEpoch, paintCaret },
+    const pending = this.request(
+      {
+        type: 'sync',
+        snapshot,
+        extras,
+        expectedFrameEpoch,
+        paintCaret,
+        ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+      },
       snapshotTransfers(snapshot)
     );
+    this.recordSent(options.stateVector, fontsRevision);
+    const response = await pending;
     const result = frameResult(response);
     this.recordSync(response, fontsRevision);
     this.ready = true;
@@ -286,6 +322,17 @@ export class ResidentEngineWorkerClient {
     });
   }
 
+  /**
+   * Requests run in order, so once a snapshot is sent every later request
+   * finds its state and fonts in the worker: the next sync can diff against
+   * them before this one answers.
+   */
+  private recordSent(stateVector: Uint8Array | undefined, fontsRevision: number): void {
+    if (this.terminalError) return;
+    if (stateVector) this.remoteVector = stateVector.slice();
+    this.appliedFontsRevision = fontsRevision;
+  }
+
   /** Record a successfully applied bootstrap/sync payload's fonts revision.
    * The state vector is tracked centrally in `onmessage`. */
   private recordSync(
@@ -345,6 +392,7 @@ function frameResult(
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,
     layoutRevision: response.layoutRevision ?? 0,
+    ...(response.layoutJson !== undefined ? { layoutJson: response.layoutJson } : {}),
   };
 }
 
