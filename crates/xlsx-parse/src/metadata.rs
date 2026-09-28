@@ -10,7 +10,7 @@ use crate::xml::xml_err;
 use crate::{MAX_DEPTH, ParseError};
 
 const DYNAMIC_TYPE: &str = r#"metadataType name="XLDAPR" minSupportedVersion="120000" copy="1" pasteAll="1" pasteValues="1" merge="1" splitFirst="1" rowColShift="1" clearFormats="1" clearComments="1" assign="1" coerce="1" cellMeta="1"/>"#;
-const DYNAMIC_BLOCK: &str = r#"extLst><ext uri="{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}"><xda:dynamicArrayProperties xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray" fDynamic="1" fCollapsed="0"/></ext></"#;
+const DYNAMIC_PROPERTIES: &str = r#"<xda:dynamicArrayProperties xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray" fDynamic="1" fCollapsed="0"/>"#;
 
 /// One child of the part's root, with what an added record needs from it.
 struct Child {
@@ -52,7 +52,9 @@ pub(crate) fn with_dynamic_array_record(source: &[u8]) -> Result<(Vec<u8>, u32),
             1
         }
     };
-    let block = format!("<{prefix}bk><{prefix}{DYNAMIC_BLOCK}{prefix}extLst></{prefix}bk>");
+    let block = format!(
+        r#"<{prefix}bk><{prefix}extLst><{prefix}ext uri="{{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}}">{DYNAMIC_PROPERTIES}</{prefix}ext></{prefix}extLst></{prefix}bk>"#
+    );
     let future = children.iter().find(|child| {
         child.local == "futureMetadata"
             && child
@@ -230,14 +232,56 @@ fn scan(source: &[u8]) -> Result<(usize, String, Vec<Child>), ParseError> {
 
 #[cfg(test)]
 mod tests {
+    use quick_xml::NsReader;
+    use quick_xml::events::Event;
+    use quick_xml::name::ResolveResult;
+
     use super::with_dynamic_array_record;
+
+    const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    const DYNAMIC: &str = "http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray";
+
+    /// every element of `part` with the namespace it resolves to.
+    fn resolved(part: &[u8]) -> Vec<(String, String)> {
+        let mut reader = NsReader::from_reader(part);
+        let mut out = Vec::new();
+        loop {
+            match reader.read_resolved_event().unwrap() {
+                (namespace, Event::Start(element) | Event::Empty(element)) => {
+                    let namespace = match namespace {
+                        ResolveResult::Bound(namespace) => {
+                            String::from_utf8(namespace.as_ref().to_vec()).unwrap()
+                        }
+                        _ => String::new(),
+                    };
+                    let local = String::from_utf8(element.local_name().as_ref().to_vec()).unwrap();
+                    out.push((local, namespace));
+                }
+                (_, Event::Eof) => break,
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn assert_namespaces(part: &[u8]) {
+        for (local, namespace) in resolved(part) {
+            let expected = if local == "dynamicArrayProperties" {
+                DYNAMIC
+            } else {
+                MAIN
+            };
+            assert_eq!(namespace, expected, "{local}");
+        }
+    }
 
     #[test]
     fn a_rich_value_part_gains_a_dynamic_array_record() {
         let source = br#"<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><metadataTypes count="1"><metadataType name="XLRICHVALUE" minSupportedVersion="120000"/></metadataTypes><futureMetadata name="XLRICHVALUE" count="1"><bk><extLst/></bk></futureMetadata><valueMetadata count="1"><bk><rc t="1" v="0"/></bk></valueMetadata></metadata>"#;
         let (part, cm) = with_dynamic_array_record(source).unwrap();
-        let part = String::from_utf8(part).unwrap();
         assert_eq!(cm, 1);
+        assert_namespaces(&part);
+        let part = String::from_utf8(part).unwrap();
         assert!(
             part.contains(r#"<metadataTypes count="2"><metadataType name="XLRICHVALUE""#),
             "{part}"
@@ -263,12 +307,30 @@ mod tests {
     fn existing_records_keep_their_indices() {
         let source = br#"<x:metadata xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:metadataTypes count="1"><x:metadataType name="XLDAPR"/></x:metadataTypes><x:futureMetadata name="XLDAPR" count="1"><x:bk/></x:futureMetadata><x:cellMetadata count="2"><x:bk/><x:bk/></x:cellMetadata></x:metadata>"#;
         let (part, cm) = with_dynamic_array_record(source).unwrap();
-        let part = String::from_utf8(part).unwrap();
         assert_eq!(cm, 3);
+        assert_namespaces(&part);
+        let part = String::from_utf8(part).unwrap();
         assert!(
-            part.contains(r#"<x:futureMetadata name="XLDAPR" count="2"><x:bk/><x:bk><x:extLst>"#),
+            part.contains(
+                r#"<x:futureMetadata name="XLDAPR" count="2"><x:bk/><x:bk><x:extLst><x:ext "#
+            ),
             "{part}"
         );
-        assert!(part.contains(r#"<x:cellMetadata count="3"><x:bk/><x:bk/><x:bk><x:rc t="1" v="1"/></x:bk></x:cellMetadata>"#), "{part}");
+        assert!(
+            part.contains(
+                r#"<x:cellMetadata count="3"><x:bk/><x:bk/><x:bk><x:rc t="1" v="1"/></x:bk></x:cellMetadata>"#
+            ),
+            "{part}"
+        );
+    }
+
+    /// a prefixed part without a dynamic-array type or block gains both, every
+    /// element in the namespace its prefix names.
+    #[test]
+    fn a_prefixed_part_gains_a_qualified_record() {
+        let source = br#"<x:metadata xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:metadataTypes count="1"><x:metadataType name="XLRICHVALUE"/></x:metadataTypes></x:metadata>"#;
+        let (part, cm) = with_dynamic_array_record(source).unwrap();
+        assert_eq!(cm, 1);
+        assert_namespaces(&part);
     }
 }
