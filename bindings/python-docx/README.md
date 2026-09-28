@@ -58,21 +58,17 @@ run, so a paragraph that mixes runs — half bold, a hyperlink, a field — rais
 `UnsupportedEditError` rather than flattening the formatting you did not ask it
 to touch. An unknown `w14:paraId` raises `KeyError`.
 
-Only paragraphs Word stamped with a `w14:paraId` can be addressed:
-`document.paragraph_ids` reports `None` for the rest. Each ID addresses one
-paragraph: one whose `w14:paraId` repeats an earlier paragraph's reads with a
-fresh ID, which `save()` writes once that paragraph is edited.
+`replace_text` uses non-`None` entries from `paragraph_ids`. Repeated IDs
+receive fresh identities that are saved after editing.
 
 ## Write
 
-Unlike the PPTX binding, edits reach the file: `save()` serializes the edited
-model, and reopening the result gives the edited text back.
+`save()` serializes the edited model; reopening it returns the edited text.
 
 ```python
-document = Document.open(data)
+document = Document.open_path("report.docx")
 document.replace_text(document.paragraph_ids[0], "New first line")
-reopened = Document.open(document.save())
-reopened.paragraph(0).text          # 'New first line'
+print(Document.open(document.save()).paragraph(0).text)
 ```
 
 Saving is deterministic. The engine has no clock, so timestamps come from
@@ -80,8 +76,7 @@ Saving is deterministic. The engine has no clock, so timestamps come from
 same edits produce the same bytes. `save(now=..., update_modified_date=True,
 modified_by=...)` overrides that for one call.
 
-The container is rebuilt rather than patched, so output is not byte-identical to
-the source even with no edits; the parts the model retained survive unchanged.
+Saving rebuilds the ZIP container and preserves untouched retained parts.
 
 ## Export structured content
 
@@ -100,13 +95,12 @@ items, tables and content controls, each with the location it was read from, and
 `diagnostics` for everything omitted or not represented. `revision_view` is
 required (`accepted`, `original`, or `markup`); only the body is exported unless
 `stories` selects `headers`, `footers`, `footnotes`, `endnotes` or `comments`.
-Fields keep their cached result and are never evaluated, and images export alt
-text and relationship metadata, not image data. `max_blocks` and `max_bytes`
-stop the export at a whole block and set `truncated`. `export_markdown` and
-`render_docx_markdown(content)` add a `<!-- docx-export:N -->` marker per block,
-mapped to its anchor in `anchors`. Content with no location of its own is
-anchored `{"kind": "unlocated", "story": ..., "reason": ...}`, never as a
-paragraph.
+Fields export cached results; images export alt text and relationship metadata.
+`max_blocks` and `max_bytes` stop the export at a whole block and set
+`truncated`. `export_markdown` and `render_docx_markdown(content)` add a
+`<!-- docx-export:N -->` marker per block, mapped to its anchor in `anchors`.
+Content with no location of its own is anchored
+`{"kind": "unlocated", "story": ..., "reason": ...}`, never as a paragraph.
 
 ## List content controls
 
@@ -131,7 +125,7 @@ Layout is a two-stage contract. Something else measures text — the browser, or
 into a display list:
 
 ```python
-layout = document.layout({"measured": measured_blocks, "options": {...}})
+layout = document.layout(open("layout-input.json").read())
 print(len(layout), layout.pages)
 layout.write("layout.json")
 
@@ -145,8 +139,7 @@ paints them.
 
 ## Rasterize
 
-**No font is compiled into the wheel**, so a page with text needs at least one
-registered face:
+Register a face for each text family before rasterizing:
 
 ```python
 from pathlib import Path
@@ -163,15 +156,13 @@ Text whose family has no chain raises `RenderError` naming the chain it wanted
 — ``missing font chain for `calibri|0|0` `` — so a missing face is loud rather
 than silently blank.
 
-Images are the opposite: an image reference the backend cannot resolve is
-skipped and counted in `png.skipped_images` instead of failing the page. Word
-hands out relationship ids per part, so `rId9` in the body and `rId9` in a
-header are different images and registration is scoped:
+`png.skipped_images` counts unresolved references. Register image bytes under
+the relationship ID and owning part:
 
 ```python
-document.register_image("rId9", body_png)
-document.register_image("rId9", header_png, scope="header_footer", part="rId7")
-document.register_image("rId4", note_png, scope="footnotes")
+document.register_image(
+    "rId9", Path("header.png").read_bytes(), scope="header_footer", part="rId7"
+)
 ```
 
 Images the display list already carries as `data:` URLs need no registration.
@@ -184,7 +175,6 @@ before any surface is allocated.
 | --- | --- | --- |
 | Read paragraphs, tables, sections | yes | yes |
 | Write text back to a file | yes | yes, single-run paragraphs |
-| Build a document from scratch | yes | no — it edits what you open |
 | Paginate (page boxes, display list) | no | yes |
 | Rasterize pages to PNG | no | yes |
 | Engine | pure Python | Rust, compiled |
@@ -225,7 +215,7 @@ argument — an unknown parse limit, an unknown image scope, malformed font byte
 Parser bounds can be tightened for untrusted input:
 
 ```python
-Document.open(untrusted, limits={"max_paragraphs": 5_000, "max_tables": 500})
+Document.open_path("untrusted.docx", limits={"max_paragraphs": 5_000, "max_tables": 500})
 ```
 
 An unknown limit name raises `ValueError` rather than being ignored.
@@ -239,8 +229,8 @@ documents genuinely proceed in parallel.
 
 ## Status
 
-Pre-1.0: the API may change between minor versions. Editing covers paragraph text on
-plain single-run paragraphs; richer edits land on the Rust facade first.
+Pre-1.0: the API may change between minor versions. Text replacement preserves
+paragraph and run formatting.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.
