@@ -156,6 +156,24 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 styles: old,
             }]))
         }
+        Op::RestoreArrayResult {
+            sheet,
+            anchor,
+            extent,
+            results,
+        } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let Some((old_extent, old_results)) = s.array_result(*anchor) else {
+                return Ok(InvertedOp(Vec::new()));
+            };
+            s.restore_array_result(*anchor, *extent, results);
+            Ok(InvertedOp(vec![Op::RestoreArrayResult {
+                sheet: *sheet,
+                anchor: *anchor,
+                extent: old_extent,
+                results: old_results,
+            }]))
+        }
         Op::SetCharts { sheet, charts } => {
             let sheet_ref = sheet_mut(wb, *sheet)?;
             let old = std::mem::replace(&mut sheet_ref.charts, charts.clone());
@@ -464,7 +482,12 @@ pub fn write_state(sheet: &mut Sheet, at: CellRef, state: &CellState) -> Vec<Cel
         changed = sheet.obstruct_array(anchor);
         changed.retain(|cell| *cell != at);
     }
-    if sheet.array_definition(at) != state.array {
+    let definition = sheet.array_definition(at);
+    let formula = sheet.cell(at).and_then(|cell| cell.formula.clone());
+    if definition.is_some() && (definition != state.array || formula != state.formula) {
+        sheet.suspend(at);
+    }
+    if definition != state.array {
         changed.extend(sheet.set_array_definition(at, None));
     }
     sheet.set_cell(
@@ -476,7 +499,11 @@ pub fn write_state(sheet: &mut Sheet, at: CellRef, state: &CellState) -> Vec<Cel
         },
     );
     if state.array.is_some() {
-        changed.extend(sheet.set_array_definition(at, state.array));
+        if sheet.array_definition(at) != state.array {
+            changed.extend(sheet.set_array_definition(at, state.array));
+        } else if formula != state.formula {
+            changed.extend(sheet.restore_suspended(at));
+        }
     }
     if !state.has_content() {
         changed.extend(sheet.restore_suspended_at(at));
@@ -623,6 +650,14 @@ fn delete_rows(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let span = CellRange::new(
+        CellRef::new(at, 0),
+        CellRef::new(
+            at.saturating_add(count.saturating_sub(1)).min(MAX_ROWS - 1),
+            MAX_COLS - 1,
+        ),
+    );
+    let cut = cut_results(s, sheet, span);
     let deleted = shift_cells(s, op);
     let dropped_heights = shift_row_heights_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
@@ -654,6 +689,7 @@ fn delete_rows(
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
+    inv.extend(cut);
     Ok(InvertedOp(inv))
 }
 
@@ -718,6 +754,14 @@ fn delete_cols(
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
     let old_col_styles = s.col_styles.clone();
+    let span = CellRange::new(
+        CellRef::new(0, at),
+        CellRef::new(
+            MAX_ROWS - 1,
+            at.saturating_add(count.saturating_sub(1)).min(MAX_COLS - 1),
+        ),
+    );
+    let cut = cut_results(s, sheet, span);
     let deleted = shift_cells(s, op);
     let dropped_widths = shift_col_widths_down(s, at, count);
     shift_col_styles_down(s, at, count);
@@ -756,7 +800,25 @@ fn delete_cols(
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
+    inv.extend(cut);
     Ok(InvertedOp(inv))
+}
+
+/// the results of every array a deletion of `span` cuts into, for its inverse
+/// to put back as results rather than as what authors wrote.
+fn cut_results(s: &Sheet, sheet: SheetId, span: CellRange) -> Vec<Op> {
+    s.array_formulas()
+        .filter(|(_, extent)| ranges_intersect(*extent, span))
+        .filter_map(|(anchor, _)| {
+            let (extent, results) = s.array_result(anchor)?;
+            (!results.is_empty()).then_some(Op::RestoreArrayResult {
+                sheet,
+                anchor,
+                extent,
+                results,
+            })
+        })
+        .collect()
 }
 
 /// remap every occupied cell through `op` in place. returns the cells whose
@@ -1280,25 +1342,51 @@ mod tests {
         assert_eq!(wb.sheets[0].result_anchor(r("C3")), Some(r("C1")));
     }
 
-    /// deleting the row an anchor sits on drops its array, and undoing the
-    /// delete brings the definition back with the formula.
+    /// deleting a row or column an array's result runs through drops what
+    /// it cut, and undoing the delete brings back the definition with the
+    /// formula and the result as the array's, not as what an author wrote.
     #[test]
-    fn a_deleted_anchor_row_restores_its_array_on_undo() {
-        let mut wb = spilled();
-        let inverse = apply(
-            &mut wb,
-            &Op::DeleteRows {
+    fn a_deletion_cutting_into_an_array_restores_its_result_on_undo() {
+        for op in [
+            Op::DeleteRows {
                 sheet: SheetId(0),
                 at: 0,
                 count: 1,
             },
-        )
-        .unwrap();
-        assert_eq!(wb.sheets[0].array_formulas().count(), 0);
-        assert!(wb.sheets[0].iter_cells().next().is_none());
-        apply_ops(&mut wb, &inverse.0).unwrap();
-        assert!(wb.sheets[0].is_dynamic_array(r("C1")));
-        assert_eq!(wb.value(SheetId(0), r("C2")), CellValue::Empty);
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+        ] {
+            let mut wb = spilled();
+            let before = wb.clone();
+            let inverse = apply(&mut wb, &op).unwrap();
+            let redo = apply_ops(&mut wb, &inverse.0).unwrap();
+            let sheet = &wb.sheets[0];
+            assert!(sheet.is_dynamic_array(r("C1")), "{op:?}");
+            assert_eq!(
+                sheet.array_formula(r("C1")),
+                before.sheets[0].array_formula(r("C1"))
+            );
+            for (address, value) in [("C1", 1.0), ("C2", 2.0), ("C3", 3.0)] {
+                assert_eq!(wb.value(SheetId(0), r(address)), num(value).value, "{op:?}");
+            }
+            for address in ["C2", "C3"] {
+                assert_eq!(sheet.result_anchor(r(address)), Some(r("C1")), "{op:?}");
+            }
+            let undo = apply_ops(&mut wb, &redo).unwrap();
+            apply_ops(&mut wb, &undo).unwrap();
+            assert_eq!(
+                wb.sheets[0].array_result(r("C1")),
+                before.sheets[0].array_result(r("C1"))
+            );
+        }
     }
 
     #[test]

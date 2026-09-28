@@ -1024,6 +1024,118 @@ fn replicas_agree_on_a_restored_cache_however_it_arrives() {
     same_replicas(&[&writer, &follower, &late]);
 }
 
+/// undoing a row or column deletion that cut into an unevaluable array brings
+/// its cached result back as the array's, through a redo and a save.
+#[test]
+fn undoing_a_deletion_restores_a_cut_cache_the_engine_cannot_recompute() {
+    let bytes = package(UNSUPPORTED, true);
+    for op in [
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 2,
+            count: 1,
+        },
+    ] {
+        let mut workbook = Workbook::open_recalculated(&bytes, options()).unwrap();
+        workbook.apply_ops(vec![op.clone()], options()).unwrap();
+        assert!(!spilled(&workbook), "{op:?}");
+        workbook.undo(options()).unwrap();
+        workbook.redo(options()).unwrap();
+        workbook.undo(options()).unwrap();
+        assert!(spilled(&workbook), "{op:?}");
+        let sheet = workbook.sheet(SheetId(0)).unwrap();
+        for address in ["C2", "C3"] {
+            assert_eq!(
+                sheet.result_anchor(cell(address)),
+                Some(cell("C1")),
+                "{op:?}"
+            );
+        }
+        let saved = workbook.save().unwrap();
+        assert!(sheet_xml(&saved).contains(r#"ref="C1:C3""#), "{op:?}");
+        assert!(spilled(&Workbook::open(&saved).unwrap()), "{op:?}");
+    }
+}
+
+/// what puts an array's result back is internal to undo.
+#[test]
+fn restoring_an_array_result_is_internal() {
+    let bytes = package(UNSUPPORTED, true);
+    for mut workbook in [
+        Workbook::open_recalculated(&bytes, options()).unwrap(),
+        Workbook::open_collaborative_recalculated(&bytes, 181, options()).unwrap(),
+    ] {
+        let before = workbook.model().clone();
+        let error = workbook
+            .apply_ops(
+                vec![Op::RestoreArrayResult {
+                    sheet: SheetId(0),
+                    anchor: cell("C1"),
+                    extent: CellRange::parse_a1("C1:C2").unwrap(),
+                    results: vec![(cell("C2"), number(9.0))],
+                }],
+                options(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("internal"), "{error}");
+        assert_eq!(workbook.model(), &before);
+    }
+}
+
+/// retyping an unevaluable array as one the engine computes and undoing that
+/// brings back the cache it replaced, and redoing it the computed result, on
+/// its own, on a replica following each step and on one seeing them all at
+/// once, and the restored cache survives a save.
+#[test]
+fn undo_and_redo_of_a_retyped_unevaluable_array_keep_both_results() {
+    let bytes = package(UNSUPPORTED, true);
+    let sequence = [number(10.0), number(11.0), number(12.0)];
+    let open =
+        |client| Workbook::open_collaborative_recalculated(&bytes, client, options()).unwrap();
+    let mut solo = Workbook::open_recalculated(&bytes, options()).unwrap();
+    let mut writer = open(171);
+    let mut follower = open(172);
+    let mut late = open(173);
+    for workbook in [&mut solo, &mut writer] {
+        edit(workbook, "C1", "=_xlfn.SEQUENCE(3,1,10)");
+        assert_eq!(column(workbook, &["C1", "C2", "C3"]), sequence);
+    }
+    sync(&writer, &mut follower);
+    for step in 0..3 {
+        for workbook in [&mut solo, &mut writer] {
+            if step == 1 {
+                workbook.redo(options()).unwrap();
+            } else {
+                workbook.undo(options()).unwrap();
+            }
+        }
+        sync(&writer, &mut follower);
+        for workbook in [&solo, &writer, &follower] {
+            if step == 1 {
+                assert_eq!(column(workbook, &["C1", "C2", "C3"]), sequence);
+            } else {
+                assert!(spilled(workbook));
+            }
+        }
+    }
+    sync(&writer, &mut late);
+    assert!(spilled(&late));
+    same_replicas(&[&writer, &follower, &late]);
+    for workbook in [&solo, &writer, &late] {
+        assert!(spilled(&Workbook::open(&workbook.save().unwrap()).unwrap()));
+    }
+}
+
 /// `A1:A2*2` entered with ctrl-shift-enter over C1:C2.
 const LEGACY: &str = concat!(
     r#"<row r="1"><c r="A1"><v>3</v></c><c r="C1"><f t="array" ref="C1:C2">A1:A2*2</f><v>6</v></c></row>"#,

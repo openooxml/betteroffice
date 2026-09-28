@@ -2407,6 +2407,7 @@ impl Workbook {
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
+                | Op::RestoreArrayResult { sheet, .. }
                 | Op::MergeCells { sheet, .. }
                 | Op::UnmergeCells { sheet, .. }
                 | Op::PatchRangeStyle { sheet, .. }
@@ -3147,6 +3148,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
+        | Op::RestoreArrayResult { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
@@ -3292,7 +3294,8 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetCharts { .. }
-        | Op::RestoreColStyles { .. } => {
+        | Op::RestoreColStyles { .. }
+        | Op::RestoreArrayResult { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
             ));

@@ -1,7 +1,7 @@
 //! sparse workbook containers and the calc-facing cell-access trait.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Range, RangeInclusive};
 
 use serde::{Deserialize, Serialize};
@@ -157,9 +157,23 @@ pub struct Sheet {
 
 /// results arrays gave up, kept apart from what authors wrote so that undoing
 /// what took them brings them back, the caches the engine cannot recompute
-/// included. derived state, so it never makes two sheets differ.
+/// included. an anchor keeps one per definition and formula it has held, so
+/// undo and redo each find the result of the formula they bring back.
+/// derived state, so it never makes two sheets differ.
 #[derive(Debug, Clone, Default)]
-struct SuspendedResults(BTreeMap<(RowId, ColId), Suspended>);
+struct SuspendedResults(BTreeMap<(RowId, ColId), Vec<Suspended>>);
+
+impl SuspendedResults {
+    /// keeps `suspended`, replacing what was kept for its definition and
+    /// formula.
+    fn keep(&mut self, key: (RowId, ColId), suspended: Suspended) {
+        let entries = self.0.entry(key).or_default();
+        entries.retain(|entry| {
+            entry.definition != suspended.definition || entry.formula != suspended.formula
+        });
+        entries.push(suspended);
+    }
+}
 
 impl PartialEq for SuspendedResults {
     fn eq(&self, _: &Self) -> bool {
@@ -336,9 +350,9 @@ impl Sheet {
     }
 
     /// keeps what the array anchored at `anchor` holds now, for restoring it.
-    fn suspend(&mut self, anchor: CellRef) {
+    pub fn suspend(&mut self, anchor: CellRef) {
         if let Some(suspended) = Self::suspended_from(self, anchor) {
-            self.suspended.0.insert((anchor.row, anchor.col), suspended);
+            self.suspended.keep((anchor.row, anchor.col), suspended);
         }
     }
 
@@ -362,29 +376,40 @@ impl Sheet {
         })
     }
 
-    /// brings back what the array anchored at `anchor` gave up, once it again
-    /// carries the definition and formula it had and nothing an author wrote
-    /// or another array fills sits in its old rectangle. returns the cells that
-    /// changed.
+    /// brings back what the array anchored at `anchor` gave up under the
+    /// definition and formula it carries again, once nothing an author wrote
+    /// or another array fills sits in that result's rectangle. returns the
+    /// cells that changed.
     pub fn restore_suspended(&mut self, anchor: CellRef) -> Vec<CellRef> {
         let key = (anchor.row, anchor.col);
-        let Some(suspended) = self.suspended.0.get(&key) else {
+        let Some(current) = self.array_formulas.get(&key).map(|array| array.definition) else {
             return Vec::new();
         };
-        let current = self.array_formulas.get(&key).map(|array| array.definition);
-        let formula = self.cell(anchor).and_then(|cell| cell.formula.as_ref());
-        let free = self.cells_in_range(suspended.extent).all(|(at, _)| {
+        let formula = self.cell(anchor).and_then(|cell| cell.formula.clone());
+        let Some(index) = self.suspended.0.get(&key).and_then(|entries| {
+            entries
+                .iter()
+                .position(|entry| entry.definition == current && entry.formula == formula)
+        }) else {
+            return Vec::new();
+        };
+        let extent = self.suspended.0[&key][index].extent;
+        let free = self.cells_in_range(extent).all(|(at, _)| {
             (at.row, at.col) == key
                 || (!self.authored_at(at)
                     && self
                         .result_anchor(at)
                         .is_none_or(|owner| (owner.row, owner.col) == key))
         });
-        if current != Some(suspended.definition) || formula != suspended.formula.as_ref() || !free {
+        if !free {
             return Vec::new();
         }
-        let suspended = self.suspended.0.remove(&key).expect("checked above");
-        let mut changed = Vec::new();
+        let entries = self.suspended.0.get_mut(&key).expect("found above");
+        let suspended = entries.remove(index);
+        if entries.is_empty() {
+            self.suspended.0.remove(&key);
+        }
+        let mut changed = self.clear_results(anchor);
         for ((row, col), value) in suspended.results {
             let at = CellRef::new(row, col);
             self.write_result(at, anchor, value);
@@ -406,8 +431,9 @@ impl Sheet {
         self.suspended
             .0
             .iter()
-            .filter(|(key, suspended)| **key == (at.row, at.col) || suspended.extent.contains(at))
-            .flat_map(|(&(row, col), suspended)| {
+            .flat_map(|(&key, entries)| entries.iter().map(move |entry| (key, entry)))
+            .filter(|(key, suspended)| *key == (at.row, at.col) || suspended.extent.contains(at))
+            .flat_map(|((row, col), suspended)| {
                 std::iter::once(CellRef::new(row, col)).chain(
                     suspended
                         .results
@@ -425,7 +451,7 @@ impl Sheet {
             .suspended
             .0
             .iter()
-            .filter(|(_, suspended)| suspended.extent.contains(at))
+            .filter(|(_, entries)| entries.iter().any(|entry| entry.extent.contains(at)))
             .map(|(&(row, col), _)| CellRef::new(row, col))
             .collect();
         anchors
@@ -551,6 +577,42 @@ impl Sheet {
         }
     }
 
+    /// the rectangle the array anchored at `anchor` fills and the result it
+    /// holds there beside the anchor.
+    pub fn array_result(&self, anchor: CellRef) -> Option<(CellRange, Vec<(CellRef, CellValue)>)> {
+        let key = (anchor.row, anchor.col);
+        let extent = self.array_formulas.get(&key)?.extent;
+        let results = self
+            .cells_in_range(extent)
+            .filter(|(at, _)| self.results.get(&(at.row, at.col)) == Some(&key))
+            .map(|(at, cell)| (at, cell.value.clone()))
+            .collect();
+        Some((extent, results))
+    }
+
+    /// makes `results` the result of the array anchored at `anchor`, filling
+    /// `extent`, in the cells no author or other array took. returns the
+    /// cells that changed.
+    pub fn restore_array_result(
+        &mut self,
+        anchor: CellRef,
+        extent: CellRange,
+        results: &[(CellRef, CellValue)],
+    ) -> Vec<CellRef> {
+        if !self.array_formulas.contains_key(&(anchor.row, anchor.col)) {
+            return Vec::new();
+        }
+        let mut changed = self.clear_results(anchor);
+        self.set_array_extent(anchor, extent, extent);
+        for (at, value) in results {
+            if extent.contains(*at) && !self.authored_at(*at) && self.result_anchor(*at).is_none() {
+                self.write_result(*at, anchor, value.clone());
+                changed.push(*at);
+            }
+        }
+        changed
+    }
+
     /// removes the anchor's result; returns the cells that held it.
     pub fn clear_results(&mut self, anchor: CellRef) -> Vec<CellRef> {
         let Some(extent) = self.array_formula(anchor) else {
@@ -629,7 +691,7 @@ impl Sheet {
     /// what took it is undone.
     pub fn carry_results(&mut self, source: &Sheet) {
         self.suspended = source.suspended.clone();
-        let mut carried = Vec::new();
+        let mut carried = BTreeSet::new();
         let anchors: Vec<(RowId, ColId)> = self.array_formulas.keys().copied().collect();
         for key in anchors {
             let anchor = CellRef::new(key.0, key.1);
@@ -642,7 +704,7 @@ impl Sheet {
             if !same {
                 continue;
             }
-            carried.push(key);
+            carried.insert(key);
             self.set_array_extent(anchor, previous.extent, previous.attempted);
             let results: Vec<(CellRef, CellValue)> = source
                 .cells_in_range(previous.extent)
@@ -651,7 +713,7 @@ impl Sheet {
                 .collect();
             if results.iter().any(|(at, _)| self.authored_at(*at)) {
                 if let Some(suspended) = Self::suspended_from(source, anchor) {
-                    self.suspended.0.insert(key, suspended);
+                    self.suspended.keep(key, suspended);
                 }
                 self.obstruct_array(anchor);
                 continue;
@@ -660,15 +722,11 @@ impl Sheet {
                 self.write_result(at, anchor, value);
             }
         }
-        let retired: Vec<(RowId, ColId)> = source
-            .array_formulas
-            .keys()
-            .filter(|key| !carried.contains(key))
-            .copied()
-            .collect();
-        for key in retired {
-            if let Some(suspended) = Self::suspended_from(source, CellRef::new(key.0, key.1)) {
-                self.suspended.0.insert(key, suspended);
+        for &key in source.array_formulas.keys() {
+            if !carried.contains(&key)
+                && let Some(suspended) = Self::suspended_from(source, CellRef::new(key.0, key.1))
+            {
+                self.suspended.keep(key, suspended);
             }
         }
         let waiting: Vec<(RowId, ColId)> = self
@@ -839,27 +897,33 @@ impl Sheet {
         }
         self.array_formulas = moved;
         let suspended = std::mem::take(&mut self.suspended.0);
-        for ((row, col), mut entry) in suspended {
+        for ((row, col), entries) in suspended {
             let Some(to) = remap(CellRef::new(row, col)) else {
                 continue;
             };
-            let rows = entry.extent.end.row.saturating_sub(entry.extent.start.row);
-            let cols = entry.extent.end.col.saturating_sub(entry.extent.start.col);
-            entry.extent = CellRange::new(
-                to,
-                CellRef::new(
-                    to.row.saturating_add(rows).min(crate::addr::MAX_ROWS - 1),
-                    to.col.saturating_add(cols).min(crate::addr::MAX_COLS - 1),
-                ),
-            );
-            entry.results = entry
-                .results
+            let entries = entries
                 .into_iter()
-                .filter_map(|((row, col), value)| {
-                    remap(CellRef::new(row, col)).map(|at| ((at.row, at.col), value))
+                .map(|mut entry| {
+                    let rows = entry.extent.end.row.saturating_sub(entry.extent.start.row);
+                    let cols = entry.extent.end.col.saturating_sub(entry.extent.start.col);
+                    entry.extent = CellRange::new(
+                        to,
+                        CellRef::new(
+                            to.row.saturating_add(rows).min(crate::addr::MAX_ROWS - 1),
+                            to.col.saturating_add(cols).min(crate::addr::MAX_COLS - 1),
+                        ),
+                    );
+                    entry.results = entry
+                        .results
+                        .into_iter()
+                        .filter_map(|((row, col), value)| {
+                            remap(CellRef::new(row, col)).map(|at| ((at.row, at.col), value))
+                        })
+                        .collect();
+                    entry
                 })
                 .collect();
-            self.suspended.0.insert((to.row, to.col), entry);
+            self.suspended.0.insert((to.row, to.col), entries);
         }
     }
 
@@ -1235,6 +1299,48 @@ impl CellProvider for Workbook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// a projection carries every array's result across in time linear in
+    /// how many arrays the sheet holds, whether they carry over or retire.
+    #[test]
+    fn carrying_results_scales_with_the_arrays_a_sheet_holds() {
+        const ARRAYS: u32 = 50_000;
+        let mut source = Sheet::new("Sheet1");
+        let mut projected = Sheet::new("Sheet1");
+        for row in 0..ARRAYS {
+            let anchor = CellRef::new(row, 0);
+            let formula = |text: &str| Cell {
+                value: CellValue::Number { value: 1.0 },
+                formula: Some(text.into()),
+                style: None,
+            };
+            source.set_cell(anchor, formula("_xlfn.SEQUENCE(1,2)"));
+            source.set_cell(
+                CellRef::new(row, 1),
+                Cell {
+                    value: CellValue::Number { value: 2.0 },
+                    ..Cell::default()
+                },
+            );
+            source.set_dynamic_array_formula(anchor, CellRange::new(anchor, CellRef::new(row, 1)));
+            let retyped = if row % 2 == 0 {
+                "_xlfn.SEQUENCE(1,2)"
+            } else {
+                "_xlfn.SEQUENCE(1,3)"
+            };
+            projected.set_cell(anchor, formula(retyped));
+            projected.set_dynamic_array_formula(anchor, CellRange::new(anchor, anchor));
+        }
+        let start = std::time::Instant::now();
+        projected.carry_results(&source);
+        let elapsed = start.elapsed();
+        assert_eq!(
+            projected.result_anchor(CellRef::new(ARRAYS - 2, 1)),
+            Some(CellRef::new(ARRAYS - 2, 0))
+        );
+        assert_eq!(projected.result_anchor(CellRef::new(ARRAYS - 1, 1)), None);
+        assert!(elapsed.as_secs_f64() < 2.0, "carrying took {elapsed:?}");
+    }
 
     #[test]
     fn sparse_set_get_and_used_range() {

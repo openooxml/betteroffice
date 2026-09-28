@@ -128,6 +128,16 @@ pub enum Op {
         sheet: SheetId,
         styles: Vec<ColStyle>,
     },
+    /// Puts back the rectangle an array filled and the result it held beside
+    /// its anchor, as derived cells: the inverse of a deletion that cut into
+    /// it.
+    #[doc(hidden)]
+    RestoreArrayResult {
+        sheet: SheetId,
+        anchor: CellRef,
+        extent: CellRange,
+        results: Vec<(CellRef, CellValue)>,
+    },
     /// Absolute replacement emitted as the inverse of a chart remap.
     #[doc(hidden)]
     SetCharts {
