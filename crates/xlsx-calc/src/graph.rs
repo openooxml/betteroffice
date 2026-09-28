@@ -76,6 +76,22 @@ impl DepGraph {
     /// build the whole graph from a workbook's stored formulas; unparseable
     /// formulas are skipped.
     pub fn build(wb: &Workbook) -> Self {
+        let mut g = Self::empty(wb);
+        for (i, sheet) in wb.sheets.iter().enumerate() {
+            let sid = SheetId(i as u32);
+            for (cell, c) in sheet.iter_cells() {
+                if let Some(src) = &c.formula {
+                    g.install(NodeKey::new(sid, cell), src);
+                }
+            }
+        }
+        g.refresh_spills(wb);
+        g
+    }
+
+    /// a graph over `wb`'s sheets, names and tables that holds no formula
+    /// yet, for [`DepGraph::set_formula`] to add the ones a caller asks about.
+    pub(crate) fn empty(wb: &Workbook) -> Self {
         let names = wb
             .sheets
             .iter()
@@ -94,7 +110,7 @@ impl DepGraph {
             .iter()
             .map(|table| (table.name.to_lowercase(), table.clone()))
             .collect();
-        let mut g = DepGraph {
+        DepGraph {
             names,
             defined_names,
             defined_name_indices,
@@ -106,17 +122,7 @@ impl DepGraph {
             spills_by_sheet: HashMap::new(),
             obstructed_by_sheet: HashMap::new(),
             asts: ParseCache::default(),
-        };
-        for (i, sheet) in wb.sheets.iter().enumerate() {
-            let sid = SheetId(i as u32);
-            for (cell, c) in sheet.iter_cells() {
-                if let Some(src) = &c.formula {
-                    g.install(NodeKey::new(sid, cell), src);
-                }
-            }
         }
-        g.refresh_spills(wb);
-        g
     }
 
     /// re-derive one node's edges after its formula changed, without touching
@@ -257,6 +263,14 @@ impl DepGraph {
     /// every volatile formula cell, in unspecified order.
     pub fn volatile_cells(&self) -> impl Iterator<Item = (SheetId, CellRef)> + '_ {
         self.volatile.iter().map(|k| (k.sheet, k.cell()))
+    }
+
+    /// the ranges the formula at `cell` reads, through its names and tables
+    /// too.
+    pub(crate) fn reads(&self, sheet: SheetId, cell: CellRef) -> &[(SheetId, CellRange)] {
+        self.deps
+            .get(&NodeKey::new(sheet, cell))
+            .map_or(&[], |node| node.edges.as_slice())
     }
 
     /// parsed asts shared with `engine::run_recalc` evaluation.

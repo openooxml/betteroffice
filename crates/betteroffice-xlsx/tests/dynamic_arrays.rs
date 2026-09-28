@@ -1288,6 +1288,63 @@ fn a_binding_reaches_through_an_alias() {
     }
 }
 
+/// the evaluator scopes names dynamically, so a `LAMBDA` stored in a `LET` and
+/// called later reads the name the `LET` binds after it: a cached file whose
+/// array reaches a workbook name the engine cannot evaluate only through such
+/// a name opens evaluable and follows its inputs, while one binding no such
+/// name stays opaque.
+#[test]
+fn a_name_bound_anywhere_in_the_formula_may_shadow_a_workbook_name() {
+    let names = || {
+        [
+            ("Remote", r#"WEBSERVICE("https://example.com")"#),
+            ("Alias", "Remote"),
+        ]
+        .map(|(name, formula)| DefinedName {
+            name: name.into(),
+            formula: formula.into(),
+            local_sheet: None,
+            hidden: false,
+        })
+        .to_vec()
+    };
+    let cached = |formula: &str| {
+        format!(
+            r#"<row r="1"><c r="A1"><v>2</v></c><c r="C1" cm="1"><f t="array" ref="C1:C3">{formula}</f><v>2</v></c></row><row r="2"><c r="C2"><v>4</v></c></row><row r="3"><c r="C3"><v>6</v></c></row>"#
+        )
+    };
+    let stored = package_named(
+        &cached("_xlfn.LET(fn,_xlfn.LAMBDA(x,Alias*x),Remote,A1,_xlfn.MAP({1;2;3},fn))"),
+        true,
+        names(),
+    );
+    let mut workbook = Workbook::open_recalculated(&stored, options()).unwrap();
+    assert!(
+        !workbook.model().sheets[0]
+            .array_definition(cell("C1"))
+            .unwrap()
+            .is_opaque()
+    );
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3"]),
+        [2.0, 4.0, 6.0].map(number)
+    );
+    edit(&mut workbook, "A1", "3");
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3"]),
+        [3.0, 6.0, 9.0].map(number)
+    );
+
+    let unbound = package_named(&cached("Alias*_xlfn.SEQUENCE(3)"), true, names());
+    let mut workbook = Workbook::open_recalculated(&unbound, options()).unwrap();
+    assert!(opaque(&workbook));
+    edit(&mut workbook, "A1", "3");
+    assert_eq!(
+        column(&workbook, &["C1", "C2", "C3"]),
+        [2.0, 4.0, 6.0].map(number)
+    );
+}
+
 /// deleting a row or column inside an opaque array shrinks its rectangle
 /// with it, so clearing the anchor afterwards leaves what moved up beside it
 /// alone; undo gives the rectangle back.

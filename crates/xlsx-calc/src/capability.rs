@@ -11,12 +11,13 @@ use xlsx_model::{
 
 use crate::array::evaluate_spill;
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS};
+use crate::graph::DepGraph;
 use crate::parser::{Expr, parse_formula};
 
-/// analysis steps one [`Capability`] takes, each expression node, binding
-/// and name reference it visits, before it answers no for whatever still
-/// needs more.
-const MAX_WORK: usize = 1 << 22;
+/// analysis steps one formula's classification takes, each expression node,
+/// binding and name reference it visits, before it answers no for that
+/// formula alone.
+const MAX_WORK: usize = 1 << 20;
 
 /// whether the engine implements everything `formula`, on `sheet`, could
 /// run: it parses, and every function it calls, in every branch and in every
@@ -57,20 +58,31 @@ pub fn classify_arrays(wb: &mut Workbook) {
     fill_uncached(wb);
 }
 
+/// an opaque array whose anchor holds no cached value, with the rectangle it
+/// fills and whether its formula can be evaluated reproducibly.
+struct Uncached {
+    sheet: usize,
+    anchor: CellRef,
+    rectangle: CellRange,
+    formula: String,
+    deterministic: bool,
+}
+
 /// Stores what each opaque array whose anchor holds no cached value shows,
 /// over its recorded rectangle. A formula that can read neither the clock nor
 /// a random number, in any branch or name, is evaluated once against the
 /// workbook as read, within one recalculation's budget and with its date
 /// system, a function the engine lacks yielding `#NAME?` as it would at
-/// runtime; identical bytes therefore always read the same. Any other, and
-/// one the budget refuses, shows `#NAME?`, as Excel shows an array it cannot
-/// evaluate. At most [`MAX_SPILL_CELLS`] cells are filled per workbook;
-/// anchors past that fill the anchor alone.
+/// runtime; identical bytes therefore always read the same. Arrays that read
+/// one another's rectangles are evaluated in that order, each stored before
+/// the ones reading it. Any other array, one in or behind a cycle of them,
+/// and one the budget refuses, shows `#NAME?`, as Excel shows an array it
+/// cannot evaluate. At most [`MAX_SPILL_CELLS`] cells are filled per
+/// workbook; anchors past that fill the anchor alone.
 fn fill_uncached(wb: &mut Workbook) {
     let mut room = MAX_SPILL_CELLS;
     let mut capability = Capability::new(wb);
-    let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
-    let mut fills: Vec<(usize, CellRef, CellRange, Vec<CellValue>)> = Vec::new();
+    let mut uncached = Vec::new();
     for (index, sheet) in wb.sheets.iter().enumerate() {
         for (anchor, definition, _) in sheet.array_definitions() {
             let Some(formula) = sheet
@@ -90,54 +102,135 @@ fn fill_uncached(wb: &mut Workbook) {
             } else {
                 CellRange::new(anchor, anchor)
             };
-            let sheet_id = SheetId(index as u32);
-            let evaluated = capability
-                .deterministic(sheet_id, formula)
-                .then(|| parse_formula(formula).ok())
-                .flatten()
-                .and_then(|expr| {
-                    let mut ctx = EvalContext::with_budget(&*wb, sheet_id, Rc::clone(&budget));
-                    ctx.cell = Some(anchor);
-                    ctx.date_system = wb.date_system;
-                    let spill = evaluate_spill(&expr, &ctx, anchor, Some(rectangle));
-                    (!ctx.has_unhandled_budget_error()).then_some(spill.values)
-                });
-            let name = CellValue::Error {
-                value: ErrorValue::Name,
-            };
-            let positions = ArraySize::of(rectangle);
-            let values = evaluated
-                .unwrap_or_else(|| vec![name; positions.rows as usize * positions.cols as usize]);
-            fills.push((index, anchor, rectangle, values));
+            uncached.push(Uncached {
+                sheet: index,
+                anchor,
+                rectangle,
+                formula: formula.to_owned(),
+                deterministic: capability.deterministic(SheetId(index as u32), formula),
+            });
         }
     }
-    for (index, anchor, rectangle, values) in fills {
-        let sheet = &mut wb.sheets[index];
-        let positions = (rectangle.start.row..=rectangle.end.row).flat_map(|row| {
-            (rectangle.start.col..=rectangle.end.col).map(move |col| CellRef::new(row, col))
-        });
-        for (at, value) in positions.zip(values) {
-            let stored = sheet.cell(at).cloned().unwrap_or_default();
-            let free = matches!(stored.value, CellValue::Empty)
-                && stored
-                    .formula
-                    .as_deref()
-                    .is_none_or(|formula| formula.trim().is_empty());
-            if (at.row, at.col) == (anchor.row, anchor.col) || free {
-                sheet.set_cell(at, Cell { value, ..stored });
+    if uncached.is_empty() {
+        return;
+    }
+    let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
+    let order = evaluation_order(wb, &uncached, &budget);
+    for (position, array) in uncached.iter().enumerate() {
+        if !order.contains(&position) {
+            store(wb, array, None);
+        }
+    }
+    for position in order {
+        let array = &uncached[position];
+        let values = evaluate(wb, array, &budget);
+        store(wb, array, values);
+    }
+}
+
+/// the deterministic arrays among `uncached` in an order where each comes
+/// after every one whose rectangle it reads. an array in or behind a cycle
+/// of them is left out, as is every one once the budget refuses to pay for
+/// working the order out.
+fn evaluation_order(wb: &Workbook, uncached: &[Uncached], budget: &EvaluationBudget) -> Vec<usize> {
+    let candidates: Vec<usize> = (0..uncached.len())
+        .filter(|&position| uncached[position].deterministic)
+        .collect();
+    let mut graph = DepGraph::empty(wb);
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); uncached.len()];
+    let mut waiting = vec![0usize; uncached.len()];
+    for &reader in &candidates {
+        let array = &uncached[reader];
+        let sheet = SheetId(array.sheet as u32);
+        graph.set_formula(sheet, array.anchor, Some(&array.formula));
+        let reads = graph.reads(sheet, array.anchor);
+        if !budget.consume((reads.len() * candidates.len()) as u64) {
+            return Vec::new();
+        }
+        for &written in &candidates {
+            let target = &uncached[written];
+            let read = reads.iter().any(|(sheet, range)| {
+                sheet.0 as usize == target.sheet && range.overlaps(&target.rectangle)
+            });
+            if read {
+                readers[written].push(reader);
+                waiting[reader] += 1;
             }
+        }
+        graph.set_formula(sheet, array.anchor, None);
+    }
+    let mut ready: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&position| waiting[position] == 0)
+        .rev()
+        .collect();
+    let mut order = Vec::with_capacity(candidates.len());
+    while let Some(position) = ready.pop() {
+        order.push(position);
+        for &reader in readers[position].iter().rev() {
+            waiting[reader] -= 1;
+            if waiting[reader] == 0 {
+                ready.push(reader);
+            }
+        }
+    }
+    order
+}
+
+/// what `array` shows over its rectangle, `None` when the budget refuses it.
+fn evaluate(
+    wb: &Workbook,
+    array: &Uncached,
+    budget: &Rc<EvaluationBudget>,
+) -> Option<Vec<CellValue>> {
+    let expr = parse_formula(&array.formula).ok()?;
+    let sheet = SheetId(array.sheet as u32);
+    let mut ctx = EvalContext::with_budget(wb, sheet, Rc::clone(budget));
+    ctx.cell = Some(array.anchor);
+    ctx.date_system = wb.date_system;
+    let spill = evaluate_spill(&expr, &ctx, array.anchor, Some(array.rectangle));
+    (!ctx.has_unhandled_budget_error()).then_some(spill.values)
+}
+
+/// writes `values`, or `#NAME?` throughout, over `array`'s rectangle as
+/// stored cells: its anchor and every cell there nothing else holds.
+fn store(wb: &mut Workbook, array: &Uncached, values: Option<Vec<CellValue>>) {
+    let size = ArraySize::of(array.rectangle);
+    let values = values.unwrap_or_else(|| {
+        let name = CellValue::Error {
+            value: ErrorValue::Name,
+        };
+        vec![name; size.rows as usize * size.cols as usize]
+    });
+    let rectangle = array.rectangle;
+    let positions = (rectangle.start.row..=rectangle.end.row).flat_map(|row| {
+        (rectangle.start.col..=rectangle.end.col).map(move |col| CellRef::new(row, col))
+    });
+    let sheet = &mut wb.sheets[array.sheet];
+    for (at, value) in positions.zip(values) {
+        let stored = sheet.cell(at).cloned().unwrap_or_default();
+        let free = matches!(stored.value, CellValue::Empty)
+            && stored
+                .formula
+                .as_deref()
+                .is_none_or(|formula| formula.trim().is_empty());
+        if (at.row, at.col) == (array.anchor.row, array.anchor.col) || free {
+            sheet.set_cell(at, Cell { value, ..stored });
         }
     }
 }
 
 /// [`evaluable`] for many formulas of one workbook, looking its defined names
 /// up by index and deciding each name, for the sheet it is read from and the
-/// bindings around it, once.
+/// names bound anywhere around it, once. each formula's classification has
+/// its own bound on work; the decisions it settles are shared.
 pub struct Capability<'a> {
     wb: &'a Workbook,
     names: HashMap<(Option<SheetId>, String), usize>,
     parsed: HashMap<usize, Option<Rc<Parsed>>>,
     decided: [HashMap<Node, bool>; 2],
+    reached: HashMap<(usize, SheetId), Rc<[String]>>,
     work: usize,
     limit: usize,
 }
@@ -162,40 +255,17 @@ impl Check {
 }
 
 /// a defined name as the walk expands it: its index, the sheet its
-/// unqualified references resolve against, and the names bound where it is
-/// read, which the evaluator keeps bound inside it.
+/// unqualified references resolve against, and the names that may be bound
+/// when it is read.
 type Node = (usize, SheetId, Rc<[String]>);
 
-/// a name a formula reads: the sheet qualifying it, if any, and the
-/// innermost of the formula's bindings around it.
-#[derive(Clone)]
-struct Reference {
-    scope: Option<String>,
-    name: String,
-    within: Option<usize>,
-}
-
-/// what a formula calls and names, gathered once: the names no `LET` or
-/// `LAMBDA` in it binds, every name it reads, bound or not, and its bindings,
-/// each with the one around it.
+/// what a formula calls, the names it reads and the names its `LET`s and
+/// `LAMBDA`s bind, gathered once.
 struct Parsed {
     supported: bool,
     volatile: bool,
-    names: Vec<Reference>,
-    every: Vec<Reference>,
-    bindings: Vec<(Option<usize>, String)>,
-}
-
-impl Parsed {
-    /// the names `check` follows: a binding shadows a workbook name for
-    /// evaluation, but whether a `LAMBDA` sees the binding around it depends
-    /// on where it is called, so determinism follows every name.
-    fn names(&self, check: Check) -> &[Reference] {
-        match check {
-            Check::Supported => &self.names,
-            Check::Deterministic => &self.every,
-        }
-    }
+    reads: Vec<(Option<String>, String)>,
+    binds: Vec<String>,
 }
 
 /// one defined name being expanded: what its formula reads, how far through
@@ -223,11 +293,17 @@ impl<'a> Capability<'a> {
             names,
             parsed: HashMap::new(),
             decided: [HashMap::new(), HashMap::new()],
+            reached: HashMap::new(),
             work: 0,
             limit: MAX_WORK,
         }
     }
 
+    /// [`evaluable`] against this workbook. the evaluator scopes names
+    /// dynamically, so a `LAMBDA` or a defined name sees whatever its caller
+    /// has bound when it runs: a name that any `LET` or `LAMBDA` in the
+    /// formula, or in a defined name it reaches, binds may stand for that
+    /// binding and is not followed as a workbook name.
     pub fn evaluable(&mut self, sheet: SheetId, formula: &str) -> bool {
         self.check(sheet, formula, Check::Supported)
     }
@@ -235,19 +311,32 @@ impl<'a> Capability<'a> {
     /// whether nothing `formula`, on `sheet`, could run, in any branch or
     /// defined name it reaches, reads the clock, draws a random number or is
     /// otherwise volatile to the engine, so evaluating it twice over the same
-    /// cells gives the same result.
+    /// cells gives the same result. every name it reads is followed, bound or
+    /// not.
     pub fn deterministic(&mut self, sheet: SheetId, formula: &str) -> bool {
         self.check(sheet, formula, Check::Deterministic)
     }
 
     fn check(&mut self, sheet: SheetId, formula: &str, check: Check) -> bool {
+        self.work = 0;
         let Some(parsed) = parse_formula(formula)
             .ok()
             .and_then(|expr| gather(&expr, &mut self.work, self.limit))
         else {
             return false;
         };
-        check.holds(&parsed) && self.names_hold(sheet, Rc::new(parsed), check)
+        if !check.holds(&parsed) {
+            return false;
+        }
+        let parsed = Rc::new(parsed);
+        let bound = match check {
+            Check::Supported => match self.bound_anywhere(sheet, &parsed) {
+                Some(bound) => bound,
+                None => return false,
+            },
+            Check::Deterministic => Rc::from(Vec::new()),
+        };
+        self.names_hold(sheet, parsed, check, bound)
     }
 
     /// the index of the name `name` reads as from `sheet`, local before
@@ -272,59 +361,132 @@ impl<'a> Capability<'a> {
         Some((index, scope))
     }
 
-    fn parsed(&mut self, index: usize) -> Option<Rc<Parsed>> {
-        let (wb, work, limit) = (self.wb, &mut self.work, self.limit);
-        self.parsed
-            .entry(index)
-            .or_insert_with(|| {
-                let formula = &wb.defined_names[index].formula;
-                let formula = formula.strip_prefix('=').unwrap_or(formula);
-                parse_formula(formula)
-                    .ok()
-                    .and_then(|expr| gather(&expr, work, limit))
-                    .map(Rc::new)
-            })
-            .clone()
+    /// the parsed definition of the name at `index`, `Some(None)` when it
+    /// does not parse, and `None` when gathering it passes the bound, which
+    /// is not kept, so a later formula tries again with its own.
+    fn parsed(&mut self, index: usize) -> Option<Option<Rc<Parsed>>> {
+        if let Some(parsed) = self.parsed.get(&index) {
+            return Some(parsed.clone());
+        }
+        let formula = &self.wb.defined_names[index].formula;
+        let formula = formula.strip_prefix('=').unwrap_or(formula);
+        let parsed = match parse_formula(formula) {
+            Ok(expr) => Some(Rc::new(gather(&expr, &mut self.work, self.limit)?)),
+            Err(_) => None,
+        };
+        self.parsed.insert(index, parsed.clone());
+        Some(parsed)
     }
 
-    /// the names bound where `reference` sits in `parsed`, beside the ones
-    /// `outer` already holds, sorted; each is charged, `None` past the bound.
-    fn bound_around(
-        &mut self,
-        outer: &[String],
-        parsed: &Parsed,
-        reference: &Reference,
-    ) -> Option<Rc<[String]>> {
-        let mut names = outer.to_vec();
-        let mut within = reference.within;
-        while let Some(at) = within {
-            let (parent, name) = &parsed.bindings[at];
-            names.push(name.clone());
-            within = *parent;
+    /// every name a `LET` or `LAMBDA` binds in `parsed` or in a defined name
+    /// reachable from it through any name it reads, sorted; `None` past the
+    /// bound. what each defined name reaches is settled once, a group of
+    /// names reaching one another together, as in [`Capability::names_hold`].
+    fn bound_anywhere(&mut self, sheet: SheetId, parsed: &Rc<Parsed>) -> Option<Rc<[String]>> {
+        struct Reach {
+            name: (usize, SheetId),
+            order: usize,
+            start: usize,
+            parsed: Rc<Parsed>,
+            next: usize,
+            low: usize,
+            binds: Vec<String>,
         }
-        self.work += names.len();
-        if self.work > self.limit {
-            return None;
+        let mut order: HashMap<(usize, SheetId), usize> = HashMap::new();
+        let mut pending: Vec<(usize, SheetId)> = Vec::new();
+        let mut root = Reach {
+            name: (usize::MAX, sheet),
+            order: usize::MAX,
+            start: 0,
+            parsed: Rc::clone(parsed),
+            next: 0,
+            low: usize::MAX,
+            binds: parsed.binds.clone(),
+        };
+        let mut stack: Vec<Reach> = Vec::new();
+        loop {
+            let frame = stack.last_mut().unwrap_or(&mut root);
+            if frame.next < frame.parsed.reads.len() {
+                let (scope, name) = frame.parsed.reads[frame.next].clone();
+                frame.next += 1;
+                let from = frame.name.1;
+                self.work += 1;
+                if self.work > self.limit {
+                    return None;
+                }
+                let Some(name) = self.resolve(from, &scope, &name) else {
+                    continue;
+                };
+                if let Some(reached) = self.reached.get(&name) {
+                    self.work += reached.len();
+                    let reached = Rc::clone(reached);
+                    let frame = stack.last_mut().unwrap_or(&mut root);
+                    frame.binds.extend(reached.iter().cloned());
+                    continue;
+                }
+                if let Some(&seen) = order.get(&name) {
+                    let frame = stack.last_mut().unwrap_or(&mut root);
+                    frame.low = frame.low.min(seen);
+                    continue;
+                }
+                let Some(expanded) = self.parsed(name.0)? else {
+                    continue;
+                };
+                self.work += expanded.binds.len();
+                let at = order.len();
+                order.insert(name, at);
+                let start = pending.len();
+                pending.push(name);
+                stack.push(Reach {
+                    name,
+                    order: at,
+                    start,
+                    binds: expanded.binds.clone(),
+                    parsed: expanded,
+                    next: 0,
+                    low: at,
+                });
+                continue;
+            }
+            let Some(mut done) = stack.pop() else {
+                break;
+            };
+            let parent = stack.last_mut().unwrap_or(&mut root);
+            if done.low >= done.order {
+                done.binds.sort_unstable();
+                done.binds.dedup();
+                let reached: Rc<[String]> = done.binds.into();
+                for name in pending.drain(done.start..) {
+                    self.reached.insert(name, Rc::clone(&reached));
+                }
+                parent.binds.extend(reached.iter().cloned());
+            } else {
+                parent.low = parent.low.min(done.low);
+                parent.binds.append(&mut done.binds);
+            }
         }
-        names.sort_unstable();
-        names.dedup();
-        Some(names.into())
+        root.binds.sort_unstable();
+        root.binds.dedup();
+        Some(root.binds.into())
     }
 
     /// whether every defined name reachable from `parsed`, read on `sheet`,
-    /// passes `check`: a walk without recursion that settles each group of
-    /// names reaching one another once all of it is known, as Tarjan's
-    /// algorithm does, so a later formula reading any of them within the same
-    /// bindings costs nothing. for evaluability, a name bound where a defined
-    /// name is read stays bound inside it, as the evaluator expands a name
-    /// within its caller's bindings.
-    fn names_hold(&mut self, sheet: SheetId, parsed: Rc<Parsed>, check: Check) -> bool {
+    /// passes `check`, leaving aside the names in `bound`: a walk without
+    /// recursion that settles each group of names reaching one another once
+    /// all of it is known, as Tarjan's algorithm does, so a later formula
+    /// reading any of them with the same names bound costs nothing.
+    fn names_hold(
+        &mut self,
+        sheet: SheetId,
+        parsed: Rc<Parsed>,
+        check: Check,
+        bound: Rc<[String]>,
+    ) -> bool {
         let decided = check as usize;
-        let unbound: Rc<[String]> = Rc::from(Vec::new());
         let mut order: HashMap<Node, usize> = HashMap::new();
         let mut pending: Vec<Node> = Vec::new();
         let mut root = Frame {
-            node: (usize::MAX, sheet, Rc::clone(&unbound)),
+            node: (usize::MAX, sheet, Rc::clone(&bound)),
             order: usize::MAX,
             start: 0,
             parsed,
@@ -334,39 +496,23 @@ impl<'a> Capability<'a> {
         let mut stack: Vec<Frame> = Vec::new();
         loop {
             let frame = stack.last_mut().unwrap_or(&mut root);
-            if frame.next < frame.parsed.names(check).len() {
-                let reference = frame.parsed.names(check)[frame.next].clone();
+            if frame.next < frame.parsed.reads.len() {
+                let (scope, name) = frame.parsed.reads[frame.next].clone();
                 frame.next += 1;
-                let (from, outer, parsed) = (
-                    frame.node.1,
-                    Rc::clone(&frame.node.2),
-                    Rc::clone(&frame.parsed),
-                );
+                let from = frame.node.1;
                 self.work += 1;
                 if self.work > self.limit {
                     return false;
                 }
-                let caller_binds = reference.scope.is_none()
-                    && outer
-                        .binary_search(&reference.name.to_ascii_lowercase())
-                        .is_ok();
-                if caller_binds {
+                let may_be_bound =
+                    scope.is_none() && bound.binary_search(&name.to_ascii_lowercase()).is_ok();
+                if may_be_bound {
                     continue;
                 }
-                let Some((index, scope)) = self.resolve(from, &reference.scope, &reference.name)
-                else {
+                let Some((index, scope)) = self.resolve(from, &scope, &name) else {
                     continue;
                 };
-                let around = match check {
-                    Check::Supported if !outer.is_empty() || reference.within.is_some() => {
-                        match self.bound_around(&outer, &parsed, &reference) {
-                            Some(around) => around,
-                            None => return false,
-                        }
-                    }
-                    _ => Rc::clone(&unbound),
-                };
-                let node = (index, scope, around);
+                let node = (index, scope, Rc::clone(&bound));
                 match self.decided[decided].get(&node) {
                     Some(true) => continue,
                     Some(false) => return self.refuse(&stack, decided),
@@ -377,7 +523,10 @@ impl<'a> Capability<'a> {
                     frame.low = frame.low.min(seen);
                     continue;
                 }
-                let Some(parsed) = self.parsed(index).filter(|parsed| check.holds(parsed)) else {
+                let Some(parsed) = self.parsed(index) else {
+                    return false;
+                };
+                let Some(parsed) = parsed.filter(|parsed| check.holds(parsed)) else {
                     self.decided[decided].insert(node, false);
                     return self.refuse(&stack, decided);
                 };
@@ -422,50 +571,23 @@ impl<'a> Capability<'a> {
     }
 }
 
-/// one step of [`gather`]'s walk: an expression to visit, or a `LET` or
-/// `LAMBDA` name coming into or going out of scope.
-enum Step<'e> {
-    Visit(&'e Expr),
-    Bind(&'e str),
-    Unbind(&'e str),
-}
-
 /// whether `expr` calls only functions the engine evaluates, whether it calls
-/// a volatile one, and the names it reads. each step is charged to `work`,
-/// and the walk gives up once `work` passes `limit`.
+/// a volatile one, the names it reads and the names its `LET`s and `LAMBDA`s
+/// bind. each expression node is charged to `work`, and the walk gives up
+/// once `work` passes `limit`.
 fn gather(expr: &Expr, work: &mut usize, limit: usize) -> Option<Parsed> {
     let mut parsed = Parsed {
         supported: true,
         volatile: false,
-        names: Vec::new(),
-        every: Vec::new(),
-        bindings: Vec::new(),
+        reads: Vec::new(),
+        binds: Vec::new(),
     };
-    let mut bound: HashMap<String, usize> = HashMap::new();
-    let mut within: Option<usize> = None;
-    let mut pending = vec![Step::Visit(expr)];
-    while let Some(step) = pending.pop() {
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
         *work += 1;
         if *work > limit {
             return None;
         }
-        let expr = match step {
-            Step::Visit(expr) => expr,
-            Step::Bind(name) => {
-                let name = name.to_ascii_lowercase();
-                *bound.entry(name.clone()).or_default() += 1;
-                parsed.bindings.push((within, name));
-                within = Some(parsed.bindings.len() - 1);
-                continue;
-            }
-            Step::Unbind(name) => {
-                if let Some(count) = bound.get_mut(&name.to_ascii_lowercase()) {
-                    *count -= 1;
-                }
-                within = within.and_then(|at| parsed.bindings[at].0);
-                continue;
-            }
-        };
         match expr {
             Expr::FuncCall { func, name, args } => {
                 if func.is_none() && !crate::array::is_array_builtin(name) {
@@ -477,53 +599,35 @@ fn gather(expr: &Expr, work: &mut usize, limit: usize) -> Option<Parsed> {
                 {
                     parsed.volatile = true;
                 }
-                let binds = match binder.as_str() {
-                    "LET" => args.len() >= 3 && args.len() % 2 == 1,
-                    "LAMBDA" => !args.is_empty(),
-                    _ => false,
-                };
-                let Some((body, heads)) = args.split_last().filter(|_| binds) else {
-                    pending.extend(args.iter().rev().map(Step::Visit));
-                    continue;
-                };
-                let width = if binder == "LET" { 2 } else { 1 };
-                for head in heads.chunks(width) {
-                    if let Expr::Name { scope: None, name } = &head[0] {
-                        pending.push(Step::Unbind(name));
+                let width = match binder.as_str() {
+                    "LET" if args.len() >= 3 && args.len() % 2 == 1 => 2,
+                    "LAMBDA" if !args.is_empty() => 1,
+                    _ => {
+                        pending.extend(args.iter().rev());
+                        continue;
                     }
-                }
-                pending.push(Step::Visit(body));
+                };
+                let (body, heads) = args.split_last().expect("a binder has a body");
+                pending.push(body);
                 for head in heads.chunks(width).rev() {
                     match &head[0] {
-                        Expr::Name { scope: None, name } => pending.push(Step::Bind(name)),
-                        other => pending.push(Step::Visit(other)),
+                        Expr::Name { scope: None, name } => {
+                            parsed.binds.push(name.to_ascii_lowercase())
+                        }
+                        other => pending.push(other),
                     }
                     if let Some(value) = head.get(1) {
-                        pending.push(Step::Visit(value));
+                        pending.push(value);
                     }
                 }
             }
-            Expr::Name { scope, name } => {
-                let reference = Reference {
-                    scope: scope.clone(),
-                    name: name.clone(),
-                    within,
-                };
-                let shadowed = scope.is_none()
-                    && bound
-                        .get(&name.to_ascii_lowercase())
-                        .is_some_and(|count| *count > 0);
-                if !shadowed {
-                    parsed.names.push(reference.clone());
-                }
-                parsed.every.push(reference);
-            }
-            Expr::ArrayLiteral { values, .. } => pending.extend(values.iter().map(Step::Visit)),
-            Expr::Unary { expr, .. } | Expr::Percent(expr) => pending.push(Step::Visit(expr)),
-            Expr::Binary { lhs, rhs, .. } => pending.extend([Step::Visit(lhs), Step::Visit(rhs)]),
+            Expr::Name { scope, name } => parsed.reads.push((scope.clone(), name.clone())),
+            Expr::ArrayLiteral { values, .. } => pending.extend(values),
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => pending.push(expr),
+            Expr::Binary { lhs, rhs, .. } => pending.extend([lhs.as_ref(), rhs.as_ref()]),
             Expr::RangeJoin { start, end } => {
                 parsed.volatile = true;
-                pending.extend([Step::Visit(start), Step::Visit(end)])
+                pending.extend([start.as_ref(), end.as_ref()])
             }
             _ => {}
         }
@@ -577,7 +681,7 @@ mod tests {
             ("LET(x,2,x*_xlfn.SEQUENCE(2))", true),
             ("LET(Remote,A1,Remote*_xlfn.SEQUENCE(3))", true),
             ("LET(x,Remote,x)", false),
-            ("LET(Remote,Remote,Remote)", false),
+            ("LET(Remote,Remote,Remote)", true),
             ("_xlfn.MAP(A1:A2,_xlfn.LAMBDA(Remote,Remote+1))", true),
             ("_xlfn.MAP(A1:A2,_xlfn.LAMBDA(x,Remote+x))", false),
             ("SUM(", false),
@@ -621,10 +725,11 @@ mod tests {
         }
     }
 
-    /// the evaluator expands a defined name within the bindings where it is
-    /// read, so a name a `LET` or `LAMBDA` binds there stays bound inside
-    /// the definition, through any chain of aliases; the same name read
-    /// unbound still reaches the workbook name, whichever is asked first.
+    /// the evaluator scopes names dynamically, so a name any `LET` or `LAMBDA`
+    /// in the formula binds, even one a `LAMBDA` stored earlier reads when
+    /// it is called later, may stand for that binding inside every defined
+    /// name the formula reaches. a formula binding no such name still reaches
+    /// the workbook name, whichever is asked first.
     #[test]
     fn a_defined_name_is_read_within_the_bindings_around_it() {
         let wb = workbook(&[
@@ -636,9 +741,13 @@ mod tests {
             ("LET(Remote,A1,Alias*_xlfn.SEQUENCE(3))", true),
             ("_xlfn.MAP(A1:A2,_xlfn.LAMBDA(Remote,Alias*2))", true),
             ("LET(Remote,1,Chain)", true),
+            (
+                "LET(fn,_xlfn.LAMBDA(x,Alias*x),Remote,A1,_xlfn.MAP({1;2;3},fn))",
+                true,
+            ),
+            ("LET(Remote,1,Alias)+Alias", true),
             ("Alias", false),
             ("Chain", false),
-            ("LET(Remote,1,Alias)+Alias", false),
             ("LET(Other,1,Alias)", false),
         ];
         for rotation in 0..questions.len() {
@@ -730,11 +839,97 @@ mod tests {
                     questions[index]
                 );
             }
-            let work = capability.work;
+            let parsed = capability.parsed.len();
+            let decided = capability.decided[0].len();
             for (question, answer) in questions.iter().zip(answers) {
                 assert_eq!(capability.evaluable(SheetId(0), question), answer);
             }
-            assert!(capability.work - work <= 6 * 4);
+            assert_eq!(capability.parsed.len(), parsed);
+            assert_eq!(capability.decided[0].len(), decided);
+        }
+    }
+
+    fn uncached(sheet: &mut Sheet, address: &str, branch: &str) {
+        let anchor = CellRef::parse_a1(address).unwrap();
+        sheet.set_cell(
+            anchor,
+            Cell {
+                formula: Some(format!("IF(FALSE,WEBSERVICE(\"x\"),{branch})")),
+                ..Cell::default()
+            },
+        );
+        sheet.set_dynamic_array_formula(anchor, CellRange::new(anchor, anchor));
+    }
+
+    fn shown(wb: &Workbook, address: &str) -> CellValue {
+        wb.value(SheetId(0), CellRef::parse_a1(address).unwrap())
+    }
+
+    /// uncached opaque arrays reading one another's rectangles are evaluated
+    /// in that order, each stored before the ones reading it, whatever order
+    /// they sit in; arrays reading each other round a cycle show `#NAME?`.
+    #[test]
+    fn uncached_arrays_are_evaluated_in_dependency_order() {
+        let mut wb = workbook(&[]);
+        let sheet = &mut wb.sheets[0];
+        uncached(sheet, "B1", "C1+1");
+        uncached(sheet, "C1", "D1*2");
+        uncached(sheet, "D1", "7");
+        uncached(sheet, "E1", "F1+1");
+        uncached(sheet, "F1", "E1+1");
+        classify_arrays(&mut wb);
+        let name = CellValue::Error {
+            value: ErrorValue::Name,
+        };
+        for (address, value) in [
+            ("B1", CellValue::Number { value: 15.0 }),
+            ("C1", CellValue::Number { value: 14.0 }),
+            ("D1", CellValue::Number { value: 7.0 }),
+            ("E1", name.clone()),
+            ("F1", name),
+        ] {
+            assert_eq!(shown(&wb, address), value, "{address}");
+        }
+    }
+
+    /// each formula's classification has its own bound on work, so formulas
+    /// that each cost much, together past a bound one pass could share, leave
+    /// every array after them evaluable.
+    #[test]
+    fn many_costly_formulas_leave_later_arrays_evaluable() {
+        const ANCHORS: u32 = 640;
+        let costly = format!("_xlfn.LET(x,1,{}x)", "y,x,".repeat(2_400));
+        let mut wb = workbook(&[]);
+        let mut capability = Capability::new(&wb);
+        let spent: usize = (0..ANCHORS)
+            .map(|_| {
+                assert!(capability.evaluable(SheetId(0), &costly));
+                capability.work
+            })
+            .sum();
+        assert!(spent > 4 << 20, "{spent}");
+        let sheet = &mut wb.sheets[0];
+        for row in 0..=ANCHORS {
+            let anchor = CellRef::new(row, 0);
+            let formula = if row < ANCHORS {
+                costly.clone()
+            } else {
+                "_xlfn.SEQUENCE(1)".to_owned()
+            };
+            sheet.set_cell(
+                anchor,
+                Cell {
+                    formula: Some(formula),
+                    value: CellValue::Number { value: 1.0 },
+                    style: None,
+                },
+            );
+            sheet.set_dynamic_array_formula(anchor, CellRange::new(anchor, anchor));
+        }
+        classify_arrays(&mut wb);
+        for row in 0..=ANCHORS {
+            let definition = wb.sheets[0].array_definition(CellRef::new(row, 0)).unwrap();
+            assert!(!definition.is_opaque(), "row {row}");
         }
     }
 
