@@ -23,6 +23,8 @@ const NUMBERED_FIXTURE: &[u8] =
 const V2_HIDDEN_UPDATE: &[u8] = include_bytes!("fixtures/deck-schema-v2-hidden.update.bin");
 const V2_1_DEFAULTS_SOURCE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-defaults.pptx");
 const V2_1_DEFAULTS_UPDATE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-defaults.update.bin");
+const V2_1_EDITS_SOURCE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-edits.pptx");
+const V2_1_EDITS_UPDATE: &[u8] = include_bytes!("fixtures/deck-schema-v2.1-edits.update.bin");
 const SHAPES: &str = "pptx:shapes";
 const V2_STORY_ID: &str = "story:shape:4343:0:0";
 const V2_HIDDEN_SHAPE_IDS: [&str; 4] = [
@@ -1023,6 +1025,8 @@ fn adjust_values(snapshot: &DeckSnapshot) -> Vec<BTreeMap<String, f64>> {
 }
 
 const DEFAULTS_SLIDE: &str = "ppt/slides/slide1.xml";
+const STORY_COUNTS: [usize; 3] = [40, 160, 640];
+const DELETIONS_PER_STORY: u32 = 6;
 const FRAGMENTED_PARAGRAPHS: usize = 40;
 const FRAGMENTED_RUNS: usize = 4;
 const FRAGMENTED_REPEATS: usize = 12;
@@ -1552,5 +1556,174 @@ fn meta_string(update: &[u8], key: &str) -> String {
     match meta(&doc).get(&doc.transact(), key) {
         Some(Out::Any(Any::String(value))) => value.to_string(),
         other => panic!("{key} is {other:?}"),
+    }
+}
+
+#[test]
+fn migrating_and_attaching_grows_linearly_with_the_number_of_stories() {
+    let slide = defaults_part(DEFAULTS_SLIDE);
+    let start = slide
+        .find(r#"<p:sp><p:nvSpPr><p:cNvPr id="10" name="Direct all caps"/>"#)
+        .unwrap();
+    let end = start + slide[start..].find("</p:sp>").unwrap() + "</p:sp>".len();
+    let template = &slide[start..end];
+    let mut timings = Vec::new();
+    for count in STORY_COUNTS {
+        let copies: String = (0..count)
+            .map(|index| {
+                template.replace(
+                    r#"id="10" name="Direct all caps""#,
+                    &format!(r#"id="{}" name="Copy {index}""#, 1000 + index),
+                )
+            })
+            .collect();
+        let source = defaults_variant(&[(
+            DEFAULTS_SLIDE,
+            "</p:spTree>",
+            &format!("{copies}</p:spTree>"),
+        )]);
+        let doc = hydrated(&legacy_seed(&source, 44500));
+        let fresh = DeckSession::open(&source, 44501).unwrap();
+        let stories: Vec<_> = fresh.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .flat_map(|shape| shape.text_stories.iter().map(|story| story.id.clone()))
+            .collect();
+        {
+            let mut txn = doc.transact_mut();
+            let map = txn.get_map("pptx:stories").unwrap();
+            for story in &stories {
+                let text = map
+                    .get(&txn, story)
+                    .unwrap()
+                    .cast::<yrs::TextRef>()
+                    .unwrap();
+                for index in (0..DELETIONS_PER_STORY).rev() {
+                    yrs::Text::remove_range(&text, &mut txn, index * 2, 1);
+                }
+            }
+        }
+        for story in &stories {
+            for index in (0..DELETIONS_PER_STORY).rev() {
+                let context = EditCtx::local("fixture");
+                fresh
+                    .delete_text(&context, story, index * 2, index * 2 + 1)
+                    .unwrap();
+            }
+        }
+        let update = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let started = std::time::Instant::now();
+        let attached = DeckSession::open_from_update_with_source(&update, &source, 44502).unwrap();
+        timings.push(started.elapsed());
+        for story in &stories {
+            assert_eq!(attached.story(story).unwrap(), fresh.story(story).unwrap());
+        }
+    }
+    for step in timings.windows(2) {
+        assert!(
+            step[1] < step[0] * 8,
+            "{STORY_COUNTS:?} stories took {timings:?}"
+        );
+    }
+}
+
+#[test]
+fn baseline_and_spacing_recover_text_restored_by_undo() {
+    let baselines: &[u8] =
+        include_bytes!("../../pptx-render/tests/fixtures/text-baseline-script.pptx");
+    let spacing: &[u8] = include_bytes!("fixtures/run-spacing-shadow.pptx");
+    for (client_id, source, key) in [
+        (44700, baselines, "baselinePct"),
+        (44800, spacing, "spacingPt"),
+    ] {
+        let fresh = DeckSession::open(source, client_id).unwrap();
+        let (story, offset) = first_offset(&fresh.snapshot().unwrap(), |style| {
+            style.baseline_pct.is_some() || style.spacing_pt.is_some()
+        });
+        let stored = stored_2_0(source, client_id + 1, |value| without_keys(value, &[key]));
+        let migrated = DeckSession::open_from_update(&stored, client_id + 2).unwrap();
+        migrated
+            .delete_text(&EditCtx::local("fixture"), &story, offset, offset + 1)
+            .unwrap();
+        assert!(migrated.undo());
+        let attached = DeckSession::open_from_update_with_source(
+            &migrated.encode_state_as_update_v1(),
+            source,
+            client_id + 3,
+        )
+        .unwrap();
+        assert_eq!(
+            attached.story(&story).unwrap(),
+            fresh.story(&story).unwrap(),
+            "{key}"
+        );
+        assert_eq!(attached.save().unwrap(), fresh.save().unwrap(), "{key}");
+    }
+}
+
+/// The first story offset whose run style matches.
+fn first_offset(snapshot: &DeckSnapshot, matches: impl Fn(&TextStyle) -> bool) -> (String, u32) {
+    fn find(
+        shapes: &[ShapeSnapshot],
+        matches: &impl Fn(&TextStyle) -> bool,
+    ) -> Option<(String, u32)> {
+        for shape in shapes {
+            for story in &shape.text_stories {
+                let mut offset = 0;
+                for paragraph in &story.paragraphs {
+                    for run in &paragraph.runs {
+                        if matches(&run.style) {
+                            return Some((story.id.clone(), offset));
+                        }
+                        offset += run.text.encode_utf16().count() as u32;
+                    }
+                    offset += 1;
+                }
+            }
+            if let Some(found) = find(&shape.children, matches) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    snapshot
+        .slides
+        .iter()
+        .find_map(|slide| find(&slide.shapes, &matches))
+        .unwrap()
+}
+
+#[test]
+fn a_released_update_edited_across_runs_and_surrogates_recovers_by_its_clocks() {
+    let fresh = DeckSession::open(V2_1_EDITS_SOURCE, 44900).unwrap();
+    let story = defaults_story(&fresh, "Direct all caps");
+    let context = EditCtx::local("fixture");
+    let typed = TextStyle {
+        font_size_pt: Some(32.0),
+        color: Some("#123456".to_owned()),
+        ..TextStyle::default()
+    };
+    fresh.delete_text(&context, &story, 1, 3).unwrap();
+    fresh.delete_text(&context, &story, 9, 11).unwrap();
+    fresh
+        .insert_text(&context, &story, 0, "NEW", &typed)
+        .unwrap();
+    fresh.delete_text(&context, &story, 27, 29).unwrap();
+    fresh
+        .insert_text(&context, &story, 19, "\u{1D402}", &typed)
+        .unwrap();
+    let attached =
+        DeckSession::open_from_update_with_source(V2_1_EDITS_UPDATE, V2_1_EDITS_SOURCE, 44901)
+            .unwrap();
+    assert_eq!(
+        attached.story(&story).unwrap(),
+        fresh.story(&story).unwrap()
+    );
+    assert_eq!(attached.save().unwrap(), fresh.save().unwrap());
+    let carried = attached.encode_state_as_update_v1();
+    for key in ["capsPendingSource", "colorsPendingSource"] {
+        assert!(!meta_has(&carried, key), "{key}");
     }
 }

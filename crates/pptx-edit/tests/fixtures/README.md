@@ -68,9 +68,17 @@ authoring `adj` 45000, a default trapezoid and one authoring 30000, a default `a
 default `star8` inside a group. It is repacked with `ooxml_opc::rezip_parts`, so a no-op
 save reproduces its bytes. `deck-schema-v2.1-defaults.update.bin` is its seed by release
 0.1.1 (`cf3d220f7`, schema 2.1, client ID 2101), which stored the old star and trapezoid
-defaults, no caps and colours resolved without the colour map. Copy
-`generate_v2_1_defaults_snapshot.rs` into that checkout's `crates/pptx-edit/examples/`,
-then run from that checkout:
+defaults, no caps and colours resolved without the colour map.
+
+`deck-schema-v2.1-edits.pptx` is the same deck with the `Direct all caps` text box
+replaced by two paragraphs of differently capped and coloured runs holding supplementary
+characters (`𝐁`, `😀`). `deck-schema-v2.1-edits.update.bin` is its 0.1.1 seed (client ID
+2102) after that release deleted within and across runs, including a surrogate pair,
+and inserted `NEW` and `𝐂`; `schema_migration.rs` applies the same edits to a fresh
+open and expects the recovered story to match it.
+
+The generator `generate_v2_1_defaults_snapshot.rs` writes both updates. Copy it into
+that checkout's `crates/pptx-edit/examples/`, then run from that checkout:
 
 ```sh
 CARGO_TARGET_DIR=/absolute/path/to/release-target cargo run --locked -p betteroffice-pptx-edit --example generate_v2_1_defaults_snapshot -- /absolute/path/to/this/branch

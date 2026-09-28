@@ -6,7 +6,7 @@ use yrs::branch::{Branch, BranchID, BranchPtr};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
-    Any, Assoc, ClientID, Doc, ID, IndexedSequence, Map, MapRef, Out, ReadTxn, Snapshot,
+    Any, Assoc, ClientID, Doc, ID, IdSet, IndexedSequence, Map, MapRef, Out, ReadTxn, Snapshot,
     StateVector, StickyIndex, Text, TextRef, Transact,
 };
 
@@ -38,6 +38,12 @@ impl SourceProperty {
                 "color",
             ),
         }
+    }
+
+    /// Whether surviving text from any client counts, as it did before caps and
+    /// colours were recovered; caps and colours take only text the seed wrote.
+    fn matches_any_client(self) -> bool {
+        matches!(self, Self::Baseline | Self::Spacing)
     }
 
     fn value(self, style: &TextStyle) -> Option<Any> {
@@ -198,12 +204,14 @@ struct Replayed {
 pub(crate) struct RecoveryCache {
     visible: Option<Visible>,
     stories: HashMap<String, Option<Story>>,
-    replay: Option<Doc>,
+    replay: Option<(Doc, Snapshot)>,
     replayed: HashMap<String, Option<Replayed>>,
 }
 
 /// The doc's state as a snapshot yrs 0.27.3 can split, which leaves out clients
 /// with at most two clock ticks, and those clients' characters, located by id.
+/// It carries no deletions: collected items hold no text, and anything a
+/// snapshot shows that the plain diff does not fails the merge in `read_story`.
 struct Visible {
     snapshot: Snapshot,
     tiny: Vec<(BranchPtr, u32, ID)>,
@@ -221,17 +229,18 @@ impl RecoveryCache {
         if self.replay.is_none() {
             let replay = crate::doc_with_client_id(BOOTSTRAP_CLIENT_ID);
             crate::deck::seed_doc(&replay, package, "")?;
-            self.replay = Some(replay);
+            let state = replay.transact().state_vector();
+            self.replay = Some((replay, Snapshot::new(state, IdSet::new())));
         }
         if !self.stories.contains_key(story_id) {
             let visible = self.visible.get_or_insert_with(|| visible(doc));
             let story = read_story(doc, story_id, visible);
             self.stories.insert(story_id.to_owned(), story);
         }
-        if let Some(replay) = &self.replay {
+        if let Some((replay, snapshot)) = &self.replay {
             self.replayed
                 .entry(story_id.to_owned())
-                .or_insert_with(|| read_replayed(replay, story_id));
+                .or_insert_with(|| read_replayed(replay, snapshot, story_id));
         }
         Ok(self.stories[story_id]
             .as_ref()
@@ -241,10 +250,9 @@ impl RecoveryCache {
 
 fn visible(doc: &Doc) -> Visible {
     let txn = doc.transact();
-    let current = txn.snapshot();
     let mut state = StateVector::default();
     let mut tiny = Vec::new();
-    for (&client, &clock) in current.state_map.iter() {
+    for (&client, &clock) in txn.state_vector().iter() {
         if clock > 2 {
             state.set_max(client, clock);
             continue;
@@ -262,7 +270,7 @@ fn visible(doc: &Doc) -> Visible {
         }
     }
     Visible {
-        snapshot: Snapshot::new(state, current.delete_set),
+        snapshot: Snapshot::new(state, IdSet::new()),
         tiny,
     }
 }
@@ -370,7 +378,7 @@ fn read_story(doc: &Doc, story_id: &str, visible: &Visible) -> Option<Story> {
     })
 }
 
-fn read_replayed(replay: &Doc, story_id: &str) -> Option<Replayed> {
+fn read_replayed(replay: &Doc, snapshot: &Snapshot, story_id: &str) -> Option<Replayed> {
     let mut txn = replay.transact_mut();
     let text = txn
         .get_map(crate::STORIES)?
@@ -380,13 +388,12 @@ fn read_replayed(replay: &Doc, story_id: &str) -> Option<Replayed> {
     let BranchID::Nested(base) = <TextRef as AsRef<Branch>>::as_ref(&text).id() else {
         return None;
     };
-    let current = txn.snapshot();
     let prefix = format!("para:{story_id}:");
     let mut tokens = Vec::new();
     let mut positions = HashMap::new();
     for diff in text.diff_range(
         &mut txn,
-        Some(&current),
+        Some(snapshot),
         Some(&Snapshot::default()),
         YChange::identity,
     ) {
@@ -426,7 +433,9 @@ fn pilcrow_token<T: ReadTxn>(pilcrow: &MapRef, txn: &T, prefix: &str) -> Token {
 
 /// The ranges to write and the characters left unresolved. A seeded character
 /// takes its source position from its clock when the replayed seed agrees with
-/// the source; otherwise from its in-order match.
+/// the source; otherwise from its in-order match. Baseline and spacing also
+/// pair the text other clients left between those positions with the source
+/// it stands in for.
 fn recover_story(
     story: &Story,
     replayed: Option<&Replayed>,
@@ -435,24 +444,59 @@ fn recover_story(
     only: Option<&HashSet<ID>>,
 ) -> (Vec<(u32, u32, Any)>, Vec<ID>) {
     let bootstrap = ClientID::new(BOOTSTRAP_CLIENT_ID);
-    let seeded = |unit: &Unit| {
-        unit.id
-            .filter(|id| id.client == bootstrap && only.is_none_or(|only| only.contains(id)))
+    let considered = |unit: &Unit| {
+        matches!(unit.token, Token::Char(_))
+            && unit
+                .id
+                .is_some_and(|id| only.is_none_or(|only| only.contains(&id)))
     };
+    let seeded = |unit: &Unit| considered(unit) && unit.id.is_some_and(|id| id.client == bootstrap);
+    let foreign = |unit: &Unit| property.matches_any_client() && considered(unit) && !seeded(unit);
     let value = |unit: &Unit| property.value(&story.styles[unit.style]);
     let mut ranges = Vec::new();
+    let mut unresolved = Vec::new();
     if let Some(positions) = exact_positions(story, replayed, source) {
+        let mut from = 0;
+        let mut gap = Vec::new();
         for (unit, position) in story.units.iter().zip(positions) {
-            if let (Some(_), Some(position)) = (seeded(unit), position) {
-                let candidate = &source[position];
-                if candidate.value != candidate.legacy && value(unit) == candidate.legacy {
-                    push_range(&mut ranges, unit, candidate);
+            match position {
+                Some(position) if position >= from => {
+                    let window = from..position;
+                    recover_gap(
+                        source,
+                        window,
+                        &gap,
+                        property,
+                        story,
+                        &mut ranges,
+                        &mut unresolved,
+                    );
+                    gap.clear();
+                    from = position + 1;
+                    let candidate = &source[position];
+                    if seeded(unit)
+                        && candidate.value != candidate.legacy
+                        && value(unit) == candidate.legacy
+                    {
+                        push_range(&mut ranges, unit, candidate);
+                    }
                 }
+                None if foreign(unit) => gap.push(unit),
+                _ => {}
             }
         }
-        return (ranges, Vec::new());
+        let window = from..source.len();
+        recover_gap(
+            source,
+            window,
+            &gap,
+            property,
+            story,
+            &mut ranges,
+            &mut unresolved,
+        );
+        return (ranges, unresolved);
     }
-    let mut unresolved = Vec::new();
     let mut paragraphs = HashMap::new();
     let mut changes = Vec::with_capacity(source.len());
     let mut previous = None;
@@ -470,22 +514,37 @@ fn recover_story(
         }
         changes.push(count);
     }
+    let mut recover_window = |window: Range<usize>, stretch: &[&Unit]| {
+        if property.matches_any_client() {
+            recover_gap(
+                source,
+                window,
+                stretch,
+                property,
+                story,
+                &mut ranges,
+                &mut unresolved,
+            );
+        } else {
+            let stretch: Vec<_> = stretch.iter().map(|unit| (*unit, value(unit))).collect();
+            recover_stretch(
+                source,
+                &changes,
+                window,
+                &stretch,
+                &mut ranges,
+                &mut unresolved,
+            );
+        }
+    };
     let mut from = 0;
     let mut stretch = Vec::new();
     for unit in &story.units {
         match unit.token {
-            Token::Char(_) if seeded(unit).is_some() => stretch.push((unit, value(unit))),
+            Token::Char(_) if seeded(unit) || foreign(unit) => stretch.push(unit),
             Token::Paragraph(index) => {
                 if let Some(&until) = paragraphs.get(&index).filter(|until| **until >= from) {
-                    let window = from..until;
-                    recover_stretch(
-                        source,
-                        &changes,
-                        window,
-                        &stretch,
-                        &mut ranges,
-                        &mut unresolved,
-                    );
+                    recover_window(from..until, &stretch);
                     from = until + 1;
                     stretch.clear();
                 }
@@ -493,16 +552,68 @@ fn recover_story(
             _ => {}
         }
     }
-    let window = from..source.len();
-    recover_stretch(
-        source,
-        &changes,
-        window,
-        &stretch,
-        &mut ranges,
-        &mut unresolved,
-    );
+    recover_window(from..source.len(), &stretch);
     (ranges, unresolved)
+}
+
+/// Pairs `stretch` with the source it stands in for in `window` by the longest
+/// common subsequence, as whole stories were paired before; past the bound its
+/// characters stay unresolved.
+fn recover_gap(
+    source: &[SourceToken],
+    window: Range<usize>,
+    stretch: &[&Unit],
+    property: SourceProperty,
+    story: &Story,
+    ranges: &mut Vec<(u32, u32, Any)>,
+    unresolved: &mut Vec<ID>,
+) {
+    if stretch.is_empty() || window.is_empty() {
+        return;
+    }
+    let window = &source[window];
+    let Some(pairs) = common_pairs(window, stretch) else {
+        unresolved.extend(stretch.iter().filter_map(|unit| unit.id));
+        return;
+    };
+    for (position, index) in pairs {
+        let (candidate, unit) = (&window[position], stretch[index]);
+        if candidate.value != candidate.legacy
+            && property.value(&story.styles[unit.style]) == candidate.legacy
+        {
+            push_range(ranges, unit, candidate);
+        }
+    }
+}
+
+/// The longest common subsequence of tokens, `None` past four million cells.
+fn common_pairs(window: &[SourceToken], stretch: &[&Unit]) -> Option<Vec<(usize, usize)>> {
+    let (rows, cols) = (window.len() + 1, stretch.len() + 1);
+    let cells = rows.checked_mul(cols).filter(|cells| *cells <= 4_000_000)?;
+    let mut lengths = vec![0u32; cells];
+    for i in (0..rows - 1).rev() {
+        for j in (0..cols - 1).rev() {
+            lengths[i * cols + j] = if window[i].token == stretch[j].token {
+                lengths[(i + 1) * cols + j + 1] + 1
+            } else {
+                lengths[(i + 1) * cols + j].max(lengths[i * cols + j + 1])
+            };
+        }
+    }
+    let mut pairs = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i + 1 < rows && j + 1 < cols {
+        if window[i].token == stretch[j].token {
+            pairs.push((i, j));
+            i += 1;
+            j += 1;
+        } else if lengths[(i + 1) * cols + j] >= lengths[i * cols + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    Some(pairs)
 }
 
 /// Each seeded character's source position by clock, or `None` when the
