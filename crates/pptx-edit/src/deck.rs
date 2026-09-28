@@ -10,9 +10,10 @@ use pptx_parse::{
     ChartAxis, ChartSpace, GraphicFrameData, Placeholder, PptxPackage, ShapeBase, ShapeNode, Slide,
 };
 use serde::de::DeserializeOwned;
+use yrs::updates::decoder::Decode;
 use yrs::{
-    Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, TextRef,
-    Transact, TransactionMut, WriteTxn,
+    Any, Array, ArrayPrelim, ArrayRef, ClientID, Doc, Map, MapPrelim, MapRef, Out, ReadTxn,
+    StateVector, TextRef, Transact, TransactionMut, Update, WriteTxn,
 };
 
 use crate::comments::{
@@ -986,6 +987,7 @@ pub(crate) struct SourceImport<'a> {
     /// The doc's package, mutated by each pass and synced back once.
     pub(crate) package: PptxPackage,
     source_snapshot: Option<DeckSnapshot>,
+    pub(crate) recovery: crate::source_run_properties::RecoveryCache,
 }
 
 impl<'a> SourceImport<'a> {
@@ -994,6 +996,7 @@ impl<'a> SourceImport<'a> {
             source,
             package,
             source_snapshot: None,
+            recovery: Default::default(),
         }
     }
 
@@ -1363,17 +1366,19 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
         let meta = required_map(&txn, META)?;
         schema_version(&meta, &txn)?
     };
-    if version < 2.1 {
-        migrate_doc_to_v2_1(doc)?;
+    let package = if version < 2.1 {
+        migrate_doc_to_v2_1(doc)?
     } else if version < SCHEMA_VERSION {
-        migrate_doc_to_v2_2(doc)?;
-    }
-    Ok(())
+        migrate_doc_to_v2_2(doc)?
+    } else {
+        return Ok(());
+    };
+    restore_preset_defaults(doc, &package)
 }
 
 /// Rewrites the stored package so media bytes ride as base64 strings rather
-/// than the integer arrays 2.1 wrote, and carries the 2.1 seed forward.
-fn migrate_doc_to_v2_2(doc: &Doc) -> EditResult<()> {
+/// than the integer arrays 2.1 wrote, and defers the 2.1 seed's runs.
+fn migrate_doc_to_v2_2(doc: &Doc) -> EditResult<PptxPackage> {
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     let package = package_from_meta(&meta, &txn)?;
@@ -1384,22 +1389,25 @@ fn migrate_doc_to_v2_2(doc: &Doc) -> EditResult<()> {
         "packageJson",
         Any::Buffer(Arc::from(package_json)),
     );
-    migrate_seed_to_v2_2(&mut txn, &meta, &package)?;
+    defer_legacy_runs(&mut txn, &meta);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
-    Ok(())
+    Ok(package)
+}
+
+/// Defers to the source the run caps a pre-2.2 seed lacked and the run colours
+/// it resolved without the slide colour map.
+fn defer_legacy_runs(txn: &mut TransactionMut<'_>, meta: &MapRef) {
+    meta.insert(txn, "capsPendingSource", true);
+    meta.insert(txn, "colorsPendingSource", true);
 }
 
 /// Moves the preset adjust defaults a pre-2.2 seed stored onto the current
-/// ones, and defers to the source the run caps it lacked and the run colours
-/// it resolved without the slide colour map.
-fn migrate_seed_to_v2_2(
-    txn: &mut TransactionMut<'_>,
-    meta: &MapRef,
-    package: &PptxPackage,
-) -> EditResult<()> {
-    meta.insert(txn, "capsPendingSource", true);
-    meta.insert(txn, "colorsPendingSource", true);
-    let shapes = required_map(txn, SHAPES)?;
+/// ones. Runs after the schema change commits, so the rewritten package the
+/// seed view below would otherwise copy has been collected.
+fn restore_preset_defaults(doc: &Doc, package: &PptxPackage) -> EditResult<()> {
+    let seeded = seeded_adjustments(doc)?;
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let shapes = required_map(&txn, SHAPES)?;
     for (index, (slide, reference)) in package
         .slides
         .iter()
@@ -1408,25 +1416,71 @@ fn migrate_seed_to_v2_2(
     {
         let slide_id = seeded_slide_id(index, reference.id);
         for (index, node) in slide.shapes.iter().enumerate() {
-            restore_preset_defaults(txn, &shapes, &slide_id, &index.to_string(), node)?;
+            restore_shape_defaults(
+                &mut txn,
+                &shapes,
+                &seeded,
+                &slide_id,
+                &index.to_string(),
+                node,
+            )?;
         }
     }
     Ok(())
 }
 
-/// Replaces each stored adjust value that is still a pre-2.2 default the
-/// source never authored with the current default.
-fn restore_preset_defaults(
+/// The shapes whose `adjustValuesJson` is still the value the seed wrote: the
+/// seed's own items, with every later deletion or overwrite applied.
+fn seeded_adjustments(doc: &Doc) -> EditResult<HashSet<String>> {
+    let bootstrap = ClientID::new(crate::BOOTSTRAP_CLIENT_ID);
+    let update = {
+        let txn = doc.transact();
+        let mut others = StateVector::default();
+        for (client, clock) in txn.state_vector().iter() {
+            if *client != bootstrap {
+                others.set_max(*client, *clock);
+            }
+        }
+        txn.encode_state_as_update_v1(&others)
+    };
+    let view = Doc::new();
+    let mut txn = view.transact_mut();
+    txn.apply_update(
+        Update::decode_v1(&update).map_err(|error| EditError::InvalidUpdate(error.to_string()))?,
+    )
+    .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+    let Some(shapes) = txn.get_map(SHAPES) else {
+        return Ok(HashSet::new());
+    };
+    Ok(shapes
+        .iter(&txn)
+        .filter(|(_, shape)| {
+            shape
+                .clone()
+                .cast::<MapRef>()
+                .is_ok_and(|shape| shape.contains_key(&txn, "adjustValuesJson"))
+        })
+        .map(|(id, _)| id.to_owned())
+        .collect())
+}
+
+/// Replaces each adjust value the seed stored that is still a pre-2.2 default
+/// the source never authored with the current default.
+fn restore_shape_defaults(
     txn: &mut TransactionMut<'_>,
     shapes: &MapRef,
+    seeded: &HashSet<String>,
     slide_id: &str,
     path: &str,
     node: &ShapeNode,
 ) -> EditResult<()> {
     match node {
         ShapeNode::Shape(source) => {
-            let Some(shape) = shapes
-                .get(txn, &seeded_shape_id(slide_id, path))
+            let id = seeded_shape_id(slide_id, path);
+            let Some(shape) = seeded
+                .contains(&id)
+                .then(|| shapes.get(txn, &id))
+                .flatten()
                 .and_then(|value| value.cast::<MapRef>().ok())
             else {
                 return Ok(());
@@ -1463,9 +1517,10 @@ fn restore_preset_defaults(
         }
         ShapeNode::Group(group) => {
             for (index, child) in group.children.iter().enumerate() {
-                restore_preset_defaults(
+                restore_shape_defaults(
                     txn,
                     shapes,
+                    seeded,
                     slide_id,
                     &seeded_child_path(path, index),
                     child,
@@ -1494,12 +1549,12 @@ fn legacy_preset_defaults(geometry: &str) -> &'static [(&'static str, f64)] {
 
 /// Applies every schema change made since 2.0 in one transaction: the package is
 /// rewritten through the current model, hidden flags and bitmap effects are
-/// backfilled, the comment flavour is recorded, preset defaults are moved as in
-/// 2.2, and everything a stored package cannot carry -- baselines, outline
-/// gradients, character spacing, caps, colour-mapped run colours, OLE picture
-/// previews, chart and paragraph properties, table geometry -- is deferred to
-/// [`import_source_render_data`] until the source is reattached.
-fn migrate_doc_to_v2_1(doc: &Doc) -> EditResult<()> {
+/// backfilled, the comment flavour is recorded, and everything a stored package
+/// cannot carry -- baselines, outline gradients, character spacing, caps,
+/// colour-mapped run colours, OLE picture previews, chart and paragraph
+/// properties, table geometry -- is deferred to [`import_source_render_data`]
+/// until the source is reattached.
+fn migrate_doc_to_v2_1(doc: &Doc) -> EditResult<PptxPackage> {
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     let package = package_from_meta(&meta, &txn)?;
@@ -1520,9 +1575,9 @@ fn migrate_doc_to_v2_1(doc: &Doc) -> EditResult<()> {
     if package_needs_ole_source(&package) {
         meta.insert(&mut txn, "olePicturesPendingSource", true);
     }
-    migrate_seed_to_v2_2(&mut txn, &meta, &package)?;
+    defer_legacy_runs(&mut txn, &meta);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
-    Ok(())
+    Ok(package)
 }
 
 fn record_comment_flavor(txn: &mut TransactionMut<'_>, meta: &MapRef, package: &PptxPackage) {

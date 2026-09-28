@@ -1023,6 +1023,9 @@ fn adjust_values(snapshot: &DeckSnapshot) -> Vec<BTreeMap<String, f64>> {
 }
 
 const DEFAULTS_SLIDE: &str = "ppt/slides/slide1.xml";
+const FRAGMENTED_PARAGRAPHS: usize = 40;
+const FRAGMENTED_RUNS: usize = 4;
+const FRAGMENTED_REPEATS: usize = 12;
 const DEFAULTS_LAYOUT: &str = "ppt/slideLayouts/slideLayout1.xml";
 const DEFAULTS_MASTER: &str = "ppt/slideMasters/slideMaster1.xml";
 const INVERTED_MAP: &str = r#"bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2""#;
@@ -1206,13 +1209,280 @@ fn recovery_concurrent_with_a_peer_edit_converges_and_keeps_the_inserted_text() 
         .unwrap();
     assert_eq!(editor.snapshot().unwrap(), recovering.snapshot().unwrap());
     let looks = run_looks(&recovering, &story);
+    assert_eq!(
+        looks.iter().map(|look| look.0.as_str()).collect::<String>(),
+        "Miixed Case Title"
+    );
     assert_eq!(looks[0], look("M", Some(TextCaps::All), "#FFFFFF"));
     assert_eq!(
         (looks[1].0.as_str(), looks[1].1),
         ("i", Some(TextCaps::Small))
     );
+    let saved = DeckSession::open(&recovering.save().unwrap(), 42902).unwrap();
+    assert_eq!(run_looks(&saved, &story), looks);
 }
 
+#[test]
+fn a_surviving_character_between_identical_source_characters_keeps_its_own_run() {
+    let source = defaults_variant(&[(
+        DEFAULTS_SLIDE,
+        "<a:t>Mixed Case Title</a:t></a:r>",
+        concat!(
+            r#"<a:t>a</a:t></a:r><a:r><a:rPr lang="en-US" sz="3200" cap="small">"#,
+            r#"<a:solidFill><a:schemeClr val="tx1"/></a:solidFill>"#,
+            r#"<a:latin typeface="Arial"/></a:rPr><a:t>a</a:t></a:r>"#
+        ),
+    )]);
+    let migrated = DeckSession::open_from_update(&legacy_seed(&source, 43100), 43101).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    migrated
+        .delete_text(&EditCtx::local("fixture"), &story, 0, 1)
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        &source,
+        43102,
+    )
+    .unwrap();
+    let expected = [look("a", Some(TextCaps::Small), "#FFFFFF")];
+    assert_eq!(run_looks(&attached, &story), expected);
+    let carried = attached.encode_state_as_update_v1();
+    assert!(!meta_has(&carried, "capsPendingSource"));
+    let saved = DeckSession::open(&attached.save().unwrap(), 43103).unwrap();
+    assert_eq!(run_looks(&saved, &story), expected);
+}
+
+#[test]
+fn an_ambiguous_character_keeps_only_its_story_pending() {
+    let source = defaults_variant(&[(
+        DEFAULTS_SLIDE,
+        "<a:t>Mixed Case Title</a:t></a:r>",
+        concat!(
+            r#"<a:t>a</a:t></a:r><a:r><a:rPr lang="en-US" sz="3200" cap="small">"#,
+            r#"<a:solidFill><a:schemeClr val="tx1"/></a:solidFill>"#,
+            r#"<a:latin typeface="Arial"/></a:rPr><a:t>a</a:t></a:r>"#
+        ),
+    )]);
+    let seeded = legacy_seed(&source, 43600);
+    let doc = hydrated(&seeded);
+    let mut package: serde_json::Value = serde_json::from_str(&package_json(&seeded)).unwrap();
+    without_keys(&mut package, &["fontSizePt"]);
+    let stored_meta = meta(&doc);
+    stored_meta.insert(
+        &mut doc.transact_mut(),
+        "packageJson",
+        Any::Buffer(serde_json::to_vec(&package).unwrap().into()),
+    );
+    let stored = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    let migrated = DeckSession::open_from_update(&stored, 43601).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    migrated
+        .delete_text(&EditCtx::local("fixture"), &story, 0, 1)
+        .unwrap();
+    let mut update = migrated.encode_state_as_update_v1();
+    for client_id in [43602, 43603] {
+        let attached =
+            DeckSession::open_from_update_with_source(&update, &source, client_id).unwrap();
+        update = attached.encode_state_as_update_v1();
+        let pending: BTreeMap<String, Vec<(u64, u32)>> =
+            serde_json::from_str(&meta_string(&update, "capsPendingSource")).unwrap();
+        assert_eq!(pending.keys().collect::<Vec<_>>(), [&story]);
+        assert_eq!(pending[&story].len(), 1);
+        assert_eq!(run_looks(&attached, &story)[0].1, None);
+        assert_eq!(
+            run_looks(&attached, &defaults_story(&attached, "Direct small caps"))[0].1,
+            Some(TextCaps::Small)
+        );
+    }
+}
+
+#[test]
+fn retyped_source_text_keeps_the_style_it_was_typed_with() {
+    let migrated = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 43200).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    let context = EditCtx::local("fixture");
+    migrated.delete_text(&context, &story, 0, 1).unwrap();
+    let typed = TextStyle {
+        font_size_pt: Some(32.0),
+        color: Some("#101828".to_owned()),
+        ..TextStyle::default()
+    };
+    migrated
+        .insert_text(&context, &story, 0, "M", &typed)
+        .unwrap();
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        43201,
+    )
+    .unwrap();
+    let expected = [
+        look("M", None, "#101828"),
+        look("ixed Case Title", Some(TextCaps::All), "#FFFFFF"),
+    ];
+    assert_eq!(run_looks(&attached, &story), expected);
+    let saved = DeckSession::open(&attached.save().unwrap(), 43202).unwrap();
+    assert_eq!(run_looks(&saved, &story), expected);
+}
+
+#[test]
+fn undo_restored_source_text_is_left_as_restored() {
+    let migrated = DeckSession::open_from_update(V2_1_DEFAULTS_UPDATE, 43300).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    migrated
+        .delete_text(&EditCtx::local("fixture"), &story, 1, 2)
+        .unwrap();
+    assert!(migrated.undo());
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        43301,
+    )
+    .unwrap();
+    assert_eq!(
+        run_looks(&attached, &story),
+        [
+            look("M", Some(TextCaps::All), "#FFFFFF"),
+            look("i", None, "#101828"),
+            look("xed Case Title", Some(TextCaps::All), "#FFFFFF"),
+        ]
+    );
+}
+
+#[test]
+fn a_preset_value_a_collaborator_set_before_migration_stays() {
+    let fresh = DeckSession::open(V2_1_DEFAULTS_SOURCE, 43400).unwrap();
+    let shape = |name: &str| {
+        fresh.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.name == name)
+            .unwrap()
+            .id
+            .clone()
+    };
+    let (trapezoid, star) = (shape("Default trapezoid"), shape("Default star"));
+    let doc = hydrated(V2_1_DEFAULTS_UPDATE);
+    {
+        let mut txn = doc.transact_mut();
+        let shapes = txn.get_map(SHAPES).unwrap();
+        let shape = shapes
+            .get(&txn, &trapezoid)
+            .unwrap()
+            .cast::<MapRef>()
+            .unwrap();
+        shape.insert(&mut txn, "adjustValuesJson", r#"{"adj":0.2}"#);
+    }
+    let edited = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    let migrated = DeckSession::open_from_update(&edited, 43401).unwrap();
+    let adjust = |session: &DeckSession, id: &str| {
+        session.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == id)
+            .unwrap()
+            .adjust_values
+            .clone()
+    };
+    assert_eq!(
+        adjust(&migrated, &trapezoid),
+        BTreeMap::from([("adj".to_owned(), 0.2)])
+    );
+    assert_eq!(adjust(&migrated, &star), adjust(&fresh, &star));
+    let attached = DeckSession::open_from_update_with_source(
+        &migrated.encode_state_as_update_v1(),
+        V2_1_DEFAULTS_SOURCE,
+        43402,
+    )
+    .unwrap();
+    let parts: BTreeMap<_, _> = ooxml_opc::unzip_parts(&attached.save().unwrap())
+        .unwrap()
+        .into_iter()
+        .collect();
+    let slide = String::from_utf8(parts[DEFAULTS_SLIDE].clone()).unwrap();
+    let start = slide.find(r#"name="Default trapezoid""#).unwrap();
+    let trapezoid_xml = &slide[start..start + slide[start..].find("</p:sp>").unwrap()];
+    assert!(trapezoid_xml.contains(r#"<a:gd fmla="val 20000" name="adj"/>"#));
+}
+
+#[test]
+fn a_fragmented_story_recovers_in_about_the_time_a_fresh_open_takes() {
+    let mut paragraphs = String::new();
+    for paragraph in 0..FRAGMENTED_PARAGRAPHS {
+        paragraphs.push_str("<a:p><a:pPr/>");
+        for run in 0..FRAGMENTED_RUNS {
+            let (caps, size) = if (paragraph + run) % 2 == 0 {
+                ("all", 3200)
+            } else {
+                ("small", 3300)
+            };
+            paragraphs.push_str(&format!(
+                "<a:r><a:rPr lang=\"en-US\" sz=\"{size}\" cap=\"{caps}\"><a:solidFill>\
+                 <a:schemeClr val=\"tx1\"/></a:solidFill><a:latin typeface=\"Arial\"/></a:rPr>\
+                 <a:t>{}</a:t></a:r>",
+                format!("run {run} of {paragraph} ").repeat(FRAGMENTED_REPEATS)
+            ));
+        }
+        paragraphs.push_str("</a:p>");
+    }
+    let slide = defaults_part(DEFAULTS_SLIDE);
+    let start = slide.find("<a:p><a:pPr/><a:r>").unwrap();
+    let end = start + slide[start..].find("</a:p>").unwrap() + "</a:p>".len();
+    let source = defaults_variant(&[(DEFAULTS_SLIDE, &slide[start..end], &paragraphs)]);
+    let stored = legacy_seed(&source, 43500);
+    let started = std::time::Instant::now();
+    let fresh = DeckSession::open(&source, 43501).unwrap();
+    let open_time = started.elapsed();
+    let migrated = DeckSession::open_from_update(&stored, 43502).unwrap();
+    let story = defaults_story(&migrated, "Direct all caps");
+    let context = EditCtx::local("fixture");
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for paragraph in fresh.story(&story).unwrap().paragraphs {
+        starts.push(offset);
+        offset += paragraph
+            .runs
+            .iter()
+            .map(|run| run.text.len() as u32)
+            .sum::<u32>()
+            + 1;
+    }
+    let typed = TextStyle {
+        font_size_pt: Some(32.0),
+        ..TextStyle::default()
+    };
+    for session in [&migrated, &fresh] {
+        for index in starts
+            .iter()
+            .rev()
+            .flat_map(|start| [start + 60, start + 30, start + 3])
+        {
+            session
+                .delete_text(&context, &story, index, index + 2)
+                .unwrap();
+            session
+                .insert_text(&context, &story, index, "X", &typed)
+                .unwrap();
+        }
+    }
+    let update = migrated.encode_state_as_update_v1();
+    let started = std::time::Instant::now();
+    let attached = DeckSession::open_from_update_with_source(&update, &source, 43503).unwrap();
+    let attach_time = started.elapsed();
+    eprintln!("TIMING attach {attach_time:?} open {open_time:?}");
+    assert_eq!(
+        attached.story(&story).unwrap(),
+        fresh.story(&story).unwrap()
+    );
+    assert!(
+        attach_time < open_time * 8,
+        "attaching took {attach_time:?}, a fresh open {open_time:?}"
+    );
+}
 fn small_caps() -> TextStyle {
     TextStyle {
         font_size_pt: Some(32.0),
@@ -1245,6 +1515,12 @@ fn run_looks(session: &DeckSession, story: &str) -> Vec<RunLook> {
         .collect()
 }
 
+fn defaults_part(part: &str) -> String {
+    let parts = ooxml_opc::unzip_parts(V2_1_DEFAULTS_SOURCE).unwrap();
+    let (_, bytes) = parts.into_iter().find(|(name, _)| name == part).unwrap();
+    String::from_utf8(bytes).unwrap()
+}
+
 /// The defaults deck with each `(part, from, to)` replacement applied once.
 fn defaults_variant(edits: &[(&str, &str, &str)]) -> Vec<u8> {
     let mut parts = ooxml_opc::unzip_parts(V2_1_DEFAULTS_SOURCE).unwrap();
@@ -1264,4 +1540,17 @@ fn legacy_seed(source: &[u8], client_id: u64) -> Vec<u8> {
         without_keys(value, &["caps", "colorMap", "colorMapOverride"])
     });
     restamped(&stored, Some(2.1))
+}
+
+fn meta_has(update: &[u8], key: &str) -> bool {
+    let doc = hydrated(update);
+    meta(&doc).contains_key(&doc.transact(), key)
+}
+
+fn meta_string(update: &[u8], key: &str) -> String {
+    let doc = hydrated(update);
+    match meta(&doc).get(&doc.transact(), key) {
+        Some(Out::Any(Any::String(value))) => value.to_string(),
+        other => panic!("{key} is {other:?}"),
+    }
 }

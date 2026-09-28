@@ -1,16 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use serde_json::Value;
+use yrs::branch::{Branch, BranchID, BranchPtr};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
-use yrs::{Any, Assoc, ClientID, IndexedSequence, Map, Out, ReadTxn, Text, TextRef, Transact};
+use yrs::{
+    Any, Assoc, ClientID, Doc, ID, IndexedSequence, Map, MapRef, Out, ReadTxn, Snapshot,
+    StateVector, StickyIndex, Text, TextRef, Transact,
+};
 
 use crate::deck::{SourceImport, map_string};
 use crate::story::style_from_attrs;
 use crate::{
     BOOTSTRAP_CLIENT_ID, DeckSession, EditError, EditResult, META, MIGRATE_ORIGIN, PARA_ID,
-    ShapeSnapshot, StorySnapshot,
+    ShapeSnapshot, StorySnapshot, TextStyle,
 };
 
 #[derive(Clone, Copy)]
@@ -36,7 +40,7 @@ impl SourceProperty {
         }
     }
 
-    fn value(self, style: &crate::TextStyle) -> Option<Any> {
+    fn value(self, style: &TextStyle) -> Option<Any> {
         match self {
             Self::Baseline => style.baseline_pct.map(Any::Number),
             Self::Spacing => style.spacing_pt.map(Any::Number),
@@ -44,6 +48,16 @@ impl SourceProperty {
             Self::Color => style.color.as_deref().map(Any::from),
         }
     }
+}
+
+/// Characters a pass could not recover, by story, as `(client, clock)`.
+type Unresolved = BTreeMap<String, Vec<(u64, u32)>>;
+
+/// Which stories a pass still has to recover: all of them after migration, or
+/// only the characters an earlier pass left unresolved.
+enum Pending {
+    All,
+    Only(Unresolved),
 }
 
 pub(crate) fn import_source(
@@ -54,12 +68,17 @@ pub(crate) fn import_source(
     let (pending_key, json_keys, attribute) = property.keys();
     let pending = {
         let txn = session.doc.transact();
-        txn.get_map(META)
-            .is_some_and(|meta| meta.get(&txn, pending_key) == Some(Out::Any(Any::Bool(true))))
+        match txn
+            .get_map(META)
+            .and_then(|meta| meta.get(&txn, pending_key))
+        {
+            Some(Out::Any(Any::Bool(true))) => Pending::All,
+            Some(Out::Any(Any::String(json))) => Pending::Only(
+                serde_json::from_str(&json).map_err(|error| EditError::Json(error.to_string()))?,
+            ),
+            _ => return Ok(()),
+        }
     };
-    if !pending {
-        return Ok(());
-    }
     let source_json =
         serde_json::to_value(import.source).map_err(|error| EditError::Json(error.to_string()))?;
     if !json_keys.iter().any(|key| has_property(&source_json, key)) {
@@ -85,22 +104,34 @@ pub(crate) fn import_source(
     import.package =
         serde_json::from_value(package).map_err(|error| EditError::Json(error.to_string()))?;
     let mut patches = Vec::new();
-    {
-        let txn = session.doc.transact();
-        let stories = txn
-            .get_map(crate::STORIES)
-            .ok_or_else(|| EditError::InvalidState("missing stories".into()))?;
-        for (id, source) in &sources {
-            let Some(story) = stories
-                .get(&txn, id)
-                .and_then(|value| value.cast::<TextRef>().ok())
-            else {
-                continue;
-            };
-            let seeded = seeded_tokens(&story, &txn, id, property);
-            for (start, end, value) in recovered(source, &seeded) {
-                patches.push((story.clone(), start, end, value));
-            }
+    let mut unresolved = Unresolved::new();
+    for (id, source) in &sources {
+        let only = match &pending {
+            Pending::All => None,
+            Pending::Only(stories) => match stories.get(id) {
+                Some(ids) => Some(
+                    ids.iter()
+                        .map(|(client, clock)| ID::new(ClientID::new(*client), *clock))
+                        .collect::<HashSet<_>>(),
+                ),
+                None => continue,
+            },
+        };
+        let Some((story, replayed)) = import.recovery.story(&session.doc, session.package(), id)?
+        else {
+            continue;
+        };
+        let (ranges, left) = recover_story(story, replayed, source, property, only.as_ref());
+        for (start, end, value) in ranges {
+            patches.push((story.text.clone(), start, end, value));
+        }
+        if !left.is_empty() {
+            unresolved.insert(
+                id.clone(),
+                left.into_iter()
+                    .map(|id| (id.client.get(), id.clock))
+                    .collect(),
+            );
         }
     }
     let mut txn = session.doc.transact_mut_with(MIGRATE_ORIGIN);
@@ -115,7 +146,13 @@ pub(crate) fn import_source(
     let meta = txn
         .get_map(META)
         .ok_or_else(|| EditError::InvalidState("missing metadata".into()))?;
-    meta.remove(&mut txn, pending_key);
+    if unresolved.is_empty() {
+        meta.remove(&mut txn, pending_key);
+    } else {
+        let json = serde_json::to_string(&unresolved)
+            .map_err(|error| EditError::Json(error.to_string()))?;
+        meta.insert(&mut txn, pending_key, json);
+    }
     Ok(())
 }
 
@@ -123,6 +160,7 @@ pub(crate) fn import_source(
 enum Token {
     Char(char),
     Paragraph(usize),
+    Break,
 }
 
 struct SourceToken {
@@ -131,11 +169,436 @@ struct SourceToken {
     legacy: Option<Any>,
 }
 
-struct SeededToken {
+/// A story's live content, read once per attachment and shared by every pass.
+struct Story {
+    text: TextRef,
+    /// The clock of the item holding the story, when the seed created it.
+    seed: Option<u32>,
+    units: Vec<Unit>,
+    styles: Vec<TextStyle>,
+}
+
+/// A character with the item that holds it, or a paragraph end.
+struct Unit {
     token: Token,
     start: u32,
     end: u32,
-    value: Option<Any>,
+    id: Option<ID>,
+    style: usize,
+}
+
+/// A story as the seed wrote it: its tokens, by clock relative to the story.
+struct Replayed {
+    tokens: Vec<Token>,
+    positions: HashMap<u32, usize>,
+}
+
+/// What the recovery passes of one attachment share.
+#[derive(Default)]
+pub(crate) struct RecoveryCache {
+    visible: Option<Visible>,
+    stories: HashMap<String, Option<Story>>,
+    replay: Option<Doc>,
+    replayed: HashMap<String, Option<Replayed>>,
+}
+
+/// The doc's state as a snapshot yrs 0.27.3 can split, which leaves out clients
+/// with at most two clock ticks, and those clients' characters, located by id.
+struct Visible {
+    snapshot: Snapshot,
+    tiny: Vec<(BranchPtr, u32, ID)>,
+}
+
+impl RecoveryCache {
+    /// The story's live content and its replayed seed, the stored package
+    /// seeded again to reproduce the legacy seed's ids.
+    fn story(
+        &mut self,
+        doc: &Doc,
+        package: &pptx_parse::PptxPackage,
+        story_id: &str,
+    ) -> EditResult<Option<(&Story, Option<&Replayed>)>> {
+        if self.replay.is_none() {
+            let replay = crate::doc_with_client_id(BOOTSTRAP_CLIENT_ID);
+            crate::deck::seed_doc(&replay, package, "")?;
+            self.replay = Some(replay);
+        }
+        if !self.stories.contains_key(story_id) {
+            let visible = self.visible.get_or_insert_with(|| visible(doc));
+            let story = read_story(doc, story_id, visible);
+            self.stories.insert(story_id.to_owned(), story);
+        }
+        if let Some(replay) = &self.replay {
+            self.replayed
+                .entry(story_id.to_owned())
+                .or_insert_with(|| read_replayed(replay, story_id));
+        }
+        Ok(self.stories[story_id]
+            .as_ref()
+            .map(|story| (story, self.replayed[story_id].as_ref())))
+    }
+}
+
+fn visible(doc: &Doc) -> Visible {
+    let txn = doc.transact();
+    let current = txn.snapshot();
+    let mut state = StateVector::default();
+    let mut tiny = Vec::new();
+    for (&client, &clock) in current.state_map.iter() {
+        if clock > 2 {
+            state.set_max(client, clock);
+            continue;
+        }
+        for clock in 0..clock {
+            let id = ID::new(client, clock);
+            if let Some(offset) = StickyIndex::from_id(id, Assoc::After).get_offset(&txn)
+                && TextRef::from(offset.branch)
+                    .sticky_index(&txn, offset.index, Assoc::After)
+                    .and_then(|index| index.id().copied())
+                    == Some(id)
+            {
+                tiny.push((offset.branch, offset.index, id));
+            }
+        }
+    }
+    Visible {
+        snapshot: Snapshot::new(state, current.delete_set),
+        tiny,
+    }
+}
+
+fn read_story(doc: &Doc, story_id: &str, visible: &Visible) -> Option<Story> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let text = txn
+        .get_map(crate::STORIES)?
+        .get(&txn, story_id)?
+        .cast::<TextRef>()
+        .ok()?;
+    let seed = match <TextRef as AsRef<Branch>>::as_ref(&text).id() {
+        BranchID::Nested(id) if id.client == ClientID::new(BOOTSTRAP_CLIENT_ID) => Some(id.clock),
+        _ => None,
+    };
+    let mut identified = Vec::new();
+    for diff in text.diff_range(
+        &mut txn,
+        Some(&visible.snapshot),
+        Some(&Snapshot::default()),
+        YChange::identity,
+    ) {
+        match (&diff.insert, diff.ychange) {
+            (Out::Any(Any::String(chunk)), Some(change)) => {
+                let mut clock = change.id.clock;
+                for unit in chunk.chars() {
+                    identified.push(Some((unit, ID::new(change.id.client, clock))));
+                    clock += unit.len_utf16() as u32;
+                }
+            }
+            _ => identified.push(None),
+        }
+    }
+    let branch = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&text));
+    let tiny: HashMap<_, _> = visible
+        .tiny
+        .iter()
+        .filter(|(owner, ..)| *owner == branch)
+        .map(|(_, index, id)| (*index, *id))
+        .collect();
+    let prefix = format!("para:{story_id}:");
+    let mut identified = identified.into_iter();
+    let mut matched = true;
+    let mut units = Vec::new();
+    let mut styles = Vec::new();
+    let mut offset = 0;
+    for diff in text.diff(&txn, YChange::identity) {
+        match &diff.insert {
+            Out::Any(Any::String(chunk)) => {
+                styles.push(style_from_attrs(diff.attributes.as_deref()));
+                for unit in chunk.chars() {
+                    let end = offset + unit.len_utf16() as u32;
+                    let id = match tiny.get(&offset) {
+                        Some(id) => Some(*id),
+                        None => match identified.next() {
+                            Some(Some((found, id))) if found == unit => Some(id),
+                            _ => {
+                                matched = false;
+                                None
+                            }
+                        },
+                    };
+                    units.push(Unit {
+                        token: Token::Char(unit),
+                        start: offset,
+                        end,
+                        id,
+                        style: styles.len() - 1,
+                    });
+                    offset = end;
+                }
+            }
+            other => {
+                matched &= matches!(identified.next(), Some(None));
+                let (token, id) = match other {
+                    Out::YMap(pilcrow) => (pilcrow_token(pilcrow, &txn, &prefix), item_id(pilcrow)),
+                    _ => (Token::Break, None),
+                };
+                units.push(Unit {
+                    token,
+                    start: offset,
+                    end: offset + 1,
+                    id,
+                    style: 0,
+                });
+                offset += 1;
+            }
+        }
+    }
+    if !matched || identified.next().is_some() {
+        for unit in units
+            .iter_mut()
+            .filter(|unit| matches!(unit.token, Token::Char(_)))
+        {
+            unit.id = text
+                .sticky_index(&txn, unit.start, Assoc::After)
+                .and_then(|index| index.id().copied());
+        }
+    }
+    Some(Story {
+        text,
+        seed,
+        units,
+        styles,
+    })
+}
+
+fn read_replayed(replay: &Doc, story_id: &str) -> Option<Replayed> {
+    let mut txn = replay.transact_mut();
+    let text = txn
+        .get_map(crate::STORIES)?
+        .get(&txn, story_id)?
+        .cast::<TextRef>()
+        .ok()?;
+    let BranchID::Nested(base) = <TextRef as AsRef<Branch>>::as_ref(&text).id() else {
+        return None;
+    };
+    let current = txn.snapshot();
+    let prefix = format!("para:{story_id}:");
+    let mut tokens = Vec::new();
+    let mut positions = HashMap::new();
+    for diff in text.diff_range(
+        &mut txn,
+        Some(&current),
+        Some(&Snapshot::default()),
+        YChange::identity,
+    ) {
+        match (&diff.insert, diff.ychange) {
+            (Out::Any(Any::String(chunk)), Some(change)) => {
+                let mut clock = change.id.clock;
+                for unit in chunk.chars() {
+                    positions.insert(clock - base.clock, tokens.len());
+                    tokens.push(Token::Char(unit));
+                    clock += unit.len_utf16() as u32;
+                }
+            }
+            (Out::YMap(pilcrow), _) => {
+                if let Some(id) = item_id(pilcrow) {
+                    positions.insert(id.clock - base.clock, tokens.len());
+                }
+                tokens.push(pilcrow_token(pilcrow, &txn, &prefix));
+            }
+            _ => tokens.push(Token::Break),
+        }
+    }
+    Some(Replayed { tokens, positions })
+}
+
+fn item_id(pilcrow: &MapRef) -> Option<ID> {
+    match <MapRef as AsRef<Branch>>::as_ref(pilcrow).id() {
+        BranchID::Nested(id) => Some(id),
+        BranchID::Root(_) => None,
+    }
+}
+
+fn pilcrow_token<T: ReadTxn>(pilcrow: &MapRef, txn: &T, prefix: &str) -> Token {
+    map_string(pilcrow, txn, PARA_ID)
+        .and_then(|id| id.strip_prefix(prefix)?.parse().ok())
+        .map_or(Token::Break, Token::Paragraph)
+}
+
+/// The ranges to write and the characters left unresolved. A seeded character
+/// takes its source position from its clock when the replayed seed agrees with
+/// the source; otherwise from its in-order match.
+fn recover_story(
+    story: &Story,
+    replayed: Option<&Replayed>,
+    source: &[SourceToken],
+    property: SourceProperty,
+    only: Option<&HashSet<ID>>,
+) -> (Vec<(u32, u32, Any)>, Vec<ID>) {
+    let bootstrap = ClientID::new(BOOTSTRAP_CLIENT_ID);
+    let seeded = |unit: &Unit| {
+        unit.id
+            .filter(|id| id.client == bootstrap && only.is_none_or(|only| only.contains(id)))
+    };
+    let value = |unit: &Unit| property.value(&story.styles[unit.style]);
+    let mut ranges = Vec::new();
+    if let Some(positions) = exact_positions(story, replayed, source) {
+        for (unit, position) in story.units.iter().zip(positions) {
+            if let (Some(_), Some(position)) = (seeded(unit), position) {
+                let candidate = &source[position];
+                if candidate.value != candidate.legacy && value(unit) == candidate.legacy {
+                    push_range(&mut ranges, unit, candidate);
+                }
+            }
+        }
+        return (ranges, Vec::new());
+    }
+    let mut unresolved = Vec::new();
+    let mut paragraphs = HashMap::new();
+    let mut changes = Vec::with_capacity(source.len());
+    let mut previous = None;
+    let mut count = 0;
+    for (position, token) in source.iter().enumerate() {
+        match token.token {
+            Token::Paragraph(index) => {
+                paragraphs.insert(index, position);
+            }
+            _ => {
+                let values = (&token.value, &token.legacy);
+                count += usize::from(previous.is_some_and(|previous| previous != values));
+                previous = Some(values);
+            }
+        }
+        changes.push(count);
+    }
+    let mut from = 0;
+    let mut stretch = Vec::new();
+    for unit in &story.units {
+        match unit.token {
+            Token::Char(_) if seeded(unit).is_some() => stretch.push((unit, value(unit))),
+            Token::Paragraph(index) => {
+                if let Some(&until) = paragraphs.get(&index).filter(|until| **until >= from) {
+                    let window = from..until;
+                    recover_stretch(
+                        source,
+                        &changes,
+                        window,
+                        &stretch,
+                        &mut ranges,
+                        &mut unresolved,
+                    );
+                    from = until + 1;
+                    stretch.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+    let window = from..source.len();
+    recover_stretch(
+        source,
+        &changes,
+        window,
+        &stretch,
+        &mut ranges,
+        &mut unresolved,
+    );
+    (ranges, unresolved)
+}
+
+/// Each seeded character's source position by clock, or `None` when the
+/// replayed seed does not reproduce this story, its paragraph ends included,
+/// or the source text.
+fn exact_positions(
+    story: &Story,
+    replayed: Option<&Replayed>,
+    source: &[SourceToken],
+) -> Option<Vec<Option<usize>>> {
+    let replayed = replayed?;
+    if replayed.tokens.len() != source.len()
+        || replayed
+            .tokens
+            .iter()
+            .zip(source)
+            .any(|(token, source)| *token != source.token)
+    {
+        return None;
+    }
+    let bootstrap = ClientID::new(BOOTSTRAP_CLIENT_ID);
+    story
+        .units
+        .iter()
+        .map(|unit| match unit.id {
+            Some(id) if id.client == bootstrap => {
+                let position = *replayed
+                    .positions
+                    .get(&id.clock.checked_sub(story.seed?)?)?;
+                (replayed.tokens[position] == unit.token).then_some(Some(position))
+            }
+            _ => Some(None),
+        })
+        .collect()
+}
+
+fn push_range(ranges: &mut Vec<(u32, u32, Any)>, unit: &Unit, candidate: &SourceToken) {
+    let value = candidate.value.clone().unwrap_or(Any::Null);
+    match ranges.last_mut() {
+        Some((_, end, last)) if *end == unit.start && *last == value => *end = unit.end,
+        _ => ranges.push((unit.start, unit.end, value)),
+    }
+}
+
+/// A character's candidate source positions run from its earliest to its latest
+/// in-order match within `window`; it is written when they all carry the same
+/// values and left unresolved when they do not.
+fn recover_stretch(
+    source: &[SourceToken],
+    changes: &[usize],
+    window: Range<usize>,
+    stretch: &[(&Unit, Option<Any>)],
+    ranges: &mut Vec<(u32, u32, Any)>,
+    unresolved: &mut Vec<ID>,
+) {
+    let from = window.start;
+    let window = &source[window];
+    let (Some(earliest), Some(latest)) = (earliest(window, stretch), latest(window, stretch))
+    else {
+        unresolved.extend(stretch.iter().filter_map(|(unit, _)| unit.id));
+        return;
+    };
+    for (((unit, value), earliest), latest) in stretch.iter().zip(earliest).zip(latest) {
+        let (earliest, latest) = (from + earliest, from + latest);
+        let candidate = &source[earliest];
+        if changes[earliest] != changes[latest] {
+            unresolved.extend(unit.id);
+        } else if candidate.value != candidate.legacy && *value == candidate.legacy {
+            push_range(ranges, unit, candidate);
+        }
+    }
+}
+
+fn earliest(window: &[SourceToken], stretch: &[(&Unit, Option<Any>)]) -> Option<Vec<usize>> {
+    let mut positions = Vec::with_capacity(stretch.len());
+    let mut next = 0;
+    for (unit, _) in stretch {
+        next += window[next..]
+            .iter()
+            .position(|source| source.token == unit.token)?;
+        positions.push(next);
+        next += 1;
+    }
+    Some(positions)
+}
+
+fn latest(window: &[SourceToken], stretch: &[(&Unit, Option<Any>)]) -> Option<Vec<usize>> {
+    let mut positions = vec![0; stretch.len()];
+    let mut end = window.len();
+    for (position, (unit, _)) in positions.iter_mut().zip(stretch).rev() {
+        end = window[..end]
+            .iter()
+            .rposition(|source| source.token == unit.token)?;
+        *position = end;
+    }
+    Some(positions)
 }
 
 fn collect_stories<'a>(
@@ -201,156 +664,6 @@ fn token_values(story: &StorySnapshot, property: SourceProperty) -> Vec<Option<A
         values.push(None);
     }
     values
-}
-
-/// The story's characters the seed wrote, told apart from later insertions by
-/// the CRDT client that inserted them, and the seeded paragraph ends.
-fn seeded_tokens<T: ReadTxn>(
-    story: &TextRef,
-    txn: &T,
-    story_id: &str,
-    property: SourceProperty,
-) -> Vec<SeededToken> {
-    let prefix = format!("para:{story_id}:");
-    let bootstrap = ClientID::new(BOOTSTRAP_CLIENT_ID);
-    let mut tokens = Vec::new();
-    let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
-        match &diff.insert {
-            Out::Any(Any::String(text)) => {
-                let value = property.value(&style_from_attrs(diff.attributes.as_deref()));
-                for unit in text.chars() {
-                    let end = offset + unit.len_utf16() as u32;
-                    if story
-                        .sticky_index(txn, offset, Assoc::After)
-                        .and_then(|index| index.id().map(|id| id.client == bootstrap))
-                        .unwrap_or(false)
-                    {
-                        tokens.push(SeededToken {
-                            token: Token::Char(unit),
-                            start: offset,
-                            end,
-                            value: value.clone(),
-                        });
-                    }
-                    offset = end;
-                }
-            }
-            Out::YMap(pilcrow) => {
-                if let Some(index) = map_string(pilcrow, txn, PARA_ID)
-                    .and_then(|id| id.strip_prefix(&prefix)?.parse().ok())
-                {
-                    tokens.push(SeededToken {
-                        token: Token::Paragraph(index),
-                        start: offset,
-                        end: offset + 1,
-                        value: None,
-                    });
-                }
-                offset += 1;
-            }
-            _ => offset += 1,
-        }
-    }
-    tokens
-}
-
-/// The ranges of seeded characters still holding their legacy value, with the
-/// source value to write. Seeded paragraph ends pin each stretch of characters
-/// to its source paragraphs.
-fn recovered(source: &[SourceToken], seeded: &[SeededToken]) -> Vec<(u32, u32, Any)> {
-    let mut paragraphs = HashMap::new();
-    let mut changes = Vec::with_capacity(source.len());
-    let mut previous = None;
-    let mut count = 0;
-    for (position, token) in source.iter().enumerate() {
-        match token.token {
-            Token::Paragraph(index) => {
-                paragraphs.insert(index, position);
-            }
-            Token::Char(_) => {
-                let values = (&token.value, &token.legacy);
-                count += usize::from(previous.is_some_and(|previous| previous != values));
-                previous = Some(values);
-            }
-        }
-        changes.push(count);
-    }
-    let mut ranges = Vec::new();
-    let mut from = 0;
-    let mut stretch = Vec::new();
-    for token in seeded {
-        match token.token {
-            Token::Char(_) => stretch.push(token),
-            Token::Paragraph(index) => {
-                if let Some(&until) = paragraphs.get(&index).filter(|until| **until >= from) {
-                    recover_stretch(source, &changes, from..until, &stretch, &mut ranges);
-                    from = until + 1;
-                    stretch.clear();
-                }
-            }
-        }
-    }
-    recover_stretch(source, &changes, from..source.len(), &stretch, &mut ranges);
-    ranges
-}
-
-/// A character's candidate source positions run from its earliest to its latest
-/// in-order match within `window`; it is written only when they all carry the
-/// same values.
-fn recover_stretch(
-    source: &[SourceToken],
-    changes: &[usize],
-    window: Range<usize>,
-    stretch: &[&SeededToken],
-    ranges: &mut Vec<(u32, u32, Any)>,
-) {
-    let from = window.start;
-    let window = &source[window];
-    let (Some(earliest), Some(latest)) = (earliest(window, stretch), latest(window, stretch))
-    else {
-        return;
-    };
-    for ((token, earliest), latest) in stretch.iter().zip(earliest).zip(latest) {
-        let (earliest, latest) = (from + earliest, from + latest);
-        let candidate = &source[earliest];
-        if changes[earliest] != changes[latest]
-            || candidate.value == candidate.legacy
-            || token.value != candidate.legacy
-        {
-            continue;
-        }
-        let value = candidate.value.clone().unwrap_or(Any::Null);
-        match ranges.last_mut() {
-            Some((_, end, last)) if *end == token.start && *last == value => *end = token.end,
-            _ => ranges.push((token.start, token.end, value)),
-        }
-    }
-}
-
-fn earliest(window: &[SourceToken], stretch: &[&SeededToken]) -> Option<Vec<usize>> {
-    let mut positions = Vec::with_capacity(stretch.len());
-    let mut next = 0;
-    for token in stretch {
-        next += window[next..]
-            .iter()
-            .position(|source| source.token == token.token)?;
-        positions.push(next);
-        next += 1;
-    }
-    Some(positions)
-}
-
-fn latest(window: &[SourceToken], stretch: &[&SeededToken]) -> Option<Vec<usize>> {
-    let mut positions = vec![0; stretch.len()];
-    let mut end = window.len();
-    for (position, token) in positions.iter_mut().zip(stretch).rev() {
-        end = window[..end]
-            .iter()
-            .rposition(|source| source.token == token.token)?;
-        *position = end;
-    }
-    Some(positions)
 }
 
 fn merge_property(target: &mut Value, source: &Value, key: &str) {
