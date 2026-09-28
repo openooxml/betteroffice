@@ -558,20 +558,26 @@ function heavyVariantOf(family: string, italic: boolean): BundledFontFace | unde
   return resolveMetricCompatFace(words.slice(0, -1).join(' '), true, italic);
 }
 
+/** The Office application whose font substitution a last-resort pick follows. */
+export type LastResortOffice = 'powerpoint' | 'word';
+
 /**
  * Choose a related family, then a serif or sans fallback.
  *
- * The sans fallback is Calibri because that is what Office substitutes for a
- * family it cannot find: a deck asking for Google Sans, Inter or Questrial is
- * drawn in Calibri, which is ~7% narrower than Arial, so falling back to Arial
- * rewraps every line the document wrote against those metrics. A heavy weight
- * in the name is read only for a family we bundle: Office substitutes
- * `Archivo Black` with a regular face, and matching that keeps the line breaks.
+ * The sans fallback follows the application that drew the file. PowerPoint
+ * substitutes Calibri for a family it cannot find: a deck asking for Google
+ * Sans, Inter or Questrial is drawn in Calibri, which is ~7% narrower than
+ * Arial, so falling back to Arial rewraps every line the deck wrote against
+ * those metrics. Word substitutes Arial, and a document paginated against
+ * Arial loses pages when drawn in Calibri. A heavy weight in the name is read
+ * only for a family we bundle: Office substitutes `Archivo Black` with a
+ * regular face, and matching that keeps the line breaks.
  */
 export function resolveLastResortFace(
   family: string,
   bold: boolean,
   italic: boolean,
+  office: LastResortOffice = 'powerpoint',
 ): BundledFontFace {
   const light = lightVariantOf(family, italic);
   if (light) return light;
@@ -585,6 +591,7 @@ export function resolveLastResortFace(
     const face = resolveMetricCompatFace(matched, bold, italic);
     if (face) return face;
   }
-  const base = looksSerif(family) ? 'Times New Roman' : 'Calibri';
+  const sans = office === 'word' ? 'Arial' : 'Calibri';
+  const base = looksSerif(family) ? 'Times New Roman' : sans;
   return resolveMetricCompatFace(base, bold, italic)!;
 }

@@ -3,6 +3,7 @@ import {
   resolveScriptFallbackFace,
   resolveLastResortFace,
   type BundledFontFace,
+  type LastResortOffice,
   type BundledFontScript,
 } from './manifest';
 
@@ -22,6 +23,7 @@ export interface BundledFontSource {
     family: string,
     bold: boolean,
     italic: boolean,
+    office?: LastResortOffice,
   ): () => Promise<ArrayBuffer>;
 }
 
@@ -38,8 +40,8 @@ export function fontProvider(
       const face = resolveScriptFallbackFace(script, bold, italic);
       return face ? load(face) : undefined;
     },
-    resolveLastResort(family, bold, italic) {
-      return load(resolveLastResortFace(family, bold, italic));
+    resolveLastResort(family, bold, italic, office) {
+      return load(resolveLastResortFace(family, bold, italic, office));
     },
   };
 }

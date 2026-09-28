@@ -38,6 +38,13 @@ describe('resolution', () => {
     expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
   });
 
+  test('Word substitutes Arial for an unknown sans family, PowerPoint Calibri', () => {
+    expect(resolveLastResortFace('Lato', false, false, 'word').file).toBe('LiberationSans-Regular.ttf');
+    expect(resolveLastResortFace('Lato', true, false, 'powerpoint').file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Garamond', false, false, 'word').family).toBe('Liberation Serif');
+    expect(resolveLastResortFace('Consolas', false, false, 'word').file).toBe('LiberationMono-Regular.ttf');
+  });
+
   test('a typewriter or old-style name lands on a face of its own kind', () => {
     expect(resolveLastResortFace('Consolas', false, false).file).toBe('LiberationMono-Regular.ttf');
     expect(resolveLastResortFace('Lucida Console', false, false).file).toBe(
