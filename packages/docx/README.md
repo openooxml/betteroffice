@@ -96,14 +96,14 @@ session.setUndoCaptureMode('auto');
 
 The two insertions undo together; marker deletion is a separate step. Boundaries
 are also available in automatic mode when a host action needs to be isolated from
-surrounding typing. Undo/redo close capture as usual. Manual mode controls history
-grouping; it does not defer updates, flush pending input, or provide atomic execution.
+surrounding typing. Undo/redo close capture as usual. Manual mode groups history;
+edit batches provide atomic execution.
 The host must close manual groups so later unrelated edits do not join them.
 
 ### Paragraph identities
 
 A session addresses paragraphs by session keys (`YrsLoc.paraId`); Word stores its
-own paragraph ID (`w14:paraId`) in the file. A session key is never saved; a session
+own paragraph ID (`w14:paraId`) in the file. Session keys identify live paragraphs; a session
 anchor resolves on every replica of one collaborative session, and each seeding open
 (`openDocx`, `seedFromDocx`, `documentToYrs`) starts a new one unless given a fixed
 `generation`, as a deterministic shared seed needs. Source IDs are kept as authored, and every
@@ -127,10 +127,9 @@ reopened.resolveParagraphAnchor(anchor); // { status: 'found', anchor: { kind: '
 
 `saved.conflicts` lists saved paragraphs whose ID the live session reassigned while the
 save ran, such as by a duplicate repair after a remote update; their anchors find them in
-the saved bytes only. The React editor's Save writes the same IDs and records them as
-saved; only `saveYrsDocx` returns the anchors and keeps unchanged parts as source bytes.
-Source paragraphs without an ID save without one and have no persisted anchor.
-`session.persistParagraphIds()` assigns them IDs across every story part, comments,
+the saved bytes only. The React editor's Save writes and records these IDs. `saveYrsDocx`
+also returns anchors and preserves unchanged source parts. `session.persistParagraphIds()`
+assigns IDs to source paragraphs without one across every story part, comments,
 note separators and retained XML included, and repairs duplicates: source IDs and
 saved IDs keep theirs over copies. It refuses, changing nothing, rather than guess at
 an ambiguous comment reference. The change is replicated, stays out of undo history,
@@ -219,9 +218,8 @@ typed ones do, so `saveYrsDocx` returns persisted anchors for them.
 
 ### Structured export
 
-Export a document as read-only structured JSON or Markdown, with the location of
-every block and inline and a diagnostic for everything the export omits or cannot
-represent.
+Export read-only structured JSON or Markdown with block and inline anchors and
+diagnostics.
 
 ```ts
 import { exportDocxMarkdown, exportDocxStructured } from '@betteroffice/docx';
@@ -259,19 +257,16 @@ continuations, content controls, section breaks, and placeholders naming the
 source element of other content. Inlines cover text, tabs, line,
 page and column breaks where the source has them, note and comment references,
 fields with their cached result in result order, hyperlinks and nested fields
-included, all anchored to the field (never evaluated; a numeric field's result
+included, all anchored to the field (a numeric field's result
 blocks stay inside the field), images (alt text and the relationship of the part
-that owns them, no binary data) and inline controls. A header or footer part
+that owns them) and inline controls. A header or footer part
 referenced through several relationships is one story with every section that
 uses it while the copies hold the same content, and one story per copy with a
 diagnostic once they differ. `revisionView` is required: `accepted` and
 `original` project pending revisions like `readParagraphs`, and `markup` keeps
 both with `revisions` attribution on each inline, moves as `moveFrom` and
-`moveTo`. Where a view cannot reconstruct history (a paragraph-mark revision,
-tracked formatting or a style change that changes the exported marks, tracked
-cell or grid changes,
-or row and table revisions the markup view cannot attribute) the block is an
-anchored `unsupported` placeholder with an `unsupported-revision` diagnostic.
+`moveTo`. Other revision history exports as an anchored `unsupported`
+placeholder with an `unsupported-revision` diagnostic.
 
 Anchors use the batch offsets and session keys: a paragraph anchor's `paraId` is the
 batch target key, and a range is paragraph-local UTF-16 in the view it
@@ -301,15 +296,14 @@ blocks per cell), attributed insertions and deletions, and a
 `<!-- docx-export:N -->` marker per block, nested ones included, mapped to its
 anchor in `anchors`. Only http, https, mailto and internal-anchor targets are linked,
 judged after entity and percent decoding, and `&` in a target is written `&amp;`; document text, titles and alt text never keep a
-line break or unescaped HTML. It does not
-preserve Word pagination or layout.
+line break or unescaped HTML.
 
 ### Page fragments
 
 A paged export attaches a page map to the structured content: the physical page,
 section and displayed page label showing each block and inline, and the body,
-header, footer or note occurrence it sits in. Ordinary exports never lay anything
-out.
+header, footer or note occurrence it sits in. Ordinary exports return structured
+content.
 
 ```ts
 import { exportDocxStructuredWithPages, renderDocxMarkdownWithPages } from '@betteroffice/docx';
@@ -348,9 +342,7 @@ painted.
 
 `pageIndex` counts physical pages from zero, blank parity pages included, while
 `displayedNumber`/`displayedLabel` follow the section's PAGE numbering (restarts,
-continuation and Roman or letter formats; an unwritable format falls back to
-decimal with `numberingStatus: 'fallback'` and an `unsupported-numbering`
-diagnostic). A header or footer part stays one exported story with an occurrence
+continuation and Roman or letter formats). A header or footer part stays one exported story with an occurrence
 on every page showing it; a note has an occurrence where its note area is, which
 may differ from its reference's page. Text slices are ranges in the export's own
 offsets, split where the node, paragraph, view or page changes; atoms (fields,
@@ -365,8 +357,7 @@ paged export reads the `markup` view, and `accepted` or `original` return
 `unsupported-revision-layout`. The other refusal codes are `stale-document`,
 `stale-layout` (stale section, settings or note metadata, fonts, options or
 `expectLayoutVersion`), `layout-unavailable`, `layout-not-converged` and
-`unsupported`; a note taller than its page's note area carries an
-`unsupported-note-layout` diagnostic.
+`unsupported`.
 Geometry is off by default; rectangles are unzoomed CSS pixels (96 per inch) from
 the physical page's top-left corner. `maxFragments` (100,000 by default) and
 `maxLayoutBytes` bound the map separately and mark it `truncated`; mapping stops a
@@ -406,7 +397,7 @@ breaks as LF, or `unavailable` with a reason), `multiLine` and `effectiveLock`,
 which folds in the locks of the controls containing it. `stories` narrows the read
 to some categories; `maxControls` (10,000) and `maxBytes` (8,388,608) refuse with
 `limit-exceeded` rather than returning part of the list, and `complete: false`
-comes with diagnostics naming what could not be covered. Tags, aliases and
+includes coverage diagnostics. Tags, aliases and
 `ooxmlId`s match exactly and case-sensitively, and `findContentControls` returns
 every match. `listDocxContentControls(bytes)` and
 `findDocxContentControls(bytes, query)` read bytes without a session and throw
@@ -415,10 +406,8 @@ collaborators resolve last-writer-wins for an inline control and merge like
 concurrent typing for a block control.
 
 A step's `target` is `{ kind: 'id', controlId }`, `{ kind: 'tag', tag }` or
-`{ kind: 'ooxmlId', ooxmlId }`. `controlId` is the per-version locator: scoped to
-the version or snapshot it was read at, it does not survive save and reopen, and
-an inline control's id can name a different control after edits, so list again
-after a version change. Tags are the template author's names for
+`{ kind: 'ooxmlId', ooxmlId }`. `controlId` is a locator scoped to the
+version or snapshot it was read at; list again after a version change. Tags are the template author's names for
 controls. `ooxmlId` is the control's authored `w:id`, the identity that survives
 save and reopen. A tag or `ooxmlId` write searches every story regardless of read
 filters and needs exactly one control in the document to carry it.
@@ -544,17 +533,14 @@ one range may span paragraphs, and separate ranges may address different stories
 
 Every range must be non-empty, ordered, and within existing paragraphs. An empty
 list, unknown comment/story/paragraph, or invalid offset throws before any content
-changes. The host must find the surviving text and supply its new range; the API
-does not infer text matches after replacement.
+changes. The host supplies the surviving text's new range.
 
 If replacement removes all commented text, the host must explicitly choose a new
 non-empty range or handle the comment's removal. Rejected reanchoring leaves the
 comment unchanged and does not roll back a text replacement already performed.
 
 `saveYrsDocx()` writes the current ranges under the comment's own ID, with its
-author, date, body, replies and resolution. Reopening the saved file restores a
-range that stays within one paragraph and overlaps no other comment's range;
-opening reads comment ranges paragraph by paragraph, one comment per run.
+author, date, body, replies and resolution.
 
 Reanchoring joins the current local undo capture, so an immediate replacement and
 reanchor can undo together. Comment edits participate in the session's history;
