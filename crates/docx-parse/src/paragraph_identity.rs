@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn applying_edits_scales_linearly() {
-        let time = |paragraphs: usize| {
+        let input = |paragraphs: usize| {
             let xml = "<w:p><w:r><w:t>text</w:t></w:r></w:p>".repeat(paragraphs);
             let edits: Vec<_> = (0..paragraphs)
                 .map(|index| {
@@ -556,21 +556,27 @@ mod tests {
                     (at..at, format!(" w14:paraId=\"{index:08X}\""))
                 })
                 .collect();
-            (0..3)
-                .map(|_| {
-                    let started = std::time::Instant::now();
-                    std::hint::black_box(apply(&xml, edits.clone()));
-                    started.elapsed()
-                })
-                .min()
-                .unwrap()
+            (xml, edits)
         };
-        let small = time(10_000);
-        let large = time(80_000);
+        let time = |(xml, edits): &(String, Vec<(Range<usize>, String)>)| {
+            let edits = edits.clone();
+            let started = std::time::Instant::now();
+            let output = apply(xml, edits);
+            let elapsed = started.elapsed();
+            drop(std::hint::black_box(output));
+            elapsed
+        };
+        let (small, large) = (input(10_000), input(80_000));
+        let (mut fastest_small, mut fastest_large) =
+            (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..5 {
+            fastest_small = fastest_small.min(time(&small));
+            fastest_large = fastest_large.min(time(&large));
+        }
         assert!(
-            large < small * 24,
+            fastest_large < fastest_small * 24,
             "8x the edits took {:.1}x as long",
-            large.as_secs_f64() / small.as_secs_f64()
+            fastest_large.as_secs_f64() / fastest_small.as_secs_f64()
         );
     }
 
