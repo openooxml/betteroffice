@@ -1,6 +1,6 @@
 /**
- * Compares two DOCX packages into tracked changes. Only text in body paragraphs of unchanged
- * structure is compared; anything else refuses with diagnostics, never a partial redline.
+ * Compares the text of body paragraphs of unchanged structure in two DOCX packages into tracked
+ * changes; any other difference returns diagnostics, never a partial redline.
  */
 
 /** Bounds a comparison enforces. The defaults are the largest values allowed; callers may tighten them. */

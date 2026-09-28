@@ -421,9 +421,7 @@ an inline control's id can name a different control after edits, so list again
 after a version change. Tags are the template author's names for
 controls. `ooxmlId` is the control's authored `w:id`, the identity that survives
 save and reopen. A tag or `ooxmlId` write searches every story regardless of read
-filters and needs exactly one control in the document to carry it; while
-controls may exist that the session cannot see, such as those in text boxes, it
-refuses with `provenance-unavailable` rather than pick one.
+filters and needs exactly one control in the document to carry it.
 
 `setContentControlText` replaces the content of a plain- or rich-text control
 with plain text and clears its placeholder flag everywhere it is recorded,
