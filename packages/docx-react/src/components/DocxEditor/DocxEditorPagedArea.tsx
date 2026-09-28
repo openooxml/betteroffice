@@ -15,7 +15,7 @@ import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
-import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import {
   InlineHeaderFooterEditor,
@@ -108,6 +108,7 @@ export function DocxEditorPagedArea({
   // Scroll page indicator
   onTotalPagesChange,
   onLayoutComputed,
+  layoutInWorker,
   onError,
   applyResidentInput,
   applyResidentDelete,
@@ -200,6 +201,8 @@ export function DocxEditorPagedArea({
   /** Receives each computed layout. */
   onError?: (error: Error) => void;
   onLayoutComputed?: (layout: Layout | null) => void;
+  /** Hands layout passes to the resident worker. */
+  layoutInWorker?: LayoutInWorker;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (
     direction: 'backward' | 'forward'
@@ -464,6 +467,7 @@ export function DocxEditorPagedArea({
         onYrsTrackedChangesChange={onYrsTrackedChangesChange}
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
+        layoutInWorker={layoutInWorker}
         onError={onError}
         applyResidentInput={applyResidentInput}
         applyResidentDelete={applyResidentDelete}
