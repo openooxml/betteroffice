@@ -78,8 +78,7 @@ host/agent-driven edits and the editor's `commands`), `collaboration`, `i18n`,
 
 ## Compose the toolbar
 
-Every built-in control runs through the editor's command store. This command
-and toolbar composition API is experimental and may change in minor releases.
+Every built-in control runs through the editor's command store.
 Replace the default toolbar with the parts you need, in your order, next to your
 own actions:
 
@@ -115,8 +114,8 @@ import {
   renders none, and supplied chrome renders in its place, also when read-only.
   `showToolbar={false}` hides the region either way.
 - `<EditorToolbar.Toolbar>` children are the complete arrangement in command mode;
-  without children it renders the default controls. `EditorToolbar.FormulaBar`
-  is the editor's name box and formula input and renders only inside the editor.
+  without children it renders the default controls. Place
+  `EditorToolbar.FormulaBar` inside the editor to show its name box and formula input.
 - `ToolbarCommand` renders a command's built-in control, `ToolbarCommandButton` a
   button (bind `args`, such as `{ value: "currency" }` for `numberFormat`), and
   `ToolbarCommandSelect` a selector's picker. `useXlsxCommand(id, args)` and
@@ -237,8 +236,6 @@ the step vocabulary and its limits.
 
 ## Host plugins
 
-The plugin API is experimental and may change in minor releases.
-
 Host-owned tools (review aids, checks, templates) install through the `plugins`
 prop. A plugin contributes a docked panel, an overlay on the grid and commands,
 and works through restricted clients rather than the editor API or the workbook
@@ -338,7 +335,7 @@ const review = defineXlsxPlugin<State>({
   resolve sheet ids after pending input against `expectVersion`, keep keyboard
   focus unless `selectCells` gets `focus: true`, and refuse with
   `stale-version` or `missing-target` rather than retarget. Sheet ids and
-  versions are session-scoped: they do not survive saving and reopening.
+  versions are session-scoped.
 - **Geometry.** `context.geometry` exists only while the canvas shows a painted
   frame of the current version. `layout` carries the frame's `sheetId`, `zoom`
   and painted `viewport` (unzoomed sheet pixels), and gets a new `id` with every
@@ -346,9 +343,8 @@ const review = defineXlsxPlugin<State>({
   and `getRangeRect({ sheetId, range })` return pixels of the overlay layer,
   zoomed and clipped to the visible grid with frozen panes placed as painted;
   cells scrolled out of view or on another sheet return null. `getCellRect` is
-  one grid cell; address a merged area as a range. `getPositionAtPoint` is null
-  until the editor exposes pointer queries. Every method returns null once its
-  layout is gone. The overlay layer sits on the grid below the editor's
+  one grid cell; address a merged area as a range. Every method returns null once
+  its layout is gone. The overlay layer sits on the grid below the editor's
   selection and cell editor, and ignores the pointer unless an element sets
   `pointer-events: auto`.
 - **Panels** dock left, right or bottom of the grid, below the toolbar and
