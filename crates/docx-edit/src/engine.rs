@@ -636,31 +636,8 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn strip_absolute_positions(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            for value in values {
-                strip_absolute_positions(value);
-            }
-        }
-        serde_json::Value::Object(fields) => {
-            for key in ["pmStart", "pmEnd", "docStart", "docEnd"] {
-                fields.remove(key);
-            }
-            for value in fields.values_mut() {
-                strip_absolute_positions(value);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn measured_fingerprint(measured: &MeasuredBlock) -> Result<u64, String> {
-    let mut value = serde_json::to_value(measured)
-        .map_err(|error| format!("fingerprint measured block: {error}"))?;
-    strip_absolute_positions(&mut value);
-    serde_json::to_vec(&value)
-        .map(|bytes| hash_bytes(&bytes))
+    crate::fingerprint::fingerprint_without_positions(measured)
         .map_err(|error| format!("fingerprint measured block: {error}"))
 }
 

@@ -73,6 +73,7 @@ mod control_source;
 mod control_values;
 mod ctx;
 mod deterministic;
+mod fingerprint;
 mod format;
 mod heading;
 mod identity;
