@@ -489,18 +489,90 @@ pub fn patch_paragraph_id_references(xml: &str, renames: &HashMap<u32, String>) 
     Some(apply(xml, edits))
 }
 
-fn apply(xml: &str, mut edits: Vec<(Range<usize>, String)>) -> String {
-    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
-    let mut output = xml.to_owned();
-    for (range, text) in edits {
-        output.replace_range(range, &text);
+/// Applies disjoint edits in one pass. Edits at the same offset land later-listed first.
+fn apply(xml: &str, edits: Vec<(Range<usize>, String)>) -> String {
+    let mut edits: Vec<_> = edits.into_iter().enumerate().collect();
+    edits.sort_by_key(|(index, (range, _))| (range.start, std::cmp::Reverse(*index)));
+    let mut output = String::with_capacity(xml.len());
+    let mut cursor = 0;
+    for (_, (range, text)) in edits {
+        debug_assert!(range.start >= cursor, "overlapping paragraph id edits");
+        output.push_str(&xml[cursor..range.start]);
+        output.push_str(&text);
+        cursor = range.end;
     }
+    output.push_str(&xml[cursor..]);
     output
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The per-edit `replace_range` form `apply` replaced.
+    fn apply_by_replacement(xml: &str, mut edits: Vec<(Range<usize>, String)>) -> String {
+        edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+        let mut output = xml.to_owned();
+        for (range, text) in edits {
+            output.replace_range(range, &text);
+        }
+        output
+    }
+
+    #[test]
+    fn edits_apply_in_one_pass_as_replacement_did() {
+        let xml = "<w:p a=\"1\">é<w:r/>日本</w:p><w:p/>";
+        let at = |needle: &str| xml.find(needle).unwrap();
+        let cases: Vec<Vec<(Range<usize>, String)>> = vec![
+            vec![],
+            vec![(at("1")..at("1") + 1, "22".into())],
+            vec![(0..0, "<x/>".into()), (xml.len()..xml.len(), "<y/>".into())],
+            vec![
+                (at("<w:r/>")..at("<w:r/>"), " b=\"2\"".into()),
+                (at("<w:r/>")..at("<w:r/>"), " c=\"3\"".into()),
+                (at("日")..at("本"), "月".into()),
+            ],
+            vec![
+                (at("é")..at("<w:r/>"), String::new()),
+                (at("<w:r/>")..at("日"), "<w:r w14:paraId=\"1\"/>".into()),
+                (
+                    at("<w:p/>") + 4..at("<w:p/>") + 4,
+                    " w14:paraId=\"2\"".into(),
+                ),
+            ],
+        ];
+        for edits in cases {
+            assert_eq!(apply(xml, edits.clone()), apply_by_replacement(xml, edits));
+        }
+    }
+
+    #[test]
+    fn applying_edits_scales_linearly() {
+        let time = |paragraphs: usize| {
+            let xml = "<w:p><w:r><w:t>text</w:t></w:r></w:p>".repeat(paragraphs);
+            let edits: Vec<_> = (0..paragraphs)
+                .map(|index| {
+                    let at = index * 37 + 4;
+                    (at..at, format!(" w14:paraId=\"{index:08X}\""))
+                })
+                .collect();
+            (0..3)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    std::hint::black_box(apply(&xml, edits.clone()));
+                    started.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let small = time(10_000);
+        let large = time(80_000);
+        assert!(
+            large < small * 24,
+            "8x the edits took {:.1}x as long",
+            large.as_secs_f64() / small.as_secs_f64()
+        );
+    }
 
     #[test]
     fn accepts_eight_hex_digits_below_the_word_limit_in_either_case() {
