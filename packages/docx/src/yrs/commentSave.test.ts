@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
@@ -13,7 +13,7 @@ import {
   yrsToDocument,
   type YrsSession,
 } from './index';
-import type { Paragraph, Run } from '../types/document';
+import type { Comment, Paragraph, Run } from '../types/document';
 import { documentToYrs } from './documentToYrs';
 
 beforeAll(() =>
@@ -66,6 +66,24 @@ function docx(): Uint8Array {
   );
 }
 
+const IDENTITIES = resolve(
+  import.meta.dir,
+  '../../../../crates/docx-edit/tests/fixtures/paragraph-identities'
+);
+
+/** The shared paragraph identity fixture: a commented body, a header and a footnote. */
+function identities(): Uint8Array {
+  const parts = new Map<string, Uint8Array>();
+  const add = (dir: string, prefix: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) add(join(dir, entry.name), `${prefix}${entry.name}/`);
+      else parts.set(`${prefix}${entry.name}`, toBytes(readFileSync(join(dir, entry.name), 'utf8')));
+    }
+  };
+  add(IDENTITIES, '');
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
 async function open(bytes: Uint8Array, clientId: number): Promise<YrsSession> {
   const session = await createYrsSession({ clientId });
   sessions.push(session);
@@ -81,14 +99,24 @@ async function seeded(bytes: Uint8Array, clientId: number): Promise<YrsSession> 
   return session;
 }
 
-/** The saved document as `saveYrsDocx` and as the editor's Save write it. */
-async function saves(session: YrsSession): Promise<Array<[string, Uint8Array]>> {
+/**
+ * The saved document as `saveYrsDocx` and as the editor's Save write it, the
+ * editor holding the source's comments and `added`.
+ */
+async function saves(
+  session: YrsSession,
+  added: Comment[] = []
+): Promise<Array<[string, Uint8Array]>> {
   const yrs = (await saveYrsDocx(session)).bytes;
   const base = session.materializeDocx()!;
+  const comments = [...(base.package.document.comments ?? []), ...added];
   const capture = captureSessionSave(session);
   const editor = await writeSessionSave(
     session,
-    yrsToDocument(session, base),
+    yrsToDocument(session, {
+      ...base,
+      package: { ...base.package, document: { ...base.package.document, comments } },
+    }),
     capture,
     base.originalBuffer!,
     {},
@@ -265,6 +293,42 @@ describe('a reanchored comment', () => {
         expect(paragraphXml(bytes, '0C000001')).toContain('<w:commentReference w:id="1"/>');
         expect(anchored(await open(bytes, 91052), '1')).toBe('tro');
       }
+    }
+  });
+
+  it('keeps every reference of a comment across stories when a replica loads it', async () => {
+    const source = await open(identities(), 91060);
+    const header = 'hf:rIdHeader';
+    const lower = source.locateParagraph('body', '0000abcd').start;
+    const { paraId: headerParaId } = source.paragraphs(header)[0]!;
+    source.applyRawOps('body', [
+      { op: 'setComment', id: '5', ranges: [[lower, lower + 2]], author: 'Ada', date: '2026-09-28T00:00:00Z' },
+    ]);
+    source.setCommentRanges('5', [
+      { story: 'body', start: { paraId: '0000abcd', offset: 0 }, end: { paraId: '0000abcd', offset: 2 } },
+      { story: header, start: { paraId: headerParaId, offset: 0 }, end: { paraId: headerParaId, offset: 4 } },
+    ]);
+    const reference = { modelKind: 'commentReference', commentId: 5 };
+    source.applyRawOps('body', [{ op: 'insertEmbed', index: lower + 5, kind: 'field', payload: reference }]);
+    const headerStart = source.locateParagraph(header, headerParaId).start;
+    source.applyRawOps(header, [
+      { op: 'insertEmbed', index: headerStart + 4, kind: 'field', payload: reference },
+    ]);
+    const replica = await createYrsSession({ clientId: 91061 });
+    sessions.push(replica);
+    replica.openDocx(identities(), false);
+    replica.loadState(source.encodeState());
+    for (const story of ['body', header]) {
+      expect(replica.storySegments(story)).toEqual(source.storySegments(story));
+    }
+    for (const [path, bytes] of await saves(replica, [{ id: 5, author: 'Ada', content: [] }])) {
+      expect([path, markers(bytes, 5)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+      const lowerXml = paragraphXml(bytes, '0000abcd');
+      expect(lowerXml.indexOf('<w:commentReference w:id="5"/>')).toBeGreaterThan(lowerXml.indexOf('wer<'));
+      const headerXml = new TextDecoder().decode(unzipContainer(bytes)['word/header1.xml']);
+      expect(
+        [...headerXml.matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id="5"\/>/g)].map((match) => match[1])
+      ).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
     }
   });
 

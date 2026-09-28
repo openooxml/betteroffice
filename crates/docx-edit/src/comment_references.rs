@@ -12,21 +12,21 @@ use yrs::{
 
 use crate::{COMMENTS, EditingDoc, STORIES, decode_anchor, map_string, out_len};
 
-/// Records the comments an update changes while it integrates, and which of them it reanchors:
-/// a replaced comment or changed anchors, never a comment the update first brings in.
+/// Records the comments an update reanchors while it integrates: a replaced comment or changed
+/// anchors, never a comment the update first brings in.
 pub(crate) struct CommentWatch {
-    changed: Arc<Mutex<(BTreeSet<String>, BTreeSet<String>)>>,
+    reanchored: Arc<Mutex<BTreeSet<String>>>,
     _subscription: Option<Subscription>,
 }
 
 impl CommentWatch {
     pub(crate) fn new(doc: &EditingDoc) -> Self {
-        let changed = Arc::new(Mutex::new((BTreeSet::new(), BTreeSet::new())));
+        let reanchored = Arc::new(Mutex::new(BTreeSet::new()));
         let comments = doc.yrs_doc().transact().get_map(COMMENTS);
         let subscription = comments.map(|comments| {
-            let changed = Arc::clone(&changed);
+            let reanchored = Arc::clone(&reanchored);
             comments.observe_deep(move |txn, events| {
-                let (changed, reanchored) = &mut *changed.lock().unwrap();
+                let mut reanchored = reanchored.lock().unwrap();
                 for event in events.iter() {
                     let Event::Map(event) = event else {
                         continue;
@@ -34,14 +34,12 @@ impl CommentWatch {
                     let path = event.path();
                     match path.front() {
                         Some(PathSegment::Key(id)) => {
-                            changed.insert(id.to_string());
                             if path.len() == 1 && event.keys(txn).contains_key("anchors") {
                                 reanchored.insert(id.to_string());
                             }
                         }
                         _ => {
                             for (id, change) in event.keys(txn).iter() {
-                                changed.insert(id.to_string());
                                 if matches!(change, EntryChange::Updated(..)) {
                                     reanchored.insert(id.to_string());
                                 }
@@ -52,14 +50,13 @@ impl CommentWatch {
             })
         });
         Self {
-            changed,
+            reanchored,
             _subscription: subscription,
         }
     }
 
-    /// The changed comments, and the subset whose anchors changed or that were replaced.
-    pub(crate) fn take(self) -> (BTreeSet<String>, BTreeSet<String>) {
-        std::mem::take(&mut self.changed.lock().unwrap())
+    pub(crate) fn take(self) -> BTreeSet<String> {
+        std::mem::take(&mut self.reanchored.lock().unwrap())
     }
 }
 
@@ -98,16 +95,11 @@ fn range_ends<T: ReadTxn>(txn: &T, comment_id: &str) -> BTreeMap<String, u32> {
 }
 
 /// Leaves each comment one reference embed right after its range in each story holding a range,
-/// and none elsewhere. With `place` false, as a remote update needs, references are only removed:
-/// duplicates, and for a comment in `reanchored` a lone one away from its range end, which Save
-/// then writes beside the range. With it, a moved comment's reference is also added where its new
-/// range lacks one. A comment whose anchors no longer resolve keeps its references.
-pub(crate) fn reconcile(
-    txn: &mut TransactionMut<'_>,
-    comment_ids: &BTreeSet<String>,
-    reanchored: &BTreeSet<String>,
-    place: bool,
-) {
+/// and none elsewhere. With `place` false, as a reanchoring remote update needs, references are
+/// only removed, and Save writes the reference beside the range; with it, a moved comment's
+/// reference is also added where its new range lacks one. A comment whose anchors no longer
+/// resolve keeps its references.
+pub(crate) fn reconcile(txn: &mut TransactionMut<'_>, comment_ids: &BTreeSet<String>, place: bool) {
     let ends: BTreeMap<&str, BTreeMap<String, u32>> = comment_ids
         .iter()
         .map(|id| (id.as_str(), range_ends(txn, id)))
@@ -148,9 +140,6 @@ pub(crate) fn reconcile(
     let mut missing = Vec::new();
     for (&id, story_ends) in &ends {
         let references = found.get(id).map(Vec::as_slice).unwrap_or_default();
-        if !place && references.len() <= 1 && !reanchored.contains(id) {
-            continue;
-        }
         let mut kept = BTreeSet::new();
         for &(index, offset) in references {
             if story_ends.get(&stories[index].0) != Some(&offset) || !kept.insert(index) {

@@ -768,12 +768,7 @@ impl EditingDoc {
             anchors.push(anchor_value(&range.story, &start, &end));
         }
         comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
-        comment_references::reconcile(
-            &mut txn,
-            &BTreeSet::from([comment_id.to_owned()]),
-            &BTreeSet::new(),
-            true,
-        );
+        comment_references::reconcile(&mut txn, &BTreeSet::from([comment_id.to_owned()]), true);
         Ok(())
     }
 
@@ -905,7 +900,7 @@ impl EditingDoc {
     /// Applies an update, then repairs any paragraph identities it duplicated.
     pub(crate) fn integrate_update(&self, update: Update, local: bool) -> EditResult<()> {
         let watch = identity::IdentityWatch::new(self);
-        let moved = comment_references::CommentWatch::new(self);
+        let reanchored = comment_references::CommentWatch::new(self);
         let result = if local {
             self.doc
                 .transact_mut_with(self.client_id)
@@ -918,10 +913,10 @@ impl EditingDoc {
             drop(watch);
             self.repair_paragraph_identities();
         }
-        let (moved, reanchored) = moved.take();
-        if !moved.is_empty() {
+        let reanchored = reanchored.take();
+        if !reanchored.is_empty() {
             let mut txn = self.transact_for(&EditCtx::system(""));
-            comment_references::reconcile(&mut txn, &moved, &reanchored, false);
+            comment_references::reconcile(&mut txn, &reanchored, false);
         }
         Ok(())
     }
@@ -1650,6 +1645,84 @@ mod tests {
         sync(&doc, &peer);
         for replica in [&doc, &peer] {
             assert_eq!(reference_offsets(replica, "body"), [8]);
+        }
+    }
+
+    #[test]
+    fn loading_and_metadata_updates_keep_every_reference_of_a_comment_across_stories() {
+        let doc = EditingDoc::new(811);
+        doc.create_story("body", "first second", "Normal", "left")
+            .unwrap();
+        doc.create_story(HEADER, "Header", "Header", "left")
+            .unwrap();
+        let reference = |index| RawOp::InsertEmbed {
+            index,
+            kind: "field".into(),
+            payload: vec![
+                ("modelKind".into(), Any::from("commentReference")),
+                ("commentId".into(), Any::from(1.0)),
+            ],
+            attrs: Attrs::new(),
+        };
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                reference(12),
+                RawOp::SetComment {
+                    id: "1".into(),
+                    ranges: vec![(0, 5)],
+                    author: "Ada".into(),
+                    date: DATE.into(),
+                    body: Any::Null,
+                },
+            ],
+            &local("Ada"),
+        )
+        .unwrap();
+        doc.apply_raw_ops(HEADER, vec![reference(4)], &local("Ada"))
+            .unwrap();
+        {
+            let mut txn = doc.doc.transact_mut_with(doc.client_id);
+            let anchors: Vec<Any> = [("body", 0, 5), (HEADER, 0, 4)]
+                .into_iter()
+                .map(|(story, start, end)| {
+                    let text = story_ref(&txn, story).unwrap();
+                    let start = text.sticky_index(&txn, start, Assoc::After).unwrap();
+                    let end = text.sticky_index(&txn, end, Assoc::Before).unwrap();
+                    anchor_value(story, &start, &end)
+                })
+                .collect();
+            let comment = txn
+                .get_map(COMMENTS)
+                .and_then(|comments| comments.get(&txn, "1"))
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
+        }
+        let placed = |replica: &EditingDoc| {
+            (
+                reference_offsets(replica, "body"),
+                reference_offsets(replica, HEADER),
+            )
+        };
+        assert_eq!(placed(&doc), (vec![12], vec![4]));
+        let peer = EditingDoc::new(812);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(placed(&peer), (vec![12], vec![4]));
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let Some(Out::YMap(comment)) = txn
+                .get_map(COMMENTS)
+                .and_then(|comments| comments.get(&txn, "1"))
+            else {
+                panic!("comment");
+            };
+            comment.insert(&mut txn, "done", true);
+        }
+        sync(&doc, &peer);
+        for replica in [&doc, &peer] {
+            assert_eq!(placed(replica), (vec![12], vec![4]));
         }
     }
 

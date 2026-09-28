@@ -367,3 +367,31 @@ fn a_source_paragraph_save_refuses_moving_references_it_does_not_replace() {
     .unwrap();
     assert_document_reference_after_end(&saved);
 }
+
+#[test]
+fn a_source_paragraph_save_leaves_references_outside_its_paragraphs_as_the_source_has_them() {
+    let original = package(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:commentRangeStart w:id="7"/><w:r><w:t>Hello</w:t></w:r><w:commentRangeEnd w:id="7"/><w:r><w:commentReference w:id="7"/></w:r></w:p><w:p><w:r><w:t>World</w:t></w:r><w:r><w:commentReference w:id="7"/></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p></w:body></w:document>"#,
+    );
+    let (_, mut request) = comment_request(json!([
+        { "type": "paragraph", "content": [
+            { "type": "commentRangeStart", "id": 7 }, text_run("Hello"),
+            { "type": "commentRangeEnd", "id": 7 }, reference(7)
+        ] },
+        { "type": "paragraph", "content": [text_run("World"), reference(7)] },
+        { "type": "paragraph", "content": [text_run("Tail edited")] },
+    ]));
+    let digest = format!("{:x}", Sha256::digest(document_xml(&original).as_bytes()));
+    request.selective = serde_json::from_value(json!({
+        "sourceParagraphs": { "partSha256": digest, "paragraphs": [{ "path": [0, 2], "block": 2 }] }
+    }))
+    .unwrap();
+    let saved = write_docx_s13(request, &original).unwrap();
+    let xml = document_xml(&saved);
+    assert_eq!(
+        element_ids(&saved, "word/document.xml", b"w:commentReference"),
+        ["7", "7"]
+    );
+    assert!(xml.contains("<w:t>World</w:t></w:r><w:r><w:commentReference w:id=\"7\"/></w:r>"));
+    assert!(xml.contains("Tail edited"));
+}
