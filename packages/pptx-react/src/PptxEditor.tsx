@@ -1211,7 +1211,6 @@ function PptxEditorContent({
       });
       const next = refreshAt(undefined, true, false, slide.id);
       setActiveTool('select');
-      setShapeSelection(null);
       setDragPreview(null);
       setTextBoxPreview(null);
       pointerGestureRef.current = null;
@@ -1219,6 +1218,7 @@ function PptxEditorContent({
       const shape = next?.snapshot.slides[next.slideIndex]?.shapes.find(
         (candidate) => candidate.id === receipt.shapeId
       );
+      if (shape) setShapeSelection(null);
       const story = shape?.textStories[0];
       if (story) {
         setSelection({
@@ -1283,17 +1283,15 @@ function PptxEditorContent({
       });
       const next = refreshAt(undefined, true, false, slide.id);
       setActiveTool('select');
-      setSelection(null);
-      setShapeSelection(
-        next?.snapshot.slides[next.slideIndex]?.id === slide.id
-          ? { slideId: slide.id, shapeId: receipt.shapeId }
-          : null
-      );
       setDragPreview(null);
       setTextBoxPreview(null);
       pointerGestureRef.current = null;
       recentClickRef.current = null;
-      if (next) stageRef.current?.focus();
+      if (next?.snapshot.slides[next.slideIndex]?.id === slide.id) {
+        setSelection(null);
+        setShapeSelection({ slideId: slide.id, shapeId: receipt.shapeId });
+        stageRef.current?.focus();
+      }
     } catch (value) {
       reportError(value);
       throw value;
