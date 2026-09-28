@@ -1680,6 +1680,25 @@ mod tests {
         );
     }
 
+    /// a selection charges each cell's text before copying it, so repeating
+    /// one long string half a million times stops at the byte budget after a
+    /// few dozen copies.
+    #[test]
+    fn selections_pay_for_each_copy_before_making_it() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        for formula in [
+            "ROWS(_xlfn.CHOOSECOLS(REPT(\"x\",32767),_xlfn.SEQUENCE(1,500000,1,0)))",
+            "ROWS(_xlfn.CHOOSEROWS(REPT(\"x\",32767),_xlfn.SEQUENCE(500000,1,1,0)))",
+        ] {
+            crate::array::COPIES.with(|copies| copies.set(0));
+            let (value, refused) = with_text_budget(&workbook, formula, 1 << 20);
+            assert_eq!((value, refused), (err(ErrorValue::Num), true), "{formula}");
+            let copies = crate::array::COPIES.with(|copies| copies.get());
+            assert!(copies <= (1 << 20) / 32767, "{formula}: {copies} copies");
+        }
+    }
+
     /// the default limits stop a 16 GB `REPT` block after a few
     /// megabytes, and a spill charges the copies it lays out.
     #[test]

@@ -11,7 +11,7 @@ use xlsx_model::{
     SheetId, Table, Workbook,
 };
 
-use crate::array::{Spill, evaluate_spill, spill_at};
+use crate::array::{Spill, charged_spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
 
@@ -132,6 +132,14 @@ fn run_recalc(
                 }
                 Some(NodeValue::Spill(spill)) => {
                     spilled.extend(write_spill(wb, *u, spill, &mut changed));
+                }
+                Some(NodeValue::Refused) => {
+                    let refused = CellValue::Error {
+                        value: ErrorValue::Num,
+                    };
+                    if write_if_changed(wb, *u, refused) {
+                        changed.push((u.0, cell_of(*u)));
+                    }
                 }
                 None => {}
             }
@@ -279,6 +287,9 @@ fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>
 enum NodeValue {
     Scalar(CellValue),
     Spill(Spill),
+    /// an array formula the budget refused: its anchor shows `#NUM!`, and its
+    /// rectangle keeps the extent and the cells it had.
+    Refused,
 }
 
 /// evaluate one formula node; `None` keeps the cached value, because the cell
@@ -315,7 +326,8 @@ fn settle_deferred(
             let (value, limited) =
                 eval_node_with(&log, wb, *u, now_serial, Rc::clone(budget), graph);
             // a spill rewrites a rectangle, which the ordered pass owns
-            if log.touched.get() || matches!(value, Some(NodeValue::Spill(_))) {
+            if log.touched.get() || matches!(value, Some(NodeValue::Spill(_) | NodeValue::Refused))
+            {
                 continue;
             }
             unsettled.remove(u);
@@ -431,9 +443,12 @@ fn eval_node_with(
         None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
     };
     let unsupported = ctx.has_unhandled_unsupported_function();
-    let incomplete = ctx.has_unhandled_budget_error() || unsupported;
-    if incomplete && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
+    let refused = ctx.has_unhandled_budget_error();
+    if (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
         return (None, ctx.exhausted());
+    }
+    if refused && authored.is_some() {
+        return (Some(NodeValue::Refused), ctx.exhausted());
     }
     // a rectangle an engine gap reshaped would retire cells the real result
     // still covers, so report the gap over the recorded rectangle instead.
@@ -444,7 +459,8 @@ fn eval_node_with(
             let name = CellValue::Error {
                 value: ErrorValue::Name,
             };
-            NodeValue::Spill(spill_at(cell, authored, name.into()))
+            charged_spill(&ctx, cell, authored, name.into())
+                .map_or(NodeValue::Refused, NodeValue::Spill)
         }
         value => value,
     };
@@ -737,6 +753,61 @@ mod tests {
         assert_eq!(value(&wb, s, "C1"), num(5.0));
         assert_eq!(value(&wb, s, "C2"), num(0.0));
         assert_eq!(value(&wb, s, "C3"), num(7.0));
+    }
+
+    /// formulas ahead of every other in the recalculation order that spend its
+    /// whole budget.
+    fn spend_the_budget(wb: &mut Workbook, s: SheetId) {
+        for row in 1..=11 {
+            put_formula(wb, s, &format!("A{row}"), "ROWS(_xlfn.SEQUENCE(1000000))");
+        }
+    }
+
+    /// a legacy array formula at C20 over C20:D29, its anchor uncached and one
+    /// interior cell holding a cached 7.
+    fn put_array(wb: &mut Workbook, s: SheetId, formula: &str) {
+        put_formula(wb, s, "C20", formula);
+        put_num(wb, s, "D25", 7.0);
+        wb.sheet_mut(s).unwrap().set_array_formula(
+            a1("C20"),
+            xlsx_model::CellRange::parse_a1("C20:D29").unwrap(),
+        );
+    }
+
+    /// an array formula the budget refuses keeps its rectangle and what it
+    /// holds, its anchor showing `#NUM!`, and fills in full once it fits.
+    #[test]
+    fn a_refused_array_keeps_its_rectangle() {
+        let refused = CellValue::Error {
+            value: xlsx_model::ErrorValue::Num,
+        };
+        for formula in ["1", "WEBSERVICE(1)"] {
+            let (mut wb, s) = one_sheet();
+            spend_the_budget(&mut wb, s);
+            put_array(&mut wb, s, formula);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert!(result.limited_cells.contains(&(s, a1("C20"))), "{formula}");
+            assert_eq!(value(&wb, s, "C20"), refused, "{formula}");
+            assert_eq!(value(&wb, s, "D25"), num(7.0), "{formula}");
+            assert_eq!(value(&wb, s, "D29"), CellValue::Empty, "{formula}");
+            assert_eq!(
+                wb.sheet(s).unwrap().array_formula(a1("C20")),
+                Some(xlsx_model::CellRange::parse_a1("C20:D29").unwrap()),
+                "{formula}"
+            );
+        }
+        let (mut wb, s) = one_sheet();
+        spend_the_budget(&mut wb, s);
+        put_array(&mut wb, s, "1");
+        rebuild_and_recalc_all(&mut wb, None);
+        for row in 1..=11 {
+            put_num(&mut wb, s, &format!("A{row}"), 0.0);
+        }
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.limited_cells.is_empty());
+        for address in ["C20", "D25", "D29"] {
+            assert_eq!(value(&wb, s, address), num(1.0), "{address}");
+        }
     }
 
     /// `WEBSERVICE` stands in for any function the engine does not implement,

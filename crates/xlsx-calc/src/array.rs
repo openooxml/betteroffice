@@ -20,12 +20,22 @@ thread_local! {
     /// units of array work done, so a test can see that a refused budget
     /// stopped the work before it began.
     pub(crate) static STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// cells copied out of a block, so a test can see how many copies a
+    /// refused block made first.
+    pub(crate) static COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// count one unit of array work in tests.
 fn step() {
     #[cfg(test)]
     STEPS.with(|steps| steps.set(steps.get() + 1));
+}
+
+/// a copy of one cell of a block.
+fn copied(value: &CellValue) -> CellValue {
+    #[cfg(test)]
+    COPIES.with(|copies| copies.set(copies.get() + 1));
+    value.clone()
 }
 
 /// cells one intermediate array may hold. the per-formula evaluation budget
@@ -64,7 +74,7 @@ impl Array {
         if row >= self.rows || col >= self.cols {
             return err(ErrorValue::NA);
         }
-        self.values[row * self.cols + col].clone()
+        copied(&self.values[row * self.cols + col])
     }
 
     /// value for a broadcast position: a single row repeats down, a single
@@ -138,6 +148,11 @@ impl Binding {
 
     pub(crate) fn value(&self) -> Value {
         (*self.value).clone()
+    }
+
+    /// the bound value, for a caller that charges before copying it.
+    fn held(&self) -> &Value {
+        &self.value
     }
 
     /// the single value this name shows, without copying a whole block.
@@ -314,6 +329,15 @@ impl<'c, 'a> Cells<'c, 'a> {
         Ok(())
     }
 
+    /// keep a copy of `value`, its text charged before it is copied.
+    fn copy(&mut self, value: &CellValue) -> Result<(), ErrorValue> {
+        if !self.ctx.keep_text(value) {
+            return Err(ErrorValue::Num);
+        }
+        self.values.push(copied(value));
+        Ok(())
+    }
+
     fn block(self, rows: usize, cols: usize) -> Value {
         reserved(rows, cols, self.values)
     }
@@ -341,14 +365,14 @@ pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
         Expr::Name { scope, name } => match crate::eval::bound(scope, name, ctx) {
             // a bound block costs what re-reading the range it came from would,
             // so a callback body cannot copy one for free once per iteration.
-            Some(binding) => match binding.value() {
+            Some(binding) => match binding.held() {
                 Value::Array(array)
                     if !ctx.consume_cells(array.values.len() as u64)
                         || !ctx.consume_text(array.text_bytes()) =>
                 {
                     Value::error(ErrorValue::Num)
                 }
-                value => value,
+                _ => binding.value(),
             },
             None => match as_array_area(expr, ctx) {
                 Some(area) => area_values(&area, ctx),
@@ -578,40 +602,31 @@ fn identity(slice: &[CellValue]) -> String {
 }
 
 fn rows_of(array: &Array, row: usize) -> Vec<CellValue> {
-    array.row_values(row).to_vec()
+    array.row_values(row).iter().map(copied).collect()
 }
 
 fn column_of(array: &Array, col: usize) -> Vec<CellValue> {
     (0..array.rows).map(|row| array.at(row, col)).collect()
 }
 
-fn from_rows(
-    ctx: &EvalContext<'_>,
-    cols: usize,
-    rows: impl ExactSizeIterator<Item = Vec<CellValue>>,
-) -> Value {
-    let count = rows.len();
-    result((|| {
-        let mut cells = Cells::reserve(ctx, count, cols)?;
-        for value in rows.flatten() {
-            cells.push(value)?;
-        }
-        Ok(cells.block(count, cols))
-    })())
-}
-
-fn from_columns(
-    ctx: &EvalContext<'_>,
-    rows: usize,
-    columns: impl ExactSizeIterator<Item = Vec<CellValue>>,
-) -> Value {
-    let cols = columns.len();
+/// the rows of `data` at `picks`, or its columns, each cell's text charged
+/// before it is copied.
+fn lines(ctx: &EvalContext<'_>, data: &Array, picks: &[usize], by_row: bool) -> Value {
+    let (rows, cols) = if by_row {
+        (picks.len(), data.cols)
+    } else {
+        (data.rows, picks.len())
+    };
     result((|| {
         let mut cells = Cells::reserve(ctx, rows, cols)?;
-        let mut columns: Vec<std::vec::IntoIter<CellValue>> = columns.map(Vec::into_iter).collect();
-        for _ in 0..rows {
-            for column in &mut columns {
-                cells.push(column.next().unwrap_or(CellValue::Empty))?;
+        for row in 0..rows {
+            for col in 0..cols {
+                let (row, col) = if by_row {
+                    (picks[row], col)
+                } else {
+                    (row, picks[col])
+                };
+                cells.copy(&data.values[row * data.cols + col])?;
             }
         }
         Ok(cells.block(rows, cols))
@@ -935,19 +950,7 @@ fn filter(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
                 None => Value::error(ErrorValue::Calc),
             });
         }
-        Ok(if by_rows {
-            from_rows(
-                ctx,
-                data.cols,
-                keep.into_iter().map(|row| rows_of(&data, row)),
-            )
-        } else {
-            from_columns(
-                ctx,
-                data.rows,
-                keep.into_iter().map(|col| column_of(&data, col)),
-            )
-        })
+        Ok(lines(ctx, &data, &keep, by_rows))
     })())
 }
 
@@ -1097,20 +1100,13 @@ fn unique(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let by_col = optional_bool(args, ctx, 1, false)?;
         let exactly_once = optional_bool(args, ctx, 2, false)?;
         let count = if by_col { data.cols } else { data.rows };
-        let line = |index: usize| {
-            if by_col {
-                column_of(&data, index)
-            } else {
-                rows_of(&data, index)
-            }
-        };
         let mut seen: HashMap<String, usize> = HashMap::with_capacity(count);
         let mut occurrences: Vec<usize> = vec![0; count];
         let mut first: Vec<usize> = Vec::new();
         for index in 0..count {
             step();
             let key = if by_col {
-                identity(&line(index))
+                identity(&column_of(&data, index))
             } else {
                 identity(data.row_values(index))
             };
@@ -1130,11 +1126,7 @@ fn unique(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         if kept.is_empty() {
             return Ok(Value::error(ErrorValue::NA));
         }
-        Ok(if by_col {
-            from_columns(ctx, data.rows, kept.into_iter().map(line))
-        } else {
-            from_rows(ctx, data.cols, kept.into_iter().map(line))
-        })
+        Ok(lines(ctx, &data, &kept, !by_col))
     })())
 }
 
@@ -1189,19 +1181,7 @@ fn choose(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
         if picks.is_empty() {
             return Err(ErrorValue::Value);
         }
-        Ok(if by_row {
-            from_rows(
-                ctx,
-                data.cols,
-                picks.into_iter().map(|row| rows_of(&data, row)),
-            )
-        } else {
-            from_columns(
-                ctx,
-                data.rows,
-                picks.into_iter().map(|col| column_of(&data, col)),
-            )
-        })
+        Ok(lines(ctx, &data, &picks, by_row))
     })())
 }
 
@@ -1492,17 +1472,10 @@ fn index_one(args: &[Expr], ctx: &EvalContext<'_>, reference: bool) -> Value {
         if row < 0.0 || col < 0.0 || row > data.rows as f64 || col > data.cols as f64 {
             return Err(ErrorValue::Ref);
         }
-        let line = |cells: Vec<CellValue>, rows: usize, cols: usize| {
-            let mut block = Cells::reserve(ctx, rows, cols)?;
-            for cell in cells {
-                block.push(cell)?;
-            }
-            Ok::<_, ErrorValue>(block.block(rows, cols))
-        };
         Ok(match (row as usize, col as usize) {
             (0, 0) => Value::Array(data),
-            (0, col) => line(column_of(&data, col - 1), data.rows, 1)?,
-            (row, 0) => line(rows_of(&data, row - 1), 1, data.cols)?,
+            (0, col) => lines(ctx, &data, &[col - 1], false),
+            (row, 0) => lines(ctx, &data, &[row - 1], true),
             (row, col) => Value::Scalar(data.at(row - 1, col - 1)),
         })
     })())
@@ -2800,16 +2773,8 @@ fn by_slice(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
         let (rows, cols) = if by_row { (count, 1) } else { (1, count) };
         let mut cells = Cells::reserve(ctx, rows, cols)?;
         for index in 0..count {
-            let (line, rows, cols) = if by_row {
-                (rows_of(&data, index), 1, data.cols)
-            } else {
-                (column_of(&data, index), data.rows, 1)
-            };
-            let mut slice = Cells::reserve(ctx, rows, cols)?;
-            for cell in line {
-                slice.push(cell)?;
-            }
-            let slice = slice.block(rows, cols);
+            let slice = lines(ctx, &data, &[index], by_row);
+            ctx.within_budget()?;
             let reference = source
                 .as_ref()
                 .map(|area| slice_reference(area, index, by_row));
@@ -3187,20 +3152,29 @@ fn charge_layout(ctx: &EvalContext<'_>, value: &Value, range: CellRange) -> bool
         && ctx.consume_text(bytes.saturating_mul(copies))
 }
 
-/// evaluate a formula as an array formula and lay its result out from `anchor`.
+/// lay `value` out from `anchor` once the budget has paid for it, or `None`
+/// when the budget refuses it.
+pub(crate) fn charged_spill(
+    ctx: &EvalContext<'_>,
+    anchor: CellRef,
+    authored: Option<CellRange>,
+    value: Value,
+) -> Option<Spill> {
+    charge_layout(ctx, &value, spill_range(anchor, &value, authored))
+        .then(|| spill_at(anchor, authored, value))
+}
+
+/// evaluate a formula as an array formula and lay its result out from
+/// `anchor`. a layout the budget refuses is only its anchor's `#NUM!`, with
+/// the refusal recorded on `ctx`.
 pub fn evaluate_spill(
     expr: &Expr,
     ctx: &EvalContext<'_>,
     anchor: CellRef,
     authored: Option<CellRange>,
 ) -> Spill {
-    let value = evaluate_array(expr, ctx);
-    // a refused layout writes only its anchor, so a workbook of refused
-    // rectangles cannot fill the sheet with errors instead
-    if !charge_layout(ctx, &value, spill_range(anchor, &value, authored)) {
-        return spill_at(anchor, None, Value::error(ErrorValue::Num));
-    }
-    spill_at(anchor, authored, value)
+    charged_spill(ctx, anchor, authored, evaluate_array(expr, ctx))
+        .unwrap_or_else(|| spill_at(anchor, None, Value::error(ErrorValue::Num)))
 }
 
 /// the single value an array formula shows in its anchor when it does not
