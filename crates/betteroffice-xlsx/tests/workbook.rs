@@ -2961,6 +2961,7 @@ fn style_edits_do_not_publish_recalculated_formula_caches_as_content() {
                         value: CellValue::Number { value: 15.0 },
                         formula: Some("SUM(A1:A2)".into()),
                         style: Some(0),
+                        array: None,
                     },
                 }],
                 CalculationOptions::default(),

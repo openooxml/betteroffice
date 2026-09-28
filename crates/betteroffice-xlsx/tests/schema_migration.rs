@@ -1,3 +1,6 @@
+//! `workbook-0.2.1-arrays-*.update.bin` are described beside them in
+//! `workbook-0.2.1-arrays.update.md`.
+//!
 //! The `workbook-schema-v5-*.update.bin` fixtures were produced by release
 //! 4bdccdd: it opens the matching workbook collaboratively, writes a cell, and
 //! persists `encode_state_as_update_v1()`. `hidden-dimensions.xlsx` is a
@@ -16,6 +19,10 @@ const HIDDEN: &[u8] = include_bytes!("fixtures/hidden-dimensions.xlsx");
 const SAMPLE_V5: &[u8] = include_bytes!("fixtures/workbook-schema-v5-sample.update.bin");
 const SHOWCASE_V5: &[u8] = include_bytes!("fixtures/workbook-schema-v5-showcase.update.bin");
 const HIDDEN_V5: &[u8] = include_bytes!("fixtures/workbook-schema-v5-hidden.update.bin");
+const ARRAYS: &[u8] = include_bytes!("fixtures/dynamic-arrays.xlsx");
+const ARRAYS_UNTOUCHED: &[u8] =
+    include_bytes!("fixtures/workbook-0.2.1-arrays-untouched.update.bin");
+const ARRAYS_EDITED: &[u8] = include_bytes!("fixtures/workbook-0.2.1-arrays-edited.update.bin");
 
 fn a1(workbook: &Workbook) -> CellValue {
     workbook
@@ -387,4 +394,151 @@ fn rename_first_sheet(snapshot: &[u8], name: &str) -> Vec<u8> {
     }
     doc.transact()
         .encode_state_as_update_v1(&StateVector::default())
+}
+
+/// The schema a shared document declares and the cells its first sheet holds.
+fn shared_contents(state: &[u8]) -> (i64, Vec<String>) {
+    let doc = Doc::new();
+    let mut txn = doc.transact_mut();
+    txn.apply_update(Update::decode_v1(state).unwrap()).unwrap();
+    let version = txn
+        .get_map("xlsx")
+        .and_then(|meta| meta.get(&txn, "schemaVersion"))
+        .and_then(|value| value.cast::<i64>().ok())
+        .unwrap();
+    let contents = txn
+        .get_map("xlsx:sheets")
+        .and_then(|sheets| sheets.get(&txn, "sheet:0"))
+        .and_then(|sheet| sheet.cast::<MapRef>().ok())
+        .and_then(|sheet| sheet.get(&txn, "contents"))
+        .and_then(|contents| contents.cast::<MapRef>().ok())
+        .unwrap();
+    let mut keys: Vec<String> = contents.keys(&txn).map(str::to_owned).collect();
+    keys.sort();
+    (version, keys)
+}
+
+fn values(workbook: &Workbook, cells: &[&str]) -> Vec<CellValue> {
+    let sheet = workbook.sheet(SheetId(0)).unwrap();
+    cells
+        .iter()
+        .map(|address| {
+            sheet
+                .cell(CellRef::parse_a1(address).unwrap())
+                .map(|cell| cell.value.clone())
+                .unwrap_or(CellValue::Empty)
+        })
+        .collect()
+}
+
+fn number(value: f64) -> CellValue {
+    CellValue::Number { value }
+}
+
+/// A 0.2.1 room nobody edited holds nothing but its seed, so the arrays'
+/// cached results in it are provably the seed's: the upgrade takes them out
+/// of the shared document and the arrays compute them again.
+#[test]
+fn an_untouched_released_array_room_upgrades_to_computed_results() {
+    let mut workbook = restored(ARRAYS, ARRAYS_UNTOUCHED, 7_100);
+    assert_eq!(
+        values(&workbook, &["C1", "C2", "C3", "E1", "E2"]),
+        [
+            number(1.0),
+            number(2.0),
+            number(3.0),
+            number(6.0),
+            number(2.0)
+        ]
+    );
+    let sheet = &workbook.model().sheets[0];
+    assert!(sheet.is_dynamic_array(CellRef::parse_a1("C1").unwrap()));
+    assert!(
+        sheet
+            .array_definition(CellRef::parse_a1("E1").unwrap())
+            .is_some_and(|definition| !definition.is_dynamic())
+    );
+    let (version, cells) = shared_contents(&workbook.encode_state_as_update_v1());
+    assert_eq!(version, 7);
+    assert_eq!(cells, ["0:0", "0:2", "0:4", "1:0", "2:0"]);
+
+    workbook
+        .edit_cell(
+            SheetId(0),
+            CellRef::parse_a1("A1").unwrap(),
+            "0",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        values(&workbook, &["C1", "C2", "C3", "E1", "E2"]),
+        [
+            number(0.0),
+            number(1.0),
+            number(2.0),
+            number(0.0),
+            number(2.0)
+        ]
+    );
+    let mut peer =
+        Workbook::open_collaborative_recalculated(ARRAYS, 7_101, CalculationOptions::default())
+            .unwrap();
+    peer.apply_update_v1(
+        &workbook.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(peer.model(), workbook.model());
+}
+
+/// Once a 0.2.1 room was edited, a constant where an array's result stood may
+/// be an author's, and its value matching the cache proves nothing: the
+/// upgrade keeps it, so the arrays report `#SPILL!` until it is cleared.
+#[test]
+fn an_edited_released_array_room_keeps_its_constants() {
+    let mut workbook = restored(ARRAYS, ARRAYS_EDITED, 7_200);
+    let spill = CellValue::Error {
+        value: betteroffice_xlsx::ErrorValue::Spill,
+    };
+    assert_eq!(
+        values(&workbook, &["C1", "C2", "C3", "E1", "E2"]),
+        [spill.clone(), number(2.0), number(3.0), spill, number(2.0)]
+    );
+    assert_eq!(
+        values(&workbook, &["G1"]),
+        [CellValue::Text {
+            value: "note".into()
+        }]
+    );
+    let (version, cells) = shared_contents(&workbook.encode_state_as_update_v1());
+    assert_eq!(version, 7);
+    assert!(cells.contains(&"1:2".to_owned()) && cells.contains(&"1:4".to_owned()));
+
+    for address in ["C2", "C3"] {
+        workbook
+            .edit_cell(
+                SheetId(0),
+                CellRef::parse_a1(address).unwrap(),
+                "",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        values(&workbook, &["C1", "C2", "C3"]),
+        [number(1.0), number(2.0), number(3.0)]
+    );
+}
+
+/// A room this release creates or migrates declares schema 7, which releases
+/// 0.1.x and 0.2.x refuse: they read schemas 3 through 6 only.
+#[test]
+fn a_current_room_declares_the_schema_older_releases_refuse() {
+    let fresh =
+        Workbook::open_collaborative_recalculated(ARRAYS, 7_300, CalculationOptions::default())
+            .unwrap();
+    assert_eq!(shared_contents(&fresh.encode_state_as_update_v1()).0, 7);
+    assert_eq!(shared_contents(ARRAYS_EDITED).0, 6);
+    let migrated = restored(ARRAYS, ARRAYS_EDITED, 7_301);
+    assert_eq!(shared_contents(&migrated.encode_state_as_update_v1()).0, 7);
 }

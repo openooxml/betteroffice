@@ -61,9 +61,9 @@ pub fn rebuild_and_recalc_all(
 }
 
 /// formula cells to re-evaluate: transitive dependents of the seeds, plus
-/// volatile cells and their dependents. an array whose result covers a seed
-/// re-evaluates too, as do the readers of an array anchor a seed rewrote and,
-/// on a seed's sheet, the dynamic arrays something obstructs.
+/// volatile cells and their dependents. an array whose result covers a seed,
+/// or which a seed obstructs, re-evaluates too, as do the readers of an array
+/// anchor a seed rewrote.
 fn collect_recompute(
     wb: &Workbook,
     graph: &DepGraph,
@@ -78,7 +78,11 @@ fn collect_recompute(
         if graph.is_formula(sheet, cell) {
             recompute.insert(k);
         }
-        for (sheet, anchor) in graph.spill_sources(sheet, CellRange::new(cell, cell)) {
+        let at = CellRange::new(cell, cell);
+        for (sheet, anchor) in graph
+            .spill_sources(sheet, at)
+            .chain(graph.obstructed_sources(sheet, at))
+        {
             let anchor = key(sheet, anchor);
             if recompute.insert(anchor) {
                 worklist.push(anchor);
@@ -88,24 +92,6 @@ fn collect_recompute(
             for (sheet, reader) in graph.readers_of(sheet, range) {
                 recompute.insert(key(sheet, reader));
                 worklist.push(key(sheet, reader));
-            }
-        }
-    }
-    let obstructed = CellValue::Error {
-        value: ErrorValue::Spill,
-    };
-    let seeded: HashSet<SheetId> = seeds.iter().map(|&(sheet, _)| sheet).collect();
-    for sheet in seeded {
-        let Some(cells) = wb.sheet(sheet) else {
-            continue;
-        };
-        for (anchor, _) in cells.array_formulas() {
-            if cells.is_dynamic_array(anchor)
-                && graph.is_formula(sheet, anchor)
-                && *wb.value_cow(sheet, anchor) == obstructed
-                && recompute.insert(key(sheet, anchor))
-            {
-                worklist.push(key(sheet, anchor));
             }
         }
     }
@@ -205,11 +191,17 @@ fn run_recalc(
     }
 }
 
-/// formula cells that transitively read any of `seeds`.
+/// formula cells that transitively read any of `seeds`, with the arrays they
+/// released room for.
 fn dependents_closure(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<Key> {
-    let mut found: HashSet<Key> = HashSet::new();
+    let mut found: HashSet<Key> = seeds
+        .iter()
+        .flat_map(|&(sheet, cell)| graph.obstructed_sources(sheet, CellRange::new(cell, cell)))
+        .map(|(sheet, anchor)| key(sheet, anchor))
+        .collect();
     let mut expanded: HashSet<Key> = HashSet::new();
     let mut worklist: Vec<Key> = seeds.iter().map(|&(s, c)| key(s, c)).collect();
+    worklist.extend(found.iter().copied());
     while let Some(node) = worklist.pop() {
         if !expanded.insert(node) {
             continue;
@@ -529,11 +521,15 @@ fn write_spill(
     changed: &mut Vec<(SheetId, CellRef)>,
 ) -> Vec<(SheetId, CellRef)> {
     let anchor = cell_of(u);
-    let previous = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(anchor));
-    let dynamic = wb
-        .sheet(u.0)
-        .is_some_and(|sheet| sheet.is_dynamic_array(anchor));
-    let (range, values) = if dynamic && blocked(wb, u.0, anchor, spill.range, previous) {
+    let Some(sheet) = wb.sheet(u.0) else {
+        return Vec::new();
+    };
+    let Some(previous) = sheet.array_formula(anchor) else {
+        return Vec::new();
+    };
+    let dynamic = sheet.is_dynamic_array(anchor);
+    let attempted = spill.range;
+    let (range, values) = if blocked(sheet, anchor, spill.range) {
         (
             CellRange::new(anchor, anchor),
             vec![CellValue::Error {
@@ -543,77 +539,70 @@ fn write_spill(
     } else {
         (spill.range, spill.values)
     };
+    let owner = (anchor.row, anchor.col);
+    let retired: Vec<CellRef> = sheet
+        .cells_in_range(previous)
+        .filter(|(at, _)| {
+            !range.contains(*at)
+                && sheet.result_anchor(*at) == Some(anchor)
+                && (at.row, at.col) != owner
+        })
+        .map(|(at, _)| at)
+        .collect();
     let mut moved = Vec::new();
-    if let Some(previous) = previous {
-        for (row, col) in cells_of(previous) {
-            let at = CellRef::new(row, col);
-            if at.row == anchor.row && at.col == anchor.col || range.contains(at) {
-                continue;
-            }
-            write_spilled_cell(wb, (u.0, row, col), CellValue::Empty, changed, &mut moved);
-        }
+    for at in retired {
+        write_result(wb, u.0, at, anchor, CellValue::Empty, changed, &mut moved);
     }
     for ((row, col), value) in cells_of(range).zip(values) {
-        if row == anchor.row && col == anchor.col {
+        let at = CellRef::new(row, col);
+        if (row, col) == owner {
             if write_if_changed(wb, (u.0, row, col), value) {
                 changed.push((u.0, anchor));
             }
             continue;
         }
-        write_spilled_cell(wb, (u.0, row, col), value, changed, &mut moved);
+        write_result(wb, u.0, at, anchor, value, changed, &mut moved);
     }
+    let extent = if !dynamic { previous } else { range };
     if let Some(sheet) = wb.sheet_mut(u.0) {
-        sheet.set_array_formula(anchor, range);
+        sheet.set_array_extent(anchor, extent, attempted);
     }
     moved
 }
 
-/// whether anything the author put in the way stops a result spilling. only
-/// cells beyond the rectangle this anchor already records count: what is inside
-/// it is the previous result, and a file may record one over its own formulas.
-fn blocked(
-    wb: &Workbook,
-    sheet: SheetId,
-    anchor: CellRef,
-    range: CellRange,
-    previous: Option<CellRange>,
-) -> bool {
+/// whether anything but this anchor's own result stops it filling `range`:
+/// what an author wrote, or another array's result.
+fn blocked(sheet: &xlsx_model::Sheet, anchor: CellRef, range: CellRange) -> bool {
     if range.start == range.end {
         return false;
     }
-    cells_of(range).any(|(row, col)| {
-        let at = CellRef::new(row, col);
-        if at.row == anchor.row && at.col == anchor.col {
-            return false;
-        }
-        if previous.is_some_and(|previous| previous.contains(at)) {
-            return false;
-        }
-        owns_formula(wb, sheet, at) || !matches!(wb.value_cow(sheet, at).as_ref(), CellValue::Empty)
+    sheet.cells_in_range(range).any(|(at, _)| {
+        (at.row, at.col) != (anchor.row, anchor.col)
+            && (sheet.authored_at(at)
+                || sheet
+                    .result_anchor(at)
+                    .is_some_and(|owner| (owner.row, owner.col) != (anchor.row, anchor.col)))
     })
 }
 
-/// whether a cell carries a formula of its own. producers mark the interior
-/// of a spilled rectangle with an empty `<f/>`, which is the anchor's formula
-/// reaching that cell, not one the cell owns.
-fn owns_formula(wb: &Workbook, sheet: SheetId, at: CellRef) -> bool {
-    wb.formula(sheet, at)
-        .is_some_and(|formula| !formula.trim().is_empty())
-}
-
-fn write_spilled_cell(
+fn write_result(
     wb: &mut Workbook,
-    u: Key,
+    sheet: SheetId,
+    at: CellRef,
+    anchor: CellRef,
     value: CellValue,
     changed: &mut Vec<(SheetId, CellRef)>,
     moved: &mut Vec<(SheetId, CellRef)>,
 ) {
-    if owns_formula(wb, u.0, cell_of(u)) {
+    let Some(target) = wb.sheet_mut(sheet) else {
         return;
-    }
-    if write_if_changed(wb, u, value) {
-        changed.push((u.0, cell_of(u)));
-        moved.push((u.0, cell_of(u)));
+    };
+    let before = target.cell(at).map(|cell| cell.value.clone());
+    target.write_result(at, anchor, value);
+    let after = target.cell(at).map(|cell| cell.value.clone());
+    if before.unwrap_or_default() != after.unwrap_or_default() {
+        changed.push((sheet, at));
+        moved.push((sheet, at));
     }
 }
 

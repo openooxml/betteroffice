@@ -111,11 +111,11 @@ pub fn serialize_workbook_with_active_sheet(
     }
     let have_sst = !wb.shared_strings.is_empty();
     let have_styles = !wb.styles.is_empty();
-    let dynamic_cm = has_dynamic_arrays(wb).then_some(1);
+    let dynamic_cm = ArrayMetadata::generated(has_dynamic_arrays(wb));
     let mut parts = vec![
         (
             "[Content_Types].xml".to_string(),
-            content_types(wb, have_sst, have_styles, dynamic_cm.is_some())?,
+            content_types(wb, have_sst, have_styles, dynamic_cm.writes_part())?,
         ),
         ("_rels/.rels".to_string(), root_rels()?),
         (
@@ -124,10 +124,10 @@ pub fn serialize_workbook_with_active_sheet(
         ),
         (
             "xl/_rels/workbook.xml.rels".to_string(),
-            workbook_rels(wb, have_sst, have_styles, dynamic_cm.is_some())?,
+            workbook_rels(wb, have_sst, have_styles, dynamic_cm.writes_part())?,
         ),
     ];
-    if dynamic_cm.is_some() {
+    if dynamic_cm.writes_part() {
         parts.push((
             "xl/metadata.xml".to_string(),
             DYNAMIC_ARRAY_METADATA.to_vec(),
@@ -448,7 +448,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                         &relationship_namespace,
                         &links,
                         shared_string_plan.as_ref(),
-                        package.dynamic_array_cm,
+                        ArrayMetadata::package(package.dynamic_array_cm),
                     )?,
                     relationships: Some(links.relationships),
                 }
@@ -893,7 +893,7 @@ fn sheet_body_matches(sheet: &Sheet, original: &Sheet) -> bool {
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
         && sheet.iter_cells().eq(original.iter_cells())
-        && sheet.array_formulas().eq(original.array_formulas())
+        && sheet.array_definitions().eq(original.array_definitions())
 }
 
 #[derive(Clone)]
@@ -2475,7 +2475,7 @@ fn worksheet_xml_with_namespace(
     relationship_namespace: &str,
     links: &HyperlinkPlan,
     shared_string_plan: Option<&SharedStringPlan>,
-    dynamic_cm: Option<u32>,
+    dynamic_cm: ArrayMetadata,
 ) -> Result<Vec<u8>, ParseError> {
     doc(|writer| {
         let mut root = BytesStart::new("worksheet");
@@ -2520,7 +2520,7 @@ fn patched_grid(
     axes: &SheetAxes,
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
-    dynamic_cm: Option<u32>,
+    dynamic_cm: ArrayMetadata,
 ) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
@@ -2589,7 +2589,7 @@ fn worksheet_xml_with_template(
             axes,
             shared_string_cells,
             shared_string_plan,
-            package.dynamic_array_cm,
+            ArrayMetadata::package(package.dynamic_array_cm),
         ),
         _ => None,
     };
@@ -2606,7 +2606,7 @@ fn worksheet_xml_with_template(
                     wb,
                     shared_string_cells,
                     shared_string_plan,
-                    package.dynamic_array_cm,
+                    ArrayMetadata::package(package.dynamic_array_cm),
                 )
             })?),
         ),
@@ -2770,7 +2770,7 @@ fn write_sheet_data(
     wb: &Workbook,
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
-    dynamic_cm: Option<u32>,
+    dynamic_cm: ArrayMetadata,
 ) -> io::Result<()> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
     if shared_string_plan.is_none() {
@@ -2928,7 +2928,7 @@ pub(crate) fn write_row<'a, I>(
     sst_index: &HashMap<&str, usize>,
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
-    dynamic_cm: Option<u32>,
+    dynamic_cm: ArrayMetadata,
 ) -> io::Result<()>
 where
     I: Iterator<Item = (CellRef, &'a Cell)>,
@@ -2982,22 +2982,56 @@ pub(crate) fn shared_string_index(
     }
 }
 
-/// what an array anchor's markup records: the rectangle it fills and, for a
-/// dynamic array, the `cm` index marking it one.
+/// what an array anchor's markup records: the rectangle it fills and the
+/// `cm` index its cell carries.
 #[derive(Clone, Copy)]
 pub(crate) struct ArrayMarkup {
     range: xlsx_model::CellRange,
     metadata: Option<u32>,
 }
 
+/// where anchors' `cm` indices come from on save.
+#[derive(Clone, Copy)]
+pub(crate) struct ArrayMetadata {
+    /// each anchor keeps the index its source gave it.
+    own: bool,
+    /// the index a dynamic array without one of its own takes.
+    dynamic: Option<u32>,
+}
+
+impl ArrayMetadata {
+    /// a package keeps its own metadata part and every index into it.
+    pub(crate) fn package(dynamic: Option<u32>) -> Self {
+        Self { own: true, dynamic }
+    }
+
+    /// a generated workbook writes the one metadata record it needs.
+    fn generated(dynamic: bool) -> Self {
+        Self {
+            own: false,
+            dynamic: dynamic.then_some(1),
+        }
+    }
+
+    fn writes_part(&self) -> bool {
+        !self.own && self.dynamic.is_some()
+    }
+}
+
 pub(crate) fn array_markup(
     sheet: &Sheet,
     at: CellRef,
-    dynamic_cm: Option<u32>,
+    metadata: ArrayMetadata,
 ) -> Option<ArrayMarkup> {
-    sheet.array_formula(at).map(|range| ArrayMarkup {
-        range,
-        metadata: dynamic_cm.filter(|_| sheet.is_dynamic_array(at)),
+    let definition = sheet.array_definition(at)?;
+    let fallback = metadata.dynamic.filter(|_| definition.is_dynamic());
+    Some(ArrayMarkup {
+        range: sheet.array_formula(at)?,
+        metadata: if metadata.own {
+            definition.metadata.or(fallback)
+        } else {
+            fallback
+        },
     })
 }
 

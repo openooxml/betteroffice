@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane,
-    Hyperlink, Sheet, SheetFormat, SheetId, Stylesheet, Table, Workbook,
+    ArrayDefinition, ArrayKind, Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem,
+    DefinedName, ErrorValue, FreezePane, Hyperlink, Sheet, SheetFormat, SheetId, Stylesheet, Table,
+    Workbook,
 };
 
 use crate::formula::SharedFormulas;
@@ -696,12 +697,21 @@ fn parse_worksheet(
                     if let Some(c) = cur.as_mut() {
                         if let Some(origin) = c.addr {
                             shared_formulas.record(&e, origin, &text)?;
-                            if let Some(range) = array_ref.filter(|range| range.contains(origin)) {
-                                if c.metadata.is_some_and(|cm| dynamic_arrays.contains(&cm)) {
-                                    sheet.set_dynamic_array_formula(origin, range);
-                                } else {
-                                    sheet.set_array_formula(origin, range);
-                                }
+                            if let Some(range) = array_ref.filter(|range| range.start == origin) {
+                                let kind =
+                                    if c.metadata.is_some_and(|cm| dynamic_arrays.contains(&cm)) {
+                                        ArrayKind::Dynamic
+                                    } else {
+                                        ArrayKind::Legacy {
+                                            rows: range.end.row - range.start.row + 1,
+                                            cols: range.end.col - range.start.col + 1,
+                                        }
+                                    };
+                                let definition = ArrayDefinition {
+                                    kind,
+                                    metadata: c.metadata,
+                                };
+                                sheet.define_array(origin, definition, range);
                             }
                         }
                         c.formula = Some(text);
@@ -767,6 +777,10 @@ fn parse_worksheet(
         }
     }
     shared_formulas.resolve(&mut sheet)?;
+    let anchors: Vec<CellRef> = sheet.array_formulas().map(|(anchor, _)| anchor).collect();
+    for anchor in anchors {
+        sheet.adopt_results(anchor);
+    }
     normalize_merges(&mut sheet.merges);
     Ok(sheet)
 }

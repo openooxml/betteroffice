@@ -1018,6 +1018,7 @@ fn live_export_reads_committed_state_read_only() {
                     value: CellValue::Number { value: 10.0 },
                     formula: None,
                     style: None,
+                    array: None,
                 },
             }],
             CalculationOptions::default(),

@@ -2932,12 +2932,18 @@ pub fn spill_at(anchor: CellRef, authored: Option<CellRange>, value: Value) -> S
 /// column repeats across it, and positions the result does not reach show
 /// `#N/A`.
 pub fn fill_at(range: CellRange, value: Value) -> Spill {
+    let height = (range.end.row - range.start.row + 1) as usize;
+    let width = (range.end.col - range.start.col + 1) as usize;
+    if height
+        .checked_mul(width)
+        .is_none_or(|cells| cells > MAX_SPILL_CELLS)
+    {
+        return spill_at(range.start, None, Value::error(ErrorValue::Num));
+    }
     let (rows, cols, values) = match value {
         Value::Array(array) => (array.rows, array.cols, array.values),
         value => (1, 1, vec![value.into_scalar()]),
     };
-    let height = (range.end.row - range.start.row + 1) as usize;
-    let width = (range.end.col - range.start.col + 1) as usize;
     let mut out = Vec::with_capacity(height * width);
     for row in 0..height {
         for col in 0..width {

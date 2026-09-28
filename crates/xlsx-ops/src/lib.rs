@@ -9,9 +9,7 @@ mod proposals;
 mod remap;
 mod undo;
 
-pub use apply::{
-    InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref, settle_array_write,
-};
+pub use apply::{InvertedOp, OpError, apply, apply_in_place, apply_ops, remap_ref, write_state};
 pub use formatting::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, HorizontalAlignment,
     NumberFormatMutation, StylePatch, StyleProperty, TextWrapping, VerticalAlignment,

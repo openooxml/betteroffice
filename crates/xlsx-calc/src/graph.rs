@@ -58,6 +58,9 @@ pub struct DepGraph {
     spills: HashMap<NodeKey, CellRange>,
     /// the same rectangles grouped by sheet, for scanning them per read range.
     spills_by_sheet: HashMap<SheetId, Vec<(NodeKey, CellRange)>>,
+    /// obstructed array anchors with the rectangle they asked for, so a cell
+    /// cleared inside it reaches the anchor.
+    obstructed_by_sheet: HashMap<SheetId, Vec<(NodeKey, CellRange)>>,
     /// parsed formula text -> ast, shared with recalc eval so each formula
     /// parses once across graph construction and every subsequent recalc.
     asts: ParseCache,
@@ -101,6 +104,7 @@ impl DepGraph {
             volatile: HashSet::new(),
             spills: HashMap::new(),
             spills_by_sheet: HashMap::new(),
+            obstructed_by_sheet: HashMap::new(),
             asts: ParseCache::default(),
         };
         for (i, sheet) in wb.sheets.iter().enumerate() {
@@ -130,8 +134,18 @@ impl DepGraph {
     pub fn refresh_spills(&mut self, wb: &Workbook) {
         self.spills.clear();
         self.spills_by_sheet.clear();
+        self.obstructed_by_sheet.clear();
         for (index, sheet) in wb.sheets.iter().enumerate() {
             let sid = SheetId(index as u32);
+            for (anchor, attempted) in sheet.obstructed_arrays() {
+                let key = NodeKey::new(sid, anchor);
+                if self.deps.contains_key(&key) {
+                    self.obstructed_by_sheet
+                        .entry(sid)
+                        .or_default()
+                        .push((key, attempted));
+                }
+            }
             for (anchor, range) in sheet.array_formulas() {
                 let key = NodeKey::new(sid, anchor);
                 if range.start != range.end && self.deps.contains_key(&key) {
@@ -157,6 +171,20 @@ impl DepGraph {
             .into_iter()
             .flatten()
             .filter(move |(_, spill)| spill.overlaps(&range))
+            .map(|(anchor, _)| (anchor.sheet, anchor.cell()))
+    }
+
+    /// obstructed array anchors on `sheet` that asked to fill part of `range`.
+    pub(crate) fn obstructed_sources(
+        &self,
+        sheet: SheetId,
+        range: CellRange,
+    ) -> impl Iterator<Item = (SheetId, CellRef)> + '_ {
+        self.obstructed_by_sheet
+            .get(&sheet)
+            .into_iter()
+            .flatten()
+            .filter(move |(_, attempted)| attempted.overlaps(&range))
             .map(|(anchor, _)| (anchor.sheet, anchor.cell()))
     }
 
@@ -271,6 +299,9 @@ impl DepGraph {
         self.volatile.remove(&key);
         self.spills.remove(&key);
         if let Some(anchors) = self.spills_by_sheet.get_mut(&key.sheet) {
+            anchors.retain(|(anchor, _)| *anchor != key);
+        }
+        if let Some(anchors) = self.obstructed_by_sheet.get_mut(&key.sheet) {
             anchors.retain(|(anchor, _)| *anchor != key);
         }
     }

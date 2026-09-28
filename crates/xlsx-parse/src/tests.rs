@@ -6345,6 +6345,44 @@ fn reads_dynamic_arrays_from_cell_metadata() {
     assert_eq!(kinds(&parts), ([true, false, false, false], Some(2)));
 }
 
+/// An anchor whose kind or metadata changed is rewritten with it, though its
+/// cells hold what they held; untouched anchors keep their own `cm`.
+#[test]
+fn an_array_definition_change_rewrites_its_anchor() {
+    let body = r#"<sheetData><row r="1"><c r="A1" cm="2"><f t="array" ref="A1:A2">SEQUENCE(2)</f><v>1</v></c><c r="B1" cm="2"><f t="array" ref="B1">SEQUENCE(1)</f><v>1</v></c></row><row r="2"><c r="A2"><v>2</v></c></row></sheetData>"#;
+    let metadata = r#"<metadata xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray"><metadataTypes count="1"><metadataType name="XLDAPR"/></metadataTypes><futureMetadata name="XLDAPR" count="1"><bk><extLst><ext><xda:dynamicArrayProperties fDynamic="1"/></ext></extLst></bk></futureMetadata><cellMetadata count="2"><bk><rc t="1" v="0"/></bk><bk><rc t="1" v="0"/></bk></cellMetadata></metadata>"#;
+    let mut parts = package(body, &[], false);
+    parts.push(("xl/metadata.xml".to_owned(), metadata.as_bytes().to_vec()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let a1 = CellRef::parse_a1("A1").unwrap();
+    let definition = parsed.workbook.sheets[0].array_definition(a1).unwrap();
+    for changed in [
+        xlsx_model::ArrayDefinition {
+            metadata: Some(1),
+            ..definition
+        },
+        xlsx_model::ArrayDefinition {
+            kind: xlsx_model::ArrayKind::Legacy { rows: 2, cols: 1 },
+            metadata: None,
+        },
+    ] {
+        let mut workbook = parsed.workbook.clone();
+        let extent = workbook.sheets[0].array_formula(a1).unwrap();
+        workbook.sheets[0].define_array(a1, changed, extent);
+        let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+        let sheet = sheet_text(&saved, "xl/worksheets/sheet1.xml");
+        let expected = match changed.metadata {
+            Some(cm) => format!(r#"<c r="A1" cm="{cm}"><f t="array" ref="A1:A2">"#),
+            None => r#"<c r="A1"><f t="array" ref="A1:A2">"#.to_owned(),
+        };
+        assert!(sheet.contains(&expected), "{sheet}");
+        assert!(
+            sheet.contains(r#"<c r="B1" cm="2"><f t="array" ref="B1">"#),
+            "{sheet}"
+        );
+    }
+}
+
 /// `<f t="array" ref>` records the rectangle the result occupies; a shared
 /// formula's `ref` and an oversized array `ref` are not array anchors.
 #[test]

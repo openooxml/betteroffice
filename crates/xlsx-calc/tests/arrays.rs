@@ -407,6 +407,7 @@ fn a_dynamic_single_value_retires_the_rest_of_its_rectangle() {
     for address in ["E1", "D2", "E2"] {
         put(workbook.sheet_mut(sheet).unwrap(), address, n(10.0));
     }
+    workbook.sheet_mut(sheet).unwrap().adopt_results(a1("D1"));
     rebuild_and_recalc_all(&mut workbook, None);
     assert_eq!(value_at(&workbook, "D1"), n(10.0));
     for address in ["E1", "D2", "E2"] {
@@ -415,6 +416,20 @@ fn a_dynamic_single_value_retires_the_rest_of_its_rectangle() {
     assert_eq!(
         workbook.sheet(sheet).unwrap().array_formula(a1("D1")),
         Some(range("D1"))
+    );
+}
+
+/// a legacy rectangle past the spill limit reports `#NUM!` at its anchor
+/// rather than allocating a cell for every position.
+#[test]
+fn an_oversized_legacy_rectangle_is_refused_before_allocation() {
+    let spill = xlsx_calc::array::fill_at(range("A1:XFD1048576"), Value::Scalar(n(1.0)));
+    assert_eq!(spill.range, range("A1"));
+    assert_eq!(
+        spill.values,
+        [CellValue::Error {
+            value: ErrorValue::Num
+        }]
     );
 }
 
@@ -524,18 +539,30 @@ fn an_obstructed_rectangle_reports_spill_and_keeps_the_obstruction() {
 }
 
 /// cells a previous result filled belong to the spill, not to the author, so a
-/// workbook opened with its cached spill still recalculates.
+/// workbook opened with its cached spill still recalculates; an author's value
+/// inside that rectangle obstructs it all the same.
 #[test]
 fn cells_the_previous_result_filled_do_not_block_it() {
     let (mut workbook, sheet) = spilling_workbook("_xlfn.SEQUENCE(3)", "D1:D3");
     for address in ["D2", "D3"] {
         put(workbook.sheet_mut(sheet).unwrap(), address, n(7.0));
     }
+    workbook.sheet_mut(sheet).unwrap().adopt_results(a1("D1"));
     rebuild_and_recalc_all(&mut workbook, None);
-    let sheet = workbook.sheet(sheet).unwrap();
     for (address, expected) in [("D1", 1.0), ("D2", 2.0), ("D3", 3.0)] {
-        assert_eq!(sheet.cell(a1(address)).unwrap().value, n(expected));
+        assert_eq!(value_at(&workbook, address), n(expected));
     }
+
+    put(workbook.sheet_mut(sheet).unwrap(), "D2", n(7.0));
+    rebuild_and_recalc_all(&mut workbook, None);
+    assert_eq!(
+        value_at(&workbook, "D1"),
+        CellValue::Error {
+            value: ErrorValue::Spill
+        }
+    );
+    assert_eq!(value_at(&workbook, "D2"), n(7.0));
+    assert_eq!(value_at(&workbook, "D3"), CellValue::Empty);
 }
 
 /// a formula reading a spilled cell must be evaluated after the spill lands.

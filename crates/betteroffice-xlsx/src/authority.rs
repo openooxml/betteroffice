@@ -6,10 +6,10 @@ use std::sync::Arc;
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
-    AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink,
-    MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Table,
-    Workbook as WorkbookModel,
+    AnchorEditAs, AnchorExtent, AnchorPos, ArrayDefinition, ArrayKind, Cell, CellFormat, CellRange,
+    CellRef, CellValue, ChartAnchor, ChartRef, ColStyle, DateSystem, DefinedName, ErrorValue,
+    FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, MAX_SPILL_CELLS, Sheet, SheetChart, SheetFormat,
+    SheetId, Stylesheet, Table, Workbook as WorkbookModel,
 };
 use xlsx_ops::{CellState, Op};
 use yrs::block::{
@@ -39,7 +39,10 @@ const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
 const CHARTS_SCHEMA_VERSION: i64 = 6;
-const SCHEMA_VERSION: i64 = 6;
+/// Array anchors carry their definition with their formula, and an array's
+/// result is no longer shared content.
+const ARRAYS_SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 7;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
@@ -111,6 +114,10 @@ struct WorkbookBase {
     styles: Stylesheet,
     /// table parts; read-only reference data, not shared state.
     tables: Vec<Table>,
+    /// each sheet's array anchors as parsed: formula and definition.
+    arrays: Vec<BTreeMap<(u32, u32), (String, ArrayDefinition)>>,
+    /// each sheet's cells the parsed arrays filled.
+    results: Vec<BTreeSet<(u32, u32)>>,
 }
 
 impl WorkbookBase {
@@ -153,7 +160,7 @@ impl WorkbookBase {
             }
         }
         if let Some(legacy) = model_with_legacy_dimensions(model, legacy_dimensions) {
-            for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..CHARTS_SCHEMA_VERSION {
                 let (legacy_fingerprint, _) = fingerprint_model_for_schema(&legacy, version)?;
                 let (without_col_styles, _) =
                     fingerprint_model_with_schema(&legacy, version, version >= 4, false)?;
@@ -229,6 +236,30 @@ impl WorkbookBase {
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
             tables: model.tables.clone(),
+            arrays: model
+                .sheets
+                .iter()
+                .map(|sheet| {
+                    sheet
+                        .array_definitions()
+                        .filter_map(|(at, definition, _)| {
+                            let formula = sheet.cell(at)?.formula.clone()?;
+                            Some(((at.row, at.col), (formula, definition)))
+                        })
+                        .collect()
+                })
+                .collect(),
+            results: model
+                .sheets
+                .iter()
+                .map(|sheet| {
+                    sheet
+                        .iter_cells()
+                        .filter(|(at, _)| sheet.result_anchor(*at).is_some())
+                        .map(|(at, _)| (at.row, at.col))
+                        .collect()
+                })
+                .collect(),
         })
     }
 
@@ -1054,6 +1085,7 @@ impl WorkbookAuthority {
     fn upgrade_schema(&self) -> Result<bool, String> {
         let version = self.schema_version()?;
         validate_schema_version(version)?;
+        let seeded_only = self.holds_only_its_seed();
         self.deduplicate_sheet_order()?;
         if version == SCHEMA_VERSION && self.has_current_base_fingerprint() {
             return Ok(false);
@@ -1111,6 +1143,12 @@ impl WorkbookAuthority {
             if version < CHARTS_SCHEMA_VERSION {
                 sheet.try_update(&mut txn, CHARTS, charts);
             }
+            if version < ARRAYS_SCHEMA_VERSION
+                && let Some(base) = base_sheet_index(&key)
+            {
+                let contents: MapRef = sheet.get_or_init(&mut txn, CONTENTS);
+                self.upgrade_arrays(&contents, &mut txn, base, version, seeded_only)?;
+            }
         }
         let meta = txn
             .get_map(META)
@@ -1118,6 +1156,49 @@ impl WorkbookAuthority {
         meta.try_update(&mut txn, BASE_FINGERPRINT, self.base.fingerprint.as_str());
         meta.try_update(&mut txn, "schemaVersion", SCHEMA_VERSION);
         Ok(true)
+    }
+
+    /// Whether one writer, the bootstrap that seeded the document, wrote all of
+    /// it: nothing was edited, so every cached array result in it is provably
+    /// the seed's.
+    fn holds_only_its_seed(&self) -> bool {
+        let txn = self.doc.transact();
+        txn.state_vector().len() == 1 && txn.snapshot().delete_set.is_empty()
+    }
+
+    /// An earlier schema stores array anchors as plain formulas and their
+    /// results as constants. Each anchor still holding the formula the workbook
+    /// was parsed with takes its definition. The cached results leave the
+    /// document only where it holds nothing but its seed; anywhere else a
+    /// constant there may be an author's, so it stays one.
+    fn upgrade_arrays(
+        &self,
+        contents: &MapRef,
+        txn: &mut TransactionMut<'_>,
+        base: usize,
+        version: i64,
+        seeded_only: bool,
+    ) -> Result<(), String> {
+        if let Some(arrays) = self.base.arrays.get(base) {
+            for (&(row, col), (formula, definition)) in arrays {
+                let key = cell_key(CellRef::new(row, col));
+                let Some(Out::Any(value)) = contents.get(txn, &key) else {
+                    continue;
+                };
+                let (cell, _) = content_from_any(&value, version)?;
+                if cell.formula.as_ref() == Some(formula)
+                    && let Some(upgraded) = content_to_any(&cell, Some(*definition))
+                {
+                    contents.try_update(txn, key, upgraded);
+                }
+            }
+        }
+        if seeded_only && let Some(results) = self.base.results.get(base) {
+            for &(row, col) in results {
+                contents.remove(txn, &cell_key(CellRef::new(row, col)));
+            }
+        }
+        Ok(())
     }
 
     fn deduplicate_sheet_order(&self) -> Result<(), String> {
@@ -2638,10 +2719,13 @@ fn sync_sheet(
     Ok(())
 }
 
+/// an array's result is computed, never shared: only what authors wrote is.
 fn sync_contents(map: &MapRef, txn: &mut TransactionMut<'_>, sheet: &Sheet) {
     let desired = sheet
-        .iter_cells()
-        .filter_map(|(at, cell)| content_to_any(cell).map(|value| (cell_key(at), value)))
+        .authored_cells()
+        .filter_map(|(at, cell)| {
+            content_to_any(&cell, sheet.array_definition(at)).map(|value| (cell_key(at), value))
+        })
         .collect::<BTreeMap<_, _>>();
     sync_map(map, txn, desired);
 }
@@ -2684,15 +2768,16 @@ fn sync_authored_cell(
 ) -> Result<(), String> {
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
     let key = cell_key(at);
-    match sheet.cell(at) {
+    match sheet.authored_cell(at) {
         Some(cell) => {
             let current = match contents.get(txn, &key) {
-                Some(Out::Any(value)) => Some(content_from_any(&value)?),
+                Some(Out::Any(value)) => Some(content_from_any(&value, SCHEMA_VERSION)?),
                 Some(_) => return Err(format!("cell content {key} is not an atomic value")),
                 None => None,
             };
-            if !authored_content_equal(current.as_ref(), Some(cell)) {
-                sync_optional(&contents, txn, &key, content_to_any(cell));
+            let desired = (cell.into_owned(), sheet.array_definition(at));
+            if !authored_content_equal(current.as_ref(), Some(&desired)) {
+                sync_optional(&contents, txn, &key, content_to_any(&desired.0, desired.1));
             }
         }
         None => {
@@ -2892,14 +2977,19 @@ fn cell_format_entry(format: &CellFormat) -> Result<(String, String), String> {
     Ok((format!("{digest:x}"), payload))
 }
 
-fn authored_content_equal(left: Option<&Cell>, right: Option<&Cell>) -> bool {
+type Content = (Cell, Option<ArrayDefinition>);
+
+fn authored_content_equal(left: Option<&Content>, right: Option<&Content>) -> bool {
     match (left, right) {
         (None, None) => true,
-        (Some(left), Some(right)) => match (&left.formula, &right.formula) {
-            (Some(left), Some(right)) => left == right,
-            (None, None) => left.value == right.value,
-            _ => false,
-        },
+        (Some((left, left_array)), Some((right, right_array))) => {
+            left_array == right_array
+                && match (&left.formula, &right.formula) {
+                    (Some(left), Some(right)) => left == right,
+                    (None, None) => left.value == right.value,
+                    _ => false,
+                }
+        }
         _ => false,
     }
 }
@@ -2978,13 +3068,19 @@ fn materialize_sheet<T: ReadTxn>(
         .ok_or_else(|| "sheet is missing its name".to_string())?;
     let mut sheet = Sheet::new(name);
     let mut cells = BTreeMap::<(u32, u32), Cell>::new();
+    let mut arrays = Vec::new();
     let contents = nested_map(sheet_map, txn, CONTENTS)?;
     for (key, value) in contents.iter(txn) {
         let at = parse_cell_key(key)?;
         let Out::Any(value) = value else {
             return Err(format!("cell content {key} is not an atomic value"));
         };
-        cells.insert((at.row, at.col), content_from_any(&value)?);
+        let (cell, array) = content_from_any(&value, version)?;
+        if let Some(definition) = array {
+            validate_array(at, &definition)?;
+            arrays.push((at, definition));
+        }
+        cells.insert((at.row, at.col), cell);
     }
     let styles = nested_map(sheet_map, txn, STYLES)?;
     for (key, value) in styles.iter(txn) {
@@ -3000,6 +3096,9 @@ fn materialize_sheet<T: ReadTxn>(
     for ((row, col), cell) in cells {
         sheet.set_cell(CellRef::new(row, col), cell);
     }
+    for (at, definition) in arrays {
+        sheet.define_array(at, definition, definition.entered(at));
+    }
     sheet.col_widths = materialize_numbers(
         &nested_map(sheet_map, txn, COL_WIDTHS)?,
         txn,
@@ -3012,7 +3111,7 @@ fn materialize_sheet<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
-    if version < SCHEMA_VERSION {
+    if version < CHARTS_SCHEMA_VERSION {
         for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
             sheet.col_widths.entry(at).or_insert(size);
         }
@@ -3292,13 +3391,21 @@ fn parse_cell_key(key: &str) -> Result<CellRef, String> {
     Ok(at)
 }
 
-fn content_to_any(cell: &Cell) -> Option<Any> {
+/// `[0, value]` for a constant, `[1, formula, cached value]` for a formula,
+/// and `[2, formula, cached value, array]` for an array anchor, so a
+/// definition never parts from its formula.
+fn content_to_any(cell: &Cell, array: Option<ArrayDefinition>) -> Option<Any> {
     if let Some(formula) = &cell.formula {
-        Some(any_array(vec![
+        let mut payload = vec![
             Any::BigInt(1),
             Any::from(formula.as_str()),
             value_to_any(&cell.value),
-        ]))
+        ];
+        if let Some(array) = array {
+            payload[0] = Any::BigInt(2);
+            payload.push(array_to_any(&array));
+        }
+        Some(any_array(payload))
     } else if !matches!(&cell.value, CellValue::Empty) {
         Some(any_array(vec![Any::BigInt(0), value_to_any(&cell.value)]))
     } else {
@@ -3306,7 +3413,7 @@ fn content_to_any(cell: &Cell) -> Option<Any> {
     }
 }
 
-fn content_from_any(value: &Any) -> Result<Cell, String> {
+fn content_from_any(value: &Any, version: i64) -> Result<Content, String> {
     let values = any_values(value, "cell content")?;
     let kind = values
         .first()
@@ -3317,24 +3424,115 @@ fn content_from_any(value: &Any) -> Result<Cell, String> {
             if matches!(&value, CellValue::Empty) {
                 return Err("empty literal cell content must be omitted".to_string());
             }
-            Ok(Cell {
-                value,
-                ..Cell::default()
-            })
+            Ok((
+                Cell {
+                    value,
+                    ..Cell::default()
+                },
+                None,
+            ))
         }
-        1 if values.len() == 3 => {
+        kind @ (1 | 2) if values.len() == 3 + usize::from(kind == 2) => {
+            if kind == 2 && version < ARRAYS_SCHEMA_VERSION {
+                return Err(format!("unsupported cell content kind {kind}"));
+            }
             let Any::String(formula) = &values[1] else {
                 return Err("formula cell content is missing formula text".to_string());
             };
-            Ok(Cell {
-                value: value_from_any(&values[2])?,
-                formula: Some(formula.to_string()),
-                ..Cell::default()
-            })
+            let array = (kind == 2)
+                .then(|| array_from_any(&values[3]))
+                .transpose()?;
+            Ok((
+                Cell {
+                    value: value_from_any(&values[2])?,
+                    formula: Some(formula.to_string()),
+                    ..Cell::default()
+                },
+                array,
+            ))
         }
-        0 | 1 => Err("cell content has the wrong payload length".to_string()),
+        0..=2 => Err("cell content has the wrong payload length".to_string()),
         kind => Err(format!("unsupported cell content kind {kind}")),
     }
+}
+
+/// `[0, metadata]` for a dynamic array and `[1, rows, cols, metadata]` for a
+/// legacy one; `metadata` is null where the anchor has no `cm`.
+fn array_to_any(definition: &ArrayDefinition) -> Any {
+    let metadata = definition
+        .metadata
+        .map_or(Any::Null, |cm| Any::BigInt(i64::from(cm)));
+    match definition.kind {
+        ArrayKind::Dynamic => any_array(vec![Any::BigInt(0), metadata]),
+        ArrayKind::Legacy { rows, cols } => any_array(vec![
+            Any::BigInt(1),
+            Any::BigInt(i64::from(rows)),
+            Any::BigInt(i64::from(cols)),
+            metadata,
+        ]),
+    }
+}
+
+fn array_from_any(value: &Any) -> Result<ArrayDefinition, String> {
+    let values = any_values(value, "array definition")?;
+    let metadata = |value: &Any| match value {
+        Any::Null => Ok(None),
+        value => u32::try_from(any_i64(value, "array metadata")?)
+            .map(Some)
+            .map_err(|_| "array metadata is out of range".to_string()),
+    };
+    let size = |value: &Any, label: &str| {
+        u32::try_from(any_i64(value, label)?)
+            .ok()
+            .filter(|size| *size > 0)
+            .ok_or_else(|| format!("{label} is out of range"))
+    };
+    match values
+        .first()
+        .map(|kind| any_i64(kind, "array kind"))
+        .transpose()?
+    {
+        Some(0) if values.len() == 2 => Ok(ArrayDefinition {
+            kind: ArrayKind::Dynamic,
+            metadata: metadata(&values[1])?,
+        }),
+        Some(1) if values.len() == 4 => Ok(ArrayDefinition {
+            kind: ArrayKind::Legacy {
+                rows: size(&values[1], "array rows")?,
+                cols: size(&values[2], "array columns")?,
+            },
+            metadata: metadata(&values[3])?,
+        }),
+        _ => Err("array definition has an unsupported shape".to_string()),
+    }
+}
+
+/// a legacy rectangle must fit the grid and the spill limit from its anchor.
+fn validate_array(at: CellRef, definition: &ArrayDefinition) -> Result<(), String> {
+    let ArrayKind::Legacy { rows, cols } = definition.kind else {
+        return Ok(());
+    };
+    let fits = u64::from(at.row) + u64::from(rows) <= u64::from(MAX_ROWS)
+        && u64::from(at.col) + u64::from(cols) <= u64::from(MAX_COLS)
+        && u64::from(rows) * u64::from(cols) <= MAX_SPILL_CELLS as u64;
+    if fits {
+        Ok(())
+    } else {
+        Err(format!("array at {} is out of bounds", cell_key(at)))
+    }
+}
+
+fn array_to_bytes(definition: &ArrayDefinition) -> Vec<u8> {
+    let metadata = definition.metadata.map_or(u64::MAX, u64::from);
+    let (kind, rows, cols) = match definition.kind {
+        ArrayKind::Dynamic => (0_u8, 0, 0),
+        ArrayKind::Legacy { rows, cols } => (1, rows, cols),
+    };
+    let mut bytes = vec![kind];
+    bytes.extend(rows.to_le_bytes());
+    bytes.extend(cols.to_le_bytes());
+    bytes.extend(metadata.to_le_bytes());
+    bytes
 }
 
 fn value_to_any(value: &CellValue) -> Any {
@@ -3618,7 +3816,8 @@ fn fingerprint_model_with_schema(
         3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
         4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
         5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
-        _ => b"betteroffice-xlsx-yrs-v6".as_slice(),
+        6 => b"betteroffice-xlsx-yrs-v6".as_slice(),
+        _ => b"betteroffice-xlsx-yrs-v7".as_slice(),
     };
     hasher.update(domain);
     let base = if include_defined_names {
@@ -3645,8 +3844,17 @@ fn fingerprint_model_with_schema(
             .any(|sheet| !sheet.col_styles.is_empty());
     for sheet in &model.sheets {
         hash_bytes(&mut hasher, sheet.name.as_bytes());
-        hash_u64(&mut hasher, sheet.iter_cells().count() as u64);
-        for (at, cell) in sheet.iter_cells() {
+        let cells: Vec<(CellRef, Cow<'_, Cell>)> = if schema_version >= ARRAYS_SCHEMA_VERSION {
+            sheet.authored_cells().collect()
+        } else {
+            sheet
+                .iter_cells()
+                .map(|(at, cell)| (at, Cow::Borrowed(cell)))
+                .collect()
+        };
+        hash_u64(&mut hasher, cells.len() as u64);
+        for (at, cell) in &cells {
+            let at = *at;
             hash_u32(&mut hasher, at.row);
             hash_u32(&mut hasher, at.col);
             hash_cell_value(&mut hasher, &cell.value);
@@ -3663,6 +3871,15 @@ fn fingerprint_model_with_schema(
                     hash_u32(&mut hasher, style);
                 }
                 None => hasher.update([0]),
+            }
+        }
+        if schema_version >= ARRAYS_SCHEMA_VERSION {
+            let definitions: Vec<_> = sheet.array_definitions().collect();
+            hash_u64(&mut hasher, definitions.len() as u64);
+            for (at, definition, _) in definitions {
+                hash_u32(&mut hasher, at.row);
+                hash_u32(&mut hasher, at.col);
+                hash_bytes(&mut hasher, &array_to_bytes(&definition));
             }
         }
         hash_u64(&mut hasher, sheet.merges.len() as u64);
@@ -4260,7 +4477,7 @@ mod tests {
         };
         assert_eq!(
             error,
-            "unsupported schema version 7; supported versions are 3 through 6"
+            "unsupported schema version 8; supported versions are 3 through 7"
         );
     }
 
@@ -4372,6 +4589,28 @@ mod tests {
         }
     }
 
+    /// a shared legacy definition is refused unless its rectangle fits the grid
+    /// and the spill limit from its anchor.
+    #[test]
+    fn an_oversized_shared_array_definition_is_refused() {
+        let legacy = |rows, cols| ArrayDefinition {
+            kind: ArrayKind::Legacy { rows, cols },
+            metadata: None,
+        };
+        assert!(validate_array(CellRef::new(0, 0), &legacy(3, 2)).is_ok());
+        assert!(validate_array(CellRef::new(0, 0), &legacy(MAX_ROWS, MAX_COLS)).is_err());
+        assert!(validate_array(CellRef::new(MAX_ROWS - 1, 0), &legacy(2, 1)).is_err());
+        assert!(
+            array_from_any(&any_array(vec![
+                Any::BigInt(1),
+                Any::BigInt(0),
+                Any::BigInt(1),
+                Any::Null
+            ]))
+            .is_err()
+        );
+    }
+
     #[test]
     fn formula_content_is_one_atomic_payload() {
         let formula = Cell {
@@ -4382,9 +4621,26 @@ mod tests {
             style: None,
         };
         assert_eq!(
-            content_from_any(&content_to_any(&formula).unwrap()).unwrap(),
-            formula
+            content_from_any(&content_to_any(&formula, None).unwrap(), SCHEMA_VERSION).unwrap(),
+            (formula.clone(), None)
         );
+        for array in [
+            ArrayDefinition {
+                kind: ArrayKind::Dynamic,
+                metadata: Some(3),
+            },
+            ArrayDefinition {
+                kind: ArrayKind::Legacy { rows: 3, cols: 2 },
+                metadata: None,
+            },
+        ] {
+            let payload = content_to_any(&formula, Some(array)).unwrap();
+            assert_eq!(
+                content_from_any(&payload, SCHEMA_VERSION).unwrap(),
+                (formula.clone(), Some(array))
+            );
+            assert!(content_from_any(&payload, CHARTS_SCHEMA_VERSION).is_err());
+        }
     }
 
     #[test]

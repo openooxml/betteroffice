@@ -3,13 +3,14 @@
 
 use serde::{Deserialize, Serialize};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, ColStyle, DefinedName, FreezePane,
-    Hyperlink, RowId, SheetChart, SheetId,
+    ArrayDefinition, Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, ColStyle,
+    DefinedName, FreezePane, Hyperlink, RowId, Sheet, SheetChart, SheetId,
 };
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
 
-/// serializable mirror of `xlsx_model::Cell`, which deliberately has no serde.
+/// serializable mirror of `xlsx_model::Cell`, which deliberately has no serde,
+/// plus the array definition an anchor carries with its formula.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CellState {
@@ -19,6 +20,26 @@ pub struct CellState {
     pub formula: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub array: Option<ArrayDefinition>,
+}
+
+impl CellState {
+    /// what an author wrote at `at`: an array's result reads as empty, and an
+    /// anchor carries its definition.
+    pub fn authored(sheet: &Sheet, at: CellRef) -> Self {
+        let mut state = sheet
+            .authored_cell(at)
+            .map(|cell| Self::from(cell.as_ref()))
+            .unwrap_or_default();
+        state.array = sheet.array_definition(at);
+        state
+    }
+
+    /// whether the state holds content rather than only a style.
+    pub fn has_content(&self) -> bool {
+        self.formula.is_some() || self.array.is_some() || !matches!(self.value, CellValue::Empty)
+    }
 }
 
 impl From<&Cell> for CellState {
@@ -27,6 +48,7 @@ impl From<&Cell> for CellState {
             value: c.value.clone(),
             formula: c.formula.clone(),
             style: c.style,
+            array: None,
         }
     }
 }
@@ -37,6 +59,7 @@ impl From<Cell> for CellState {
             value: c.value,
             formula: c.formula,
             style: c.style,
+            array: None,
         }
     }
 }

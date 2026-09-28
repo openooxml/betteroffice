@@ -106,7 +106,7 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
                 restores.push(Op::SetCell {
                     sheet: owner,
                     at: cell,
-                    cell: CellState::from(c),
+                    cell: CellState::authored(sheet, cell),
                 });
                 edits.push((owner, cell, formula));
             }
@@ -1697,7 +1697,7 @@ pub(crate) fn rename_sheet_references(
                 if rewritten.len() > MAX_FORMULA_BYTES {
                     return Err(OpError::FormulaNotRewritable { sheet: owner, cell });
                 }
-                restores.push((owner, cell, CellState::from(stored)));
+                restores.push((owner, cell, CellState::authored(sheet, cell)));
                 edits.push((owner, cell, rewritten));
             }
         }

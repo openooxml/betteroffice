@@ -6,7 +6,7 @@ use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ColId, DefinedName, RowId, Sheet, SheetId, Workbook,
+    ArrayDefinition, Cell, CellRange, CellRef, ColId, DefinedName, RowId, Sheet, SheetId, Workbook,
 };
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
@@ -89,14 +89,8 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
     match op {
         Op::SetCell { sheet, at, cell } => {
             let s = sheet_mut(wb, *sheet)?;
-            let mut old = s.cell(*at).map(CellState::from).unwrap_or_default();
-            if settle_array_write(s, *at, &old, cell) {
-                old = CellState {
-                    style: old.style,
-                    ..CellState::default()
-                };
-            }
-            s.set_cell(*at, cell.clone().into());
+            let old = CellState::authored(s, *at);
+            write_state(s, *at, cell);
             Ok(InvertedOp(vec![Op::SetCell {
                 sheet: *sheet,
                 at: *at,
@@ -315,17 +309,13 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 let sheet_ref = wb
                     .sheet(*formula_sheet)
                     .ok_or(OpError::SheetNotFound(*formula_sheet))?;
-                let state = sheet_ref
-                    .cell(*cell)
-                    .map(CellState::from)
-                    .unwrap_or_default();
-                old_formulas.push((*formula_sheet, *cell, state));
+                old_formulas.push((*formula_sheet, *cell, CellState::authored(sheet_ref, *cell)));
             }
             let defined_names = rename_defined_names(wb, &old_name, name);
             let charts = rename_chart_refs(wb, &old_name, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             for (formula_sheet, cell, state) in formulas {
-                sheet_mut(wb, *formula_sheet)?.set_cell(*cell, state.clone().into());
+                write_state(sheet_mut(wb, *formula_sheet)?, *cell, state);
             }
             let mut inverse = vec![Op::RestoreSheet {
                 sheet: *sheet,
@@ -423,11 +413,11 @@ fn apply_range_formats(
         for col in range.start.col..=range.end.col {
             let at = CellRef::new(row, col);
             let style = staged.next().expect("stage covers the range");
+            let authored = CellState::authored(sheet_ref, at);
             let (old, remove) = match sheet_ref.cell_mut(at) {
                 Some(cell) if style != cell.style => {
-                    let old = CellState::from(&*cell);
                     cell.style = style;
-                    (old, *cell == Cell::default())
+                    (authored, *cell == Cell::default())
                 }
                 Some(_) => continue,
                 None if style.is_some() => {
@@ -455,35 +445,33 @@ fn apply_range_formats(
     Ok(InvertedOp(inverse))
 }
 
-/// what writing `cell` over `old` at `at` does to the arrays around it: an
-/// anchor that loses its formula clears what it filled and retires, one whose
-/// formula returns revives, and a value or formula of its own written into a
-/// dynamic array's spill obstructs it. returns whether the write obstructed a
-/// spill, whose value was never the cell's own, so undoing the write clears
-/// the cell.
-pub fn settle_array_write(
-    sheet: &mut Sheet,
-    at: CellRef,
-    old: &CellState,
-    cell: &CellState,
-) -> bool {
-    let owned = |state: &CellState| {
-        state
-            .formula
-            .as_deref()
-            .is_some_and(|formula| !formula.trim().is_empty())
-    };
-    if owned(old) && !owned(cell) {
-        sheet.retire_array(at, |_| false);
+/// writes an authored `state` at `at`. a result cell given no content keeps
+/// its result and takes only the style; given content, it becomes the
+/// author's and obstructs the array whose result it held. the anchor's
+/// definition travels with its formula, so a changed one retires the old
+/// array's result. returns the cells whose value changed beside `at`.
+pub fn write_state(sheet: &mut Sheet, at: CellRef, state: &CellState) -> Vec<CellRef> {
+    let mut changed = Vec::new();
+    if let Some(anchor) = sheet.result_anchor(at) {
+        if !state.has_content() {
+            if let Some(cell) = sheet.cell_mut(at) {
+                cell.style = state.style;
+            }
+            return changed;
+        }
+        changed = sheet.obstruct_array(anchor);
+        changed.retain(|cell| *cell != at);
     }
-    if owned(cell) && !owned(old) {
-        sheet.revive_array(at, |_, stored| {
-            stored.formula.is_some() || !matches!(stored.value, CellValue::Empty)
-        });
-    }
-    (cell.formula.is_some() || !matches!(cell.value, CellValue::Empty))
-        && (cell.value != old.value || cell.formula != old.formula)
-        && sheet.obstruct_spill(at).is_some()
+    changed.extend(sheet.set_array_definition(at, state.array));
+    sheet.set_cell(
+        at,
+        Cell {
+            value: state.value.clone(),
+            formula: state.formula.clone(),
+            style: state.style,
+        },
+    );
+    changed
 }
 
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
@@ -597,7 +585,7 @@ fn insert_rows(
         inv.push(Op::SetCell {
             sheet,
             at: r,
-            cell: CellState::from(&c),
+            cell: c,
         });
     }
     inv.push(Op::SetHyperlinks {
@@ -635,7 +623,7 @@ fn delete_rows(
         inv.push(Op::SetCell {
             sheet,
             at: r,
-            cell: CellState::from(&c),
+            cell: c,
         });
     }
     for (row, h) in dropped_heights {
@@ -691,7 +679,7 @@ fn insert_cols(
         inv.push(Op::SetCell {
             sheet,
             at: r,
-            cell: CellState::from(&c),
+            cell: c,
         });
     }
     inv.push(Op::SetHyperlinks {
@@ -737,7 +725,7 @@ fn delete_cols(
         inv.push(Op::SetCell {
             sheet,
             at: r,
-            cell: CellState::from(&c),
+            cell: c,
         });
     }
     for (col, w) in dropped_widths {
@@ -763,8 +751,21 @@ fn delete_cols(
 
 /// remap every occupied cell through `op` in place. returns the cells whose
 /// address was dropped, for the inverse.
-fn shift_cells(s: &mut Sheet, op: &Op) -> Vec<(CellRef, Cell)> {
+/// moves the cells an op shifts; the ones it deletes come back as what their
+/// authors wrote, an anchor with its definition.
+fn shift_cells(s: &mut Sheet, op: &Op) -> Vec<(CellRef, CellState)> {
+    let definitions: BTreeMap<(RowId, ColId), ArrayDefinition> = s
+        .array_definitions()
+        .map(|(at, definition, _)| ((at.row, at.col), definition))
+        .collect();
     s.remap_cells(|at| remap_ref(at, op))
+        .into_iter()
+        .map(|(at, cell)| {
+            let mut state = CellState::from(cell);
+            state.array = definitions.get(&(at.row, at.col)).copied();
+            (at, state)
+        })
+        .collect()
 }
 
 fn shift_row_heights_up(s: &mut Sheet, at: RowId, count: u32) {
@@ -955,11 +956,11 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         index,
         name: removed.name.clone(),
     }];
-    for (at, cell) in removed.iter_cells() {
+    for (at, _) in removed.authored_cells() {
         inv.push(Op::SetCell {
             sheet,
             at,
-            cell: CellState::from(cell),
+            cell: CellState::authored(&removed, at),
         });
     }
     for range in &removed.merges {
@@ -1141,7 +1142,7 @@ mod tests {
         assert_eq!(remap_ref(r("Z9"), &op), Some(r("Z9")));
     }
 
-    /// C1 holds a dynamic array spilled over C1:C3.
+    /// C1 holds a dynamic array whose result fills C1:C3.
     fn spilled() -> Workbook {
         let mut wb = wb_one_sheet();
         let sheet = &mut wb.sheets[0];
@@ -1157,63 +1158,80 @@ mod tests {
             sheet.set_cell(r(address), Cell::from(num(value)));
         }
         sheet.set_dynamic_array_formula(r("C1"), CellRange::parse_a1("C1:C3").unwrap());
+        sheet.adopt_results(r("C1"));
         wb
     }
 
+    /// any value written into a result is the author's, the one it already
+    /// shows included, and obstructs the array; undoing it leaves the cell
+    /// empty for the array to fill again.
     #[test]
     fn a_value_written_into_a_spill_obstructs_it_and_undoes_to_blank() {
-        let mut wb = spilled();
-        let write = Op::SetCell {
-            sheet: SheetId(0),
-            at: r("C2"),
-            cell: num(9.0),
-        };
-        let inverse = apply(&mut wb, &write).unwrap();
-        let sheet = &wb.sheets[0];
-        assert_eq!(
-            sheet.array_formula(r("C1")),
-            Some(CellRange::parse_a1("C1").unwrap())
-        );
-        assert_eq!(
-            wb.value(SheetId(0), r("C1")),
-            CellValue::Error {
-                value: xlsx_model::ErrorValue::Spill
-            }
-        );
-        assert_eq!(
-            wb.value(SheetId(0), r("C2")),
-            CellValue::Number { value: 9.0 }
-        );
-        assert_eq!(wb.value(SheetId(0), r("C3")), CellValue::Empty);
-        assert_eq!(
-            inverse.0,
-            vec![Op::SetCell {
+        for written in [9.0, 2.0] {
+            let mut wb = spilled();
+            let write = Op::SetCell {
                 sheet: SheetId(0),
                 at: r("C2"),
-                cell: CellState::default(),
-            }]
-        );
+                cell: num(written),
+            };
+            let inverse = apply(&mut wb, &write).unwrap();
+            let sheet = &wb.sheets[0];
+            assert_eq!(
+                sheet.array_formula(r("C1")),
+                Some(CellRange::parse_a1("C1").unwrap())
+            );
+            assert_eq!(
+                wb.value(SheetId(0), r("C1")),
+                CellValue::Error {
+                    value: xlsx_model::ErrorValue::Spill
+                }
+            );
+            assert_eq!(
+                wb.value(SheetId(0), r("C2")),
+                CellValue::Number { value: written }
+            );
+            assert_eq!(wb.sheets[0].result_anchor(r("C2")), None);
+            assert_eq!(wb.value(SheetId(0), r("C3")), CellValue::Empty);
+            assert_eq!(
+                inverse.0,
+                vec![Op::SetCell {
+                    sheet: SheetId(0),
+                    at: r("C2"),
+                    cell: CellState::default(),
+                }]
+            );
+        }
+    }
 
-        let mut restyled = spilled();
-        let mut styled = num(2.0);
-        styled.style = Some(1);
-        apply(
-            &mut restyled,
+    /// a result takes a style and keeps its value and its array.
+    #[test]
+    fn restyling_a_result_keeps_it_in_its_array() {
+        let mut wb = spilled();
+        let inverse = apply(
+            &mut wb,
             &Op::SetCell {
                 sheet: SheetId(0),
                 at: r("C2"),
-                cell: styled,
+                cell: CellState {
+                    style: Some(1),
+                    ..CellState::default()
+                },
             },
         )
         .unwrap();
+        assert_eq!(wb.sheets[0].result_anchor(r("C2")), Some(r("C1")));
         assert_eq!(
-            restyled.sheets[0].array_formula(r("C1")),
-            Some(CellRange::parse_a1("C1:C3").unwrap())
+            wb.value(SheetId(0), r("C2")),
+            CellValue::Number { value: 2.0 }
         );
+        assert_eq!(wb.sheets[0].cell(r("C2")).unwrap().style, Some(1));
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(wb.sheets[0].cell(r("C2")).unwrap().style, None);
+        assert_eq!(wb.sheets[0].result_anchor(r("C2")), Some(r("C1")));
     }
 
-    /// the anchor stops filling anything, and undoing the write brings the
-    /// dynamic array back, spilling afresh from its anchor.
+    /// the anchor's definition leaves with its formula and comes back with it
+    /// on undo; the result it filled is gone.
     #[test]
     fn an_array_anchor_that_loses_its_formula_clears_what_it_filled() {
         let mut wb = spilled();
@@ -1228,8 +1246,16 @@ mod tests {
         .unwrap();
         assert_eq!(wb.value(SheetId(0), r("C2")), CellValue::Empty);
         assert_eq!(wb.value(SheetId(0), r("C3")), CellValue::Empty);
-        assert_eq!(wb.sheets[0].array_formula(r("C1")), None);
-        assert_eq!(wb.sheets[0].spill_anchor(r("C2")), None);
+        assert_eq!(wb.sheets[0].array_definition(r("C1")), None);
+        assert_eq!(wb.sheets[0].result_anchor(r("C2")), None);
+        let Op::SetCell { cell: restored, .. } = &inverse.0[0] else {
+            panic!("a cell write undoes a cell write");
+        };
+        assert!(
+            restored
+                .array
+                .is_some_and(|definition| definition.is_dynamic())
+        );
 
         apply_ops(&mut wb, &inverse.0).unwrap();
         assert_eq!(
@@ -1237,6 +1263,27 @@ mod tests {
             Some(CellRange::parse_a1("C1").unwrap())
         );
         assert!(wb.sheets[0].is_dynamic_array(r("C1")));
+    }
+
+    /// deleting the row an anchor sits on drops its array, and undoing the
+    /// delete brings the definition back with the formula.
+    #[test]
+    fn a_deleted_anchor_row_restores_its_array_on_undo() {
+        let mut wb = spilled();
+        let inverse = apply(
+            &mut wb,
+            &Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.sheets[0].array_formulas().count(), 0);
+        assert!(wb.sheets[0].iter_cells().next().is_none());
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert!(wb.sheets[0].is_dynamic_array(r("C1")));
+        assert_eq!(wb.value(SheetId(0), r("C2")), CellValue::Empty);
     }
 
     #[test]

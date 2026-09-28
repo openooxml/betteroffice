@@ -22,6 +22,7 @@ fn transaction_json_round_trip() {
                     value: CellValue::Text { value: "hi".into() },
                     formula: Some("A1&\"i\"".into()),
                     style: Some(3),
+                    array: None,
                 },
             },
             Op::MergeCells {

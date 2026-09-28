@@ -1,7 +1,7 @@
 //! sparse workbook containers and the calc-facing cell-access trait.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ops::{Range, RangeInclusive};
 
 use serde::{Deserialize, Serialize};
@@ -146,20 +146,71 @@ pub struct Sheet {
     /// `<col>` style runs in source order; read by the renderer, never the writer.
     pub col_styles: Vec<ColStyle>,
     pub charts: Vec<SheetChart>,
-    /// anchors of `t="array"` formulas mapped to the rectangle their result
-    /// occupies. authored from the file, then kept current by recalc.
+    /// array anchors: the definition each carries with its formula, and the
+    /// rectangle its result fills.
     array_formulas: BTreeMap<(RowId, ColId), ArrayFormula>,
+    /// cells holding an array's result rather than authored content, each
+    /// mapped to the anchor whose result it is.
+    results: BTreeMap<(RowId, ColId), (RowId, ColId)>,
+}
+
+/// how an array formula lays its result out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ArrayKind {
+    /// spills to its result's size.
+    Dynamic,
+    /// fills the rectangle it was entered in, as ctrl-shift-enter does.
+    Legacy { rows: u32, cols: u32 },
+}
+
+/// what an array anchor carries beside its formula, always together with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArrayDefinition {
+    #[serde(flatten)]
+    pub kind: ArrayKind,
+    /// the `cm` cell-metadata index the source gave the anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<u32>,
+}
+
+impl ArrayDefinition {
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self.kind, ArrayKind::Dynamic)
+    }
+
+    /// the rectangle a legacy array anchored at `anchor` fills; a dynamic one
+    /// starts at its anchor alone.
+    pub fn entered(&self, anchor: CellRef) -> CellRange {
+        let anchor = CellRef::new(anchor.row, anchor.col);
+        match self.kind {
+            ArrayKind::Dynamic => CellRange::new(anchor, anchor),
+            ArrayKind::Legacy { rows, cols } => CellRange::new(
+                anchor,
+                CellRef::new(
+                    anchor
+                        .row
+                        .saturating_add(rows.saturating_sub(1))
+                        .min(crate::addr::MAX_ROWS - 1),
+                    anchor
+                        .col
+                        .saturating_add(cols.saturating_sub(1))
+                        .min(crate::addr::MAX_COLS - 1),
+                ),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ArrayFormula {
-    range: CellRange,
-    /// a dynamic array spills to its result's size; a legacy one keeps the
-    /// rectangle it was entered in.
-    dynamic: bool,
-    /// the anchor lost its formula: the array fills nothing until a formula
-    /// is written back, which is how undoing the removal restores it.
-    dormant: bool,
+    definition: ArrayDefinition,
+    /// the rectangle its result fills now.
+    extent: CellRange,
+    /// the rectangle its last evaluation asked for, beyond `extent` while
+    /// something obstructs it.
+    attempted: CellRange,
 }
 
 impl Sheet {
@@ -170,203 +221,307 @@ impl Sheet {
         }
     }
 
-    fn live_array(&self, at: CellRef) -> Option<&ArrayFormula> {
+    /// the definition the anchor at `at` carries.
+    pub fn array_definition(&self, at: CellRef) -> Option<ArrayDefinition> {
         self.array_formulas
             .get(&(at.row, at.col))
-            .filter(|array| !array.dormant)
+            .map(|array| array.definition)
     }
 
     /// the rectangle the array formula anchored at `at` currently fills.
     pub fn array_formula(&self, at: CellRef) -> Option<CellRange> {
-        self.live_array(at).map(|array| array.range)
+        self.array_formulas
+            .get(&(at.row, at.col))
+            .map(|array| array.extent)
     }
 
     /// whether the array formula anchored at `at` is a dynamic array.
     pub fn is_dynamic_array(&self, at: CellRef) -> bool {
-        self.live_array(at).is_some_and(|array| array.dynamic)
+        self.array_definition(at)
+            .is_some_and(|definition| definition.is_dynamic())
     }
 
-    /// moves an anchor's rectangle, keeping its kind; a new anchor is a legacy
-    /// array.
+    /// records the rectangle an anchor's result fills. a new anchor is a
+    /// legacy array entered over `spill`.
     pub fn set_array_formula(&mut self, at: CellRef, spill: CellRange) {
-        self.array_formulas
-            .entry((at.row, at.col))
-            .and_modify(|array| {
-                array.range = spill;
-                array.dormant = false;
-            })
-            .or_insert(ArrayFormula {
-                range: spill,
-                dynamic: false,
-                dormant: false,
-            });
+        match self.array_formulas.get_mut(&(at.row, at.col)) {
+            Some(array) => {
+                array.extent = spill;
+                array.attempted = spill;
+            }
+            None => self.define_array(
+                at,
+                ArrayDefinition {
+                    kind: ArrayKind::Legacy {
+                        rows: spill.end.row - spill.start.row + 1,
+                        cols: spill.end.col - spill.start.col + 1,
+                    },
+                    metadata: None,
+                },
+                spill,
+            ),
+        }
     }
 
     /// records a dynamic array anchored at `at`, currently filling `spill`.
     pub fn set_dynamic_array_formula(&mut self, at: CellRef, spill: CellRange) {
+        self.define_array(
+            at,
+            ArrayDefinition {
+                kind: ArrayKind::Dynamic,
+                metadata: None,
+            },
+            spill,
+        );
+    }
+
+    /// registers `definition` at `at`, its result filling `extent`.
+    pub fn define_array(&mut self, at: CellRef, definition: ArrayDefinition, extent: CellRange) {
         self.array_formulas.insert(
             (at.row, at.col),
             ArrayFormula {
-                range: spill,
-                dynamic: true,
-                dormant: false,
+                definition,
+                extent,
+                attempted: extent,
             },
         );
     }
 
-    pub fn clear_array_formula(&mut self, at: CellRef) {
+    /// sets or clears the definition at `at`. a changed definition retires
+    /// the old array's result; returns the cells that changed.
+    pub fn set_array_definition(
+        &mut self,
+        at: CellRef,
+        definition: Option<ArrayDefinition>,
+    ) -> Vec<CellRef> {
+        if self.array_definition(at) == definition {
+            return Vec::new();
+        }
+        let cleared = self.clear_results(at);
         self.array_formulas.remove(&(at.row, at.col));
+        if let Some(definition) = definition {
+            self.define_array(at, definition, definition.entered(at));
+        }
+        cleared
+    }
+
+    pub fn clear_array_formula(&mut self, at: CellRef) {
+        self.set_array_definition(at, None);
     }
 
     /// every array-formula anchor with its rectangle, in address order.
     pub fn array_formulas(&self) -> impl Iterator<Item = (CellRef, CellRange)> + '_ {
         self.array_formulas
             .iter()
-            .filter(|(_, array)| !array.dormant)
-            .map(|(&(row, col), array)| (CellRef::new(row, col), array.range))
+            .map(|(&(row, col), array)| (CellRef::new(row, col), array.extent))
     }
 
-    /// whether any anchor, filling or waiting for its formula, is registered.
-    pub fn has_array_formulas(&self) -> bool {
-        !self.array_formulas.is_empty()
+    /// every anchor with its definition and the rectangle it fills.
+    pub fn array_definitions(
+        &self,
+    ) -> impl Iterator<Item = (CellRef, ArrayDefinition, CellRange)> + '_ {
+        self.array_formulas
+            .iter()
+            .map(|(&(row, col), array)| (CellRef::new(row, col), array.definition, array.extent))
     }
 
-    /// takes `source`'s array registrations, the ones waiting for their
-    /// formula included.
-    pub fn adopt_array_formulas(&mut self, source: &Sheet) {
-        self.array_formulas = source.array_formulas.clone();
+    /// anchors whose last evaluation asked for more than they fill, with the
+    /// rectangle asked for, so clearing what obstructs one reaches it.
+    pub fn obstructed_arrays(&self) -> impl Iterator<Item = (CellRef, CellRange)> + '_ {
+        self.array_formulas
+            .iter()
+            .filter(|(_, array)| array.attempted != array.extent)
+            .map(|(&(row, col), array)| (CellRef::new(row, col), array.attempted))
     }
 
-    /// the anchor of the dynamic array whose result covers `at`, when `at` is
-    /// not that anchor.
-    pub fn spill_anchor(&self, at: CellRef) -> Option<CellRef> {
-        self.array_formulas.iter().find_map(|(&(row, col), array)| {
-            let anchor = CellRef::new(row, col);
-            (array.dynamic
-                && !array.dormant
-                && (row, col) != (at.row, at.col)
-                && array.range.contains(at)
-                && self.cell(anchor).is_some_and(owns_formula))
-            .then_some(anchor)
+    /// records what the anchor's evaluation filled and what it asked for.
+    pub fn set_array_extent(&mut self, at: CellRef, extent: CellRange, attempted: CellRange) {
+        if let Some(array) = self.array_formulas.get_mut(&(at.row, at.col)) {
+            array.extent = extent;
+            array.attempted = attempted;
+        }
+    }
+
+    /// the anchor whose result `at` holds.
+    pub fn result_anchor(&self, at: CellRef) -> Option<CellRef> {
+        self.results
+            .get(&(at.row, at.col))
+            .map(|&(row, col)| CellRef::new(row, col))
+    }
+
+    /// whether `at` holds content an author wrote, rather than being empty or
+    /// holding an array's result.
+    pub fn authored_at(&self, at: CellRef) -> bool {
+        !self.results.contains_key(&(at.row, at.col))
+            && self
+                .cell(at)
+                .is_some_and(|cell| owns_formula(cell) || !matches!(cell.value, CellValue::Empty))
+    }
+
+    /// what an author wrote at `at`: an array's result reads as empty there,
+    /// keeping only its style.
+    pub fn authored_cell(&self, at: CellRef) -> Option<Cow<'_, Cell>> {
+        let cell = self.cell(at)?;
+        if !self.results.contains_key(&(at.row, at.col)) {
+            return Some(Cow::Borrowed(cell));
+        }
+        cell.style.map(|style| {
+            Cow::Owned(Cell {
+                style: Some(style),
+                ..Cell::default()
+            })
         })
     }
 
-    /// a value authored at `at` obstructs the dynamic array spilling over it.
-    /// returns the anchor.
-    pub fn obstruct_spill(&mut self, at: CellRef) -> Option<CellRef> {
-        let anchor = self.spill_anchor(at)?;
-        self.obstruct(anchor, |cell| cell == at);
-        Some(anchor)
+    /// every cell an author wrote, in address order.
+    pub fn authored_cells(&self) -> impl Iterator<Item = (CellRef, Cow<'_, Cell>)> + '_ {
+        self.iter_cells()
+            .filter_map(|(at, _)| self.authored_cell(at).map(|cell| (at, cell)))
     }
 
-    /// the array falls back to its anchor, which shows `#SPILL!`, and clears
-    /// the rest of its result, the `authored` cells aside.
-    fn obstruct(&mut self, anchor: CellRef, authored: impl Fn(CellRef) -> bool) {
-        let Some(array) = self.array_formulas.get_mut(&(anchor.row, anchor.col)) else {
-            return;
-        };
-        let range = std::mem::replace(&mut array.range, CellRange::new(anchor, anchor));
-        if let Some(cell) = self.cell_mut(anchor) {
-            cell.value = CellValue::Error {
-                value: ErrorValue::Spill,
-            };
-        }
-        self.clear_filled(anchor, range, authored);
-    }
-
-    /// the anchor at `at` lost its formula: its result is cleared, the
-    /// `authored` cells aside, and it waits for a formula to return.
-    pub fn retire_array(&mut self, at: CellRef, authored: impl Fn(CellRef) -> bool) {
-        let Some(array) = self.array_formulas.get_mut(&(at.row, at.col)) else {
-            return;
-        };
-        if array.dormant {
-            return;
-        }
-        array.dormant = true;
-        let range = std::mem::replace(&mut array.range, CellRange::new(at, at));
-        if !array.dynamic {
-            array.range = range;
-        }
-        self.clear_filled(at, range, authored);
-    }
-
-    /// a formula written back at `at` restores the array retired there: a
-    /// dynamic one spills afresh, and a legacy one refills its rectangle, or
-    /// is an ordinary formula once an `occupied` cell sits in it.
-    pub fn revive_array(&mut self, at: CellRef, occupied: impl Fn(CellRef, &Cell) -> bool) {
-        let Some(array) = self.array_formulas.get(&(at.row, at.col)).copied() else {
-            return;
-        };
-        if !array.dormant {
-            return;
-        }
-        let blocked = !array.dynamic
-            && self
-                .cells_in_range(array.range)
-                .any(|(cell, stored)| cell != at && occupied(cell, stored));
-        if blocked {
-            self.array_formulas.remove(&(at.row, at.col));
-        } else if let Some(array) = self.array_formulas.get_mut(&(at.row, at.col)) {
-            array.dormant = false;
-        }
-    }
-
-    /// the cells inside a registered array's rectangle that `authored` claims.
-    pub fn authored_array_cells(
-        &self,
-        authored: impl Fn(CellRef, &Cell) -> bool,
-    ) -> BTreeSet<(RowId, ColId)> {
-        self.array_formulas
-            .values()
-            .flat_map(|array| self.cells_in_range(array.range))
-            .filter(|(at, cell)| authored(*at, cell))
-            .map(|(at, _)| (at.row, at.col))
-            .collect()
-    }
-
-    /// settles every array against the cells authors hold, whatever order
-    /// they were written in: an anchor without a formula retires, one whose
-    /// formula returned revives, and a dynamic array with an `authored` cell
-    /// in its rectangle is obstructed.
-    pub fn settle_arrays(&mut self, authored: &BTreeSet<(RowId, ColId)>) {
-        let is_authored = |at: CellRef| authored.contains(&(at.row, at.col));
-        let anchors: Vec<CellRef> = self
-            .array_formulas
-            .keys()
-            .map(|&(row, col)| CellRef::new(row, col))
-            .collect();
-        for anchor in anchors {
-            if self.cell(anchor).is_some_and(owns_formula) {
-                self.revive_array(anchor, |cell, _| is_authored(cell));
-            } else {
-                self.retire_array(anchor, is_authored);
+    /// writes `value` into `at` as the result of the array anchored at `anchor`.
+    pub fn write_result(&mut self, at: CellRef, anchor: CellRef, value: CellValue) {
+        let key = (at.row, at.col);
+        if matches!(value, CellValue::Empty) {
+            if self.results.remove(&key).is_some() {
+                self.clear_value(at);
             }
-            let Some(array) = self.live_array(anchor).copied() else {
+            return;
+        }
+        self.results.insert(key, (anchor.row, anchor.col));
+        match self.cells.get_mut(&key) {
+            Some(cell) => cell.value = value,
+            None => {
+                self.cells.insert(
+                    key,
+                    Cell {
+                        value,
+                        ..Cell::default()
+                    },
+                );
+            }
+        }
+    }
+
+    /// marks what the anchor's source rectangle holds beside the anchor as
+    /// its result, as the file cached it; cells with a formula of their own
+    /// stay authored.
+    pub fn adopt_results(&mut self, anchor: CellRef) {
+        let Some(extent) = self.array_formula(anchor) else {
+            return;
+        };
+        let owned: Vec<(RowId, ColId)> = self
+            .cells_in_range(extent)
+            .filter(|(at, cell)| {
+                (at.row, at.col) != (anchor.row, anchor.col) && !owns_formula(cell)
+            })
+            .map(|(at, _)| (at.row, at.col))
+            .collect();
+        for key in owned {
+            self.results.insert(key, (anchor.row, anchor.col));
+        }
+    }
+
+    /// removes the anchor's result; returns the cells that held it.
+    pub fn clear_results(&mut self, anchor: CellRef) -> Vec<CellRef> {
+        let Some(extent) = self.array_formula(anchor) else {
+            return Vec::new();
+        };
+        let owner = (anchor.row, anchor.col);
+        let owned: Vec<CellRef> = self
+            .cells_in_range(extent)
+            .filter(|(at, _)| self.results.get(&(at.row, at.col)) == Some(&owner))
+            .map(|(at, _)| at)
+            .collect();
+        for &at in &owned {
+            self.results.remove(&(at.row, at.col));
+            self.clear_value(at);
+        }
+        owned
+    }
+
+    /// authored content now sits in the anchor's result: the array reports
+    /// `#SPILL!` and gives up its result. returns the cells that changed.
+    pub fn obstruct_array(&mut self, anchor: CellRef) -> Vec<CellRef> {
+        let Some(array) = self.array_formulas.get(&(anchor.row, anchor.col)).copied() else {
+            return Vec::new();
+        };
+        let mut changed = self.clear_results(anchor);
+        let extent = if array.definition.is_dynamic() {
+            CellRange::new(anchor, anchor)
+        } else {
+            array.extent
+        };
+        let attempted = CellRange::new(
+            CellRef::new(
+                array.extent.start.row.min(array.attempted.start.row),
+                array.extent.start.col.min(array.attempted.start.col),
+            ),
+            CellRef::new(
+                array.extent.end.row.max(array.attempted.end.row),
+                array.extent.end.col.max(array.attempted.end.col),
+            ),
+        );
+        self.set_array_extent(anchor, extent, attempted);
+        let spill = CellValue::Error {
+            value: ErrorValue::Spill,
+        };
+        if let Some(cell) = self.cell_mut(anchor)
+            && cell.value != spill
+        {
+            cell.value = spill;
+            changed.push(anchor);
+        }
+        changed
+    }
+
+    fn clear_value(&mut self, at: CellRef) {
+        let key = (at.row, at.col);
+        if let Some(cell) = self.cells.get_mut(&key) {
+            cell.value = CellValue::Empty;
+            if cell
+                .formula
+                .as_deref()
+                .is_some_and(|formula| formula.trim().is_empty())
+            {
+                cell.formula = None;
+            }
+            if *cell == Cell::default() {
+                self.cells.remove(&key);
+            }
+        }
+    }
+
+    /// carries `source`'s results and extents over for every array whose
+    /// definition and formula this sheet still holds, into cells no author
+    /// took. an array one of whose cells an author took is obstructed.
+    pub fn carry_results(&mut self, source: &Sheet) {
+        let anchors: Vec<(RowId, ColId)> = self.array_formulas.keys().copied().collect();
+        for key in anchors {
+            let anchor = CellRef::new(key.0, key.1);
+            let Some(previous) = source.array_formulas.get(&key) else {
                 continue;
             };
-            let obstructed = array.dynamic
-                && self
-                    .cells_in_range(array.range)
-                    .any(|(cell, _)| cell != anchor && is_authored(cell));
-            if obstructed {
-                self.obstruct(anchor, is_authored);
+            let same = self.array_formulas[&key].definition == previous.definition
+                && self.cell(anchor).and_then(|cell| cell.formula.as_ref())
+                    == source.cell(anchor).and_then(|cell| cell.formula.as_ref());
+            if !same {
+                continue;
             }
-        }
-    }
-
-    fn clear_filled(&mut self, anchor: CellRef, range: CellRange, keep: impl Fn(CellRef) -> bool) {
-        let filled: Vec<CellRef> = self
-            .cells_in_range(range)
-            .filter(|(cell, stored)| *cell != anchor && !keep(*cell) && !owns_formula(stored))
-            .map(|(cell, _)| cell)
-            .collect();
-        for cell in filled {
-            if let Some(stored) = self.cell_mut(cell) {
-                stored.value = CellValue::Empty;
-                if *stored == Cell::default() {
-                    self.cells.remove(&(cell.row, cell.col));
+            self.set_array_extent(anchor, previous.extent, previous.attempted);
+            let mut obstructed = false;
+            for (at, cell) in source.cells_in_range(previous.extent) {
+                if source.results.get(&(at.row, at.col)) != Some(&key) {
+                    continue;
                 }
+                if self.authored_at(at) {
+                    obstructed = true;
+                    continue;
+                }
+                self.write_result(at, anchor, cell.value.clone());
+            }
+            if obstructed {
+                self.obstruct_array(anchor);
             }
         }
     }
@@ -389,7 +544,10 @@ impl Sheet {
         self.cells.get_mut(&(at.row, at.col))
     }
 
+    /// stores `cell` as authored content; an array's result there becomes the
+    /// author's.
     pub fn set_cell(&mut self, at: CellRef, cell: Cell) {
+        self.results.remove(&(at.row, at.col));
         if cell == Cell::default() {
             self.cells.remove(&(at.row, at.col));
         } else {
@@ -406,6 +564,22 @@ impl Sheet {
         remap: impl Fn(CellRef) -> Option<CellRef>,
     ) -> Vec<(CellRef, Cell)> {
         self.remap_array_formulas(&remap);
+        let results = std::mem::take(&mut self.results);
+        let mut orphans = Vec::new();
+        for ((row, col), (anchor_row, anchor_col)) in &results {
+            let cell = remap(CellRef::new(*row, *col));
+            let anchor = remap(CellRef::new(*anchor_row, *anchor_col));
+            match (cell, anchor) {
+                (Some(cell), Some(anchor))
+                    if self.array_formulas.contains_key(&(anchor.row, anchor.col)) =>
+                {
+                    self.results
+                        .insert((cell.row, cell.col), (anchor.row, anchor.col));
+                }
+                (Some(cell), _) => orphans.push(cell),
+                (None, _) => {}
+            }
+        }
         let mut dropped = Vec::new();
         self.cells.retain(|_, cell| *cell != Cell::default());
         let mut plan: CellMoves = Vec::new();
@@ -453,7 +627,26 @@ impl Sheet {
                 self.cells.insert((to.row, to.col), cell);
             }
         }
+        for at in orphans {
+            self.clear_value(at);
+        }
         dropped
+            .into_iter()
+            .filter_map(|(at, cell)| {
+                if !results.contains_key(&(at.row, at.col)) {
+                    return Some((at, cell));
+                }
+                cell.style.map(|style| {
+                    (
+                        at,
+                        Cell {
+                            style: Some(style),
+                            ..Cell::default()
+                        },
+                    )
+                })
+            })
+            .collect()
     }
 
     /// move each array anchor with its cell, translating its rectangle by the
@@ -467,17 +660,22 @@ impl Sheet {
             let Some(to) = remap(CellRef::new(row, col)) else {
                 continue;
             };
-            let spill = array.range;
-            let rows = spill.end.row.saturating_sub(spill.start.row);
-            let cols = spill.end.col.saturating_sub(spill.start.col);
-            let end = CellRef::new(
-                to.row.saturating_add(rows).min(crate::addr::MAX_ROWS - 1),
-                to.col.saturating_add(cols).min(crate::addr::MAX_COLS - 1),
-            );
+            let translate = |range: CellRange| {
+                let rows = range.end.row.saturating_sub(range.start.row);
+                let cols = range.end.col.saturating_sub(range.start.col);
+                CellRange::new(
+                    to,
+                    CellRef::new(
+                        to.row.saturating_add(rows).min(crate::addr::MAX_ROWS - 1),
+                        to.col.saturating_add(cols).min(crate::addr::MAX_COLS - 1),
+                    ),
+                )
+            };
             moved.insert(
                 (to.row, to.col),
                 ArrayFormula {
-                    range: CellRange::new(to, end),
+                    extent: translate(array.extent),
+                    attempted: translate(array.attempted),
                     ..*array
                 },
             );

@@ -21,8 +21,8 @@ use super::staging::CommitHistory;
 use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved, cell_target};
 use super::{
     StagedApply, Workbook, array_footprint, authority_error, calculation_result,
-    cell_states_semantically_equal, current_cell_state, edit_cell_state, settled_changes,
-    validate_cell_state, validate_model_sheets, validate_op, written_cells,
+    cell_states_semantically_equal, current_cell_state, edit_cell_state, merge_changed, seeds_with,
+    settled_cells, validate_cell_state, validate_model_sheets, validate_op, written_cells,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
 use crate::{Error, Result};
@@ -747,6 +747,7 @@ impl Workbook {
                         value: CellValue::Empty,
                         formula: Some(source.clone()),
                         style: current.style,
+                        array: current.array,
                     };
                     if !cell_states_semantically_equal(&current, &state) {
                         states.push((cell, state));
@@ -1036,14 +1037,15 @@ impl Workbook {
             .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))
             .collect::<Vec<_>>();
         let footprint = array_footprint(&self.model, &written_cells(&prepared.ops));
+        let settled = settled_cells(&prepared.model, footprint);
         let mut graph = DepGraph::build(&prepared.model);
         let mut recalculated = recalc_after(
             &mut prepared.model,
             &mut graph,
-            &seeds,
+            &seeds_with(&seeds, &settled),
             request.calculation.now_serial,
         );
-        settled_changes(&prepared.model, footprint, &mut recalculated.changed);
+        merge_changed(&mut recalculated.changed, settled);
         let changed_sheets = steps
             .iter()
             .zip(&changed)
