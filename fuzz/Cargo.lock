@@ -71,7 +71,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "betteroffice-drawingml"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "indexmap",
  "serde",
@@ -90,11 +90,11 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-ooxml-diff"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "betteroffice-ooxml-text"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rustybuzz",
  "serde",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-opc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "quick-xml",
  "zip",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-edit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-parse"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-raster"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
