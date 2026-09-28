@@ -16,9 +16,10 @@ const MAX_POINTS: usize = 100_000;
 const MAX_PLOT_GROUPS: usize = 64;
 const MAX_AXES: usize = 128;
 /// Chart-wide, so per-vector limits cannot multiply into an unbounded parse.
-/// Points are charged as read: an X cache that also labels a scatter's
-/// categories is charged once, so a chart retains at most twice its budget.
 const MAX_CHART_SERIES: usize = 1_024;
+/// Charged per cache point read. A scatter's X cache also labels its
+/// categories, and the legacy flat series clone every plot group's categories
+/// and values, so a chart retains at most three times this many slots.
 const MAX_CHART_POINTS: usize = 200_000;
 const MAX_AXIS_IDS: usize = 16;
 /// Per-series `c:dLbl` overrides, charged against the chart-wide point budget.
@@ -1896,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_scatter_x_cache_labels_its_categories_within_twice_the_budget() {
+    fn a_full_scatter_x_cache_labels_its_categories_within_three_times_the_budget() {
         let cache = |name: &str| {
             Node::el(
                 name,
@@ -1915,6 +1916,7 @@ mod tests {
         let series = &space.plot_groups[0].series;
         let slots: usize = series
             .iter()
+            .chain(&space.series)
             .map(|series| {
                 series.categories.capacity()
                     + series.values.capacity()
@@ -1923,7 +1925,7 @@ mod tests {
             .sum();
         assert_eq!(series[0].values.len(), MAX_POINTS);
         assert_eq!(series[0].categories.len(), MAX_POINTS);
-        assert!(slots <= 2 * MAX_CHART_POINTS, "{slots} slots");
+        assert!(slots <= 3 * MAX_CHART_POINTS, "{slots} slots");
     }
 
     #[test]
