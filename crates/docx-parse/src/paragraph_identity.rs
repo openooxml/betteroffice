@@ -546,7 +546,9 @@ mod tests {
         }
     }
 
+    /// Wall-clock, so kept out of the default suite: `cargo test -- --ignored applying_edits`.
     #[test]
+    #[ignore = "timing-sensitive; run on demand"]
     fn applying_edits_scales_linearly() {
         let input = |paragraphs: usize| {
             let xml = "<w:p><w:r><w:t>text</w:t></w:r></w:p>".repeat(paragraphs);
