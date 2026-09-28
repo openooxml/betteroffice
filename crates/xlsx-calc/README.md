@@ -92,7 +92,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `T` | Text passes through, everything else → `""`. |
 | `CHAR(n)` / `CODE(text)` | `CHAR` for code points 1..=255; `CODE` returns the first char's code point (Unicode, not a code page). |
 | `VALUE`, `NUMBERVALUE(text, [dec], [grp])` | `VALUE` handles a trailing `%`. |
-| `TEXT(value, format)` | **Minimal**: only `0`, `0.00`, `#,##0`, `#,##0.00`, `0%`; any other code → `#VALUE!`. |
+| `TEXT(value, format)` | Formats through the number-format interpreter, dates in the workbook's date system. |
 | `TEXTJOIN(delim, ignore_empty, …)` | `ignore_empty` also skips empty strings; ranges flatten row-major. |
 | `CONCAT` / `CONCATENATE` | Ranges flatten row-major. |
 
@@ -111,8 +111,9 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 
 Serial ↔ calendar math is the Excel **1900 system including the deliberate leap
 bug** (serial 60 = the phantom 1900-02-29), matching `xlsx_model::date`. The
-workbook date system is not reachable through `CellProvider`, so the 1904 epoch
-is not yet wired — a follow-up.
+workbook's date system reaches the evaluator as `EvalContext::date_system`;
+`TEXT` formats dates in it, while the date functions above still compute in the
+1900 system.
 
 ### Logical
 
@@ -174,9 +175,8 @@ with `~` escaping a literal `*`, `?`, or `~`.
   code units. This differs only for astral (supplementary-plane) characters.
 - **`SEARCH`, and `VLOOKUP` / `HLOOKUP` / `MATCH` in exact mode**, do not
   implement wildcards yet.
-- **`TEXT`** implements only the five format codes listed above; the full
-  §18.8.31 number-format interpreter is a separate PR.
-- **1904 date system** is not yet wired (see Date & time).
+- **1904 date system**: only `TEXT` honours it; the date functions compute in
+  the 1900 system (see Date & time).
 - **`RAND`** is not implemented; **`RANDBETWEEN`** is, and draws from
   `EvalContext::rand_seed` — pin it before the first draw and the sequence
   replays exactly. Left `None`, each context takes a fresh stream from a
@@ -188,10 +188,9 @@ with `~` escaping a literal `*`, `?`, or `~`.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
 - **Array results** spill from a dynamic-array anchor into the cells beside
-  it and report `#SPILL!` when an authored value or a merge is in the way; a
-  legacy Ctrl+Shift+Enter array keeps the rectangle it was entered in. Array
-  evaluation is charged against the recalculation budget, and a formula that
-  exceeds it keeps its cached value.
+  it and report `#SPILL!` when an authored value or formula is in the way.
+  Array evaluation is charged against the recalculation budget, and a formula
+  that exceeds it keeps its cached value.
 - **`ROW` / `COLUMN`** with no reference answer the calling cell's own position.
   Recalculation supplies it; a context built directly by `EvalContext::new`
   leaves `cell` unset and those forms stay `#VALUE!`.
