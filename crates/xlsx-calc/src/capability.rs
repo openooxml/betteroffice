@@ -1,7 +1,7 @@
 //! whether the engine can evaluate a formula wherever it could run, decided
 //! from the formula alone so that no input changes the answer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use xlsx_model::{
@@ -116,10 +116,16 @@ fn fill_uncached(wb: &mut Workbook) {
     }
     let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
     let order = evaluation_order(wb, &uncached, &budget);
-    for (position, array) in uncached.iter().enumerate() {
-        if !order.contains(&position) {
-            store(wb, array, None);
-        }
+    let mut ordered = vec![false; uncached.len()];
+    for &position in &order {
+        ordered[position] = true;
+    }
+    for (array, _) in uncached
+        .iter()
+        .zip(&ordered)
+        .filter(|(_, ordered)| !**ordered)
+    {
+        store(wb, array, None);
     }
     for position in order {
         let array = &uncached[position];
@@ -129,9 +135,11 @@ fn fill_uncached(wb: &mut Workbook) {
 }
 
 /// the deterministic arrays among `uncached` in an order where each comes
-/// after every one whose rectangle it reads. an array in or behind a cycle
-/// of them is left out, as is every one once the budget refuses to pay for
-/// working the order out.
+/// after every one whose rectangle it reads. the work of finding who reads
+/// whom is charged to `budget`: each array, and each of its reads against
+/// every other array, an array reading nothing costing one. an array in or
+/// behind a cycle of them is left out, as is every one once the budget
+/// refuses.
 fn evaluation_order(wb: &Workbook, uncached: &[Uncached], budget: &EvaluationBudget) -> Vec<usize> {
     let candidates: Vec<usize> = (0..uncached.len())
         .filter(|&position| uncached[position].deterministic)
@@ -144,8 +152,13 @@ fn evaluation_order(wb: &Workbook, uncached: &[Uncached], budget: &EvaluationBud
         let sheet = SheetId(array.sheet as u32);
         graph.set_formula(sheet, array.anchor, Some(&array.formula));
         let reads = graph.reads(sheet, array.anchor);
-        if !budget.consume((reads.len() * candidates.len()) as u64) {
+        let pairs = reads.len().saturating_mul(candidates.len());
+        if !budget.consume(1 + pairs as u64) {
             return Vec::new();
+        }
+        if reads.is_empty() {
+            graph.set_formula(sheet, array.anchor, None);
+            continue;
         }
         for &written in &candidates {
             let target = &uncached[written];
@@ -222,15 +235,15 @@ fn store(wb: &mut Workbook, array: &Uncached, values: Option<Vec<CellValue>>) {
 }
 
 /// [`evaluable`] for many formulas of one workbook, looking its defined names
-/// up by index and deciding each name, for the sheet it is read from and the
-/// names bound anywhere around it, once. each formula's classification has
-/// its own bound on work; the decisions it settles are shared.
+/// up by index. each formula's classification has its own bound on work; a
+/// decision about a defined name read by a formula binding no name, and
+/// which names reach no binding at all, are settled once and shared.
 pub struct Capability<'a> {
     wb: &'a Workbook,
     names: HashMap<(Option<SheetId>, String), usize>,
     parsed: HashMap<usize, Option<Rc<Parsed>>>,
     decided: [HashMap<Node, bool>; 2],
-    reached: HashMap<(usize, SheetId), Rc<[String]>>,
+    unbinding: HashSet<Node>,
     work: usize,
     limit: usize,
 }
@@ -254,10 +267,9 @@ impl Check {
     }
 }
 
-/// a defined name as the walk expands it: its index, the sheet its
-/// unqualified references resolve against, and the names that may be bound
-/// when it is read.
-type Node = (usize, SheetId, Rc<[String]>);
+/// a defined name as the walk expands it: its index and the sheet its
+/// unqualified references resolve against.
+type Node = (usize, SheetId);
 
 /// what a formula calls, the names it reads and the names its `LET`s and
 /// `LAMBDA`s bind, gathered once.
@@ -293,7 +305,7 @@ impl<'a> Capability<'a> {
             names,
             parsed: HashMap::new(),
             decided: [HashMap::new(), HashMap::new()],
-            reached: HashMap::new(),
+            unbinding: HashSet::new(),
             work: 0,
             limit: MAX_WORK,
         }
@@ -334,9 +346,9 @@ impl<'a> Capability<'a> {
                 Some(bound) => bound,
                 None => return false,
             },
-            Check::Deterministic => Rc::from(Vec::new()),
+            Check::Deterministic => HashSet::new(),
         };
-        self.names_hold(sheet, parsed, check, bound)
+        self.names_hold(sheet, parsed, check, &bound)
     }
 
     /// the index of the name `name` reads as from `sheet`, local before
@@ -379,21 +391,30 @@ impl<'a> Capability<'a> {
     }
 
     /// every name a `LET` or `LAMBDA` binds in `parsed` or in a defined name
-    /// reachable from it through any name it reads, sorted; `None` past the
-    /// bound. what each defined name reaches is settled once, a group of
-    /// names reaching one another together, as in [`Capability::names_hold`].
-    fn bound_anywhere(&mut self, sheet: SheetId, parsed: &Rc<Parsed>) -> Option<Rc<[String]>> {
+    /// reachable from it through any name it reads; `None` past the bound.
+    /// the walk keeps one set for the formula, each name added once and
+    /// charged, and skips the names already known to reach no binding. a
+    /// group of names reaching one another is settled together, as in
+    /// [`Capability::names_hold`], and remembered once none of it binds.
+    fn bound_anywhere(&mut self, sheet: SheetId, parsed: &Rc<Parsed>) -> Option<HashSet<String>> {
         struct Reach {
-            name: (usize, SheetId),
+            name: Node,
             order: usize,
             start: usize,
             parsed: Rc<Parsed>,
             next: usize,
             low: usize,
-            binds: Vec<String>,
+            binds: bool,
         }
-        let mut order: HashMap<(usize, SheetId), usize> = HashMap::new();
-        let mut pending: Vec<(usize, SheetId)> = Vec::new();
+        let mut bound: HashSet<String> = HashSet::new();
+        self.work += parsed.binds.len();
+        if self.work > self.limit {
+            return None;
+        }
+        bound.extend(parsed.binds.iter().cloned());
+        let mut order: HashMap<Node, usize> = HashMap::new();
+        let mut settled: HashSet<Node> = HashSet::new();
+        let mut pending: Vec<Node> = Vec::new();
         let mut root = Reach {
             name: (usize::MAX, sheet),
             order: usize::MAX,
@@ -401,7 +422,7 @@ impl<'a> Capability<'a> {
             parsed: Rc::clone(parsed),
             next: 0,
             low: usize::MAX,
-            binds: parsed.binds.clone(),
+            binds: false,
         };
         let mut stack: Vec<Reach> = Vec::new();
         loop {
@@ -417,11 +438,11 @@ impl<'a> Capability<'a> {
                 let Some(name) = self.resolve(from, &scope, &name) else {
                     continue;
                 };
-                if let Some(reached) = self.reached.get(&name) {
-                    self.work += reached.len();
-                    let reached = Rc::clone(reached);
-                    let frame = stack.last_mut().unwrap_or(&mut root);
-                    frame.binds.extend(reached.iter().cloned());
+                if self.unbinding.contains(&name) {
+                    continue;
+                }
+                if settled.contains(&name) {
+                    stack.last_mut().unwrap_or(&mut root).binds = true;
                     continue;
                 }
                 if let Some(&seen) = order.get(&name) {
@@ -433,6 +454,10 @@ impl<'a> Capability<'a> {
                     continue;
                 };
                 self.work += expanded.binds.len();
+                if self.work > self.limit {
+                    return None;
+                }
+                bound.extend(expanded.binds.iter().cloned());
                 let at = order.len();
                 order.insert(name, at);
                 let start = pending.len();
@@ -441,52 +466,54 @@ impl<'a> Capability<'a> {
                     name,
                     order: at,
                     start,
-                    binds: expanded.binds.clone(),
+                    binds: !expanded.binds.is_empty(),
                     parsed: expanded,
                     next: 0,
                     low: at,
                 });
                 continue;
             }
-            let Some(mut done) = stack.pop() else {
+            let Some(done) = stack.pop() else {
                 break;
             };
             let parent = stack.last_mut().unwrap_or(&mut root);
+            parent.binds |= done.binds;
             if done.low >= done.order {
-                done.binds.sort_unstable();
-                done.binds.dedup();
-                let reached: Rc<[String]> = done.binds.into();
                 for name in pending.drain(done.start..) {
-                    self.reached.insert(name, Rc::clone(&reached));
+                    order.remove(&name);
+                    if done.binds {
+                        settled.insert(name);
+                    } else {
+                        self.unbinding.insert(name);
+                    }
                 }
-                parent.binds.extend(reached.iter().cloned());
             } else {
                 parent.low = parent.low.min(done.low);
-                parent.binds.append(&mut done.binds);
             }
         }
-        root.binds.sort_unstable();
-        root.binds.dedup();
-        Some(root.binds.into())
+        Some(bound)
     }
 
     /// whether every defined name reachable from `parsed`, read on `sheet`,
     /// passes `check`, leaving aside the names in `bound`: a walk without
     /// recursion that settles each group of names reaching one another once
-    /// all of it is known, as Tarjan's algorithm does, so a later formula
-    /// reading any of them with the same names bound costs nothing.
+    /// all of it is known, as Tarjan's algorithm does. what it settles for a
+    /// formula binding no name is shared with every later formula; anything
+    /// else holds for this formula alone.
     fn names_hold(
         &mut self,
         sheet: SheetId,
         parsed: Rc<Parsed>,
         check: Check,
-        bound: Rc<[String]>,
+        bound: &HashSet<String>,
     ) -> bool {
         let decided = check as usize;
+        let shared = bound.is_empty();
+        let mut local: HashMap<Node, bool> = HashMap::new();
         let mut order: HashMap<Node, usize> = HashMap::new();
         let mut pending: Vec<Node> = Vec::new();
         let mut root = Frame {
-            node: (usize::MAX, sheet, Rc::clone(&bound)),
+            node: (usize::MAX, sheet),
             order: usize::MAX,
             start: 0,
             parsed,
@@ -504,18 +531,20 @@ impl<'a> Capability<'a> {
                 if self.work > self.limit {
                     return false;
                 }
-                let may_be_bound =
-                    scope.is_none() && bound.binary_search(&name.to_ascii_lowercase()).is_ok();
-                if may_be_bound {
+                if scope.is_none() && bound.contains(&name.to_ascii_lowercase()) {
                     continue;
                 }
-                let Some((index, scope)) = self.resolve(from, &scope, &name) else {
+                let Some(node) = self.resolve(from, &scope, &name) else {
                     continue;
                 };
-                let node = (index, scope, Rc::clone(&bound));
-                match self.decided[decided].get(&node) {
+                let known = if shared {
+                    self.decided[decided].get(&node).copied()
+                } else {
+                    local.get(&node).copied()
+                };
+                match known {
                     Some(true) => continue,
-                    Some(false) => return self.refuse(&stack, decided),
+                    Some(false) => return self.refuse(&stack, decided, shared),
                     None => {}
                 }
                 if let Some(&seen) = order.get(&node) {
@@ -523,17 +552,19 @@ impl<'a> Capability<'a> {
                     frame.low = frame.low.min(seen);
                     continue;
                 }
-                let Some(parsed) = self.parsed(index) else {
+                let Some(parsed) = self.parsed(node.0) else {
                     return false;
                 };
                 let Some(parsed) = parsed.filter(|parsed| check.holds(parsed)) else {
-                    self.decided[decided].insert(node, false);
-                    return self.refuse(&stack, decided);
+                    if shared {
+                        self.decided[decided].insert(node, false);
+                    }
+                    return self.refuse(&stack, decided, shared);
                 };
                 let at = order.len();
-                order.insert(node.clone(), at);
+                order.insert(node, at);
                 let start = pending.len();
-                pending.push(node.clone());
+                pending.push(node);
                 stack.push(Frame {
                     node,
                     order: at,
@@ -548,24 +579,34 @@ impl<'a> Capability<'a> {
                 break;
             };
             if done.low >= done.order {
+                let memo = if shared {
+                    &mut self.decided[decided]
+                } else {
+                    &mut local
+                };
                 for node in pending.drain(done.start..) {
-                    self.decided[decided].insert(node, true);
+                    memo.insert(node, true);
                 }
             } else {
                 let parent = stack.last_mut().unwrap_or(&mut root);
                 parent.low = parent.low.min(done.low);
             }
         }
-        for node in pending {
-            self.decided[decided].insert(node, true);
+        if shared {
+            for node in pending {
+                self.decided[decided].insert(node, true);
+            }
         }
         true
     }
 
-    /// every name being expanded reaches what fails the check.
-    fn refuse(&mut self, stack: &[Frame], decided: usize) -> bool {
-        for frame in stack {
-            self.decided[decided].insert(frame.node.clone(), false);
+    /// every name being expanded reaches what fails the check, which is
+    /// remembered when the decision is one formulas share.
+    fn refuse(&mut self, stack: &[Frame], decided: usize, shared: bool) -> bool {
+        if shared {
+            for frame in stack {
+                self.decided[decided].insert(frame.node, false);
+            }
         }
         false
     }
@@ -930,6 +971,58 @@ mod tests {
         for row in 0..=ANCHORS {
             let definition = wb.sheets[0].array_definition(CellRef::new(row, 0)).unwrap();
             assert!(!definition.is_opaque(), "row {row}");
+        }
+    }
+
+    /// a chain of names each binding a name of its own is walked with one set
+    /// of bound names for the formula, not one per name, so it costs time
+    /// and memory linear in its length.
+    #[test]
+    fn a_chain_of_binding_names_is_walked_with_one_set() {
+        const LENGTH: usize = 30_000;
+        let names: Vec<(String, String)> = (0..LENGTH)
+            .map(|index| {
+                let formula = if index + 1 == LENGTH {
+                    "1".to_owned()
+                } else {
+                    format!("LET(bound_{index},0,step_{})", index + 1)
+                };
+                (format!("step_{index}"), formula)
+            })
+            .collect();
+        let names: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(name, formula)| (name.as_str(), formula.as_str()))
+            .collect();
+        let wb = workbook(&names);
+        let mut capability = Capability::new(&wb);
+        let start = std::time::Instant::now();
+        assert!(capability.evaluable(SheetId(0), "step_0"));
+        assert!(capability.work <= 16 * LENGTH, "{}", capability.work);
+        assert!(capability.decided[0].is_empty());
+        assert!(start.elapsed().as_secs_f64() < 5.0, "{:?}", start.elapsed());
+    }
+
+    /// many uncached arrays that read nothing are ordered in time linear in
+    /// how many there are, and each shows what it evaluates to.
+    #[test]
+    fn many_uncached_arrays_reading_nothing_are_ordered_promptly() {
+        const ANCHORS: u32 = 100_000;
+        let mut wb = workbook(&[]);
+        let sheet = &mut wb.sheets[0];
+        for row in 0..ANCHORS {
+            uncached(sheet, &CellRef::new(row, 0).to_a1(), "1");
+        }
+        let start = std::time::Instant::now();
+        classify_arrays(&mut wb);
+        assert!(
+            start.elapsed().as_secs_f64() < 60.0,
+            "{:?}",
+            start.elapsed()
+        );
+        for row in [0, ANCHORS - 1] {
+            let at = CellRef::new(row, 0);
+            assert_eq!(wb.value(SheetId(0), at), CellValue::Number { value: 1.0 });
         }
     }
 
