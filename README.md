@@ -92,12 +92,12 @@ What to install for which language, with a first example each:
 Page agreement is reported on its own because a document either paginates as Word does or it does not; SSIM cannot express that.
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e8ce123fa9f8e9efc5096811fb98f6f0c17d2e48">e8ce123f</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
-<tr><td>Exact page counts</td><td align="right">48/63</td><td align="right">63/63</td><td align="right">45/63</td></tr>
-<tr><td>Absolute page error</td><td align="right">32</td><td align="right">0</td><td align="right">56</td></tr>
-<tr><td>SSIM</td><td align="right">0.7540</td><td align="right">0.8368</td><td align="right">0.7749</td></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/fdceeb169ae58320b71a1b65ac0ae80baa0d3f5b">fdceeb16</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>Exact page counts</td><td align="right">48/63</td><td align="right">60/63</td><td align="right">44/63</td></tr>
+<tr><td>Absolute page error</td><td align="right">32</td><td align="right">5</td><td align="right">57</td></tr>
+<tr><td>SSIM</td><td align="right">0.7550</td><td align="right">0.8286</td><td align="right">0.7694</td></tr>
 <tr><td>Scored/total</td><td align="right">63/63</td><td align="right">63/63</td><td align="right">63/63</td></tr>
-<tr><td>Render time (avg)</td><td align="right">546 ms</td><td align="right">527 ms</td><td align="right">788 ms</td></tr>
+<tr><td>Render time (avg)</td><td align="right">530 ms</td><td align="right">518 ms</td><td align="right">773 ms</td></tr>
 <tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
@@ -105,21 +105,21 @@ Page agreement is reported on its own because a document either paginates as Wor
 ### PPTX
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1">0.1.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e8ce123fa9f8e9efc5096811fb98f6f0c17d2e48">e8ce123f</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
-<tr><td>SSIM</td><td align="right">0.8667</td><td align="right">0.8924</td><td align="right">0.9043</td></tr>
-<tr><td>Scored/total</td><td align="right">88/103</td><td align="right">103/103</td><td align="right">103/103</td></tr>
-<tr><td>Render time (avg)</td><td align="right">205 ms</td><td align="right">144 ms</td><td align="right">1310 ms</td></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1">0.1.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/fdceeb169ae58320b71a1b65ac0ae80baa0d3f5b">fdceeb16</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>SSIM</td><td align="right">0.8671</td><td align="right">0.9169</td><td align="right">0.9030</td></tr>
+<tr><td>Scored/total</td><td align="right">69/103</td><td align="right">103/103</td><td align="right">103/103</td></tr>
+<tr><td>Render time (avg)</td><td align="right">216 ms</td><td align="right">157 ms</td><td align="right">1301 ms</td></tr>
 <tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
 ### XLSX
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e8ce123fa9f8e9efc5096811fb98f6f0c17d2e48">e8ce123f</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
-<tr><td>SSIM</td><td align="right">0.7002</td><td align="right">0.7660</td><td align="right">0.6901</td></tr>
-<tr><td>Scored/total</td><td align="right">205/208</td><td align="right">207/208</td><td align="right">204/208</td></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/fdceeb169ae58320b71a1b65ac0ae80baa0d3f5b">fdceeb16</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>SSIM</td><td align="right">0.7010</td><td align="right">0.7661</td><td align="right">0.6893</td></tr>
+<tr><td>Scored/total</td><td align="right">182/208</td><td align="right">207/208</td><td align="right">195/208</td></tr>
 <tr><td>Recalc accuracy</td><td align="right">68.28%</td><td align="right">99.60%</td><td align="right">85.87%</td></tr>
-<tr><td>Recalc time (avg)</td><td align="right">70 ms</td><td align="right">89 ms</td><td align="right">466 ms</td></tr>
+<tr><td>Recalc time (avg)</td><td align="right">61 ms</td><td align="right">76 ms</td><td align="right">391 ms</td></tr>
 <tr><td>Parse success</td><td align="right">99.52%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
