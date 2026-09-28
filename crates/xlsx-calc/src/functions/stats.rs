@@ -44,16 +44,14 @@ fn pairs(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Vec<f64>, Vec<f64>), E
         return Err(ErrorValue::Value);
     }
     let mut areas = [as_area(&args[0], ctx), as_area(&args[1], ctx)];
+    if let [Some(y), Some(x)] = &areas
+        && y.cell_count() != x.cell_count()
+    {
+        return Err(ErrorValue::NA);
+    }
     // two references are cut to one extent, so a whole column on each of two
     // sheets still pairs row for row
-    if let [Some(y), Some(x)] = &mut areas {
-        if y.cell_count() != x.cell_count() {
-            return Err(ErrorValue::NA);
-        }
-        let mut cut = [*y, *x];
-        criteria::bound_together(&mut cut, ctx);
-        [*y, *x] = cut;
-    }
+    criteria::cut_references(&mut areas, ctx);
     let ys = positioned(&args[0], areas[0], ctx)?;
     let xs = positioned(&args[1], areas[1], ctx)?;
     if xs.len() != ys.len() {
@@ -81,7 +79,7 @@ fn positioned(
 ) -> Result<Vec<Option<f64>>, ErrorValue> {
     match area {
         Some(area) => area
-            .values_ref(ctx)?
+            .cells_ref(ctx)?
             .into_iter()
             .map(|value| match value.as_ref() {
                 CellValue::Number { value } => Ok(Some(*value)),

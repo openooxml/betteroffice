@@ -208,12 +208,12 @@ fn output_cells(rows: usize, cols: usize) -> Result<usize, ErrorValue> {
 /// charged, so a long body cannot be repeated a million times for free.
 const FREE_NODES: u64 = 8;
 
-/// multiply-adds one budget unit pays for in the matrix builtins, whose work
-/// outgrows the cells they read and write.
-const PRODUCTS_PER_UNIT: u64 = 16;
+/// inner-loop steps, a multiply-add or a separator probe, one budget unit pays
+/// for in the builtins whose work outgrows the cells they read and write.
+const STEPS_PER_UNIT: u64 = 16;
 
-fn charge_products(ctx: &EvalContext<'_>, products: u64) -> Result<(), ErrorValue> {
-    if !ctx.consume_cells(products / PRODUCTS_PER_UNIT) {
+fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
+    if !ctx.consume_cells(steps / STEPS_PER_UNIT) {
         return Err(ErrorValue::Num);
     }
     Ok(())
@@ -268,6 +268,7 @@ fn reserved(rows: usize, cols: usize, values: Vec<CellValue>) -> Value {
 
 /// evaluate an expression as a possibly rectangular value.
 pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
+    ctx.fix_whole_extent(expr);
     match expr {
         Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. } => {
             match as_array_area(expr, ctx) {
@@ -303,8 +304,10 @@ pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
         Expr::Unary { op, expr } => map1(evaluate_array(expr, ctx), ctx, |v| apply_unary(*op, v)),
         Expr::Percent(inner) => map1(evaluate_array(inner, ctx), ctx, apply_percent),
         Expr::Binary { op, lhs, rhs } => {
-            let left = evaluate_array(lhs, ctx);
-            let right = evaluate_array(rhs, ctx);
+            let mut sides = operands([&**lhs, &**rhs], ctx).into_iter();
+            let (Some((left, _)), Some((right, _))) = (sides.next(), sides.next()) else {
+                return Value::error(ErrorValue::Value);
+            };
             map2(left, right, ctx, |a, b| apply_binary(*op, a, b))
         }
         // these yield a reference, so a multi-cell result is a block here
@@ -380,20 +383,101 @@ fn map2(
 /// extent the sheet actually uses so `A:A` costs the authored data, not a
 /// million blanks.
 fn as_array_area(expr: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
-    let mut area = as_area(expr, ctx)?;
-    if area.rows >= xlsx_model::MAX_ROWS as usize {
-        let used = ctx.provider.used_rows(area.sheet) as usize;
+    Some(cut(as_area(expr, ctx)?, ctx))
+}
+
+fn full_height(area: &Area) -> bool {
+    area.rows >= xlsx_model::MAX_ROWS as usize
+}
+
+fn full_width(area: &Area) -> bool {
+    area.cols >= xlsx_model::MAX_COLS as usize
+}
+
+/// a whole-column or whole-row area cut to where the data ends: on its own
+/// sheet, or on the furthest sheet the formula's whole references reach.
+fn cut(mut area: Area, ctx: &EvalContext<'_>) -> Area {
+    let (rows, cols) = ctx.whole_extent();
+    if full_height(&area) {
+        let used = ctx.provider.used_rows(area.sheet).max(rows) as usize;
         area.rows = used.saturating_sub(area.start.row as usize).max(1);
     }
-    if area.cols >= xlsx_model::MAX_COLS as usize {
-        let used = ctx.provider.used_cols(area.sheet) as usize;
+    if full_width(&area) {
+        let used = ctx.provider.used_cols(area.sheet).max(cols) as usize;
         area.cols = used.saturating_sub(area.start.col as usize).max(1);
     }
-    Some(area)
+    area
+}
+
+/// the area an argument names when array evaluation reads it as a reference.
+fn reference_area(expr: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
+    match expr {
+        Expr::Range { .. }
+        | Expr::ColumnRange { .. }
+        | Expr::RowRange { .. }
+        | Expr::RangeJoin { .. }
+        | Expr::TableRef { .. }
+        | Expr::Name { .. } => as_area(expr, ctx),
+        Expr::FuncCall { name, .. }
+            if name.eq_ignore_ascii_case("OFFSET") || name.eq_ignore_ascii_case("INDIRECT") =>
+        {
+            as_area(expr, ctx)
+        }
+        _ => None,
+    }
+}
+
+/// what each argument evaluates to, with the references among them cut to one
+/// extent so whole columns or rows on different sheets still pair cell for
+/// cell, and the blank cells each reference holds past that cut.
+fn operands<'e>(
+    args: impl IntoIterator<Item = &'e Expr>,
+    ctx: &EvalContext<'_>,
+) -> Vec<(Value, u64)> {
+    let args: Vec<&Expr> = args.into_iter().collect();
+    let areas: Vec<Option<Area>> = args.iter().map(|arg| reference_area(arg, ctx)).collect();
+    let reach = |full: fn(&Area) -> bool, extent: fn(&Area) -> usize| {
+        areas
+            .iter()
+            .flatten()
+            .filter(|area| full(area))
+            .map(|area| extent(&cut(*area, ctx)))
+            .max()
+    };
+    let rows = reach(full_height, |area| area.rows);
+    let cols = reach(full_width, |area| area.cols);
+    args.into_iter()
+        .zip(areas)
+        .map(|(arg, area)| match area {
+            Some(area) => {
+                let mut shared = area;
+                if let Some(rows) = rows.filter(|_| full_height(&area)) {
+                    shared.rows = rows;
+                }
+                if let Some(cols) = cols.filter(|_| full_width(&area)) {
+                    shared.cols = cols;
+                }
+                let unread = area.unread(shared.cell_count().unwrap_or(0));
+                (area_values(&shared, ctx), unread)
+            }
+            None => (evaluate_array(arg, ctx), 0),
+        })
+        .collect()
+}
+
+/// arguments that pair cell for cell, read as blocks cut to one extent.
+fn aligned_arguments<'e>(
+    args: impl IntoIterator<Item = &'e Expr>,
+    ctx: &EvalContext<'_>,
+) -> Result<Vec<Array>, ErrorValue> {
+    operands(args, ctx)
+        .into_iter()
+        .map(|(value, _)| block_of(value))
+        .collect()
 }
 
 fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
-    match area.values_ref(ctx) {
+    match area.cells_ref(ctx) {
         Ok(values) => {
             let values = values
                 .into_iter()
@@ -415,6 +499,10 @@ fn argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Array,
         .get(index)
         .map(|arg| evaluate_array(arg, ctx))
         .ok_or(ErrorValue::Value)?;
+    block_of(value)
+}
+
+fn block_of(value: Value) -> Result<Array, ErrorValue> {
     match value {
         Value::Scalar(CellValue::Error { value }) => Err(value),
         Value::Scalar(value) => Array::new(1, 1, vec![value]),
@@ -612,11 +700,12 @@ fn lift(f: Func, args: &[Expr], ctx: &EvalContext<'_>, positions: Option<&[usize
     }
     result((|| {
         let count = reserve(ctx, rows, cols)?;
+        // every call reads each lifted element and evaluates the other
+        // arguments again
         let repeated = args
             .iter()
             .zip(&values)
-            .filter(|(_, value)| value.is_none())
-            .map(|(arg, _)| nodes(arg))
+            .map(|(arg, value)| if value.is_some() { 1 } else { nodes(arg) })
             .sum::<u64>()
             .saturating_sub(FREE_NODES);
         if !ctx.consume_cells((count as u64).saturating_mul(repeated)) {
@@ -852,8 +941,9 @@ fn filter(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         if args.len() < 2 || args.len() > 3 {
             return Err(ErrorValue::Value);
         }
-        let data = argument(args, ctx, 0)?;
-        let include = argument(args, ctx, 1)?;
+        let [data, include]: [Array; 2] = aligned_arguments(&args[..2], ctx)?
+            .try_into()
+            .map_err(|_| ErrorValue::Value)?;
         let by_rows = include.rows == data.rows && include.cols == 1;
         let by_cols = include.cols == data.cols && include.rows == 1;
         if !by_rows && !by_cols {
@@ -925,17 +1015,16 @@ fn sortby(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         if args.len() < 2 {
             return Err(ErrorValue::Value);
         }
-        let data = argument(args, ctx, 0)?;
+        let columns = std::iter::once(&args[0]).chain(args[1..].iter().step_by(2));
+        let mut blocks = aligned_arguments(columns, ctx)?.into_iter();
+        let data = blocks.next().ok_or(ErrorValue::Value)?;
         let mut keys: Vec<(Array, bool)> = Vec::new();
-        let mut index = 1;
-        while index < args.len() {
-            let by = argument(args, ctx, index)?;
+        for (by, index) in blocks.zip((1..args.len()).step_by(2)) {
             if by.rows != data.rows || by.cols != 1 {
                 return Err(ErrorValue::Value);
             }
             let descending = optional_number(args, ctx, index + 1, 1.0)? < 0.0;
             keys.push((by, descending));
-            index += 2;
         }
         let mut order: Vec<usize> = (0..data.rows).collect();
         order.sort_by(|a, b| {
@@ -1741,16 +1830,16 @@ fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let kind = optional_number(args, ctx, 2, 1.0)?.trunc();
         let (rows, cols) = keys.dims();
         let count = reserve(ctx, rows, cols)?;
-        rescans(ctx, count, &data)?;
+        let mut first = true;
         let mut cells = Vec::with_capacity(count);
         for row in 0..rows {
             for col in 0..cols {
-                cells.push(
-                    match match_position(&data, &keys.broadcast(row, col), kind) {
-                        Some(position) => num(position as f64),
-                        None => err(ErrorValue::NA),
-                    },
-                );
+                let (position, visits) = match_position(&data, &keys.broadcast(row, col), kind);
+                charge_search(ctx, &mut first, visits)?;
+                cells.push(match position {
+                    Some(position) => num(position as f64),
+                    None => err(ErrorValue::NA),
+                });
             }
         }
         Ok(reserved(rows, cols, cells))
@@ -1758,10 +1847,13 @@ fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 }
 
 /// `MATCH`'s 1-based hit: exact for kind 0, otherwise the last value that
-/// stays on the wanted side of the key, as an ordered scan gives it.
-fn match_position(data: &Array, target: &CellValue, kind: f64) -> Option<usize> {
+/// stays on the wanted side of the key, as an ordered scan gives it. the
+/// count is the values the scan visited.
+fn match_position(data: &Array, target: &CellValue, kind: f64) -> (Option<usize>, usize) {
     let mut best = None;
+    let mut visits = 0;
     for (position, value) in data.values.iter().enumerate() {
+        visits += 1;
         let ordering = cmp_values(value, target);
         let hit = match kind {
             0.0 => ordering == std::cmp::Ordering::Equal,
@@ -1782,15 +1874,14 @@ fn match_position(data: &Array, target: &CellValue, kind: f64) -> Option<usize> 
             break;
         }
     }
-    best
+    (best, visits)
 }
 
-/// charge every key after the first for rereading a block the first one paid
-/// for, so keys against a computed block cost what the lifted scalar lookup
-/// over a reference does.
-fn rescans(ctx: &EvalContext<'_>, keys: usize, data: &Array) -> Result<(), ErrorValue> {
-    let rereads = (keys.saturating_sub(1) as u64).saturating_mul(data.values.len() as u64);
-    if !ctx.consume_cells(rereads) {
+/// charge a key's search for the values it visited, except the first key's,
+/// which the block's own read paid for: a block of keys against a block
+/// costs what its searches do.
+fn charge_search(ctx: &EvalContext<'_>, first: &mut bool, visits: usize) -> Result<(), ErrorValue> {
+    if !std::mem::take(first) && !ctx.consume_cells(visits as u64) {
         return Err(ErrorValue::Num);
     }
     Ok(())
@@ -1806,7 +1897,13 @@ fn lookup_modes(mode: f64, search: f64) -> Result<(), ErrorValue> {
     Ok(())
 }
 
-fn lookup_position(lookup: &Array, key: &CellValue, mode: f64, search: f64) -> Option<usize> {
+/// the position, and the values visited finding it.
+fn lookup_position(
+    lookup: &Array,
+    key: &CellValue,
+    mode: f64,
+    search: f64,
+) -> (Option<usize>, usize) {
     use std::cmp::Ordering;
     let count = lookup.values.len();
     let reverse = search < 0.0;
@@ -1822,13 +1919,13 @@ fn lookup_position(lookup: &Array, key: &CellValue, mode: f64, search: f64) -> O
                 &pattern.to_lowercase(),
                 &text.to_lowercase(),
             ) {
-                return Some(position);
+                return (Some(position), step + 1);
             }
             continue;
         }
         let ordering = cmp_values(value, key);
         if ordering == Ordering::Equal {
-            return Some(position);
+            return (Some(position), step + 1);
         }
         // -1 keeps the largest value below the key, 1 the smallest above it
         let wanted = match mode {
@@ -1847,7 +1944,7 @@ fn lookup_position(lookup: &Array, key: &CellValue, mode: f64, search: f64) -> O
             approximate = Some((position, value));
         }
     }
-    approximate.map(|(position, _)| position)
+    (approximate.map(|(position, _)| position), count)
 }
 
 /// how a lookup vector addresses a result block: down its rows, or across its
@@ -1882,8 +1979,9 @@ fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         if let Some(error) = keys.as_error() {
             return Err(error);
         }
-        let lookup = argument(args, ctx, 1)?;
-        let data = argument(args, ctx, 2)?;
+        let [lookup, data]: [Array; 2] = aligned_arguments(&args[1..3], ctx)?
+            .try_into()
+            .map_err(|_| ErrorValue::Value)?;
         let mode = optional_number(args, ctx, 4, 0.0)?.trunc();
         let search = optional_number(args, ctx, 5, 1.0)?.trunc();
         lookup_modes(mode, search)?;
@@ -1899,30 +1997,31 @@ fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
                 )
                 .clone()
         };
-        let slice = |key: &CellValue| match lookup_position(&lookup, key, mode, search) {
-            Some(position) if down => rows_of(&data, position),
-            Some(position) => column_of(&data, position),
-            None => vec![missing()],
+        let slice = |key: &CellValue| {
+            let (position, visits) = lookup_position(&lookup, key, mode, search);
+            let picked = match position {
+                Some(position) if down => rows_of(&data, position),
+                Some(position) => column_of(&data, position),
+                None => vec![missing()],
+            };
+            (picked, visits)
         };
         // one key against a vector answers per key; a block result needs one
         if (down && data.cols == 1) || (!down && data.rows == 1) {
             let (rows, cols) = keys.dims();
             let count = reserve(ctx, rows, cols)?;
-            rescans(ctx, count, &lookup)?;
+            let mut first = true;
             let mut cells = Vec::with_capacity(count);
             for row in 0..rows {
                 for col in 0..cols {
-                    cells.push(
-                        slice(&keys.broadcast(row, col))
-                            .into_iter()
-                            .next()
-                            .unwrap_or(err(ErrorValue::NA)),
-                    );
+                    let (picked, visits) = slice(&keys.broadcast(row, col));
+                    charge_search(ctx, &mut first, visits)?;
+                    cells.push(picked.into_iter().next().unwrap_or(err(ErrorValue::NA)));
                 }
             }
             return Ok(reserved(rows, cols, cells));
         }
-        let picked = slice(&keys.broadcast(0, 0));
+        let (picked, _) = slice(&keys.broadcast(0, 0));
         let (rows, cols) = if down {
             (1, picked.len())
         } else {
@@ -1950,16 +2049,17 @@ fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         lookup_modes(mode, search)?;
         let (rows, cols) = keys.dims();
         let count = reserve(ctx, rows, cols)?;
-        rescans(ctx, count, &lookup)?;
+        let mut first = true;
         let mut cells = Vec::with_capacity(count);
         for row in 0..rows {
             for col in 0..cols {
-                cells.push(
-                    match lookup_position(&lookup, &keys.broadcast(row, col), mode, search) {
-                        Some(position) => num(position as f64 + 1.0),
-                        None => err(ErrorValue::NA),
-                    },
-                );
+                let (position, visits) =
+                    lookup_position(&lookup, &keys.broadcast(row, col), mode, search);
+                charge_search(ctx, &mut first, visits)?;
+                cells.push(match position {
+                    Some(position) => num(position as f64 + 1.0),
+                    None => err(ErrorValue::NA),
+                });
             }
         }
         Ok(reserved(rows, cols, cells))
@@ -2285,7 +2385,7 @@ fn regress(
     intercept: bool,
 ) -> Result<Fit, ErrorValue> {
     let terms = (xs.len() + usize::from(intercept)) as u64;
-    charge_products(ctx, (ys.len() as u64).saturating_mul(terms * terms))?;
+    charge_steps(ctx, (ys.len() as u64).saturating_mul(terms * terms))?;
     least_squares(ys, xs, intercept).ok_or(ErrorValue::Num)
 }
 
@@ -2428,7 +2528,7 @@ fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             return Err(ErrorValue::Value);
         }
         let count = reserve(ctx, left.rows, right.cols)?;
-        charge_products(ctx, (count as u64).saturating_mul(left.cols as u64))?;
+        charge_steps(ctx, (count as u64).saturating_mul(left.cols as u64))?;
         let mut cells = Vec::with_capacity(count);
         for row in 0..left.rows {
             for col in 0..right.cols {
@@ -2446,7 +2546,10 @@ fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// SUMPRODUCT: elementwise product of every argument, summed; non-numeric
 /// cells count as zero.
 fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
-    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
+    let values: Vec<Value> = operands(args, ctx)
+        .into_iter()
+        .map(|(value, _)| value)
+        .collect();
     if !values.iter().any(|value| matches!(value, Value::Array(_)))
         && let Some(scalar) = crate::functions::resolve("SUMPRODUCT")
     {
@@ -2454,17 +2557,21 @@ fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     }
     let mut rows = 1usize;
     let mut cols = 1usize;
-    let mut largest = 1usize;
+    let mut paid = 0u64;
     for value in &values {
         let (r, c) = value.dims();
         rows = rows.max(r);
         cols = cols.max(c);
-        largest = largest.max(r * c);
+        if matches!(value, Value::Array(_)) {
+            paid += (r * c) as u64;
+        }
     }
-    // broadcasting a column against a row walks more positions than either
-    // operand holds, and those were never charged
-    let positions = (rows as u64).saturating_mul(cols as u64);
-    if !ctx.consume_cells(positions.saturating_sub(largest as u64)) {
+    // every operand is read at every position; a block paid for its own
+    // cells, but a broadcast or a scalar repeated across the others was not
+    let reads = (rows as u64)
+        .saturating_mul(cols as u64)
+        .saturating_mul(values.len() as u64);
+    if !ctx.consume_cells(reads.saturating_sub(paid)) {
         return Value::error(ErrorValue::Num);
     }
     let mut total = 0.0;
@@ -2492,7 +2599,7 @@ fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         if args.len() < 3 {
             return Err(ErrorValue::Value);
         }
-        let Some(values) = joined_values(&args[2..], ctx)? else {
+        let Some(joined) = joined_values(&args[2..], ctx)? else {
             return Ok(scalar("TEXTJOIN", args, ctx));
         };
         let separator = to_text(&evaluate_array(&args[0], ctx).into_scalar())?;
@@ -2502,22 +2609,36 @@ fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let mut out = String::new();
         let mut chars = 0usize;
         let mut first = true;
-        for value in values {
-            let empty = match &value {
-                CellValue::Empty => true,
-                CellValue::Text { value } => value.is_empty(),
-                _ => false,
-            };
-            if ignore_empty && empty {
-                continue;
+        for (values, unread) in joined {
+            for value in values {
+                let empty = match &value {
+                    CellValue::Empty => true,
+                    CellValue::Text { value } => value.is_empty(),
+                    _ => false,
+                };
+                if ignore_empty && empty {
+                    continue;
+                }
+                // a separator goes between every pair, so a run of kept blanks
+                // still shows as delimiters
+                if !std::mem::take(&mut first) && !append_text(&mut out, &separator, &mut chars) {
+                    return Err(ErrorValue::Value);
+                }
+                if !append_text(&mut out, &to_text(&value)?, &mut chars) {
+                    return Err(ErrorValue::Value);
+                }
             }
-            // a separator goes between every pair, so a run of kept blanks
-            // still shows as delimiters
-            if !std::mem::take(&mut first) && !append_text(&mut out, &separator, &mut chars) {
-                return Err(ErrorValue::Value);
-            }
-            if !append_text(&mut out, &to_text(&value)?, &mut chars) {
-                return Err(ErrorValue::Value);
+            // the blanks past a whole-column or whole-row read still join,
+            // each one a separator wide
+            if !ignore_empty && unread > 0 {
+                let separators = unread - u64::from(std::mem::take(&mut first));
+                if !separator.is_empty() {
+                    for _ in 0..separators {
+                        if !append_text(&mut out, &separator, &mut chars) {
+                            return Err(ErrorValue::Value);
+                        }
+                    }
+                }
             }
         }
         Ok(Value::Scalar(text(out)))
@@ -2526,12 +2647,12 @@ fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 
 fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     result((|| {
-        let Some(values) = joined_values(args, ctx)? else {
+        let Some(joined) = joined_values(args, ctx)? else {
             return Ok(scalar("CONCAT", args, ctx));
         };
         let mut out = String::new();
         let mut chars = 0usize;
-        for value in values {
+        for value in joined.into_iter().flat_map(|(values, _)| values) {
             if !append_text(&mut out, &to_text(&value)?, &mut chars) {
                 return Err(ErrorValue::Value);
             }
@@ -2540,22 +2661,26 @@ fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     })())
 }
 
-/// every value the joined arguments contribute, or `None` when none of them is
-/// a computed block.
-fn joined_values(
-    args: &[Expr],
-    ctx: &EvalContext<'_>,
-) -> Result<Option<Vec<CellValue>>, ErrorValue> {
-    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
-    if !values.iter().any(|value| matches!(value, Value::Array(_))) {
+/// the values one joined argument contributes, and the blanks past them when
+/// it is a whole reference cut to the used extent.
+type Joined = (Vec<CellValue>, u64);
+
+/// what each joined argument contributes, or `None` when none of them is a
+/// computed block.
+fn joined_values(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Option<Vec<Joined>>, ErrorValue> {
+    let values = operands(args, ctx);
+    if !values
+        .iter()
+        .any(|(value, _)| matches!(value, Value::Array(_)))
+    {
         return Ok(None);
     }
-    let mut out = Vec::new();
-    for value in values {
+    let mut out = Vec::with_capacity(values.len());
+    for (value, unread) in values {
         match value {
-            Value::Array(array) => out.extend(array.values),
+            Value::Array(array) => out.push((array.values, unread)),
             Value::Lambda(_) => return Err(ErrorValue::Value),
-            Value::Scalar(value) => out.push(value),
+            Value::Scalar(value) => out.push((vec![value], unread)),
         }
     }
     Ok(Some(out))
@@ -2910,6 +3035,8 @@ fn textsplit(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let ignore_empty = optional_bool(args, ctx, 3, false)?;
         let insensitive = optional_number(args, ctx, 4, 0.0)? != 0.0;
         let pad = optional(args, ctx, 5)?.unwrap_or(err(ErrorValue::NA));
+        let separators = (columns.len() + rows.len()) as u64;
+        charge_steps(ctx, (source.len() as u64).saturating_mul(separators))?;
         let mut grid: Vec<Vec<String>> = split_text(&source, &rows, insensitive)
             .into_iter()
             .map(|row| split_text(&row, &columns, insensitive))

@@ -94,15 +94,13 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let areas: Vec<Option<Area>> = args.iter().map(|arg| as_area(arg, ctx)).collect();
     // references on different sheets are cut to one extent, so their cells
     // still pair up by position
-    let mut cut: Vec<Area> = areas.iter().flatten().copied().collect();
-    criteria::bound_together(&mut cut, ctx);
-    let mut cut = cut.into_iter();
+    let mut cut = areas.clone();
+    criteria::cut_references(&mut cut, ctx);
     let mut arrays: Vec<((usize, usize), Vec<f64>)> = Vec::with_capacity(args.len());
-    for (arg, area) in args.iter().zip(areas) {
-        match area {
-            Some(area) => {
-                let cut = cut.next().unwrap_or(area);
-                let values = match cut.values_ref(ctx) {
+    for ((arg, area), cut) in args.iter().zip(areas).zip(cut) {
+        match area.zip(cut) {
+            Some((area, cut)) => {
+                let values = match cut.cells_ref(ctx) {
                     Ok(values) => values,
                     Err(error) => return err(error),
                 };

@@ -288,11 +288,14 @@ pub(crate) fn collect_pairs(
     })
 }
 
-/// the range and value range of a `SUMIF`/`AVERAGEIF`, cut together. a value
-/// range of another shape keeps its top-left and takes the range's shape, as
-/// excel resizes it.
+/// the range and value range of a `SUMIF`/`AVERAGEIF`, cut together. the value
+/// range keeps its top-left and takes the range's shape, as excel resizes it.
 pub(crate) fn single_pair(range: Area, values: Area, ctx: &EvalContext<'_>) -> (Area, Area) {
-    let values = aligned(values, range.rows, range.cols).unwrap_or(values);
+    let values = Area {
+        rows: range.rows,
+        cols: range.cols,
+        ..values
+    };
     let mut areas = [range, values];
     bound_together(&mut areas, ctx);
     (areas[0], areas[1])
@@ -324,6 +327,15 @@ pub(crate) fn bound_together(areas: &mut [Area], ctx: &EvalContext<'_>) {
         {
             area.cols = cols;
         }
+    }
+}
+
+/// `bound_together` over the arguments that are references.
+pub(crate) fn cut_references(areas: &mut [Option<Area>], ctx: &EvalContext<'_>) {
+    let mut cut: Vec<Area> = areas.iter().flatten().copied().collect();
+    bound_together(&mut cut, ctx);
+    for (area, cut) in areas.iter_mut().flatten().zip(cut) {
+        *area = cut;
     }
 }
 

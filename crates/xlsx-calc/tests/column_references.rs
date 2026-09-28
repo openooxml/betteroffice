@@ -2,7 +2,9 @@ use std::cell::Cell as Counter;
 
 use xlsx_calc::{ColumnRange, EvalContext, Expr, evaluate, parse_formula, references};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellProvider, CellRef, CellValue, ErrorValue, Sheet, SheetId, Workbook};
+use xlsx_model::{
+    Cell, CellProvider, CellRef, CellValue, DefinedName, ErrorValue, Sheet, SheetId, Workbook,
+};
 
 #[test]
 fn parses_and_prints_anchored_column_ranges() {
@@ -258,6 +260,14 @@ fn two_sheets() -> Workbook {
     let mut workbook = Workbook::default();
     workbook.sheets.push(one);
     workbook.sheets.push(two);
+    for (name, formula) in [("Keys", "One!$A:$A"), ("Vals", "Two!$B:$B")] {
+        workbook.defined_names.push(DefinedName {
+            name: name.into(),
+            formula: formula.into(),
+            local_sheet: None,
+            hidden: false,
+        });
+    }
     workbook
 }
 
@@ -268,9 +278,27 @@ fn number(value: f64) -> Cell {
     }
 }
 
+/// the formula evaluated as written and inside `LET`, whose body takes the
+/// array evaluator; both must agree.
 fn on_one(workbook: &Workbook, formula: &str) -> CellValue {
-    let context = EvalContext::new(workbook, SheetId(0));
-    evaluate(&parse_formula(formula).unwrap(), &context)
+    let evaluated = |formula: &str| {
+        let context = EvalContext::new(workbook, SheetId(0));
+        evaluate(&parse_formula(formula).unwrap(), &context)
+    };
+    let scalar = evaluated(formula);
+    assert_eq!(
+        evaluated(&format!("_xlfn.LET(_xlpm.s,0,{formula})")),
+        scalar,
+        "array evaluation of {formula}"
+    );
+    scalar
+}
+
+fn text_length(value: CellValue) -> usize {
+    match value {
+        CellValue::Text { value } => value.chars().count(),
+        other => panic!("expected text, got {other:?}"),
+    }
 }
 
 /// a whole-column or whole-row read stops at the used range, but the blanks
@@ -296,6 +324,19 @@ fn blank_counts_include_the_cells_past_the_used_range() {
             "{formula}"
         );
     }
+    let cols = MAX_COLS as usize;
+    assert_eq!(
+        text_length(on_one(&workbook, "TEXTJOIN(\",\",FALSE,1:1)")),
+        cols
+    );
+    assert_eq!(
+        text_length(on_one(&workbook, "TEXTJOIN(\",\",FALSE,Two!1:1)")),
+        cols + 2
+    );
+    assert_eq!(
+        text_length(on_one(&workbook, "TEXTJOIN(\"\",FALSE,Two!1:1)")),
+        3
+    );
     assert_eq!(
         on_one(&workbook, "TEXTJOIN(\",\",FALSE,A:A)"),
         CellValue::Error {
@@ -342,11 +383,19 @@ fn whole_references_on_two_sheets_stay_aligned() {
     let workbook = two_sheets();
     for (formula, expected) in [
         ("SUMIF(A:A,\"\",Two!B:B)", 49.0),
+        ("SUMIF(A:A,\"\",Two!B1)", 49.0),
         ("SUMIFS(Two!B:B,A:A,\"\")", 49.0),
         ("AVERAGEIF(A:A,\"\",Two!B:B)", 7.0),
+        ("AVERAGEIF(A:A,\"\",Two!B1)", 7.0),
         ("MAXIFS(Two!B:B,A:A,\"\")", 10.0),
         ("SUMPRODUCT(A:A,Two!B:B)", 17.0),
         ("SUMPRODUCT(Two!B:B,A:A)", 17.0),
+        ("SUM(A:A*Two!B:B)", 17.0),
+        ("SUM(Two!B:B*A:A)", 17.0),
+        ("SUM(_xlfn.FILTER(Two!B:B,A:A=\"\"))", 49.0),
+        ("SUMPRODUCT(Keys,Vals)", 17.0),
+        ("SUMPRODUCT(Vals,Keys)", 17.0),
+        ("SUM(Keys*Vals)", 17.0),
     ] {
         assert_eq!(
             on_one(&workbook, formula),
@@ -354,8 +403,38 @@ fn whole_references_on_two_sheets_stay_aligned() {
             "{formula}"
         );
     }
+    assert_eq!(
+        on_one(&workbook, "_xlfn.XLOOKUP(10,Two!B:B,A:A)"),
+        CellValue::Empty
+    );
     let CellValue::Number { value } = on_one(&workbook, "CORREL(A:A,Two!B:B)") else {
         panic!("CORREL pairs the three rows One holds");
     };
     assert!((value - 3.0 / (42.0_f64 / 9.0 * 2.0).sqrt()).abs() < 1e-12);
+}
+
+/// references cut to one extent that still spans every column are read as
+/// that rectangle, not cut again to each sheet's own width.
+#[test]
+fn a_shared_cut_is_read_without_cutting_again() {
+    let mut one = Sheet::new("One");
+    one.set_cell(CellRef::new(0, 0), number(2.0));
+    one.set_cell(CellRef::new(1, 0), number(3.0));
+    let mut two = Sheet::new("Two");
+    two.set_cell(CellRef::new(0, 1), number(7.0));
+    two.set_cell(CellRef::new(0, MAX_COLS - 1), number(1.0));
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(one);
+    workbook.sheets.push(two);
+    for formula in [
+        "SUMPRODUCT(One!1:2,Two!1:2)",
+        "SUMPRODUCT(Two!1:2,One!1:2)",
+        "SUM(One!1:2*Two!1:2)",
+    ] {
+        assert_eq!(
+            on_one(&workbook, formula),
+            CellValue::Number { value: 0.0 },
+            "{formula}"
+        );
+    }
 }
