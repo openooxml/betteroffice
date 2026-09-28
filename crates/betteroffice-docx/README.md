@@ -20,8 +20,9 @@ let saved = document.save()?;
 ```
 
 Each paragraph ID addresses one body paragraph. A paragraph whose `w14:paraId`
-repeats an earlier paragraph's carries a fresh ID, which `save` writes once that
-paragraph is edited; until then it saves with its authored ID. A lookup that
+repeats an earlier paragraph's carries a fresh ID that no part of the package
+uses, which `save` writes once that paragraph is edited or the model is taken
+through `model_mut`; until then it saves with its authored ID. A lookup that
 still matches several paragraphs returns `None` or `Error::AmbiguousParagraph`.
 
 `DocumentModel` exposes the body, sections, headers, footers, notes, styles,

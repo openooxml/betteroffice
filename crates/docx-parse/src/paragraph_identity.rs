@@ -97,7 +97,8 @@ pub fn paragraph_ids_by_part(
         .collect())
 }
 
-/// The valid values of every `paraId` and `paraIdParent` attribute of one XML part.
+/// The valid values of every `paraId` and `paraIdParent` attribute of one
+/// XML part, decoded and unescaped as the parser reads them.
 pub fn paragraph_id_attributes(xml: &[u8]) -> BTreeSet<u32> {
     let mut ids = BTreeSet::new();
     let mut reader = Reader::from_reader(xml);
@@ -105,13 +106,15 @@ pub fn paragraph_id_attributes(xml: &[u8]) -> BTreeSet<u32> {
         match reader.read_event() {
             Ok(Event::Start(element) | Event::Empty(element)) => {
                 for attribute in element.attributes().flatten() {
-                    if matches!(
+                    if !matches!(
                         attribute.key.local_name().as_ref(),
                         b"paraId" | b"paraIdParent"
-                    ) && let Some(id) = std::str::from_utf8(&attribute.value)
-                        .ok()
-                        .and_then(parse_paragraph_id)
-                    {
+                    ) {
+                        continue;
+                    }
+                    #[allow(deprecated)]
+                    let value = attribute.decode_and_unescape_value(reader.decoder());
+                    if let Some(id) = value.ok().as_deref().and_then(parse_paragraph_id) {
                         ids.insert(id);
                     }
                 }
@@ -129,9 +132,9 @@ pub struct ParagraphOccurrence {
     pub ordinal: u32,
     /// Byte range of the start tag.
     pub tag: Range<usize>,
-    /// The authored paragraph ID: `w14:paraId`, else `paraId`, else `w:paraId`.
+    /// The authored paragraph ID, unescaped: `w14:paraId`, else `paraId`, else `w:paraId`.
     pub para_id: Option<String>,
-    /// The `w:id` of the enclosing `w:comment`, `w:footnote` or `w:endnote`.
+    /// The unescaped `w:id` of the enclosing `w:comment`, `w:footnote` or `w:endnote`.
     pub item_id: Option<String>,
 }
 
@@ -229,6 +232,13 @@ fn tags(xml: &str) -> Option<Vec<Tag<'_>>> {
         });
     }
     Some(result)
+}
+
+/// An attribute value as the parser reads it; `None` when it does not unescape.
+fn unescaped(xml: &str, range: Range<usize>) -> Option<String> {
+    quick_xml::escape::unescape(&xml[range])
+        .ok()
+        .map(|value| value.into_owned())
 }
 
 fn attribute<'a>(tag: &Tag<'a>, name: &str) -> Option<Range<usize>> {
@@ -333,12 +343,12 @@ pub fn paragraph_occurrences(xml: &str) -> Option<Vec<ParagraphOccurrence>> {
             if tag.end {
                 items.pop();
             } else if !tag.empty {
-                items.push(attribute(tag, "w:id").map(|range| xml[range].to_owned()));
+                items.push(attribute(tag, "w:id").and_then(|range| unescaped(xml, range)));
             }
         }
         "w:p" if !tag.end => occurrences.push(ParagraphOccurrence {
             ordinal: occurrences.len() as u32,
-            para_id: scopes.para_id(tag).map(|range| xml[range].to_owned()),
+            para_id: scopes.para_id(tag).and_then(|range| unescaped(xml, range)),
             item_id: items.last().cloned().flatten(),
             tag: tag.range.clone(),
         }),
@@ -459,16 +469,18 @@ fn paragraph_id_edit(
 }
 
 /// Rewrites every `paraId` and `paraIdParent` attribute value, under any
-/// prefix, that numerically equals a key of `renames`, leaving every other
-/// byte in place. `None` when the XML cannot be scanned.
+/// prefix, whose unescaped value numerically equals a key of `renames`,
+/// leaving every other byte in place. `None` when the XML cannot be scanned.
 pub fn patch_paragraph_id_references(xml: &str, renames: &HashMap<u32, String>) -> Option<String> {
     let mut edits = Vec::new();
     for tag in tags(xml)? {
         for (key, range) in &tag.attributes {
             let local = key.rsplit(':').next().unwrap_or(key);
             if matches!(local, "paraId" | "paraIdParent")
-                && let Some(renamed) =
-                    parse_paragraph_id(&xml[range.clone()]).and_then(|id| renames.get(&id))
+                && let Some(renamed) = unescaped(xml, range.clone())
+                    .as_deref()
+                    .and_then(parse_paragraph_id)
+                    .and_then(|id| renames.get(&id))
             {
                 edits.push((range.clone(), renamed.clone()));
             }
@@ -557,6 +569,32 @@ mod tests {
                 .into_iter()
                 .collect::<Vec<_>>(),
             vec![10, 11, 12, 13]
+        );
+    }
+
+    #[test]
+    fn inventory_and_occurrences_read_escaped_ids_as_the_parser_does() {
+        let document = br#"<w:document><w:comment w:id="&#55;"><w:p w14:paraId="0000001&#x41;"/></w:comment><w:p paraId="0000001&#66;"/></w:document>"#;
+        let parts = vec![
+            ("word/document.xml".to_owned(), document.to_vec()),
+            (
+                "word/commentsExtended.xml".to_owned(),
+                br#"<w15:commentsEx><w15:commentEx w15:paraId="0000002&#x43;" w15:paraIdParent="0000002&amp;"/></w15:commentsEx>"#.to_vec(),
+            ),
+        ];
+        assert_eq!(
+            package_paragraph_ids(&parts)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![0x1A, 0x1B, 0x2C]
+        );
+        let occurrences = paragraph_occurrences(std::str::from_utf8(document).unwrap()).unwrap();
+        assert_eq!(
+            occurrences
+                .iter()
+                .map(|occurrence| (occurrence.para_id.as_deref(), occurrence.item_id.as_deref()))
+                .collect::<Vec<_>>(),
+            [(Some("0000001A"), Some("7")), (Some("0000001B"), None)]
         );
     }
 
@@ -673,15 +711,14 @@ mod tests {
 
     #[test]
     fn reference_patches_rename_every_matching_companion_attribute() {
-        let companions = r#"<w15:commentsEx><w15:commentEx w15:paraId="0000000a" w15:done="0"/><w15:commentEx w15:paraId="0000000C" w15:paraIdParent="0000000A"/></w15:commentsEx>"#;
+        let companions = r#"<w15:commentsEx><w15:commentEx w15:paraId="0000000a" w15:done="0"/><w15:commentEx w15:paraId="0000000C" w15:paraIdParent="0000000A"/><w15:commentEx w15:paraId="0000000D" w15:paraIdParent="0000000&#x41;"/></w15:commentsEx>"#;
         let renames = HashMap::from([(10, "00000099".to_owned())]);
         assert_eq!(
             patch_paragraph_id_references(companions, &renames).unwrap(),
-            companions.replacen("0000000a", "00000099", 1).replacen(
-                "\"0000000A\"",
-                "\"00000099\"",
-                1
-            )
+            companions
+                .replacen("0000000a", "00000099", 1)
+                .replacen("\"0000000A\"", "\"00000099\"", 1)
+                .replacen("0000000&#x41;", "00000099", 1)
         );
     }
 
