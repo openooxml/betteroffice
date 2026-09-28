@@ -42,7 +42,8 @@ avoidance. Line jumps draw in the arc and gap styles; other jump styles and
 last-routed (3) crossings stay unbridged, and a page past the crossing-detection
 budget renders with no line jumps at all. The native PNG backend,
 `betteroffice-vsdx-raster`, sets each run in the face registered for its family,
-falling back to Carlito Regular, without small caps, superscripts or subscripts,
+else a registered Arial or `sans-serif` face, else Carlito Regular, without
+small caps, superscripts or subscripts,
 and draws images other than JPEG and PNG as dashed placeholders counted in
 `skipped_images`.
 
