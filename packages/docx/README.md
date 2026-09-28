@@ -103,9 +103,8 @@ The host must close manual groups so later unrelated edits do not join them.
 ### Paragraph identities
 
 A session addresses paragraphs by session keys (`YrsLoc.paraId`); Word stores its
-own paragraph ID (`w14:paraId`) in the file. Session keys identify live paragraphs; a session
-anchor resolves on every replica of one collaborative session, and each seeding open
-(`openDocx`, `seedFromDocx`, `documentToYrs`) starts a new one unless given a fixed
+own paragraph ID (`w14:paraId`) in the file. A session anchor resolves on every
+replica of one collaborative session, and each seeding open (`openDocx`, `seedFromDocx`, `documentToYrs`) starts a new one unless given a fixed
 `generation`, as a deterministic shared seed needs. Source IDs are kept as authored, and every
 paragraph authored in the session gets a fresh, valid ID that avoids every ID the
 package already uses.
@@ -302,8 +301,7 @@ line break or unescaped HTML.
 
 A paged export attaches a page map to the structured content: the physical page,
 section and displayed page label showing each block and inline, and the body,
-header, footer or note occurrence it sits in. Ordinary exports return structured
-content.
+header, footer or note occurrence it sits in.
 
 ```ts
 import { exportDocxStructuredWithPages, renderDocxMarkdownWithPages } from '@betteroffice/docx';

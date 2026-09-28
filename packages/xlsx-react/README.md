@@ -168,7 +168,7 @@ command state whose callbacks run commands, and passing those props throws.
 
 ## AI agents
 
-`onReady`'s `handle` is the open `WorkbookHandle`. An agent stages edits with
+`onReady`'s `handle` is the `WorkbookHandle`. An agent stages edits with
 `propose()` instead of applying them; the editor paints per-cell ghosts and a
 review panel where the human accepts or rejects. The full proposal API lives in
 [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx).
