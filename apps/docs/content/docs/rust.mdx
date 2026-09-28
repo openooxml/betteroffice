@@ -248,9 +248,10 @@ cargo add betteroffice-pptx --features raster
 `render_slide` returns a display list and hit-test metadata. Register at least
 one font face before rendering. With the `raster` feature enabled, `render_png`
 produces PNG bytes and reads embedded images from the presentation. SVG pictures
-are drawn without text, embedded raster images, markers, filters, masks or
-patterns: a hyperlink or an embedded image leaves the rest of the picture drawn,
-and any other element outside the drawn set leaves the picture undrawn.
+draw their paths, basic shapes, gradients, clip paths, symbols, `use` references
+and hyperlinked content, and leave out their text and embedded raster images. A
+picture that uses markers, filters, masks, patterns, scripts or animation is
+skipped and counted in `skipped_images`.
 
 PPTX saves preserve untouched parts and patch edited slides to retain unsupported
 XML. The ZIP container is rebuilt, so the complete file may differ byte for byte.

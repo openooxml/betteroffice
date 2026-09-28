@@ -23,7 +23,8 @@ for API details and supported operations.
 | `betteroffice-vsdx-formula` | Bounded formula parsing |
 
 `betteroffice-vsdx-validate` skips the overlapping-shape and connector-crossing
-rules on pages with more than `MAX_PAIRWISE_SHAPES` (2,000) shapes.
+rules on pages where more than `MAX_PAIRWISE_SHAPES` (2,000) shapes have scene
+bounds.
 
 ## JavaScript and React
 
@@ -40,9 +41,10 @@ painted opaque and reported. Connectors route without Visio's obstacle
 avoidance. Line jumps draw in the arc and gap styles; other jump styles and
 last-routed (3) crossings stay unbridged, and a page past the crossing-detection
 budget renders with no line jumps at all. The native PNG backend,
-`betteroffice-vsdx-raster`, sets all text in Carlito Regular without run font
-families, small caps, superscripts or subscripts, and draws images other than
-JPEG and PNG as dashed placeholders counted in `skipped_images`.
+`betteroffice-vsdx-raster`, sets each run in the face registered for its family,
+falling back to Carlito Regular, without small caps, superscripts or subscripts,
+and draws images other than JPEG and PNG as dashed placeholders counted in
+`skipped_images`.
 
 ## Python
 
