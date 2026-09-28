@@ -289,9 +289,8 @@ kept, and a larger `maxBytes` never keeps fewer blocks. Of a story longer than
 four units per remaining byte beyond one million, only the leading paragraphs
 within that bound are read: those that fit are kept, then the export stops and says
 so. A comment body, field payload, shape or table cell past the bound is not read
-at all. Markdown keeps story separators, headings, lists, tables (entity-escaped
-HTML, nested where needed, where Markdown tables cannot carry merges or several
-blocks per cell), attributed insertions and deletions, and a
+at all. Markdown keeps story separators, headings, lists, tables (pipe tables, or
+entity-escaped HTML, nested where needed, for merged or multi-block cells), attributed insertions and deletions, and a
 `<!-- docx-export:N -->` marker per block, nested ones included, mapped to its
 anchor in `anchors`. Only http, https, mailto and internal-anchor targets are linked,
 judged after entity and percent decoding, and `&` in a target is written `&amp;`; document text, titles and alt text never keep a
@@ -344,8 +343,8 @@ continuation and Roman or letter formats). A header or footer part stays one exp
 on every page showing it; a note has an occurrence where its note area is, which
 may differ from its reference's page. Text slices are ranges in the export's own
 offsets, split where the node, paragraph, view or page changes; atoms (fields,
-controls, images, note marks, breaks) are sliced whole and marked `partial` with
-an `anchor-only` diagnostic when only part of their content is on the page. Table
+controls, images, note marks, breaks) are sliced whole, and one split across
+pages carries `partial` and an `anchor-only` diagnostic. Table
 fragments list their row window with `continuedFromPrevious`, `continuedOnNext`
 and `repeatedHeader`, and each cell paragraph has fragments of its own for the lines
 its cell shows (a line the cell cuts through is listed with a `clipped-content`

@@ -49,8 +49,8 @@ controls needs an `EditingDoc` session.
 
 ## Rendering
 
-The `raster` feature is opt-in; the raster backend is server-side only and the
-default build still targets `wasm32-unknown-unknown`.
+The opt-in `raster` feature adds native PNG rendering; the default build targets
+`wasm32-unknown-unknown`.
 
 ```toml
 betteroffice-docx = { version = "0.3", features = ["raster"] }

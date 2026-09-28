@@ -227,9 +227,9 @@ layout.write("slide-0.json")
 scene = layout.to_dict()
 ```
 
-Font selection tries the requested family's closest registered style, then the
-closest style in the first registered family. Known requested families supply
-their measured metrics.
+Font selection tries the requested family's style, then that family without
+italic, without bold and plain, then the closest style in the first registered
+family. Known requested families supply their measured metrics.
 
 `render_slide` returns the display list — the same drawing contract the browser
 editor paints, as JSON — for hosts that paint it themselves. `render_png`

@@ -94,8 +94,7 @@ they do not make hostile Yrs `Any` payloads safe.
 
 Cell formats live in a content-addressed `xlsx:cell-formats` map that per-sheet
 style maps reference by key, so concurrent style creation does not depend on
-local style-table indices. Undo and redo track local user-origin transactions
-only; remote updates and accepted agent proposals stay out of local history.
+local style-table indices. Undo and redo track local user-origin transactions.
 
 ## Charts
 

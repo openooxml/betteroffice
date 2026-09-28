@@ -268,8 +268,8 @@ const review = definePptxPlugin<State>({
   `focus: true`, and refuse with `stale-version`, `missing-target`,
   `layout-unavailable` or `unsupported` (during proposal review) rather than
   retarget. Ids are session-scoped.
-- **Geometry.** `context.geometry` is present while the canvas paints the
-  current version outside proposal review.
+- **Geometry.** `context.geometry` describes the painted current version, and is
+  `null` during proposal review.
   `layout.width` and `height` are the unzoomed slide in display-list pixels and
   `layout.zoom` the resolved scale, fit included. `geometry.toOverlayRect` takes
   a `slide-emu` (9,525 EMU per pixel) or `slide-px` rectangle and returns pixels

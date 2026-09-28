@@ -364,7 +364,6 @@ class Workbook:
 
         Committed edits, peer updates, undo, redo and a recalculation that changes values or
         what an export reports about results move it; the active sheet and proposals do not.
-        It never survives save and reopen.
         """
         return self._inner.version()
 

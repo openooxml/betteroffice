@@ -4,7 +4,7 @@ The native raster backend: paints one
 [betteroffice-docx-layout](https://crates.io/crates/betteroffice-docx-layout)
 display-list page to PNG through tiny-skia. It uses the same font store and
 fallback chains as layout, resolves embedded image relationship IDs from
-caller-provided bytes, and never enters the wasm build.
+caller-provided bytes, and builds for native targets.
 
 ```rust
 use docx_raster::{RenderResources, render_png};

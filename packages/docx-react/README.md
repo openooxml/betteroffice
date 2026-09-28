@@ -202,7 +202,7 @@ To place the toolbar outside the editor, capture its commands in state;
 import { useState } from 'react';
 import { DocxCommandProvider, type DocxCommandStore } from '@betteroffice/docx-react';
 
-function Editor() {
+function Editor({ share }: { share(): void }) {
   const [commands, setCommands] = useState<DocxCommandStore | null>(null);
   return <>
     <DocxCommandProvider commands={commands}>
