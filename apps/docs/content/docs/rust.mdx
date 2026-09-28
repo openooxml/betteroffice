@@ -57,6 +57,9 @@ match workbook.apply_edits(&request)? {
 }
 ```
 
+Batches do not insert or delete rows, columns or sheets, and refuse writes to
+merged-cell followers, array-formula cells and protected sheets.
+
 `Workbook::export_structured` and `export_markdown` read the committed workbook
 with its version as sparse cells, sheet metadata and diagnostics, or as bounded
 Markdown with anchor markers; `export_xlsx_structured`, `export_xlsx_markdown`
@@ -71,13 +74,25 @@ if let Ok(export) = workbook.export_structured(&XlsxExportOptions::default())? {
         println!("{:?} {:?} {}", cell.anchor, cell.formula, cell.display_text);
     }
 }
-let markdown = export_xlsx_markdown(&bytes, &XlsxExportOptions::default(), &XlsxMarkdownOptions::default())?;
+let markdown = export_xlsx_markdown(&xlsx_bytes, &XlsxExportOptions::default(), &XlsxMarkdownOptions::default())?;
 ```
 
 `Workbook::edit_cell_profiled` and `apply_ops_profiled` return the usual edit
 outcome with an `EditProfile`. Supply a monotonic clock reporting milliseconds
 to collect validate, apply, recalculation, and result-building durations. Normal
 edit methods do not read a profiling clock.
+
+Formula evaluation in `betteroffice-xlsx-calc` computes the date functions in the
+1900 date system; only `TEXT` formats dates in a workbook's 1904 system. `RAND` is
+not implemented, and the `RANDBETWEEN` seed is set on `EvalContext::rand_seed`, not
+through `CalculationOptions`. `ROW()` and `COLUMN()` without a reference return
+`#VALUE!` in a context built by `EvalContext::new`, which has no calling cell. A
+defined name under `ROW`, `COLUMN`, `ROWS` or `COLUMNS` counts as a direct
+reference, so a name bound to a computed reference keeps no dependency edge to
+the cells that reference reads, and an `OFFSET` with a computed target
+re-evaluates on every recalculation but may read a same-pass write to that target
+one recalculation late. `SEARCH` and exact-mode `VLOOKUP`, `HLOOKUP` and `MATCH`
+match `*` and `?` literally.
 
 Open and save DOCX and PPTX files through their format APIs:
 
@@ -192,7 +207,7 @@ let read = presentation.export_structured(&options)?.expect("usable options");
 for slide in &read.content.slides {
     println!("slide {}: {} shapes", slide.index, slide.shapes.len());
 }
-let markdown = betteroffice_pptx::export_pptx_markdown(&bytes, &options)?;
+let markdown = betteroffice_pptx::export_pptx_markdown(&pptx_bytes, &options)?;
 ```
 
 ## PowerPoint comments
@@ -233,7 +248,11 @@ cargo add betteroffice-pptx --features raster
 
 `render_slide` returns a display list and hit-test metadata. Register at least
 one font face before rendering. With the `raster` feature enabled, `render_png`
-produces PNG bytes and reads embedded images from the presentation.
+produces PNG bytes and reads embedded images from the presentation. SVG pictures
+draw their paths, basic shapes, gradients, clip paths, symbols, `use` references
+and hyperlinked content, and leave out their text and embedded raster images. A
+picture that uses markers, filters, masks, patterns, scripts or animation is
+skipped and counted in `skipped_images`.
 
 PPTX saves preserve untouched parts and patch edited slides to retain unsupported
 XML. The ZIP container is rebuilt, so the complete file may differ byte for byte.

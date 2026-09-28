@@ -68,7 +68,7 @@ export function createPluginGeometry(
       current() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,
     getPositionAtPoint(clientX, clientY) {
       if (!current()) return null;
-      const position = resolve(dom.getPositionAtPoint(clientX, clientY));
+      const position = resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
       return position ? { ...position, layoutId: layout.id } : null;
     },
   };

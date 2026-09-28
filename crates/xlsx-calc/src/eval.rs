@@ -17,6 +17,9 @@ use crate::reference::table_rect;
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
+/// bytes of text one formula may create or copy, and one recalculation.
+pub const MAX_EVALUATION_TEXT_BYTES: u64 = 64 << 20;
+pub const MAX_RECALCULATION_TEXT_BYTES: u64 = 512 << 20;
 pub const MAX_CELL_TEXT_CHARS: usize = 32_767;
 const MAX_DEFINED_NAME_DEPTH: usize = 256;
 /// names one formula may have bound at once across nested `LET`/`LAMBDA`.
@@ -28,27 +31,39 @@ const MAX_LAMBDA_DEPTH: usize = 64;
 #[cfg(test)]
 thread_local! {
     static DEFINED_NAME_EXPANSIONS: Cell<usize> = const { Cell::new(0) };
+    static LAMBDA_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) struct EvaluationBudget {
     remaining: Cell<u64>,
+    text: Cell<u64>,
 }
 
 impl EvaluationBudget {
     pub(crate) fn new(limit: u64) -> Self {
+        Self::with_text(limit, MAX_RECALCULATION_TEXT_BYTES)
+    }
+
+    pub(crate) fn with_text(cells: u64, bytes: u64) -> Self {
         Self {
-            remaining: Cell::new(limit),
+            remaining: Cell::new(cells),
+            text: Cell::new(bytes),
         }
     }
 
-    fn consume(&self, count: u64) -> bool {
-        let remaining = self.remaining.get();
-        if count > remaining {
-            return false;
-        }
-        self.remaining.set(remaining - count);
-        true
+    pub(crate) fn consume(&self, count: u64) -> bool {
+        take(&self.remaining, count)
     }
+}
+
+/// take `count` from what is left, or nothing when that is not enough.
+fn take(left: &Cell<u64>, count: u64) -> bool {
+    let remaining = left.get();
+    if count > remaining {
+        return false;
+    }
+    left.set(remaining - count);
+    true
 }
 
 /// evaluation environment: the cell source, the sheet unqualified refs resolve
@@ -68,6 +83,7 @@ pub struct EvalContext<'a> {
     pub date_system: DateSystem,
     random_state: Rc<Cell<Option<u64>>>,
     remaining_cell_visits: Rc<Cell<u64>>,
+    remaining_text_bytes: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
@@ -91,6 +107,7 @@ impl<'a> EvalContext<'a> {
             date_system: DateSystem::V1900,
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
+            remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
@@ -113,6 +130,7 @@ impl<'a> EvalContext<'a> {
             date_system: DateSystem::V1900,
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
+            remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
@@ -139,6 +157,7 @@ impl<'a> EvalContext<'a> {
             date_system: DateSystem::V1900,
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
+            remaining_text_bytes: Rc::new(Cell::new(MAX_EVALUATION_TEXT_BYTES)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
@@ -161,6 +180,7 @@ impl<'a> EvalContext<'a> {
             date_system: self.date_system,
             random_state: Rc::clone(&self.random_state),
             remaining_cell_visits: Rc::clone(&self.remaining_cell_visits),
+            remaining_text_bytes: Rc::clone(&self.remaining_text_bytes),
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
@@ -191,6 +211,32 @@ impl<'a> EvalContext<'a> {
         true
     }
 
+    /// charge `bytes` of text created or copied, as `consume_cells` charges
+    /// cells: text a formula builds is memory the cell budget does not see.
+    pub(crate) fn consume_text(&self, bytes: usize) -> bool {
+        let bytes = bytes as u64;
+        let remaining = self.remaining_text_bytes.get();
+        if bytes > remaining
+            || self
+                .shared_budget
+                .as_ref()
+                .is_some_and(|budget| !take(&budget.text, bytes))
+        {
+            self.record_budget_error();
+            return false;
+        }
+        self.remaining_text_bytes.set(remaining - bytes);
+        true
+    }
+
+    /// charge a value's text before it is kept.
+    pub(crate) fn keep_text(&self, value: &CellValue) -> bool {
+        match value {
+            CellValue::Text { value } => self.consume_text(value.len()),
+            _ => true,
+        }
+    }
+
     /// next draw in [0, 1) from this context's stream; advances it.
     pub(crate) fn next_random_unit(&self) -> f64 {
         let seed = self
@@ -208,6 +254,16 @@ impl<'a> EvalContext<'a> {
 
     pub(crate) fn exhausted(&self) -> bool {
         self.exhausted.get()
+    }
+
+    /// `#NUM!`, recorded as a budget error, once this evaluation has been
+    /// refused budget, so a loop stops instead of repeating refused work.
+    pub(crate) fn within_budget(&self) -> Result<(), ErrorValue> {
+        if self.exhausted.get() {
+            self.record_budget_error();
+            return Err(ErrorValue::Num);
+        }
+        Ok(())
     }
 
     pub(crate) fn budget_error_checkpoint(&self) -> u64 {
@@ -284,6 +340,8 @@ impl<'a> EvalContext<'a> {
         if depth >= MAX_LAMBDA_DEPTH {
             return false;
         }
+        #[cfg(test)]
+        LAMBDA_CALLS.with(|count| count.set(count.get() + 1));
         self.lambda_depth.set(depth + 1);
         true
     }
@@ -346,12 +404,31 @@ pub(crate) fn num(value: f64) -> CellValue {
     }
 }
 
-pub(crate) fn text(value: impl Into<String>) -> CellValue {
+/// text a formula built, charged to the text budget.
+pub(crate) fn text(ctx: &EvalContext<'_>, value: impl Into<String>) -> CellValue {
     let value = value.into();
     if value.chars().count() > MAX_CELL_TEXT_CHARS {
         err(ErrorValue::Value)
     } else {
+        kept(ctx, CellValue::Text { value })
+    }
+}
+
+/// text whose bytes were charged before it was built.
+pub(crate) fn text_unmetered(value: String) -> CellValue {
+    if value.chars().count() > MAX_CELL_TEXT_CHARS {
+        err(ErrorValue::Value)
+    } else {
         CellValue::Text { value }
+    }
+}
+
+/// `value` once its text is charged, or the budget error in its place.
+pub(crate) fn kept(ctx: &EvalContext<'_>, value: CellValue) -> CellValue {
+    if ctx.keep_text(&value) {
+        value
+    } else {
+        err(ErrorValue::Num)
     }
 }
 
@@ -363,7 +440,7 @@ pub(crate) fn boolean(value: bool) -> CellValue {
 pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
     match expr {
         Expr::Number(n) => num(*n),
-        Expr::Text(s) => CellValue::Text { value: s.clone() },
+        Expr::Text(s) => kept(ctx, CellValue::Text { value: s.clone() }),
         Expr::Bool(b) => CellValue::Bool { value: *b },
         Expr::Error(e) => err(*e),
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
@@ -388,13 +465,13 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             Err(error) => err(error),
         },
         Expr::Name { scope, name } => match bound(scope, name, ctx) {
-            Some(binding) => binding.scalar(),
+            Some(binding) => kept(ctx, binding.scalar()),
             None => evaluate_defined_name(scope, name, ctx),
         },
         Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),
         Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, ctx),
         Expr::Percent(inner) => apply_percent(&evaluate(inner, ctx)),
-        Expr::Literal(value) => normalize_provider_value(value.clone()),
+        Expr::Literal(value) => kept(ctx, normalize_provider_value(value.clone())),
         Expr::ArrayLiteral { .. } => crate::array::evaluate_array(expr, ctx).into_scalar(),
         Expr::FuncCall { func, name, args } => match func {
             Some(_)
@@ -529,7 +606,10 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
-    normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned()
+    kept(
+        ctx,
+        normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned(),
+    )
 }
 
 /// resolve a possibly sheet-qualified name to its sheet id (`None` -> the
@@ -573,12 +653,17 @@ fn eval_binary(op: BinaryOp, lhs: &Expr, rhs: &Expr, ctx: &EvalContext<'_>) -> C
     if let CellValue::Error { value } = rv {
         return err(value);
     }
-    apply_binary(op, &lv, &rv)
+    apply_binary(op, &lv, &rv, ctx)
 }
 
 /// the operator itself, over values already evaluated; errors propagate
 /// leftmost-first.
-pub(crate) fn apply_binary(op: BinaryOp, lv: &CellValue, rv: &CellValue) -> CellValue {
+pub(crate) fn apply_binary(
+    op: BinaryOp,
+    lv: &CellValue,
+    rv: &CellValue,
+    ctx: &EvalContext<'_>,
+) -> CellValue {
     if let CellValue::Error { value } = lv {
         return err(*value);
     }
@@ -606,7 +691,10 @@ pub(crate) fn apply_binary(op: BinaryOp, lv: &CellValue, rv: &CellValue) -> Cell
                 Ok(s) => s,
                 Err(e) => return err(e),
             };
-            text(a + &b)
+            if !ctx.consume_text(a.len() + b.len()) {
+                return err(ErrorValue::Num);
+            }
+            text_unmetered(a + &b)
         }
         _ => compare(op, lv, rv),
     }
@@ -857,7 +945,11 @@ impl Area {
         row: usize,
         col: usize,
     ) -> Result<CellValue, ErrorValue> {
-        self.get_ref(ctx, row, col).map(Cow::into_owned)
+        let value = self.get_ref(ctx, row, col)?;
+        if !ctx.keep_text(&value) {
+            return Err(ErrorValue::Num);
+        }
+        Ok(value.into_owned())
     }
 
     /// borrowed variant of `get` for callers that only inspect the value.
@@ -891,19 +983,33 @@ impl Area {
         // reading a whole-column or whole-row band for its values costs the
         // extent the sheet reaches; the blanks past it contribute nothing and
         // would spend the recalculation's budget on the address space
-        let area = bound_area(*self, ctx);
-        let count = area.cell_count().ok_or(ErrorValue::Num)?;
+        bound_area(*self, ctx).cells_ref(ctx)
+    }
+
+    /// every cell of exactly this rectangle, row-major, for an area already
+    /// cut to an extent it shares with others.
+    pub(crate) fn cells_ref<'p>(
+        &self,
+        ctx: &EvalContext<'p>,
+    ) -> Result<Vec<Cow<'p, CellValue>>, ErrorValue> {
+        let count = self.cell_count().ok_or(ErrorValue::Num)?;
         if !ctx.consume_cells(count) {
             return Err(ErrorValue::Num);
         }
         let capacity = usize::try_from(count).map_err(|_| ErrorValue::Num)?;
         let mut out = Vec::with_capacity(capacity);
-        for row in 0..area.rows {
-            for col in 0..area.cols {
-                out.push(area.get_unmetered_ref(ctx, row, col));
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                out.push(self.get_unmetered_ref(ctx, row, col));
             }
         }
         Ok(out)
+    }
+
+    /// the cells a read of `read` values left unread past the used extent,
+    /// every one of them blank.
+    pub(crate) fn unread(&self, read: u64) -> u64 {
+        self.cell_count().unwrap_or(0).saturating_sub(read)
     }
 
     pub(crate) fn cell_count(&self) -> Option<u64> {
@@ -1435,6 +1541,497 @@ mod tests {
                 CellValue::Error {
                     value: ErrorValue::Value
                 }
+            );
+        }
+    }
+
+    fn lambda_calls(formula: &str) -> (CellValue, usize) {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        LAMBDA_CALLS.with(|count| count.set(0));
+        let context = EvalContext::new(&workbook, SheetId(0));
+        let value = evaluate(&parse_formula(formula).unwrap(), &context);
+        (value, LAMBDA_CALLS.with(|count| count.get()))
+    }
+
+    /// a callback whose body the budget refuses stops at that refusal instead
+    /// of running the refused work once per remaining element.
+    #[test]
+    fn a_callback_stops_once_the_budget_is_spent() {
+        let (value, calls) = lambda_calls(
+            "SUM(_xlfn.MAKEARRAY(50,1,_xlfn.LAMBDA(_xlpm.rr,_xlpm.cc,SUM(_xlfn.SEQUENCE(1000000)))))",
+        );
+        assert_eq!(value, err(ErrorValue::Num));
+        assert!(calls <= 2, "{calls} calls");
+    }
+
+    /// each call of a callback pays for the body it evaluates, so a long body
+    /// cannot run once per cell of a large block on one cell's budget.
+    #[test]
+    fn a_long_callback_body_pays_for_every_call() {
+        let body = vec!["_xlpm.r"; 1000].join(",");
+        let (value, calls) = lambda_calls(&format!(
+            "SUM(_xlfn.MAKEARRAY(2000,1,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,SUM({body}))))"
+        ));
+        assert_eq!(value, err(ErrorValue::Num));
+        assert!(calls < 2000, "{calls} calls");
+    }
+
+    /// `XLOOKUP` evaluates its fallback once however many keys miss.
+    #[test]
+    fn xlookup_evaluates_its_fallback_once() {
+        let (value, calls) = lambda_calls(
+            "SUM(_xlfn.XLOOKUP(_xlfn.SEQUENCE(100),A1:A2,A1:A2,_xlfn.REDUCE(1,{1},_xlfn.LAMBDA(_xlpm.a,_xlpm.v,_xlpm.a))))",
+        );
+        assert_eq!(value, num(100.0));
+        assert_eq!(calls, 1);
+    }
+
+    /// work that outgrows the cells it reads is charged before it is done:
+    /// broadcasting, a block of keys against a block, a matrix product, and
+    /// an argument evaluated again for every lifted element.
+    #[test]
+    fn superlinear_array_work_is_charged() {
+        let ones = vec!["1"; 2000].join(",");
+        let lifted = vec!["FALSE,0"; 1000].join(",");
+        for formula in [
+            "SUMPRODUCT(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(1,2000))".to_string(),
+            format!("SUMPRODUCT(_xlfn.SEQUENCE(1000000),{ones})"),
+            "SUM(MATCH(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000,1,-1),0))".to_string(),
+            "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000,1,-1)))".to_string(),
+            "SUM(MMULT(_xlfn.SEQUENCE(200,500),_xlfn.SEQUENCE(500,200)))".to_string(),
+            format!("SUM(MATCH(_xlfn.SEQUENCE(1000),A1,SUM({ones})))"),
+            format!("SUM(_xlfn.IFS(_xlfn.SEQUENCE(1000)<0,0,{lifted},TRUE,1))"),
+            "ROWS(_xlfn.TEXTSPLIT(REPT(\"a\",30000),_xlfn.SEQUENCE(1000)&\"x\"))".to_string(),
+        ] {
+            for formula in [formula.clone(), format!("_xlfn.LET(_xlpm.s,0,{formula})")] {
+                let (value, _) = lambda_calls(&formula);
+                assert_eq!(value, err(ErrorValue::Num), "{formula}");
+            }
+        }
+    }
+
+    /// a block of keys pays for the values its searches visit, so keys an
+    /// exact match finds at once cost one read each rather than a full scan.
+    #[test]
+    fn a_block_of_keys_pays_for_its_searches() {
+        for formula in [
+            "SUM(MATCH(_xlfn.SEQUENCE(2000,1,1,0),_xlfn.SEQUENCE(2000),0))",
+            "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(2000,1,1,0),_xlfn.SEQUENCE(2000)))",
+            "SUM(_xlfn.XLOOKUP(_xlfn.SEQUENCE(2000,1,1,0),_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000)))",
+        ] {
+            for formula in [
+                formula.to_string(),
+                format!("_xlfn.LET(_xlpm.s,0,{formula})"),
+            ] {
+                assert_eq!(lambda_calls(&formula).0, num(2000.0), "{formula}");
+            }
+        }
+    }
+
+    fn with_text_budget(workbook: &Workbook, formula: &str, bytes: u64) -> (CellValue, bool) {
+        let budget = Rc::new(EvaluationBudget::with_text(
+            MAX_RECALCULATION_CELL_VISITS,
+            bytes,
+        ));
+        let context = EvalContext::with_budget(workbook, SheetId(0), budget);
+        let value = evaluate(&parse_formula(formula).unwrap(), &context);
+        (value, context.has_unhandled_budget_error())
+    }
+
+    /// text an array builds or copies counts against a byte budget as it is
+    /// kept: generated strings, broadcasts, binding reads, reference reads
+    /// and concatenations all stop at the limit, where their element counts
+    /// alone are cheap.
+    #[test]
+    fn text_arrays_stay_within_the_text_budget() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "x".repeat(32_767),
+                },
+                ..Cell::default()
+            },
+        );
+        workbook.sheets.push(sheet);
+        for formula in [
+            "SUM(LEN(REPT(\"x\",_xlfn.SEQUENCE(1000,1,32767,0))))",
+            "ROWS(IF(_xlfn.SEQUENCE(1000)>0,REPT(\"x\",32767)))",
+            "SUM(LEN(_xlfn.SEQUENCE(1000)&REPT(\"x\",30000)))",
+            "ROWS(_xlfn.LET(_xlpm.x,REPT(\"x\",32767),_xlfn.MAKEARRAY(1000,1,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.x))))",
+            "ROWS(IF(_xlfn.SEQUENCE(1000)>0,A1))",
+            "ROWS(_xlfn.VSTACK(A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1,A1))",
+        ] {
+            for formula in [
+                formula.to_string(),
+                format!("_xlfn.LET(_xlpm.s,0,{formula})"),
+            ] {
+                let (value, refused) = with_text_budget(&workbook, &formula, 1 << 20);
+                assert_eq!(value, err(ErrorValue::Num), "{formula}");
+                assert!(refused, "{formula}");
+            }
+        }
+        assert_eq!(
+            with_text_budget(&workbook, "ROWS(IF(_xlfn.SEQUENCE(100)>0,\"ab\"))", 1 << 20),
+            (num(100.0), false)
+        );
+    }
+
+    /// a selection charges each cell's text before copying it, so repeating
+    /// one long string half a million times stops at the byte budget after a
+    /// few dozen copies.
+    #[test]
+    fn selections_pay_for_each_copy_before_making_it() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        for formula in [
+            "ROWS(_xlfn.CHOOSECOLS(REPT(\"x\",32767),_xlfn.SEQUENCE(1,500000,1,0)))",
+            "ROWS(_xlfn.CHOOSEROWS(REPT(\"x\",32767),_xlfn.SEQUENCE(500000,1,1,0)))",
+        ] {
+            crate::array::COPIES.with(|copies| copies.set(0));
+            let (value, refused) = with_text_budget(&workbook, formula, 1 << 20);
+            assert_eq!((value, refused), (err(ErrorValue::Num), true), "{formula}");
+            let copies = crate::array::COPIES.with(|copies| copies.get());
+            assert!(copies <= (1 << 20) / 32767, "{formula}: {copies} copies");
+        }
+    }
+
+    /// the default limits stop a 16 GB `REPT` block after a few
+    /// megabytes, and a spill charges the copies it lays out.
+    #[test]
+    fn a_text_bomb_stops_at_the_default_limits() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        let context = EvalContext::new(&workbook, SheetId(0));
+        let formula = "SUM(REPT(\"x\",_xlfn.SEQUENCE(500000,1,32767,0)))";
+        assert_eq!(
+            evaluate(&parse_formula(formula).unwrap(), &context),
+            err(ErrorValue::Num)
+        );
+        assert!(context.has_unhandled_budget_error());
+
+        let budget = Rc::new(EvaluationBudget::with_text(
+            MAX_RECALCULATION_CELL_VISITS,
+            1 << 20,
+        ));
+        let context = EvalContext::with_budget(&workbook, SheetId(0), budget);
+        let range = xlsx_model::CellRange::parse_a1("A1:A1000").unwrap();
+        let spill = crate::array::evaluate_spill(
+            &parse_formula("REPT(\"x\",32767)").unwrap(),
+            &context,
+            range.start,
+            Some(range),
+        );
+        assert!(
+            spill
+                .values
+                .iter()
+                .all(|value| *value == err(ErrorValue::Num))
+        );
+        assert!(context.has_unhandled_budget_error());
+    }
+
+    /// a formula whose text outgrows the recalculation's byte budget keeps its
+    /// cached value, as a formula over the cell budget does.
+    #[test]
+    fn a_text_bomb_keeps_the_cached_values() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        for col in 0..12 {
+            sheet.set_cell(
+                CellRef::new(0, col),
+                Cell {
+                    value: CellValue::Number { value: 7.0 },
+                    formula: Some("SUM(LEN(REPT(\"x\",_xlfn.SEQUENCE(500000,1,32767,0))))".into()),
+                    style: None,
+                },
+            );
+        }
+        workbook.sheets.push(sheet);
+        let (_, result) = crate::rebuild_and_recalc_all(&mut workbook, None);
+        assert_eq!(result.limited_cells.len(), 12);
+        for col in 0..12 {
+            assert_eq!(
+                workbook.value(SheetId(0), CellRef::new(0, col)),
+                CellValue::Number { value: 7.0 }
+            );
+        }
+    }
+
+    /// the value, the stepped work and the cells spent evaluating `formula`
+    /// on a budget of `cells`.
+    fn stepped(formula: &str, cells: u64) -> (CellValue, u64, u64) {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        crate::array::STEPS.with(|steps| steps.set(0));
+        let budget = Rc::new(EvaluationBudget::new(cells));
+        let context = EvalContext::with_budget(&workbook, SheetId(0), Rc::clone(&budget));
+        let value = evaluate(&parse_formula(formula).unwrap(), &context);
+        let steps = crate::array::STEPS.with(|steps| steps.get());
+        (value, steps, cells - budget.remaining.get())
+    }
+
+    /// a charge the budget refuses stops its work before any of it runs: a
+    /// lifted call, a broadcast product, and a sort's output or comparisons.
+    #[test]
+    fn refused_work_never_starts() {
+        let lifted = vec!["FALSE,0"; 1000].join(",");
+        for formula in [
+            format!("SUM(_xlfn.IFS(_xlfn.SEQUENCE(1000)<0,0,{lifted},TRUE,1))"),
+            "SUMPRODUCT(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(1,2000))".to_string(),
+        ] {
+            let (value, steps, _) = stepped(&formula, MAX_RECALCULATION_CELL_VISITS);
+            assert_eq!((value, steps), (err(ErrorValue::Num), 0), "{formula}");
+        }
+        let (_, _, reading) = stepped(
+            "ROWS(_xlfn.SEQUENCE(4096,1,4096,-1))",
+            MAX_RECALCULATION_CELL_VISITS,
+        );
+        let comparisons = 4096 * 13 / 16;
+        for (formula, keys) in [
+            ("ROWS(_xlfn._xlws.SORT(_xlfn.SEQUENCE(4096,1,4096,-1)))", 0),
+            (
+                "ROWS(_xlfn.SORTBY(_xlfn.SEQUENCE(4096,1,4096,-1),_xlfn.SEQUENCE(4096)))",
+                4096,
+            ),
+        ] {
+            let output = reading + keys + 4096;
+            let (value, steps, spent) = stepped(formula, MAX_RECALCULATION_CELL_VISITS);
+            assert_eq!(
+                (value, spent),
+                (num(4096.0), output + comparisons),
+                "{formula}"
+            );
+            assert!(steps > 0, "{formula}");
+            for cells in [output - 1, output + comparisons - 1] {
+                let (value, steps, _) = stepped(formula, cells);
+                assert_eq!(
+                    (value, steps),
+                    (err(ErrorValue::Num), 0),
+                    "{formula} on {cells}"
+                );
+            }
+        }
+    }
+
+    /// a lookup pays for the values each key's search visits as it visits
+    /// them: keys found at once cost one visit each, from either end, and a
+    /// block of misses stops once its visits outrun the formula's budget.
+    #[test]
+    fn lookups_visit_only_what_they_pay_for() {
+        for (formula, total) in [
+            (
+                "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(100000,1,1,0),_xlfn.SEQUENCE(500000)))",
+                100_000.0,
+            ),
+            (
+                "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(100000,1,500000,0),_xlfn.SEQUENCE(500000),0,-1))",
+                5e10,
+            ),
+            (
+                "SUM(MATCH(_xlfn.SEQUENCE(100000,1,1,0),_xlfn.SEQUENCE(500000),0))",
+                100_000.0,
+            ),
+            (
+                "SUM(_xlfn.XLOOKUP(_xlfn.SEQUENCE(100000,1,1,0),_xlfn.SEQUENCE(300000),_xlfn.SEQUENCE(300000)))",
+                100_000.0,
+            ),
+        ] {
+            let (value, steps, _) = stepped(formula, MAX_RECALCULATION_CELL_VISITS);
+            assert_eq!((value, steps), (num(total), 100_000), "{formula}");
+        }
+        let (value, steps, _) = stepped(
+            "SUM(MATCH(_xlfn.SEQUENCE(2000),_xlfn.SEQUENCE(2000,1,-1),0))",
+            MAX_RECALCULATION_CELL_VISITS,
+        );
+        assert_eq!(value, err(ErrorValue::Num));
+        assert!(steps <= MAX_EVALUATION_CELL_VISITS + 2000, "{steps}");
+    }
+
+    /// numeric spills share the recalculation's budget however many anchors
+    /// a workbook holds, and a spill the budget refuses writes only its anchor.
+    #[test]
+    fn numeric_spills_share_the_recalculation_budget() {
+        let workbook = Workbook::default();
+        let budget = Rc::new(EvaluationBudget::new(1_000_000));
+        let formula = parse_formula("1").unwrap();
+        let mut written = Vec::new();
+        for col in 0..10 {
+            let range =
+                xlsx_model::CellRange::new(CellRef::new(0, col), CellRef::new(262_143, col));
+            let context = EvalContext::with_budget(&workbook, SheetId(0), Rc::clone(&budget));
+            let spill = crate::array::evaluate_spill(&formula, &context, range.start, Some(range));
+            if spill.values == [err(ErrorValue::Num)] {
+                assert_eq!(
+                    spill.range,
+                    xlsx_model::CellRange::new(range.start, range.start)
+                );
+            } else {
+                assert!(spill.values.iter().all(|value| *value == num(1.0)));
+                written.push(spill.values.len());
+            }
+        }
+        assert_eq!(written, [262_144; 3]);
+    }
+
+    /// an array builtin that falls back to its scalar form evaluates its
+    /// arguments again, so nesting one in another's arguments doubles the work
+    /// per level; the budget still bounds it.
+    #[test]
+    fn nested_scalar_fallbacks_stay_within_the_budget() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        for wrapper in ["SUM({})", "ABS(SUM({}))", "COUNTA({})", "LEN(CONCAT({}))"] {
+            let mut formula = "_xlfn.LET(_xlpm.x,1,_xlpm.x)".to_string();
+            for _ in 0..40 {
+                formula = wrapper.replace("{}", &formula);
+            }
+            let budget = Rc::new(EvaluationBudget::new(10_000));
+            let context = EvalContext::with_budget(&workbook, SheetId(0), budget);
+            evaluate(&parse_formula(&formula).unwrap(), &context);
+            assert!(context.has_unhandled_budget_error(), "{wrapper}");
+        }
+    }
+
+    /// legitimate large formulas over a stale cache recalculate in full, on
+    /// open and again after an input they read or look up changes.
+    #[test]
+    fn large_formulas_recalculate_over_a_populated_cache() {
+        let mut data = Sheet::new("Data");
+        for row in 0..100_000 {
+            data.set_cell(CellRef::new(row, 0), number(f64::from(row + 1)));
+        }
+        let formulas = [
+            ("B1", "SUMPRODUCT(A1:A100000,A1:A100000)"),
+            ("B2", "COUNTIF(A:A,\">50000\")"),
+            ("B3", "COUNTBLANK(A:A)"),
+            (
+                "B4",
+                "SUM(MATCH(_xlfn.SEQUENCE(2000,1,1,0),_xlfn.SEQUENCE(2000),0))",
+            ),
+            (
+                "B5",
+                "SUM(_xlfn.MAKEARRAY(200000,1,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.r)))",
+            ),
+            ("B6", "_xlfn.XLOOKUP(99999,A:A,A:A)"),
+            ("B7", "SUMPRODUCT(--(A1:A100000>99990))"),
+            ("B8", "SUMPRODUCT(A:A,Other!A:A)"),
+            ("B9", "MATCH(100001,A1:A100000,0)"),
+            ("B10", "_xlfn.XLOOKUP(100001,A:A,A:A,\"none\")"),
+            ("B11", "VLOOKUP(100001,A:A,1,FALSE)"),
+            (
+                "B12",
+                "SUM(_xlfn.XMATCH(_xlfn.SEQUENCE(50,1,100001,0),A1:A2000))",
+            ),
+        ];
+        for (address, formula) in formulas {
+            data.set_cell(
+                CellRef::parse_a1(address).unwrap(),
+                Cell {
+                    value: CellValue::Number { value: -1.0 },
+                    formula: Some(formula.into()),
+                    style: None,
+                },
+            );
+        }
+        let mut other = Sheet::new("Other");
+        for row in 0..10 {
+            other.set_cell(CellRef::new(row, 0), number(1.0));
+        }
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(data);
+        workbook.sheets.push(other);
+        let values = |workbook: &Workbook| {
+            formulas
+                .iter()
+                .map(|(address, _)| workbook.value(SheetId(0), CellRef::parse_a1(address).unwrap()))
+                .collect::<Vec<_>>()
+        };
+
+        let (mut graph, result) = crate::rebuild_and_recalc_all(&mut workbook, None);
+        assert!(
+            result.limited_cells.is_empty(),
+            "{:?}",
+            result.limited_cells
+        );
+        let missing = err(ErrorValue::NA);
+        let opened = [
+            num(333_338_333_350_000.0),
+            num(50_000.0),
+            num(948_576.0),
+            num(2_000.0),
+            num(20_000_100_000.0),
+            num(99_999.0),
+            num(10.0),
+            num(55.0),
+            missing.clone(),
+            CellValue::Text {
+                value: "none".into(),
+            },
+            missing.clone(),
+            missing,
+        ];
+        assert_eq!(values(&workbook), opened.to_vec());
+
+        let first = CellRef::new(0, 0);
+        workbook
+            .sheet_mut(SheetId(0))
+            .unwrap()
+            .set_cell(first, number(100_001.0));
+        let result = crate::recalc_after(&mut workbook, &mut graph, &[(SheetId(0), first)], None);
+        assert!(
+            result.limited_cells.is_empty(),
+            "{:?}",
+            result.limited_cells
+        );
+        let edited = [
+            333_348_333_550_000.0,
+            50_001.0,
+            948_576.0,
+            2_000.0,
+            20_000_100_000.0,
+            99_999.0,
+            11.0,
+            100_055.0,
+            1.0,
+            100_001.0,
+            100_001.0,
+            50.0,
+        ];
+        assert_eq!(values(&workbook), edited.map(num).to_vec());
+    }
+
+    /// every cell of a workbook built to exhaust the recalculation keeps its
+    /// cached value, and the callbacks it runs stay bounded by the budget.
+    #[test]
+    fn a_hostile_workbook_stays_within_the_recalculation_budget() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("Data");
+        for col in 0..12 {
+            sheet.set_cell(
+                CellRef::new(0, col),
+                Cell {
+                    value: CellValue::Number { value: 7.0 },
+                    formula: Some(
+                        "SUM(_xlfn.MAKEARRAY(1000000,1,_xlfn.LAMBDA(_xlpm.rr,_xlpm.cc,SUM(_xlfn.SEQUENCE(1000000)))))"
+                            .into(),
+                    ),
+                    style: None,
+                },
+            );
+        }
+        workbook.sheets.push(sheet);
+        LAMBDA_CALLS.with(|count| count.set(0));
+        let (_, result) = crate::rebuild_and_recalc_all(&mut workbook, None);
+        assert!(LAMBDA_CALLS.with(|count| count.get()) <= 12);
+        assert_eq!(result.limited_cells.len(), 12);
+        for col in 0..12 {
+            assert_eq!(
+                workbook.value(SheetId(0), CellRef::new(0, col)),
+                CellValue::Number { value: 7.0 }
             );
         }
     }

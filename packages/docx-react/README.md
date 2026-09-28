@@ -92,9 +92,7 @@ configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
 ```
 
 For offline assets, import `* as fonts` from `@betteroffice/fonts` and call
-`configureDefaultFonts({ fonts })`. Without a provider, pagination uses
-approximate fallback metrics. CJK coverage fonts are substitutes and can differ
-from Word's fonts; see [font configuration](../fonts/README.md).
+`configureDefaultFonts({ fonts })`; see [font configuration](../fonts/README.md).
 
 ## Collaboration
 
@@ -133,8 +131,8 @@ Overlapping UI save requests share one workflow. Errors reach `onError`.
 `DocxEditorRef.flushPendingInput()` and `PagedEditorRef.flushPendingInput()` wait
 until input accepted before the call and its selection are authoritative in Yrs.
 They wait for active IME composition to end, and reject on input failure, unmount,
-or document replacement. A failed input queue remains failed until a new session
-is loaded. The promise does not wait for browser painting.
+or document replacement. An input failure rejects only the flushes, saves and
+commands that waited for that input; later ones proceed.
 
 ```tsx
 <DocxEditor
@@ -161,9 +159,7 @@ for the persisted anchors of the saved paragraphs.
 ## Compose the toolbar
 
 Every built-in control runs through one command store, `ref.commands`, which
-hosts can use for their own chrome. This command and toolbar composition API is
-experimental and may change in minor releases. Pass `toolbar` to replace the
-default chrome with an arrangement of public parts; the children of
+hosts can use for their own chrome. Pass `toolbar` to replace the default chrome with an arrangement of public parts; the children of
 `EditorToolbar.Toolbar` are the complete row, in your order:
 
 ```tsx
@@ -199,16 +195,22 @@ function CompactToolbar({ onShare }: { onShare(): void }) {
 `showToolbar={false}` hides either. The default chrome is hidden for `readOnly`;
 chrome you supply still renders, with its writing controls disabled.
 
-To place the toolbar outside the editor, capture the ref in state and provide it.
-Until the editor attaches, `commands={null}` reports every command unavailable:
+To place the toolbar outside the editor, capture its commands in state;
+`commands={null}` reports every command unavailable:
 
 ```tsx
-const [commands, setCommands] = useState<DocxCommandStore | null>(null);
+import { useState } from 'react';
+import { DocxCommandProvider, DocxEditor, type DocxCommandStore } from '@betteroffice/docx-react';
 
-<DocxCommandProvider commands={commands}>
-  <CompactToolbar onShare={share} />
-</DocxCommandProvider>
-<DocxEditor ref={(editor) => setCommands(editor?.commands ?? null)} toolbar={null} />
+function Editor({ share }: { share(): void }) {
+  const [commands, setCommands] = useState<DocxCommandStore | null>(null);
+  return <>
+    <DocxCommandProvider commands={commands}>
+      <CompactToolbar onShare={share} />
+    </DocxCommandProvider>
+    <DocxEditor ref={(editor) => setCommands(editor?.commands ?? null)} toolbar={null} />
+  </>;
+}
 ```
 
 Outside the editor, `EditorToolbar` supplies its own styling root and the
@@ -224,9 +226,9 @@ editor's locale, and its keyboard shortcuts reach that editor only.
   a disabled command always carries `disabledReason: { code, message }`, and
   controls expose that message as their accessible description. Marks report
   `'mixed'` for mixed selections.
-- **Results.** `execute(id, args)` resolves to `executed`, `noop`, `opened` (a
-  dialog or picker), `requested` (handed to the host, such as a controlled mode
-  or `onSaveRequest`), or `{ ok: false, failure }`. Commands run after input
+- **Results.** `execute(id, args)` resolves to `{ ok: true, status }` (`executed`,
+  `noop`, `opened` for a dialog or picker, `requested` when handed to the host)
+  or `{ ok: false, failure }`. Commands run after input
   accepted before the call and check availability again first, so a stale
   enabled state never authorizes a change. A dialog or picker a command opens
   applies to the document and selection it opened with, or fails with
@@ -234,9 +236,9 @@ editor's locale, and its keyboard shortcuts reach that editor only.
   rendered.
 - **Modes.** `readOnly` and viewing mode refuse writes (`read-only`,
   `viewing-mode`); navigation, find, zoom, print and save remain available.
-  Suggesting mode keeps direct character formatting untracked, tracks paragraph
-  styles and row edits, and refuses operations it cannot record as suggestions
-  (`suggesting-unsupported`), such as inserting tables or breaks.
+  Suggesting mode tracks paragraph styles and row edits, keeps direct character
+  formatting untracked, and refuses structural commands such as table and break
+  insertion with `suggesting-unsupported`.
 - **Focus and overflow.** Pointer clicks keep the document focused; keyboard
   activation keeps focus in the toolbar, and dialogs take focus. At narrow
   widths trailing groups move into a More menu with arrow, Home/End, typeahead
@@ -290,8 +292,6 @@ plain- and rich-text controls with `setContentControlText` steps through
 `applyEdits`, which refreshes the control's story and the story holding it.
 
 ## Host plugins
-
-The plugin API is experimental and may change in minor releases.
 
 Host-owned tools (review aids, templates, checks) install through the `plugins`
 prop. A plugin contributes a panel, an overlay, sidebar cards, and commands, and
@@ -355,11 +355,10 @@ const review = defineDocxPlugin<State>({
   and `editBatches`, and `history: 'none'` also `untrackedHistory`. Grants,
   editor mode and document policy are checked again right before each change,
   so a revoked grant, viewing mode, `readOnly` or a replaced document refuses
-  even through a client obtained earlier. Mutating built-in commands have no
-  authoritative lock policy yet and refuse plugins with `unsupported-policy`;
-  plugins change documents through edit batches, whose Rust policy refuses
-  locked content. Suggesting mode follows each operation's own rules; a batch
-  step needs `suggest` there.
+  even through a client obtained earlier. Mutating built-in commands refuse
+  plugins with `unsupported-policy`; plugins change documents through edit
+  batches, whose Rust policy refuses locked content. Suggesting mode follows
+  each operation's own rules; a batch step needs `suggest` there.
 - **Contributed commands** register as `plugin:<pluginId>/<id>` on
   `ref.commands`. They always run with their own plugin's clients, even when the
   host's toolbar, shortcuts or `ref.commands` invoke them, and outside the input
@@ -388,8 +387,7 @@ const review = defineDocxPlugin<State>({
   `geometry.getPositionAtPoint(clientX, clientY)` returns the text under a client
   point with the layout's `layoutId` and `version` and an edit batch `target`, or
   null likewise, while input is pending, and until the pages show that layout.
-  `geometry.dom` is
-  experimental and may be replaced by a data-only facade. The layer ignores the
+  The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit
   target.
@@ -448,11 +446,8 @@ the document is replaced meanwhile.
 
 ## Framework notes
 
-Import `@betteroffice/docx-react/styles.css` once (in a bundler entry or, under
-Next.js, at the page/layout level — CSS imported inside a `next/dynamic`
-component does not attach in production builds). The editor is browser-only
-(canvas, wasm, workers); under Next.js load it with `next/dynamic` and
-`ssr: false`.
+Import `@betteroffice/docx-react/styles.css` once at the entry/page/layout level.
+In Next.js, load the editor with `next/dynamic` and `ssr: false`.
 
 [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
 [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx-react/CHANGELOG.md) · Apache-2.0.

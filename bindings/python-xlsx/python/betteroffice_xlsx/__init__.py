@@ -102,9 +102,8 @@ SheetKey = Union[int, str]
 class Sheet:
     """One sheet, bound to its workbook.
 
-    Assigning writes what a user would type, so a leading ``=`` makes a formula
-    and recalculates its dependents. Indexing reads the current value, which for
-    an untouched cell is whatever the file cached.
+    Assignments use format-aware input parsing and recalculate dependents;
+    indexing reads the current value.
     """
 
     __slots__ = ("_index", "_workbook")
@@ -365,7 +364,6 @@ class Workbook:
 
         Committed edits, peer updates, undo, redo and a recalculation that changes values or
         what an export reports about results move it; the active sheet and proposals do not.
-        It never survives save and reopen.
         """
         return self._inner.version()
 

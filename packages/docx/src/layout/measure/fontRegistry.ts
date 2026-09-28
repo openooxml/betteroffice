@@ -65,12 +65,14 @@ export interface BundledFontProvider {
    * Optional so mock/partial providers can omit it; when absent (or returning
    * undefined) an unmapped family still yields an empty chain and the caller
    * browser-falls-back that run — the pre-policy behavior. Same lazy loader
-   * contract as {@link BundledFontProvider.resolve}.
+   * contract as {@link BundledFontProvider.resolve}. This registry passes
+   * `office: 'word'` so the pick follows Word's substitution.
    */
   resolveLastResort?(
     family: string,
     bold: boolean,
-    italic: boolean
+    italic: boolean,
+    office?: 'word' | 'powerpoint'
   ): (() => Promise<ArrayBuffer>) | undefined;
 }
 
@@ -375,7 +377,7 @@ export class TextMeasureFontRegistry {
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
     let lastResort: (() => Promise<ArrayBuffer>) | undefined;
     try {
-      lastResort = bundled?.resolveLastResort?.(family, bold, italic);
+      lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
     } catch (error) {
       retryable = true;
       console.warn(

@@ -11,6 +11,7 @@ import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils'
 import {
   captureSessionSave,
   writeSessionSave,
+  yrsToDocument,
   type DocxSessionSave,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -21,6 +22,8 @@ import {
   type ImageResolver,
 } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
+import { flushedSession } from '../editorBatches';
+import { dirtyProjectionStory } from './useYrsCoreSession';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
@@ -101,6 +104,28 @@ async function writeEditorDocument(
 }
 
 /**
+ * `document` with the comments a save writes, the stories they are anchored
+ * in projected again with them: the editor projects its host's comments.
+ */
+function withSavedComments(document: Document, session: YrsSession, comments: Comment[]): Document {
+  const base: Document = {
+    ...document,
+    package: { ...document.package, document: { ...document.package.document, comments } },
+  };
+  const storyIds = new Set<string>();
+  for (const comment of comments) {
+    try {
+      for (const anchor of session.resolveComment(String(comment.id))) {
+        storyIds.add(dirtyProjectionStory(anchor.story));
+      }
+    } catch {
+      // Replies and comments whose anchors are gone hold no range.
+    }
+  }
+  return storyIds.size > 0 ? yrsToDocument(session, base, { storyIds }) : base;
+}
+
+/**
  * File-IO surface of the editor: save (to buffer), download, print, open
  * a DOCX from disk, insert an image from disk. The two file <input> refs
  * live here too because they're hidden inputs whose `click()` is wrapped
@@ -145,22 +170,12 @@ export function useFileIO({
   const handleSave = useCallback(
     async (): Promise<ArrayBuffer | null> => {
       try {
-        const editor = pagedEditorRef.current;
-        if (!editor) return null;
-        const session = editor.getYrsSession();
-        await editor.flushPendingInput();
-        const assertCurrent = () => {
-          if (editor !== pagedEditorRef.current || session !== editor.getYrsSession()) {
-            throw new Error('The document changed while saving');
-          }
-        };
-        assertCurrent();
-        const document = editor.getDocument();
-        if (!document) return null;
-        const capture = session && document.originalBuffer ? captureSessionSave(session) : null;
-
-        // Sync React comments state (including new replies) back to the document model
-        document.package.document.comments = comments;
+        if (!pagedEditorRef.current) return null;
+        const { editor, session } = await flushedSession(pagedEditorRef);
+        const projected = editor.getDocument();
+        if (!projected) return null;
+        const capture = projected.originalBuffer ? captureSessionSave(session) : null;
+        const document = withSavedComments(projected, session, comments);
 
         // Inject commentRangeStart/End for reply comments that share the parent's range.
         // Pages/Word require every comment (including replies) to have range markers in document.xml.
@@ -169,8 +184,10 @@ export function useFileIO({
         injectTCReplyRangeMarkers(document.package.document.content, comments);
 
         const buffer = await writeEditorDocument(document, session, capture);
-        assertCurrent();
-        document.originalBuffer = buffer;
+        if (pagedEditorRef.current?.getYrsSession() !== session) {
+          throw new Error('The document changed while saving');
+        }
+        projected.originalBuffer = buffer;
 
         onSave?.(buffer);
         return buffer;
@@ -209,10 +226,9 @@ export function useFileIO({
   const handleDownloadDocument = useCallback((): Promise<DocxSaveOutcome> => {
     if (saveRequestRef.current) return saveRequestRef.current;
     const pending = Promise.resolve().then(async (): Promise<DocxSaveOutcome> => {
-      const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
+      const session = pagedEditorRef.current?.getYrsSession();
       if (onSaveRequest && (await onSaveRequest()) !== true) return 'requested';
-      if (editor !== pagedEditorRef.current || session !== editor?.getYrsSession()) {
+      if (session !== pagedEditorRef.current?.getYrsSession()) {
         throw new Error('The document changed during the save request');
       }
       const buffer = await handleSave();

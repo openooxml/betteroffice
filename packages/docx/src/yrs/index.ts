@@ -713,6 +713,8 @@ export interface YrsTableReceipt {
   columns: number;
   createdStoryIds: string[];
   deletedStoryIds: string[];
+  /** Existing stories whose content changed: the table's story, plus a merge's surviving cell. */
+  changedStoryIds: string[];
   newParaIds: string[];
   deletedTable: boolean;
   revisionIds: string[];
@@ -1380,6 +1382,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   const markReceiptStories = (receipt: YrsTableReceipt): YrsTableReceipt => {
     markDirty(receipt.createdStoryIds);
     markDirty(receipt.deletedStoryIds);
+    markDirty(receipt.changedStoryIds);
     return receipt;
   };
 

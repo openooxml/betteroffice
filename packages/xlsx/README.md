@@ -32,9 +32,8 @@ workbook.editCell(0, 9, 2, "=SUM(C1:C9)"); // recalcs dependents
 const bytes = workbook.save();
 ```
 
-`initWasm()` fetches the packaged wasm asset once in browsers. Pass wasm bytes
-or a precompiled `WebAssembly.Module` explicitly in runtimes that cannot fetch
-the asset URL.
+`initWasm()` fetches the packaged wasm asset once in browsers; other runtimes
+pass wasm bytes or a precompiled `WebAssembly.Module`.
 
 Around the handle, the package exports the helpers a custom grid needs:
 `cellAtPoint` / `cellRect` / `rangeRect` (hit-testing), the viewport math,
@@ -78,9 +77,8 @@ if (isProposalsAvailable()) {
 ```
 
 The React editor paints pending proposals as in-cell tracked-change ghosts with
-an accept/reject panel. Guard with `isProposalsAvailable()` against cores built
-without the feature. `StaleProposalError.targets` names each drifted cell's sheet
-beside `cells`.
+an accept/reject panel. `isProposalsAvailable()` reports proposal availability.
+`StaleProposalError.targets` names each drifted cell's sheet beside `cells`.
 
 ## Version-checked edit batches
 
@@ -119,34 +117,28 @@ if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
   corners. Matrices and guards match the target's shape exactly. Guards compare
   a cell's value, formula (`null` for none) or display text before the batch.
 - `validateEdits` stages a batch without changing anything; `findText` searches
-  display text exactly and case-sensitively. Update listeners run once, after
+  display text exactly and case-sensitively. Update listeners run once, before
   `applyEdits` returns, and see the recalculated state and its new version.
   `changedSheets` names every sheet the batch or its recalculation changed.
 - Requests over 16 MiB and results over 64 MiB refuse with `limit-exceeded`;
   calculation diagnostics stop at 10,000 cells per list and set `truncated`.
 - `history: "none"` keeps a batch out of undo; standalone undo still replays
-  older steps over its cells. It is experimental: that interaction may change
-  in a minor release. `source` records provenance only. Volatile functions see
-  only `calculation.nowSerial`.
+  older steps over its cells. `source` records provenance only. Volatile
+  functions see only `calculation.nowSerial`.
 - Versions and sheet ids are session-scoped; standalone sheet ids are
-  positional, so each is valid only for the version it was read at. Batches do
-  not insert or delete rows, columns or sheets, merge cells or move charts, and
-  refuse writes to merged-cell followers, array-formula cells and protected
-  sheets.
+  positional, so each is valid only for the version it was read at.
 
 ## Structured export
 
 XLSX exports bounded sparse worksheet content and Markdown with positional
 anchors, formulas, stored values, formatted text, explicit hidden-content
-options, and omission diagnostics. Export does not recalculate formulas:
+options, and omission diagnostics. Export reads stored values:
 
 ```ts
-const result = workbook.exportStructured({ scope: [{ sheet: 0, range: "A1:D20" }] });
-if (result.ok) {
-  for (const cell of result.content.sheets[0].cells) {
-    console.log(cell.anchor, cell.value, cell.formula, cell.displayText);
-  }
-}
+import { exportXlsxStructured } from "@betteroffice/xlsx";
+
+const read = workbook.exportStructured({ scope: [{ sheet: 0, range: "A1:D20" }] });
+if (read.ok) console.log(read.content.sheets[0].cells);
 
 const markdown = workbook.exportMarkdown({}, { maxRows: 100 });
 const fromBytes = await exportXlsxStructured(bytes); // no session, no clock
@@ -176,8 +168,6 @@ const fromBytes = await exportXlsxStructured(bytes); // no session, no clock
   `includeHiddenNames`), with a `hidden-content-excluded` diagnostic. A sheet
   whose visibility is unknown, such as one from a model handed in without its
   package, counts as hidden.
-  Comments, rich-text runs, conditional formatting, pivot tables and unreadable
-  charts are diagnosed, not exported.
 - `maxCells` (default 100,000) and `maxBytes` (default 8 MiB) stop at a complete
   record with `truncated: true` and a `truncated` diagnostic; an absent cell is
   empty only before that point. Scope refusals (`invalid-scope`,
@@ -215,17 +205,15 @@ function dispose() {
 }
 ```
 
-The provider speaks the Yjs sync-v1 protocol used by y-websocket. WebSocket room
-routing, authentication, WebRTC signaling, reconnection policy, and awareness
-remain transport concerns; document updates flow directly between the connection
-and the Rust/WASM Yrs replica without a second JavaScript `Y.Doc`.
+The provider handles Yjs sync-v1 and awareness. Room routing, authentication,
+WebRTC signaling, and reconnection remain transport concerns; document updates
+flow directly into the Rust/WASM Yrs replica.
 After a close, the transport may reopen itself or the caller may invoke
 `provider.connect()` for another connection attempt.
 Call `provider.destroy()` before discarding its transport or workbook.
 
-Collaborative sessions currently support cell content, formulas, styles, column
-widths, and row heights. Structural edits and inverse-op undo are rejected until
-they have stable axis identities and a Yrs-aware undo manager.
+Collaborative sessions synchronize cell content, formulas, styles, column widths,
+and row heights, with Yrs-backed undo and redo. Structural operations throw.
 
 ## Development
 

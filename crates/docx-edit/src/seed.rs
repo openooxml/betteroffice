@@ -2795,13 +2795,12 @@ fn paragraph_units(
             }
             "hyperlink" => {
                 boundaries = None;
-                units.extend(hyperlink_to_units(
-                    content,
-                    style_formatting.as_ref(),
-                    styles,
-                    &[],
-                    source,
-                ));
+                let mut linked =
+                    hyperlink_to_units(content, style_formatting.as_ref(), styles, &[], source);
+                for unit in &mut linked {
+                    unit.comment_id.clone_from(&comment_id);
+                }
+                units.extend(linked);
             }
             "simpleField" | "complexField" => {
                 boundaries = None;
@@ -5906,6 +5905,32 @@ mod tests {
         assert_eq!(boundaries[0]["text"], "A\t\u{00ad}");
         assert_eq!(boundaries[0]["marksKey"], "bold:{}");
         assert_eq!(boundaries[1]["text"], "12");
+    }
+
+    #[test]
+    fn hyperlink_units_belong_to_the_comment_around_them() {
+        let link = |text: &str| {
+            json!({"type": "hyperlink", "href": "https://example.com/", "children": [
+                {"type": "run", "content": [{"type": "text", "text": text}]}
+            ]})
+        };
+        let ParagraphUnits { units, .. } = paragraph_units(
+            &json!({"content": [
+                {"type": "run", "content": [{"type": "text", "text": "See "}]},
+                {"type": "commentRangeStart", "id": 7},
+                link("the"),
+                {"type": "commentRangeEnd", "id": 7},
+                link(" link")
+            ]}),
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        let comments: Vec<_> = units
+            .iter()
+            .map(|unit| unit.comment_id.as_deref())
+            .collect();
+        assert_eq!(comments, [None, Some("7"), None]);
     }
 
     #[test]

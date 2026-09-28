@@ -103,6 +103,9 @@ pub struct TableReceipt {
     pub columns: u32,
     pub created_story_ids: Vec<String>,
     pub deleted_story_ids: Vec<String>,
+    /// Existing stories whose content changed: the table's story, plus a merge's surviving cell.
+    #[serde(default)]
+    pub changed_story_ids: Vec<String>,
     pub new_para_ids: Vec<String>,
     pub deleted_table: bool,
     #[serde(default)]
@@ -782,6 +785,7 @@ fn receipt(
         (0, 0, true)
     };
     Ok(TableReceipt {
+        changed_story_ids: vec![locator.story.clone()],
         table: locator,
         rows,
         columns,
@@ -1529,7 +1533,9 @@ impl EditingDoc {
         survivor.colspan = rect.right - rect.left;
         data.rows = reconstruct_rows(data.rows, kept)?;
         write_table(&mut txn, &table, &data);
-        receipt(locator, Some(&data), Vec::new(), deleted, Vec::new())
+        let mut receipt = receipt(locator, Some(&data), Vec::new(), deleted, Vec::new())?;
+        receipt.changed_story_ids.push(target.cell.story);
+        Ok(receipt)
     }
 
     /// Splits the merged cell covering `at` back into one cell per grid slot.
@@ -2298,6 +2304,7 @@ mod tests {
         let range = TableRange::new(cell(0, 0), cell(1, 1));
         let merged = doc.merge_cells(&direct(), &range).unwrap();
         assert_eq!(merged.deleted_story_ids.len(), 3);
+        assert_eq!(merged.changed_story_ids, ["body", "body:t0:r0c0"]);
         let (_, _, rows) = table_value(&doc);
         assert_eq!(rows[0]["cells"].as_array().unwrap().len(), 1);
         assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 0);

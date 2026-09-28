@@ -78,8 +78,7 @@ host/agent-driven edits and the editor's `commands`), `collaboration`, `i18n`,
 
 ## Compose the toolbar
 
-Every built-in control runs through the editor's command store. This command
-and toolbar composition API is experimental and may change in minor releases.
+Every built-in control runs through the editor's command store.
 Replace the default toolbar with the parts you need, in your order, next to your
 own actions:
 
@@ -115,8 +114,8 @@ import {
   renders none, and supplied chrome renders in its place, also when read-only.
   `showToolbar={false}` hides the region either way.
 - `<EditorToolbar.Toolbar>` children are the complete arrangement in command mode;
-  without children it renders the default controls. `EditorToolbar.FormulaBar`
-  is the editor's name box and formula input and renders only inside the editor.
+  without children it renders the default controls. Place
+  `EditorToolbar.FormulaBar` inside the editor to show its name box and formula input.
 - `ToolbarCommand` renders a command's built-in control, `ToolbarCommandButton` a
   button (bind `args`, such as `{ value: "currency" }` for `numberFormat`), and
   `ToolbarCommandSelect` a selector's picker. `useXlsxCommand(id, args)` and
@@ -156,7 +155,7 @@ import {
   after them, even in the same handler, act on the new selection and sheet.
 - The store enforces read-only mode, the selection a command needs and its
   arguments for the editor's UI. `api.handle` stays unrestricted host
-  authority, and the store is not workbook protection.
+  authority, and workbook protection is separate from the store.
 - Narrow toolbars move trailing groups into a keyboard-accessible More menu. Host
   `ToolbarButton`s get an entry there; wrap other content in `ToolbarOverflow`.
   A group holding content without an entry stays in the row, which scrolls
@@ -169,7 +168,7 @@ command state whose callbacks run commands, and passing those props throws.
 
 ## AI agents
 
-`onReady` hands you the open `WorkbookHandle`. An agent stages edits with
+`onReady`'s `handle` is the `WorkbookHandle`. An agent stages edits with
 `propose()` instead of applying them; the editor paints per-cell ghosts and a
 review panel where the human accepts or rejects. The full proposal API lives in
 [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx).
@@ -236,8 +235,6 @@ See [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) for
 the step vocabulary and its limits.
 
 ## Host plugins
-
-The plugin API is experimental and may change in minor releases.
 
 Host-owned tools (review aids, checks, templates) install through the `plugins`
 prop. A plugin contributes a docked panel, an overlay on the grid and commands,
@@ -312,9 +309,9 @@ const review = defineXlsxPlugin<State>({
   and `editBatches`, and `history: "none"` also `untrackedHistory`. The grant
   and `readOnly` are checked again right before each change, so a revoked grant,
   `readOnly` or a replaced workbook refuses even through a client obtained
-  earlier. Mutating built-in commands have no authoritative policy yet and
-  refuse plugins with `unsupported-policy`; plugins change workbooks through
-  edit batches. Grants are not spreadsheet protection.
+  earlier. Mutating built-in commands refuse plugins with `unsupported-policy`;
+  plugins change workbooks through edit batches. Grants govern the plugin API,
+  separately from sheet and workbook protection.
 - **Contributed commands** register as `plugin:<pluginId>/<id>` on
   `api.commands`. They always run with their own plugin's clients, even when the
   toolbar, a shortcut or the host invokes them. `execute` returns
@@ -338,7 +335,7 @@ const review = defineXlsxPlugin<State>({
   resolve sheet ids after pending input against `expectVersion`, keep keyboard
   focus unless `selectCells` gets `focus: true`, and refuse with
   `stale-version` or `missing-target` rather than retarget. Sheet ids and
-  versions are session-scoped: they do not survive saving and reopening.
+  versions are session-scoped.
 - **Geometry.** `context.geometry` exists only while the canvas shows a painted
   frame of the current version. `layout` carries the frame's `sheetId`, `zoom`
   and painted `viewport` (unzoomed sheet pixels), and gets a new `id` with every
@@ -346,9 +343,8 @@ const review = defineXlsxPlugin<State>({
   and `getRangeRect({ sheetId, range })` return pixels of the overlay layer,
   zoomed and clipped to the visible grid with frozen panes placed as painted;
   cells scrolled out of view or on another sheet return null. `getCellRect` is
-  one grid cell; address a merged area as a range. `getPositionAtPoint` is null
-  until the editor exposes pointer queries. Every method returns null once its
-  layout is gone. The overlay layer sits on the grid below the editor's
+  one grid cell; address a merged area as a range. `getPositionAtPoint` is null;
+  check it before calling. Every method returns null once its layout is gone. The overlay layer sits on the grid below the editor's
   selection and cell editor, and ignores the pointer unless an element sets
   `pointer-events: auto`.
 - **Panels** dock left, right or bottom of the grid, below the toolbar and

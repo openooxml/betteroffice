@@ -2499,10 +2499,11 @@ impl EditSession {
     //
     // Every op below returns the same receipt:
     // `{"table":TableLocator,"rows","columns","createdStoryIds":[string, …],
-    // "deletedStoryIds":[string, …],"newParaIds":[string, …],
-    // "deletedTable":bool,"revisionIds":[string, …]}` — `rows`/`columns` are
-    // the grid AFTER the op, the story lists let the host follow cell content
-    // in and out of existence, and `revisionIds` is non-empty only for the ops
+    // "deletedStoryIds":[string, …],"changedStoryIds":[string, …],
+    // "newParaIds":[string, …],"deletedTable":bool,"revisionIds":[string, …]}`
+    // — `rows`/`columns` are the grid AFTER the op, the story lists let the
+    // host follow cell content in and out of existence and invalidate what
+    // the op rewrote, and `revisionIds` is non-empty only for the ops
     // that accept a suggesting author. All of them additionally error on an
     // unknown table or a cell outside the grid.
 

@@ -68,7 +68,8 @@ export class PptxDocument {
     static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
     /**
      * `source` is the file the update was seeded from; when it matches the
-     * recorded fingerprint the session keeps its part bytes and can save.
+     * recorded fingerprint the session keeps its part bytes and can save, and
+     * failing to reattach it throws.
      * Any other bytes fall back to the bare update session, whose `saveBytes`
      * fails — joining a room must not depend on carrying the right file.
      */

@@ -7,13 +7,14 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use yrs::types::Attrs;
-use yrs::{Any, Map, Text};
+use yrs::{Any, Map, MapPrelim, Text};
 
 use crate::format::PROTECTED_ATTRS;
 use crate::op::{OpError, OpResult};
 use crate::ops::embed::embed_map_at;
 use crate::ops::paragraph::ParagraphRecord;
-use crate::{EditCtx, EditingDoc, KIND_KEY, ParagraphId, insertion_attrs, story_ref};
+use crate::ops::utf16_len;
+use crate::{BREAK_KIND, EditCtx, EditingDoc, KIND_KEY, ParagraphId, insertion_attrs, story_ref};
 
 /// Why fill text is refused.
 #[derive(Debug, Eq, PartialEq)]
@@ -161,7 +162,8 @@ pub(crate) fn property_patch(payload: &HashMap<String, Any>) -> Result<Vec<(Stri
     Ok(patch)
 }
 
-/// One surviving paragraph of a block control whose inline content is replaced.
+/// One surviving paragraph of a block control whose inline content is replaced; LF in `text`
+/// is a line break.
 pub(crate) struct ParagraphFill {
     pub node_start: u32,
     pub pilcrow: u32,
@@ -280,12 +282,24 @@ impl EditingDoc {
                             .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
                             .collect();
                         attrs.extend(insertion_attrs(None, None));
-                        story.insert_with_attributes(
-                            &mut txn,
-                            paragraph.node_start,
-                            &paragraph.text,
-                            attrs,
-                        );
+                        let mut at = paragraph.node_start;
+                        for (index, line) in paragraph.text.split('\n').enumerate() {
+                            if index > 0 {
+                                story
+                                    .insert_embed_with_attributes(
+                                        &mut txn,
+                                        at,
+                                        MapPrelim::default(),
+                                        attrs.clone(),
+                                    )
+                                    .insert(&mut txn, KIND_KEY, BREAK_KIND);
+                                at += 1;
+                            }
+                            if !line.is_empty() {
+                                story.insert_with_attributes(&mut txn, at, line, attrs.clone());
+                                at += utf16_len(line);
+                            }
+                        }
                     }
                 }
                 Ok(minted)

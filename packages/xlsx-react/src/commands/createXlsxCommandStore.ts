@@ -132,8 +132,7 @@ export interface XlsxCommandController {
   pluginShortcuts(): readonly { id: XlsxPluginCommandId; chord: string }[];
   /**
    * A store acting for `scope`: its answer is checked inside each operation, and mutating
-   * built-in commands, which have no authoritative policy path yet, refuse with
-   * `unsupported-policy`.
+   * built-in commands refuse with `unsupported-policy`.
    */
   scoped(scope: XlsxCommandScope): XlsxCommandStore;
   /** Whether `store` is this editor's store or one scoped from it. */

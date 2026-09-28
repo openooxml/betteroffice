@@ -138,8 +138,7 @@ export interface PptxCommandController {
   pluginShortcuts(): readonly { id: PptxPluginCommandId; chord: string }[];
   /**
    * A store acting for `scope`: its answer is checked inside each operation, and mutating
-   * built-in commands, which have no authoritative policy path yet, refuse with
-   * `unsupported-policy`.
+   * built-in commands refuse with `unsupported-policy`.
    */
   scoped(scope: PptxCommandScope): PptxCommandStore;
   /** Whether `store` is this editor's store or one scoped from it. */

@@ -1081,7 +1081,11 @@ function paragraphUnits(
       units.push(...runToUnits(content, styleFormatting, styleResolver, commentId));
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
-      units.push(...hyperlinkToUnits(content, styleFormatting, styleResolver));
+      const linked = hyperlinkToUnits(content, styleFormatting, styleResolver);
+      for (const unit of linked) {
+        if (commentId !== undefined) unit.commentId = commentId;
+      }
+      units.push(...linked);
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
       units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex));

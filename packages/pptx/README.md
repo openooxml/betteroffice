@@ -33,7 +33,7 @@ sizeCanvasForSlide(canvas, frame, devicePixelRatio);
 await paintSlide(canvas.getContext('2d')!, frame, devicePixelRatio);
 ```
 
-`initWasm()` with no argument only works where `fetch` of a same-origin URL works (browsers); Node and SSR must pass the wasm bytes.
+Browsers can call `initWasm()`; Node and SSR pass wasm bytes to `initWasm(bytes)`.
 
 All parsing, edits, collaboration state, text shaping, layout, hit-testing, and
 display-list emission stay in Rust. The package decodes the typed boundary and
@@ -93,8 +93,7 @@ unchanged words as context and retaining fonts and emphasis. Pass its
 `textChanges` to `paintSlide()` for red highlights and strikethrough on deletions,
 and green highlights and underlines on insertions. Its snapshot and UTF-16
 ranges describe a temporary review layout; use the live handle for editing and
-the ordinary proposed layout for the result after acceptance. Review rendering
-does not replace the live hit-test state or add markup to saved presentations.
+the ordinary proposed layout for the result after acceptance.
 
 Supported edits replace text within one paragraph, format text, align paragraphs,
 set shape geometry/fill/stroke/adjustments, and replace speaker notes. Text offsets
@@ -108,8 +107,7 @@ with target IDs. Review a fresh preview before calling
 Unrelated peer edits survive acceptance and Undo. Up to 64 proposals, each with
 1–256 edits, may be pending.
 
-Pending proposals belong to this open session: they are excluded from PPTX
-exports and collaboration updates. Accepted edits save and sync normally.
+Pending proposals live in the open session; accepted edits save and synchronize.
 `isProposalsAvailable()` supports hosts that load an older WASM build.
 
 ## Version-checked edit batches
@@ -154,16 +152,8 @@ out of undo history and existing undo and redo entries in place;
 Refusals carry a `code` (`stale-version`, `missing-target`, `ambiguous-target`,
 `content-mismatch`, `overlapping-steps`, `unsupported`, `invalid-step`,
 `limit-exceeded`), the failing `stepIndex` and the target; malformed requests
-throw, and so do NaN or infinite numbers. Current limits: text steps leave
-fields and soft line breaks whole, and a batch refuses when saving could turn a
-field into plain text, which it can rule out only while every field is non-empty
-and sits in the paragraph's unchanged leading or trailing text; a paragraph's alignment and its
-text cannot change in one batch; slides, shapes and paragraphs are neither
-created nor removed; a batch holds at most 128 steps and 1,048,576 inserted
-UTF-16 units; requests hold at most 16 MiB of JSON and reads and searches return
-at most 64 MiB, searches marking the cut with `truncated`. Slide, shape, story and paragraph
-ids anchor targets within one session only, and versions from one session
-never match another.
+throw, and so do NaN or infinite numbers. Slide, shape, story and paragraph
+ids and versions are session-scoped.
 
 ## Structured export
 
@@ -174,16 +164,11 @@ flushes editor input or changes anything. `exportPptxStructured(bytes)`,
 headless, with anchors that address the returned snapshot only.
 
 ```ts
+import { exportPptxMarkdown } from '@betteroffice/pptx';
+
 const read = deck.exportStructured({ includeNotes: true });
 if (!read.ok) throw new Error(read.failure.message);
-for (const slide of read.content.slides) {
-  for (const shape of slide.shapes) {
-    for (const paragraph of shape.stories.flatMap((story) => story.paragraphs)) {
-      console.log(slide.index, paragraph.list?.kind, paragraph.anchor);
-    }
-  }
-}
-
+console.log(read.content.slides);
 const { markdown, anchors } = await exportPptxMarkdown(bytes);
 ```
 
@@ -196,17 +181,17 @@ and text styles and numbered as the renderer numbers them); runs carry
 formatting marks, links, soft line breaks, fields with their cached result and
 zero-width placeholders for inline content such as equations. Tables keep their
 grid, spans and merge continuations with each cell's current story. Pictures,
-video, audio, charts, SmartArt, embedded objects and shape-tree elements the
-deck model does not hold become placeholders with their alternative text and
-relationships; their data is never exported. Layout and master content is not
-exported, and an empty placeholder never shows its prompt text.
+video, audio, charts, SmartArt, embedded objects and unmodelled shape-tree
+elements become placeholders with their alternative text and relationships.
+Each slide exports its own shapes, with an `inherited-content-omitted`
+diagnostic for layout and master shapes drawn on it.
 
 Every record carries an anchor: `range` anchors are batch text targets in the
 story offsets of `readContent()`, so a session export's `range` anchor can be a
 step's `target` at the version it was read at; `notes` and `comment` ranges
 index their plain text, and records seeded from the file carry `provenance`
 (part, SHA-256, element path, `sldId`, `cNvPr` id). Session anchors belong to
-the returned version and do not survive save and reopen. A collaboration
+the returned version. A collaboration
 session opened from an update seeded by an older release, without its source
 file, may not know which slides are hidden:
 those slides are exported with `hidden: null` and a `visibility-unknown`
@@ -230,7 +215,7 @@ each block that `anchors` maps back to its source.
 
 PowerPoint has two comment systems and a file only ever uses one: `legacy`
 reads in every version of PowerPoint plus LibreOffice and Google Slides, while
-`modern` carries replies and a resolved state but only shows in PowerPoint 365.
+`modern` carries replies and resolution for PowerPoint 365.
 A deck commits to one at its first comment, so `setCommentFlavor` only works
 while `comments()` is empty, and `replyToComment` / `setCommentStatus` throw on
 a legacy deck.
@@ -302,7 +287,7 @@ and operation types until `handle.addUndoBoundary()`. The getter
 the current group and preserves history; setting the same mode is a no-op.
 Auto preserves the existing policy (500 ms capture on native targets, separate
 transactions in the browser). Remote and agent origins remain outside local
-undo. These controls group history; they do not make edits atomic.
+undo. These controls group history; edit batches make edits atomic.
 
 `handle.anchorCaret(storyId, index)` returns a caret anchor, plain data that
 later edits, undo, redo and remote updates carry along with the text;

@@ -1,6 +1,6 @@
 export * from './manifest';
 export type { BundledFontSource } from './provider';
-import type { BundledFontFace } from './manifest';
+import { BUNDLED_FONTS, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
 
@@ -26,6 +26,42 @@ const FONT_ASSET_URLS: Record<string, () => URL> = {
     new URL('../assets/Carlito-Italic.ttf', import.meta.url),
   'Carlito-Regular.ttf': () =>
     new URL('../assets/Carlito-Regular.ttf', import.meta.url),
+  'ComicRelief-Bold.ttf': () =>
+    new URL('../assets/ComicRelief-Bold.ttf', import.meta.url),
+  'ComicRelief-Regular.ttf': () =>
+    new URL('../assets/ComicRelief-Regular.ttf', import.meta.url),
+  'DMSans-Bold.ttf': () =>
+    new URL('../assets/DMSans-Bold.ttf', import.meta.url),
+  'DMSans-BoldItalic.ttf': () =>
+    new URL('../assets/DMSans-BoldItalic.ttf', import.meta.url),
+  'DMSans-Italic.ttf': () =>
+    new URL('../assets/DMSans-Italic.ttf', import.meta.url),
+  'DMSans-Regular.ttf': () =>
+    new URL('../assets/DMSans-Regular.ttf', import.meta.url),
+  'DMSerifDisplay-Italic.ttf': () =>
+    new URL('../assets/DMSerifDisplay-Italic.ttf', import.meta.url),
+  'DMSerifDisplay-Regular.ttf': () =>
+    new URL('../assets/DMSerifDisplay-Regular.ttf', import.meta.url),
+  'Gelasio-Bold.ttf': () =>
+    new URL('../assets/Gelasio-Bold.ttf', import.meta.url),
+  'Gelasio-BoldItalic.ttf': () =>
+    new URL('../assets/Gelasio-BoldItalic.ttf', import.meta.url),
+  'Gelasio-Italic.ttf': () =>
+    new URL('../assets/Gelasio-Italic.ttf', import.meta.url),
+  'Gelasio-Regular.ttf': () =>
+    new URL('../assets/Gelasio-Regular.ttf', import.meta.url),
+  'Heebo-Bold.ttf': () =>
+    new URL('../assets/Heebo-Bold.ttf', import.meta.url),
+  'Heebo-Regular.ttf': () =>
+    new URL('../assets/Heebo-Regular.ttf', import.meta.url),
+  'Inter-Bold.ttf': () =>
+    new URL('../assets/Inter-Bold.ttf', import.meta.url),
+  'Inter-BoldItalic.ttf': () =>
+    new URL('../assets/Inter-BoldItalic.ttf', import.meta.url),
+  'Inter-Italic.ttf': () =>
+    new URL('../assets/Inter-Italic.ttf', import.meta.url),
+  'Inter-Regular.ttf': () =>
+    new URL('../assets/Inter-Regular.ttf', import.meta.url),
   'LiberationMono-Bold.ttf': () =>
     new URL('../assets/LiberationMono-Bold.ttf', import.meta.url),
   'LiberationMono-BoldItalic.ttf': () =>
@@ -50,6 +86,14 @@ const FONT_ASSET_URLS: Record<string, () => URL> = {
     new URL('../assets/LiberationSerif-Italic.ttf', import.meta.url),
   'LiberationSerif-Regular.ttf': () =>
     new URL('../assets/LiberationSerif-Regular.ttf', import.meta.url),
+  'Montserrat-Bold.ttf': () =>
+    new URL('../assets/Montserrat-Bold.ttf', import.meta.url),
+  'Montserrat-BoldItalic.ttf': () =>
+    new URL('../assets/Montserrat-BoldItalic.ttf', import.meta.url),
+  'Montserrat-Italic.ttf': () =>
+    new URL('../assets/Montserrat-Italic.ttf', import.meta.url),
+  'Montserrat-Regular.ttf': () =>
+    new URL('../assets/Montserrat-Regular.ttf', import.meta.url),
   'NotoNaskhArabic-Regular.ttf': () =>
     new URL('../assets/NotoNaskhArabic-Regular.ttf', import.meta.url),
   'NotoSansArabic-Bold.ttf': () =>
@@ -60,6 +104,42 @@ const FONT_ASSET_URLS: Record<string, () => URL> = {
     new URL('../assets/NotoSansHebrew-Bold.ttf', import.meta.url),
   'NotoSansHebrew-Regular.ttf': () =>
     new URL('../assets/NotoSansHebrew-Regular.ttf', import.meta.url),
+  'OpenSans-Bold.ttf': () =>
+    new URL('../assets/OpenSans-Bold.ttf', import.meta.url),
+  'OpenSans-BoldItalic.ttf': () =>
+    new URL('../assets/OpenSans-BoldItalic.ttf', import.meta.url),
+  'OpenSans-Italic.ttf': () =>
+    new URL('../assets/OpenSans-Italic.ttf', import.meta.url),
+  'OpenSans-Regular.ttf': () =>
+    new URL('../assets/OpenSans-Regular.ttf', import.meta.url),
+  'Oswald-Bold.ttf': () =>
+    new URL('../assets/Oswald-Bold.ttf', import.meta.url),
+  'Oswald-Regular.ttf': () =>
+    new URL('../assets/Oswald-Regular.ttf', import.meta.url),
+  'Poppins-Bold.ttf': () =>
+    new URL('../assets/Poppins-Bold.ttf', import.meta.url),
+  'Poppins-BoldItalic.ttf': () =>
+    new URL('../assets/Poppins-BoldItalic.ttf', import.meta.url),
+  'Poppins-Italic.ttf': () =>
+    new URL('../assets/Poppins-Italic.ttf', import.meta.url),
+  'Poppins-Regular.ttf': () =>
+    new URL('../assets/Poppins-Regular.ttf', import.meta.url),
+  'Roboto-Bold.ttf': () =>
+    new URL('../assets/Roboto-Bold.ttf', import.meta.url),
+  'Roboto-BoldItalic.ttf': () =>
+    new URL('../assets/Roboto-BoldItalic.ttf', import.meta.url),
+  'Roboto-Italic.ttf': () =>
+    new URL('../assets/Roboto-Italic.ttf', import.meta.url),
+  'Roboto-Regular.ttf': () =>
+    new URL('../assets/Roboto-Regular.ttf', import.meta.url),
+  'SourceSans3-Bold.ttf': () =>
+    new URL('../assets/SourceSans3-Bold.ttf', import.meta.url),
+  'SourceSans3-BoldItalic.ttf': () =>
+    new URL('../assets/SourceSans3-BoldItalic.ttf', import.meta.url),
+  'SourceSans3-Italic.ttf': () =>
+    new URL('../assets/SourceSans3-Italic.ttf', import.meta.url),
+  'SourceSans3-Regular.ttf': () =>
+    new URL('../assets/SourceSans3-Regular.ttf', import.meta.url),
 };
 
 export interface FontAssetOptions {
@@ -118,17 +198,26 @@ function resolvedAssetBase(baseUrl: string | URL): URL {
   }
 }
 
-async function assetUrl(file: string, baseUrl: URL | undefined): Promise<URL> {
+const CJK_FILES = new Set(
+  BUNDLED_FONTS.filter((face) => face.script?.startsWith('cjk-')).map((face) => face.file),
+);
+
+async function assetUrl(
+  { file, script }: BundledFontFace,
+  baseUrl: URL | undefined,
+): Promise<URL> {
   if (baseUrl !== undefined) return new URL(file, baseUrl);
   const local = FONT_ASSET_URLS[file];
   if (local) return local();
-  const cjk = await loadCjkAssetUrls();
-  const resolveCjk = cjk?.[file];
-  if (resolveCjk) return resolveCjk();
-  if (!cjk) {
-    throw new Error(
-      `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`,
-    );
+  if (script?.startsWith('cjk-') || CJK_FILES.has(file)) {
+    const cjk = await loadCjkAssetUrls();
+    const resolveCjk = cjk?.[file];
+    if (resolveCjk) return resolveCjk();
+    if (!cjk) {
+      throw new Error(
+        `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`,
+      );
+    }
   }
   throw new Error(`Unknown bundled font asset: ${file}`);
 }
@@ -142,7 +231,7 @@ export function loadBundledFontBytes(
     options?.baseUrl === undefined
       ? undefined
       : resolvedAssetBase(options.baseUrl);
-  return assetUrl(face.file, baseUrl).then((url) => loadFontBytes(face, url));
+  return assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
 }
 
 const registeredFaces = new Map<string, Promise<void>>();

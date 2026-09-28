@@ -90,7 +90,7 @@ pub enum SearchScope {
 pub enum TextTarget {
     /// The paragraph's whole accepted-view text.
     Paragraph(ParagraphTarget),
-    /// An explicit range; v1 requires both ends in one paragraph.
+    /// An explicit range within one paragraph.
     Range(TextRange),
     /// The one exact, case-sensitive, paragraph-local match of `text` in `within`.
     Search {

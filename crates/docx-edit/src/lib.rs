@@ -49,7 +49,7 @@
 //! must be minted only while serializing OOXML. A paragraph's Word `w14:paraId` is a separate
 //! binding on its pilcrow, never derived from its internal ID; see [`ParagraphIdentity`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -65,6 +65,7 @@ use yrs::{
 };
 
 mod batch;
+mod comment_references;
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 mod compare;
 pub mod content_controls;
@@ -767,6 +768,7 @@ impl EditingDoc {
             anchors.push(anchor_value(&range.story, &start, &end));
         }
         comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
+        comment_references::reconcile(&mut txn, &BTreeSet::from([comment_id.to_owned()]), true);
         Ok(())
     }
 
@@ -898,6 +900,7 @@ impl EditingDoc {
     /// Applies an update, then repairs any paragraph identities it duplicated.
     pub(crate) fn integrate_update(&self, update: Update, local: bool) -> EditResult<()> {
         let watch = identity::IdentityWatch::new(self);
+        let reanchored = comment_references::CommentWatch::new(self);
         let result = if local {
             self.doc
                 .transact_mut_with(self.client_id)
@@ -909,6 +912,11 @@ impl EditingDoc {
         if watch.changed() {
             drop(watch);
             self.repair_paragraph_identities();
+        }
+        let reanchored = reanchored.take();
+        if !reanchored.is_empty() {
+            let mut txn = self.transact_for(&EditCtx::system(""));
+            comment_references::reconcile(&mut txn, &reanchored, false);
         }
         Ok(())
     }
@@ -1361,6 +1369,410 @@ mod tests {
             assert_eq!(metadata(), before);
             assert_eq!(undo.changed_stories(), ["body"]);
             assert!(undo.redo());
+        }
+    }
+
+    /// Seeds comment 1 over "first" with its reference right after it, a header, and a synced peer.
+    fn referenced(doc: &EditingDoc) -> EditingDoc {
+        doc.create_story("body", "first second", "Normal", "left")
+            .unwrap();
+        doc.create_story(HEADER, "Header", "Header", "left")
+            .unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::InsertEmbed {
+                    index: 5,
+                    kind: "field".into(),
+                    payload: vec![
+                        ("modelKind".into(), Any::from("commentReference")),
+                        ("commentId".into(), Any::from(1.0)),
+                    ],
+                    attrs: Attrs::new(),
+                },
+                RawOp::SetComment {
+                    id: "1".into(),
+                    ranges: vec![(0, 5)],
+                    author: "Ada".into(),
+                    date: DATE.into(),
+                    body: Any::Null,
+                },
+            ],
+            &local("Ada"),
+        )
+        .unwrap();
+        let peer = EditingDoc::new(doc.client_id + 1);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        peer
+    }
+
+    fn reference_offsets(doc: &EditingDoc, story: &str) -> Vec<u32> {
+        let mut offset = 0;
+        let mut found = Vec::new();
+        for segment in doc.story_segments(story).unwrap() {
+            match segment.content {
+                SegmentContent::Text(text) => offset += text.encode_utf16().count() as u32,
+                SegmentContent::OtherEmbed { payload, .. } => {
+                    if payload.get("modelKind") == Some(&Any::from("commentReference")) {
+                        found.push(offset);
+                    }
+                    offset += 1;
+                }
+                SegmentContent::Pilcrow(_) => offset += 1,
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn comment_reanchoring_moves_its_reference_with_undo() {
+        let doc = EditingDoc::new(803);
+        referenced(&doc);
+        let mut undo = doc.undo_manager();
+        doc.set_comment_ranges("1", &[StoryRange::new("body", 7, 13)])
+            .unwrap();
+        for _ in 0..3 {
+            assert_eq!(reference_offsets(&doc, "body"), [12]);
+            let anchor = resolved(&doc, "1");
+            assert_eq!((anchor.start, anchor.end), (6, 12));
+            assert!(undo.undo());
+            assert_eq!(reference_offsets(&doc, "body"), [5]);
+            let anchor = resolved(&doc, "1");
+            assert_eq!((anchor.start, anchor.end), (0, 5));
+            assert!(undo.redo());
+        }
+    }
+
+    #[test]
+    fn comment_reanchoring_keeps_a_reference_already_after_the_range() {
+        let doc = EditingDoc::new(804);
+        referenced(&doc);
+        doc.set_comment_ranges("1", &[StoryRange::new("body", 1, 5)])
+            .unwrap();
+        assert_eq!(reference_offsets(&doc, "body"), [5]);
+        doc.set_comment_ranges(
+            "1",
+            &[StoryRange::new("body", 0, 2), StoryRange::new("body", 3, 5)],
+        )
+        .unwrap();
+        assert_eq!(reference_offsets(&doc, "body"), [5]);
+    }
+
+    #[test]
+    fn comment_reanchoring_converges_with_a_concurrent_edit() {
+        let doc = EditingDoc::new(805);
+        let peer = referenced(&doc);
+        doc.set_comment_ranges("1", &[StoryRange::new("body", 7, 13)])
+            .unwrap();
+        peer.apply_raw_ops(
+            "body",
+            vec![RawOp::Insert {
+                index: 0,
+                text: "xx".into(),
+                attrs: Attrs::new(),
+            }],
+            &local("Ada"),
+        )
+        .unwrap();
+        sync(&doc, &peer);
+        for replica in [&doc, &peer] {
+            assert_eq!(reference_offsets(replica, "body"), [14]);
+            let anchor = resolved(replica, "1");
+            assert_eq!((anchor.start, anchor.end), (8, 14));
+        }
+        assert_eq!(doc.story_segments("body"), peer.story_segments("body"));
+    }
+
+    const HEADER: &str = "header:rId7";
+
+    #[test]
+    fn comment_reanchoring_into_another_story_leaves_no_reference_behind() {
+        let doc = EditingDoc::new(806);
+        referenced(&doc);
+        let mut undo = doc.undo_manager();
+        doc.set_comment_ranges("1", &[StoryRange::new(HEADER, 0, 4)])
+            .unwrap();
+        for _ in 0..2 {
+            assert!(reference_offsets(&doc, "body").is_empty());
+            assert_eq!(reference_offsets(&doc, HEADER), [4]);
+            assert!(undo.undo());
+            assert_eq!(reference_offsets(&doc, "body"), [5]);
+            assert!(reference_offsets(&doc, HEADER).is_empty());
+            assert!(undo.redo());
+        }
+    }
+
+    #[test]
+    fn raw_comment_replacement_moves_its_reference() {
+        let doc = EditingDoc::new(807);
+        referenced(&doc);
+        let replace = |story: &str, ranges| {
+            doc.apply_raw_ops(
+                story,
+                vec![RawOp::SetComment {
+                    id: "1".into(),
+                    ranges,
+                    author: "Ada".into(),
+                    date: DATE.into(),
+                    body: Any::Null,
+                }],
+                &local("Ada"),
+            )
+            .unwrap();
+        };
+        replace("body", vec![(7, 13)]);
+        assert_eq!(reference_offsets(&doc, "body"), [12]);
+        assert_eq!(
+            (resolved(&doc, "1").start, resolved(&doc, "1").end),
+            (6, 12)
+        );
+        replace(HEADER, vec![(0, 4)]);
+        assert!(reference_offsets(&doc, "body").is_empty());
+        assert_eq!(reference_offsets(&doc, HEADER), [4]);
+    }
+
+    #[test]
+    fn concurrent_comment_reanchors_keep_one_reference_in_either_sync_order() {
+        let moves = [
+            StoryRange::new("body", 7, 13),
+            StoryRange::new(HEADER, 0, 4),
+        ];
+        for peer_first in [false, true] {
+            for (left, right) in [(&moves[0], &moves[1]), (&moves[0], &moves[0])] {
+                let doc = EditingDoc::new(808);
+                let peer = referenced(&doc);
+                doc.set_comment_ranges("1", std::slice::from_ref(left))
+                    .unwrap();
+                peer.set_comment_ranges("1", std::slice::from_ref(right))
+                    .unwrap();
+                let (first, second) = if peer_first {
+                    (&peer, &doc)
+                } else {
+                    (&doc, &peer)
+                };
+                first
+                    .apply_update_v1(&second.encode_state_as_update_v1())
+                    .unwrap();
+                second
+                    .apply_update_v1(&first.encode_state_as_update_v1())
+                    .unwrap();
+                sync(&doc, &peer);
+                let anchor = resolved(&doc, "1");
+                for replica in [&doc, &peer] {
+                    let references: Vec<_> = ["body", HEADER]
+                        .into_iter()
+                        .flat_map(|story| {
+                            reference_offsets(replica, story)
+                                .into_iter()
+                                .map(move |offset| (story.to_owned(), offset))
+                        })
+                        .collect();
+                    assert_eq!(references, [(anchor.story.clone(), anchor.end)]);
+                    assert_eq!(resolved(replica, "1"), anchor);
+                }
+                for story in ["body", HEADER] {
+                    assert_eq!(doc.story_segments(story), peer.story_segments(story));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loading_and_metadata_updates_keep_a_lone_reference_away_from_its_range() {
+        let doc = EditingDoc::new(809);
+        doc.create_story("body", "first second", "Normal", "left")
+            .unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::InsertEmbed {
+                    index: 12,
+                    kind: "field".into(),
+                    payload: vec![
+                        ("modelKind".into(), Any::from("commentReference")),
+                        ("commentId".into(), Any::from(1.0)),
+                    ],
+                    attrs: Attrs::new(),
+                },
+                RawOp::SetComment {
+                    id: "1".into(),
+                    ranges: vec![(0, 5)],
+                    author: "Ada".into(),
+                    date: DATE.into(),
+                    body: Any::Null,
+                },
+            ],
+            &local("Ada"),
+        )
+        .unwrap();
+        let peer = EditingDoc::new(810);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(reference_offsets(&peer, "body"), [12]);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let Some(Out::YMap(comment)) = txn
+                .get_map(COMMENTS)
+                .and_then(|comments| comments.get(&txn, "1"))
+            else {
+                panic!("comment");
+            };
+            comment.insert(&mut txn, "done", true);
+        }
+        sync(&doc, &peer);
+        for replica in [&doc, &peer] {
+            assert_eq!(reference_offsets(replica, "body"), [12]);
+        }
+
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::Delete { index: 12, len: 1 },
+                RawOp::InsertEmbed {
+                    index: 8,
+                    kind: "field".into(),
+                    payload: vec![
+                        ("modelKind".into(), Any::from("commentReference")),
+                        ("commentId".into(), Any::from(1.0)),
+                    ],
+                    attrs: Attrs::new(),
+                },
+            ],
+            &local("Ada"),
+        )
+        .unwrap();
+        sync(&doc, &peer);
+        for replica in [&doc, &peer] {
+            assert_eq!(reference_offsets(replica, "body"), [8]);
+        }
+    }
+
+    #[test]
+    fn loading_and_metadata_updates_keep_every_reference_of_a_comment_across_stories() {
+        let doc = EditingDoc::new(811);
+        doc.create_story("body", "first second", "Normal", "left")
+            .unwrap();
+        doc.create_story(HEADER, "Header", "Header", "left")
+            .unwrap();
+        let reference = |index| RawOp::InsertEmbed {
+            index,
+            kind: "field".into(),
+            payload: vec![
+                ("modelKind".into(), Any::from("commentReference")),
+                ("commentId".into(), Any::from(1.0)),
+            ],
+            attrs: Attrs::new(),
+        };
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                reference(12),
+                RawOp::SetComment {
+                    id: "1".into(),
+                    ranges: vec![(0, 5)],
+                    author: "Ada".into(),
+                    date: DATE.into(),
+                    body: Any::Null,
+                },
+            ],
+            &local("Ada"),
+        )
+        .unwrap();
+        doc.apply_raw_ops(HEADER, vec![reference(4)], &local("Ada"))
+            .unwrap();
+        {
+            let mut txn = doc.doc.transact_mut_with(doc.client_id);
+            let anchors: Vec<Any> = [("body", 0, 5), (HEADER, 0, 4)]
+                .into_iter()
+                .map(|(story, start, end)| {
+                    let text = story_ref(&txn, story).unwrap();
+                    let start = text.sticky_index(&txn, start, Assoc::After).unwrap();
+                    let end = text.sticky_index(&txn, end, Assoc::Before).unwrap();
+                    anchor_value(story, &start, &end)
+                })
+                .collect();
+            let comment = txn
+                .get_map(COMMENTS)
+                .and_then(|comments| comments.get(&txn, "1"))
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
+        }
+        let placed = |replica: &EditingDoc| {
+            (
+                reference_offsets(replica, "body"),
+                reference_offsets(replica, HEADER),
+            )
+        };
+        assert_eq!(placed(&doc), (vec![12], vec![4]));
+        let peer = EditingDoc::new(812);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(placed(&peer), (vec![12], vec![4]));
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            let Some(Out::YMap(comment)) = txn
+                .get_map(COMMENTS)
+                .and_then(|comments| comments.get(&txn, "1"))
+            else {
+                panic!("comment");
+            };
+            comment.insert(&mut txn, "done", true);
+        }
+        sync(&doc, &peer);
+        for replica in [&doc, &peer] {
+            assert_eq!(placed(replica), (vec![12], vec![4]));
+        }
+    }
+
+    #[test]
+    fn a_winning_start_only_reanchor_drops_the_losing_moves_reference() {
+        let start_only = StoryRange::new("body", 2, 5);
+        let moved = StoryRange::new(HEADER, 0, 4);
+        for peer_first in [false, true] {
+            for (left, right) in [(&start_only, &moved), (&moved, &start_only)] {
+                let doc = EditingDoc::new(808);
+                let peer = referenced(&doc);
+                doc.set_comment_ranges("1", std::slice::from_ref(left))
+                    .unwrap();
+                peer.set_comment_ranges("1", std::slice::from_ref(right))
+                    .unwrap();
+                let (first, second) = if peer_first {
+                    (&peer, &doc)
+                } else {
+                    (&doc, &peer)
+                };
+                first
+                    .apply_update_v1(&second.encode_state_as_update_v1())
+                    .unwrap();
+                second
+                    .apply_update_v1(&first.encode_state_as_update_v1())
+                    .unwrap();
+                sync(&doc, &peer);
+                let anchor = resolved(&doc, "1");
+                for replica in [&doc, &peer] {
+                    let references: Vec<_> = ["body", HEADER]
+                        .into_iter()
+                        .flat_map(|story| {
+                            reference_offsets(replica, story)
+                                .into_iter()
+                                .map(move |offset| (story.to_owned(), offset))
+                        })
+                        .collect();
+                    assert!(references.len() <= 1, "{references:?}");
+                    assert!(
+                        references
+                            .iter()
+                            .all(|(story, offset)| *story == anchor.story && *offset == anchor.end),
+                        "{references:?} vs {anchor:?}"
+                    );
+                    assert_eq!(resolved(replica, "1"), anchor);
+                }
+                for story in ["body", HEADER] {
+                    assert_eq!(doc.story_segments(story), peer.story_segments(story));
+                }
+            }
         }
     }
 

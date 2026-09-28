@@ -1,5 +1,65 @@
 # @betteroffice/pptx-react
 
+## 0.2.0
+
+### Minor Changes
+
+- ad64aa4: **Breaking:** collaboration updates now carry deck schema 2.2, and a 0.1.x update is migrated to 2.2 when it is opened. 0.1.x clients cannot open a document this version saved or migrated, so mixed-version collaboration across this upgrade is not supported: upgrade every client that shares a stored update.
+- 7665432: Add version-checked, all-or-nothing PPTX edit batches. `PresentationHandle.version()`, `readContent()` and `findText()` return slides and story text with the session version they were read at; `validateEdits()` and `applyEdits()` resolve every step against that version and either commit text insertion, replacement, deletion and formatting, paragraph alignment, speaker notes, and shape rectangle, fill and outline changes as one transaction and one undo step, or return a typed refusal (`stale-version`, `missing-target`, `ambiguous-target`, `content-mismatch`, `overlapping-steps`, `unsupported`, `invalid-step`, `limit-exceeded`) with the deck untouched. `history: "none"` keeps a batch out of undo history, and `source` records provenance only. `PptxEditorApi` gains the same operations, flushing pending input first, refreshing the editor once after an applied batch, and refusing with `read-only` while the editor is read-only. The Rust `DeckSession` and `Presentation` and the Python `Presentation` expose the same API, and proposal previews and acceptance now share the batch staging. Ids and versions are session-scoped. The Rust `EditStep` and `EditFailureCode` enums are non-exhaustive.
+- affeb36: Expose the PPTX editor's commands as `PptxEditorApi.commands`: serializable state with a stated reason for every disabled command, descriptors with platform-aware shortcuts, and `execute` that runs after pending input such as a decoding picture and checks availability again. Hosts compose built-in controls with their own actions through the `toolbar` and `showToolbar` props, `PptxCommandProvider`, `usePptxCommand`/`usePptxCommandState`, `EditorToolbar mode="commands"`, `ToolbarCommand`, `ToolbarCommandButton`, `ToolbarCommandSelect` and `ToolbarOverflow`, inside or outside the editor. The prop-based `EditorToolbar`, `Toolbar` and `useEditorToolbar` keep working and are deprecated. Canvas and panel proposal review, keyboard shortcuts and the default toolbar run through the same commands; a picture lands on the slide it was chosen for. Narrow toolbars move groups into a keyboard-accessible More menu, and `ToolbarDropdown` follows the menu or dialog pattern of its content. New locale keys cover command labels and disabled reasons. The command and toolbar composition API is experimental and may change in minor releases. `@betteroffice/pptx` adds `anchorCaret` and `resolveCaretAnchor`: plain-data caret positions that follow later edits, undo, redo and remote updates.
+- 2eb2c55: Expose host save interception, awaited input flushing, and pointer position queries. Add manual undo capture, explicit boundaries, and undoable comment repositioning. `PptxEditorApi.save()` now throws while input or a pointer gesture is pending (await `flushPendingInput()` first) and after the presentation is replaced, instead of returning bytes that miss accepted input.
+- 3d77b4f: Add host-controlled viewing mode, initial slide selection, and imperative slide and text navigation APIs.
+- 911a294: Insert a picture onto a slide from the editor. The image mints its own media part, content-type default and relationship on save; `PptxEditor` gains a small "Insert image" icon button next to the text-box tool, and `PresentationHandle` gains `addPicture`. `addPicture` takes PNG, JPEG, GIF, BMP, TIFF, WebP and SVG images up to 8 MiB, checked before the picture reaches the deck, keeping oversized bytes out of collaboration updates.
+- d11dff3: Host editor plugins in `PptxEditor` through the new `plugins`, `pluginGrants` and `onPluginError` props. The plugin API is experimental and may change in minor releases. A plugin created with `definePptxPlugin` can contribute a docked panel (left, right or bottom of the slide), an overlay on the slide canvas, and commands registered as `plugin:<pluginId>/<id>`, whose results carry the plugin's own failure codes or a refused edit batch unchanged, with toolbar entries (`PptxPluginToolbar` places them in replacement chrome) and shortcuts; `ToolbarCommandButton`, `ToolbarCommand`, `usePptxCommand` and `usePptxCommandState` accept those ids. Each activation receives `load`, `document-change`, `selection-change`, `mode-change`, `layout-change` and `grants-change` events, restricted clients (versioned `readContent`, `findText` and `validateEdits`, commands, granted edit batches, and `goToSlide`, `selectShape` and `selectText` navigation that keeps focus unless asked), slide geometry that converts slide EMU or pixels into overlay pixels and reports rendered shape bounds, version-guarded state and `onCleanup` disposers. Plugins read, validate and navigate by default; built-in commands and edit batches need an explicit grant, rechecked with `readOnly` immediately before every write, and mutating built-in commands refuse plugins with `unsupported-policy`. Every contribution renders behind its own error boundary with a plugin-scoped command context, and a failing plugin is stopped and reported without affecting the editor or other plugins. A superseded slide paint no longer draws over the slide painted after it. New locale keys cover plugin panels, the plugin toolbar group and the new disabled reasons.
+- 911a294: Reorder a shape's paint order on its slide: bring to front, send to back, and step it forward or backward. `PresentationHandle` gains `bringShapeToFront`, `sendShapeToBack`, `bringShapeForward` and `sendShapeBackward`, and `PptxEditor`'s shape-formatting toolbar gains an "Arrange" menu for them.
+- 8a5e6b8: Render PPTX pictures stored as SVG in both backends. The browser packages decode them with the browser's own SVG support, and the Rust and Python `render_png` paths rasterize them natively: shapes, paths, fills, strokes, gradients, clip paths, `<use>` and class-based stylesheets draw, under a sandbox that budgets the cost of expanding and painting a document before any of it runs. A tiled SVG repeats at its intrinsic size.
+
+### Patch Changes
+
+- 5114756: Drag and resize placeholders that take their geometry from the layout or master, from the frame they are drawn in, and draw them with the rotation and flips they inherit. The snapshot carries that geometry as `inherited`; the first `moveShape`, `resizeShape` or `setShapeRect` makes the whole transform the placeholder's own, so it keeps its size and orientation live and after a save. The Rust crates add `Placeholder::matches`, the placeholder matching that rendering and editing share, and the facade re-exports `InheritedGeometry`.
+- 7faab61: A text box or shape drawn while a picture is still decoding now lands on the slide it was drawn on, even when you move to another slide before the picture finishes, and that slide's thumbnail shows it.
+- Updated dependencies [6c30f4a]
+- Updated dependencies [9639a6b]
+- Updated dependencies [80341ac]
+- Updated dependencies [6963a67]
+- Updated dependencies [3fb2bf7]
+- Updated dependencies [c02a145]
+- Updated dependencies [030505a]
+- Updated dependencies [ad64aa4]
+- Updated dependencies [7665432]
+- Updated dependencies [affeb36]
+- Updated dependencies [8e8f97a]
+- Updated dependencies [030505a]
+- Updated dependencies [3e0c311]
+- Updated dependencies [2eb2c55]
+- Updated dependencies [5114756]
+- Updated dependencies [911a294]
+- Updated dependencies [030505a]
+- Updated dependencies [6963a67]
+- Updated dependencies [d11dff3]
+- Updated dependencies [58f9bfb]
+- Updated dependencies [60c79dd]
+- Updated dependencies [7faab61]
+- Updated dependencies [ad64aa4]
+- Updated dependencies [7f158c7]
+- Updated dependencies [3830d79]
+- Updated dependencies [911a294]
+- Updated dependencies [6963a67]
+- Updated dependencies [27bf1fc]
+- Updated dependencies [e0d12f3]
+- Updated dependencies [18e1f32]
+- Updated dependencies [73d405c]
+- Updated dependencies [d76b4db]
+- Updated dependencies [8a5e6b8]
+- Updated dependencies [c5f1467]
+- Updated dependencies [6c30f4a]
+- Updated dependencies [ab3d722]
+- Updated dependencies [030505a]
+- Updated dependencies [af6292e]
+- Updated dependencies [1f84618]
+  - @betteroffice/pptx@0.2.0
+  - @betteroffice/pptx-i18n@0.2.0
+
 ## 0.1.1
 
 ### Patch Changes

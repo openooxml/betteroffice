@@ -29,6 +29,7 @@ import type {
   HorizontalRuleContent,
   TextFormatting,
   Hyperlink,
+  HyperlinkContent,
   TrackedChangeInfo,
   Table,
   TableRow,
@@ -998,27 +999,26 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): Parag
     : { type: 'deletion', info, content: [run] };
 }
 
+/**
+ * Adds an item to a hyperlink: a run to its children, and every child, in
+ * order, to its structured children once it has them.
+ */
 function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
-  if (item.kind === 'text') {
-    hyperlink.children.push(createTextRun(item.text, item.attributes));
-    return;
-  }
-  if (item.embedKind === 'break') {
-    hyperlink.children.push({
-      type: 'run',
-      content: [{ type: 'break', breakType: 'textWrapping' }],
-    });
-  } else if (item.embedKind === 'tab') {
-    hyperlink.children.push({ type: 'run', content: [{ type: 'tab' }] });
-  } else if (item.embedKind === 'horizontalRule') {
-    hyperlink.children.push(horizontalRuleRun(item.payload, item.attributes));
+  let child: HyperlinkContent | undefined;
+  if (item.kind === 'text') child = createTextRun(item.text, item.attributes);
+  else if (item.embedKind === 'break') {
+    child = { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+  } else if (item.embedKind === 'tab') child = { type: 'run', content: [{ type: 'tab' }] };
+  else if (item.embedKind === 'horizontalRule') {
+    child = horizontalRuleRun(item.payload, item.attributes);
   } else if (item.embedKind === 'field') {
-    const child =
+    child =
       commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
-    if (child.type === 'run') hyperlink.children.push(child);
-    else (hyperlink.structuredChildren ??= [...hyperlink.children]).push(child);
-  } else if (item.embedKind === 'math') {
-    (hyperlink.structuredChildren ??= [...hyperlink.children]).push(mathFromPayload(item.payload));
+  } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
+  if (!child) return;
+  if (child.type === 'run') hyperlink.children.push(child);
+  if (child.type !== 'run' || hyperlink.structuredChildren) {
+    (hyperlink.structuredChildren ??= [...hyperlink.children]).push(child);
   }
 }
 
@@ -1329,77 +1329,166 @@ function restoreOriginalRuns(
   });
 }
 
-/** The story units a run projects from: one per UTF-16 unit of text, one per inline embed. */
-function runTextLength(run: Run): number {
-  return run.content.reduce((length, content) => {
-    if (content.type === 'text' || content.type === 'instrText')
-      return length + content.text.length;
-    if (content.type === 'symbol') return length + content.char.length;
-    if (
-      content.type === 'tab' ||
-      content.type === 'softHyphen' ||
-      content.type === 'noBreakHyphen' ||
-      content.type === 'footnoteRef' ||
-      content.type === 'endnoteRef' ||
-      content.type === 'horizontalRule' ||
-      content.type === 'commentReference' ||
-      content.type === 'drawing' ||
-      content.type === 'shape' ||
-      content.type === 'chart' ||
-      (content.type === 'break' &&
-        (content.breakType === undefined || content.breakType === 'textWrapping'))
-    ) {
-      return length + 1;
-    }
-    return length;
-  }, 0);
+/** The story units a run entry projects from: one per UTF-16 unit of text, one per inline embed. */
+function runContentLength(content: RunContent): number {
+  if (content.type === 'text' || content.type === 'instrText') return content.text.length;
+  if (content.type === 'symbol') return content.char.length;
+  if (
+    content.type === 'tab' ||
+    content.type === 'softHyphen' ||
+    content.type === 'noBreakHyphen' ||
+    content.type === 'footnoteRef' ||
+    content.type === 'endnoteRef' ||
+    content.type === 'horizontalRule' ||
+    content.type === 'commentReference' ||
+    content.type === 'drawing' ||
+    content.type === 'shape' ||
+    content.type === 'chart' ||
+    (content.type === 'break' &&
+      (content.breakType === undefined || content.breakType === 'textWrapping'))
+  ) {
+    return 1;
+  }
+  return 0;
 }
 
+function runTextLength(run: Run): number {
+  return run.content.reduce((length, content) => length + runContentLength(content), 0);
+}
+
+/** The story units a hyperlink child spans: its text, or one for a field or an equation. */
+function linkChildLength(child: HyperlinkContent): number {
+  if (child.type === 'run') return runTextLength(child);
+  return child.type === 'simpleField' ||
+    child.type === 'complexField' ||
+    child.type === 'mathEquation'
+    ? 1
+    : 0;
+}
+
+/**
+ * The story units projected content spans. Fields, controls and equations
+ * are one embed each; a complex field's hyperlinks and simple fields are
+ * seeded ahead of it.
+ */
 function paragraphContentLength(content: ParagraphContent): number {
   switch (content.type) {
     case 'run':
       return runTextLength(content);
     case 'hyperlink':
-      return content.children.reduce(
-        (sum, child) => sum + (child.type === 'run' ? runTextLength(child) : 0),
+      return (content.structuredChildren ?? content.children).reduce(
+        (sum, child) => sum + linkChildLength(child),
         0
       );
-    case 'simpleField':
-      return content.content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
     case 'complexField':
-      return content.fieldResult.reduce((sum, run) => sum + runTextLength(run), 0);
+      return [
+        ...(content.structuredCode?.inline ?? []),
+        ...(content.structuredResult?.inline ?? []),
+      ]
+        .filter((child) => child.type === 'hyperlink' || child.type === 'simpleField')
+        .reduce((sum, child) => sum + paragraphContentLength(child), 1);
+    case 'simpleField':
     case 'inlineSdt':
-      return content.content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+    case 'mathEquation':
+      return 1;
     case 'insertion':
     case 'deletion':
     case 'moveFrom':
     case 'moveTo':
-      return content.content.reduce(
-        (sum, child) => sum + (child.type === 'run' ? runTextLength(child) : 0),
-        0
-      );
-    case 'mathEquation':
-      return content.plainText?.length ?? 0;
+      return content.content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
     default:
       return 0;
   }
 }
 
-function splitTextRun(run: Run, offset: number): [Run | null, Run | null] {
-  if (!run.content.every((content) => content.type === 'text')) return [run, null];
-  const text = run.content.map((content) => (content.type === 'text' ? content.text : '')).join('');
-  const make = (part: string): Run | null =>
-    part
-      ? {
-          type: 'run',
-          ...(run.formatting ? { formatting: run.formatting } : {}),
-          ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),
-          content: [{ type: 'text', text: part }],
-        }
-      : null;
-  return [make(text.slice(0, offset)), make(text.slice(offset))];
+type Split<T> = [T | null, T | null];
+
+/** Splits `items` `at` story units in, or null when an item there cannot be split. */
+function splitItems<T>(
+  items: readonly T[],
+  at: number,
+  length: (item: T) => number,
+  split: (item: T, at: number) => Split<T> | null
+): [T[], T[]] | null {
+  const left: T[] = [];
+  const right: T[] = [];
+  let offset = 0;
+  for (const item of items) {
+    const width = length(item);
+    if (offset >= at) right.push(item);
+    else if (offset + width <= at) left.push(item);
+    else {
+      const parts = split(item, at - offset);
+      if (!parts) return null;
+      if (parts[0]) left.push(parts[0]);
+      if (parts[1]) right.push(parts[1]);
+    }
+    offset += width;
+  }
+  return [left, right];
 }
 
+function splitRunContent(content: RunContent, at: number): Split<RunContent> | null {
+  if (content.type !== 'text' && content.type !== 'instrText') return null;
+  return [
+    { ...content, text: content.text.slice(0, at) },
+    { ...content, text: content.text.slice(at) },
+  ];
+}
+
+/** One side of a split hyperlink, holding `children` in order. */
+function linkPart(link: Hyperlink, children: HyperlinkContent[]): Hyperlink | null {
+  if (children.length === 0) return null;
+  const legacy = children.filter(
+    (child): child is Hyperlink['children'][number] =>
+      child.type === 'run' || child.type === 'bookmarkStart' || child.type === 'bookmarkEnd'
+  );
+  return link.structuredChildren
+    ? { ...link, children: legacy, structuredChildren: children }
+    : { ...link, children: legacy };
+}
+
+/**
+ * Splits content `at` story units in: runs between their units, hyperlinks
+ * and tracked changes into two halves. Null for content that holds no
+ * position there, such as a field.
+ */
+function splitContent(content: ParagraphContent, at: number): Split<ParagraphContent> | null {
+  if (content.type === 'run') {
+    const parts = splitItems(content.content, at, runContentLength, splitRunContent);
+    return parts && [
+      parts[0].length > 0 ? { ...content, content: parts[0] } : null,
+      parts[1].length > 0 ? { ...content, content: parts[1] } : null,
+    ];
+  }
+  if (content.type === 'hyperlink') {
+    const children: readonly HyperlinkContent[] = content.structuredChildren ?? content.children;
+    const parts = splitItems(children, at, linkChildLength, (child, offset) =>
+      child.type === 'run' ? (splitContent(child, offset) as Split<Run> | null) : null
+    );
+    return parts && [linkPart(content, parts[0]), linkPart(content, parts[1])];
+  }
+  if (isTrackedWrapper(content)) {
+    const parts = splitItems(
+      content.content,
+      at,
+      paragraphContentLength,
+      (child, offset) => splitContent(child, offset) as Split<Run | Hyperlink> | null
+    );
+    return parts && [
+      parts[0].length > 0 ? { ...content, content: parts[0] } : null,
+      parts[1].length > 0 ? { ...content, content: parts[1] } : null,
+    ];
+  }
+  return null;
+}
+
+/**
+ * Inserts zero-width markers at story offsets into paragraph content,
+ * splitting runs, hyperlinks and tracked changes where one falls inside
+ * them. Markers inside content that cannot be split go around it: starts
+ * before, ends after.
+ */
 function insertBoundaries(
   content: ParagraphContent[],
   boundaries: CommentBoundary[],
@@ -1435,38 +1524,35 @@ function insertBoundaries(
   let cursor = 0;
   let boundaryIndex = 0;
   const emit = (offset: number): void => {
-    while (boundaryIndex < sorted.length && sorted[boundaryIndex].offset === offset) {
-      const boundary = sorted[boundaryIndex++];
-      result.push(makeMarker(boundary));
+    while (boundaryIndex < sorted.length && sorted[boundaryIndex].offset <= offset) {
+      result.push(makeMarker(sorted[boundaryIndex++]));
     }
   };
 
   emit(0);
-  for (const item of content) {
-    const length = paragraphContentLength(item);
-    const inside = sorted
-      .slice(boundaryIndex)
-      .map((boundary) => boundary.offset)
-      .filter((offset) => offset > cursor && offset < cursor + length);
-    if (item.type === 'run' && item.content.every((entry) => entry.type === 'text')) {
-      let remaining: Run | null = item;
-      let localCursor = 0;
-      for (const absolute of inside) {
-        if (!remaining) break;
-        const [left, right] = splitTextRun(remaining, absolute - cursor - localCursor);
-        if (left) result.push(left);
-        emit(absolute);
-        remaining = right;
-        localCursor = absolute - cursor;
-      }
-      if (remaining) result.push(remaining);
-    } else {
-      result.push(item);
+  for (const child of content) {
+    const end = cursor + paragraphContentLength(child);
+    let item: ParagraphContent | null = child;
+    while (item && boundaryIndex < sorted.length && sorted[boundaryIndex].offset < end) {
+      const offset = sorted[boundaryIndex].offset;
+      const parts = splitContent(item, offset - cursor);
+      if (!parts) break;
+      if (parts[0]) result.push(parts[0]);
+      cursor = offset;
+      emit(cursor);
+      item = parts[1];
     }
-    cursor += length;
+    const inside: CommentBoundary[] = [];
+    while (boundaryIndex < sorted.length && sorted[boundaryIndex].offset < end) {
+      inside.push(sorted[boundaryIndex++]);
+    }
+    for (const boundary of inside) if (boundary.kind === 'start') result.push(makeMarker(boundary));
+    if (item) result.push(item);
+    for (const boundary of inside) if (boundary.kind === 'end') result.push(makeMarker(boundary));
+    cursor = end;
     emit(cursor);
   }
-  emit(cursor);
+  emit(Number.POSITIVE_INFINITY);
   return result;
 }
 
@@ -2019,6 +2105,8 @@ interface SessionProjectionMemo {
   clean: Set<string>;
   dirty: Set<string>;
   stories: Map<string, ProjectedStory>;
+  /** The story each nested story was last projected inside. */
+  parents: Map<string, string>;
 }
 
 const projectedBlocks = new WeakMap<BlockContent, ProjectedBlockMemo>();
@@ -2053,7 +2141,13 @@ const sessionProjectionMemos = new WeakMap<YrsSession, SessionProjectionMemo>();
 function sessionProjectionMemo(session: YrsSession): SessionProjectionMemo {
   let memo = sessionProjectionMemos.get(session);
   if (!memo) {
-    memo = { wholesale: true, clean: new Set(), dirty: new Set(), stories: new Map() };
+    memo = {
+      wholesale: true,
+      clean: new Set(),
+      dirty: new Set(),
+      stories: new Map(),
+      parents: new Map(),
+    };
     sessionProjectionMemos.set(session, memo);
   }
   return memo;
@@ -2077,6 +2171,10 @@ function sameJson(a: unknown, b: unknown): boolean {
 
 const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+|:sdt\d+)$/;
 
+/** Page and column breaks the layout gives a block of their own, ahead of a paragraph. */
+const isBlockBreak = (item: InlineItem): boolean =>
+  item.kind === 'embed' && (item.embedKind === 'pageBreak' || item.embedKind === 'columnBreak');
+
 /** Stories a committed op touched; `all` invalidates the whole session. */
 export function noteYrsStoriesDirty(
   session: YrsSession,
@@ -2088,16 +2186,21 @@ export function noteYrsStoriesDirty(
     memo.clean.clear();
     memo.dirty.clear();
     memo.stories.clear();
+    memo.parents.clear();
     return;
   }
   const queue = typeof stories === 'string' ? [stories] : [...stories];
+  const queued = new Set(queue);
   for (let index = 0; index < queue.length; index += 1) {
     const story = queue[index]!;
     memo.dirty.add(story);
     memo.clean.delete(story);
     memo.stories.delete(story);
-    const parent = NESTED_STORY_ID.exec(story)?.[1];
-    if (parent) queue.push(parent);
+    const parent = memo.parents.get(story) ?? NESTED_STORY_ID.exec(story)?.[1];
+    if (parent && !queued.has(parent)) {
+      queued.add(parent);
+      queue.push(parent);
+    }
   }
 }
 
@@ -2108,6 +2211,8 @@ class SaveContext {
   private readonly baseParagraphs: Map<string, Paragraph>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
+  /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
+  private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
 
   constructor(
@@ -2121,6 +2226,19 @@ class SaveContext {
     this.baseParagraphs = collectBaseParagraphs(this.baseStories);
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
     this.memo = sessionProjectionMemo(session);
+    for (const [story, ranges] of this.comments) {
+      const seen = new Set<string>();
+      for (
+        let owner: string | undefined = story;
+        owner !== undefined && !seen.has(owner);
+        owner = this.memo.parents.get(owner) ?? NESTED_STORY_ID.exec(owner)?.[1]
+      ) {
+        seen.add(owner);
+        const nested = this.subtreeComments.get(owner) ?? new Map<string, unknown>();
+        nested.set(story, ranges);
+        this.subtreeComments.set(owner, nested);
+      }
+    }
   }
 
   private storyIsClean(storyId: string): boolean {
@@ -2129,10 +2247,11 @@ class SaveContext {
       : !this.memo.dirty.has(storyId);
   }
 
-  private cellContents(payload: TablePayload): BlockContent[][] {
+  private cellContents(payload: TablePayload, parent: string): BlockContent[][] {
     const contents: BlockContent[][] = [];
     for (const row of Array.isArray(payload.rows) ? payload.rows : []) {
       for (const cell of Array.isArray(row.cells) ? row.cells : []) {
+        if (cell.story !== undefined) this.memo.parents.set(cell.story, parent);
         contents.push(
           cell.story !== undefined && this.storyIds.has(cell.story)
             ? this.storyToBlocks(cell.story)
@@ -2146,7 +2265,8 @@ class SaveContext {
   storyToBlocks(storyId: string): BlockContent[] {
     const baseBlocks = this.baseStories.get(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
-    const commentsKey = storyComments.length === 0 ? '' : stableStringify(storyComments);
+    const nestedComments = this.subtreeComments.get(storyId);
+    const commentsKey = nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '';
     const priorStory = this.memo.stories.get(storyId);
     // Nested stories are mapped positionally, so a different array means
     // drift, not divergence — mutation paths mark them dirty anyway. A root
@@ -2167,6 +2287,7 @@ class SaveContext {
     const segments = this.session.storySegments(storyId);
     let items: InlineItem[] = [];
     let paragraphStart = 0;
+    let inlineStart = 0;
     let paragraphIndex = 0;
     let storyOffset = 0;
     let candidatesByKey: Map<string, BlockContent[]> | null = null;
@@ -2205,10 +2326,11 @@ class SaveContext {
       const boundaries: CommentBoundary[] = [];
       for (const range of storyComments) {
         if (range.start >= paragraphStart && range.start <= end) {
-          boundaries.push({ id: range.id, kind: 'start', offset: range.start - paragraphStart });
+          const offset = Math.max(0, range.start - inlineStart);
+          boundaries.push({ id: range.id, kind: 'start', offset });
         }
         if (range.end >= paragraphStart && range.end <= end) {
-          boundaries.push({ id: range.id, kind: 'end', offset: range.end - paragraphStart });
+          boundaries.push({ id: range.id, kind: 'end', offset: Math.max(0, range.end - inlineStart) });
         }
       }
       return boundaries;
@@ -2273,6 +2395,7 @@ class SaveContext {
         paragraphIndex += 1;
         storyOffset += 1;
         paragraphStart = storyOffset;
+        inlineStart = storyOffset;
         continue;
       }
 
@@ -2282,7 +2405,7 @@ class SaveContext {
         const firstCell = Array.isArray(payload.rows) ? payload.rows[0]?.cells?.[0] : undefined;
         const key = `T${firstCell?.story ?? ''}`;
         const contents =
-          candidatesFor(key).length > 0 ? this.cellContents(payload) : undefined;
+          candidatesFor(key).length > 0 ? this.cellContents(payload, storyId) : undefined;
         const reused =
           contents !== undefined
             ? (reuseContainer(key, inputs, contents) as Table | undefined)
@@ -2295,12 +2418,13 @@ class SaveContext {
           projectedBlocks.set(table, {
             key,
             inputs,
-            children: contents ?? this.cellContents(payload),
+            children: contents ?? this.cellContents(payload, storyId),
           });
         }
         blocks.push(table);
       } else if (segment.embedKind === 'blockSdt') {
         const childStory = asString(segment.payload.story);
+        if (childStory) this.memo.parents.set(childStory, storyId);
         const childContent =
           childStory && this.storyIds.has(childStory)
             ? this.storyToBlocks(childStory)
@@ -2356,6 +2480,7 @@ class SaveContext {
         items.push(segment as EmbedItem);
       }
       storyOffset += 1;
+      if (items.every(isBlockBreak)) inlineStart = storyOffset;
     }
 
     // Defensive recovery for malformed/legacy stories without a final pilcrow.

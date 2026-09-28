@@ -27,6 +27,7 @@ use crate::table::{Table, TableCell};
 use crate::vml::Watermark;
 use crate::xml::ParseError;
 
+use super::comment_references::{ParagraphLocation, normalize_comment_references};
 use super::context::SerializerContext;
 use super::numbering::serialize_numbering_xml;
 use super::paragraph::serialize_paragraph;
@@ -179,6 +180,20 @@ pub fn write_docx_s13_parts(
                 "source paragraphs and changed paragraph ids cannot be combined",
             ));
         }
+        let replaced: HashSet<usize> = sources
+            .paragraphs
+            .iter()
+            .map(|source| source.block)
+            .collect();
+        normalize_saved_comment_references(&mut request, |_, story| match story {
+            SavedStory::Body => Written::Blocks(replaced.clone()),
+            _ => Written::Nothing,
+        });
+        let sources = request
+            .selective
+            .as_ref()
+            .and_then(|selective| selective.source_paragraphs.as_ref())
+            .expect("source paragraphs were just read");
         let original = package
             .bytes("word/document.xml")
             .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
@@ -198,14 +213,66 @@ pub fn write_docx_s13_parts(
         .iter()
         .map(|part| (part.part.as_str(), part.para_ids.as_slice()))
         .collect();
-    let patched_part = |package: &Package, path: &str| {
-        let path = package.resolve_path(path);
-        patched.get(path).and_then(|ids| {
-            package
+    let mut patched_parts: HashMap<String, Vec<u8>> = patched
+        .iter()
+        .filter(|(path, _)| **path != COMMENTS_PART)
+        .filter_map(|(path, ids)| {
+            let path = package.resolve_path(path);
+            let bytes = package
                 .original_bytes(path)
-                .and_then(|bytes| patch_part(bytes, ids))
+                .and_then(|bytes| patch_part(bytes, ids))?;
+            Some((path.to_owned(), bytes))
         })
-    };
+        .collect();
+
+    let preserved = |path: &str| patched_parts.contains_key(package.resolve_path(path));
+    let changed: Option<HashSet<String>> = request
+        .selective
+        .as_ref()
+        .map(|selective| selective.changed_para_ids.iter().cloned().collect());
+    normalize_saved_comment_references(&mut request, |request, story| {
+        let part = |entries: &[(String, HeaderFooter)], index: usize, kind: &str| {
+            relationships
+                .get(&entries[index].0)
+                .filter(|relationship| {
+                    relationship.relationship_type == kind
+                        && !relationship.target.is_empty()
+                        && relationship.target_mode != Some(TargetMode::External)
+                })
+                .and_then(|relationship| {
+                    resolve_relative_path(&package.document_path, &relationship.target).ok()
+                })
+                .filter(|path| !preserved(path))
+                .map_or(Written::Nothing, |_| Written::Everything)
+        };
+        let note = |note: &Note, path: &str| {
+            if changed.is_some() || preserved(path) || note.verbatim_xml.is_some() {
+                Written::Nothing
+            } else {
+                Written::Everything
+            }
+        };
+        match story {
+            SavedStory::Body if preserved("word/document.xml") => Written::Nothing,
+            SavedStory::Body => changed
+                .clone()
+                .map_or(Written::Everything, Written::Paragraphs),
+            SavedStory::Header(index) => {
+                part(&request.header_entries, index, relationship_types::HEADER)
+            }
+            SavedStory::Footer(index) => {
+                part(&request.footer_entries, index, relationship_types::FOOTER)
+            }
+            SavedStory::Footnote(index) => note(&request.footnotes[index], "word/footnotes.xml"),
+            SavedStory::FootnoteSeparator(index) => {
+                note(&request.footnote_separators[index], "word/footnotes.xml")
+            }
+            SavedStory::Endnote(index) => note(&request.endnotes[index], "word/endnotes.xml"),
+            SavedStory::EndnoteSeparator(index) => {
+                note(&request.endnote_separators[index], "word/endnotes.xml")
+            }
+        }
+    });
 
     if request.selective.is_some() {
         validate_selective_header_footer_parts(&package, &relationships)?;
@@ -216,7 +283,7 @@ pub fn write_docx_s13_parts(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    let document_xml = if let Some(patched) = patched_part(&package, "word/document.xml") {
+    let document_xml = if let Some(patched) = patched_parts.remove(&package.document_path) {
         String::from_utf8(patched).map_err(|error| save_error(error.to_string()))?
     } else if let Some(selective) = request.selective.as_ref() {
         let original = package
@@ -260,7 +327,7 @@ pub fn write_docx_s13_parts(
         })
         .collect();
     for path in story_parts {
-        if let Some(bytes) = patched_part(&package, &path) {
+        if let Some(bytes) = patched_parts.remove(&path) {
             package.set(path, bytes);
         }
     }
@@ -300,7 +367,7 @@ pub fn write_docx_s13_parts(
     if request.selective.is_none() {
         let mut footnotes = request.footnote_separators;
         footnotes.extend(request.footnotes);
-        if let Some(bytes) = patched_part(&package, "word/footnotes.xml") {
+        if let Some(bytes) = patched_parts.remove("word/footnotes.xml") {
             package.set("word/footnotes.xml", bytes);
         } else if !footnotes.is_empty() {
             package.set_text(
@@ -310,7 +377,7 @@ pub fn write_docx_s13_parts(
         }
         let mut endnotes = request.endnote_separators;
         endnotes.extend(request.endnotes);
-        if let Some(bytes) = patched_part(&package, "word/endnotes.xml") {
+        if let Some(bytes) = patched_parts.remove("word/endnotes.xml") {
             package.set("word/endnotes.xml", bytes);
         } else if !endnotes.is_empty() {
             package.set_text(
@@ -471,6 +538,83 @@ fn comments_need_paragraph_ids(document: &DocumentBody) -> bool {
 }
 
 /// Applies the plan's source-paragraph IDs to every serialized part's model.
+/// A story of a save request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavedStory {
+    Body,
+    Header(usize),
+    Footer(usize),
+    Footnote(usize),
+    Endnote(usize),
+    FootnoteSeparator(usize),
+    EndnoteSeparator(usize),
+}
+
+/// What a save writes of a story from its model rather than its source bytes.
+enum Written {
+    Nothing,
+    Everything,
+    /// The paragraphs with these Word paragraph IDs.
+    Paragraphs(HashSet<String>),
+    /// The top-level paragraphs at these blocks.
+    Blocks(HashSet<usize>),
+}
+
+impl Written {
+    fn holds(&self, location: &ParagraphLocation) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Everything => true,
+            Self::Paragraphs(ids) => location.para_id.as_ref().is_some_and(|id| ids.contains(id)),
+            Self::Blocks(blocks) => !location.nested && blocks.contains(&location.block),
+        }
+    }
+}
+
+/// Normalizes, across the request's stories, the comment references of what the save writes
+/// from its model, which `written` gives for each story.
+fn normalize_saved_comment_references(
+    request: &mut S13SaveRequest,
+    written: impl Fn(&S13SaveRequest, SavedStory) -> Written,
+) {
+    let stories: Vec<SavedStory> = std::iter::once(SavedStory::Body)
+        .chain((0..request.header_entries.len()).map(SavedStory::Header))
+        .chain((0..request.footer_entries.len()).map(SavedStory::Footer))
+        .chain((0..request.footnotes.len()).map(SavedStory::Footnote))
+        .chain((0..request.endnotes.len()).map(SavedStory::Endnote))
+        .chain((0..request.footnote_separators.len()).map(SavedStory::FootnoteSeparator))
+        .chain((0..request.endnote_separators.len()).map(SavedStory::EndnoteSeparator))
+        .collect();
+    let writes: Vec<Written> = stories
+        .iter()
+        .map(|story| written(request, *story))
+        .collect();
+    let mut blocks = vec![&mut request.document.content];
+    blocks.extend(
+        request
+            .header_entries
+            .iter_mut()
+            .map(|(_, story)| &mut story.content),
+    );
+    blocks.extend(
+        request
+            .footer_entries
+            .iter_mut()
+            .map(|(_, story)| &mut story.content),
+    );
+    for notes in [
+        &mut request.footnotes,
+        &mut request.endnotes,
+        &mut request.footnote_separators,
+        &mut request.endnote_separators,
+    ] {
+        blocks.extend(notes.iter_mut().map(|note| &mut note.content));
+    }
+    normalize_comment_references(&mut blocks, |location| {
+        writes[location.story].holds(location)
+    });
+}
+
 fn apply_paragraph_id_assignments(
     request: &mut S13SaveRequest,
     paragraph_ids: &S13ParagraphIds,
@@ -1782,27 +1926,9 @@ impl<'a> SelectiveParagraphIndex<'a> {
     }
 
     fn cell(&mut self, cell: &TableCell) -> Option<()> {
-        // Mirrors `serialize_table_cell`: block SDTs emit nothing and an
-        // otherwise empty cell still emits a `<w:p/>` fallback.
-        let mut emitted = false;
-        for block in &cell.content {
-            match block {
-                BlockContent::Paragraph(paragraph) => {
-                    self.paragraph(paragraph)?;
-                    emitted = true;
-                }
-                BlockContent::Table(table) => {
-                    self.table(table)?;
-                    emitted = true;
-                }
-                BlockContent::BlockSdt(_) => {}
-                BlockContent::RawXml(raw) => {
-                    self.fragment(&raw.xml)?;
-                    emitted = true;
-                }
-            }
-        }
-        if !emitted {
+        // Mirrors `serialize_table_cell`: an empty cell emits a `<w:p/>` fallback.
+        self.story(&cell.content)?;
+        if cell.content.is_empty() {
             self.count += 1;
         }
         Some(())
@@ -2677,6 +2803,42 @@ mod tests {
         assert!(document.contains("<w:t>edited</w:t>"));
         assert!(!document.contains("model copy"));
         assert_eq!(parts["custom/opaque.dat"], b"opaque\0bytes");
+    }
+
+    #[test]
+    fn selective_save_counts_block_controls_in_table_cells() {
+        let document = concat!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"><w:body>",
+            "<w:tbl><w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc>",
+            "<w:sdt><w:sdtPr><w:tag w:val=\"cell\"/><w:text/></w:sdtPr><w:sdtContent>",
+            "<w:p w14:paraId=\"AAAAAAAA\"><w:r><w:t>control</w:t></w:r></w:p>",
+            "</w:sdtContent></w:sdt><w:p w14:paraId=\"CCCCCCCC\"/></w:tc></w:tr></w:tbl>",
+            "<!-- opaque authored gap -->",
+            "<w:p w14:paraId=\"BBBBBBBB\"><w:r><w:t>old</w:t></w:r></w:p>",
+            "<w:sectPr/></w:body></w:document>"
+        );
+        let parsed =
+            crate::parse_docx_s9_wire(&base_package(document), Default::default()).expect("parse");
+        let table = serde_json::to_value(&parsed.document.package.document.content[0]).unwrap();
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [table, text_paragraph("edited", Some("BBBBBBBB"))] },
+            "options": { "updateModifiedDate": false },
+            "selective": { "changedParaIds": ["BBBBBBBB"] }
+        }))
+        .expect("request");
+        let mut context = SerializerContext::new(&request.determinism).unwrap();
+        let patched = build_selective_document_xml(
+            &request.document,
+            document,
+            &["BBBBBBBB".to_owned()],
+            &mut context,
+        )
+        .unwrap()
+        .expect("the census counts the control's paragraph");
+        let unchanged = &document[..document.find("<w:p w14:paraId=\"BBBBBBBB\">").unwrap()];
+        assert!(patched.starts_with(unchanged));
+        assert!(patched.contains("<w:t>edited</w:t>"));
     }
 
     #[test]

@@ -353,7 +353,8 @@ impl PptxDocument {
     }
 
     /// `source` is the file the update was seeded from; when it matches the
-    /// recorded fingerprint the session keeps its part bytes and can save.
+    /// recorded fingerprint the session keeps its part bytes and can save, and
+    /// failing to reattach it throws.
     /// Any other bytes fall back to the bare update session, whose `saveBytes`
     /// fails — joining a room must not depend on carrying the right file.
     #[wasm_bindgen(js_name = openCollaborativeFromUpdate)]
@@ -363,12 +364,13 @@ impl PptxDocument {
         source: Option<Vec<u8>>,
     ) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
-        let session = source
-            .and_then(|source| {
-                DeckSession::open_from_update_with_source(update, &source, client_id).ok()
-            })
-            .map_or_else(|| DeckSession::open_from_update(update, client_id), Ok)
-            .map_err(js_error)?;
+        let session = DeckSession::open_from_update(update, client_id).map_err(js_error)?;
+        let session = match source {
+            Some(source) if session.seeded_from(&source).map_err(js_error)? => {
+                session.attach_source(&source).map_err(js_error)?
+            }
+            _ => session,
+        };
         Ok(Self::opened(session))
     }
 

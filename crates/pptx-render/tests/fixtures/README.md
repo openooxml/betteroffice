@@ -44,7 +44,7 @@ The kept source rectangle is `(102.4, 204.8, 614.4, 716.8)` pixels. Rendering sh
 `outer-shadow-scale.pptx` derives from `outer-shadow.pptx`. The filled card uses
 `sx="200000" sy="50000" algn="tr"`; the outlined card uses
 `sx="-150000" sy="200000" algn="ctr"`. It covers unequal axes, a flipped shadow,
-and source reattachment and edited-save round trips from schema 17 to 18.
+and source reattachment and edited-save round trips.
 
 `outer-shadow-picture.pptx` derives from `outer-shadow.pptx`. Slide 1 replaces the
 two cards with two 240x240 CSS-pixel pictures of the same 64x64 bitmap, whose

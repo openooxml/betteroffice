@@ -2,8 +2,7 @@
 
 UI locale strings, types, and runtime helpers for the
 [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react)
-editor. `en` is the source of truth; community locales mirror its shape and fall
-back to English for any untranslated key.
+editor. `en` defines the locale shape; community locales override its strings.
 
 ```bash
 bun add @betteroffice/xlsx-i18n
@@ -20,7 +19,7 @@ import { XlsxEditor } from '@betteroffice/xlsx-react';
 <XlsxEditor file={file} i18n={de} />;
 ```
 
-Keys set to `null` in any locale fall back to English.
+Keys set to `null` keep the English string.
 
 ## Locales
 
