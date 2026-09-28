@@ -313,9 +313,6 @@ styles actually change.
 Saving serializes edited worksheet state and retains source range coordinates.
 Collaboration fingerprints the modeled workbook.
 
-The engine refuses structural edits while a pivot table or an unmodeled chart
-part is preserved.
-
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.
 

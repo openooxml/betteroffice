@@ -91,7 +91,8 @@ defined name under `ROW`, `COLUMN`, `ROWS` or `COLUMNS` counts as a direct
 reference, so a name bound to a computed reference keeps no dependency edge to
 the cells that reference reads, and an `OFFSET` with a computed target
 re-evaluates on every recalculation but may read a same-pass write to that target
-one recalculation late.
+one recalculation late. `SEARCH` and exact-mode `VLOOKUP`, `HLOOKUP` and `MATCH`
+match `*` and `?` literally.
 
 Open and save DOCX and PPTX files through their format APIs:
 

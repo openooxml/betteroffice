@@ -8,7 +8,7 @@ Beyond the core replacements it also ships the families PowerPoint decks are
 commonly drawn with — Inter, Roboto, Source Sans 3, DM Sans, DM Serif Display,
 Open Sans, Montserrat, Poppins, Oswald and Heebo, the fonts themselves — plus
 Gelasio for Georgia and Comic Relief for Comic Sans MS, both metric-compatible.
-Unknown families resolve to a related, monospace, serif or Calibri face.
+Unknown families resolve to a related, monospace, serif or sans face: Calibri, or Arial for Word.
 
 ## Why it matters
 
