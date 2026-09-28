@@ -213,16 +213,19 @@ pub fn write_docx_s13_parts(
         .iter()
         .map(|part| (part.part.as_str(), part.para_ids.as_slice()))
         .collect();
-    let patched_part = |package: &Package, path: &str| {
-        let path = package.resolve_path(path);
-        patched.get(path).and_then(|ids| {
-            package
+    let mut patched_parts: HashMap<String, Vec<u8>> = patched
+        .iter()
+        .filter(|(path, _)| **path != COMMENTS_PART)
+        .filter_map(|(path, ids)| {
+            let path = package.resolve_path(path);
+            let bytes = package
                 .original_bytes(path)
-                .and_then(|bytes| patch_part(bytes, ids))
+                .and_then(|bytes| patch_part(bytes, ids))?;
+            Some((path.to_owned(), bytes))
         })
-    };
+        .collect();
 
-    let preserved = |path: &str| patched.contains_key(package.resolve_path(path));
+    let preserved = |path: &str| patched_parts.contains_key(package.resolve_path(path));
     let changed: Option<HashSet<String>> = request
         .selective
         .as_ref()
@@ -280,7 +283,7 @@ pub fn write_docx_s13_parts(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    let document_xml = if let Some(patched) = patched_part(&package, "word/document.xml") {
+    let document_xml = if let Some(patched) = patched_parts.remove(&package.document_path) {
         String::from_utf8(patched).map_err(|error| save_error(error.to_string()))?
     } else if let Some(selective) = request.selective.as_ref() {
         let original = package
@@ -324,7 +327,7 @@ pub fn write_docx_s13_parts(
         })
         .collect();
     for path in story_parts {
-        if let Some(bytes) = patched_part(&package, &path) {
+        if let Some(bytes) = patched_parts.remove(&path) {
             package.set(path, bytes);
         }
     }
@@ -364,7 +367,7 @@ pub fn write_docx_s13_parts(
     if request.selective.is_none() {
         let mut footnotes = request.footnote_separators;
         footnotes.extend(request.footnotes);
-        if let Some(bytes) = patched_part(&package, "word/footnotes.xml") {
+        if let Some(bytes) = patched_parts.remove("word/footnotes.xml") {
             package.set("word/footnotes.xml", bytes);
         } else if !footnotes.is_empty() {
             package.set_text(
@@ -374,7 +377,7 @@ pub fn write_docx_s13_parts(
         }
         let mut endnotes = request.endnote_separators;
         endnotes.extend(request.endnotes);
-        if let Some(bytes) = patched_part(&package, "word/endnotes.xml") {
+        if let Some(bytes) = patched_parts.remove("word/endnotes.xml") {
             package.set("word/endnotes.xml", bytes);
         } else if !endnotes.is_empty() {
             package.set_text(

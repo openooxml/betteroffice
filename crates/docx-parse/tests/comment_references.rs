@@ -338,6 +338,30 @@ fn a_part_kept_as_source_bytes_keeps_them_with_a_stray_reference_and_a_hyperlink
     assert_eq!(document_xml(&saved), source);
 }
 
+#[test]
+fn a_part_whose_paragraph_id_patch_fails_is_normalized_as_it_is_serialized() {
+    let original = package(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:commentRangeStart w:id="7"/><w:r><w:t>Hello</w:t></w:r><w:commentRangeEnd w:id="7"/></w:p><w:p><w:r><w:commentReference w:id="7"/></w:r><w:r><w:t>World</w:t></w:r></w:p></w:body></w:document>"#,
+    );
+    let (_, mut request) = comment_request(json!([
+        paragraph("11111111", comment_range()),
+        paragraph("22222222", json!([reference(7), text_run("World")])),
+    ]));
+    request.footnotes = serde_json::from_value(json!([{
+        "type": "footnote", "id": 1, "noteType": "normal",
+        "content": [paragraph("33333333", json!([text_run("Note"), reference(7)]))]
+    }]))
+    .unwrap();
+    request.paragraph_ids = serde_json::from_value(json!({ "patchedParts": [
+        { "part": "word/document.xml", "paraIds": [[9, "1A2B3C4D"]] },
+        { "part": "word/footnotes.xml", "paraIds": [[0, "2B3C4D5E"]] }
+    ] }))
+    .unwrap();
+    let saved = write_docx_s13(request, &original).unwrap();
+    assert_reference_after_end(&saved);
+    assert!(element_ids(&saved, "word/footnotes.xml", b"w:commentReference").is_empty());
+}
+
 fn selective_original() -> Vec<u8> {
     package(
         r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:commentRangeStart w:id="7"/><w:r><w:t>Hello</w:t></w:r><w:commentRangeEnd w:id="7"/></w:p><w:p w14:paraId="22222222"><w:r><w:t>World</w:t></w:r><w:r><w:commentReference w:id="7"/></w:r></w:p></w:body></w:document>"#,
