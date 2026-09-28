@@ -34,6 +34,8 @@ pub struct PreservedPackage {
     pub(crate) rich_shared_strings: BTreeSet<usize>,
     /// The `cm` index the source's cell metadata gives a dynamic array.
     pub(crate) dynamic_array_cm: Option<u32>,
+    /// The source's cell metadata part.
+    pub(crate) metadata: Option<PartReference>,
 }
 
 impl PreservedPackage {
@@ -110,6 +112,12 @@ impl PreservedPackage {
             "xl/sharedStrings.xml",
         );
         let styles = part_reference(&parts, &workbook_relationships, "styles", "xl/styles.xml");
+        let metadata = part_reference(
+            &parts,
+            &workbook_relationships,
+            "sheetMetadata",
+            "xl/metadata.xml",
+        );
         let theme = part_reference(
             &parts,
             &workbook_relationships,
@@ -184,6 +192,7 @@ impl PreservedPackage {
             unpatchable_references,
             rich_shared_strings,
             dynamic_array_cm: None,
+            metadata,
         })
     }
 

@@ -449,7 +449,9 @@ fn apply_range_formats(
 /// its result and takes only the style; given content, it becomes the
 /// author's and obstructs the array whose result it held. the anchor's
 /// definition travels with its formula, so a changed one retires the old
-/// array's result. returns the cells whose value changed beside `at`.
+/// array's result, and restoring a definition or clearing what obstructed an
+/// array brings back what it gave up. returns the cells whose value changed
+/// beside `at`.
 pub fn write_state(sheet: &mut Sheet, at: CellRef, state: &CellState) -> Vec<CellRef> {
     let mut changed = Vec::new();
     if let Some(anchor) = sheet.result_anchor(at) {
@@ -462,7 +464,9 @@ pub fn write_state(sheet: &mut Sheet, at: CellRef, state: &CellState) -> Vec<Cel
         changed = sheet.obstruct_array(anchor);
         changed.retain(|cell| *cell != at);
     }
-    changed.extend(sheet.set_array_definition(at, state.array));
+    if sheet.array_definition(at) != state.array {
+        changed.extend(sheet.set_array_definition(at, None));
+    }
     sheet.set_cell(
         at,
         Cell {
@@ -471,6 +475,12 @@ pub fn write_state(sheet: &mut Sheet, at: CellRef, state: &CellState) -> Vec<Cel
             style: state.style,
         },
     );
+    if state.array.is_some() {
+        changed.extend(sheet.set_array_definition(at, state.array));
+    }
+    if !state.has_content() {
+        changed.extend(sheet.restore_suspended_at(at));
+    }
     changed
 }
 
@@ -1230,8 +1240,8 @@ mod tests {
         assert_eq!(wb.sheets[0].result_anchor(r("C2")), Some(r("C1")));
     }
 
-    /// the anchor's definition leaves with its formula and comes back with it
-    /// on undo; the result it filled is gone.
+    /// the anchor's definition leaves with its formula, and undo brings it
+    /// back with the result it filled.
     #[test]
     fn an_array_anchor_that_loses_its_formula_clears_what_it_filled() {
         let mut wb = spilled();
@@ -1260,9 +1270,14 @@ mod tests {
         apply_ops(&mut wb, &inverse.0).unwrap();
         assert_eq!(
             wb.sheets[0].array_formula(r("C1")),
-            Some(CellRange::parse_a1("C1").unwrap())
+            Some(CellRange::parse_a1("C1:C3").unwrap())
         );
         assert!(wb.sheets[0].is_dynamic_array(r("C1")));
+        assert_eq!(
+            wb.value(SheetId(0), r("C3")),
+            CellValue::Number { value: 3.0 }
+        );
+        assert_eq!(wb.sheets[0].result_anchor(r("C3")), Some(r("C1")));
     }
 
     /// deleting the row an anchor sits on drops its array, and undoing the

@@ -2940,24 +2940,14 @@ pub fn fill_at(range: CellRange, value: Value) -> Spill {
     {
         return spill_at(range.start, None, Value::error(ErrorValue::Num));
     }
-    let (rows, cols, values) = match value {
-        Value::Array(array) => (array.rows, array.cols, array.values),
-        value => (1, 1, vec![value.into_scalar()]),
+    let values = match value {
+        Value::Array(array) => (0..height)
+            .flat_map(|row| (0..width).map(move |col| (row, col)))
+            .map(|(row, col)| crate::engine::computed(array.broadcast(row, col)))
+            .collect(),
+        value => vec![crate::engine::computed(value.into_scalar()); height * width],
     };
-    let mut out = Vec::with_capacity(height * width);
-    for row in 0..height {
-        for col in 0..width {
-            let row = if rows == 1 { 0 } else { row };
-            let col = if cols == 1 { 0 } else { col };
-            out.push(match values.get(row * cols + col) {
-                Some(value) if row < rows && col < cols => crate::engine::computed(value.clone()),
-                _ => CellValue::Error {
-                    value: ErrorValue::NA,
-                },
-            });
-        }
-    }
-    Spill { range, values: out }
+    Spill { range, values }
 }
 
 /// evaluate a formula as an array formula: a dynamic array lays its result out

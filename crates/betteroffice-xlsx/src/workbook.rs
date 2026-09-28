@@ -2819,6 +2819,14 @@ fn array_footprint(
         let Some(sheet) = model.sheets.get(index as usize) else {
             continue;
         };
+        for &(row, col) in &cells {
+            footprint.extend(
+                sheet
+                    .suspended_cells(CellRef::new(row, col))
+                    .into_iter()
+                    .map(|at| (SheetId(index), at, model.value(SheetId(index), at))),
+            );
+        }
         for (_, range) in sheet.array_formulas() {
             let covers = cells
                 .range((range.start.row, 0)..=(range.end.row, u32::MAX))

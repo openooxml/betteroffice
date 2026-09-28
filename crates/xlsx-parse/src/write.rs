@@ -383,6 +383,12 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         )
     });
 
+    let metadata = plan_dynamic_array_metadata(wb, package, &mut used_relationship_ids)?;
+    let array_metadata = ArrayMetadata::package(
+        package
+            .dynamic_array_cm
+            .or(metadata.as_ref().map(|(_, _, cm)| *cm)),
+    );
     let mut parts = PartStore::new(&package.parts);
     let retained_origins = sheets
         .iter()
@@ -427,6 +433,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                     provenance,
                     shared_string_plan.as_ref(),
                     axes,
+                    array_metadata,
                 )?
             }
             Some(_) => continue,
@@ -448,7 +455,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                         &relationship_namespace,
                         &links,
                         shared_string_plan.as_ref(),
-                        ArrayMetadata::package(package.dynamic_array_cm),
+                        array_metadata,
                     )?,
                     relationships: Some(links.relationships),
                 }
@@ -472,9 +479,12 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         merged_workbook_relationships(
             package,
             &sheets,
-            shared_strings.as_ref(),
-            styles.as_ref(),
-            theme.as_ref(),
+            [
+                shared_strings.as_ref(),
+                styles.as_ref(),
+                theme.as_ref(),
+                metadata.as_ref().map(|(part, _, _)| part),
+            ],
             edited,
         )?,
     )?;
@@ -491,10 +501,14 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             shared_strings.as_ref(),
             styles.as_ref(),
             theme.as_ref(),
+            metadata.as_ref().map(|(part, _, _)| part),
             edited,
             &pruned,
         )?,
     )?;
+    if let Some((part, bytes, _)) = metadata {
+        parts.set(part.path, bytes)?;
+    }
 
     replace_shared_strings(
         &mut parts,
@@ -1448,20 +1462,17 @@ fn merged_root_relationships(package: &PreservedPackage) -> Result<Vec<u8>, Pars
     relationships_xml(&relationships)
 }
 
+/// `parts` are the planned shared strings, styles, theme and cell metadata.
 fn merged_workbook_relationships(
     package: &PreservedPackage,
     sheets: &[PlannedSheet],
-    shared_strings: Option<&PlannedPart>,
-    styles: Option<&PlannedPart>,
-    theme: Option<&PlannedPart>,
+    parts: [Option<&PlannedPart>; 4],
     edited: bool,
 ) -> Result<Vec<u8>, ParseError> {
     let planned = sheets
         .iter()
         .map(|sheet| &sheet.relationship)
-        .chain(shared_strings.map(|part| &part.relationship))
-        .chain(styles.map(|part| &part.relationship))
-        .chain(theme.map(|part| &part.relationship))
+        .chain(parts.into_iter().flatten().map(|part| &part.relationship))
         .collect::<Vec<_>>();
     let planned_by_id = planned
         .iter()
@@ -1531,12 +1542,14 @@ fn relationships_xml(relationships: &[Relationship]) -> Result<Vec<u8>, ParseErr
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merged_content_types(
     package: &PreservedPackage,
     sheets: &[PlannedSheet],
     shared_strings: Option<&PlannedPart>,
     styles: Option<&PlannedPart>,
     theme: Option<&PlannedPart>,
+    metadata: Option<&PlannedPart>,
     edited: bool,
     pruned: &HashSet<String>,
 ) -> Result<Vec<u8>, ParseError> {
@@ -1582,6 +1595,16 @@ fn merged_content_types(
                 .as_ref()
                 .and_then(|source| source_content_type(package, &source.path))
                 .unwrap_or(if strict { CT_STRICT_STYLES } else { CT_STYLES }),
+        );
+    }
+    if let Some(part) = metadata {
+        desired.insert(
+            normalized_part_name(&part.path),
+            package
+                .metadata
+                .as_ref()
+                .and_then(|source| source_content_type(package, &source.path))
+                .unwrap_or(CT_METADATA),
         );
     }
     if let Some(part) = theme {
@@ -2578,6 +2601,7 @@ fn worksheet_xml_with_template(
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
     sheet_axes: Option<&SheetAxes>,
+    array_metadata: ArrayMetadata,
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
     let patched = match (original, sheet_axes) {
@@ -2589,7 +2613,7 @@ fn worksheet_xml_with_template(
             axes,
             shared_string_cells,
             shared_string_plan,
-            ArrayMetadata::package(package.dynamic_array_cm),
+            array_metadata,
         ),
         _ => None,
     };
@@ -2606,7 +2630,7 @@ fn worksheet_xml_with_template(
                     wb,
                     shared_string_cells,
                     shared_string_plan,
-                    ArrayMetadata::package(package.dynamic_array_cm),
+                    array_metadata,
                 )
             })?),
         ),
@@ -3018,6 +3042,9 @@ impl ArrayMetadata {
     }
 }
 
+/// A legacy array an author's content sits inside is written over its anchor
+/// alone: its rectangle cannot hold both, and reading the file back must not
+/// take that content for the array's result.
 pub(crate) fn array_markup(
     sheet: &Sheet,
     at: CellRef,
@@ -3025,14 +3052,59 @@ pub(crate) fn array_markup(
 ) -> Option<ArrayMarkup> {
     let definition = sheet.array_definition(at)?;
     let fallback = metadata.dynamic.filter(|_| definition.is_dynamic());
+    let mut range = sheet.array_formula(at)?;
+    let conflicted = !definition.is_dynamic()
+        && sheet
+            .cells_in_range(range)
+            .any(|(cell, _)| (cell.row, cell.col) != (at.row, at.col) && sheet.authored_at(cell));
+    if conflicted {
+        range = xlsx_model::CellRange::new(at, at);
+    }
     Some(ArrayMarkup {
-        range: sheet.array_formula(at)?,
+        range,
         metadata: if metadata.own {
             definition.metadata.or(fallback)
         } else {
             fallback
         },
     })
+}
+
+/// The cell metadata a save must add when a dynamic array the source never
+/// marked has no `cm` the source's metadata could lend it: the part to write,
+/// extended when the source holds one, and the `cm` index of its new record.
+fn plan_dynamic_array_metadata(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    used_relationship_ids: &mut HashSet<String>,
+) -> Result<Option<(PlannedPart, Vec<u8>, u32)>, ParseError> {
+    let unmarked = wb.sheets.iter().any(|sheet| {
+        sheet.array_definitions().any(|(at, definition, _)| {
+            definition.is_dynamic()
+                && definition.metadata.is_none()
+                && sheet.cell(at).is_some_and(|cell| cell.formula.is_some())
+        })
+    });
+    if package.dynamic_array_cm.is_some() || !unmarked {
+        return Ok(None);
+    }
+    let part = plan_part(
+        package.metadata.as_ref(),
+        &package.workbook_relationships,
+        "sheetMetadata",
+        &relationship_type(package, "sheetMetadata", REL_METADATA),
+        "xl/metadata.xml",
+        used_relationship_ids,
+    );
+    let (bytes, cm) = match package
+        .metadata
+        .as_ref()
+        .and_then(|source| package.part_bytes(&source.path))
+    {
+        Some(source) => crate::metadata::with_dynamic_array_record(source)?,
+        None => (DYNAMIC_ARRAY_METADATA.to_vec(), 1),
+    };
+    Ok(Some((part, bytes, cm)))
 }
 
 fn has_dynamic_arrays(wb: &Workbook) -> bool {

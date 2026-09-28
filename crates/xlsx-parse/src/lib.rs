@@ -5,6 +5,7 @@ mod axis;
 mod chart;
 mod formula;
 mod inventory;
+mod metadata;
 mod package;
 mod patch;
 mod read;

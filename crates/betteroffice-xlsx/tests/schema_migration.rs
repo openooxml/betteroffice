@@ -23,6 +23,8 @@ const ARRAYS: &[u8] = include_bytes!("fixtures/dynamic-arrays.xlsx");
 const ARRAYS_UNTOUCHED: &[u8] =
     include_bytes!("fixtures/workbook-0.2.1-arrays-untouched.update.bin");
 const ARRAYS_EDITED: &[u8] = include_bytes!("fixtures/workbook-0.2.1-arrays-edited.update.bin");
+const ANCHORS_EDITED: &[u8] =
+    include_bytes!("fixtures/workbook-b153acd5b-arrays-anchors-edited.update.bin");
 
 fn a1(workbook: &Workbook) -> CellValue {
     workbook
@@ -541,4 +543,68 @@ fn a_current_room_declares_the_schema_older_releases_refuse() {
     assert_eq!(shared_contents(ARRAYS_EDITED).0, 6);
     let migrated = restored(ARRAYS, ARRAYS_EDITED, 7_301);
     assert_eq!(shared_contents(&migrated.encode_state_as_update_v1()).0, 7);
+}
+
+/// A migrated room's legacy array with an author's constant inside it saves
+/// over its anchor alone, so reading the file back keeps the constant the
+/// author's rather than taking it for the array's result.
+#[test]
+fn a_conflicted_legacy_array_keeps_the_authors_constant_through_a_save() {
+    let workbook = restored(ARRAYS, ARRAYS_EDITED, 7_500);
+    let saved = workbook.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let sheet = parts
+        .iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .map(|(_, bytes)| String::from_utf8(bytes.clone()).unwrap())
+        .unwrap();
+    assert!(
+        sheet.contains(r#"<f t="array" ref="E1">A1:A2*2</f>"#),
+        "{sheet}"
+    );
+    let mut reopened = Workbook::open_recalculated(&saved, CalculationOptions::default()).unwrap();
+    assert_eq!(values(&reopened, &["E1", "E2"]), [number(6.0), number(2.0)]);
+    reopened
+        .edit_cell(
+            SheetId(0),
+            CellRef::parse_a1("A2").unwrap(),
+            "5",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(values(&reopened, &["E2"]), [number(2.0)]);
+}
+
+/// The release before schema 7 turns an array anchor edited in a room into a
+/// plain formula, and so does migrating that room: an anchor's array is
+/// provably its own only while its formula is the one the workbook opened with.
+#[test]
+fn anchors_edited_before_schema_7_migrate_as_the_plain_formulas_they_became() {
+    let workbook = restored(ARRAYS, ANCHORS_EDITED, 7_600);
+    let sheet = &workbook.model().sheets[0];
+    for anchor in ["C1", "E1"] {
+        assert_eq!(
+            sheet.array_definition(CellRef::parse_a1(anchor).unwrap()),
+            None,
+            "{anchor}"
+        );
+    }
+    assert_eq!(
+        values(&workbook, &["C1", "C2", "C3", "E1", "E2"]),
+        [
+            number(3.0),
+            number(2.0),
+            number(3.0),
+            CellValue::Error {
+                value: betteroffice_xlsx::ErrorValue::Value
+            },
+            number(2.0)
+        ]
+    );
+    let mut peer =
+        Workbook::open_collaborative_recalculated(ARRAYS, 7_601, CalculationOptions::default())
+            .unwrap();
+    peer.apply_update_v1(ANCHORS_EDITED, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(peer.model(), workbook.model());
 }

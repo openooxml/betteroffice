@@ -969,3 +969,177 @@ fn an_unrelated_edit_leaves_a_large_spill_untouched() {
         assert_eq!(value(&workbook, &format!("C{ROWS}")), number(7.0));
     }
 }
+
+/// an array the engine cannot evaluate keeps the result its file cached.
+const UNSUPPORTED: &str = concat!(
+    r#"<row r="1"><c r="C1" cm="1"><f t="array" ref="C1:C3">WEBSERVICE("https://example.com")</f><v>1</v></c></row>"#,
+    r#"<row r="2"><c r="C2"><v>2</v></c></row>"#,
+    r#"<row r="3"><c r="C3"><v>3</v></c></row>"#,
+);
+
+/// undoing what took an unevaluable array's cached result brings it back,
+/// through a save, since the engine could never compute it again.
+#[test]
+fn undo_restores_a_cached_result_the_engine_cannot_recompute() {
+    let bytes = package(UNSUPPORTED, true);
+    for mut workbook in [
+        Workbook::open_recalculated(&bytes, options()).unwrap(),
+        Workbook::open_collaborative_recalculated(&bytes, 141, options()).unwrap(),
+    ] {
+        assert!(spilled(&workbook));
+        edit(&mut workbook, "C1", "");
+        assert!(cleared(&workbook));
+        workbook.undo(options()).unwrap();
+        assert!(spilled(&workbook));
+        edit(&mut workbook, "C2", "x");
+        assert!(obstructed_by(&workbook, text("x")));
+        workbook.undo(options()).unwrap();
+        assert!(spilled(&workbook));
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        assert!(spilled(&reopened));
+    }
+}
+
+/// replicas agree on an unevaluable array's cached result whether they see
+/// what took it and its undo one by one or together.
+#[test]
+fn replicas_agree_on_a_restored_cache_however_it_arrives() {
+    let bytes = package(UNSUPPORTED, true);
+    let open =
+        |client| Workbook::open_collaborative_recalculated(&bytes, client, options()).unwrap();
+    let mut writer = open(151);
+    let mut follower = open(152);
+    let mut late = open(153);
+    for input in ["", "x"] {
+        let address = if input.is_empty() { "C1" } else { "C2" };
+        edit(&mut writer, address, input);
+        sync(&writer, &mut follower);
+        writer.undo(options()).unwrap();
+        sync(&writer, &mut follower);
+    }
+    sync(&writer, &mut late);
+    for replica in [&writer, &follower, &late] {
+        assert!(spilled(replica));
+    }
+    same_replicas(&[&writer, &follower, &late]);
+}
+
+/// `A1:A2*2` entered with ctrl-shift-enter over C1:C2.
+const LEGACY: &str = concat!(
+    r#"<row r="1"><c r="A1"><v>3</v></c><c r="C1"><f t="array" ref="C1:C2">A1:A2*2</f><v>6</v></c></row>"#,
+    r#"<row r="2"><c r="A2"><v>1</v></c><c r="C2"><v>2</v></c></row>"#,
+    r#"<row r="3"><c r="A3"><v>2</v></c></row>"#,
+);
+
+/// a legacy array restored over a value another author typed meanwhile keeps
+/// that value, and the file it saves reads back with the value still the
+/// author's.
+#[test]
+fn a_concurrent_legacy_conflict_keeps_the_authors_value_through_a_save() {
+    let bytes = package(LEGACY, false);
+    let open =
+        |client| Workbook::open_collaborative_recalculated(&bytes, client, options()).unwrap();
+    let mut clearer = open(161);
+    let mut typist = open(162);
+    edit(&mut clearer, "C1", "");
+    sync(&clearer, &mut typist);
+    edit(&mut typist, "C2", "99");
+    sync(&typist, &mut clearer);
+    clearer.undo(options()).unwrap();
+    sync(&clearer, &mut typist);
+    for replica in [&clearer, &typist] {
+        assert_eq!(
+            column(replica, &["C1", "C2"]),
+            [error(ErrorValue::Spill), number(99.0)]
+        );
+        let saved = replica.save().unwrap();
+        assert!(sheet_xml(&saved).contains(r#"<f t="array" ref="C1">A1:A2*2</f>"#));
+        let mut reopened = Workbook::open_recalculated(&saved, options()).unwrap();
+        edit(&mut reopened, "A2", "7");
+        assert_eq!(
+            column(&reopened, &["C1", "C2"]),
+            [number(6.0), number(99.0)]
+        );
+    }
+}
+
+/// turns the legacy array at C1 into a dynamic `SEQUENCE(A1)` through a raw
+/// operation, the way an integration would.
+fn made_dynamic(bytes: &[u8]) -> Workbook {
+    let mut workbook = Workbook::open_recalculated(bytes, options()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::SetCell {
+                sheet: SheetId(0),
+                at: cell("C1"),
+                cell: CellState {
+                    formula: Some("_xlfn.SEQUENCE(A1)".into()),
+                    array: Some(betteroffice_xlsx::ArrayDefinition {
+                        kind: betteroffice_xlsx::ArrayKind::Dynamic,
+                        metadata: None,
+                    }),
+                    ..CellState::default()
+                },
+            }],
+            options(),
+        )
+        .unwrap();
+    workbook
+}
+
+fn part(bytes: &[u8], path: &str) -> Option<String> {
+    ooxml_opc::unzip_parts(bytes)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == path)
+        .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+}
+
+/// an array made dynamic in a package with no dynamic-array metadata saves
+/// the metadata that marks it, so it reopens dynamic and keeps spilling.
+#[test]
+fn a_package_gains_the_metadata_a_new_dynamic_array_needs() {
+    let rich = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><metadataTypes count="1"><metadataType name="XLRICHVALUE" minSupportedVersion="120000"/></metadataTypes><futureMetadata name="XLRICHVALUE" count="1"><bk><extLst/></bk></futureMetadata><valueMetadata count="1"><bk><rc t="1" v="0"/></bk></valueMetadata></metadata>"#;
+    let mut with_rich = ooxml_opc::unzip_parts(&package(LEGACY, true)).unwrap();
+    for (name, bytes) in &mut with_rich {
+        if name == "xl/metadata.xml" {
+            *bytes = rich.as_bytes().to_vec();
+        }
+    }
+    for bytes in [
+        package(LEGACY, false),
+        ooxml_opc::rezip_parts(&with_rich).unwrap(),
+    ] {
+        let workbook = made_dynamic(&bytes);
+        assert_eq!(
+            column(&workbook, &["C1", "C2", "C3"]),
+            [number(1.0), number(2.0), number(3.0)]
+        );
+        let saved = workbook.save().unwrap();
+        let xml = sheet_xml(&saved);
+        let (cm, _) = xml
+            .split_once(r#"<c r="C1" cm=""#)
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .unwrap_or_else(|| panic!("{xml}"));
+        assert!(xml.contains(r#"<f t="array" ref="C1:C3">"#), "{xml}");
+        let metadata = part(&saved, "xl/metadata.xml").unwrap();
+        assert!(metadata.contains(r#"fDynamic="1""#), "{metadata}");
+        let types = part(&saved, "[Content_Types].xml").unwrap();
+        assert!(types.contains("/xl/metadata.xml"), "{types}");
+        assert!(
+            part(&saved, "xl/_rels/workbook.xml.rels")
+                .unwrap()
+                .contains("sheetMetadata")
+        );
+        if bytes == package(LEGACY, false) {
+            assert_eq!(cm, "1");
+        } else {
+            assert!(metadata.contains("XLRICHVALUE") && metadata.contains("<valueMetadata"));
+        }
+        let mut reopened = Workbook::open_recalculated(&saved, options()).unwrap();
+        assert!(reopened.model().sheets[0].is_dynamic_array(cell("C1")));
+        edit(&mut reopened, "A1", "4");
+        assert_eq!(value(&reopened, "C4"), number(4.0));
+    }
+}
