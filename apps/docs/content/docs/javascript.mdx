@@ -881,10 +881,10 @@ if (!result.ok) console.warn(result.failure.code, result.failure.reason);
 ```
 
 The text replaces the control's content and clears its placeholder: CRLF becomes
-LF, LF is a line break in an inline control and a new paragraph in a block
-control, and a plain-text control accepts it only with `w:multiLine`. The new
-text takes the formatting of the control's first text run, or the control's own
-run properties while it shows its placeholder. Every step commits or none does;
+LF, LF is a line break (a new paragraph in a rich-text block control), and a
+plain-text control accepts it only with `w:multiLine`. The new text takes the
+formatting of the control's first text run, or the control's own run properties
+while it shows its placeholder. Every step commits or none does;
 missing or duplicate tags and `ooxmlId`s, locked, data-bound and nested controls,
 and content other than text, tabs and line breaks are refused as data with a
 `reason`. `findContentControls(query)` returns every exact match of an id, tag,

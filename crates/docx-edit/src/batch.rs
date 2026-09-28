@@ -199,7 +199,8 @@ pub enum EditOperation {
         style_id: String,
     },
     /// Replaces the content of a plain- or rich-text content control with plain text and clears
-    /// its placeholder state. LF breaks lines inline and paragraphs in a block control.
+    /// its placeholder state. LF is a line break, or a paragraph break in a rich-text block
+    /// control.
     SetContentControlText {
         target: ContentControlSelector,
         text: String,
@@ -2043,7 +2044,8 @@ fn plan_inline_fill<T: ReadTxn>(
 }
 
 /// A block fill rewrites the control's child story: surviving paragraphs keep their ids and
-/// properties, extra ones take the first paragraph's style defaults.
+/// properties, extra ones take the first paragraph's style defaults. A rich-text control takes a
+/// paragraph per line; a plain-text control holds its lines as line breaks in one paragraph.
 fn plan_block_fill<T: ReadTxn>(
     views: &mut Views<'_, T>,
     fill: Fill<'_>,
@@ -2101,7 +2103,11 @@ fn plan_block_fill<T: ReadTxn>(
     let (Some(first), Some(last)) = (view.paragraphs.first(), view.paragraphs.last()) else {
         return Err(unsupported("the control's story holds no paragraph"));
     };
-    let lines: Vec<&str> = fill.text.split('\n').collect();
+    let lines: Vec<&str> = if fill.record.control.metadata.control_type == "richText" {
+        fill.text.split('\n').collect()
+    } else {
+        vec![fill.text.as_str()]
+    };
     if lines.len().saturating_sub(view.paragraphs.len()) > MAX_INSERTED_PARAGRAPHS {
         return Err(failure(
             EditFailureCode::LimitExceeded,

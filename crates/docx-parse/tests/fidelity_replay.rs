@@ -188,3 +188,55 @@ fn raw_note_blocks_keep_inherited_namespace_bindings() {
         "for part in ['footnotes.xml','endnotes.xml']:\n root=E.fromstring(z.read('word/'+part))\n assert next(root.iter('{urn:foreign}block'),None) is not None",
     );
 }
+
+#[test]
+fn block_controls_in_table_cells_survive_resave() {
+    let control = |tag: &str, id: u32, kind: &str, content: &str| {
+        format!(
+            r#"<w:sdt><w:sdtPr><w:alias w:val="{tag} alias"/><w:tag w:val="{tag}"/><w:id w:val="{id}"/><w:lock w:val="sdtLocked"/><w:dataBinding w:xpath="/root[1]/{tag}[1]" w:storeItemID="{{6F2C8B5D-3E1A-4C7B-9D2E-1A2B3C4D5E6F}}"/>{kind}</w:sdtPr><w:sdtEndPr><w:rPr><w:b/></w:rPr></w:sdtEndPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
+        )
+    };
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let table = |cells: &[String]| {
+        format!(
+            "<w:tbl><w:tblGrid>{}</w:tblGrid><w:tr>{}</w:tr></w:tbl>",
+            r#"<w:gridCol w:w="2000"/>"#.repeat(cells.len()),
+            cells
+                .iter()
+                .map(|cell| format!("<w:tc>{cell}</w:tc>"))
+                .collect::<String>()
+        )
+    };
+    let text = "<w:text/>";
+    let body = table(&[
+        format!(
+            "{}<w:p/>",
+            control("before", 1, text, &paragraph("control then paragraph"))
+        ),
+        control("alone", 2, text, &paragraph("control alone")),
+        format!(
+            "{}<w:p/>",
+            table(&[control("nested", 3, text, &paragraph("in a nested table"))])
+        ),
+        control(
+            "holder",
+            4,
+            "<w:richText/>",
+            &format!("{}<w:p/>", table(&[paragraph("table in a control")])),
+        ),
+    ]);
+    let source = package(&body, "", None);
+    let mut parts = ooxml_opc::unzip_parts(&roundtrip(&source)).unwrap();
+    let (_, document) = ooxml_opc::unzip_parts(&source)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == "word/document.xml")
+        .unwrap();
+    parts.push(("source.xml".to_owned(), document));
+    python_check(
+        &ooxml_opc::rezip_parts(&parts).unwrap(),
+        &format!(
+            "W='{{{W}}}'\ndef sig(node,props=False):\n out=[]\n for el in node:\n  local=el.tag.replace(W,'')\n  if props or local in ('sdtPr','sdtEndPr'): out.append((local,sorted(el.attrib.items()),sig(el,True)))\n  elif local in ('sdt','sdtContent','tbl','tr','tc','p'): out.append((local,sig(el)))\n  elif local=='t': out.append((local,el.text))\n  else: out.extend(sig(el))\n return out\nbody=lambda part:E.fromstring(z.read(part)).find(W+'body')\nsaved=body('word/document.xml')\nassert sig(saved)==sig(body('source.xml')),(sig(saved),sig(body('source.xml')))\nassert len(list(saved.iter(W+'sdt')))==4"
+        ),
+    );
+}
