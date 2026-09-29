@@ -47,6 +47,9 @@ pub struct PageFlowGeometry {
     pub pending_columns: Option<ColumnLayout>,
     /// Whether the section in force already opened a page before this one.
     pub section_started: bool,
+    /// Whether the displayed number this page would continue from the page
+    /// before it differs in parity from its physical one.
+    pub continued_parity_offset: bool,
 }
 
 /// Current state of a page being laid out.
@@ -114,6 +117,12 @@ pub struct Paginator {
     section_started: bool,
     /// Per state, whether its page is the first of its section.
     opens_section: Vec<bool>,
+    /// Whether the current page's displayed number differs in parity from
+    /// its physical one, which selects its even band.
+    displayed_parity_offset: bool,
+    /// [`Self::displayed_parity_offset`] had the current page continued the
+    /// previous page's numbering.
+    continued_parity_offset: bool,
 }
 
 impl Paginator {
@@ -155,6 +164,8 @@ impl Paginator {
             section_page_margins: Vec::new(),
             section_started: false,
             opens_section: Vec::new(),
+            displayed_parity_offset: false,
+            continued_parity_offset: false,
         })
     }
 
@@ -197,6 +208,7 @@ impl Paginator {
         paginator.numbering_parity_offset = geometry.numbering_parity_offset;
         paginator.section_index = section_index;
         paginator.section_started = geometry.section_started;
+        paginator.displayed_parity_offset = geometry.continued_parity_offset;
         Ok(paginator)
     }
 
@@ -204,7 +216,6 @@ impl Paginator {
         let idx = self.get_current();
         let number = self.pages[self.states[idx].page_index].number;
         self.numbering_parity_offset = start % 2 != u64::from(number % 2);
-        self.restamp_pristine_band();
     }
 
     pub fn physical_parity_is_odd(&self, number: u64) -> bool {
@@ -225,7 +236,13 @@ impl Paginator {
             if entering {
                 self.opens_section[idx] = true;
                 self.section_started = true;
-                self.restamp_pristine_band();
+                self.displayed_parity_offset =
+                    self.page_parity_offset(true, self.pages[page_index].number);
+                if self.promote_pending_geometry() {
+                    self.restamp_pristine_page();
+                } else {
+                    self.restamp_pristine_band();
+                }
             }
         }
     }
@@ -246,6 +263,11 @@ impl Paginator {
                 .opens_section
                 .last()
                 .map_or(self.section_started, |opens| !opens),
+            continued_parity_offset: if self.states.is_empty() {
+                self.displayed_parity_offset
+            } else {
+                self.continued_parity_offset
+            },
         }
     }
 
@@ -280,6 +302,18 @@ impl Paginator {
         Some((state.page_index, page.number, flow))
     }
 
+    /// Parity offset of a page's displayed number: its section's numbering
+    /// restart when it opens the section, else the previous page's plus one.
+    fn page_parity_offset(&self, opens_section: bool, page_number: u32) -> bool {
+        self.section_page_margins
+            .get(self.section_index)
+            .and_then(|margins| margins.restart)
+            .filter(|_| opens_section)
+            .map_or(self.continued_parity_offset, |start| {
+                start % 2 != u64::from(page_number % 2)
+            })
+    }
+
     /// The margins of a page: its section's, unless the page shows the
     /// first-page or even-page band and that band reserves its own extent.
     fn page_margins(&self, opens_section: bool, page_number: u32) -> PageMargins {
@@ -289,7 +323,7 @@ impl Paginator {
             .and_then(|variants| {
                 if opens_section && variants.first.is_some() {
                     variants.first.as_ref()
-                } else if !self.physical_parity_is_odd(u64::from(page_number)) {
+                } else if (page_number % 2 == 0) != self.displayed_parity_offset {
                     variants.even.as_ref()
                 } else {
                     None
@@ -354,6 +388,32 @@ impl Paginator {
         self.column_region_bottom = content_top;
     }
 
+    /// Puts deferred page geometry in force; false when none was deferred.
+    fn promote_pending_geometry(&mut self) -> bool {
+        if self.pending_page_size.is_none()
+            && self.pending_margins.is_none()
+            && self.pending_columns.is_none()
+        {
+            return false;
+        }
+        if let Some(size) = self.pending_page_size.take() {
+            self.page_size = size;
+        }
+        if let Some(margins) = self.pending_margins.take() {
+            self.margins = margins;
+        }
+        if let Some(columns) = self.pending_columns.take() {
+            self.columns = columns;
+        }
+        self.column_width = calculate_column_width(
+            self.page_size.w,
+            self.margins.left,
+            self.margins.right,
+            &self.columns,
+        );
+        true
+    }
+
     /// Re-forms a pristine page whose band changed after it opened.
     fn restamp_pristine_band(&mut self) {
         let Some(idx) = self.pristine_page() else {
@@ -368,29 +428,12 @@ impl Paginator {
     /// Opens the next page, promoting any deferred geometry first, and returns
     /// its state index.
     fn create_new_page(&mut self) -> usize {
-        if self.pending_page_size.is_some()
-            || self.pending_margins.is_some()
-            || self.pending_columns.is_some()
-        {
-            if let Some(size) = self.pending_page_size.take() {
-                self.page_size = size;
-            }
-            if let Some(margins) = self.pending_margins.take() {
-                self.margins = margins;
-            }
-            if let Some(columns) = self.pending_columns.take() {
-                self.columns = columns;
-            }
-            self.column_width = calculate_column_width(
-                self.page_size.w,
-                self.margins.left,
-                self.margins.right,
-                &self.columns,
-            );
-        }
+        self.promote_pending_geometry();
         let page_number = self.start_page_number + self.pages.len() as u32;
         let opens_section = !self.section_started;
         self.section_started = true;
+        self.continued_parity_offset = self.displayed_parity_offset;
+        self.displayed_parity_offset = self.page_parity_offset(opens_section, page_number);
         let margins = self.page_margins(opens_section, page_number);
         let content_top = margins.top;
         let footnote_height = self.footnote_reservation(page_number);
@@ -857,12 +900,20 @@ mod tests {
     }
 
     #[test]
-    fn a_pristine_page_entering_a_section_takes_its_first_band_as_a_resume_does() {
+    fn a_pristine_page_entering_a_section_takes_its_geometry_as_a_resume_does() {
+        let next = PageMargins {
+            left: 144.0,
+            ..margins(96.0, 96.0)
+        };
         let bands = vec![
             SectionPageMargins::default(),
             SectionPageMargins {
-                first: Some(margins(180.0, 96.0)),
+                first: Some(PageMargins {
+                    top: 180.0,
+                    ..next.clone()
+                }),
                 even: None,
+                restart: None,
             },
         ];
         let size = Size {
@@ -874,17 +925,60 @@ mod tests {
         paginator.get_current();
         paginator.force_authored_page_break(false);
         paginator
-            .update_page_layout(None, Some(margins(96.0, 96.0)), false)
+            .update_page_layout(None, Some(next), false)
             .unwrap();
         paginator.set_section_index(1);
         let (page_index, number, flow) = paginator.clean_page_start().unwrap();
-        assert_eq!(paginator.pages[page_index].margins.top, 180.0);
+        let full = (
+            paginator.pages[page_index].margins.clone(),
+            paginator.column_width(),
+        );
+        assert_eq!((full.0.top, full.0.left), (180.0, 144.0));
 
         let mut resumed = Paginator::resume_in_section(&flow, number, 1, None).unwrap();
         resumed.set_section_page_margins(bands);
         let idx = resumed.get_current();
-        assert_eq!(resumed.pages[idx].margins.top, 180.0);
+        assert_eq!(
+            (resumed.pages[idx].margins.clone(), resumed.column_width()),
+            full
+        );
         assert_eq!(resumed.state(idx).content_top, 180.0);
+    }
+
+    fn even_band_paginator() -> Paginator {
+        let even = |restart| SectionPageMargins {
+            first: None,
+            even: Some(margins(180.0, 96.0)),
+            restart,
+        };
+        let size = Size {
+            w: 816.0,
+            h: 1056.0,
+        };
+        let mut paginator = Paginator::new(size, margins(96.0, 96.0), columns(), None).unwrap();
+        paginator.set_section_page_margins(vec![even(None), even(Some(3)), even(None)]);
+        let first = paginator.get_current();
+        paginator.set_pen_y(first, 200.0);
+        paginator.set_section_index(1);
+        paginator
+    }
+
+    #[test]
+    fn a_restart_decides_even_bands_from_the_first_page_its_section_owns() {
+        let mut paginator = even_band_paginator();
+        let second = paginator.force_authored_page_break(false);
+        assert_eq!(paginator.pages[second].margins.top, 96.0);
+        paginator.set_pen_y(second, 200.0);
+        let third = paginator.force_authored_page_break(false);
+        assert_eq!(paginator.pages[third].margins.top, 180.0);
+    }
+
+    #[test]
+    fn a_section_that_owns_no_page_does_not_restart_the_numbering() {
+        let mut paginator = even_band_paginator();
+        let second = paginator.force_authored_page_break(false);
+        paginator.set_section_index(2);
+        assert_eq!(paginator.pages[second].margins.top, 180.0);
     }
 
     #[test]

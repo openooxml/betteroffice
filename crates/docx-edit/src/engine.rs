@@ -628,6 +628,11 @@ fn extend_input_for_header_footer(
                 SectionPageMargins {
                     first: section.title_pg.then(|| extend(HeaderFooterType::First)),
                     even: even_and_odd.then(|| extend(HeaderFooterType::Even)),
+                    restart: section
+                        .page_numbering
+                        .as_ref()
+                        .and_then(|numbering| numbering.start)
+                        .filter(|_| even_and_odd),
                 },
             )
         })

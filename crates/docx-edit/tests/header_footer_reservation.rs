@@ -27,14 +27,13 @@ fn request(bytes: &[u8]) -> String {
         .unwrap()
         .document
         .package;
-    let mut sections: Vec<_> = package
+    let sections: Vec<_> = package
         .document
         .sections
         .unwrap_or_default()
         .into_iter()
         .map(|section| json!({"properties": section.properties}))
         .collect();
-    sections.push(json!({"properties": package.document.final_section_properties}));
     json!({
         "bodyStory": "body", "renderEnv": {},
         "regions": {"sections": sections, "settings": package.settings},
