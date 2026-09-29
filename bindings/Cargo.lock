@@ -78,6 +78,7 @@ dependencies = [
  "betteroffice-docx-parse",
  "betteroffice-docx-raster",
  "betteroffice-ooxml-text",
+ "betteroffice-opc",
  "serde_json",
  "sha2",
 ]

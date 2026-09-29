@@ -35,6 +35,8 @@ use crate::{DocumentModel, DocumentStructure, Error, LayoutResult, Result, SaveO
 pub struct Document {
     /// Inflated package parts retained from open for `save` to reuse.
     original_parts: Vec<(String, Vec<u8>)>,
+    /// Source container retained so unchanged members re-emit verbatim on save.
+    source_container: ooxml_opc::SourceContainer,
     seed: String,
     model: DocumentModel,
     /// By body paragraph ordinal, the fresh ID handed to a paragraph that
@@ -70,6 +72,7 @@ impl Document {
         );
         Ok(Self {
             original_parts,
+            source_container: ooxml_opc::SourceContainer::new(bytes.to_vec()),
             seed: format!("{:x}", Sha256::digest(bytes)),
             model,
             authored_ids,
@@ -329,7 +332,12 @@ impl Document {
             selective: None,
             paragraph_ids: None,
         };
-        write_docx_s13_parts(request, &self.original_parts, None).map_err(Error::from)
+        write_docx_s13_parts(
+            request,
+            &self.original_parts,
+            Some(self.source_container.as_bytes()),
+        )
+        .map_err(Error::from)
     }
 
     /// `body` as it saves: a paragraph still at its ordinal with its fresh ID
