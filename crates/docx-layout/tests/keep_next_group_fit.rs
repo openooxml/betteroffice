@@ -190,3 +190,40 @@ fn a_run_that_does_not_fit_moves_to_the_next_column() {
     assert_eq!(heading.0, 0);
     assert!(heading.1 > at(1.0).unwrap().1);
 }
+
+#[test]
+fn a_row_chain_that_only_fits_without_the_header_rows_is_not_weighed() {
+    let mut rows = table(
+        3,
+        &[
+            (true, false, true),
+            (true, false, true),
+            (false, true, true),
+            (false, false, true),
+        ],
+        None,
+    );
+    rows["measure"]["rows"][3]["height"] = json!(60);
+    rows["measure"]["totalHeight"] = json!(120);
+    assert!(head_stays_with_follower(vec![
+        paragraph(1, &[40.0], json!({})),
+        paragraph(2, &[10.0], json!({"keepNext": true})),
+        rows,
+    ]));
+}
+
+#[test]
+fn a_run_skips_columns_too_short_for_it() {
+    let at = place(
+        vec![
+            paragraph(1, &[60.0], json!({})),
+            json!({"block": {"kind": "sectionBreak", "id": 4, "type": "continuous"},
+                "measure": {"kind": "sectionBreak"}}),
+            paragraph(2, &[10.0], json!({"keepNext": true})),
+            paragraph(3, &[40.0], json!({})),
+        ],
+        Some(json!({"count": 2, "gap": 20})),
+    );
+    assert_eq!(at(2.0).unwrap().0, 1);
+    assert_eq!(at(3.0).unwrap().0, 1);
+}

@@ -246,8 +246,9 @@ pub fn measure_keep_with_next_group_at(
 
 /// Height (px) of the shortest first fragment placement gives a table: its
 /// header band and first body slice, extended to the end of any
-/// keep-with-next row chain starting in them that fits `capacity`. A floating
-/// table keeps its flow slice, as it is not placed in the flow.
+/// keep-with-next row chain starting in them that fits `capacity` along with
+/// the rows above it. A floating table keeps its flow slice, as it is not
+/// placed in the flow.
 fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64) -> f64 {
     let first =
         first_table_fragment_height(block, measure, &build_table_row_break_info(block, measure));
@@ -267,7 +268,7 @@ fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64)
         .zip(crate::hooks::row_keep_heights(block, measure))
         .take(headers + 1)
     {
-        if keep > 0.0 && keep <= capacity {
+        if keep > 0.0 && top + keep <= capacity {
             slice = slice.max(top + keep);
         }
         top += row.height;

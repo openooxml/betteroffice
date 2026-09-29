@@ -566,7 +566,15 @@ fn place(
                 page_has_content,
             )?;
             if must_advance {
-                paginator.advance_for_overflow();
+                // advance until a column holds the run or a fresh page opens
+                loop {
+                    let idx = paginator.advance_for_overflow();
+                    if paginator.state(idx).column_index == 0
+                        || fresh_page_height <= paginator.get_available_height()
+                    {
+                        break;
+                    }
+                }
             }
         }
 
