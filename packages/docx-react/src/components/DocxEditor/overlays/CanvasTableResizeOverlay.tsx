@@ -30,7 +30,7 @@
 import React, { useLayoutEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  deriveDisplayListTableFragments,
+  deriveDisplayListTableFragmentsOnPages,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
@@ -100,8 +100,8 @@ export function CanvasTableResizeOverlay({
   sidebarOpen,
   zoom,
 }: CanvasTableResizeOverlayProps): React.ReactPortal | null {
-  // Handles exist only on the pages around the viewport; the window follows
-  // scrolling a frame at a time.
+  // Handles exist only on the visible pages and one page either side; the
+  // window follows scrolling and resizing a frame at a time.
   const [pageWindow, setPageWindow] = useState<RemotePresencePageWindow | null>(null);
   useLayoutEffect(() => {
     const host = canvasHostRef.current;
@@ -110,11 +110,11 @@ export function CanvasTableResizeOverlay({
       return;
     }
     const metrics = buildRemotePresencePageMetrics(displayListQueries.displayList, zoom);
-    const scrollParent = findVerticalScrollParentOrRoot(host);
-    const usesWindow =
-      scrollParent === document.scrollingElement || scrollParent === document.documentElement;
-    const scrollTarget: EventTarget = usesWindow ? window : scrollParent;
+    const scrollsWindow = (element: HTMLElement) =>
+      element === document.scrollingElement || element === document.documentElement;
+    let scrollParent = findVerticalScrollParentOrRoot(host);
     const update = () => {
+      const usesWindow = scrollsWindow(scrollParent);
       const column = host.firstElementChild as HTMLElement | null;
       const viewportTop = usesWindow ? 0 : scrollParent.getBoundingClientRect().top;
       const viewportBottom =
@@ -124,14 +124,14 @@ export function CanvasTableResizeOverlay({
             metrics,
             column.getBoundingClientRect().top,
             viewportTop,
-            viewportBottom
+            viewportBottom,
+            Infinity
           )
         : null;
       setPageWindow((previous) =>
         previous?.start === next?.start && previous?.end === next?.end ? previous : next
       );
     };
-    update();
     let frame: number | null = null;
     const schedule = () => {
       if (frame !== null) return;
@@ -140,10 +140,35 @@ export function CanvasTableResizeOverlay({
         update();
       });
     };
-    scrollTarget.addEventListener('scroll', schedule, { passive: true });
+    let unbind = () => {};
+    const bind = () => {
+      const usesWindow = scrollsWindow(scrollParent);
+      const target: EventTarget = usesWindow ? window : scrollParent;
+      target.addEventListener('scroll', schedule, { passive: true });
+      const resized = usesWindow ? null : new ResizeObserver(schedule);
+      resized?.observe(scrollParent);
+      unbind = () => {
+        target.removeEventListener('scroll', schedule);
+        resized?.disconnect();
+      };
+    };
+    bind();
+    // A hidden editor finds no scroller; look again once its host resizes.
+    const hostResized = new ResizeObserver(() => {
+      const next = findVerticalScrollParentOrRoot(host);
+      if (next !== scrollParent) {
+        unbind();
+        scrollParent = next;
+        bind();
+      }
+      schedule();
+    });
+    hostResized.observe(host);
     window.addEventListener('resize', schedule);
+    update();
     return () => {
-      scrollTarget.removeEventListener('scroll', schedule);
+      unbind();
+      hostResized.disconnect();
       window.removeEventListener('resize', schedule);
       if (frame !== null) cancelAnimationFrame(frame);
     };
@@ -179,12 +204,12 @@ export function CanvasTableResizeOverlay({
     };
 
     const out: HandleSpec[] = [];
-    const displayList = displayListQueries.displayList;
-    const nearViewport = {
-      ...displayList,
-      pages: displayList.pages.slice(pageWindow.start, pageWindow.end + 1),
-    };
-    for (const frag of deriveDisplayListTableFragments(nearViewport, tableKeyOf)) {
+    for (const frag of deriveDisplayListTableFragmentsOnPages(
+      displayListQueries.displayList,
+      tableKeyOf,
+      pageWindow.start,
+      pageWindow.end
+    )) {
       const table = tableAt.get(frag.tableKey);
       if (!table || table.widthsTwips.length === 0) continue;
       const { pmStart, widthsTwips, rowCount } = table;
