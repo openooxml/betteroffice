@@ -40,6 +40,41 @@ pub struct DocumentBody {
     pub comments: Option<Vec<Comment>>,
 }
 
+/// Whether `document` holds what the layout may apply to the body's first
+/// pages from anywhere in it, so that no cut of the body lays out like the
+/// whole: a float placed from outside the text (a drawing anchored to the page
+/// or margin, a table or frame not anchored to the text, VML positioned from
+/// the page or margin), or a section with columns, whose settings sections
+/// without their own may take.
+pub(crate) fn refuses_a_body_cut(document: &XmlElement) -> bool {
+    let mut pending = vec![document];
+    while let Some(element) = pending.pop() {
+        let refused = match element.local_name() {
+            "anchor" => {
+                element.attribute(None, "simplePos") == Some("1")
+                    || element
+                        .child_by_local_name("positionV")
+                        .and_then(|position| position.attribute(None, "relativeFrom"))
+                        .is_some_and(|from| !matches!(from, "paragraph" | "line"))
+            }
+            "tblpPr" => element.attribute(Some("w"), "vertAnchor") != Some("text"),
+            "framePr" => element.attribute(Some("w"), "vAnchor") != Some("text"),
+            "cols" => {
+                element
+                    .attribute(Some("w"), "num")
+                    .is_some_and(|count| !matches!(count.trim(), "" | "0" | "1"))
+                    || element.children_named("w", "col").nth(1).is_some()
+            }
+            _ => crate::vml::placed_off_the_text(element),
+        };
+        if refused {
+            return true;
+        }
+        pending.extend(element.child_elements());
+    }
+    false
+}
+
 /// Assemble the body below an already safe-parsed `w:document` root.
 pub fn parse_document_body(
     document: &XmlElement,
@@ -368,6 +403,66 @@ mod tests {
             extract_all_template_variables(&body.content),
             ["first", "second-name"]
         );
+    }
+
+    #[test]
+    fn refuses_a_cut_of_a_body_with_floats_off_the_text_or_columns() {
+        let refused = |body: &str| {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!(
+                r#"<w:document xmlns:w="w" xmlns:wp="wp" xmlns:v="v"><w:body>{body}</w:body></w:document>"#
+            );
+            let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
+            refuses_a_body_cut(document.root().unwrap())
+        };
+        let anchor = |attributes: &str, vertical: &str| {
+            format!(
+                "<w:p><w:r><w:drawing><wp:anchor {attributes}>{vertical}</wp:anchor></w:drawing></w:r></w:p>"
+            )
+        };
+        let table = |attributes: &str| {
+            format!("<w:tbl><w:tblPr><w:tblpPr {attributes}/></w:tblPr></w:tbl>")
+        };
+        let frame =
+            |attributes: &str| format!("<w:p><w:pPr><w:framePr {attributes}/></w:pPr></w:p>");
+        let section =
+            |columns: &str| format!("<w:p><w:pPr><w:sectPr>{columns}</w:sectPr></w:pPr></w:p>");
+        let vml = |style: &str| {
+            format!(r#"<w:p><w:r><w:pict><v:shape style="{style}"/></w:pict></w:r></w:p>"#)
+        };
+        for body in [
+            anchor("", r#"<wp:positionV relativeFrom="margin"/>"#),
+            anchor("", r#"<wp:positionV relativeFrom="page"/>"#),
+            anchor("", r#"<wp:positionV relativeFrom="topMargin"/>"#),
+            anchor(
+                r#"simplePos="1""#,
+                r#"<wp:positionV relativeFrom="paragraph"/>"#,
+            ),
+            table(r#"w:vertAnchor="margin""#),
+            table(r#"w:tblpY="60""#),
+            frame(r#"w:vAnchor="page""#),
+            frame(r#"w:w="2000""#),
+            vml("position:absolute;mso-position-vertical-relative:margin"),
+            vml("position:absolute;mso-position-vertical-relative:page"),
+            section(r#"<w:cols w:num="2"/>"#),
+            section(r#"<w:cols><w:col w:w="3000"/><w:col w:w="3000"/></w:cols>"#),
+        ] {
+            assert!(refused(&body), "{body}");
+        }
+        for body in [
+            anchor("", r#"<wp:positionV relativeFrom="paragraph"/>"#),
+            anchor("", r#"<wp:positionV relativeFrom="line"/>"#),
+            anchor("", ""),
+            table(r#"w:vertAnchor="text""#),
+            frame(r#"w:dropCap="drop" w:vAnchor="text""#),
+            vml("position:absolute;mso-position-vertical-relative:text"),
+            vml("width:300pt;height:165pt"),
+            section(r#"<w:cols w:num="1" w:space="720"/>"#),
+            section(r#"<w:cols w:space="720"/>"#),
+        ] {
+            assert!(!refused(&body), "{body}");
+        }
     }
 
     #[test]

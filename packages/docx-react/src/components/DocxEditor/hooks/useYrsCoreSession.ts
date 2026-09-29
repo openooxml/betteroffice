@@ -141,7 +141,10 @@ async function openPreview(
 ): Promise<{ session: YrsSession; host: YrsDocxHost } | null> {
   const session = await yrs.createYrsSession({ clientId });
   try {
-    return { session, host: session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS) };
+    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    if (host) return { session, host };
+    session.destroy();
+    return null;
   } catch (error) {
     console.warn('[yrs] the first-page preview could not open; opening in full', error);
     session.destroy();

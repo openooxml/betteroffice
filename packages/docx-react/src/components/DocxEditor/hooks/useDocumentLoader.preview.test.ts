@@ -35,7 +35,7 @@ afterAll(async () => {
 test('comments load from the full document, not from its preview', async () => {
   const previewSession = await createYrsSession();
   const fullSession = await createYrsSession();
-  const preview = previewSession.openDocxPreview(COMMENTED, 1);
+  const preview = previewSession.openDocxPreview(COMMENTED, 1)!;
   const full = fullSession.openDocx(COMMENTED, true);
   const fullComments = full.document.package.document?.comments;
   expect(fullComments?.length).toBeGreaterThan(0);

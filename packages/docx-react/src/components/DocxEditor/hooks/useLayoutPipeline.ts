@@ -22,6 +22,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
+import { documentPageCount } from './documentPageCount';
 import type { LayoutInWorker } from './useDisplayList';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
@@ -102,6 +103,8 @@ export interface UseLayoutPipelineReturn {
   runLayoutPipeline: (options?: { onHost?: boolean }) => void;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
   cancelPendingScrollRestore: () => void;
+  /** Counts navigation intents, the user's and programmatic scrolls alike. */
+  navigationEpoch: () => number;
   /**
    * The region layout request the pipeline would lay the current document out with now, or
    * `null` while it has no session or the fonts the document needs are not ready.
@@ -175,7 +178,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const lastTotalPagesRef = useRef<number>(0);
   useEffect(() => {
     onLayoutComputedRef.current?.(layout);
-    const total = layout?.pages.length ?? 0;
+    const total = documentPageCount(layout);
     if (total === lastTotalPagesRef.current) return;
     lastTotalPagesRef.current = total;
     onTotalPagesChangeRef.current?.(total);
@@ -609,12 +612,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     return JSON.stringify(request);
   }, [document, pageGap, renderEnv, residentMeasurementConfig, session]);
 
+  const navigationEpoch = useCallback(() => navigationEpochRef.current, []);
+
   return {
     layout,
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
     scheduleLayout,
     cancelPendingScrollRestore,
+    navigationEpoch,
     getLayoutRequest,
   };
 }

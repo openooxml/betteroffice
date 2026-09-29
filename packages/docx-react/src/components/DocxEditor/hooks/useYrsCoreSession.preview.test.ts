@@ -29,6 +29,16 @@ beforeAll(() =>
   )
 );
 
+// Its sections have columns, which a preview refuses.
+const COLUMNS = new Uint8Array(
+  readFileSync(
+    resolve(
+      import.meta.dir,
+      '../../../../../../crates/betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx'
+    )
+  )
+);
+
 afterAll(async () => {
   cleanup();
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -124,6 +134,30 @@ test('without the option the document opens in full at once', async () => {
   );
   await waitFor(() => expect(result.current.session).not.toBeNull());
   expect(result.current.previewing).toBe(false);
+  expect(hosts).toEqual([false]);
+  unmount();
+});
+
+test('a document the preview refuses opens in full at once', async () => {
+  const hosts: Array<boolean> = [];
+  const { result, unmount } = renderHook(() =>
+    useYrsCoreSession(
+      true,
+      null,
+      null,
+      COLUMNS,
+      1,
+      undefined,
+      {
+        isCurrentLoad: () => true,
+        onHostDocument: (_host, _generation, options) => hosts.push(options?.preview === true),
+      },
+      { previewFirstPage: true }
+    )
+  );
+  await waitFor(() => expect(result.current.session).not.toBeNull());
+  expect(result.current.previewing).toBe(false);
+  expect(result.current.session!.isDisplayOnly()).toBe(false);
   expect(hosts).toEqual([false]);
   unmount();
 });
