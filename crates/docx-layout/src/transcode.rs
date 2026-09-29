@@ -22,10 +22,67 @@ use serde::de::{self, DeserializeOwned, DeserializeSeed, Visitor};
 use serde::ser::{self, Serialize};
 
 /// Convert `value` into `U` as a JSON round trip would, without the JSON.
-pub(crate) fn transcode<T: Serialize + ?Sized, U: DeserializeOwned>(
-    value: &T,
-) -> Result<U, String> {
+#[cfg(test)]
+fn transcode<T: Serialize + ?Sized, U: DeserializeOwned>(value: &T) -> Result<U, String> {
     Transcoder::default().convert(value)
+}
+
+/// Batches smaller than this stay sequential: below it the conversion is
+/// cheaper than spawning workers.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_TRANSCODE_MIN: usize = 64;
+
+/// Convert each item independently. Each conversion is a pure function of its
+/// input, so on hosts with threads sizeable batches chunk across worker
+/// threads with output order and values identical to the sequential walk; a
+/// worker stops at its chunk's first error and chunks report in order, which
+/// keeps the first-error contract too.
+pub(crate) fn transcode_batch<T, U>(items: &[T]) -> Result<Vec<U>, String>
+where
+    T: Serialize + Sync,
+    U: DeserializeOwned + Send,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    if items.len() >= PARALLEL_TRANSCODE_MIN {
+        return transcode_batch_parallel(items);
+    }
+    let mut transcoder = Transcoder::default();
+    items.iter().map(|item| transcoder.convert(item)).collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn transcode_batch_parallel<T, U>(items: &[T]) -> Result<Vec<U>, String>
+where
+    T: Serialize + Sync,
+    U: DeserializeOwned + Send,
+{
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(items.len() / PARALLEL_TRANSCODE_MIN + 1);
+    if workers <= 1 {
+        let mut transcoder = Transcoder::default();
+        return items.iter().map(|item| transcoder.convert(item)).collect();
+    }
+    let chunk_len = items.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk_len)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut transcoder = Transcoder::default();
+                    chunk
+                        .iter()
+                        .map(|item| transcoder.convert(item))
+                        .collect::<Result<Vec<U>, _>>()
+                })
+            })
+            .collect();
+        let mut out = Vec::with_capacity(items.len());
+        for handle in handles {
+            out.extend(handle.join().expect("transcode worker panicked")?);
+        }
+        Ok(out)
+    })
 }
 
 /// Reusable tape for converting many values in a row.
