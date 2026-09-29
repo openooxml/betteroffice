@@ -292,6 +292,7 @@ fn lower_story<T: ReadTxn>(
     let story_slot = map.stories.len() as u32;
     map.stories.push(story_id.to_owned());
     let mut table_ordinal = 0_u32;
+    let mut break_ordinal = 0_u32;
 
     let result = (|| {
         let story = story_ref(txn, story_id)?;
@@ -440,7 +441,10 @@ fn lower_story<T: ReadTxn>(
                     {
                         attrs.list_marker_hidden = Some(true);
                     }
-                    let id = BlockId::Str(format!("{story_id}:{kind}:{story_index}"));
+                    // Numbered among the story's breaks rather than by position,
+                    // so an edit before a break leaves its block unchanged.
+                    let id = BlockId::Str(format!("{story_id}:{kind}:{break_ordinal}"));
+                    break_ordinal += 1;
                     if kind == "columnBreak" {
                         blocks.push(LayoutBlock::ColumnBreak(ColumnBreakBlock {
                             sdt_groups: None,
