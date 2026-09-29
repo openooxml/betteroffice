@@ -160,7 +160,24 @@ export function CanvasTableResizeOverlay({
     // Layout elsewhere can move pages into view without scrolling or resizing.
     const pagesShown =
       typeof IntersectionObserver === 'function' ? new IntersectionObserver(schedule) : null;
-    host.querySelectorAll('.canvas-page').forEach((page) => pagesShown?.observe(page));
+    const observePages = () => {
+      pagesShown?.disconnect();
+      host.querySelectorAll('.canvas-page').forEach((page) => pagesShown?.observe(page));
+    };
+    observePages();
+    // The page surfaces are replaced without a display-list change when the
+    // canvas falls back from worker rendering.
+    const pagesReplaced =
+      typeof MutationObserver === 'function'
+        ? new MutationObserver(() => {
+            const column = host.firstElementChild;
+            if (column) pagesReplaced?.observe(column, { childList: true });
+            observePages();
+            schedule();
+          })
+        : null;
+    pagesReplaced?.observe(host, { childList: true });
+    if (host.firstElementChild) pagesReplaced?.observe(host.firstElementChild, { childList: true });
     window.addEventListener('resize', schedule);
     update();
     return () => {
@@ -168,6 +185,7 @@ export function CanvasTableResizeOverlay({
       scrollerResized?.disconnect();
       hostResized.disconnect();
       pagesShown?.disconnect();
+      pagesReplaced?.disconnect();
       window.removeEventListener('resize', schedule);
       if (frame !== null) cancelAnimationFrame(frame);
     };
