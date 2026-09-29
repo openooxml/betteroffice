@@ -89,6 +89,8 @@ beforeAll(async () => {
 });
 afterEach(cleanup);
 afterAll(async () => {
+  // React's scheduler still runs the last commit's passive effects, which read `window`.
+  await new Promise((done) => setTimeout(done, 100));
   console.error = quiet.error;
   console.warn = quiet.warn;
   if (ownsDom) await GlobalRegistrator.unregister();
