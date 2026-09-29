@@ -550,8 +550,11 @@ fn place(
                 |before| paginator.leading_spacing(before),
                 paginator.state(state_idx).deferred_spacing,
             )?;
-            let must_advance = hooks::keep_with_next_group_must_advance(
+            let fresh_page_height =
+                hooks::measure_keep_with_next_group_at(group, measured, |_| 0.0, 0.0)?;
+            let must_advance = hooks::keep_with_next_group_must_advance_from(
                 group_height,
+                fresh_page_height,
                 paginator.get_available_height(),
                 page_content_height,
                 page_has_content,

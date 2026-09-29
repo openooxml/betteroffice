@@ -71,6 +71,24 @@ pub fn keep_with_next_group_must_advance(
     ))
 }
 
+pub fn keep_with_next_group_must_advance_from(
+    group_height: f64,
+    fresh_page_height: f64,
+    available_height: f64,
+    page_content_height: f64,
+    page_has_content: bool,
+) -> Result<bool, LayoutError> {
+    Ok(break_policy::keep_with_next_group_must_advance_from(
+        break_policy::KeepWithNextFit {
+            group_height,
+            available_height,
+            page_content_height,
+            page_has_content,
+        },
+        fresh_page_height,
+    ))
+}
+
 pub fn handle_section_break(
     block: &SectionBreakBlock,
     paginator: &mut Paginator,
@@ -115,7 +133,9 @@ fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64
     height
 }
 
-fn row_keep_heights(block: &TableBlock, measure: &TableExtent) -> Vec<f64> {
+/// Per row, the height of the keep-with-next row chain it starts (0 inside
+/// or outside a chain), which placement keeps on one page.
+pub(crate) fn row_keep_heights(block: &TableBlock, measure: &TableExtent) -> Vec<f64> {
     let mut heights = vec![0.0_f64; measure.rows.len()];
     for index in (0..measure.rows.len().saturating_sub(1)).rev() {
         let keeps_next = block.rows.get(index).is_some_and(|row| {

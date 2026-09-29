@@ -222,7 +222,16 @@ pub fn measure_keep_with_next_group_at(
         }
         Some(BlockExtent::Table(table)) => match follower.map(|mb| &mb.block) {
             Some(LayoutBlock::Table(block)) => {
-                first_table_fragment_height(block, table, &build_table_row_break_info(block, table))
+                let first = first_table_fragment_height(
+                    block,
+                    table,
+                    &build_table_row_break_info(block, table),
+                );
+                let kept = crate::hooks::row_keep_heights(block, table)
+                    .first()
+                    .copied()
+                    .unwrap_or(0.0);
+                first.max(kept)
             }
             _ => 0.0,
         },
@@ -230,12 +239,12 @@ pub fn measure_keep_with_next_group_at(
         Some(BlockExtent::TextBox(text_box)) => text_box.height,
         _ => 0.0,
     };
-    if witness > 0.0 {
-        let before = match follower.map(|mb| &mb.block) {
-            Some(LayoutBlock::Paragraph(block)) => get_spacing_before(block),
-            _ => 0.0,
-        };
-        budget += before.max(owed) + witness;
+    match follower.map(|mb| &mb.block) {
+        Some(LayoutBlock::Paragraph(block)) => {
+            budget += get_spacing_before(block).max(owed) + witness
+        }
+        _ if witness > 0.0 => budget += owed + witness,
+        _ => {}
     }
     budget
 }
