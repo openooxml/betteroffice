@@ -237,6 +237,33 @@ test('pages away from the viewport build in batches while the main thread idles'
   }
 });
 
+test('a display-only preview builds its visible pages only', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  Object.assign(host, { isDisplayOnly: () => true });
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const last = result.current.frame!.displayList.pages.length - 1;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      runIdleCallbacks();
+    });
+    expect(
+      EngineWorker.last!.posted.filter((request) => request.type === 'buildPages')
+    ).toEqual([]);
+    await act(async () => {
+      result.current.setDisplayWindow(last, last + 1);
+    });
+    await waitFor(() => expect(result.current.frame!.displayList.pages[last]?.unbuilt).toBeFalsy());
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
 test('a failed page build hands rendering back to the main thread', async () => {
   const { engine, inputs, host } = lazyFixture();
   const errors = spyOn(console, 'error').mockImplementation(() => {});

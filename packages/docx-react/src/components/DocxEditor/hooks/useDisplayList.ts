@@ -926,6 +926,8 @@ export function useRustDisplayList(
       if (unbuilt.length === 0) return;
       let batch = unbuilt.filter((index) => index >= start && index < end);
       if (batch.length === 0) {
+        // A display-only preview is replaced before anything reads its other pages.
+        if (worker.engine.isDisplayOnly?.()) return;
         const settling = settleWaitersRef.current.size > 0;
         if (!settling && !idle) {
           schedulePageBuildsWhenIdleRef.current();
