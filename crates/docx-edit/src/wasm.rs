@@ -1252,31 +1252,44 @@ impl EditSession {
         seed_stories: bool,
         generation: Option<&str>,
     ) -> Result<String, JsValue> {
+        self.open_docx_retaining(bytes, seed_stories, generation)
+            .map_err(|error| js_err(&error))
+    }
+
+    /// Opens `bytes`, retaining them and their digest only once opening succeeds.
+    fn open_docx_retaining(
+        &self,
+        bytes: &[u8],
+        seed_stories: bool,
+        generation: Option<&str>,
+    ) -> Result<String, String> {
         let source: Arc<[u8]> = Arc::from(bytes);
         let digest = crate::seed::package_digest(bytes);
-        let (envelope, parts) =
-            crate::seed::parse_docx_package_with_digest(bytes, digest.clone()).map_err(js_err)?;
+        let (envelope, parts) = crate::seed::parse_docx_package_with_digest(bytes, digest.clone())
+            .map_err(|error| error.to_string())?;
         let host_envelope = thin_docx_envelope(&envelope);
-        self.docx_digest.replace(Some(digest.clone()));
         let referenced_fonts = if seed_stories {
             let fonts = crate::seed::seed_parsed_docx(
                 self.engine.doc(),
                 envelope,
                 parts,
                 Arc::clone(&source),
-                digest,
+                digest.clone(),
             )
-            .map_err(js_err)?;
+            .map_err(|error| error.to_string())?;
             self.engine.doc().begin_opening(generation);
             fonts
         } else {
-            let fonts = crate::seed::referenced_fonts(&envelope).map_err(js_err)?;
+            let fonts =
+                crate::seed::referenced_fonts(&envelope).map_err(|error| error.to_string())?;
             let parts = crate::structured::source::SourceParts::new(parts);
-            let mut metadata =
-                crate::seed::source_metadata(&envelope, Some(&parts)).map_err(js_err)?;
+            let mut metadata = crate::seed::source_metadata(&envelope, Some(&parts))
+                .map_err(|error| error.to_string())?;
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
-            self.engine.doc().retain_source_docx(Arc::clone(&source));
+            self.engine
+                .doc()
+                .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
             drop(envelope);
             fonts
         };
@@ -1284,8 +1297,9 @@ impl EditSession {
             envelope: host_envelope,
             referenced_fonts,
         };
-        let json = serde_json::to_string(&host).map_err(js_err)?;
+        let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
+        self.docx_digest.replace(Some(digest));
         self.engine.doc().rotate_version(js_entropy());
         Ok(json)
     }
@@ -4665,6 +4679,37 @@ mod tests {
         let applied = envelope(&session.apply_edits_json(&request).unwrap());
         assert_eq!(applied["source"], "agent");
         assert!(!session.can_undo());
+    }
+
+    /// A package whose paragraph text id is invalid, so parsing generates
+    /// one from the package digest.
+    fn unidentified_docx(text: &str) -> Vec<u8> {
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:textId="invalid"><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn a_failed_reopen_keeps_the_open_package_and_its_digest() {
+        let opened = unidentified_docx("Alpha");
+        let session = EditSession::new(75.0).unwrap();
+        session.open_docx(&opened, true, None).unwrap();
+        let materialized = session.materialize_docx().unwrap();
+        assert!(
+            session
+                .open_docx_retaining(&unidentified_docx("Beta"), true, None)
+                .is_err()
+        );
+        assert_eq!(session.materialize_docx().unwrap(), materialized);
+        let fresh = EditSession::new(76.0).unwrap();
+        fresh.open_docx(&opened, true, None).unwrap();
+        assert_eq!(fresh.materialize_docx().unwrap(), materialized);
     }
 
     #[test]
