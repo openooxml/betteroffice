@@ -16,7 +16,8 @@ beforeAll(async () => {
   const modules: Record<string, string> = {
     './residentEngineSession':
       'export const createResidentEngineSession = async (heapLimitBytes) => ((testHarness.heapLimits ??= []).push(heapLimitBytes), testHarness.session);',
-    '../layout/render/glyphCache': 'export class GlyphCache {}',
+    '../layout/render/glyphCache':
+      'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
@@ -609,6 +610,32 @@ describe('resident worker memory', () => {
       'Resident engine worker ran out of memory allocating 65536 bytes: unreachable'
     );
     expect(trapped.memory).toEqual(w.harness.memories);
+  });
+
+  test('a trap that the raster paints past still answers the request as out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 65536, liveBytes: 65000, peakBytes: 65000, failedAllocationBytes: 112 },
+    ];
+    Object.assign(w.harness.session, {
+      outlineGlyphJson: () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      },
+    });
+    const rasterize = w.harness.rasterize;
+    w.harness.rasterize = async (...args: Parameters<typeof rasterize>) => {
+      try {
+        (w.harness as { glyphs?: (fontId: number, glyphId: number) => string }).glyphs?.(1, 1);
+      } catch {
+        // painted with browser text instead
+      }
+      return rasterize(...args);
+    };
+    const attached = await w.attach([1]);
+    expect(!attached.ok && attached.terminal && attached.outOfMemory).toBe(true);
+    const next = await w.build([1]);
+    expect(!next.ok && next.terminal).toBe(true);
   });
 
   test('a trap without a failed allocation is not reported as out of memory', async () => {

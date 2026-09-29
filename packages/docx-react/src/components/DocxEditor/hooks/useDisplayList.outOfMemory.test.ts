@@ -327,6 +327,49 @@ test('a provisional layout that a host layout replaced does not run again once i
   }
 });
 
+test('a display build that fails beside a worker pass leaves the pass its replacement worker', async () => {
+  const { native, frame, engine, layoutJson } = setup();
+  const { host, adopted } = revisedHost(engine);
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, resolved }) =>
+        useRustDisplayList(layout, undefined, undefined, resolved, host),
+      {
+        initialProps: {
+          layout: null as Layout | null,
+          resolved: undefined as ReadonlySet<number> | undefined,
+        },
+      }
+    );
+    const pending = result.current.layoutInWorker(host, REQUEST)!;
+    const [first] = FakeWorker.spawned;
+    await act(async () => first!.replyFrame(frame(1), 1, { layoutJson }));
+    const computation = (await pending) as { layout: Layout };
+    await act(async () => rerender({ layout: computation.layout, resolved: undefined }));
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+
+    // A relayout and a display build are both waiting when the worker runs out of memory.
+    await act(async () => {
+      void result.current.layoutInWorker(host, REQUEST);
+      rerender({ layout: computation.layout, resolved: new Set([7]) });
+    });
+    expect(first!.posted.map((request) => request.type)).toEqual(['bootstrap', 'sync', 'sync']);
+    await act(async () => first!.outOfMemory());
+    expect(FakeWorker.spawned).toHaveLength(2);
+    const second = FakeWorker.spawned[1]!;
+    expect(second.posted.map((request) => request.type)).toEqual(['bootstrap']);
+    expect(second.last()).toMatchObject({ provisionalPages: 3 });
+    expect(adopted).toHaveLength(3);
+    expect(result.current.error).toBeNull();
+    await act(async () => second.replyFrame(frame(2), 2, { layoutJson }));
+    unmount();
+  } finally {
+    warnings.mockRestore();
+    native.free();
+  }
+});
+
 test('a worker that runs out of memory attaching canvases is replaced and lays out again', async () => {
   const { native, inputs, frame, engine } = setup();
   let relayouts = 0;

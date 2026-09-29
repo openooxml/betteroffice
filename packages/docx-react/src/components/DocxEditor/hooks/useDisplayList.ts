@@ -164,7 +164,10 @@ interface WorkerLayoutFrame {
 /** The display fallback needs a main-thread layout of a worker-run one. */
 class MainThreadLayoutPendingError extends Error {}
 
-/** A newer layout with another revision preview reached the session; its own pass shows it. */
+/**
+ * A newer layout reached the session, with another revision preview or from a
+ * worker pass run again; its own pass shows it.
+ */
 class SupersededPreviewError extends Error {}
 
 export interface ResidentFrameApplyResult {
@@ -1292,6 +1295,11 @@ export function useRustDisplayList(
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
           // A newer build recovers the worker it asks.
           if (!latest) return Promise.reject(cause);
+          // So does a layout adopted since this build began, such as a worker
+          // pass running again, whose frame this build's snapshot would erase.
+          if (hostEngine.residentWorkerProbe()?.layoutRevision !== probe.layoutRevision) {
+            return Promise.reject(new SupersededPreviewError());
+          }
           const outcome = replaceOutOfMemoryWorker(hostEngine, client, cause);
           if (outcome === 'retry') {
             try {

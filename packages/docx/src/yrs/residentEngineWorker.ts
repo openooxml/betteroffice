@@ -69,26 +69,20 @@ interface LayoutRequest {
 let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
 let completedLayout: (LayoutRequest & { layoutJson: string }) | null = null;
 
+// The request being handled, and the last one answered with a trap.
+let handlingId = 0;
+let trappedId = 0;
+
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
     .then(() => {
       if (trap) throw trap;
+      handlingId = event.data.id;
       return handle(event.data);
     })
     .catch((error) => {
       if (error instanceof WebAssembly.RuntimeError) {
-        trap = error;
-        const failed = editFailedAllocationBytes();
-        reply({
-          id: event.data.id,
-          ok: false,
-          error:
-            failed > 0
-              ? `Resident engine worker ran out of memory allocating ${failed} bytes: ${error.message}`
-              : `Resident engine worker trapped: ${error.message}`,
-          terminal: true,
-          ...(failed > 0 ? { outOfMemory: true } : {}),
-        });
+        trapped(event.data.id, error);
         return;
       }
       reply({
@@ -98,6 +92,24 @@ scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
       });
     });
 };
+
+/** A trap leaves the module unusable: `id` is answered as terminal, and nothing succeeds after. */
+function trapped(id: number, error: WebAssembly.RuntimeError): void {
+  if (trap && id === trappedId) return;
+  trap = error;
+  trappedId = id;
+  const failed = editFailedAllocationBytes();
+  reply({
+    id,
+    ok: false,
+    error:
+      failed > 0
+        ? `Resident engine worker ran out of memory allocating ${failed} bytes: ${error.message}`
+        : `Resident engine worker trapped: ${error.message}`,
+    terminal: true,
+    ...(failed > 0 ? { outOfMemory: true } : {}),
+  });
+}
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'destroy') {
@@ -527,7 +539,15 @@ async function replayOffscreen(
   }
   if (!glyphCache && session) {
     glyphCache = new GlyphCache({
-      provider: (fontId, glyphId) => session!.outlineGlyphJson(fontId, glyphId),
+      provider: (fontId, glyphId) => {
+        try {
+          return session!.outlineGlyphJson(fontId, glyphId);
+        } catch (error) {
+          // The raster paints on with browser text, so the trap is answered here.
+          if (error instanceof WebAssembly.RuntimeError) trapped(handlingId, error);
+          throw error;
+        }
+      },
     });
   }
   const caretTarget =
@@ -629,5 +649,6 @@ function editFailedAllocationBytes(): number {
 }
 
 function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
+  if (trap && response.ok) return;
   scope.postMessage({ ...response, memory: wasmModuleMemories() }, transfer);
 }
