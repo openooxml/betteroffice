@@ -1932,8 +1932,24 @@ pub struct LayoutOptions {
     pub body_break_type: Option<SectionBreakType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_restarts: Option<Vec<Option<SectionPageRestart>>>,
+    /// Per section, the body margins of the pages that show a header or
+    /// footer other than the default one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_page_margins: Option<Vec<SectionPageMargins>>,
     #[serde(default)]
     pub sections: Option<Vec<SectionLayoutContract>>,
+}
+
+/// Body margins for a section's first page under `w:titlePg` and its even
+/// pages under `w:evenAndOddHeaders`, each widened by the band that page
+/// shows. `None` where the flag is off: those pages use the section margins.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPageMargins {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<PageMargins>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub even: Option<PageMargins>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
