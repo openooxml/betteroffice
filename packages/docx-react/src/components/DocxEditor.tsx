@@ -883,8 +883,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     () => pagedEditorRef.current?.relayout(),
     handoffFromRef
   );
+  // The full session failing to render as it opens fails the load, which
+  // reports it.
+  const failOpeningRef = useRef<(error: Error) => boolean>(() => false);
   useEffect(() => {
-    if (canvasRenderer.error) onError?.(canvasRenderer.error);
+    if (canvasRenderer.error && !failOpeningRef.current(canvasRenderer.error)) {
+      onError?.(canvasRenderer.error);
+    }
   }, [canvasRenderer.error, onError]);
 
   const [yrsTrackedChangesResult, setYrsTrackedChangesResult] = useState<TrackedChangesResult>(
@@ -1056,6 +1061,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // Until the full session's pages are shown, the editor takes no input and its
   // API and commands see a document that is still loading.
   const opening = yrsCore.opening;
+  failOpeningRef.current = yrsCore.failOpening;
   const readOnly = modeReadOnly || opening;
   if (opening) writeModeRef.current = 'viewing';
   const openingRef = useRef(opening);

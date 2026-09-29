@@ -87,7 +87,10 @@ test('a failed full open reports the error and leaves no preview behind', async 
 
 test('a full open that never finishes fails the load once its wait runs out', async () => {
   const { result, errors, unmount } = await previewThen('stall', 50);
+  // Only a full session's render failure fails the load.
+  expect(result.current.failOpening(new Error('preview render failed'))).toBe(false);
   await waitFor(() => expect(errors).toHaveLength(1));
+  expect(errors[0]!.message).not.toBe('preview render failed');
   expect(result.current.session).toBeNull();
   expect(result.current.opening).toBe(false);
   unmount();
@@ -109,6 +112,25 @@ test('a full session keeps the preview until its first frame shows, past the wai
   expect(result.current.opening).toBe(false);
   expect(result.current.handoffFrom).toBeNull();
   expect(result.current.session).toBe(full);
+  expect(result.current.failOpening(new Error('render failed'))).toBe(false);
   expect(errors).toEqual([]);
+  unmount();
+});
+
+test('a full session that fails to render before its first frame fails the load', async () => {
+  const { result, errors, preview, unmount } = await previewThen('open');
+  await waitFor(() => expect(result.current.previewing).toBe(false));
+  expect(result.current.session).not.toBe(preview);
+  let failed = false;
+  await act(async () => {
+    failed = result.current.failOpening(new Error('render failed'));
+  });
+  expect(failed).toBe(true);
+  expect(errors.map((error) => error.message)).toEqual(['render failed']);
+  expect(result.current.session).toBeNull();
+  expect(result.current.opening).toBe(false);
+  expect(result.current.handoffFrom).toBeNull();
+  expect(result.current.failOpening(new Error('later'))).toBe(false);
+  expect(errors).toHaveLength(1);
   unmount();
 });

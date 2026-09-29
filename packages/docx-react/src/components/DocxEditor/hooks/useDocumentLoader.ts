@@ -164,10 +164,18 @@ export function useDocumentLoader({
   );
 
   const failHostDocument = useCallback(
-    (error: Error, generation: number) => {
-      if (!loadGeneration.complete(generation)) return;
-      // A preview's first pages are not the document the load failed to open.
-      if (previewDocumentRef.current) {
+    (error: Error, generation: number, options?: { opened: boolean }) => {
+      // A load that fails after its document was accepted has completed.
+      if (
+        options?.opened
+          ? !loadGeneration.isCurrent(generation)
+          : !loadGeneration.complete(generation)
+      ) {
+        return;
+      }
+      // A preview's first pages, or a document that failed to show, are not
+      // the document the load opened.
+      if (options?.opened || previewDocumentRef.current) {
         previewDocumentRef.current = null;
         history.reset(null);
       }

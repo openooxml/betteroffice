@@ -43,6 +43,11 @@ export interface YrsCoreSession {
   /** A frame of `engine`'s layout was published for display. */
   notifyFramePresented(engine: unknown): void;
   /**
+   * Fails the load with `error` if its full session has yet to show a frame,
+   * dropping that session and the preview. Returns whether it did.
+   */
+  failOpening(error: Error): boolean;
+  /**
    * Materializes the save projection base when the main thread is next idle,
    * for a host that projects the document on every change.
    */
@@ -57,7 +62,8 @@ interface YrsCoreSessionCallbacks {
     generation: number,
     options?: { preview: boolean }
   ) => void;
-  onError?: (error: Error, generation: number) => void;
+  /** `opened`: the load's full document was already accepted. */
+  onError?: (error: Error, generation: number, options?: { opened: boolean }) => void;
 }
 
 export interface YrsCoreSessionOptions {
@@ -253,6 +259,7 @@ export function useYrsCoreSession(
   const previewingRef = useRef(false);
   previewingRef.current = previewing;
   const retiringRef = useRef<YrsSession | null>(null);
+  const failOpeningRef = useRef<((error: Error) => boolean) | null>(null);
   // Collaboration shares one replica from the start, so it never previews.
   // Read once per load: a later change of the option does not reopen it.
   const previewFirstPageRef = useRef(false);
@@ -298,14 +305,28 @@ export function useYrsCoreSession(
       setPreviewing(false);
       retire(preview);
     };
-    const fail = (error: unknown): void => {
+    const fail = (error: unknown, options?: { opened: boolean }): void => {
       if (shown) dropPreview(shown.session);
       if (!cancelled && callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false) {
         callbacksRef.current?.onError?.(
           error instanceof Error ? error : new Error(String(error)),
-          seedGeneration
+          seedGeneration,
+          options
         );
       }
+    };
+
+    failOpeningRef.current = (error: Error): boolean => {
+      const full = sessionRef.current;
+      if (!shown || stale() || !full || full === shown.session) return false;
+      abandoned = true;
+      sessionRef.current = null;
+      setSession(null);
+      setTimeout(() => full.destroy(), 0);
+      retiringRef.current = null;
+      setHandoffFrom(null);
+      fail(error, { opened: true });
+      return true;
     };
 
     void import('@betteroffice/docx/yrs')
@@ -404,6 +425,7 @@ export function useYrsCoreSession(
 
     return () => {
       cancelled = true;
+      failOpeningRef.current = null;
       if (fullOpenTimer !== null) clearTimeout(fullOpenTimer);
       paintWaitRef.current?.resolve();
       paintWaitRef.current = null;
@@ -435,6 +457,12 @@ export function useYrsCoreSession(
     const retiring = retiringRef.current;
     if (retiring && engine === sessionRef.current && engine !== retiring) retire(retiring);
   }, [retire]);
+
+  const failOpening = useCallback(
+    (error: Error): boolean =>
+      retiringRef.current !== null && (failOpeningRef.current?.(error) ?? false),
+    []
+  );
 
   // Save, export and getDocument materialize the base on first use; only a
   // host projecting every change asks for it ahead of the first edit.
@@ -569,6 +597,7 @@ export function useYrsCoreSession(
     handoffFrom,
     opening: previewing || handoffFrom !== null,
     notifyFramePresented,
+    failOpening,
     storyBlocks,
     bodyBlocks,
     inputPositionMap,
