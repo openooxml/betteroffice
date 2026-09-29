@@ -726,7 +726,6 @@ export function createDisplayListQueries(
     }
     if (replace.length === 0) return;
     try {
-      // Every other page stays where it is, so a load costs the loaded pages only.
       eng.updateDisplayList(
         handle,
         JSON.stringify({

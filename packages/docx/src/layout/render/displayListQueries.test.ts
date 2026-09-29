@@ -433,9 +433,26 @@ describe('createDisplayListQueries page loads in the real store', () => {
       ),
     });
     const list = { pages: Array.from({ length: 12 }, (_, index) => textPage(index)) };
-    const lazy = createDisplayListQueries(list, engine);
+    const calls = { byHandle: 0, json: 0, updates: 0 };
+    const counted = {
+      ...engine,
+      rangeRectsByHandle: (handle: number, from: number, to: number) => {
+        calls.byHandle += 1;
+        return engine.rangeRectsByHandle!(handle, from, to);
+      },
+      rangeRectsJson: (json: string, from: number, to: number) => {
+        calls.json += 1;
+        return engine.rangeRectsJson(json, from, to);
+      },
+      updateDisplayList: (handle: number, update: string) => {
+        calls.updates += 1;
+        engine.updateDisplayList!(handle, update);
+      },
+    };
+    const lazy = createDisplayListQueries(list, counted);
     const order = [7, 2, 11, 2, 0, 5];
     const answers = order.map((index) => lazy.rangeRects(index * 100 + 3, index * 100 + 50));
+    expect(calls).toEqual({ byHandle: 6, json: 0, updates: 5 });
     const eager = createDisplayListQueries(list, engine);
     eager.rangeRects(1, 1200);
     expect(order.map((index) => eager.rangeRects(index * 100 + 3, index * 100 + 50))).toEqual(
