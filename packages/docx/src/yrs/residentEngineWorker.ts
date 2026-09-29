@@ -88,30 +88,31 @@ scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   enqueue(() => handle(event.data), event.data.id);
 };
 
-function enqueue(operation: () => Promise<void> | void, id: number | null): void {
+function enqueue(operation: () => Promise<void> | void, id: number): void {
   operations = operations
     .then(() => {
       if (trap) throw trap;
       return operation();
     })
-    .catch((error) => {
-      if (id === null) return;
-      if (error instanceof WebAssembly.RuntimeError) {
-        trap = error;
-        reply({
-          id,
-          ok: false,
-          error: `Resident engine worker trapped: ${error.message}`,
-          terminal: true,
-        });
-        return;
-      }
-      reply({
-        id,
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    .catch((error) => replyFailure(id, error));
+}
+
+function replyFailure(id: number, error: unknown): void {
+  if (error instanceof WebAssembly.RuntimeError) {
+    trap = error;
+    reply({
+      id,
+      ok: false,
+      error: `Resident engine worker trapped: ${error.message}`,
+      terminal: true,
     });
+    return;
+  }
+  reply({
+    id,
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+  });
 }
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
@@ -213,7 +214,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         begun: false,
         restarts: 0,
       };
-      scheduleCompletionSlice();
+      scheduleCompletionSlice(slicedCompletion);
       return;
     }
     await completeProvisionalLayout();
@@ -388,20 +389,26 @@ async function completeProvisionalLayout(): Promise<void> {
   slicedCompletion = null;
   const { layoutInput, ...request } = incompleteLayout;
   incompleteLayout = null;
-  let layoutJson: string | undefined;
-  if (waiting?.begun) {
-    try {
-      layoutJson = session.resumeRegionLayout(ALL_BLOCKS).layoutJson;
-    } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
+  try {
+    let layoutJson: string | undefined;
+    if (waiting?.begun) {
+      try {
+        layoutJson = session.resumeRegionLayout(ALL_BLOCKS).layoutJson;
+      } catch (error) {
+        if (error instanceof WebAssembly.RuntimeError) throw error;
+      }
     }
-  }
-  completedLayout = {
-    ...request,
-    layoutJson: layoutJson ?? session.layoutDocumentWithRegionsRetainedJson(layoutInput),
-  };
-  if (waiting) {
-    await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
+    completedLayout = {
+      ...request,
+      layoutJson: layoutJson ?? session.layoutDocumentWithRegionsRetainedJson(layoutInput),
+    };
+    if (waiting) {
+      await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
+    }
+  } catch (error) {
+    // The waiting completion is answered too, and the request that finished it fails.
+    if (waiting) replyFailure(waiting.id, error);
+    throw error;
   }
 }
 
@@ -439,32 +446,36 @@ async function replyCompletedLayout(
 // A zero-delay turn of the event loop, so requests that arrived meanwhile
 // queue ahead of the next step.
 const completionTurns = typeof MessageChannel === 'function' ? new MessageChannel() : null;
+const turnCallbacks: Array<() => void> = [];
+if (completionTurns) completionTurns.port1.onmessage = () => turnCallbacks.shift()?.();
 
-function scheduleCompletionSlice(): void {
-  const queue = () => {
-    const completion = slicedCompletion;
-    if (!completion) return;
+function nextTurn(callback: () => void): void {
+  if (!completionTurns) {
+    setTimeout(callback, 0);
+    return;
+  }
+  turnCallbacks.push(callback);
+  completionTurns.port2.postMessage(null);
+}
+
+/** Queues the next step of `completion`, which a later completion supersedes. */
+function scheduleCompletionSlice(completion: SlicedCompletion): void {
+  nextTurn(() => {
+    if (slicedCompletion !== completion) return;
     enqueue(async () => {
       try {
-        await completionSlice();
+        await completionSlice(completion);
       } catch (error) {
         if (slicedCompletion === completion) slicedCompletion = null;
         throw error;
       }
     }, completion.id);
-  };
-  if (completionTurns) {
-    completionTurns.port1.onmessage = queue;
-    completionTurns.port2.postMessage(null);
-  } else {
-    setTimeout(queue, 0);
-  }
+  });
 }
 
 /** One bounded step of a sliced completion, which then queues the next. */
-async function completionSlice(): Promise<void> {
-  const completion = slicedCompletion;
-  if (!session || !completion || !incompleteLayout) return;
+async function completionSlice(completion: SlicedCompletion): Promise<void> {
+  if (!session || slicedCompletion !== completion || !incompleteLayout) return;
   let progress;
   if (!completion.begun) {
     progress = session.beginRegionLayout(incompleteLayout.layoutInput);
@@ -480,10 +491,14 @@ async function completionSlice(): Promise<void> {
       completion.begun = false;
       completion.restarts += 1;
       if (completion.restarts > COMPLETION_RESTARTS) {
-        await completeProvisionalLayout();
+        try {
+          await completeProvisionalLayout();
+        } catch {
+          // Answered as the completion's failure.
+        }
         return;
       }
-      scheduleCompletionSlice();
+      scheduleCompletionSlice(completion);
       return;
     }
     const elapsed = Math.max(1, performance.now() - started);
@@ -493,7 +508,7 @@ async function completionSlice(): Promise<void> {
     );
   }
   if (progress.layoutJson === undefined) {
-    scheduleCompletionSlice();
+    scheduleCompletionSlice(completion);
     return;
   }
   const { layoutInput: _input, ...request } = incompleteLayout;

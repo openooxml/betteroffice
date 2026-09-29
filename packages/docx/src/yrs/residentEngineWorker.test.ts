@@ -66,11 +66,13 @@ function worker() {
   let nextId = 0;
   let frameEpoch = 0;
   const replies = new Map<number, (reply: ResidentEngineWorkerResponse) => void>();
+  const answered: number[] = [];
   const surfaces = new Map<string, Surface>();
   const scope = {
     onmessage: (_event: { data: ResidentEngineWorkerRequest }) => {},
     postMessage(reply: ResidentEngineWorkerResponse) {
-      replies.get(reply.id)!(reply);
+      answered.push(reply.id);
+      replies.get(reply.id)?.(reply);
       replies.delete(reply.id);
     },
   };
@@ -176,6 +178,7 @@ function worker() {
   return {
     harness,
     surfaces,
+    answered,
     send,
     resetCalls() {
       harness.rasterized = [];
@@ -724,6 +727,61 @@ describe('sliced layout completion', () => {
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(order).toEqual(['complete', 'frame']);
     expect(calls).toEqual(['begin', 'resume:2', 'resume:100']);
+  });
+
+  test('a completion that fails when a frame request finishes it is answered once, as is the frame request', async () => {
+    const { w, onResume, bootstrap } = steppedWorker(100);
+    await bootstrap();
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsRetainedJson: () => {
+        throw new Error('layout failed');
+      },
+    });
+    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      (w.harness.session as { resumeRegionLayout?: unknown }).resumeRegionLayout = () => {
+        throw new Error('layout failed');
+      };
+      frame = w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false });
+    });
+    const completion = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    const framed = await frame!;
+    expect(completion.ok).toBe(false);
+    expect(framed.ok).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
+  test("a superseded completion's queued step never runs the next completion", async () => {
+    const { w, calls, onResume, bootstrap } = steppedWorker(12);
+    await bootstrap();
+    let second: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      void bootstrap();
+      second = w.send({
+        type: 'completeLayout',
+        expectedFrameEpoch: 1,
+        paintCaret: false,
+        sliceBlocks: 4,
+      });
+    });
+    const first = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 4,
+    });
+    const next = await second!;
+    expect(first.ok && first.frame).toBeUndefined();
+    expect(next.ok && next.layoutJson).toBe(full);
+    expect(calls.filter((call) => call === 'begin')).toHaveLength(2);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
   });
 
   test('a new snapshot supersedes the pass', async () => {

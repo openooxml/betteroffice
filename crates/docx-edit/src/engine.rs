@@ -110,6 +110,10 @@ struct RegionFastPathState {
     /// and no note references — the fast path skips note stabilization
     /// entirely, so it requires a note-free document.
     notes_clear: bool,
+    /// The environment the pass lowered the body with. A body lowered since
+    /// with another one, as by a region layout begun and then abandoned, is not
+    /// the pass's.
+    render_env: RenderEnv,
 }
 
 /// What a completed region layout of the session's own stories was computed from, published
@@ -2204,20 +2208,21 @@ impl EngineSession {
             resident_body && single_section && !provisional,
             parsed_render_env.as_ref(),
         ) {
-            (true, Some(env)) => Some(self.regional_fingerprint(&regions, env)),
+            (true, Some(env)) => Some((self.regional_fingerprint(&regions, env), env.clone())),
             _ => None,
         };
         self.regions.replace(Some(ResidentRegionState {
             request_json: input_json,
             request_fingerprint,
             headers_footers,
-            fast_path: regional.map(|regional| RegionFastPathState {
+            fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
                 regions: Rc::new(regions),
                 measurement: Rc::new(measurement),
                 measurement_fingerprint,
                 fonts,
                 regional,
                 notes_clear,
+                render_env,
             }),
         }));
         // Only the region-measured arena may seed the next pass's reuse walk.
@@ -3145,12 +3150,14 @@ impl EngineSession {
                             Rc::clone(&fast.measurement),
                             fast.measurement_fingerprint,
                             fast.regional,
+                            fast.render_env.clone(),
                         )
                     },
                 )
             })
         };
-        let Some((regions, measurement, measurement_fingerprint, regional)) = fast_config else {
+        let Some((regions, measurement, measurement_fingerprint, regional, pass_env)) = fast_config
+        else {
             return Ok(false);
         };
         let env = {
@@ -3160,6 +3167,9 @@ impl EngineSession {
             };
             lowered.env.clone()
         };
+        if env != pass_env {
+            return Ok(false);
+        }
         if self.regional_fingerprint(&regions, &env) != regional {
             return Ok(false);
         }

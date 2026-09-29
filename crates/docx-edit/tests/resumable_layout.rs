@@ -1,13 +1,14 @@
 //! A region layout measured a few blocks at a time lays out exactly as one pass, on the
 //! repository's DOCX corpus and on generated documents, and leaves the same retained state.
 
+#[allow(dead_code)]
 #[path = "support/page_fixture.rs"]
 mod fixture;
 
 use std::path::PathBuf;
 
 use docx_edit::{EditCtx, EngineSession, FormatPolicy, Position, SegmentContent, seed_from_docx};
-use fixture::{FONT, p, r, region_request, with_body_and_note};
+use fixture::{FONT, p, r, region_request, with_body, with_body_and_note};
 
 const CORPUS: &[&str] = &[
     "crates/betteroffice-docx/tests/corpus/fixtures/betteroffice-demo.docx",
@@ -273,4 +274,49 @@ fn a_change_between_steps_abandons_the_pass() {
         engine.resume_region_layout(1).is_err(),
         "new fonts abandon it"
     );
+}
+
+/// An abandoned pass that lowered the body with another environment leaves
+/// the next resident edit as it would be without it.
+#[test]
+fn an_abandoned_pass_leaves_resident_edits_alone() {
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let body = format!(
+        "{}{}<w:sectPr/>",
+        p("00000001", &r("Visible text before the hidden run.")),
+        p(
+            "00000002",
+            r#"<w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve">hidden words that take up a line or more of their own when shown</w:t></w:r>"#
+        )
+    );
+    let bytes = with_body(&body);
+    let edited = |abandon: bool| {
+        let (engine, request) = seeded(&bytes, font);
+        // One section and no note contents, so edits take the resident path.
+        let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        request["notes"]["contents"] = serde_json::json!([]);
+        let last = request["regions"]["sections"]
+            .as_array()
+            .unwrap()
+            .last()
+            .cloned();
+        request["regions"]["sections"] = serde_json::json!([last]);
+        let request = request.to_string();
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        if abandon {
+            let mut shown: serde_json::Value = serde_json::from_str(&request).unwrap();
+            shown["renderEnv"]["showHiddenText"] = true.into();
+            shown["measurement"]["defaults"]["fontSize"] = 12.into();
+            let progress = engine.begin_region_layout(&shown.to_string()).unwrap();
+            assert!(progress.layout_json.is_none());
+        }
+        type_into(&engine);
+        engine.apply_and_layout("body", 1).unwrap();
+        engine.retained_kernel_inputs_json().unwrap()
+    };
+    assert_eq!(edited(true), edited(false));
 }
