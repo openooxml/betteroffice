@@ -76,7 +76,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
       const clientY = pageRect.top + (rect.y + rect.height / 2) * scaleY;
       scroller.scrollTo({
-        top: scroller.scrollTop + (clientY - (viewport.top + viewport.bottom) / 2) / viewport.zoom,
+        top: scroller.scrollTop + (clientY - viewport.top) / viewport.zoom - viewport.height / 2,
         behavior: smooth ? 'smooth' : 'auto',
       });
       return true;
