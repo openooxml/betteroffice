@@ -362,7 +362,7 @@ export class EditSession {
      * snapshot. `fonts` holds the font files back to back, `font_lengths` their byte lengths;
      * `request` is a region layout request whose font chains name fonts by their index. The
      * reply is `{"ok":true,"content"}` or `{"ok":false,"failure"}`; a rejected font or an
-     * unusable request throws. The module's shared measurement fonts are left untouched.
+     * unusable request throws. The session's measurement fonts are left untouched.
      */
     export_snapshot_with_private_fonts_json(fonts: Uint8Array, font_lengths: Uint32Array, request: string, options: string): string;
     /**
@@ -1524,6 +1524,7 @@ export interface InitOutput {
     readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
+    readonly clear_measure_fonts: () => void;
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1540,7 +1541,6 @@ export interface InitOutput {
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-    readonly clear_measure_fonts: () => void;
     readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];

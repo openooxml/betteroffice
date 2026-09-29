@@ -33,6 +33,12 @@
 //!   reports `{"revisionId": string|null}` — null outside suggesting mode.
 //!   Ops with no receipt content return `()`.
 //!
+//! - **Each session owns its measurement fonts.** Every entry point that
+//!   reaches font registration, measurement, layout, display state or glyph
+//!   outlines starts with `let _fonts = self.fonts.enter();`
+//!   ([`docx_layout::MeasureFonts`]), so font ids are the session's own. One
+//!   that forgets panics on its first font lookup.
+//!
 //! Story lengths, selection indices and every other unit count in this module
 //! are UTF-16 units in which each embed, pilcrows included, counts as one.
 
@@ -1167,6 +1173,8 @@ fn persisted_receipt_json(session_id: &str, persisted: &PersistedParagraphIds) -
 #[wasm_bindgen]
 pub struct EditSession {
     engine: EngineSession,
+    /// This session's measurement fonts; see the module docs.
+    fonts: docx_layout::MeasureFonts,
     docx_source: RefCell<Option<Arc<[u8]>>>,
     /// The [`crate::seed::package_digest`] of `docx_source`, when known.
     docx_digest: RefCell<Option<String>>,
@@ -1545,6 +1553,7 @@ impl EditSession {
         }
         let session = Self {
             engine: EngineSession::new(client_id as u64),
+            fonts: docx_layout::MeasureFonts::default(),
             docx_source: RefCell::new(None),
             docx_digest: RefCell::new(None),
             update_observer: None,
@@ -1569,6 +1578,7 @@ impl EditSession {
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
     pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
+        let _fonts = self.fonts.enter();
         docx_layout::register_measure_font(bytes)
     }
 
@@ -1581,6 +1591,7 @@ impl EditSession {
         base: u32,
         requested_family: &str,
     ) -> Result<u32, JsValue> {
+        let _fonts = self.fonts.enter();
         docx_layout::register_substitute_measure_font(base, requested_family)
     }
 
@@ -1588,6 +1599,7 @@ impl EditSession {
     /// invalidates the retained paragraph measurement templates, so the next
     /// edit must pass back through the full layout path.
     pub fn clear_measure_fonts(&self) {
+        let _fonts = self.fonts.enter();
         docx_layout::clear_measure_fonts();
         self.engine.clear_measurement_templates();
     }
@@ -1597,6 +1609,7 @@ impl EditSession {
     /// a later resident edit re-measures only the changed block. Errors with
     /// the engine's message for input it cannot measure.
     pub fn measure_paragraph_json(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine.measure_paragraph_json(input).map_err(js_err)
     }
 
@@ -1604,6 +1617,7 @@ impl EditSession {
     /// input and the resulting layout are retained for the resident edit path.
     /// Errors on unparseable input or on layout failure.
     pub fn layout_document_json(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .layout_document_json(input)
             .map_err(|error| JsValue::from_str(&error))
@@ -1612,6 +1626,7 @@ impl EditSession {
     /// Region-layout input JSON in, the font families and sizes that input
     /// needs as JSON out, so the host can register fonts before laying out.
     pub fn layout_font_requirements_json(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .layout_font_requirements_json(input)
             .map_err(|error| JsValue::from_str(&error))
@@ -1621,6 +1636,7 @@ impl EditSession {
     /// regions already composed as JSON out — ready for the display builder
     /// with no host-side layout mutation. Retains the pass for resident edits.
     pub fn layout_document_with_regions_json(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_json(input)
             .map_err(|error| JsValue::from_str(&error))
@@ -1634,6 +1650,7 @@ impl EditSession {
         &self,
         input: &str,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_retained_json(input)
             .map_err(|error| JsValue::from_str(&error))
@@ -1646,6 +1663,7 @@ impl EditSession {
         input: &str,
         pages: u32,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_prefix_retained_json(input, pages as usize)
             .map_err(|error| JsValue::from_str(&error))
@@ -1654,6 +1672,7 @@ impl EditSession {
     /// Retained `{ measured, options }` for the main-thread display-list
     /// fallback after a retained-only region layout.
     pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .retained_kernel_inputs_json()
             .map_err(|error| JsValue::from_str(&error))
@@ -1662,12 +1681,14 @@ impl EditSession {
     /// Makes the next display frame a full one whatever epoch its caller
     /// passes, for a host that switches to this engine from another.
     pub fn reset_frame_base(&self) {
+        let _fonts = self.fonts.enter();
         self.engine.reset_frame_base();
     }
 
     /// `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
     /// against the same resident font store this session measures with.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .build_display_list_json(input)
             .map_err(|error| JsValue::from_str(&error))
@@ -1685,6 +1706,7 @@ impl EditSession {
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if !(expected_frame_epoch.is_finite()
             && expected_frame_epoch >= 0.0
             && expected_frame_epoch.fract() == 0.0
@@ -1703,6 +1725,7 @@ impl EditSession {
     /// built; the others stay unbuilt placeholders carrying their geometry
     /// until [`Self::build_display_pages_frame`] builds them.
     pub fn set_display_window(&self, start: u32, end: u32) {
+        let _fonts = self.fonts.enter();
         self.engine
             .set_display_window(Some(start as usize..(end.max(start)) as usize));
     }
@@ -1716,6 +1739,7 @@ impl EditSession {
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if !(expected_frame_epoch.is_finite()
             && expected_frame_epoch >= 0.0
             && expected_frame_epoch.fract() == 0.0
@@ -1736,6 +1760,7 @@ impl EditSession {
     /// selection is not a collapsed body caret, or the retained layout has no
     /// geometry for it. `frameEpoch` identifies the frame the rect belongs to.
     pub fn resident_caret_snapshot_json(&self) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         let paragraph = {
             let selection = self.selection.borrow();
             let Some(selection) = selection.as_ref() else {
@@ -1784,6 +1809,7 @@ impl EditSession {
     /// in that paragraph. The caller must then run the full layout path.
     pub fn apply_input(&self, text: &str, expected_frame_epoch: f64) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if text.is_empty() || text.contains(['\r', '\n']) {
             return Err(js_err(
                 "apply_input requires non-empty paragraph-break-free text",
@@ -1852,6 +1878,7 @@ impl EditSession {
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if text.is_empty() || text.contains(['\r', '\n']) {
             return Err(js_err(
                 "apply_input requires non-empty paragraph-break-free text",
@@ -1950,6 +1977,7 @@ impl EditSession {
         count: u32,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if !(expected_frame_epoch.is_finite()
             && expected_frame_epoch >= 0.0
             && expected_frame_epoch.fract() == 0.0
@@ -1980,6 +2008,7 @@ impl EditSession {
         count: u32,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if !(expected_frame_epoch.is_finite()
             && expected_frame_epoch >= 0.0
             && expected_frame_epoch.fract() == 0.0
@@ -2041,6 +2070,7 @@ impl EditSession {
         x: f64,
         y: f64,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .display_hit_test_regions_json(page_index as usize, x, y)
             .map_err(|error| JsValue::from_str(&error))
@@ -2058,6 +2088,7 @@ impl EditSession {
         direction: &str,
         goal_x: f64,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .display_vertical_move_json(position as i64, direction, goal_x)
             .map_err(|error| JsValue::from_str(&error))
@@ -2068,6 +2099,7 @@ impl EditSession {
     /// page-local px, one entry per page the range touches. Body positions
     /// only. Errors when no display list is resident.
     pub fn display_range_rects_json(&self, from: f64, to: f64) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .display_range_rects_json(from as i64, to as i64)
             .map_err(|error| JsValue::from_str(&error))
@@ -2088,6 +2120,7 @@ impl EditSession {
         from: f64,
         to: f64,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .display_range_rects_region_json(region, part_id, from as i64, to as i64)
             .map_err(|error| JsValue::from_str(&error))
@@ -2099,6 +2132,7 @@ impl EditSession {
     /// [`EditSession::register_measure_font`] and `glyph_id` from shaping.
     /// Errors when the glyph cannot be extracted.
     pub fn outline_glyph_json(&self, font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         docx_layout::outline_glyph_json(font_id, glyph_id)
     }
 
@@ -3763,6 +3797,7 @@ impl EditSession {
         options: &str,
         current_request: Option<String>,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         let options: crate::structured::PageExportOptions =
             serde_json::from_str(options).map_err(js_err)?;
         let read = match current_request {
@@ -3778,7 +3813,7 @@ impl EditSession {
     /// snapshot. `fonts` holds the font files back to back, `font_lengths` their byte lengths;
     /// `request` is a region layout request whose font chains name fonts by their index. The
     /// reply is `{"ok":true,"content"}` or `{"ok":false,"failure"}`; a rejected font or an
-    /// unusable request throws. The module's shared measurement fonts are left untouched.
+    /// unusable request throws. The session's measurement fonts are left untouched.
     pub fn export_snapshot_with_private_fonts_json(
         &self,
         fonts: &[u8],
@@ -3786,6 +3821,7 @@ impl EditSession {
         request: &str,
         options: &str,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         let options: crate::structured::PageExportOptions =
             serde_json::from_str(options).map_err(js_err)?;
         let mut files = Vec::with_capacity(font_lengths.len());
@@ -4145,6 +4181,7 @@ impl EditSession {
     /// malformed table, references itself through a cell story, or contains an
     /// embed lowering does not support.
     pub fn yrs_blocks_for_story(&self, story: &str, env_json: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         let env = parse_render_env(env_json)?;
         self.engine.lower_story_json(story, &env).map_err(js_err)
     }
@@ -4818,7 +4855,6 @@ mod tests {
             private["measurement"] = json!({"fontChains": chains(0), "defaults": defaults});
             private.to_string()
         };
-        docx_layout::clear_measure_fonts();
         let id = session.register_measure_font(font).unwrap();
         request["measurement"] = json!({"fontChains": chains(id), "defaults": defaults});
         let request = request.to_string();
@@ -4900,6 +4936,178 @@ mod tests {
         );
         assert_eq!(limited["failure"]["code"], "invalid-options");
         assert_eq!(session.version(), version);
+    }
+
+    #[test]
+    fn every_font_entry_point_reads_the_session_store() {
+        const LIBERATION: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        const CARLITO: &[u8] = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
+        let parse = |json: String| serde_json::from_str::<Value>(&json).unwrap();
+        let open = |client_id: f64| {
+            let session = EditSession::new(client_id).unwrap();
+            session.open_docx(&batch_docx(), true, None, None).unwrap();
+            session
+        };
+        let request = |session: &EditSession| {
+            let mut request = json!({
+                "bodyStory": "body",
+                "regions": {"sections": [{"properties": {}}]},
+                "renderEnv": {},
+            });
+            let requirements = parse(
+                session
+                    .layout_font_requirements_json(&request.to_string())
+                    .unwrap(),
+            );
+            let chains: serde_json::Map<String, Value> = requirements
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|requirement| {
+                    (
+                        requirement["key"].as_str().unwrap().to_owned(),
+                        json!([0, 1]),
+                    )
+                })
+                .collect();
+            request["measurement"] = json!({
+                "fontChains": chains,
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true,
+            });
+            (request.to_string(), chains)
+        };
+        let drive = |session: &EditSession, fonts: [&[u8]; 2], between: &dyn Fn()| {
+            let mut out = Vec::new();
+            let mut record = |value: Value| {
+                out.push(value);
+                between();
+            };
+            session.clear_measure_fonts();
+            record(json!(session.register_measure_font(fonts[0]).unwrap()));
+            record(json!(session.register_measure_font(fonts[1]).unwrap()));
+            let substitute = session
+                .register_substitute_measure_font(0, "MS Mincho")
+                .unwrap();
+            assert_eq!(substitute, 2);
+            record(json!(substitute));
+            let (request, chains) = request(session);
+            let blocks = parse(session.yrs_blocks_for_story("body", "{}").unwrap());
+            record(blocks.clone());
+            let measure = json!({
+                "block": blocks[0],
+                "maxWidth": 200,
+                "fontChains": chains,
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true,
+            });
+            record(parse(
+                session
+                    .measure_paragraph_json(&measure.to_string())
+                    .unwrap(),
+            ));
+            record(parse(
+                session.layout_document_with_regions_json(&request).unwrap(),
+            ));
+            record(parse(
+                session
+                    .layout_document_with_regions_prefix_retained_json(&request, 1)
+                    .unwrap(),
+            ));
+            let layout = parse(
+                session
+                    .layout_document_with_regions_retained_json(&request)
+                    .unwrap(),
+            );
+            record(layout.clone());
+            let mut kernel = parse(session.retained_kernel_inputs_json().unwrap());
+            record(kernel.clone());
+            session.reset_frame_base();
+            record(json!(session.build_display_list_frame("{}", 0.0).unwrap()));
+            session
+                .set_selection("body", "00000002", 2, "00000002", 2)
+                .unwrap();
+            record(parse(session.resident_caret_snapshot_json().unwrap()));
+            record(json!(session.apply_input("x", 1.0).unwrap()));
+            record(json!(session.apply_delete("backward", 2.0, 1).unwrap()));
+            record(parse(
+                session
+                    .display_hit_test_regions_json(0, 120.0, 100.0)
+                    .unwrap(),
+            ));
+            record(parse(
+                session
+                    .display_vertical_move_json(3.0, "down", 120.0)
+                    .unwrap(),
+            ));
+            record(parse(session.display_range_rects_json(1.0, 9.0).unwrap()));
+            record(parse(
+                session
+                    .display_range_rects_region_json("body", "", 1.0, 9.0)
+                    .unwrap(),
+            ));
+            record(parse(session.outline_glyph_json(0, 36).unwrap()));
+            record(parse(session.outline_glyph_json(1, 36).unwrap()));
+            let pages = parse(
+                session
+                    .export_structured_with_pages_json(
+                        r#"{"revisionView":"markup"}"#,
+                        Some(request.clone()),
+                    )
+                    .unwrap(),
+            );
+            record(pages["content"]["layout"]["fragments"].clone());
+            kernel["layout"] = layout["layout"].clone();
+            record(parse(
+                session
+                    .build_display_list_json(&kernel.to_string())
+                    .unwrap(),
+            ));
+            kernel.as_object_mut().unwrap().remove("layout");
+            record(parse(
+                session.layout_document_json(&kernel.to_string()).unwrap(),
+            ));
+            let private = parse(
+                session
+                    .export_snapshot_with_private_fonts_json(
+                        fonts[1],
+                        &[fonts[1].len() as u32],
+                        &request.replace("[0,1]", "[0]"),
+                        r#"{"revisionView":"markup"}"#,
+                    )
+                    .unwrap(),
+            );
+            record(private["content"]["layout"]["fragments"].clone());
+            record(parse(session.outline_glyph_json(0, 36).unwrap()));
+            session.set_display_window(0, 0);
+            session
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            record(json!(session.build_display_list_frame("{}", 0.0).unwrap()));
+            record(json!(
+                session.build_display_pages_frame(vec![0], 0.0).unwrap()
+            ));
+            out
+        };
+        let quiet = || {};
+        let a_alone = drive(&open(81.0), [LIBERATION, CARLITO], &quiet);
+        let b_alone = drive(&open(82.0), [CARLITO, LIBERATION], &quiet);
+        assert_ne!(a_alone, b_alone);
+
+        let b = open(84.0);
+        let (b_request, _) = request(&b);
+        let b_round = || {
+            b.clear_measure_fonts();
+            b.register_measure_font(CARLITO).unwrap();
+            b.register_measure_font(LIBERATION).unwrap();
+            b.layout_document_with_regions_retained_json(&b_request)
+                .unwrap();
+            b.build_display_list_frame("{}", 0.0).unwrap();
+            b.outline_glyph_json(1, 36).unwrap();
+        };
+        b_round();
+        assert_eq!(drive(&open(83.0), [LIBERATION, CARLITO], &b_round), a_alone);
     }
 
     #[test]
@@ -5030,11 +5238,9 @@ mod tests {
             ("word/document.xml".to_owned(), document.into_bytes()),
         ])
         .unwrap();
-        docx_layout::clear_measure_fonts();
-        let font_id = docx_layout::register_measure_font(include_bytes!(
-            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
-        ))
-        .unwrap();
+        const LIBERATION: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let font_id = 0;
         let request = json!({
             "bodyStory": "body",
             "regions": { "sections": [{ "sectionId": "main", "properties": {
@@ -5050,6 +5256,7 @@ mod tests {
         })
         .to_string();
         let numpages = |session: &EditSession| {
+            let _fonts = session.fonts.enter();
             let layout: Value = serde_json::from_str(
                 &session
                     .engine
@@ -5074,18 +5281,21 @@ mod tests {
             (text, layout["layout"]["pages"].as_array().unwrap().len())
         };
         let full = EditSession::new(80.0).unwrap();
+        full.register_measure_font(LIBERATION).unwrap();
         full.open_docx(&bytes, true, None, None).unwrap();
         let (text, pages) = numpages(&full);
         assert!(pages > 1);
         assert_eq!(text, pages.to_string());
         // The preview's blocks fit its pages whole; its page count is still not the document's.
         let preview = EditSession::new(81.0).unwrap();
+        preview.register_measure_font(LIBERATION).unwrap();
         preview.open_preview(&bytes, 20).unwrap().unwrap();
         let (text, preview_pages) = numpages(&preview);
         assert!(preview_pages < pages);
         assert_eq!(text, "");
 
         // An edit's resident pass lays out part of the package too.
+        let fonts = preview.fonts.enter();
         preview
             .engine
             .doc()
@@ -5116,6 +5326,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(text, "");
+        drop(fonts);
 
         // A complete open over the preview counts the whole document again.
         preview.delete_story("body").unwrap();
@@ -5401,11 +5612,8 @@ mod tests {
             &["table", "pageBreak", "columnBreak", "blockSdt"],
             "ABCDE",
         );
-        session
-            .engine
-            .layout_document_json(&caret_layout_input())
-            .unwrap();
-        session.engine.build_display_list_frame("{}", 0).unwrap();
+        session.layout_document_json(&caret_layout_input()).unwrap();
+        session.build_display_list_frame("{}", 0.0).unwrap();
         session.set_selection("body", "p1", 7, "p1", 7).unwrap();
 
         let snapshot: Value =
