@@ -56,6 +56,12 @@ test('a first-page preview opens first, cannot save, and hands over once it has 
   expect(hosts).toEqual([true]);
   expect(preview.materializeDocx()).toBeNull();
   await expect(saveYrsDocx(preview)).rejects.toThrow();
+  expect(preview.isDisplayOnly()).toBe(true);
+  expect(result.current.documentFromYrs(null)).toBeNull();
+  const paragraph = preview.paragraphs('body')[0]!;
+  expect(() =>
+    preview.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'x')
+  ).toThrow(/display-only/);
 
   await act(async () => {
     result.current.notifyFramePresented(preview);
@@ -66,6 +72,7 @@ test('a first-page preview opens first, cannot save, and hands over once it has 
   expect(hosts).toEqual([true, false]);
   expect(result.current.handoffFrom).toBe(preview);
   expect(full.materializeDocx()).not.toBeNull();
+  expect(full.isDisplayOnly()).toBe(false);
 
   await act(async () => {
     result.current.notifyFramePresented(full);

@@ -1071,7 +1071,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     parseError: state.parseError,
     document: history.state,
     session: yrsCore.session,
-    readOnly: readOnlyProp,
+    readOnly: readOnlyProp || yrsCore.previewing,
     mode: editingMode,
     modeControlled: modeProp !== undefined,
     onModeChange,
