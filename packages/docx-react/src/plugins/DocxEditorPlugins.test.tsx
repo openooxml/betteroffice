@@ -1075,6 +1075,7 @@ describe('DocxEditor plugins', () => {
     const body = [
       `<w:p w14:paraId="00000001"><w:pPr><w:bidi/></w:pPr>${rtl('\u05D0\u05D1\u05D2')}</w:p>`,
       `<w:p w14:paraId="00000002">${ltr('abc ')}${rtl('\u05D0\u05D1\u05D2')}${ltr(' def')}</w:p>`,
+      `<w:p w14:paraId="00000003"><w:pPr><w:bidi/></w:pPr>${rtl('\u05D0\u05D1\u05D2')}<w:r><w:rPr><w:vanish/></w:rPr><w:t>${'x'.repeat(70)}</w:t></w:r></w:p>`,
     ].join('');
     const { ref } = await mount({ plugins: [plugin] }, false, await inlineImageDocument(body));
     await until(() => geometry !== null);
@@ -1100,7 +1101,7 @@ describe('DocxEditor plugins', () => {
       if (!result.ok) throw new Error(result.failure.message);
       return result;
     };
-    const [hebrew, mixed] = read.paragraphs;
+    const [hebrew, mixed, suffixed] = read.paragraphs;
     for (const [paragraph, start] of [
       [hebrew!, 0],
       [mixed!, 4],
@@ -1116,6 +1117,8 @@ describe('DocxEditor plugins', () => {
     const word = anchor(hebrew!.paraId, 0, 3).rects[0]!;
     expect(anchor(hebrew!.paraId, 0, 0).anchor.x).toBeCloseTo(word.x + word.width);
     expect(anchor(hebrew!.paraId, 3, 3).anchor.x).toBeCloseTo(word.x);
+    const hidden = anchor(suffixed!.paraId, 0, suffixed!.text.length);
+    expect(hidden.anchor.x).toBeCloseTo(Math.min(...hidden.rects.map((rect) => rect.x)));
   });
 
   test('public presenters and hooks bind contributed commands', async () => {

@@ -80,8 +80,6 @@ export interface AnchorGeometryAccess {
   presented: boolean;
 }
 
-const LAST_UNIT_SCAN = 64;
-
 interface Interval {
   from: number;
   to: number;
@@ -165,12 +163,18 @@ export function createPluginGeometry(
   };
   const unavailable = () =>
     anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
-  /** Just past the last unit of `[from, to)` that draws, looking back at most `LAST_UNIT_SCAN`. */
+  /** Just past the last unit of `[from, to)` that draws, found by bisecting its visible suffix. */
   const lastUnitEnd = (from: number, to: number): number | null => {
-    for (let end = to; end > from && to - end < LAST_UNIT_SCAN; end -= 1) {
-      if (unitAt(end - 1)) return end;
+    const draws = (start: number) => queries.rangeRects(start, to).some((rect) => rect.width > 0);
+    if (!draws(from)) return null;
+    let low = from;
+    let high = to - 1;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (draws(middle)) low = middle;
+      else high = middle - 1;
     }
-    return null;
+    return low + 1;
   };
   const unitAt = (from: number): DisplayListRect | null =>
     queries

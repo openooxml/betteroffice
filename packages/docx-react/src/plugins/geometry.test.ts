@@ -204,7 +204,7 @@ function semanticGeometry(zoom = 1) {
     pageCount: () => 2,
     rangeRects: (from: number, to: number) => {
       const previous = calls.at(-1);
-      const probe = to - from === 1 && !!previous && to <= previous[1] && from >= previous[0];
+      const probe = !!previous && to <= previous[1] && from >= previous[0];
       if (!probe) calls.push([from, to]);
       return [{ ...RANGE, x: 10 + from, width: to - from }];
     },
@@ -456,6 +456,31 @@ describe('semantic anchor geometry', () => {
     expect(
       anchored(geometry.getAnchorGeometry({ kind: 'revision', revisionId: 'ef' })).anchor
     ).toMatchObject({ x: 153 });
+  });
+
+  test('finds the last drawn unit behind a long hidden suffix', () => {
+    for (const rtl of [false, true]) {
+      const { geometry, session, source } = semanticGeometry();
+      session.paragraphSpans = () => [{ paraId: 'p', length: 100 }];
+      const x = (unit: number) => 10 + (rtl ? 2 - unit : unit);
+      source.rangeRects = (from, to) => {
+        const rects: DisplayListRect[] = [];
+        for (let unit = Math.max(0, from); unit < Math.min(3, to); unit += 1) {
+          rects.push({ ...RANGE, x: x(unit), width: 1 });
+        }
+        return rects;
+      };
+      source.hitTestRegions = (_page, at) => {
+        const unit = [0, 1, 2].find((candidate) => at >= x(candidate) && at < x(candidate) + 1);
+        if (unit === undefined) return null;
+        const leftHalf = at < x(unit) + 0.5;
+        return { region: 'body', pos: leftHalf !== rtl ? unit : unit + 1, target: 'text' };
+      };
+      expect(anchored(geometry.getAnchorGeometry(PARAGRAPH_TARGET)).anchor).toMatchObject({
+        x: rtl ? 153 : 156,
+        width: 0,
+      });
+    }
   });
 
   test('puts collapsed boundaries on the caret stop, in either direction', () => {
