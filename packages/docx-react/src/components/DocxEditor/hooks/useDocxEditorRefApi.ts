@@ -172,6 +172,7 @@ export function useDocxEditorRefApi({
   setComments,
   setShowCommentsSidebar,
   contentChangeSubscribersRef,
+  onContentSubscribersChange,
   selectionChangeSubscribersRef,
   getCachedStyleResolver,
   commentIdAllocator,
@@ -193,6 +194,7 @@ export function useDocxEditorRefApi({
   setComments: React.Dispatch<React.SetStateAction<Comment[]>>;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   contentChangeSubscribersRef: React.RefObject<Set<(doc: Document) => void>>;
+  onContentSubscribersChange?: (count: number) => void;
   selectionChangeSubscribersRef: React.RefObject<Set<(state: SelectionState | null) => void>>;
   getCachedStyleResolver: (
     styles: Parameters<typeof createStyleResolver>[0]
@@ -446,8 +448,14 @@ export function useDocxEditorRefApi({
       getComments: () => comments,
 
       onContentChange: (listener) => {
-        contentChangeSubscribersRef.current.add(listener);
-        return () => contentChangeSubscribersRef.current.delete(listener);
+        const subscribers = contentChangeSubscribersRef.current;
+        subscribers.add(listener);
+        onContentSubscribersChange?.(subscribers.size);
+        return () => {
+          const removed = subscribers.delete(listener);
+          onContentSubscribersChange?.(subscribers.size);
+          return removed;
+        };
       },
       onSelectionChange: (listener) => {
         selectionChangeSubscribersRef.current.add(listener);

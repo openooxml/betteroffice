@@ -66,7 +66,7 @@ export function createYrsPositionProjection(
   rootStory: string,
   source?: YrsStorySegmentSource
 ): YrsPositionProjection | null {
-  if (!session.storyIds().includes(rootStory)) return null;
+  if (!session.hasStory(rootStory)) return null;
   return new YrsPositionProjection(session, rootStory, source);
 }
 

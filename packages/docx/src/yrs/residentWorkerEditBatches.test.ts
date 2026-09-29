@@ -126,3 +126,81 @@ test('host batches drain worker input, invalidate the worker once and never adop
   expect(stale).toBeInstanceOf(FrameDeltaError);
   expect((stale as FrameDeltaError).code).toBe('stale-frame');
 });
+
+test('one resident delete request removes several characters and stops at the story start', async () => {
+  const main = await createYrsSession({ clientId: 5102 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Alpha');
+  const { secondParaId } = main.splitParagraph({ story: 'body', paraId, offset: 2 });
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  main.setSelection({ story: 'body', paraId: secondParaId, offset: 1 });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  let frame = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+  expect(frameText(frame)).toBe('Alpha');
+
+  const remove = async (count: number) => {
+    const deleted = await client.applyDelete(
+      'backward',
+      main.selection()!,
+      frame.frameEpoch,
+      false,
+      false,
+      count
+    );
+    if (!deleted.applied) throw new Error('the worker refused resident deletion');
+    for (const update of deleted.updates) main.applyLocalUpdate(update);
+    main.setSelection(deleted.selection!.anchor, deleted.selection!.head);
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(deleted.frame));
+    return deleted.deletedUnits;
+  };
+  expect(await remove(3)).toBe(3);
+  expect(accepted(main)).toEqual(['Aha']);
+  expect(frameText(frame)).toBe('Aha');
+  expect(await remove(10)).toBe(1);
+  expect(accepted(main)).toEqual(['ha']);
+  expect(frameText(frame)).toBe('ha');
+});
+
+test('one resident delete request merges at most one paragraph', async () => {
+  const main = await createYrsSession({ clientId: 5103 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Alpha');
+  const { secondParaId } = main.splitParagraph({ story: 'body', paraId, offset: 2 });
+  const { secondParaId: lastParaId } = main.splitParagraph({
+    story: 'body',
+    paraId: secondParaId,
+    offset: 0,
+  });
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  main.setSelection({ story: 'body', paraId: lastParaId, offset: 0 });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  let frame = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+  expect(accepted(main)).toEqual(['Al', '', 'pha']);
+
+  const remove = async (count: number) => {
+    const deleted = await client.applyDelete(
+      'backward',
+      main.selection()!,
+      frame.frameEpoch,
+      false,
+      false,
+      count
+    );
+    if (!deleted.applied) throw new Error('the worker refused resident deletion');
+    for (const update of deleted.updates) main.applyLocalUpdate(update);
+    main.setSelection(deleted.selection!.anchor, deleted.selection!.head);
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(deleted.frame));
+    return deleted.deletedUnits;
+  };
+  expect(await remove(3)).toBe(1);
+  expect(accepted(main)).toEqual(['Al', 'pha']);
+  expect(await remove(3)).toBe(3);
+  expect(accepted(main)).toEqual(['pha']);
+  expect(frameText(frame)).toBe('pha');
+});
