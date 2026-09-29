@@ -41,6 +41,10 @@ export interface DisplayPage {
   footer?: HfRegion;
   /** Footnote/endnote regions in page coordinates. Undefined = none. */
   noteAreas?: NoteRegion[];
+  /** Geometry only: the page's content is built when the host asks for it. */
+  unbuilt?: boolean;
+  /** For an unbuilt page, the lowest and highest body position its layout places. */
+  positionSpan?: [number, number];
 }
 
 /** A page-local rectangle emitted as display-list metadata. */
