@@ -1133,6 +1133,8 @@ fn persisted_receipt_json(session_id: &str, persisted: &PersistedParagraphIds) -
 pub struct EditSession {
     engine: EngineSession,
     docx_source: RefCell<Option<Arc<[u8]>>>,
+    /// The [`crate::seed::package_digest`] of `docx_source`, when known.
+    docx_digest: RefCell<Option<String>>,
     update_observer: Option<Subscription>,
     update_event_observer: Option<UpdateEventObserver>,
     undo: UndoSession,
@@ -1251,14 +1253,18 @@ impl EditSession {
         generation: Option<&str>,
     ) -> Result<String, JsValue> {
         let source: Arc<[u8]> = Arc::from(bytes);
-        let (envelope, parts) = crate::seed::parse_docx_package(bytes).map_err(js_err)?;
+        let digest = crate::seed::package_digest(bytes);
+        let (envelope, parts) =
+            crate::seed::parse_docx_package_with_digest(bytes, digest.clone()).map_err(js_err)?;
         let host_envelope = thin_docx_envelope(&envelope);
+        self.docx_digest.replace(Some(digest.clone()));
         let referenced_fonts = if seed_stories {
             let fonts = crate::seed::seed_parsed_docx(
                 self.engine.doc(),
                 envelope,
                 parts,
                 Arc::clone(&source),
+                digest,
             )
             .map_err(js_err)?;
             self.engine.doc().begin_opening(generation);
@@ -1402,6 +1408,7 @@ impl EditSession {
         let session = Self {
             engine: EngineSession::new(client_id as u64),
             docx_source: RefCell::new(None),
+            docx_digest: RefCell::new(None),
             update_observer: None,
             update_event_observer: None,
             undo: UndoSession::with_clock(Arc::new(|| js_sys::Date::now() as u64)),
@@ -1950,7 +1957,13 @@ impl EditSession {
         let Some(source) = source.as_ref() else {
             return Ok(None);
         };
-        let envelope = crate::seed::parse_docx_for_edit(source).map_err(js_err)?;
+        let digest = self
+            .docx_digest
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| crate::seed::package_digest(source));
+        let (envelope, _) =
+            crate::seed::parse_docx_package_with_digest(source, digest).map_err(js_err)?;
         let json = serde_json::to_string(&envelope).map_err(js_err)?;
         Ok(Some(json))
     }
@@ -3601,6 +3614,7 @@ impl EditSession {
         let json = outcome.to_json(&options.limits).map_err(js_err)?;
         if let CompareOutcome::Applied(applied) = outcome {
             self.docx_source.replace(Some(Arc::from(original)));
+            self.docx_digest.replace(None);
             self.compared.replace(Some((applied, options.limits)));
         }
         Ok(json)
