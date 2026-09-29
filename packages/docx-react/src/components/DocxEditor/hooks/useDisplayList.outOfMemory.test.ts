@@ -248,16 +248,24 @@ test('a provisional layout whose completion runs out of memory completes in a fr
   }
 });
 
-test('a superseded provisional layout does not run again in the replacement worker', async () => {
-  const { native, frame, engine, layoutJson } = setup();
+/** A host engine that counts its layouts, as a session's layout revision does. */
+function revisedHost(engine: YrsSession) {
   const adopted: string[] = [];
+  let revision = 0;
   const host = {
     ...engine,
     adoptResidentWorkerLayout: (request: string) => {
       adopted.push(request);
-      return 1;
+      return ++revision;
     },
+    residentWorkerProbe: () => ({ layoutRevision: revision }),
   } as YrsSession;
+  return { host, adopted, layOutHere: () => void ++revision };
+}
+
+test('a superseded provisional layout does not run again in the replacement worker', async () => {
+  const { native, frame, engine, layoutJson } = setup();
+  const { host, adopted } = revisedHost(engine);
   const newer = JSON.stringify({ ...JSON.parse(REQUEST), renderEnv: { preview: 'b' } });
   const warnings = spyOn(console, 'warn').mockImplementation(() => {});
   try {
@@ -285,6 +293,33 @@ test('a superseded provisional layout does not run again in the replacement work
     expect(adopted).toEqual([REQUEST, newer, newer]);
     expect(FakeWorker.spawned).toHaveLength(2);
     expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    warnings.mockRestore();
+    native.free();
+  }
+});
+
+test('a provisional layout that a host layout replaced does not run again once its worker runs out of memory', async () => {
+  const { native, frame, engine, layoutJson } = setup();
+  const { host, adopted, layOutHere } = revisedHost(engine);
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, null)
+    );
+    const pending = result.current.layoutInWorker(host, REQUEST)!;
+    const [first] = FakeWorker.spawned;
+    await act(async () =>
+      first!.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true })
+    );
+    const provisional = (await pending) as { complete?: Promise<unknown> };
+    layOutHere();
+    await waitFor(() => expect(first!.last()).toMatchObject({ type: 'completeLayout' }));
+    await act(async () => first!.outOfMemory());
+    await act(async () => expect(await provisional.complete).toBeNull());
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expect(adopted).toEqual([REQUEST]);
     unmount();
   } finally {
     warnings.mockRestore();

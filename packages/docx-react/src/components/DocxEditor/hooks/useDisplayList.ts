@@ -308,7 +308,6 @@ export function useRustDisplayList(
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
   const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
-  const workerLayoutRequestRef = useRef(0);
   const completionGateRef = useRef<(() => void) | null>(null);
   const resolvedCommentIdsRef = useRef(resolvedCommentIds);
   resolvedCommentIdsRef.current = resolvedCommentIds;
@@ -1014,7 +1013,7 @@ export function useRustDisplayList(
       const worker = workerRef.current.client;
       const bootstrapping = !worker.bootstrapSent();
       const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
-      hostEngine.adoptResidentWorkerLayout(request);
+      const adoptedRevision = hostEngine.adoptResidentWorkerLayout(request);
       const snapshot = hostEngine.residentWorkerSnapshot(
         bootstrapping
           ? {}
@@ -1048,7 +1047,6 @@ export function useRustDisplayList(
         !bootstrapping &&
         workerPresentationActiveRef.current &&
         paintedCaretMachine.shouldPaint(performance.now());
-      const requestId = ++workerLayoutRequestRef.current;
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
@@ -1058,8 +1056,9 @@ export function useRustDisplayList(
         cause: unknown
       ): Promise<WorkerLayoutComputation | null> | null => {
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
-          // A newer pass recovers the worker it asks; the host drops this one.
-          if (requestId !== workerLayoutRequestRef.current) return null;
+          // A newer layout, here or in a worker, replaced this pass: the host
+          // drops it, and a newer worker request recovers the worker it asks.
+          if (hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision) return null;
           const outcome = replaceOutOfMemoryWorker(hostEngine, worker, cause);
           if (outcome === 'failed') return Promise.reject(cause);
           if (outcome === 'stale') return null;
