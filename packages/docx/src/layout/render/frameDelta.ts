@@ -21,6 +21,8 @@ const POSITION_MASK =
   POSITION_FRAGMENT_START |
   POSITION_FRAGMENT_END |
   POSITION_INLINE_WIDGET;
+/** Run flag: shift only the masked fields each primitive has. */
+const POSITION_PRESENT_ONLY = 1 << 7;
 const MAX_VALUE_DEPTH = 64;
 const MAX_CONTAINER_ITEMS = 10_000_000;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
@@ -645,12 +647,14 @@ function shiftPrimitivePositionsOwned(
   changedMask: number,
   delta: number
 ): void {
+  const presentOnly = (changedMask & POSITION_PRESENT_ONLY) !== 0;
   const shift = (
     mask: number,
     field: 'docStart' | 'docEnd' | 'fragmentDocStart' | 'fragmentDocEnd'
   ): void => {
     if ((changedMask & mask) === 0) return;
     const current = primitive[field];
+    if (presentOnly && current === undefined) return;
     if (typeof current !== 'number') invalid(`position shift requires retained ${field}`);
     const value = current + delta;
     if (!Number.isSafeInteger(value)) invalid(`position shift overflows ${field}`);
@@ -660,7 +664,10 @@ function shiftPrimitivePositionsOwned(
   shift(POSITION_DOC_END, 'docEnd');
   shift(POSITION_FRAGMENT_START, 'fragmentDocStart');
   shift(POSITION_FRAGMENT_END, 'fragmentDocEnd');
-  if ((changedMask & POSITION_INLINE_WIDGET) !== 0) {
+  if (
+    (changedMask & POSITION_INLINE_WIDGET) !== 0 &&
+    !(presentOnly && primitive.inlineSdtWidget === undefined)
+  ) {
     if (
       !primitive.inlineSdtWidget ||
       !Number.isSafeInteger(primitive.inlineSdtWidget.pos + delta)
@@ -772,8 +779,8 @@ function decodePositionShiftRuns(
     if (
       runCount === 0 ||
       start < previousEnd ||
-      changedMask === 0 ||
-      (changedMask & ~POSITION_MASK) !== 0 ||
+      (changedMask & POSITION_MASK) === 0 ||
+      (changedMask & ~(POSITION_MASK | POSITION_PRESENT_ONLY)) !== 0 ||
       delta === 0
     ) {
       invalid('position shift run is invalid');
@@ -971,12 +978,14 @@ function shiftPrimitivePositions(
   delta: number
 ): DisplayPrimitive {
   const next: DisplayPrimitive = { ...primitive };
+  const presentOnly = (changedMask & POSITION_PRESENT_ONLY) !== 0;
   const shift = (
     mask: number,
     field: 'docStart' | 'docEnd' | 'fragmentDocStart' | 'fragmentDocEnd'
   ): void => {
     if ((changedMask & mask) === 0) return;
     const current = next[field];
+    if (presentOnly && current === undefined) return;
     if (typeof current !== 'number') invalid(`position shift requires retained ${field}`);
     const value = current + delta;
     if (!Number.isSafeInteger(value)) invalid(`position shift overflows ${field}`);
@@ -986,7 +995,10 @@ function shiftPrimitivePositions(
   shift(POSITION_DOC_END, 'docEnd');
   shift(POSITION_FRAGMENT_START, 'fragmentDocStart');
   shift(POSITION_FRAGMENT_END, 'fragmentDocEnd');
-  if ((changedMask & POSITION_INLINE_WIDGET) !== 0) {
+  if (
+    (changedMask & POSITION_INLINE_WIDGET) !== 0 &&
+    !(presentOnly && next.inlineSdtWidget === undefined)
+  ) {
     if (!next.inlineSdtWidget || !Number.isSafeInteger(next.inlineSdtWidget.pos + delta)) {
       invalid('position shift requires retained inline widget metadata');
     }

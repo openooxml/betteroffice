@@ -32,6 +32,9 @@ const POSITION_DOC_END: u8 = 1 << 1;
 const POSITION_FRAGMENT_START: u8 = 1 << 2;
 const POSITION_FRAGMENT_END: u8 = 1 << 3;
 const POSITION_INLINE_WIDGET: u8 = 1 << 4;
+/// Run flag: shift only the masked fields each primitive has, so one run
+/// covers primitives that carry different position fields.
+const POSITION_PRESENT_ONLY: u8 = 1 << 7;
 const POSITION_FIELDS: [u8; 5] = [
     POSITION_DOC_START,
     POSITION_DOC_END,
@@ -179,7 +182,9 @@ fn encode_frame_delta_inner(
                     let patches = position_patches(old, &page.snapshot);
                     if patches.is_empty() {
                         ops.push(PageOp::Upsert(page));
-                    } else if let Some(runs) = position_shift_runs(old, &page.snapshot) {
+                    } else if let Some(runs) =
+                        position_shift_runs(&old.positions, &page.snapshot.positions)
+                    {
                         ops.push(PageOp::ShiftPositions(page, runs));
                     } else {
                         ops.push(PageOp::PatchPositions(page, patches));
@@ -603,14 +608,14 @@ fn position_patches(previous: &FramePageSnapshot, next: &FramePageSnapshot) -> V
 }
 
 fn position_shift_runs(
-    previous: &FramePageSnapshot,
-    next: &FramePageSnapshot,
+    previous: &[PrimitivePositionSnapshot],
+    next: &[PrimitivePositionSnapshot],
 ) -> Option<Vec<PositionShiftRun>> {
-    if previous.positions.len() != next.positions.len() {
+    if previous.len() != next.len() {
         return None;
     }
     let mut runs: Vec<PositionShiftRun> = Vec::new();
-    for (index, (previous, next)) in previous.positions.iter().zip(&next.positions).enumerate() {
+    for (index, (previous, next)) in previous.iter().zip(next).enumerate() {
         let before = [
             previous.doc_start,
             previous.doc_end,
@@ -626,8 +631,12 @@ fn position_shift_runs(
             next.inline_widget_pos,
         ];
         let mut changed_mask = 0;
+        let mut present_mask = 0;
         let mut common_delta = None;
         for (field_index, field) in POSITION_FIELDS.iter().enumerate() {
+            if after[field_index].is_some() {
+                present_mask |= field;
+            }
             if before[field_index] == after[field_index] {
                 continue;
             }
@@ -641,26 +650,47 @@ fn position_shift_runs(
             common_delta = Some(delta);
             changed_mask |= field;
         }
+        let index = checked_u32(index, "position shift primitive index").ok()?;
+        let last = runs
+            .last_mut()
+            .filter(|last| last.start.checked_add(last.count) == Some(index));
         let Some(delta) = common_delta else {
+            // A primitive without positions changes nothing inside a
+            // present-only run, so it does not have to end one.
+            if present_mask == 0
+                && let Some(last) = last
+                && last.changed_mask & POSITION_PRESENT_ONLY != 0
+            {
+                last.count = last.count.checked_add(1)?;
+            }
             continue;
         };
         if delta == 0 {
             return None;
         }
-        let index = checked_u32(index, "position shift primitive index").ok()?;
-        if let Some(last) = runs.last_mut()
-            && last.start.checked_add(last.count) == Some(index)
-            && last.changed_mask == changed_mask
-            && last.delta == delta
-        {
-            last.count = last.count.checked_add(1)?;
+        let changed_mask = if changed_mask == present_mask {
+            changed_mask | POSITION_PRESENT_ONLY
         } else {
-            runs.push(PositionShiftRun {
+            changed_mask
+        };
+        match last {
+            Some(last)
+                if last.delta == delta
+                    && last.changed_mask & POSITION_PRESENT_ONLY != 0
+                    && changed_mask & POSITION_PRESENT_ONLY != 0 =>
+            {
+                last.count = last.count.checked_add(1)?;
+                last.changed_mask |= changed_mask;
+            }
+            Some(last) if last.delta == delta && last.changed_mask == changed_mask => {
+                last.count = last.count.checked_add(1)?;
+            }
+            _ => runs.push(PositionShiftRun {
                 start: index,
                 count: 1,
                 changed_mask,
                 delta,
-            });
+            }),
         }
     }
     (!runs.is_empty()).then_some(runs)
@@ -1614,12 +1644,60 @@ mod tests {
         assert_eq!(u32_at(&delta, payload + 12), 1);
         assert_eq!(
             delta[payload + 16],
-            POSITION_DOC_START | POSITION_DOC_END | POSITION_FRAGMENT_START | POSITION_FRAGMENT_END
+            POSITION_DOC_START
+                | POSITION_DOC_END
+                | POSITION_FRAGMENT_START
+                | POSITION_FRAGMENT_END
+                | POSITION_PRESENT_ONLY
         );
         assert_eq!(
             i64::from_le_bytes(delta[payload + 24..payload + 32].try_into().unwrap()),
             10
         );
+    }
+
+    #[test]
+    fn a_uniform_shift_of_mixed_primitives_is_one_present_only_run() {
+        let at = |doc: Option<(i64, i64)>, fragment: Option<(i64, i64)>, widget: Option<i64>| {
+            PrimitivePositionSnapshot {
+                doc_start: doc.map(|range| range.0),
+                doc_end: doc.map(|range| range.1),
+                fragment_doc_start: fragment.map(|range| range.0),
+                fragment_doc_end: fragment.map(|range| range.1),
+                inline_widget_pos: widget,
+            }
+        };
+        let moved = |delta: i64| {
+            vec![
+                at(Some((10 + delta, 14 + delta)), None, None),
+                at(None, Some((9 + delta, 20 + delta)), None),
+                at(None, None, None),
+                at(Some((15 + delta, 16 + delta)), None, Some(15 + delta)),
+                // A header primitive in its own story does not move.
+                at(Some((3, 4)), None, None),
+            ]
+        };
+        for delta in [7, -5] {
+            let runs = position_shift_runs(&moved(0), &moved(delta)).unwrap();
+            assert_eq!(runs.len(), 1, "delta {delta}");
+            assert_eq!((runs[0].start, runs[0].count, runs[0].delta), (0, 4, delta));
+            assert_eq!(
+                runs[0].changed_mask,
+                POSITION_DOC_START
+                    | POSITION_DOC_END
+                    | POSITION_FRAGMENT_START
+                    | POSITION_FRAGMENT_END
+                    | POSITION_INLINE_WIDGET
+                    | POSITION_PRESENT_ONLY
+            );
+        }
+
+        // A present field that stays put keeps its primitive on an exact run.
+        let before = [at(Some((10, 14)), Some((9, 20)), None)];
+        let after = [at(Some((12, 16)), Some((9, 20)), None)];
+        let runs = position_shift_runs(&before, &after).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].changed_mask, POSITION_DOC_START | POSITION_DOC_END);
     }
 
     #[test]

@@ -160,6 +160,8 @@ const SHIFT_DOC_END: u8 = 1 << 1;
 const SHIFT_FRAGMENT_START: u8 = 1 << 2;
 const SHIFT_FRAGMENT_END: u8 = 1 << 3;
 const SHIFT_INLINE_WIDGET: u8 = 1 << 4;
+/// Shift only the masked fields a primitive has (frame-delta run flag).
+const SHIFT_PRESENT_ONLY: u8 = 1 << 7;
 
 fn primitive_attrs_mut(
     primitive: &mut crate::display_list::Primitive,
@@ -183,7 +185,7 @@ fn shift_position_field(
     name: &str,
     delta: i64,
 ) -> Result<(), String> {
-    if mask & bit == 0 {
+    if mask & bit == 0 || (mask & SHIFT_PRESENT_ONLY != 0 && field.is_none()) {
         return Ok(());
     }
     let value = field.ok_or_else(|| format!("position shift requires retained {name}"))?;
@@ -223,7 +225,9 @@ fn shift_primitive_positions(
         "fragmentDocEnd",
         delta,
     )?;
-    if mask & SHIFT_INLINE_WIDGET != 0 {
+    if mask & SHIFT_INLINE_WIDGET != 0
+        && (mask & SHIFT_PRESENT_ONLY == 0 || attrs.inline_sdt_widget.is_some())
+    {
         let widget = attrs
             .inline_sdt_widget
             .as_mut()
@@ -243,6 +247,17 @@ fn shift_page_positions(
     page: &mut DisplayPage,
     runs: &[(usize, usize, u8, i64)],
 ) -> Result<(), String> {
+    const FIELDS: u8 = SHIFT_DOC_START
+        | SHIFT_DOC_END
+        | SHIFT_FRAGMENT_START
+        | SHIFT_FRAGMENT_END
+        | SHIFT_INLINE_WIDGET;
+    if runs
+        .iter()
+        .any(|run| run.2 & FIELDS == 0 || run.2 & !(FIELDS | SHIFT_PRESENT_ONLY) != 0)
+    {
+        return Err("position shift run has an invalid field mask".to_owned());
+    }
     let mut index = 0usize;
     let mut cursor = 0usize;
     let mut apply = |primitive: &mut crate::display_list::Primitive| -> Result<(), String> {
@@ -622,6 +637,66 @@ mod tests {
         }
         close_display_list(handle);
         close_display_list(fresh);
+    }
+
+    #[test]
+    fn a_present_only_shift_run_moves_what_exact_runs_move() {
+        drain();
+        let list = |text_start: i64, rect: i64, widget: i64, header: i64| {
+            format!(
+                r##"{{"pages": [{{"pageIndex": 0, "width": 816, "height": 1056,
+                    "primitives": [
+                        {{"kind": "text", "text": "Hello", "x": 100, "baselineY": 200,
+                          "width": 50, "font": "400 16px Arial", "color": "#000000",
+                          "docStart": {text_start}, "docEnd": {text_end}}},
+                        {{"kind": "rect", "x": 0, "y": 0, "w": 5, "h": 5, "fill": "#000000",
+                          "fragmentDocStart": {rect}, "fragmentDocEnd": {rect_end}}},
+                        {{"kind": "rect", "x": 0, "y": 9, "w": 5, "h": 5, "fill": "#000000"}},
+                        {{"kind": "text", "text": "w", "x": 10, "baselineY": 300,
+                          "width": 5, "font": "400 16px Arial", "color": "#000000",
+                          "docStart": {widget}, "docEnd": {widget_end},
+                          "inlineSdtWidget": {{"pos": {widget}, "kind": "checkbox", "groupId": "g"}}}}
+                    ],
+                    "header": {{"kind": "header", "rId": "rId1", "y": 0, "height": 40, "primitives": [
+                        {{"kind": "text", "text": "H", "x": 10, "baselineY": 20,
+                          "width": 5, "font": "400 16px Arial", "color": "#000000",
+                          "docStart": {header}, "docEnd": {header_end}}}
+                    ]}}
+                }}]}}"##,
+                text_end = text_start + 5,
+                rect_end = rect + 9,
+                widget_end = widget + 1,
+                header_end = header + 1,
+            )
+        };
+        let stored = |handle: u32| SESSIONS.with(|s| s.borrow().get(handle).cloned().unwrap());
+        for delta in [6_i64, -4] {
+            let exact = open_display_list(&list(10, 9, 20, 3)).expect("opens");
+            let present_only = open_display_list(&list(10, 9, 20, 3)).expect("opens");
+            let exact_runs =
+                serde_json::json!([[0, 1, 3, delta], [1, 1, 12, delta], [3, 1, 19, delta]]);
+            let present_runs = serde_json::json!([[0, 4, 0x9f, delta]]);
+            for (handle, runs) in [(exact, exact_runs), (present_only, present_runs)] {
+                let update = serde_json::json!({"total": 1, "shift": [[0, 0, [runs]]]});
+                update_display_list(handle, &update.to_string()).expect("updates");
+            }
+            assert_eq!(stored(exact), stored(present_only), "delta {delta}");
+            let fresh = open_display_list(&list(10 + delta, 9 + delta, 20 + delta, 3)).unwrap();
+            assert_eq!(stored(present_only), stored(fresh));
+            for handle in [exact, present_only, fresh] {
+                close_display_list(handle);
+            }
+        }
+
+        let handle = open_display_list(&list(10, 9, 20, 3)).expect("opens");
+        let flag_alone = serde_json::json!({"total": 1, "shift": [[0, 0, [[[0, 1, 0x80, 1]]]]]});
+        assert!(update_display_list(handle, &flag_alone.to_string()).is_err());
+        let handle = open_display_list(&list(10, 9, 20, 3)).expect("opens");
+        let absent = serde_json::json!({"total": 1, "shift": [[0, 0, [[[2, 1, 1, 1]]]]]});
+        assert!(
+            update_display_list(handle, &absent.to_string()).is_err(),
+            "an exact run still needs its fields"
+        );
     }
 
     #[test]

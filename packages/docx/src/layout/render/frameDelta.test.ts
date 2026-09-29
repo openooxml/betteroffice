@@ -23,6 +23,25 @@ const FONT = resolve(
   '../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 );
 
+const PRESENT_ONLY = 1 << 7;
+
+/** The first shift run's mask in `frame`, rewritten, must fail to decode when invalid. */
+function expectStrictShiftMasks(frame: Uint8Array): void {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const operations = view.getUint32(52, true);
+  let maskOffset = -1;
+  for (let index = 0; index < operations && maskOffset < 0; index++) {
+    const record = 80 + index * 48;
+    if (frame[record] === 5) maskOffset = view.getUint32(record + 32, true) + 16;
+  }
+  expect(maskOffset).toBeGreaterThan(0);
+  for (const mask of [PRESENT_ONLY, (frame[maskOffset]! & 0x1f) | 0x40]) {
+    const patched = frame.slice();
+    patched[maskOffset] = mask;
+    expect(() => decodeFrameDelta(patched)).toThrow('position shift run is invalid');
+  }
+}
+
 describe('FrameDelta wire round-trip', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
@@ -154,10 +173,9 @@ describe('FrameDelta wire round-trip', () => {
 
     session.insert_text('body', paraId, 5, 'x', undefined, undefined);
     const second = envelopeFor();
-    const next = applyFrameDeltaOwned(
-      retained,
-      decodeFrameDelta(session.build_display_list_frame(second, retained.frameEpoch))
-    );
+    const deltaFrame = session.build_display_list_frame(second, retained.frameEpoch);
+    expectStrictShiftMasks(deltaFrame);
+    const next = applyFrameDeltaOwned(retained, decodeFrameDelta(deltaFrame));
 
     // trailing pages absorb the insert as an in-place position shift with a
     // recorded, replayable run log
@@ -166,7 +184,9 @@ describe('FrameDelta wire round-trip', () => {
     const runLists = displayPageShiftsSince(trailingPage, revisionBefore);
     expect(runLists).not.toBeNull();
     expect(runLists!.length).toBe(1);
-    expect(runLists![0].length).toBeGreaterThan(0);
+    // the whole page moves as one run over the fields each primitive has
+    expect(runLists![0]).toHaveLength(1);
+    expect(runLists![0][0]!.changedMask & PRESENT_ONLY).toBe(PRESENT_ONLY);
     expect(displayPageShiftsSince(trailingPage, revisionBefore + 1)).toEqual([]);
 
     // handle adoption ships those shifts as compact ops instead of replacing
@@ -242,5 +262,99 @@ describe('FrameDelta wire round-trip', () => {
     expect(() => applyFrameDeltaOwned(previous, delta)).toThrow('requires retained docStart');
     expect(displayPageRevision(page)).toBe(0);
     expect(displayPageShiftsSince(page, 0)).toEqual([]);
+  });
+
+  it('moves a page the same with present-only and exact shift runs', () => {
+    const text = (start: number, extra: Record<string, unknown> = {}) => ({
+      kind: 'text' as const,
+      text: 'x',
+      x: 10,
+      baselineY: 20,
+      width: 10,
+      font: '400 16px Calibri',
+      color: '#000000',
+      docStart: start,
+      docEnd: start + 1,
+      ...extra,
+    });
+    const page = (): DisplayPage =>
+      ({
+        pageIndex: 0,
+        width: 100,
+        height: 100,
+        primitives: [
+          text(10),
+          {
+            kind: 'rect',
+            x: 0,
+            y: 0,
+            w: 5,
+            h: 5,
+            fill: '#000',
+            fragmentDocStart: 9,
+            fragmentDocEnd: 30,
+          },
+          { kind: 'rect', x: 0, y: 9, w: 5, h: 5, fill: '#000' },
+          text(20, { inlineSdtWidget: { kind: 'checkbox', groupId: 'g', pos: 20 } }),
+        ],
+        noteAreas: [
+          {
+            kind: 'footnote',
+            separatorPrimitives: [{ kind: 'rect', x: 0, y: 90, w: 50, h: 1, fill: '#000' }],
+            primitives: [text(40)],
+          },
+        ],
+        header: { kind: 'header', rId: 'rId1', y: 0, height: 10, primitives: [text(3)] },
+        footer: { kind: 'footer', rId: 'rId2', y: 90, height: 10, primitives: [text(4)] },
+      }) as unknown as DisplayPage;
+    const frameWith = (displayPage: DisplayPage): RetainedFrame => ({
+      protocolVersion: FRAME_DELTA_VERSION,
+      docEpoch: 1,
+      layoutEpoch: 1,
+      frameEpoch: 1,
+      pages: [
+        {
+          pageIndex: 0,
+          pageId: 1n,
+          fingerprint: 1n,
+          primitiveIds: new BigUint64Array([1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n]),
+          page: displayPage,
+        },
+      ],
+      damagedPageIds: new Set(),
+      removedPageIds: new Set(),
+      displayList: { pages: [displayPage] },
+    });
+    type Run = { start: number; count: number; changedMask: number; delta: number };
+    const shiftedBy = (runs: Run[]) =>
+      ({
+        protocolVersion: FRAME_DELTA_VERSION,
+        full: false,
+        docEpoch: 1,
+        layoutEpoch: 2,
+        frameEpoch: 2,
+        baseFrameEpoch: 1,
+        pageCount: 1,
+        operations: [{ kind: 'shift-positions', pageIndex: 0, pageId: 1n, fingerprint: 2n, runs }],
+        bytes: new Uint8Array(),
+      }) as DecodedFrameDelta;
+    for (const delta of [6, -4]) {
+      const exact = shiftedBy([
+        { start: 0, count: 1, changedMask: 0b11, delta },
+        { start: 1, count: 1, changedMask: 0b1100, delta },
+        { start: 3, count: 1, changedMask: 0b10011, delta },
+        { start: 5, count: 1, changedMask: 0b11, delta },
+      ]);
+      const presentOnly = shiftedBy([
+        { start: 0, count: 4, changedMask: 0b11111 | PRESENT_ONLY, delta },
+        { start: 4, count: 2, changedMask: 0b11 | PRESENT_ONLY, delta },
+      ]);
+      const viaExact = applyFrameDelta(frameWith(page()), exact).displayList;
+      expect(applyFrameDelta(frameWith(page()), presentOnly).displayList).toEqual(viaExact);
+      expect(applyFrameDeltaOwned(frameWith(page()), presentOnly).displayList).toEqual(
+        applyFrameDeltaOwned(frameWith(page()), exact).displayList
+      );
+      expect(viaExact.pages[0]!.header!.primitives[0]).toMatchObject({ docStart: 3 });
+    }
   });
 });
