@@ -1,5 +1,3 @@
-// Fails a pending changeset whose body reads long — the changelog is a
-// tl;dr, not a design doc. See AGENTS.md, "Changesets".
 import { readdir, readFile } from 'node:fs/promises';
 
 const MAX_WORDS = 45;

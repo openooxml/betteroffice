@@ -2,4 +2,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Shifting page positions after an edit no longer clones a key per primitive, removing a major source of per-keystroke overhead.
+Typing in large documents is smoother, with per-edit page-position updates no longer adding noticeable per-keystroke overhead.
