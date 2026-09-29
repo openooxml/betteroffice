@@ -18,7 +18,8 @@ const PAGE = { width: 100, height: 200 };
 const PAGES = 12;
 const GAP = 24;
 const SCROLLER_TOP = 40.25;
-const SCROLLER_HEIGHT = 300.4;
+const SCROLLER_BOX = 300.4;
+const SCROLLER_HEIGHT = 300;
 
 function rect(top: number, height: number, width = 0): DOMRect {
   return {
@@ -55,11 +56,10 @@ function scene(zoom: number, scrollTop: number) {
   const scroller = document.createElement('div');
   Object.defineProperties(scroller, {
     currentCSSZoom: { value: zoom },
-    offsetHeight: { value: Math.round(SCROLLER_HEIGHT) },
     clientHeight: { value: SCROLLER_HEIGHT },
     scrollTop: { value: scrollTop },
   });
-  scroller.getBoundingClientRect = () => rect(SCROLLER_TOP, SCROLLER_HEIGHT * zoom);
+  scroller.getBoundingClientRect = () => rect(SCROLLER_TOP, SCROLLER_BOX * zoom);
   scroller.scrollTo = ((options: ScrollToOptions) => (
     moves.push(options.top ?? NaN), behaviors.push(options.behavior)
   )) as typeof scroller.scrollTo;
@@ -121,4 +121,11 @@ test('scrollToPage animates a near page and jumps to a far one', () => {
   api.scrollToPageImpl(2);
   api.scrollToPageImpl(PAGES);
   expect(behaviors).toEqual(['smooth', 'auto']);
+});
+
+test('scrollToPage computes an unzoomed target exactly as before', () => {
+  const { host, scroller, moves } = scene(1, 100.5);
+  scrollApi(host, scroller).scrollToPageImpl(3);
+  const clientY = SCROLLER_TOP + (pageCentre(3) - 100.5);
+  expect(moves[0]).toBe(100.5 + clientY - SCROLLER_TOP - SCROLLER_HEIGHT / 2);
 });

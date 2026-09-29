@@ -78,11 +78,13 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const viewport = scrollViewport(scroller);
       const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
       const clientY = pageRect.top + (rect.y + rect.height / 2) * scaleY;
-      const distance = (clientY - (viewport.top + viewport.bottom) / 2) / viewport.zoom;
-      const height = (viewport.bottom - viewport.top) / viewport.zoom;
+      const distance = (clientY - viewport.top) / viewport.zoom - viewport.height / 2;
       scroller.scrollTo({
         top: scroller.scrollTop + distance,
-        behavior: smooth && Math.abs(distance) <= height * SMOOTH_SCROLL_VIEWPORTS ? 'smooth' : 'auto',
+        behavior:
+          smooth && Math.abs(distance) <= viewport.height * SMOOTH_SCROLL_VIEWPORTS
+            ? 'smooth'
+            : 'auto',
       });
       return true;
     },

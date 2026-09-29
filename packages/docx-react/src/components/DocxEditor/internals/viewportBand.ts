@@ -1,29 +1,35 @@
 import { effectiveZoom } from '@betteroffice/docx/layout/render';
 
-/**
- * The client-pixel band a scroller shows, and the client pixels one unit of its
- * `scrollTop` moves. The root scrolls in viewport units whatever its zoom.
- */
+/** What a scroller shows, measured the way each caller measured it before zoom was handled. */
 export interface ScrollViewport {
+  /** Client top of the scroller's box; the window's for the root. */
   top: number;
+  /** Client bottom of the scroller's box; the window's for the root. */
   bottom: number;
+  /** Layout height the scroller shows its content in: `clientHeight`, or the window's. */
+  height: number;
+  /** Client pixels per unit of `scrollTop`: the root scrolls in viewport units. */
   zoom: number;
 }
 
 function isRootScroller(scroller: Element): boolean {
   return (
     typeof document !== 'undefined' &&
-    (scroller === document.scrollingElement ||
-      scroller === document.documentElement ||
-      scroller === document.body)
+    scroller === (document.scrollingElement ?? document.documentElement)
   );
 }
 
 export function scrollViewport(scroller: HTMLElement): ScrollViewport {
-  if (isRootScroller(scroller)) return { top: 0, bottom: window.innerHeight, zoom: 1 };
-  const zoom = effectiveZoom(scroller);
-  const top = scroller.getBoundingClientRect().top;
-  return { top, bottom: top + scroller.clientHeight * zoom, zoom };
+  if (isRootScroller(scroller)) {
+    return { top: 0, bottom: window.innerHeight, height: window.innerHeight, zoom: 1 };
+  }
+  const rect = scroller.getBoundingClientRect();
+  return {
+    top: rect.top,
+    bottom: rect.bottom,
+    height: scroller.clientHeight,
+    zoom: effectiveZoom(scroller),
+  };
 }
 
 /**
@@ -34,23 +40,26 @@ export function viewportColumnBand(
   scroller: HTMLElement | null,
   column: HTMLElement
 ): { top: number; bottom: number } {
-  const viewport = scroller ? scrollViewport(scroller) : { top: 0, bottom: window.innerHeight };
-  const origin = column.getBoundingClientRect().top;
+  const viewport = scroller
+    ? scrollViewport(scroller)
+    : { top: 0, height: window.innerHeight, zoom: 1 };
   const zoom = effectiveZoom(column);
-  return { top: (viewport.top - origin) / zoom, bottom: (viewport.bottom - origin) / zoom };
+  const top = (viewport.top - column.getBoundingClientRect().top) / zoom;
+  return { top, bottom: top + (viewport.height * viewport.zoom) / zoom };
 }
 
-/** The `scrollTop` change that brings `[top, bottom]`, in client pixels, `margin` layout pixels inside the viewport. */
+/**
+ * The `scrollTop` change that brings the client-pixel span `[top, bottom]`
+ * `margin` layout pixels inside the scroller's box.
+ */
 export function scrollIntoViewDelta(
   viewport: ScrollViewport,
   top: number,
   bottom: number,
   margin: number
 ): number {
-  const start = (top - viewport.top) / viewport.zoom;
-  const end = (bottom - viewport.top) / viewport.zoom;
-  const height = (viewport.bottom - viewport.top) / viewport.zoom;
-  if (start < margin) return start - margin;
-  if (end > height - margin) return end - height + margin;
+  const { zoom } = viewport;
+  if (top < viewport.top + margin * zoom) return (top - viewport.top) / zoom - margin;
+  if (bottom > viewport.bottom - margin * zoom) return (bottom - viewport.bottom) / zoom + margin;
   return 0;
 }
