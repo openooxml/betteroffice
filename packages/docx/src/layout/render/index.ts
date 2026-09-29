@@ -34,6 +34,11 @@ export { loadGlyphOutlineProvider } from './glyphOutlineWasm';
 
 export {
   buildMirrorPage,
+  buildMirrorPageLinks,
+  displayPageHoldsMirrorId,
+  mirrorPageHasHeaderCells,
+  mirrorPageHasTabStops,
+  reduceMirrorToLinks,
   MIRROR_CLASS_NAMES,
   type BuildMirrorPageOptions,
   type MirrorLabels,
@@ -42,6 +47,7 @@ export {
 export {
   applyInteractiveSdtFocus,
   buildInteractiveOverlayPage,
+  interactiveOverlayHasTabStops,
   type BuildInteractiveOverlayOptions,
   type InteractiveOverlayLabels,
 } from './interactiveOverlay';
@@ -128,6 +134,7 @@ export {
   displayPageCanvas,
   displayPageCanvases,
   DisplayPageRegistry,
+  materializeDisplayPages,
   resolveCanvasPoint,
   resolveDisplayPageClientRect,
   type CanvasPointHit,
