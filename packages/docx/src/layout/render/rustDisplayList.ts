@@ -508,7 +508,8 @@ export async function buildRustDisplayList(
  * Build one display frame. An engine that retains pagination returns a binary
  * FrameDelta, decoded and applied on top of `previous` so unchanged pages keep
  * object identity; `previous` also supplies the frame epoch the engine checks
- * before sending a delta rather than a full frame. An engine without
+ * before sending a delta rather than a full frame, unless `expectedFrameEpoch`
+ * overrides it (the engine numbers its frame after that epoch). An engine without
  * `buildDisplayListFrame` takes the full-JSON path, and its result carries
  * `frame: null` and `transport: 'json'`.
  *
@@ -518,7 +519,8 @@ export async function buildRustDisplayList(
 export async function buildRustDisplayFrame(
   inputs: DisplayListBuildInputs,
   engine?: RustDisplayListEngine,
-  previous: RetainedFrame | null = null
+  previous: RetainedFrame | null = null,
+  expectedFrameEpoch = previous?.frameEpoch ?? 0
 ): Promise<RustDisplayFrameResult> {
   let eng: RustDisplayListEngine;
   try {
@@ -537,7 +539,7 @@ export async function buildRustDisplayFrame(
   const inputJson = encodeDisplayListFrameExtras(inputs);
   let encoded: Uint8Array;
   try {
-    encoded = eng.buildDisplayListFrame(inputJson, previous?.frameEpoch ?? 0);
+    encoded = eng.buildDisplayListFrame(inputJson, expectedFrameEpoch);
   } catch (error) {
     throw new RustDisplayListSourceError('build', error);
   }

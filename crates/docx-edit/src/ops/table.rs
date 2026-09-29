@@ -7,7 +7,7 @@
 //! rewrites them together in one transaction, and creates/removes cell stories
 //! in that same transaction.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -980,6 +980,14 @@ fn delete_table_in_txn(
 }
 
 impl EditingDoc {
+    /// The payload of `locator`'s table embed, as [`EditingDoc::story_segments`]
+    /// gives it, without reading the rest of the story's segments.
+    pub fn table_payload(&self, locator: &TableLocator) -> OpResult<BTreeMap<String, Any>> {
+        let txn = self.yrs_doc().transact();
+        let (_, table, _) = table_at(&txn, locator)?;
+        Ok(crate::embed_payload(&table, &txn))
+    }
+
     /// Story-global position of the table embed. Used by wasm awareness state
     /// to make a cell selection sticky without putting it in the document.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
@@ -1985,6 +1993,40 @@ mod tests {
 
     fn cell(row: u32, column: u32) -> CellLoc {
         CellLoc::new("body", 0, row, column)
+    }
+
+    #[test]
+    fn a_table_payload_is_the_one_its_story_segment_carries() {
+        let doc = seed_table();
+        doc.insert_table(&direct(), Position::new("body", 1), 1, 2)
+            .unwrap();
+        let tables: Vec<_> = doc
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                crate::SegmentContent::OtherEmbed { kind, payload } if kind == "table" => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables.len(), 2);
+        for (index, payload) in tables.iter().enumerate() {
+            assert_eq!(
+                &doc.table_payload(&TableLocator::new("body", index as u32))
+                    .unwrap(),
+                payload
+            );
+        }
+        assert!(matches!(
+            doc.table_payload(&TableLocator::new("body", 2)),
+            Err(OpError::UnknownTable { .. })
+        ));
+        assert!(matches!(
+            doc.table_payload(&TableLocator::new("missing", 0)),
+            Err(OpError::UnknownStory(_))
+        ));
     }
 
     #[test]

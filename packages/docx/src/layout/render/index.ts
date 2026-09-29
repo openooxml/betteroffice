@@ -90,6 +90,7 @@ export {
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  displayPageNoteAnchorRevision,
   displayPageRevision,
   FRAME_DELTA_HEADER_BYTES,
   FRAME_DELTA_PAGE_OP_BYTES,
@@ -116,12 +117,17 @@ export {
   type DisplayListRegionHit,
   type DisplayListVerticalMove,
   type DisplayListVisualLine,
+  type VisualLineExtent,
   type ResidentDisplayListQueryEngine,
 } from './displayListQueries';
 
 export { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX, canvasPageTops } from './canvasPageMetrics';
 
 export {
+  bindDisplayPageRegistry,
+  displayPageCanvas,
+  displayPageCanvases,
+  DisplayPageRegistry,
   resolveCanvasPoint,
   resolveDisplayPageClientRect,
   type CanvasPointHit,
@@ -176,6 +182,7 @@ export {
   detectDisplayListTableInsertHover,
   deriveDisplayListSelectedCellRects,
   deriveDisplayListTableFragments,
+  deriveDisplayListTableFragmentsOnPages,
   type DisplayListTableInsertHoverHit,
   type DisplayListTableInsertHoverInput,
   type DisplayListSelectedCellRect,

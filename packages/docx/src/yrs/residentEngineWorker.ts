@@ -253,9 +253,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const applied =
       request.type === 'applyDelete'
         ? request.profile
-          ? session.applyDeleteProfiled(request.direction, request.expectedFrameEpoch)
+          ? session.applyDeleteProfiled(
+              request.direction,
+              request.expectedFrameEpoch,
+              request.count
+            )
           : {
-              frame: session.applyDelete(request.direction, request.expectedFrameEpoch),
+              frame: session.applyDelete(
+                request.direction,
+                request.expectedFrameEpoch,
+                request.count
+              ),
               profile: undefined,
             }
         : request.profile
@@ -271,8 +279,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       pendingUpdates,
       applied.profile,
       started,
-      true,
-      request.paintCaret
+      request.selection.head.story === 'body',
+      request.paintCaret,
+      undefined,
+      false,
+      request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
     if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -282,6 +293,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       ok: false,
       error: message,
       residentUnavailable: message.includes('resident input state is not ready'),
+      // The edit committed here but never reached the host: this replica is
+      // no longer the host's, so the host must replace it.
+      ...(pendingUpdates.length > 0 ? { terminal: true } : {}),
     });
   } finally {
     pendingUpdates = [];
@@ -415,7 +429,8 @@ async function replyFrame(
   requireCaret = false,
   paintCaret = false,
   layoutJson?: string,
-  layoutProvisional = false
+  layoutProvisional = false,
+  deletedUnits?: number
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
@@ -473,6 +488,7 @@ async function replyFrame(
       replayMs,
       replayedPages,
       layoutRevision,
+      ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),
       ...(layoutProvisional ? { layoutProvisional } : {}),
