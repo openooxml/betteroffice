@@ -1000,6 +1000,31 @@ export function createDisplayListQueries(
   ): DisplayListRect[] =>
     scopedCaretRects((from, to) => noteRangeRects(region, noteId, from, to), pos);
 
+  // A position on a page whose content is not built yet resolves to the top of
+  // that page's content box, which is enough to scroll it into view (and so
+  // have it built). Unbuilt pages whose spans overlap, as a table row split
+  // across them does, are picked in proportion to where the position falls in
+  // their shared range; spans that only touch give it to the later page.
+  const unbuiltPageRect = (pos: number): DisplayListRect | null => {
+    const candidates = list.pages.filter((page) => {
+      const span = page.unbuilt ? page.positionSpan : undefined;
+      return span !== undefined && pos >= span[0] && pos <= span[1];
+    });
+    if (candidates.length === 0) return null;
+    const low = Math.max(...candidates.map((page) => page.positionSpan![0]));
+    const high = Math.min(...candidates.map((page) => page.positionSpan![1]));
+    const share = high > low ? (pos - low) / (high - low + 1) : 1;
+    const pick = Math.min(candidates.length - 1, Math.floor(share * candidates.length));
+    const found = candidates[pick]!;
+    return {
+      pageIndex: found.pageIndex,
+      x: found.contentBounds?.x ?? 0,
+      y: found.contentBounds?.y ?? 0,
+      width: 0,
+      height: 0,
+    };
+  };
+
   const caretRect = (pos: number): DisplayListRect | null => {
     const forward = rangeRects(pos, pos + 1);
     if (forward.length > 0) {
@@ -1007,6 +1032,10 @@ export function createDisplayListQueries(
       const r = forward[0];
       return { pageIndex: r.pageIndex, x: r.x, y: r.y, width: 0, height: r.height };
     }
+    // Before the trailing edge: at the start of an unbuilt page, the previous
+    // position is still painted on the page before it.
+    const unbuilt = unbuiltPageRect(pos);
+    if (unbuilt) return unbuilt;
     if (pos > 0) {
       // end of doc / trailing edge: right edge of the previous position
       const backward = rangeRects(pos - 1, pos);

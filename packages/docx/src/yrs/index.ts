@@ -850,6 +850,13 @@ export interface YrsSession extends CollaborationReplica {
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
   buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  /**
+   * Limit full display builds to pages `start..end` plus the pages already
+   * built; the rest stay unbuilt placeholders carrying their geometry. @internal
+   */
+  setDisplayWindow(start: number, end: number): void;
+  /** Build the listed unbuilt pages into a FrameDelta v1. @internal */
+  buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
   /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
   resetFrameBase(): void;
   /** Caret geometry from the current resident display frame. */
@@ -1677,6 +1684,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
+      session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     applyInput: (text, expectedFrameEpoch) => {
