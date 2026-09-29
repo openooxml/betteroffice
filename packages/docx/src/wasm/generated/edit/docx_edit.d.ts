@@ -503,6 +503,11 @@ export class EditSession {
      */
     layout_document_with_regions_json(input: string): string;
     /**
+     * The retained region layout of the first `pages` pages only; see
+     * `EngineSession::layout_document_with_regions_prefix_retained_json`.
+     */
+    layout_document_with_regions_prefix_retained_json(input: string, pages: number): string;
+    /**
      * Same full region pass as [`Self::layout_document_with_regions_json`],
      * but the reply carries only `{ layout, headersFooters?, notesConverged }`
      * — the measured arena stays retained wasm-side and is fetched on demand
@@ -618,6 +623,14 @@ export class EditSession {
      * as a host that hashed them off this thread already knows it.
      */
     open_docx(bytes: Uint8Array, seed_stories: boolean, generation?: string | null, digest?: string | null): string;
+    /**
+     * Opens `bytes` for display only, seeded from the body's first `blocks`
+     * blocks (see `seed::seed_docx_preview`): the reply is the host metadata
+     * of that parse. The session keeps no source package, so it cannot save.
+     * Opens nothing and replies with nothing for a document the preview
+     * refuses, which opens with [`EditSession::open_docx`] instead.
+     */
+    open_docx_preview(bytes: Uint8Array, blocks: number): string | undefined;
     /**
      * One glyph outline from this session's resident font store:
      * `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
@@ -914,6 +927,11 @@ export class EditSession {
      * identity such as `paraId`.
      */
     set_paragraph_attrs(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, attrs_json: string, author_name?: string | null, author_date?: string | null): void;
+    /**
+     * Marks whether the session's document is part of a package, as a
+     * replica of a preview is: its layouts render NUMPAGES empty.
+     */
+    set_partial_document(partial: boolean): void;
     /**
      * Stores this peer's anchor and head as sticky positions, replacing any
      * previous selection. Both endpoints must lie in `story`. The positions
@@ -1404,6 +1422,7 @@ export interface InitOutput {
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_comments: (a: number) => [number, number, number, number];
@@ -1418,6 +1437,7 @@ export interface InitOutput {
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+    readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
@@ -1458,6 +1478,7 @@ export interface InitOutput {
     readonly editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
+    readonly editsession_set_partial_document: (a: number, b: number) => void;
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
