@@ -1568,10 +1568,7 @@ impl EngineSession {
                         )?;
                     floats = anchors_floats;
                     if anchors_floats {
-                        return Ok(Arena::Full(
-                            blocks.to_vec(),
-                            couples_flow || !floats_follow_the_text(blocks),
-                        ));
+                        return Ok(Arena::Full(blocks.to_vec(), couples_flow));
                     }
                     match self.resident_region_measured(
                         blocks,
@@ -1610,7 +1607,9 @@ impl EngineSession {
                     let widths = region_measurement_widths(blocks.iter(), &input, &regions);
                     let geometry = initial_float_page_geometry(&input, &regions);
                     let measures = match prefix_pages {
-                        Some(pages) if !coupled => {
+                        // Floats whose zones only settle later, such as shapes that page-side
+                        // wrapping brings into the body, rule a prefix out too.
+                        Some(pages) if !coupled && floats_follow_the_text(&blocks) => {
                             let measures = measure_page_prefix(
                                 &mut blocks,
                                 &widths,
@@ -4243,16 +4242,38 @@ mod tests {
     #[test]
     fn floats_placed_from_outside_the_text_keep_the_whole_body() {
         let request = float_page_request(serde_json::json!({}));
-        for (name, float) in [
+        let off_page_shape = INSIDE_SHAPE
+            .replace(
+                r#"<wp:positionH relativeFrom="margin"><wp:align>inside</wp:align></wp:positionH>"#,
+                r#"<wp:positionH relativeFrom="outsideMargin"><wp:posOffset>-3175000</wp:posOffset></wp:positionH>"#,
+            )
+            .replace(
+                r#"<wp:positionV relativeFrom="paragraph">"#,
+                r#"<wp:positionV relativeFrom="margin">"#,
+            )
+            .replace(
+                r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+                "<wp:wrapTopAndBottom/>",
+            );
+        assert_ne!(off_page_shape, INSIDE_SHAPE);
+        for (name, float, every) in [
             (
                 "margin table",
                 floating_table(r#"w:vertAnchor="margin""#, 3),
+                7,
             ),
-            ("page table", floating_table(r#"w:vertAnchor="page""#, 3)),
-            ("table without an anchor", floating_table("", 3)),
-            ("inside shape", format!("<w:p>{INSIDE_SHAPE}</w:p>")),
+            ("page table", floating_table(r#"w:vertAnchor="page""#, 3), 7),
+            ("table without an anchor", floating_table("", 3), 7),
+            ("inside shape", format!("<w:p>{INSIDE_SHAPE}</w:p>"), 7),
+            // One late shape that starts off the page, so it has no zone until
+            // page-side wrapping brings it in.
+            (
+                "late off-page shape",
+                format!("<w:p>{off_page_shape}</w:p>"),
+                150,
+            ),
         ] {
-            let bytes = floated_body(|index| (index % 7 == 3).then(|| float.clone()));
+            let bytes = floated_body(|index| (index % every == every - 1).then(|| float.clone()));
             let (full, prefix) = full_and_prefix(&bytes, &request, &|_| {});
             assert_ne!(prefix["provisional"], true, "{name}");
             assert_eq!(prefix["layout"], full["layout"], "{name}");
