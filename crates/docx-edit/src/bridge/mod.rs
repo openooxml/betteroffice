@@ -1077,8 +1077,11 @@ fn lower_table<T: ReadTxn>(
                 row_span: map_number(tc_pr, "rowspan"),
                 width,
                 width_value,
+                preferred_width: width_value.map(|value| docx_layout::types::PreferredWidth {
+                    value: Some(value),
+                    r#type: width_type.clone(),
+                }),
                 width_type,
-                preferred_width: None,
                 grid_start: None,
                 min_content_width: None,
                 max_content_width: None,
@@ -1155,7 +1158,9 @@ fn lower_table<T: ReadTxn>(
             width: map_number(tbl_pr, "width"),
             width_type: map_string(tbl_pr, "widthType"),
             preferred_width: None,
-            layout_mode: None,
+            layout_mode: Some(
+                map_string(tbl_pr, "tableLayout").unwrap_or_else(|| "autofit".to_owned()),
+            ),
             width_algorithm: None,
             style_cascade: None,
             background: None,
@@ -4140,6 +4145,7 @@ mod tests {
         let mut expected = json!([{
             "kind": "table",
             "id": "placeholder",
+            "layoutMode": "autofit",
             "rows": [
                 {
                     "id": "placeholder", "isHeader": false,

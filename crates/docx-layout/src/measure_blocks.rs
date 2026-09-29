@@ -8,7 +8,7 @@ use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offs
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
 use crate::table_grid::{
     content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
-    resolve_table_column_widths, resolve_table_width_px,
+    resolve_table_column_widths, resolve_table_column_widths_with_content, resolve_table_width_px,
 };
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
@@ -1801,6 +1801,78 @@ fn column_content_maximums(
     Ok(maximums)
 }
 
+fn cell_content_widths(
+    cell: &crate::types::TableCell,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Option<(f64, f64)> {
+    if matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl")) {
+        return None;
+    }
+    let padding = cell
+        .padding
+        .as_ref()
+        .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
+            padding.left + padding.right
+        });
+    let content_width = (content_width - padding).max(1.0);
+    let mut minimum = 0.0_f64;
+    let mut maximum = 0.0_f64;
+    for block in &cell.blocks {
+        let widths = match block {
+            LayoutBlock::Paragraph(paragraph) => {
+                crate::typed_measure::intrinsic_widths(paragraph, content_width, config)?
+            }
+            LayoutBlock::Table(table) => {
+                let width: f64 = measure_table_column_widths(table, content_width, config)
+                    .iter()
+                    .sum();
+                (width, width)
+            }
+            LayoutBlock::Image(image) if image.anchor.is_none() => (image.width, image.width),
+            LayoutBlock::Shape(shape) if !anchored_shape(shape) => (shape.width, shape.width),
+            LayoutBlock::Chart(chart) => (chart.width, chart.width),
+            LayoutBlock::TextBox(text_box) => (text_box.width, text_box.width),
+            _ => continue,
+        };
+        minimum = minimum.max(widths.0);
+        maximum = maximum.max(widths.1);
+    }
+    Some((minimum + padding, maximum + padding))
+}
+
+fn measure_table_column_widths(
+    table: &TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Vec<f64> {
+    if table
+        .width_algorithm
+        .as_deref()
+        .or(table.layout_mode.as_deref())
+        != Some("autofit")
+    {
+        return resolve_table_column_widths(table, content_width);
+    }
+    let content_widths: Vec<Vec<Option<(f64, f64)>>> = table
+        .rows
+        .iter()
+        .map(|row| {
+            row.cells
+                .iter()
+                .map(|cell| {
+                    if cell.min_content_width.is_some() && cell.max_content_width.is_some() {
+                        None
+                    } else {
+                        cell_content_widths(cell, content_width, config)
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    resolve_table_column_widths_with_content(table, content_width, Some(&content_widths))
+}
+
 fn measure_table(
     table: &mut TableBlock,
     content_width: f64,
@@ -1809,7 +1881,7 @@ fn measure_table(
     let explicit_width =
         resolve_table_width_px(table.width, table.width_type.as_deref(), content_width);
     let target_width = explicit_width.unwrap_or(content_width);
-    let mut column_widths = resolve_table_column_widths(table, content_width);
+    let mut column_widths = measure_table_column_widths(table, content_width, config);
     let content_sized = content_sized_columns(table, content_width, &column_widths);
     if !content_sized.is_empty() {
         let maximums = column_content_maximums(table, &content_sized, content_width, config)?;

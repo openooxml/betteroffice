@@ -251,6 +251,7 @@ fn resolve_autofit_column_widths(
     content_width: f64,
     col_count: usize,
     explicit_width_px: Option<f64>,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
 ) -> Vec<f64> {
     let source = table_block
         .grid_widths
@@ -279,11 +280,21 @@ fn resolve_autofit_column_widths(
             explicit_width_px.unwrap_or(content_width),
             cell.width,
         );
-        let mut minimum = cell.min_content_width.unwrap_or(0.0).max(0.0);
+        let measured = content_widths
+            .and_then(|rows| rows.get(grid_cell.row_index))
+            .and_then(|cells| cells.get(grid_cell.cell_index))
+            .copied()
+            .flatten();
+        let max_content_width = cell.max_content_width.or(measured.map(|widths| widths.1));
+        let mut minimum = cell
+            .min_content_width
+            .or(measured.map(|widths| widths.0))
+            .unwrap_or(0.0)
+            .max(0.0);
         if cell.no_wrap.unwrap_or(false) {
-            minimum = minimum.max(cell.max_content_width.unwrap_or(0.0));
+            minimum = minimum.max(max_content_width.unwrap_or(0.0));
         }
-        let maximum = minimum.max(cell.max_content_width.or(preferred).unwrap_or(0.0));
+        let maximum = minimum.max(max_content_width.or(preferred).unwrap_or(0.0));
         add_span_constraint(
             &mut minimums,
             grid_cell.column_index,
@@ -357,7 +368,7 @@ fn table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
 ///
 /// Word sizes exactly these columns from their content, so the declared
 /// `w:gridCol` is only a hint and goes stale whenever the content changes.
-/// Empty under `w:tblLayout w:type="fixed"`, and whenever the declared
+/// Empty for fixed and autofit layouts, and whenever the declared
 /// geometry already decides the answer.
 pub fn content_sized_columns(
     table_block: &TableBlock,
@@ -371,7 +382,7 @@ pub fn content_sized_columns(
         .width_algorithm
         .as_deref()
         .or(table_block.layout_mode.as_deref())
-        == Some("fixed")
+        .is_some_and(|algorithm| matches!(algorithm, "fixed" | "autofit"))
     {
         return Vec::new();
     }
@@ -453,6 +464,14 @@ pub fn grow_content_sized_columns(
 /// Resolves per-column pixel widths from the table's grid metadata and width
 /// budget, per the module's three algorithms. Measures no cell content.
 pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64) -> Vec<f64> {
+    resolve_table_column_widths_with_content(table_block, content_width, None)
+}
+
+pub(crate) fn resolve_table_column_widths_with_content(
+    table_block: &TableBlock,
+    content_width: f64,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> Vec<f64> {
     let mut column_widths: Vec<f64> = table_block.column_widths.clone().unwrap_or_default();
     let explicit_width_px = preferred_width_px(
         table_block.preferred_width.as_ref(),
@@ -480,9 +499,10 @@ pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64)
     if !table_block.rows.is_empty() && algorithm == "autofit" {
         return resolve_autofit_column_widths(
             table_block,
-            content_width,
+            table_width_budget(table_block, content_width),
             col_count,
             explicit_width_px,
+            content_widths,
         );
     }
 
