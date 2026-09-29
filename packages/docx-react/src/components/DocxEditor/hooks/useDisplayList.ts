@@ -913,7 +913,8 @@ export function useRustDisplayList(
           client: new ResidentEngineWorkerClient(),
         };
       }
-      const worker = workerRef.current.client;
+      const requested = workerRef.current;
+      const worker = requested.client;
       const bootstrapping = !worker.bootstrapSent();
       const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
       hostEngine.adoptResidentWorkerLayout(request);
@@ -948,6 +949,7 @@ export function useRustDisplayList(
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
       const unavailable = (cause: unknown): null => {
+        if (workerRef.current !== requested) return null;
         console.error(
           '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
           cause

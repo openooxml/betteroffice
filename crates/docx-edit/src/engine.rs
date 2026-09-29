@@ -80,7 +80,7 @@ struct MeasurementState {
 #[derive(Debug)]
 struct ResidentRegionState {
     request_json: String,
-    /// [`layout_options_fingerprint`] of `request_json`.
+    /// [`region_options_fingerprint`] of `request_json`.
     request_fingerprint: String,
     headers_footers: Option<serde_json::Value>,
     /// Inputs retained from the last full region pass so a plain body-text
@@ -658,6 +658,7 @@ struct PaginationState {
     checkpoints: Vec<LayoutCheckpoint>,
     block_fingerprints: Vec<u64>,
     options_fingerprint: u64,
+    revision_preview_key: u64,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
     position_deltas: HashMap<String, i64>,
@@ -829,15 +830,28 @@ fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
         {
             options.remove("pageGap");
         }
-        // A revision preview changes blocks, which their own fingerprints catch.
-        if let Some(env) = fields
-            .get_mut("renderEnv")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            env.remove("revisionPreview");
-        }
     }
     pages::sha256_hex(canonical_json(&request).as_bytes())
+}
+
+/// Identifies the revision preview a pass lays out under; 0 is none.
+fn revision_preview_key(env: &RenderEnv) -> Result<u64, String> {
+    if env.revision_preview.is_empty() {
+        return Ok(0);
+    }
+    serde_json::to_vec(&env.revision_preview)
+        .map(|bytes| hash_bytes(&bytes))
+        .map_err(|error| format!("fingerprint revision preview: {error}"))
+}
+
+fn region_options_fingerprint(mut request: serde_json::Value) -> String {
+    if let Some(env) = request
+        .get_mut("renderEnv")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        env.remove("revisionPreview");
+    }
+    layout_options_fingerprint(request)
 }
 
 /// `value` as JSON with object keys sorted, whatever order they were read in.
@@ -1661,7 +1675,7 @@ impl EngineSession {
         input_json: &str,
         prefix_pages: Option<usize>,
     ) -> Result<RegionPass, String> {
-        let request_fingerprint = layout_options_fingerprint(
+        let request_fingerprint = region_options_fingerprint(
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?,
         );
         // Reused pages keep the section stamps and page labels of the regions
@@ -1687,6 +1701,9 @@ impl EngineSession {
                     .map_err(|error| format!("parse render environment: {error}"))?,
             )
         };
+        let revision_preview_key = parsed_render_env
+            .as_ref()
+            .map_or(Ok(0), revision_preview_key)?;
         if regions.sections.len() <= 1
             && let Some(env) = &mut parsed_render_env
         {
@@ -1864,7 +1881,11 @@ impl EngineSession {
             }))
         .then(|| input.clone());
         let (mut initial_layout, mut arena) = if refs.is_empty() {
-            self.layout_document_value_with_fingerprints(input, block_fingerprints.clone())?;
+            self.layout_document_value_with_fingerprints(
+                input,
+                block_fingerprints.clone(),
+                Some(revision_preview_key),
+            )?;
             let layout = self
                 .pagination
                 .borrow_mut()
@@ -1933,7 +1954,11 @@ impl EngineSession {
             } else {
                 block_fingerprints
             };
-            self.layout_document_value_with_fingerprints(final_input, fingerprints)?;
+            self.layout_document_value_with_fingerprints(
+                final_input,
+                fingerprints,
+                Some(revision_preview_key),
+            )?;
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
@@ -2260,7 +2285,7 @@ impl EngineSession {
     /// and `apply_input`.
     fn layout_document_value(&self, input: LayoutInput) -> Result<(), String> {
         let block_fingerprints = measured_fingerprints(&input)?;
-        self.layout_document_value_with_fingerprints(input, block_fingerprints)
+        self.layout_document_value_with_fingerprints(input, block_fingerprints, None)
     }
 
     /// Paginate a resident measured arena whose clean block fingerprints were
@@ -2269,7 +2294,8 @@ impl EngineSession {
     fn layout_document_value_with_fingerprints(
         &self,
         mut input: LayoutInput,
-        block_fingerprints: Vec<u64>,
+        mut block_fingerprints: Vec<u64>,
+        revision_preview_key: Option<u64>,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
@@ -2280,6 +2306,24 @@ impl EngineSession {
         let mut deltas = HashMap::new();
         let run = {
             let mut previous = self.pagination.borrow_mut();
+            if revision_preview_key.is_some_and(|key| key != previous.revision_preview_key)
+                && incremental_eligible(&previous, &input, input_options_fingerprint)
+            {
+                let retained = previous.input.as_ref().expect("eligibility checked input");
+                for (((fingerprint, retained_fingerprint), next), retained) in block_fingerprints
+                    .iter_mut()
+                    .zip(&previous.block_fingerprints)
+                    .zip(&input.measured)
+                    .zip(&retained.measured)
+                {
+                    if *fingerprint == *retained_fingerprint
+                        && crate::fingerprint::relative_positions_fingerprint(&next.block)?
+                            != crate::fingerprint::relative_positions_fingerprint(&retained.block)?
+                    {
+                        *fingerprint ^= 1;
+                    }
+                }
+            }
             let first_dirty = previous
                 .block_fingerprints
                 .iter()
@@ -2350,6 +2394,9 @@ impl EngineSession {
         pagination.checkpoints = run.checkpoints;
         pagination.block_fingerprints = block_fingerprints;
         pagination.options_fingerprint = input_options_fingerprint;
+        if let Some(key) = revision_preview_key {
+            pagination.revision_preview_key = key;
+        }
         pagination.rebuilt_page_start = run.rebuilt_page_start;
         pagination.rebuilt_page_end = run.rebuilt_page_end;
         pagination.position_deltas = deltas;
@@ -2874,7 +2921,11 @@ impl EngineSession {
             return self.build_display_list_frame(&extras, expected_frame_epoch);
         }
         let resident = self.resident_layout_input(story)?;
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.layout_document_value_with_fingerprints(
+            resident.input,
+            resident.block_fingerprints,
+            None,
+        )?;
         let extras = self
             .display
             .borrow()
@@ -2938,7 +2989,11 @@ impl EngineSession {
             };
             lowered.env.clone()
         };
-        if self.regional_fingerprint(&regions, &env) != regional {
+        // A preview lowered since the last region pass (a font preflight for a
+        // pass the worker laid out) takes the full path, under the retained request.
+        if self.regional_fingerprint(&regions, &env) != regional
+            || revision_preview_key(&env)? != self.pagination.borrow().revision_preview_key
+        {
             return Ok(false);
         }
         let outcome = self
@@ -3006,7 +3061,11 @@ impl EngineSession {
         };
         phase(RegionResidentPhase::Measured);
         let previous_capture = self.capture.borrow_mut().take();
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.layout_document_value_with_fingerprints(
+            resident.input,
+            resident.block_fingerprints,
+            None,
+        )?;
         let mut pagination = self.pagination.borrow_mut();
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
@@ -3117,6 +3176,7 @@ impl EngineSession {
             self.layout_document_value_with_fingerprints(
                 resident.input,
                 resident.block_fingerprints,
+                None,
             )?;
             let finished = now();
             profile.paginate_ms = finished - started;
@@ -3656,6 +3716,17 @@ impl EngineSession {
                     &format!("The editor's layout request cannot be read: {error}"),
                 )
             })?;
+        if current
+            .as_ref()
+            .and_then(|request| request.get("renderEnv"))
+            .and_then(|env| env.get("revisionPreview"))
+            .is_some_and(|preview| !RenderEnv::parse_revision_preview(preview).is_empty())
+        {
+            return Err(refuse(
+                ExportFailureCode::UnsupportedRevisionLayout,
+                "The retained layout previews revision decisions instead of their markup.",
+            ));
+        }
         if let Some(message) = pages::metadata_mismatch(&self.doc, &request, current.is_some()) {
             return Err(refuse(ExportFailureCode::StaleLayout, &message));
         }
