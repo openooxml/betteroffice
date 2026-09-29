@@ -298,17 +298,18 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     host.geometryChanged();
     if (!geometry || !dom) return;
+    const shown = () => isPresented(dom.context.pagesContainer, dom.queries.displayList);
+    if (shown()) return;
     let frame = 0;
     const settle = () => {
-      if (isPresented(dom.context.pagesContainer, dom.queries.displayList)) {
-        host.geometryChanged();
-      } else {
+      if (!shown()) {
         frame = requestAnimationFrame(settle);
+        return;
       }
+      host.geometryChanged();
+      host.layoutPresented(geometry.layout);
     };
-    if (!isPresented(dom.context.pagesContainer, dom.queries.displayList)) {
-      frame = requestAnimationFrame(settle);
-    }
+    frame = requestAnimationFrame(settle);
     return () => cancelAnimationFrame(frame);
   }, [host, geometry, dom]);
 

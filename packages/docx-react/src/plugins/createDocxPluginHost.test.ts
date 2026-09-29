@@ -115,6 +115,24 @@ describe('plugin host proposal previews', () => {
     host.close('unmounted');
   });
 
+  test('repeats the current layout once its pixels are presented, and nothing for another one', async () => {
+    const { host, plugin, events } = setup();
+    const registry = stubSession();
+    host.setPlugins([plugin]);
+    host.open(registry.session);
+    await settle();
+    host.layoutChanged(layout(0));
+    await settle();
+    events.length = 0;
+    host.layoutPresented({ ...layout(0), id: 'older' });
+    host.layoutPresented(layout(0));
+    await settle();
+    expect(events).toEqual([
+      { type: 'layout-change', generation: host.generation()!, layout: layout(0) },
+    ]);
+    host.close('unmounted');
+  });
+
   test('subscribes only with installed plugins and detaches on removal, replacement and close', () => {
     const { host, plugin } = setup();
     const first = stubSession();

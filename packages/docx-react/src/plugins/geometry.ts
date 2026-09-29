@@ -143,20 +143,29 @@ export function createPluginGeometry(
   };
   const unavailable = () =>
     anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
-  /** The trailing edge of the unit before `to`: its left edge when the caret stop there is `to`. */
-  const endEdge = (to: number): DisplayListRect | null => {
-    const unit = queries
-      .rangeRects(to - 1, to)
+  const unitAt = (from: number): DisplayListRect | null =>
+    queries
+      .rangeRects(from, from + 1)
       .filter((rect) => rect.width > 0)
-      .at(-1);
-    if (!unit) return null;
-    const hit = queries.hitTestRegions(
-      unit.pageIndex,
-      unit.x + Math.min(1, unit.width / 4),
-      unit.y + unit.height / 2
-    );
-    const rtl = hit?.region === 'body' && hit.pos === to;
-    return { ...unit, x: rtl ? unit.x : unit.x + unit.width, width: 0 };
+      .at(-1) ?? null;
+  /**
+   * The collapsed caret at `pos`, on the edge of a neighbouring unit whose caret stop is `pos`:
+   * the unit after it first unless `before`, which prefers the unit before it.
+   */
+  const caretAt = (pos: number, before = false): DisplayListRect | null => {
+    const units = before ? [pos - 1, pos] : [pos, pos - 1];
+    for (const from of units) {
+      const unit = unitAt(from);
+      if (!unit) continue;
+      const hit = queries.hitTestRegions(
+        unit.pageIndex,
+        unit.x + Math.min(1, unit.width / 4),
+        unit.y + unit.height / 2
+      );
+      const left = hit?.region === 'body' && hit.pos !== null ? hit.pos === pos : from === pos;
+      return { ...unit, x: left ? unit.x : unit.x + unit.width, width: 0 };
+    }
+    return null;
   };
   return {
     layout,
@@ -218,18 +227,15 @@ export function createPluginGeometry(
         }
         if (visible.length > 0) tail = to;
       }
-      const end = tail !== null ? (endEdge(tail) ?? lastInReadingOrder(drawn)) : null;
-      let anchor = end ? project(end) : null;
-      const lastRange = ranges.at(-1);
-      if (!anchor && lastRange) {
-        const caret = queries.caretRect(lastRange.from);
-        if (caret) anchor = project({ ...caret, width: 0 });
-      }
-      if (!anchor) {
-        const position = editor.yrsLocToDisplayPosition(resolved.paragraph);
-        const paragraph = position === null ? null : queries.anchorRect(position);
-        if (paragraph) anchor = project({ ...paragraph, width: 0 });
-      }
+      const last = ranges.at(-1);
+      const paragraph = editor.yrsLocToDisplayPosition(resolved.paragraph);
+      const end =
+        tail !== null
+          ? (caretAt(tail, true) ?? lastInReadingOrder(drawn))
+          : ((last && (caretAt(last.to) ?? caretAt(last.from, true))) ??
+            (paragraph === null ? null : caretAt(paragraph)));
+      const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
+      const anchor = end ? project(end) : fallback ? project({ ...fallback, width: 0 }) : null;
       if (!anchor) return unavailable();
       const page = projector.getPageBounds(anchor.pageIndex);
       if (!page) return unavailable();

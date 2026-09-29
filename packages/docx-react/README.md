@@ -393,7 +393,9 @@ const review = defineDocxPlugin<State>({
   its zero-based `pageIndex`, an `anchor` collapsed at the end of the last one (at
   the boundary of a target the preview hides, else at its paragraph) and the
   anchor's `pageRect`. It refuses with a typed failure rather than answer from a
-  stale layout; `layout.previewVersion` is the proposal preview the pixels show.
+  stale or unpainted layout, and `layout-change` repeats once the pages have painted
+  a layout that arrived before its pixels; `layout.previewVersion` is the proposal
+  preview the pixels show.
   The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit

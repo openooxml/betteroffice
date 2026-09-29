@@ -315,6 +315,25 @@ function refused(result: DocxAnchorGeometryResult, code: string) {
   expect(result).toMatchObject({ ok: false, failure: { code } });
 }
 
+/**
+ * Lays units 0..3 out one pixel wide from x=10 on one line, left to right or right to left,
+ * dropping `hidden` units as a preview does; hit tests answer each unit's left caret stop.
+ */
+function textLine(source: DisplayListQueries, hidden: number[] = [], rtl = false) {
+  const x = (unit: number) => 10 + (rtl ? 3 - unit : unit);
+  source.rangeRects = (from, to) => {
+    const rects: DisplayListRect[] = [];
+    for (let unit = Math.max(0, from); unit < Math.min(4, to); unit += 1) {
+      if (!hidden.includes(unit)) rects.push({ ...RANGE, x: x(unit), width: 1 });
+    }
+    return rects;
+  };
+  source.hitTestRegions = (_page, at) => {
+    const unit = [0, 1, 2, 3].find((candidate) => at >= x(candidate) && at < x(candidate) + 1);
+    return unit === undefined ? null : { region: 'body', pos: rtl ? unit + 1 : unit, target: 'text' };
+  };
+}
+
 describe('semantic anchor geometry', () => {
   test('resolves every target kind and returns versioned, page-aware fragments', () => {
     const { geometry } = semanticGeometry();
@@ -376,25 +395,40 @@ describe('semantic anchor geometry', () => {
 
   test('anchors a hidden target at its boundary, then falls back to its paragraph', () => {
     const { geometry, source } = semanticGeometry();
-    const starts: number[] = [];
-    source.rangeRects = () => [{ ...RANGE, width: 0 }];
-    source.caretRect = (position) => {
-      starts.push(position);
-      return { ...RANGE, x: 8 };
-    };
     const target: DocxGeometryTarget = { kind: 'revision', revisionId: 'r2' };
+    textLine(source, [2, 3]);
     expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
       rects: [],
-      anchor: { pageIndex: 0, x: 151, width: 0 },
+      anchor: { pageIndex: 0, x: 155, width: 0 },
     });
-    expect(starts).toEqual([2]);
-    source.caretRect = () => null;
+    textLine(source, [0, 1, 2, 3]);
     expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
       rects: [],
       anchor: { pageIndex: 0, x: 146, width: 0 },
     });
     source.anchorRect = () => null;
     refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+  });
+
+  test('puts collapsed boundaries on the caret stop, in either direction', () => {
+    const { geometry, source } = semanticGeometry();
+    const at = (offset: number) =>
+      anchored(
+        geometry.getAnchorGeometry({
+          kind: 'range',
+          version: 'v1',
+          range: {
+            ...TEXT_RANGE,
+            start: { paraId: 'p', offset },
+            end: { paraId: 'p', offset },
+          },
+        })
+      );
+    textLine(source);
+    expect([0, 2, 4].map((offset) => at(offset).anchor.x)).toEqual([153, 155, 157]);
+    textLine(source, [], true);
+    expect([0, 2, 4].map((offset) => at(offset).anchor.x)).toEqual([157, 155, 153]);
+    expect(at(2).rects).toEqual([]);
   });
 
   test('anchors at the logical end of the last unit, whatever order the fragments come in', () => {
@@ -492,59 +526,41 @@ describe('semantic anchor geometry', () => {
     ]);
     session.listRevisions = () => [];
     const fallback = anchored(geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }));
-    expect(fallback).toMatchObject({ rects: [], anchor: { x: 146, width: 0 } });
+    expect(fallback).toMatchObject({ rects: [], anchor: { x: 153, width: 0 } });
   });
 
   test('draws only the side a decision keeps and anchors a wholly hidden one at its boundary', () => {
-    const { geometry, calls, setSnapshot, source } = semanticGeometry();
+    const { geometry, setSnapshot, source } = semanticGeometry();
     const decide = (state: 'accepted' | 'rejected', revisionIds = ['r1', 'r2']) =>
       setSnapshot({
         proposals: [{ id: 'proposal', paragraph: PARAGRAPH, state, changed: true, revisionIds }],
       });
     const target: DocxGeometryTarget = { kind: 'proposal', id: 'proposal' };
     decide('accepted');
-    const accepted = anchored(geometry.getAnchorGeometry(target));
-    expect(calls).toEqual([
-      [2, 4],
-      [3, 4],
-    ]);
-    expect(accepted.anchor).toMatchObject({ x: 157, width: 0 });
-    calls.length = 0;
+    textLine(source, [0]);
+    expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+      rects: [{ x: 155 }, { x: 156 }],
+      anchor: { x: 157, width: 0 },
+    });
     decide('rejected');
-    anchored(geometry.getAnchorGeometry(target));
-    expect(calls).toEqual([
-      [0, 1],
-      [0, 1],
-    ]);
+    textLine(source, [2, 3]);
+    expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+      rects: [{ x: 153 }],
+      anchor: { x: 154, width: 0 },
+    });
     expect(
       anchored(geometry.getAnchorGeometry({ kind: 'revision', revisionId: 'r2' })).rects
     ).toEqual([]);
-    calls.length = 0;
-    const carets: number[] = [];
-    source.rangeRects = (from, to) => {
-      calls.push([from, to]);
-      return [{ ...RANGE, width: 4 }];
-    };
-    source.caretRect = (position) => {
-      carets.push(position);
-      return { ...RANGE, x: 8, width: 0 };
-    };
     decide('accepted', ['r1']);
+    textLine(source, [0]);
     expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
       rects: [],
-      anchor: { x: 151, width: 0 },
+      anchor: { x: 154, width: 0 },
     });
-    expect(calls).toEqual([]);
-    expect(carets).toEqual([0]);
   });
 
   test('hides the same text from range and search targets as from its revision', () => {
-    const { geometry, calls, setSnapshot, source } = semanticGeometry();
-    const carets: number[] = [];
-    source.caretRect = (position) => {
-      carets.push(position);
-      return { ...RANGE, x: 8, width: 0 };
-    };
+    const { geometry, setSnapshot, source } = semanticGeometry();
     const decide = (state: 'accepted' | 'rejected') =>
       setSnapshot({
         proposals: [
@@ -552,6 +568,7 @@ describe('semantic anchor geometry', () => {
         ],
       });
     decide('accepted');
+    textLine(source, [0]);
     const deleted: DocxGeometryTarget = {
       kind: 'range',
       version: 'v1',
@@ -560,22 +577,19 @@ describe('semantic anchor geometry', () => {
     for (const target of [deleted, { kind: 'revision', revisionId: 'r1' } as const]) {
       expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
         rects: [],
-        anchor: { x: 151, width: 0 },
+        anchor: { x: 154, width: 0 },
       });
     }
-    expect(calls).toEqual([]);
     decide('rejected');
-    const inserted = anchored(
-      geometry.getAnchorGeometry({ kind: 'search', paragraph: PARAGRAPH, text: 'aa', occurrence: 2 })
-    );
-    expect(inserted.rects).toEqual([]);
-    expect(carets).toEqual([0, 0, 2]);
-    const partly = anchored(geometry.getAnchorGeometry({ kind: 'paragraph', paragraph: PARAGRAPH }));
-    expect(partly.rects).toHaveLength(1);
-    expect(calls).toEqual([
-      [0, 2],
-      [1, 2],
-    ]);
+    textLine(source, [2, 3]);
+    expect(
+      anchored(
+        geometry.getAnchorGeometry({ kind: 'search', paragraph: PARAGRAPH, text: 'aa', occurrence: 2 })
+      )
+    ).toMatchObject({ rects: [], anchor: { x: 155 } });
+    expect(
+      anchored(geometry.getAnchorGeometry({ kind: 'paragraph', paragraph: PARAGRAPH }))
+    ).toMatchObject({ rects: [{ x: 153 }, { x: 154 }], anchor: { x: 155 } });
   });
 
   test('coalesces overlapping revision ranges', () => {
@@ -599,7 +613,7 @@ describe('semantic anchor geometry', () => {
     });
     expect(anchored(geometry.getAnchorGeometry({ kind: 'proposal', id: 'noop' }))).toMatchObject({
       rects: [],
-      anchor: { x: 146, width: 0 },
+      anchor: { x: 153, width: 0 },
     });
     refused(geometry.getAnchorGeometry({ kind: 'proposal', id: 'missing' }), 'unknown-proposal');
     refused(

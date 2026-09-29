@@ -77,6 +77,8 @@ export interface DocxPluginHost {
   layoutId(): string | null;
   /** Geometry moved without a new layout, as on resize or scroll-container changes. */
   geometryChanged(): void;
+  /** The pages now show `layout`'s pixels; repeats its `layout-change` if it is still current. */
+  layoutPresented(layout: DocxPluginLayout): void;
   activations(): readonly DocxPluginActivation[];
   subscribe(listener: () => void): () => void;
   /** The restricted command store an activation's React contributions see. */
@@ -425,6 +427,12 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     layoutId: () => (runtime.generation() === null ? null : state.layout?.id ?? null),
 
     geometryChanged: () => runtime.touch(),
+
+    layoutPresented(layout) {
+      const generation = runtime.generation();
+      if (!generation || !state.layout || !sameLayout(layout, state.layout)) return;
+      notify({ type: 'layout-change', generation, layout: state.layout });
+    },
 
     activations: () => runtime.activations(),
     subscribe: (listener) => runtime.subscribe(listener),

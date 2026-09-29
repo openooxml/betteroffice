@@ -236,7 +236,10 @@ export interface DocxPluginNavigation {
   >;
 }
 
-/** Lifecycle notifications describe current state; several changes may arrive as one. */
+/**
+ * Lifecycle notifications describe current state; several changes may arrive as one.
+ * `layout-change` repeats once the pages have painted a layout that arrived before its pixels.
+ */
 export type DocxPluginEvent =
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }
   | { type: 'document-change'; generation: string; version: string }
