@@ -81,6 +81,16 @@ pub struct RenderEnv {
     pub numeric_ids: BTreeMap<String, f64>,
     /// Include hidden text in visible layout without changing the document.
     pub show_hidden_text: bool,
+    /// Revision id, as [`crate::ChangeInfo`] reports it, to the decision
+    /// shown in place of its markup. A decided insertion or deletion renders
+    /// as plain text or not at all, at its original positions; any other
+    /// revision renders as a tracked change. Entries with other values are
+    /// ignored.
+    #[serde(
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "deserialize_revision_preview"
+    )]
+    pub revision_preview: BTreeMap<String, RevisionPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph_spacing_line_px: Option<f64>,
     /// Section document-grid snap pitch in px (`w:docGrid w:linePitch`),
@@ -98,6 +108,69 @@ impl RenderEnv {
         self.numeric_ids.insert(yrs_id.into(), layout_id);
         self
     }
+
+    pub fn with_revision_preview(
+        mut self,
+        revision_id: impl Into<String>,
+        preview: RevisionPreview,
+    ) -> Self {
+        self.revision_preview.insert(revision_id.into(), preview);
+        self
+    }
+
+    /// Reads `revisionPreview` entries from JSON, skipping any that are not
+    /// an `"accepted"` or `"rejected"` string.
+    pub fn parse_revision_preview(value: &Value) -> BTreeMap<String, RevisionPreview> {
+        let Value::Object(entries) = value else {
+            return BTreeMap::new();
+        };
+        entries
+            .iter()
+            .filter_map(|(id, state)| {
+                let preview = match state.as_str()? {
+                    "accepted" => RevisionPreview::Accepted,
+                    "rejected" => RevisionPreview::Rejected,
+                    _ => return None,
+                };
+                Some((id.clone(), preview))
+            })
+            .collect()
+    }
+
+    fn revision_decision(&self, value: &Any) -> Option<RevisionPreview> {
+        if self.revision_preview.is_empty() {
+            return None;
+        }
+        let (id, ..) = crate::queries::revision_parts(value)?;
+        self.revision_preview.get(&id).copied()
+    }
+
+    /// Whether the decisions previewed hide a run with these attributes: an
+    /// insertion rejected, or a deletion accepted.
+    fn revision_hidden(&self, attributes: Option<&Attrs>) -> bool {
+        attribute(attributes, INS).and_then(|value| self.revision_decision(value))
+            == Some(RevisionPreview::Rejected)
+            || attribute(attributes, DEL).and_then(|value| self.revision_decision(value))
+                == Some(RevisionPreview::Accepted)
+    }
+}
+
+/// A decision [`RenderEnv::revision_preview`] shows for one revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RevisionPreview {
+    Accepted,
+    Rejected,
+}
+
+fn deserialize_revision_preview<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, RevisionPreview>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(RenderEnv::parse_revision_preview(&value))
 }
 
 /// Why a story could not be lowered. Every variant means the input is wrong,
@@ -390,10 +463,13 @@ fn lower_story<T: ReadTxn>(
                             detail: "table embed interrupts paragraph content".to_owned(),
                         });
                     }
-                    let hidden = shared_map_string(&table, txn, "blockId")
-                        .is_some_and(|id| hidden_field_blocks.contains(&id));
+                    let previewed_out = env.revision_hidden(attributes);
+                    let hidden = previewed_out
+                        || shared_map_string(&table, txn, "blockId")
+                            .is_some_and(|id| hidden_field_blocks.contains(&id));
                     map.tables.push((pm_cursor, story_slot, table_ordinal));
                     table_ordinal += 1;
+                    let mut unnumbered = previewed_out.then(|| list_state.clone());
                     let (lowered, node_size) = lower_table(
                         &table,
                         txn,
@@ -402,7 +478,7 @@ fn lower_story<T: ReadTxn>(
                         pm_cursor,
                         env,
                         active_stories,
-                        list_state,
+                        unnumbered.as_mut().unwrap_or(&mut *list_state),
                         map,
                     )?;
                     if !hidden {
@@ -431,7 +507,9 @@ fn lower_story<T: ReadTxn>(
                         });
                     }
                     let kind = shared_map_string(&page_break, txn, "_kind").unwrap_or_default();
+                    let hidden = env.revision_hidden(attributes);
                     if kind == "pageBreak"
+                        && !hidden
                         && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last_mut()
                         && paragraph.runs.is_empty()
                         && paragraph.pm_end == Some(pm_cursor as f64)
@@ -445,20 +523,24 @@ fn lower_story<T: ReadTxn>(
                     // so an edit before a break leaves its block unchanged.
                     let id = BlockId::Str(format!("{story_id}:{kind}:{break_ordinal}"));
                     break_ordinal += 1;
-                    if kind == "columnBreak" {
-                        blocks.push(LayoutBlock::ColumnBreak(ColumnBreakBlock {
-                            sdt_groups: None,
-                            id,
-                            pm_start: Some(pm_cursor as f64),
-                            pm_end: Some((pm_cursor + 1) as f64),
-                        }));
-                    } else {
-                        blocks.push(LayoutBlock::PageBreak(PageBreakBlock {
-                            sdt_groups: None,
-                            id,
-                            pm_start: Some(pm_cursor as f64),
-                            pm_end: Some((pm_cursor + 1) as f64),
-                        }));
+                    if !hidden {
+                        let (pm_start, pm_end) =
+                            (Some(pm_cursor as f64), Some((pm_cursor + 1) as f64));
+                        blocks.push(if kind == "columnBreak" {
+                            LayoutBlock::ColumnBreak(ColumnBreakBlock {
+                                sdt_groups: None,
+                                id,
+                                pm_start,
+                                pm_end,
+                            })
+                        } else {
+                            LayoutBlock::PageBreak(PageBreakBlock {
+                                sdt_groups: None,
+                                id,
+                                pm_start,
+                                pm_end,
+                            })
+                        });
                     }
                     story_index += 1;
                     paragraph_start = story_index;
@@ -487,13 +569,15 @@ fn lower_story<T: ReadTxn>(
                         });
                     };
                     let group = lower_sdt_group(&block_sdt, txn, pm_cursor as i64);
+                    let previewed_out = env.revision_hidden(attributes);
+                    let mut unnumbered = previewed_out.then(|| list_state.clone());
                     let (mut child_blocks, content_size) = lower_story(
                         txn,
                         &child_story,
                         env,
                         pm_cursor + 1,
                         active_stories,
-                        list_state,
+                        unnumbered.as_mut().unwrap_or(&mut *list_state),
                         CellEdges {
                             before: cell_edges.before && story_index == 0,
                             after: cell_edges.after && story_index + 1 == story.len(txn),
@@ -501,7 +585,7 @@ fn lower_story<T: ReadTxn>(
                         map,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
-                    if !hidden_field_blocks.contains(&child_story) {
+                    if !previewed_out && !hidden_field_blocks.contains(&child_story) {
                         blocks.extend(child_blocks);
                     }
                     story_index += 1;
@@ -555,6 +639,7 @@ fn lower_story<T: ReadTxn>(
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                         atom: true,
+                        revision_hidden: env.revision_hidden(attributes),
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -568,7 +653,7 @@ fn lower_story<T: ReadTxn>(
                     let hidden = instruction
                         .as_deref()
                         .is_some_and(super::seed::numeric_field_instruction);
-                    if hidden {
+                    if hidden && !env.revision_hidden(attributes) {
                         pending_hidden_field_blocks
                             .append(&mut hidden_field_result_blocks(&field, txn));
                     }
@@ -597,6 +682,7 @@ fn lower_story<T: ReadTxn>(
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                         atom: true,
+                        revision_hidden: env.revision_hidden(attributes),
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -615,6 +701,7 @@ fn lower_story<T: ReadTxn>(
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                         atom: true,
+                        revision_hidden: env.revision_hidden(attributes),
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -634,6 +721,7 @@ fn lower_story<T: ReadTxn>(
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                         atom: true,
+                        revision_hidden: env.revision_hidden(attributes),
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -680,6 +768,7 @@ fn lower_story<T: ReadTxn>(
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                         atom: true,
+                        revision_hidden: env.revision_hidden(attributes),
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -709,6 +798,7 @@ fn lower_story<T: ReadTxn>(
                         inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                         atom: true,
+                        revision_hidden: env.revision_hidden(attributes),
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -717,6 +807,7 @@ fn lower_story<T: ReadTxn>(
                 Out::YMap(sdt)
                     if shared_map_string(&sdt, txn, "_kind").as_deref() == Some("sdt") =>
                 {
+                    let first = paragraph_runs.len();
                     let node_size = lower_inline_sdt(
                         &sdt,
                         txn,
@@ -727,6 +818,9 @@ fn lower_story<T: ReadTxn>(
                         None,
                         &mut paragraph_runs,
                     );
+                    if env.revision_hidden(attributes) {
+                        hide_runs(&mut paragraph_runs[first..]);
+                    }
                     story_index += 1;
                     paragraph_pm_units += node_size;
                     at_block_boundary = false;
@@ -800,6 +894,7 @@ fn lower_story<T: ReadTxn>(
                             inherited_hyperlink: inherited_hyperlink_style(attributes),
                             inline_sdt_widget: None,
                             atom: true,
+                            revision_hidden: env.revision_hidden(attributes),
                         });
                     } else {
                         paragraph_drawings.push(DrawingMarker {
@@ -808,6 +903,7 @@ fn lower_story<T: ReadTxn>(
                             anchored: shapes::anchored_shape(&block),
                             block: LayoutBlock::Shape(block),
                             hidden: mark_bool(attributes, "hidden") == Some(true),
+                            revision_hidden: env.revision_hidden(attributes),
                         });
                     }
                     story_index += 1;
@@ -834,6 +930,7 @@ fn lower_story<T: ReadTxn>(
                         story_index,
                         block: LayoutBlock::Chart(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
+                        revision_hidden: env.revision_hidden(attributes),
                         anchored: false,
                     });
                     story_index += 1;
@@ -1720,6 +1817,7 @@ fn lower_inline_sdt_values(
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
                         atom: true,
+                        revision_hidden: env.revision_hidden(Some(&attrs)),
                     });
                 }
                 width
@@ -1735,6 +1833,7 @@ fn lower_inline_sdt_values(
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                     atom: true,
+                    revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
                 1
             }
@@ -1749,6 +1848,7 @@ fn lower_inline_sdt_values(
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                     atom: true,
+                    revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
                 1
             }
@@ -1764,6 +1864,7 @@ fn lower_inline_sdt_values(
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: None,
                         atom: true,
+                        revision_hidden: env.revision_hidden(Some(&attrs)),
                     });
                 }
                 1
@@ -1797,6 +1898,7 @@ fn lower_inline_sdt_values(
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                     atom: true,
+                    revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
                 1
             }
@@ -1820,6 +1922,7 @@ fn lower_inline_sdt_values(
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                     atom: true,
+                    revision_hidden: env.revision_hidden(Some(&attrs)),
                 });
                 1
             }
@@ -1848,12 +1951,14 @@ fn lower_inline_sdt_values(
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
                         atom: true,
+                        revision_hidden: env.revision_hidden(Some(&attrs)),
                     });
                 }
                 1
             }
             "sdt" => payload.map_or(2, |payload| {
-                lower_inline_sdt_values(
+                let first = runs.len();
+                let size = lower_inline_sdt_values(
                     payload,
                     env,
                     story_index,
@@ -1861,7 +1966,11 @@ fn lower_inline_sdt_values(
                     child_pm_start,
                     widget.clone(),
                     runs,
-                )
+                );
+                if env.revision_hidden(Some(&attrs)) {
+                    hide_runs(&mut runs[first..]);
+                }
+                size
             }),
             // A shape or chart nested in an inline SDT produces no run; every
             // other leaf still occupies one position even without one.
@@ -2022,6 +2131,15 @@ struct RawRun {
     inline_sdt_widget: Option<Value>,
     /// Content of an embed rather than story text.
     atom: bool,
+    /// Content the previewed revision decisions leave out of layout.
+    revision_hidden: bool,
+}
+
+/// Leaves out the content of a control whose own revision the preview hides.
+fn hide_runs(runs: &mut [RawRun]) {
+    for run in runs {
+        run.revision_hidden = true;
+    }
 }
 
 /// A paragraph's shape or chart child, at the offset it occupied.
@@ -2031,6 +2149,7 @@ struct DrawingMarker {
     story_index: u32,
     block: LayoutBlock,
     hidden: bool,
+    revision_hidden: bool,
     anchored: bool,
 }
 
@@ -2153,6 +2272,7 @@ fn push_text_chunks(
             inherited_hyperlink: inherited_hyperlink_style(attributes),
             inline_sdt_widget: None,
             atom: false,
+            revision_hidden: env.revision_hidden(attributes),
         });
     }
 }
@@ -2179,6 +2299,8 @@ fn flush_paragraph_parts<T: ReadTxn>(
         story_slot,
         shared_map_string(pilcrow, txn, "paraId").unwrap_or_default(),
     ));
+    raw_runs.retain(|run| !run.revision_hidden);
+    drawings.retain(|drawing| !drawing.revision_hidden);
     if env.show_hidden_text {
         for run in &mut raw_runs {
             if run.formatting.hidden == Some(true) {
@@ -2872,8 +2994,13 @@ fn revision_meta(value: &Any, env: &RenderEnv) -> Option<RevisionMeta> {
 }
 
 fn lower_revisions(attributes: Option<&Attrs>, env: &RenderEnv, result: &mut RunFormatting) {
-    let insertion = attribute(attributes, INS).and_then(|value| revision_meta(value, env));
-    let deletion = attribute(attributes, DEL).and_then(|value| revision_meta(value, env));
+    let pending = |key| {
+        attribute(attributes, key)
+            .filter(|value| env.revision_decision(value).is_none())
+            .and_then(|value| revision_meta(value, env))
+    };
+    let insertion = pending(INS);
+    let deletion = pending(DEL);
     if insertion.is_some() {
         result.is_insertion = Some(true);
     }
