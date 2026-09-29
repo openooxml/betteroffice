@@ -124,13 +124,15 @@ function nextPageWindow(
  * One page's surface: canvas + a11y mirror + optional interactive overlay.
  * Memoized so a keystroke's snapshot commit re-renders only the pages whose
  * `DisplayPage` identity actually changed — the owned frame-delta path keeps
- * untouched pages' identity stable across keystrokes.
+ * untouched pages' identity stable across keystrokes. A page without
+ * `chrome` keeps only its sized canvas.
  */
 const CanvasPageSurface = memo(function CanvasPageSurface({
   page,
   pageKey,
   zoom,
   interactive,
+  chrome,
   deferChrome,
   registerCanvas,
 }: {
@@ -138,6 +140,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   pageKey: string;
   zoom: number;
   interactive: boolean;
+  chrome: boolean;
   deferChrome: boolean;
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
 }) {
@@ -158,8 +161,8 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           boxShadow: '0 1px 3px var(--doc-shadow)',
         }}
       />
-      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} />
-      {interactive ? (
+      {chrome ? <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} /> : null}
+      {chrome && interactive ? (
         <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
       ) : null}
     </div>
@@ -358,6 +361,31 @@ export function CanvasPagesView({
     effectiveWindow === null
       ? !windowingEnabled || index < PAGE_WINDOW_MIN_PAGES
       : pageInWindow(index);
+  // The page holding focus (an SDT widget, or assistive-technology focus in
+  // its mirror) keeps its chrome when it leaves the window.
+  const [focusedPage, setFocusedPage] = useState<number | null>(null);
+  useEffect(() => {
+    const host = innerHostRef.current;
+    if (!host) return;
+    const pageOf = (target: EventTarget | null): number | null => {
+      const surface =
+        target instanceof Element ? target.closest<HTMLElement>('.canvas-page') : null;
+      const index = surface ? Number(surface.dataset.pageIndex) : NaN;
+      return Number.isInteger(index) ? index : null;
+    };
+    const onFocusIn = (event: FocusEvent) => setFocusedPage(pageOf(event.target));
+    const onFocusOut = (event: FocusEvent) => {
+      if (!(event.relatedTarget instanceof Node) || !host.contains(event.relatedTarget)) {
+        setFocusedPage(null);
+      }
+    };
+    host.addEventListener('focusin', onFocusIn);
+    host.addEventListener('focusout', onFocusOut);
+    return () => {
+      host.removeEventListener('focusin', onFocusIn);
+      host.removeEventListener('focusout', onFocusOut);
+    };
+  }, []);
 
   // One glyph-outline cache for the canvas lifetime (task contract: not
   // per-render). The wasm-backed outline provider loads lazily through the
@@ -583,9 +611,9 @@ export function CanvasPagesView({
           const pageKey = retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
           const surfaceKey = `${pageKey}:${offscreenEligible && !offscreenFailed ? 'offscreen' : 'dom'}`;
           // per-page wrapper so the mirror positions 1:1 over its canvas.
-          // Every page keeps its full DOM (canvas element, a11y mirror, SDT
-          // overlay) — the page window releases only bitmap backing stores,
-          // so the accessible document and page geometry never shrink.
+          // Every page keeps its sized canvas, so page geometry never
+          // changes; the a11y mirror and SDT overlay exist only for pages in
+          // the window and the page holding focus, built while idle.
           return (
             <CanvasPageSurface
               key={surfaceKey}
@@ -593,7 +621,8 @@ export function CanvasPagesView({
               pageKey={pageKey}
               zoom={zoom}
               interactive={interactive}
-              deferChrome={!chromeInWindow(i)}
+              chrome={chromeInWindow(i) || i === focusedPage}
+              deferChrome={windowingEnabled}
               registerCanvas={registerCanvas}
             />
           );
