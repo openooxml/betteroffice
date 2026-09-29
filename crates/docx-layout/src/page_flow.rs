@@ -631,6 +631,9 @@ impl Paginator {
         let idx = self.get_current();
         let page_index = self.states[idx].page_index;
         self.pages[page_index].fragments.push(fragment);
+        if self.pages[page_index].fragments.len() == 1 {
+            self.page_start_spacing_spent = self.leading_spacing_spent;
+        }
     }
 
     #[allow(dead_code)] // reached once the floating-table hook is swapped in

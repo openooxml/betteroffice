@@ -871,6 +871,19 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Whether a display page shows the section and numbering stamps of `page`,
+/// which choose its header and footer and fill its page fields.
+fn page_stamps_match(
+    shown: &docx_layout::display_list::DisplayPage,
+    page: &docx_layout::types::Page,
+) -> bool {
+    shown.section_id == page.section_id
+        && shown.section_index == page.section_index
+        && shown.section_page_index == page.section_page_index
+        && shown.section_page_number == page.section_page_number
+        && shown.page_label == page.page_label
+}
+
 /// Which pages a full display build compiles: all of them without a window,
 /// otherwise the window plus every page the previous list had built.
 fn full_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
@@ -887,6 +900,20 @@ fn full_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
                     .is_some_and(|page| !page.unbuilt)
         })
         .collect()
+}
+
+/// A whole-document placement pass, as one rebuilt page range.
+fn full_pass(input: &mut LayoutInput) -> Result<docx_layout::place::IncrementalLayout, String> {
+    let run =
+        docx_layout::place::layout_document_checkpointed(input).map_err(|error| match error {
+            docx_layout::LayoutError::Unsupported(_) => "UNSUPPORTED".to_owned(),
+            docx_layout::LayoutError::Invalid(reason) => reason,
+        })?;
+    Ok(docx_layout::place::IncrementalLayout {
+        rebuilt_page_ranges: std::iter::once(run.rebuilt_page_start..run.rebuilt_page_end)
+            .collect(),
+        checkpointed: run,
+    })
 }
 
 fn measured_fingerprint(measured: &MeasuredBlock) -> Result<u64, String> {
@@ -2298,7 +2325,7 @@ impl EngineSession {
                     previous.input.as_ref().expect("eligibility checked input"),
                     &input,
                 );
-                let attempted = docx_layout::place::layout_document_incremental(
+                let attempted = docx_layout::place::layout_document_incremental_ranges(
                     &mut input,
                     previous
                         .layout
@@ -2314,27 +2341,17 @@ impl EngineSession {
                         incremental = true;
                         run
                     }
-                    Err(docx_layout::LayoutError::Unsupported(_)) => {
-                        docx_layout::place::layout_document_checkpointed(&mut input).map_err(
-                            |error| match error {
-                                docx_layout::LayoutError::Unsupported(_) => {
-                                    "UNSUPPORTED".to_owned()
-                                }
-                                docx_layout::LayoutError::Invalid(reason) => reason,
-                            },
-                        )?
-                    }
+                    Err(docx_layout::LayoutError::Unsupported(_)) => full_pass(&mut input)?,
                     Err(docx_layout::LayoutError::Invalid(reason)) => return Err(reason),
                 }
             } else {
-                docx_layout::place::layout_document_checkpointed(&mut input).map_err(|error| {
-                    match error {
-                        docx_layout::LayoutError::Unsupported(_) => "UNSUPPORTED".to_owned(),
-                        docx_layout::LayoutError::Invalid(reason) => reason,
-                    }
-                })?
+                full_pass(&mut input)?
             }
         };
+        let docx_layout::place::IncrementalLayout {
+            checkpointed: run,
+            rebuilt_page_ranges,
+        } = run;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input = Some(input);
         pagination.measured_with = None;
@@ -2349,7 +2366,7 @@ impl EngineSession {
         pagination.options_fingerprint = input_options_fingerprint;
         pagination.rebuilt_page_start = run.rebuilt_page_start;
         pagination.rebuilt_page_end = run.rebuilt_page_end;
-        pagination.rebuilt_page_ranges = run.rebuilt_page_ranges;
+        pagination.rebuilt_page_ranges = rebuilt_page_ranges;
         pagination.position_deltas = deltas;
         pagination.last_incremental = incremental;
         pagination.layout_epoch = pagination.layout_epoch.wrapping_add(1);
@@ -3193,19 +3210,35 @@ impl EngineSession {
             let mut display = self.display.borrow_mut();
             if pagination.last_incremental && display.extras_fingerprint == extras_fingerprint {
                 // The first range is rebuilt as a range; the pages after it shift,
-                // but later ranges and the pages elsewhere whose notes anchor to
-                // references the edit moved are rebuilt too.
+                // but later ranges, the pages elsewhere whose notes anchor to
+                // references the edit moved, and retained pages whose section or
+                // numbering stamps changed are rebuilt too.
                 let first = pagination
                     .rebuilt_page_ranges
                     .first()
                     .cloned()
                     .unwrap_or(pagination.rebuilt_page_start..pagination.rebuilt_page_end);
+                let restamped = display
+                    .list
+                    .as_ref()
+                    .filter(|list| list.pages.len() == layout.pages.len())
+                    .map(|list| {
+                        list.pages
+                            .iter()
+                            .zip(&layout.pages)
+                            .enumerate()
+                            .filter(|(_, (shown, page))| !page_stamps_match(shown, page))
+                            .map(|(index, _)| index)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let note_pages: Vec<usize> = pagination
                     .rebuilt_page_ranges
                     .iter()
                     .skip(1)
                     .flat_map(Clone::clone)
                     .chain(pagination.note_changed_pages.iter().copied())
+                    .chain(restamped)
                     .filter(|&index| !first.contains(&index))
                     .collect::<BTreeSet<_>>()
                     .into_iter()
@@ -7171,6 +7204,7 @@ mod tests {
                 .unwrap();
         }
         let incremental_builds = engine.stats().incremental_display_builds;
+        let rebuilt_display_pages = engine.stats().rebuilt_display_pages;
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.apply_and_layout("body", epoch).unwrap();
         assert_eq!(
@@ -7182,6 +7216,54 @@ mod tests {
             vec![0..1, pages - 1..pages]
         );
         assert_eq!(engine.stats().rebuilt_pages, 2);
+        assert_eq!(
+            engine.stats().rebuilt_display_pages,
+            rebuilt_display_pages + 2
+        );
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap().pages,
+            full_display_build(&engine, &extras).pages
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn a_retained_page_whose_stamps_changed_is_rebuilt() {
+        let (engine, extras) = paged_filler_engine(208, 48);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
+        assert!(pages >= 4, "the fixture must span several pages");
+        let last = pages - 1;
+        // As when a section's first page moved: the last page shows other numbering.
+        engine.display.borrow_mut().list.as_mut().unwrap().pages[last].page_label =
+            Some("i".to_owned());
+
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                " too",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let incremental_builds = engine.stats().incremental_display_builds;
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            incremental_builds + 1
+        );
+        assert!(
+            engine
+                .pagination
+                .borrow()
+                .rebuilt_page_ranges
+                .iter()
+                .all(|range| !range.contains(&last))
+        );
         assert_eq!(
             engine.with_display_list(Clone::clone).unwrap().pages,
             full_display_build(&engine, &extras).pages

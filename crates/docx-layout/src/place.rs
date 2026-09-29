@@ -75,8 +75,14 @@ pub struct CheckpointedLayout {
     pub placed_blocks: usize,
     pub rebuilt_page_start: usize,
     pub rebuilt_page_end: usize,
-    /// The page ranges placed afresh, ascending within
-    /// `rebuilt_page_start..rebuilt_page_end`; the pages between them are retained.
+}
+
+/// [`CheckpointedLayout`] of an incremental pass with the page ranges it placed afresh.
+#[derive(Debug)]
+pub struct IncrementalLayout {
+    pub checkpointed: CheckpointedLayout,
+    /// Ascending within `rebuilt_page_start..rebuilt_page_end`; the pages between
+    /// them are retained.
     pub rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
 }
 
@@ -358,7 +364,6 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
         placed_blocks: placement.placed_blocks,
         rebuilt_page_start: 0,
         rebuilt_page_end: page_count,
-        rebuilt_page_ranges: std::iter::once(0..page_count).collect(),
     })
 }
 
@@ -374,6 +379,26 @@ pub fn layout_document_incremental(
     next_fingerprints: &[u64],
     dirty_index: usize,
 ) -> Result<CheckpointedLayout, LayoutError> {
+    layout_document_incremental_ranges(
+        input,
+        previous_layout,
+        previous_checkpoints,
+        previous_fingerprints,
+        next_fingerprints,
+        dirty_index,
+    )
+    .map(|run| run.checkpointed)
+}
+
+/// [`layout_document_incremental`], reporting the page ranges it placed afresh.
+pub fn layout_document_incremental_ranges(
+    input: &mut Input,
+    previous_layout: &mut Layout,
+    previous_checkpoints: &[LayoutCheckpoint],
+    previous_fingerprints: &[u64],
+    next_fingerprints: &[u64],
+    dirty_index: usize,
+) -> Result<IncrementalLayout, LayoutError> {
     let options = &input.options;
     let page_size = options.page_size.clone().unwrap_or(DEFAULT_PAGE_SIZE);
     let margins = resolve_page_margins(options.margins.as_ref());
@@ -460,7 +485,7 @@ pub fn layout_document_incremental(
     )> = Vec::new();
     let mut checkpoints: Vec<_> = previous_checkpoints
         .iter()
-        .filter(|checkpoint| checkpoint.page_index < resume.page_index)
+        .filter(|checkpoint| checkpoint.block_index < resume.block_index)
         .cloned()
         .collect();
     let mut placed_blocks = 0;
@@ -503,8 +528,8 @@ pub fn layout_document_incremental(
                     previous_checkpoints
                         .iter()
                         .filter(|checkpoint| {
-                            (previous.page_index..resume.page_index)
-                                .contains(&checkpoint.page_index)
+                            (previous.block_index..resume.block_index)
+                                .contains(&checkpoint.block_index)
                         })
                         .cloned(),
                 );
@@ -556,7 +581,7 @@ pub fn layout_document_incremental(
                 checkpoints.extend(
                     previous_checkpoints
                         .iter()
-                        .filter(|checkpoint| checkpoint.page_index >= previous.page_index)
+                        .filter(|checkpoint| checkpoint.block_index >= previous.block_index)
                         .cloned()
                         .map(|mut checkpoint| {
                             checkpoint.page_index =
@@ -571,22 +596,24 @@ pub fn layout_document_incremental(
     }
     refresh_reused_page_ranges(&mut pages, &reused_ranges, &input.measured);
 
-    Ok(CheckpointedLayout {
-        layout: Layout {
-            page_size,
-            pages,
-            columns: options.columns.clone(),
-            headers: None,
-            footers: None,
-            page_gap: options.page_gap,
-            partial: false,
+    Ok(IncrementalLayout {
+        checkpointed: CheckpointedLayout {
+            layout: Layout {
+                page_size,
+                pages,
+                columns: options.columns.clone(),
+                headers: None,
+                footers: None,
+                page_gap: options.page_gap,
+                partial: false,
+            },
+            checkpoints,
+            placed_blocks,
+            rebuilt_page_start: resume.page_index,
+            rebuilt_page_end: rebuilt_page_ranges
+                .last()
+                .map_or(resume.page_index, |range| range.end),
         },
-        checkpoints,
-        placed_blocks,
-        rebuilt_page_start: resume.page_index,
-        rebuilt_page_end: rebuilt_page_ranges
-            .last()
-            .map_or(resume.page_index, |range| range.end),
         rebuilt_page_ranges,
     })
 }
@@ -1772,7 +1799,10 @@ mod pagination_rule_tests {
         let mut next_fingerprints = previous_fingerprints.clone();
         next_fingerprints[7] = 2;
         next_fingerprints[42] = 2;
-        let incremental = layout_document_incremental(
+        let IncrementalLayout {
+            checkpointed: incremental,
+            rebuilt_page_ranges,
+        } = layout_document_incremental_ranges(
             &mut input(measured(&base)),
             &mut previous_layout,
             &previous.checkpoints,
@@ -1781,12 +1811,94 @@ mod pagination_rule_tests {
             7,
         )
         .unwrap();
-        assert_eq!(incremental.rebuilt_page_ranges, vec![1..2, 8..9]);
+        assert_eq!(rebuilt_page_ranges, vec![1..2, 8..9]);
         assert_eq!(
             (incremental.rebuilt_page_start, incremental.rebuilt_page_end),
             (1, 9)
         );
         assert!(incremental.placed_blocks * 4 < base.len());
+    }
+
+    #[test]
+    fn a_checkpoint_after_a_floating_table_keeps_the_spacing_its_page_starts_with() {
+        let floating_table = json!({
+            "block": {
+                "kind": "table", "id": 90,
+                "rows": [{ "id": 91, "cells": [{ "id": 92, "blocks": [] }] }],
+                "columnWidths": [50],
+                "floating": {},
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [50],
+                "totalWidth": 50, "totalHeight": 20,
+                "rows": [{ "height": 20, "cells": [
+                    { "width": 50, "height": 20, "blocks": [] }
+                ] }],
+            },
+        });
+        // The table overflows onto the second page, whose automatic break spends
+        // the following paragraph's space before.
+        let measured = || {
+            vec![
+                paragraph(0, 9, 10.0, json!({})),
+                floating_table.clone(),
+                paragraph(1, 1, 10.0, json!({ "spacing": { "before": 20 } })),
+            ]
+        };
+        let previous = layout_document_checkpointed(&mut input(measured())).unwrap();
+        let mut previous_layout = previous.layout.clone();
+        let incremental = layout_document_incremental(
+            &mut input(measured()),
+            &mut previous_layout,
+            &previous.checkpoints,
+            &[1, 1, 1],
+            &[1, 1, 2],
+            2,
+        )
+        .unwrap();
+        assert_eq!(incremental.rebuilt_page_start, 1);
+        assert_eq!(
+            serde_json::to_string(&incremental.layout).unwrap(),
+            serde_json::to_string(&previous.layout).unwrap()
+        );
+    }
+
+    #[test]
+    fn incremental_checkpoints_match_a_full_pass_on_a_page_with_several() {
+        let page_break =
+            || json!({"block":{"kind":"pageBreak","id":"page"},"measure":{"kind":"pageBreak"}});
+        let measured = || {
+            let mut blocks = vec![paragraph(0, 1, 10.0, json!({})), page_break(), page_break()];
+            blocks.extend((1..40).map(|id| paragraph(id, 1, 10.0, json!({}))));
+            blocks
+        };
+        let previous = layout_document_checkpointed(&mut input(measured())).unwrap();
+        // The second break opens no page: its checkpoint and the next paragraph's share one.
+        assert!(
+            previous
+                .checkpoints
+                .windows(2)
+                .any(|pair| pair[0].page_index == pair[1].page_index)
+        );
+        let previous_fingerprints = vec![1_u64; measured().len()];
+        let mut next_fingerprints = previous_fingerprints.clone();
+        next_fingerprints[2] = 2;
+        next_fingerprints[35] = 2;
+        let mut previous_layout = previous.layout.clone();
+        let incremental = layout_document_incremental(
+            &mut input(measured()),
+            &mut previous_layout,
+            &previous.checkpoints,
+            &previous_fingerprints,
+            &next_fingerprints,
+            2,
+        )
+        .unwrap();
+        assert_eq!(incremental.checkpoints, previous.checkpoints);
+        assert_eq!(
+            serde_json::to_string(&incremental.layout).unwrap(),
+            serde_json::to_string(&previous.layout).unwrap()
+        );
     }
 
     fn oversized_cant_split_table() -> serde_json::Value {
