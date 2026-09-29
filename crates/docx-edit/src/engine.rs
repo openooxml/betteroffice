@@ -318,7 +318,8 @@ fn options_through_section(
 }
 
 /// Measures leading blocks until their pagination runs two pages past
-/// `pages`, far enough that no later block moves the first `pages` pages.
+/// `pages` outside a section with columns, far enough that no later block
+/// moves the first `pages` pages.
 /// Returns the extents of the measured prefix; all blocks when it never does.
 /// With `anchored` objects the prefix is measured whole each time it grows: a
 /// float applies from its anchor on, and zones are extracted at the body's
@@ -361,6 +362,17 @@ fn measure_page_prefix(
         if end == blocks.len() {
             return Ok(measures);
         }
+        let options =
+            options_through_section(request_options, regions, section_breaks(&blocks[..end]));
+        // Columns are balanced over their whole section, so no prefix ends inside one.
+        if options
+            .columns
+            .as_ref()
+            .is_some_and(|columns| columns.count > 1.0)
+        {
+            step *= 2;
+            continue;
+        }
         let mut probe = LayoutInput {
             measured: blocks[..end]
                 .iter()
@@ -370,11 +382,7 @@ fn measure_page_prefix(
                     measure: measure.clone(),
                 })
                 .collect(),
-            options: options_through_section(
-                request_options,
-                regions,
-                section_breaks(&blocks[..end]),
-            ),
+            options,
         };
         let probed =
             docx_layout::place::layout_document(&mut probe).map_err(layout_error_message)?;
@@ -4518,6 +4526,32 @@ mod tests {
         let (full, prefix) = full_and_prefix(&bytes, &request, &|_| {});
         assert_eq!(prefix["provisional"], true);
         assert_eq!(first_pages(&prefix), first_pages(&full));
+    }
+
+    #[test]
+    fn a_prefix_does_not_end_inside_a_section_with_columns() {
+        let mut request: serde_json::Value =
+            serde_json::from_str(&float_page_request(serde_json::json!({}))).unwrap();
+        let properties = &mut request["regions"]["sections"][0]["properties"];
+        properties["pageWidth"] = 12240.into();
+        properties["pageHeight"] = 15840.into();
+        properties["columnCount"] = 2.into();
+        properties["columnSpace"] = 300.into();
+        let request = request.to_string();
+        // Balanced over 32 paragraphs, the first column would end sooner than
+        // over all 100, which are too tall to balance.
+        let mut body = format!(
+            "<w:p><w:r><w:t>{}</w:t></w:r></w:p>",
+            "A long first paragraph of text and more text. ".repeat(100)
+        );
+        for index in 1..100 {
+            body.push_str(&format!(
+                "<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>"
+            ));
+        }
+        body.push_str(r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="360" w:right="360" w:bottom="360" w:left="360" w:header="720" w:footer="720"/><w:cols w:num="2" w:space="300"/></w:sectPr>"#);
+        let (full, prefix) = full_and_prefix(&docx_bytes("", &body), &request, &|_| {});
+        assert_eq!(prefix["layout"], full["layout"]);
     }
 
     #[test]
