@@ -226,7 +226,7 @@ export function useDocxEditorRefApi({
       flushPendingInput: async () => {
         await flushedSession(pagedEditorRef);
       },
-      save: handleSave,
+      save: async () => (opening() ? null : handleSave()),
       setZoom,
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),

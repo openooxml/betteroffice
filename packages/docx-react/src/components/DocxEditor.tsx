@@ -1750,21 +1750,33 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     },
   };
 
-  // Stable callbacks wrapper that delegates to ref (avoids recreating items on every render)
+  // Stable callbacks wrapper that delegates to ref (avoids recreating items on every render).
+  // Comments do not change while the document opens.
   const stableCallbacks = useMemo<CommentCallbacks>(
     () => ({
-      onCommentReply: (...args) => commentCallbacksRef.current.onCommentReply?.(...args),
-      onCommentResolve: (...args) => commentCallbacksRef.current.onCommentResolve?.(...args),
-      onCommentUnresolve: (...args) => commentCallbacksRef.current.onCommentUnresolve?.(...args),
-      onCommentDelete: (...args) => commentCallbacksRef.current.onCommentDelete?.(...args),
-      onAddComment: (...args) => commentCallbacksRef.current.onAddComment?.(...args),
+      onCommentReply: (...args) => {
+        if (!openingRef.current) commentCallbacksRef.current.onCommentReply?.(...args);
+      },
+      onCommentResolve: (...args) => {
+        if (!openingRef.current) commentCallbacksRef.current.onCommentResolve?.(...args);
+      },
+      onCommentUnresolve: (...args) => {
+        if (!openingRef.current) commentCallbacksRef.current.onCommentUnresolve?.(...args);
+      },
+      onCommentDelete: (...args) => {
+        if (!openingRef.current) commentCallbacksRef.current.onCommentDelete?.(...args);
+      },
+      onAddComment: (...args) => {
+        if (!openingRef.current) commentCallbacksRef.current.onAddComment?.(...args);
+      },
       onCancelAddComment: (...args) => commentCallbacksRef.current.onCancelAddComment?.(...args),
       onAcceptChange: (...args) => commentCallbacksRef.current.onAcceptChange?.(...args),
       onRejectChange: (...args) => commentCallbacksRef.current.onRejectChange?.(...args),
       onAcceptChangeById: (...args) => commentCallbacksRef.current.onAcceptChangeById?.(...args),
       onRejectChangeById: (...args) => commentCallbacksRef.current.onRejectChangeById?.(...args),
-      onTrackedChangeReply: (...args) =>
-        commentCallbacksRef.current.onTrackedChangeReply?.(...args),
+      onTrackedChangeReply: (...args) => {
+        if (!openingRef.current) commentCallbacksRef.current.onTrackedChangeReply?.(...args);
+      },
     }),
     []
   );

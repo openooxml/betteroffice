@@ -211,3 +211,49 @@ test('a request of the preview failing after the handover leaves the new session
     full.native.free();
   }
 });
+
+test('input for a session the worker does not serve takes the host path', async () => {
+  FakeWorker.created = [];
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const preview = hostWithPage(9514, 'Preview page');
+  const at = { story: 'body', paraId: '00000001', offset: 0 };
+  Object.assign(preview.engine, { selection: () => ({ anchor: at, head: at }) });
+  const handoffFrom = { current: null as YrsSession | null };
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) =>
+        useRustDisplayList(layout, undefined, undefined, undefined, source, undefined, handoffFrom),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pending = result.current.layoutInWorker(preview.engine, REQUEST);
+    const worker = FakeWorker.created[0]!;
+    worker.reply({
+      id: worker.posted[0]!.id,
+      ok: true,
+      frame: preview.frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson: preview.layoutJson,
+    });
+    const computation = await pending!;
+    await act(async () => {
+      rerender({ layout: computation!.layout, source: preview.engine });
+    });
+    await waitFor(() => expect(text(result.current.displayList)).toContain('Preview'));
+
+    // The shown session is no longer the one the worker holds.
+    await act(async () => {
+      rerender({ layout: computation!.layout, source: {} as YrsSession });
+    });
+    const outcome = await Promise.race([
+      result.current.applyInput('x'),
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 200)),
+    ]);
+    expect(outcome).toBeNull();
+    expect(worker.posted.map((request) => request.type)).not.toContain('applyInput');
+    unmount();
+  } finally {
+    preview.native.free();
+  }
+});

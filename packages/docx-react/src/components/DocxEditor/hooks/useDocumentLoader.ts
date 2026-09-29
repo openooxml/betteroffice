@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { YrsDocxHost } from '@betteroffice/docx/yrs';
@@ -74,6 +74,7 @@ export function useDocumentLoader({
   const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
   const [yrsSeedGeneration, setYrsSeedGeneration] = useState(0);
   const [loadGeneration] = useState(() => new DocumentLoadGeneration());
+  const previewDocumentRef = useRef<Document | null>(null);
 
   const loadParsedDocument = useCallback(
     (doc: Document, seedBytes?: Uint8Array) => {
@@ -133,6 +134,7 @@ export function useDocumentLoader({
         return;
       }
       const doc = host.document;
+      previewDocumentRef.current = options?.preview ? doc : null;
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
       const embeddedFamilies = getEmbeddedFontFamilies(doc.package.fontTable);
@@ -207,8 +209,14 @@ export function useDocumentLoader({
     if (commentsLoadedRef.current) return;
     const doc = history.state;
     if (!doc) return;
-    commentsLoadedRef.current = true;
     const bodyComments = doc.package?.document?.comments;
+    // A preview's parse generates other IDs than the full document's, whose
+    // comments are the ones loaded; its sidebar opens now all the same.
+    if (doc === previewDocumentRef.current) {
+      if (bodyComments && bodyComments.length > 0) setShowCommentsSidebar(true);
+      return;
+    }
+    commentsLoadedRef.current = true;
     if (bodyComments && bodyComments.length > 0) {
       setComments(bodyComments);
       setShowCommentsSidebar(true);
