@@ -1319,7 +1319,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       !sameYrsSelection(previousStickySelection, stickySelection);
     if (
       selection.anchor === selection.head &&
-      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged)
+      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged, readOnly)
     ) {
       const scroller = findVerticalScrollParentOrRoot(host);
       const viewport = scroller.getBoundingClientRect();
@@ -1339,6 +1339,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enabled,
     layoutUpdateOrigin,
     onStateChange,
+    readOnly,
     residentCaret,
     residentCaretAuthoritative,
     selectionEpoch,
