@@ -18,7 +18,11 @@ import {
   type RetainedFrame,
   type ResidentDisplayListQueryEngine,
 } from '@betteroffice/docx/layout/render';
-import { getLayoutKernelInputs } from '@betteroffice/docx/editor';
+import {
+  getLayoutKernelInputs,
+  workerLayoutComputation,
+  type LayoutComputation,
+} from '@betteroffice/docx/editor';
 import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
@@ -27,6 +31,7 @@ import {
   sameYrsSelection,
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
+  type ResidentEngineWorkerFrame,
   type YrsResidentCaretSnapshot,
   type YrsSelection,
   type YrsSession,
@@ -79,6 +84,8 @@ export interface UseRustDisplayListResult {
     direction: 'backward' | 'forward',
     count?: number
   ): Promise<ResidentFrameApplyResult | null>;
+  /** See {@link LayoutInWorker}. */
+  layoutInWorker: LayoutInWorker;
   /**
    * True while the worker owns the visible page surfaces. Sticky across
    * invalidation (remote/structural updates) so the canvas keeps its last
@@ -103,6 +110,29 @@ export interface UseRustDisplayListResult {
   /** Selection move / blur / IME start / mode change: immediate swap to the DOM caret. */
   notifyCaretInterrupt(): void;
 }
+
+/**
+ * Lay the document out in the resident worker, which then owns that layout:
+ * the reply carries the layout and its first frame, and the main thread runs
+ * no layout of its own. Null when no worker can take it, and a null result
+ * when the worker failed; either way the caller lays out on the main thread.
+ */
+export type LayoutInWorker = (
+  session: YrsSession,
+  request: string
+) => Promise<LayoutComputation | null> | null;
+
+interface WorkerLayoutFrame {
+  result: ResidentEngineWorkerFrame;
+  previousFrame: RetainedFrame | null;
+  engine: YrsSession;
+  /** Content epoch and display extras the worker built the frame for. */
+  contentEpoch: number;
+  layoutExtras: string;
+}
+
+/** The display fallback needs a main-thread layout of a worker-run one. */
+class MainThreadLayoutPendingError extends Error {}
 
 export interface ResidentFrameApplyResult {
   frameEpoch: number | null;
@@ -190,6 +220,9 @@ export function useRustDisplayList(
     client: ResidentEngineWorkerClient;
   } | null>(null);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
+  const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
+  const resolvedCommentIdsRef = useRef(resolvedCommentIds);
+  resolvedCommentIdsRef.current = resolvedCommentIds;
   const recoveryFrameEpochRef = useRef(0);
   const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const suppressWorkerInvalidationRef = useRef(0);
@@ -651,6 +684,107 @@ export function useRustDisplayList(
     [applyResidentInput]
   );
 
+  // The display extras this hook builds frames with, minus the header/footer
+  // payload a layout supplies.
+  const frameExtrasInputs = useCallback((): Pick<
+    Parameters<typeof encodeDisplayListFrameExtras>[0],
+    'fontChains' | 'resolvedCommentIds'
+  > => {
+    const fontChains = fontChainsProviderRef?.current?.();
+    const resolved = resolvedCommentIdsRef.current;
+    return {
+      ...(fontChains ? { fontChains } : {}),
+      ...(resolved && resolved.size > 0
+        ? { resolvedCommentIds: [...resolved].sort((a, b) => a - b) }
+        : {}),
+    };
+  }, [fontChainsProviderRef]);
+
+  // Stop using the worker for `hostEngine`: its frames and queries go, and
+  // every later layout and frame runs on the main thread.
+  const dropWorker = useCallback(
+    (hostEngine: YrsSession): void => {
+      adoptHostEngine(hostEngine);
+      if (workerRef.current?.engine === hostEngine) {
+        workerRef.current.client.destroy();
+        workerRef.current = null;
+      }
+      setWorkerSurfacesActive(false);
+      setWorkerPresentationActive(false);
+    },
+    [adoptHostEngine, setWorkerPresentationActive]
+  );
+
+  const layoutInWorker = useCallback<LayoutInWorker>(
+    (hostEngine, request) => {
+      if (
+        overrides?.build ||
+        !canUseResidentEngineWorker() ||
+        !isWorkerHostEngine(hostEngine) ||
+        !hostEngine.adoptResidentWorkerLayout ||
+        workerFallbackEngineRef.current === hostEngine
+      ) {
+        return null;
+      }
+      if (workerRef.current?.engine !== hostEngine) {
+        workerRef.current?.client.destroy();
+        workerRef.current = {
+          engine: hostEngine,
+          client: new ResidentEngineWorkerClient(),
+        };
+      }
+      const worker = workerRef.current.client;
+      const bootstrapping = !worker.bootstrapSent();
+      const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
+      hostEngine.adoptResidentWorkerLayout(request);
+      const snapshot = hostEngine.residentWorkerSnapshot(
+        bootstrapping
+          ? {}
+          : {
+              knownStateVector: worker.remoteStateVector(),
+              knownFontsRevision: worker.syncedFontsRevision(),
+            }
+      );
+      if (!snapshot) return null;
+      const contentEpoch = contentEpochRef.current;
+      const options = {
+        layoutExtras: JSON.stringify(frameExtrasInputs()),
+        stateVector: hostEngine.encodeStateVector(),
+      };
+      const paintCaret =
+        !bootstrapping &&
+        workerPresentationActiveRef.current &&
+        paintedCaretMachine.shouldPaint(performance.now());
+      const reply = bootstrapping
+        ? worker.bootstrap(snapshot, '', options)
+        : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
+      return reply
+        .then((result) => {
+          if (result.layoutJson === undefined) {
+            throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
+          }
+          const computation = workerLayoutComputation(result.layoutJson);
+          workerLayoutFramesRef.current.set(computation.layout, {
+            result,
+            previousFrame,
+            engine: hostEngine,
+            contentEpoch,
+            layoutExtras: options.layoutExtras,
+          });
+          return computation;
+        })
+        .catch((cause: unknown) => {
+          console.error(
+            '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
+            cause
+          );
+          dropWorker(hostEngine);
+          return null;
+        });
+    },
+    [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine]
+  );
+
   const attachOffscreenCanvases = useCallback(
     async (
       pages: ResidentEngineOffscreenPage[],
@@ -727,7 +861,9 @@ export function useRustDisplayList(
     // builds never encode state or copy fonts.
     const probe = workerEligible ? residentEngine.residentWorkerProbe() : null;
     const buildOnMainThread = () =>
-      overrides?.build
+      residentEngine?.residentLayoutInWorker?.()
+        ? Promise.reject(new MainThreadLayoutPendingError())
+        : overrides?.build
         ? build(buildInputs, engine ?? undefined).then((displayList) => ({
             displayList,
             frame: null as RetainedFrame | null,
@@ -771,68 +907,101 @@ export function useRustDisplayList(
           '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
           nextError
         );
-        adoptHostEngine(hostEngine);
-        if (workerRef.current?.engine === hostEngine) {
-          workerRef.current.client.destroy();
-          workerRef.current = null;
-        }
-        setWorkerSurfacesActive(false);
-        setWorkerPresentationActive(false);
+        dropWorker(hostEngine);
         return buildOnMainThread();
       };
+      const prebuilt = workerLayoutFramesRef.current.get(layout);
+      if (prebuilt) workerLayoutFramesRef.current.delete(layout);
       try {
-        if (workerRef.current?.engine !== hostEngine) {
-          workerRef.current?.client.destroy();
-          workerRef.current = {
-            engine: hostEngine,
-            client: new ResidentEngineWorkerClient(),
-          };
-        }
-        const worker = workerRef.current.client;
-        const extras = encodeDisplayListFrameExtras(buildInputs);
-        const bootstrapping = worker.layoutRevision() === 0;
-        const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
-        // On a fresh client both hints are null, so a bootstrap snapshot is
-        // always complete; a sync snapshot ships a state diff and skips font
-        // bytes the worker already holds.
-        const buildSnapshot = () => {
-          const snapshot = hostEngine.residentWorkerSnapshot({
-            knownStateVector: worker.remoteStateVector(),
-            knownFontsRevision: worker.syncedFontsRevision(),
+        // The frame is adopted only while nothing newer reached the session
+        // or the display since the worker built it.
+        if (
+          prebuilt &&
+          prebuilt.engine === hostEngine &&
+          workerRef.current?.engine === hostEngine &&
+          prebuilt.contentEpoch === contentEpoch &&
+          (snapshotRef.current.frame?.frameEpoch ?? null) ===
+            (prebuilt.previousFrame?.frameEpoch ?? null) &&
+          prebuilt.layoutExtras === JSON.stringify(frameExtrasInputs())
+        ) {
+          // The worker ran this layout and built its frame in the same pass.
+          const { result, previousFrame } = prebuilt;
+          const delta = decodeFrameDelta(result.frame);
+          const nextFrame = applyFrameDelta(previousFrame, delta);
+          pending = Promise.resolve({
+            displayList: nextFrame.displayList,
+            frame: nextFrame,
+            caret: residentCaretForSelection(
+              result.caret,
+              result.selection,
+              hostEngine.selection(),
+              nextFrame
+            ),
+            queryEngine: null,
+            workerProduced: true,
+            caretPainted: result.caretPainted,
           });
-          if (!snapshot) throw new Error('Resident worker snapshot was not available');
-          return snapshot;
-        };
-        // Structural text input reaches the worker as a sync/buildFrame; keep
-        // the painted caret glued to those frames while the typing burst lasts.
-        const paintCaret =
-          !bootstrapping &&
-          workerPresentationActiveRef.current &&
-          paintedCaretMachine.shouldPaint(performance.now());
-        const workerFrame = bootstrapping
-          ? worker.bootstrap(buildSnapshot(), extras)
-          : worker.layoutRevision() !== probe.layoutRevision
-            ? worker.sync(buildSnapshot(), extras, previousFrame?.frameEpoch ?? 0, paintCaret)
-            : worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0, paintCaret);
-        pending = workerFrame
-          .then((result) => {
-            const delta = decodeFrameDelta(result.frame);
-            const nextFrame = applyFrameDelta(previousFrame, delta);
-            return {
-              displayList: nextFrame.displayList,
-              frame: nextFrame,
-              caret: residentCaretForSelection(
-                result.caret,
-                result.selection,
-                hostEngine.selection(),
-                nextFrame
-              ),
-              queryEngine: null,
-              workerProduced: true,
-              caretPainted: result.caretPainted,
+        } else {
+          if (workerRef.current?.engine !== hostEngine) {
+            workerRef.current?.client.destroy();
+            workerRef.current = {
+              engine: hostEngine,
+              client: new ResidentEngineWorkerClient(),
             };
-          })
-          .catch(fallback);
+          }
+          const worker = workerRef.current.client;
+          const extras = encodeDisplayListFrameExtras(buildInputs);
+          const bootstrapping = !worker.bootstrapSent();
+          const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
+          // On a fresh client both hints are null, so a bootstrap snapshot is
+          // always complete; a sync snapshot ships a state diff and skips font
+          // bytes the worker already holds.
+          const buildSnapshot = () => {
+            const snapshot = hostEngine.residentWorkerSnapshot({
+              knownStateVector: worker.remoteStateVector(),
+              knownFontsRevision: worker.syncedFontsRevision(),
+            });
+            if (!snapshot) throw new Error('Resident worker snapshot was not available');
+            return snapshot;
+          };
+          const sent = () => ({ stateVector: hostEngine.encodeStateVector() });
+          // Structural text input reaches the worker as a sync/buildFrame; keep
+          // the painted caret glued to those frames while the typing burst lasts.
+          const paintCaret =
+            !bootstrapping &&
+            workerPresentationActiveRef.current &&
+            paintedCaretMachine.shouldPaint(performance.now());
+          const workerFrame = bootstrapping
+            ? worker.bootstrap(buildSnapshot(), extras, sent())
+            : worker.layoutRevision() !== probe.layoutRevision
+              ? worker.sync(
+                  buildSnapshot(),
+                  extras,
+                  previousFrame?.frameEpoch ?? 0,
+                  paintCaret,
+                  sent()
+                )
+              : worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0, paintCaret);
+          pending = workerFrame
+            .then((result) => {
+              const delta = decodeFrameDelta(result.frame);
+              const nextFrame = applyFrameDelta(previousFrame, delta);
+              return {
+                displayList: nextFrame.displayList,
+                frame: nextFrame,
+                caret: residentCaretForSelection(
+                  result.caret,
+                  result.selection,
+                  hostEngine.selection(),
+                  nextFrame
+                ),
+                queryEngine: null,
+                workerProduced: true,
+                caretPainted: result.caretPainted,
+              };
+            })
+            .catch(fallback);
+        }
       } catch (error) {
         pending = fallback(error);
       }
@@ -872,6 +1041,10 @@ export function useRustDisplayList(
         );
       })
       .catch((error) => {
+        if (error instanceof MainThreadLayoutPendingError) {
+          setTimeout(() => requestLayoutRef.current?.(), 0);
+          return;
+        }
         if (
           generation !== generationRef.current ||
           contentEpoch !== contentEpochRef.current
@@ -894,6 +1067,8 @@ export function useRustDisplayList(
     resolvedCommentIds,
     engine,
     residentEngine,
+    dropWorker,
+    frameExtrasInputs,
     setWorkerPresentationActive,
     paintedCaretMachine,
     applyPaintedCaretReply,
@@ -946,6 +1121,7 @@ export function useRustDisplayList(
     caret: snapshot.caret,
     applyInput,
     applyDelete,
+    layoutInWorker,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1071,6 +1247,8 @@ export interface UseCanvasRendererResult {
     direction: 'backward' | 'forward',
     count?: number
   ): Promise<ResidentFrameApplyResult | null>;
+  /** Hands a layout pass to the resident worker; see {@link LayoutInWorker}. */
+  layoutInWorker: LayoutInWorker;
   setWorkerPresentationActive(active: boolean): void;
   /** OffscreenCanvas replay bridge; null keeps DOM-canvas replay. */
   offscreenReplay: {
@@ -1131,6 +1309,7 @@ export function useCanvasRenderer(
     caret,
     applyInput,
     applyDelete,
+    layoutInWorker,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1227,6 +1406,7 @@ export function useCanvasRenderer(
     glyphOutlineProvider: engine?.outlineGlyphJson ?? null,
     applyInput,
     applyDelete,
+    layoutInWorker,
     setWorkerPresentationActive,
     offscreenReplay,
     paintedCaretActive,

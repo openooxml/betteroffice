@@ -83,7 +83,7 @@ export const editsession_measure_paragraph_json: (a: number, b: number, c: numbe
 export const editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_new: (a: number) => [number, number, number];
-export const editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_paragraph_identities: (a: number) => [number, number, number, number];
 export const editsession_paragraph_save_plan: (a: number) => [number, number, number, number];

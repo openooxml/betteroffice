@@ -94,3 +94,25 @@ test('worker pages count as presented only once their attach has painted them', 
   expect(attaches).toHaveLength(4);
   expect(shows(third.displayList)).toBe(true);
 });
+
+test('main-thread pages stop counting as presented at a new zoom until they repaint', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const shown = frame(1);
+  const view = (zoom: number) => (
+    <CanvasPagesView
+      displayList={shown.displayList}
+      frame={shown}
+      hostRef={hostRef}
+      zoom={zoom}
+      glyphOutlineProvider={() => ''}
+    />
+  );
+  const shows = () => isPresented(hostRef.current, shown.displayList);
+  const { rerender } = render(view(1));
+  await act(async () => {});
+  expect(shows()).toBe(true);
+  rerender(view(2));
+  expect(shows()).toBe(false);
+  await act(async () => {});
+  expect(shows()).toBe(true);
+});

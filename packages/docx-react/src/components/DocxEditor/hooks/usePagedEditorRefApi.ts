@@ -64,7 +64,7 @@ export interface PagedEditorCommandBridge {
 interface RefApiInputs {
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
-  runLayoutPipeline: () => void;
+  runLayoutPipeline: (options?: { onHost?: boolean }) => void;
   getLayoutRequest: () => string | null;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
   revealPositionImpl: (position: number) => RevealPositionOutcome;

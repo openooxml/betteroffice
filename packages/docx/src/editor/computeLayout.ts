@@ -177,3 +177,25 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
     notesConverged: output.notesConverged,
   };
 }
+
+/**
+ * The layout a resident worker ran, from its region layout reply. The
+ * measured blocks stay in the worker, so the main-thread display fallback has
+ * to lay the document out on this thread first.
+ */
+export function workerLayoutComputation(layoutJson: string): LayoutComputation {
+  const output = JSON.parse(layoutJson) as ResidentRegionLayoutRetainedOutput;
+  const unavailable = (): never => {
+    throw new Error('the measured blocks of a worker-run layout live in the worker');
+  };
+  kernelInputsByLayout.set(output.layout, {
+    get measured() {
+      return unavailable();
+    },
+    get options() {
+      return unavailable();
+    },
+    ...(output.headersFooters ? { headersFooters: output.headersFooters } : {}),
+  });
+  return { layout: output.layout, notesConverged: output.notesConverged };
+}

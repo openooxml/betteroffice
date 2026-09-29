@@ -13,6 +13,7 @@ export type ResidentEngineWorkerRequest =
       snapshot: YrsResidentWorkerSnapshot;
       extras: string;
       expectedFrameEpoch: number;
+      layoutExtras?: string;
     }
   | {
       id: number;
@@ -21,6 +22,12 @@ export type ResidentEngineWorkerRequest =
       extras: string;
       expectedFrameEpoch: number;
       paintCaret: boolean;
+      /**
+       * Display extras without the header/footer payload. When present, the
+       * snapshot's layout is authoritative: the worker completes the extras
+       * from the layout it runs and returns that layout as `layoutJson`.
+       */
+      layoutExtras?: string;
     }
   | {
       id: number;
@@ -93,6 +100,8 @@ export type ResidentEngineWorkerResponse =
       /** The worker replica's yrs state vector after this operation, so the
        * next sync can ship a diff instead of the whole document state. */
       stateVector?: ArrayBuffer;
+      /** The region layout the worker ran, for a request carrying `layoutExtras`. */
+      layoutJson?: string;
     }
   | {
       id: number;

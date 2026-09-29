@@ -614,8 +614,10 @@ export class EditSession {
      * styles, theme, settings, fonts and relationships still cross while the
      * bulk of the document stays in Rust. Errors on bytes that are not a
      * readable DOCX.
+     * `digest`, when given, must be the SHA-256 of `bytes` in lowercase hex,
+     * as a host that hashed them off this thread already knows it.
      */
-    open_docx(bytes: Uint8Array, seed_stories: boolean, generation?: string | null): string;
+    open_docx(bytes: Uint8Array, seed_stories: boolean, generation?: string | null, digest?: string | null): string;
     /**
      * One glyph outline from this session's resident font store:
      * `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
@@ -1415,7 +1417,7 @@ export interface InitOutput {
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
-    readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];

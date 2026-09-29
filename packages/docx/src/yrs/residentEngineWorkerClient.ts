@@ -26,6 +26,16 @@ export interface ResidentEngineWorkerFrame {
   layoutRevision: number;
   /** Characters an applyDelete removed. */
   deletedUnits: number;
+  /** The region layout the worker ran, when the request handed it the layout. */
+  layoutJson?: string;
+}
+
+/** A bootstrap/sync whose snapshot layout the worker runs as the only layout. */
+export interface ResidentEngineWorkerLayoutOptions {
+  /** Display extras minus the header/footer payload the worker's layout supplies. */
+  layoutExtras?: string;
+  /** The host state vector the snapshot brings the worker to. */
+  stateVector?: Uint8Array;
 }
 
 export interface ResidentEngineOffscreenPage {
@@ -80,11 +90,15 @@ export class ResidentEngineWorkerClient {
   private revision = 0;
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
+  private bootstrapped = false;
+  /** Id of the last snapshot request sent; replies to earlier requests must
+   * not replace the state it recorded. */
+  private lastSnapshotId = 0;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
       const response = event.data;
-      if (response.ok && response.stateVector) {
+      if (response.ok && response.stateVector && response.id >= this.lastSnapshotId) {
         this.remoteVector = new Uint8Array(response.stateVector);
       }
       if (!response.ok && response.terminal) {
@@ -125,15 +139,30 @@ export class ResidentEngineWorkerClient {
     return this.appliedFontsRevision;
   }
 
+  /** A bootstrap was sent; later snapshots go as syncs queued behind it. */
+  bootstrapSent(): boolean {
+    return this.bootstrapped;
+  }
+
   async bootstrap(
     snapshot: YrsResidentWorkerSnapshot,
-    extras: string
+    extras: string,
+    options: ResidentEngineWorkerLayoutOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
-    const response = await this.request(
-      { type: 'bootstrap', snapshot, extras, expectedFrameEpoch: 0 },
+    this.bootstrapped = true;
+    const pending = this.request(
+      {
+        type: 'bootstrap',
+        snapshot,
+        extras,
+        expectedFrameEpoch: 0,
+        ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+      },
       snapshotTransfers(snapshot)
     );
+    this.recordSent(options.stateVector, fontsRevision);
+    const response = await pending;
     const result = frameResult(response);
     this.recordSync(response, fontsRevision);
     this.ready = true;
@@ -145,13 +174,23 @@ export class ResidentEngineWorkerClient {
     snapshot: YrsResidentWorkerSnapshot,
     extras: string,
     expectedFrameEpoch: number,
-    paintCaret = false
+    paintCaret = false,
+    options: ResidentEngineWorkerLayoutOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
-    const response = await this.request(
-      { type: 'sync', snapshot, extras, expectedFrameEpoch, paintCaret },
+    const pending = this.request(
+      {
+        type: 'sync',
+        snapshot,
+        extras,
+        expectedFrameEpoch,
+        paintCaret,
+        ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+      },
       snapshotTransfers(snapshot)
     );
+    this.recordSent(options.stateVector, fontsRevision);
+    const response = await pending;
     const result = frameResult(response);
     this.recordSync(response, fontsRevision);
     this.ready = true;
@@ -282,6 +321,18 @@ export class ResidentEngineWorkerClient {
     });
   }
 
+  /**
+   * Requests run in order, so once a snapshot is sent every later request
+   * finds its state and fonts in the worker: the next sync can diff against
+   * them before this one answers.
+   */
+  private recordSent(stateVector: Uint8Array | undefined, fontsRevision: number): void {
+    if (this.terminalError) return;
+    this.lastSnapshotId = this.nextId - 1;
+    if (stateVector) this.remoteVector = stateVector.slice();
+    this.appliedFontsRevision = fontsRevision;
+  }
+
   /** Restarted by every message, so a queue of slow but answered requests never trips it. */
   private armWatchdog(): void {
     this.disarmWatchdog();
@@ -305,10 +356,10 @@ export class ResidentEngineWorkerClient {
   /** Record a successfully applied bootstrap/sync payload's fonts revision.
    * The state vector is tracked centrally in `onmessage`. */
   private recordSync(
-    _response: ResidentEngineWorkerResponse & { ok: true },
+    response: ResidentEngineWorkerResponse & { ok: true },
     fontsRevision: number
   ): void {
-    this.appliedFontsRevision = fontsRevision;
+    if (response.id >= this.lastSnapshotId) this.appliedFontsRevision = fontsRevision;
   }
 
   private fail(error: Error): void {
@@ -360,6 +411,7 @@ function frameResult(
     replayedPages: response.replayedPages ?? 0,
     layoutRevision: response.layoutRevision ?? 0,
     deletedUnits: response.deletedUnits ?? 0,
+    ...(response.layoutJson !== undefined ? { layoutJson: response.layoutJson } : {}),
   };
 }
 
