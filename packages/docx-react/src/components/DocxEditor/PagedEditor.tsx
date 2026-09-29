@@ -1340,6 +1340,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsLocToDisplayPosition,
         getScrollContainer,
         displayListQueries,
+        layout,
         canvasHostRef,
         onNavigationIntent: cancelPendingScrollRestore,
         requestCanvasParagraphFlash,
