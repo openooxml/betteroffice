@@ -6,12 +6,15 @@ if (ownsDom) GlobalRegistrator.register();
 
 import { createRef } from 'react';
 import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import type {
-  DisplayList,
-  DisplayListQueries,
-  DisplayPage,
-  DisplayPrimitive,
-  RetainedFrame,
+import {
+  applyFrameDeltaOwned,
+  FRAME_DELTA_VERSION,
+  type DecodedFrameDelta,
+  type DisplayList,
+  type DisplayListQueries,
+  type DisplayPage,
+  type DisplayPrimitive,
+  type RetainedFrame,
 } from '@betteroffice/docx/layout/render';
 import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasPageMirror } from './CanvasPageMirror';
@@ -282,4 +285,75 @@ test('a plugin DOM query for a range on a page whose chrome is not built finds i
   expect(elements).toHaveLength(1);
   expect(elements[0]!.isConnected).toBe(true);
   expect(mirroredPages(host)).toContain(30);
+});
+
+test('a position shift in place moves a control at once, and the mirror by idle time', async () => {
+  const page = {
+    pageIndex: 0,
+    width: 100,
+    height: 100,
+    primitives: [
+      { ...widget('shifted'), docStart: 1, docEnd: 2, blockId: 'p' } as DisplayPrimitive,
+    ],
+  } as DisplayPage;
+  const first: RetainedFrame = {
+    protocolVersion: FRAME_DELTA_VERSION,
+    docEpoch: 1,
+    layoutEpoch: 1,
+    frameEpoch: 1,
+    pages: [
+      { pageId: 1n, pageIndex: 0, fingerprint: 1n, primitiveIds: new BigUint64Array([1n]), page },
+    ],
+    damagedPageIds: new Set([1n]),
+    removedPageIds: new Set(),
+    displayList: { pages: [page] },
+  };
+  const hostRef = createRef<HTMLDivElement>();
+  const view = (frame: RetainedFrame) => (
+    <CanvasPagesView
+      displayList={frame.displayList}
+      frame={frame}
+      hostRef={hostRef}
+      interactive
+      glyphOutlineProvider={() => ''}
+    />
+  );
+  const { rerender } = render(view(first));
+  await act(async () => {});
+  const host = hostRef.current!;
+  const controlPos = () =>
+    host.querySelector<HTMLElement>('button[data-sdt-group-id="shifted"]')?.dataset.sdtPos;
+  const mirrorStart = () =>
+    host.querySelector<HTMLElement>('.canvas-page-mirror [data-doc-start]')?.dataset.docStart;
+  expect(controlPos()).toBe('1');
+  expect(mirrorStart()).toBe('1');
+
+  const shift: DecodedFrameDelta = {
+    protocolVersion: FRAME_DELTA_VERSION,
+    full: false,
+    docEpoch: 2,
+    layoutEpoch: 2,
+    frameEpoch: 2,
+    baseFrameEpoch: 1,
+    pageCount: 1,
+    operations: [
+      {
+        kind: 'shift-positions',
+        pageIndex: 0,
+        pageId: 1n,
+        fingerprint: 2n,
+        // docStart, docEnd and the inline widget's position
+        runs: [{ start: 0, count: 1, changedMask: 1 | 2 | 16, delta: 5 }],
+        anchors: [],
+      },
+    ],
+    bytes: new Uint8Array(),
+  };
+  const second = applyFrameDeltaOwned(first, shift);
+  expect(second.displayList.pages[0]).toBe(page);
+  rerender(view(second));
+  await act(async () => {});
+  expect(controlPos()).toBe('6');
+  await idle();
+  expect(mirrorStart()).toBe('6');
 });

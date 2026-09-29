@@ -17,7 +17,11 @@
  */
 
 import { useRef } from 'react';
-import { buildInteractiveOverlayPage, type DisplayPage } from '@betteroffice/docx/layout/render';
+import {
+  buildInteractiveOverlayPage,
+  displayPageRevision,
+  type DisplayPage,
+} from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
 import { usePageChrome } from './usePageChrome';
@@ -55,7 +59,8 @@ export function CanvasInteractiveOverlay({
     active,
     defer,
     rebuildAtOnce: true,
-    urgentRevision: 0,
+    // Its buttons carry the positions a shift moves.
+    urgentRevision: displayPageRevision(page),
     registerBuild,
     make: makeOverlay,
   });
