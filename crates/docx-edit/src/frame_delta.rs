@@ -480,7 +480,11 @@ fn prepare_pages<'a>(
             (*next_page_id, true, false)
         };
         let positions = primitive_positions(page);
-        let full_prepare = is_new || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index));
+        // An unbuilt page has no primitive positions to shift, so its
+        // position span only reaches the host through a fresh fingerprint.
+        let full_prepare = is_new
+            || page.unbuilt
+            || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index));
         let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
             let hashes = hash_page(page)?;
             let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
@@ -1576,6 +1580,57 @@ mod tests {
             assert_eq!(retained.fingerprint, fresh.fingerprint);
             assert_eq!(retained.primitive_ids, fresh.primitive_ids);
         }
+    }
+
+    #[test]
+    fn an_unbuilt_page_whose_position_span_moves_is_sent_again() {
+        let list = |span: [i64; 2]| -> DisplayList {
+            serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": [
+                {
+                    "pageIndex": 0, "width": 816, "height": 1056,
+                    "primitives": [{
+                        "kind": "text", "text": "built", "x": 96, "baselineY": 120,
+                        "width": 40, "font": "16px serif", "color": "#000000",
+                        "blockId": 7, "docStart": 1, "docEnd": 6
+                    }]
+                },
+                {
+                    "pageIndex": 1, "width": 816, "height": 1056,
+                    "primitives": [], "unbuilt": true, "positionSpan": span
+                }
+            ]}))
+            .unwrap()
+        };
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: frame_epoch,
+            layout_epoch: frame_epoch,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let mut next_id = 0;
+        let (_, snapshots) =
+            encode_frame_delta(&list([8, 30]), &[], epochs(1), true, &mut next_id).unwrap();
+
+        let (unchanged, snapshots) = encode_frame_delta_incremental(
+            &list([8, 30]),
+            &snapshots,
+            epochs(2),
+            &mut next_id,
+            0..0,
+        )
+        .unwrap();
+        assert_eq!(u32_at(&unchanged, 52), 0);
+
+        let (moved, _) = encode_frame_delta_incremental(
+            &list([14, 36]),
+            &snapshots,
+            epochs(3),
+            &mut next_id,
+            0..0,
+        )
+        .unwrap();
+        assert_eq!(u32_at(&moved, 52), 1);
+        assert_eq!(moved[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
     }
 
     #[test]

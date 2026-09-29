@@ -41,7 +41,7 @@
  * exists, because building the display list went through the same module.
  */
 
-import type { DisplayList, DisplayPrimitive } from './displayList';
+import type { DisplayList, DisplayPage, DisplayPrimitive } from './displayList';
 import {
   displayPageRevision,
   displayPageShiftsSince,
@@ -817,20 +817,22 @@ export function createDisplayListQueries(
 
   // A position on a page whose content is not built yet resolves to the top of
   // that page's content box, which is enough to scroll it into view (and so
-  // have it built).
+  // have it built). Spans meet where a paragraph or table row continues on the
+  // next page, and the position there belongs to the later page.
   const unbuiltPageRect = (pos: number): DisplayListRect | null => {
+    let found: DisplayPage | null = null;
     for (const page of list.pages) {
       const span = page.unbuilt ? page.positionSpan : undefined;
-      if (!span || pos < span[0] || pos > span[1]) continue;
-      return {
-        pageIndex: page.pageIndex,
-        x: page.contentBounds?.x ?? 0,
-        y: page.contentBounds?.y ?? 0,
-        width: 0,
-        height: 0,
-      };
+      if (span && pos >= span[0] && pos <= span[1]) found = page;
     }
-    return null;
+    if (!found) return null;
+    return {
+      pageIndex: found.pageIndex,
+      x: found.contentBounds?.x ?? 0,
+      y: found.contentBounds?.y ?? 0,
+      width: 0,
+      height: 0,
+    };
   };
 
   const caretRect = (pos: number): DisplayListRect | null => {
@@ -840,6 +842,10 @@ export function createDisplayListQueries(
       const r = forward[0];
       return { pageIndex: r.pageIndex, x: r.x, y: r.y, width: 0, height: r.height };
     }
+    // Before the trailing edge: at the start of an unbuilt page, the previous
+    // position is still painted on the page before it.
+    const unbuilt = unbuiltPageRect(pos);
+    if (unbuilt) return unbuilt;
     if (pos > 0) {
       // end of doc / trailing edge: right edge of the previous position
       const backward = rangeRects(pos - 1, pos);
@@ -848,7 +854,7 @@ export function createDisplayListQueries(
         return { pageIndex: r.pageIndex, x: r.x + r.width, y: r.y, width: 0, height: r.height };
       }
     }
-    return unbuiltPageRect(pos);
+    return null;
   };
 
   const anchorRect = (pos: number): DisplayListRect | null => {

@@ -229,4 +229,27 @@ describe('createDisplayListQueries unbuilt pages', () => {
     expect(queries.anchorRect(50)).toEqual({ pageIndex: 1, x: 10, y: 12, width: 0, height: 0 });
     expect(queries.caretRect(90)).toBeNull();
   });
+
+  test('the first position of an unbuilt page anchors to it, not to the page painted before it', () => {
+    const { engine } = fakeEngine();
+    engine.rangeRectsByHandle = (_handle, from, to) =>
+      from === 39 && to === 40
+        ? JSON.stringify([{ pageIndex: 0, x: 20, y: 30, width: 5, height: 10 }])
+        : '[]';
+    const unbuilt = (pageIndex: number, positionSpan: [number, number]): DisplayPage => ({
+      pageIndex,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      positionSpan,
+      contentBounds: { x: 10, y: 12 + pageIndex, width: 80, height: 70 },
+    });
+    const queries = createDisplayListQueries(
+      { pages: [page(0), unbuilt(1, [40, 80]), unbuilt(2, [80, 120])] },
+      engine
+    );
+    expect(queries.caretRect(40)).toEqual({ pageIndex: 1, x: 10, y: 13, width: 0, height: 0 });
+    expect(queries.caretRect(80)).toEqual({ pageIndex: 2, x: 10, y: 14, width: 0, height: 0 });
+  });
 });
