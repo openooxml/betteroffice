@@ -133,6 +133,7 @@ export const editsession_story_ids: (a: number) => [number, number];
 export const editsession_story_len: (a: number, b: number, c: number) => [number, number, number];
 export const editsession_story_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_table_payload: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_track_undo: (a: number) => void;
 export const editsession_undo: (a: number) => number;
