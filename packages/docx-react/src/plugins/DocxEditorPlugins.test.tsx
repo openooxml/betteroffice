@@ -801,6 +801,70 @@ describe('DocxEditor plugins', () => {
     ).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
   });
 
+  test('an overlay resolves paragraph and search anchors at the rendered version', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.anchors',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return <div data-testid="anchor-overlay" />;
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin] });
+    await until(() => geometry !== null);
+    const session = ref.current!.getEditorRef()!.getYrsSession()!;
+    await act(async () => {
+      expect(session.persistParagraphIds().status).toBe('applied');
+      ref.current!.getEditorRef()!.syncYrsInputState(true);
+    });
+    const { version, paragraph } = await firstParagraph(ref);
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === version);
+    const entry = session
+      .paragraphIdentities()
+      .paragraphs.find(
+        (candidate) =>
+          candidate.session?.story === paragraph.story &&
+          candidate.session.paraId === paragraph.paraId
+      )!;
+    const identity = entry.session!;
+    expect(entry.persisted).not.toBeNull();
+    const current = geometry! as DocxPluginGeometry;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+    }
+    const targets = [
+      { kind: 'paragraph' as const, paragraph: identity },
+      { kind: 'paragraph' as const, paragraph: entry.persisted! },
+      { kind: 'search' as const, paragraph: entry.persisted!, text: paragraph.text.slice(0, 3) },
+    ];
+    for (const target of targets) {
+      const result = current.getAnchorGeometry(target);
+      expect(result).toMatchObject({
+        ok: true,
+        version,
+        previewVersion: 0,
+        layoutId: current.layout.id,
+      });
+      if (!result.ok) throw new Error(result.failure.message);
+      expect(result.rects.length).toBeGreaterThan(0);
+      expect(result.anchor.width).toBe(0);
+    }
+    expect(
+      current.getAnchorGeometry({
+        kind: 'range',
+        version: `${version}-stale`,
+        range: {
+          story: paragraph.story,
+          start: { paraId: paragraph.paraId, offset: 0 },
+          end: { paraId: paragraph.paraId, offset: 3 },
+          view: 'accepted',
+        },
+      })
+    ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  });
+
   test('public presenters and hooks bind contributed commands', async () => {
     const calls: string[] = [];
     function Bound() {

@@ -35,6 +35,7 @@ import {
 import { resolveParagraph } from './createPluginClients';
 import { createPluginGeometry, pluginLayout } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
+import { currentPreviewKey } from './proposalPreview';
 import type {
   DocxEditorPluginProps,
   DocxPluginGeometry,
@@ -224,14 +225,25 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   }, [managed, options.canvasHostRef, options.overlayTarget, options.queries]);
 
   const version = useSyncExternalStore(host.subscribe, host.version, host.version);
+  const previewVersion = useSyncExternalStore(
+    host.subscribe,
+    host.previewVersion,
+    host.previewVersion
+  );
+  const previewKey = currentPreviewKey(options.session);
   const layout = useMemo(
-    () => pluginLayout(options.queries, managed ? version : null, options.zoom),
-    [managed, options.queries, options.zoom, version]
+    () =>
+      pluginLayout(options.queries, managed ? version : null, options.zoom, {
+        key: previewKey,
+        previewVersion,
+      }),
+    [managed, options.queries, options.zoom, version, previewKey, previewVersion]
   );
   const layoutStable = useRef<DocxPluginLayout | null>(null);
   if (
     layout?.id !== layoutStable.current?.id ||
     layout?.version !== layoutStable.current?.version ||
+    layout?.previewVersion !== layoutStable.current?.previewVersion ||
     layout?.zoom !== layoutStable.current?.zoom
   ) {
     layoutStable.current = layout;
@@ -248,6 +260,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
             layer,
             () =>
               host.layoutId() === currentLayout.id &&
+              host.previewVersion() === currentLayout.previewVersion &&
               domRef.current === dom &&
               dom.context.pagesContainer.isConnected,
             (hit) =>
@@ -256,7 +269,13 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
                 hit,
                 dom.context.pagesContainer,
                 dom.queries
-              )
+              ),
+            dom.queries,
+            () => {
+              const editor = latest.current.pagedEditorRef.current;
+              const session = editor?.getYrsSession();
+              return editor && session ? { session, editor } : null;
+            }
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.
