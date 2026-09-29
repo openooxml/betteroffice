@@ -1,12 +1,13 @@
-import type {
-  DocxParagraphAnchor,
-  DocxTextRange,
-  DocxTextView,
-  YrsLoc,
-  YrsSession,
-  YrsStorySegment,
+import {
+  proposalRevisionPreview,
+  type DocxParagraphAnchor,
+  type DocxTextRange,
+  type DocxTextView,
+  type YrsLoc,
+  type YrsSession,
+  type YrsStorySegment,
 } from '@betteroffice/docx/yrs';
-import { proposalSnapshot, revisionPreview } from './proposalPreview';
+import { proposalSnapshot } from './proposalPreview';
 import type { DocxAnchorGeometryResult, DocxGeometryTarget } from './types';
 
 export type AnchorFailure = Extract<DocxAnchorGeometryResult, { ok: false }>;
@@ -181,7 +182,7 @@ function resolveParagraph(
 /** The revisions the proposal preview hides: accepted deletions and rejected insertions. */
 export function hiddenRanges(session: AnchorSession): RawAnchorRange[] {
   const snapshot = proposalSnapshot(session);
-  const preview = snapshot ? revisionPreview(snapshot) : undefined;
+  const preview = snapshot ? proposalRevisionPreview(snapshot) : undefined;
   if (!preview) return [];
   return session
     .listRevisions()
