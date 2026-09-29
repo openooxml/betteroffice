@@ -174,68 +174,19 @@ const widget = (groupId: string): DisplayPrimitive =>
   }) as DisplayPrimitive;
 
 
-test('Tab reaches a control on an unbuilt page through its stand-in, in either direction', async () => {
-  const hostRef = createRef<HTMLDivElement>();
-  const pages = blankPages(40, (index) =>
-    index === 0
-      ? [widget('first')]
-      : index === 30
-        ? [widget('far'), { ...widget('farther'), x: 50 } as DisplayPrimitive]
-        : []
-  );
-  render(
-    <>
-      <CanvasPagesView
-        displayList={{ pages }}
-        hostRef={hostRef}
-        interactive
-        glyphOutlineProvider={() => ''}
-      />
-      <button type="button" id="after">
-        after
-      </button>
-    </>
-  );
-  await idle();
-  const host = hostRef.current!;
-  const control = (groupId: string) =>
-    host.querySelector<HTMLButtonElement>(`button[data-sdt-group-id="${groupId}"]`);
-  const standIn = () =>
-    host.querySelector<HTMLElement>(
-      '.canvas-page[data-page-index="30"] .canvas-interactive-overlay .canvas-chrome-stand-in'
-    );
-  // Only chrome that would hold a tab stop gets a stand-in.
-  expect(host.querySelectorAll('.canvas-interactive-overlay .canvas-chrome-stand-in')).toHaveLength(1);
-  expect(control('far')).toBeNull();
-  const tab = (from: Element, shiftKey: boolean) =>
-    from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true }));
-
-  await act(async () => control('first')!.focus());
-  tab(control('first')!, false);
-  await act(async () => standIn()!.focus());
-  expect(document.activeElement).toBe(control('far'));
-
-  // Focus leaving the page returns its chrome to a stand-in.
-  const after = document.getElementById('after')!;
-  await act(async () => after.focus());
-  expect(standIn()).not.toBeNull();
-  tab(after, true);
-  await act(async () => standIn()!.focus());
-  expect(document.activeElement).toBe(control('farther'));
-});
-
-test('a page in the window whose chrome is still pending shows stand-ins Tab can reach', async () => {
+test('controls on every page and links on pages outside the window stay built', async () => {
   const hostRef = createRef<HTMLDivElement>();
   const link = {
     kind: 'text',
     x: 10,
     y: 10,
-    text: 'link',
+    text: 'far link',
     font: '11px sans-serif',
     color: '#000',
     href: '#somewhere',
   } as unknown as DisplayPrimitive;
-  const pages = blankPages(40, (index) => (index === 1 ? [link, widget('own')] : []));
+  const words = { ...link, text: 'plain words', href: undefined } as unknown as DisplayPrimitive;
+  const pages = blankPages(40, (index) => (index === 30 ? [widget('far'), link, words] : []));
   render(
     <CanvasPagesView
       displayList={{ pages }}
@@ -244,12 +195,12 @@ test('a page in the window whose chrome is still pending shows stand-ins Tab can
       glyphOutlineProvider={() => ''}
     />
   );
-  await act(async () => {});
-  const page = hostRef.current!.querySelector<HTMLElement>('.canvas-page[data-page-index="1"]')!;
-  const standIns = page.querySelectorAll<HTMLElement>('.canvas-chrome-stand-in');
-  expect(standIns).toHaveLength(2);
-  await act(async () => standIns[0]!.focus());
-  expect(document.activeElement?.getAttribute('href')).toBe('#somewhere');
+  await idle();
+  const page = hostRef.current!.querySelector<HTMLElement>('.canvas-page[data-page-index="30"]')!;
+  expect(page.querySelector('button[data-sdt-group-id="far"]')).not.toBeNull();
+  const mirror = page.querySelector('.canvas-page-mirror')!;
+  expect(mirror.querySelector('a[href="#somewhere"]')?.textContent).toBe('far link');
+  expect(mirror.textContent).not.toContain('plain words');
 });
 
 test('a link to a note on a page whose chrome is not built builds that page first', async () => {
@@ -358,8 +309,8 @@ test('a position shift in place moves a control at once, and the mirror by idle 
   const { rerender } = render(view(first));
   await act(async () => {});
   const host = hostRef.current!;
-  const controlPos = () =>
-    host.querySelector<HTMLElement>('button[data-sdt-group-id="shifted"]')?.dataset.sdtPos;
+  const control = () => host.querySelector<HTMLElement>('button[data-sdt-group-id="shifted"]');
+  const controlPos = () => control()?.dataset.sdtPos;
   const mirrorStart = () =>
     host.querySelector<HTMLElement>('.canvas-page-mirror [data-doc-start]')?.dataset.docStart;
   expect(controlPos()).toBe('1');
@@ -386,11 +337,14 @@ test('a position shift in place moves a control at once, and the mirror by idle 
     ],
     bytes: new Uint8Array(),
   };
+  await act(async () => control()!.focus());
   const second = applyFrameDeltaOwned(first, shift);
   expect(second.displayList.pages[0]).toBe(page);
   rerender(view(second));
   await act(async () => {});
   expect(controlPos()).toBe('6');
+  // The rebuilt control keeps focus.
+  expect(document.activeElement).toBe(control());
   await idle();
   expect(mirrorStart()).toBe('6');
 });

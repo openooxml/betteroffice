@@ -13,6 +13,7 @@
 import { useMemo, useRef } from 'react';
 import {
   buildMirrorPage,
+  buildMirrorPageLinks,
   mirrorPageHasTabStops,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
@@ -20,14 +21,18 @@ import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
 import { usePageChrome, type PageChromeHandle } from './usePageChrome';
 
+const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
+  labels: {
+    page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
+    header: t('a11y.headerLabel'),
+    footer: t('a11y.footerLabel'),
+  },
+});
 const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
-  buildMirrorPage(page, {
-    labels: {
-      page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
-      header: t('a11y.headerLabel'),
-      footer: t('a11y.footerLabel'),
-    },
-  });
+  buildMirrorPage(page, mirrorLabels(page, t));
+// A page outside the window keeps its links, for Tab, link lists and targets.
+const makeMirrorLinks = (page: DisplayPage, t: TFunction): HTMLElement =>
+  buildMirrorPageLinks(page, mirrorLabels(page, t));
 
 export function CanvasPageMirror({
   page,
@@ -56,10 +61,7 @@ export function CanvasPageMirror({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
-  const standInLabel = useMemo(
-    () => (mirrorPageHasTabStops(page) ? t('a11y.pageLabel', { number: page.pageIndex + 1 }) : null),
-    [page, t]
-  );
+  const fallback = useMemo(() => (mirrorPageHasTabStops(page) ? makeMirrorLinks : null), [page]);
   usePageChrome(hostRef, {
     page,
     t,
@@ -67,9 +69,9 @@ export function CanvasPageMirror({
     defer,
     rebuildAtOnce: visible,
     urgentRevision: noteAnchorRevision,
-    standInLabel,
     register,
     make: makeMirror,
+    fallback,
   });
 
   return (

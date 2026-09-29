@@ -105,7 +105,10 @@ function pageRegionPrimitives(page: DisplayPage): DisplayPrimitive[] {
 /** Whether the mirror renders `p` as a link: a hyperlink, or a note reference. */
 function mirrorLinks(p: DisplayPrimitive): boolean {
   if (p.kind === 'image') return Boolean(p.href);
-  return (p.kind === 'text' || p.kind === 'glyphRun') && (Boolean(p.href) || p.noteRef?.id !== undefined);
+  return (
+    (p.kind === 'text' || p.kind === 'glyphRun') &&
+    (Boolean(p.href) || p.noteRef?.id !== undefined)
+  );
 }
 
 /** Whether a note of `area` gets a backlink: it has primitives and metadata. */
@@ -124,6 +127,48 @@ export function mirrorPageHasTabStops(page: DisplayPage): boolean {
     (page.noteAreas ?? []).some((area) =>
       (area.noteIds ?? []).some((noteId) => noteHasBacklink(area, noteId))
     )
+  );
+}
+
+/**
+ * `buildMirrorPage` of only `page`'s links: hyperlinks, note references, and
+ * each note's backlink. The page's element ids and link order are the full
+ * mirror's, so links stay reachable (by Tab, link lists and fragment
+ * targets) without building every run of the page.
+ */
+export function buildMirrorPageLinks(
+  page: DisplayPage,
+  options: BuildMirrorPageOptions = {}
+): HTMLElement {
+  const noteArea = (area: NoteRegion): NoteRegion => {
+    const kind = area.kind ?? 'footnote';
+    // Each note keeps one of its primitives, so its aside (the target of its
+    // references) and any backlink still build.
+    const keep = new Set(
+      (area.noteIds ?? []).map((noteId) =>
+        (area.primitives ?? []).find((p) => p.groupId === `${kind}-${noteId}`)
+      )
+    );
+    return {
+      ...area,
+      separatorPrimitives: [],
+      primitives: (area.primitives ?? []).filter((p) => mirrorLinks(p) || keep.has(p)),
+    };
+  };
+  return buildMirrorPage(
+    {
+      ...page,
+      primitives: page.primitives.filter(mirrorLinks),
+      pageBorders: [],
+      ...(page.header
+        ? { header: { ...page.header, primitives: page.header.primitives.filter(mirrorLinks) } }
+        : {}),
+      ...(page.footer
+        ? { footer: { ...page.footer, primitives: page.footer.primitives.filter(mirrorLinks) } }
+        : {}),
+      ...(page.noteAreas ? { noteAreas: page.noteAreas.map(noteArea) } : {}),
+    },
+    options
   );
 }
 

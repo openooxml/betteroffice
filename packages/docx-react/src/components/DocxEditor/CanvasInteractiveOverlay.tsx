@@ -54,19 +54,16 @@ export function CanvasInteractiveOverlay({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
-  const standInLabel = useMemo(
-    () => (interactiveOverlayHasTabStops(page) ? t('a11y.contentControl') : null),
-    [page, t]
-  );
+  // Controls stay built on every page, so Tab and assistive technology reach them.
+  const controls = useMemo(() => interactiveOverlayHasTabStops(page), [page]);
   usePageChrome(hostRef, {
     page,
     t,
-    active,
+    active: active || controls,
     defer,
     rebuildAtOnce: true,
     // Its buttons carry the positions a shift moves.
     urgentRevision: displayPageRevision(page),
-    standInLabel,
     register,
     make: makeOverlay,
   });

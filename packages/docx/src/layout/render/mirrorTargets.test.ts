@@ -2,7 +2,12 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
 import type { DisplayPage, DisplayPrimitive } from './displayList';
 import { buildInteractiveOverlayPage, interactiveOverlayHasTabStops } from './interactiveOverlay';
-import { buildMirrorPage, displayPageHoldsMirrorId, mirrorPageHasTabStops } from './mirrorDom';
+import {
+  buildMirrorPage,
+  buildMirrorPageLinks,
+  displayPageHoldsMirrorId,
+  mirrorPageHasTabStops,
+} from './mirrorDom';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -72,5 +77,17 @@ test('a page reports the note ids and tab stops its chrome builds', () => {
       ).length;
     expect(mirrorPageHasTabStops(page)).toBe(stops(mirror) > 0);
     expect(interactiveOverlayHasTabStops(page)).toBe(stops(overlay) > 0);
+  }
+});
+
+test("a page's links-only mirror holds the full mirror's links and ids, in order", () => {
+  const links = (root: HTMLElement) =>
+    Array.from(root.querySelectorAll('a'), (a) => [a.getAttribute('href'), a.id, a.textContent]);
+  const ids = (root: HTMLElement) => Array.from(root.querySelectorAll('[id]'), (el) => el.id);
+  for (const page of pages) {
+    const full = buildMirrorPage(page);
+    const linksOnly = buildMirrorPageLinks(page);
+    expect(links(linksOnly)).toEqual(links(full));
+    expect(ids(linksOnly)).toEqual(ids(full));
   }
 });
