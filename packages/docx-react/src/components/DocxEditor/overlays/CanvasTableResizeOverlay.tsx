@@ -112,14 +112,32 @@ export function CanvasTableResizeOverlay({
     const metrics = buildRemotePresencePageMetrics(displayListQueries.displayList, zoom);
     const scrollsWindow = (element: HTMLElement) =>
       element === document.scrollingElement || element === document.documentElement;
-    let scrollParent = findVerticalScrollParentOrRoot(host);
+    let frame: number | null = null;
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        update();
+      });
+    };
+    // The scroller is looked up again on every update: an editor shown after
+    // mounting, or an ancestor that starts scrolling, changes it without any
+    // event on the old one.
+    let scrollParent: HTMLElement | null = null;
+    let scrollerResized: ResizeObserver | null = null;
     const update = () => {
-      const usesWindow = scrollsWindow(scrollParent);
+      const next = findVerticalScrollParentOrRoot(host);
+      if (next !== scrollParent) {
+        scrollerResized?.disconnect();
+        scrollParent = next;
+        scrollerResized = scrollsWindow(next) ? null : new ResizeObserver(schedule);
+        scrollerResized?.observe(next);
+      }
+      const usesWindow = scrollsWindow(next);
       const column = host.firstElementChild as HTMLElement | null;
-      const viewportTop = usesWindow ? 0 : scrollParent.getBoundingClientRect().top;
-      const viewportBottom =
-        viewportTop + (usesWindow ? window.innerHeight : scrollParent.clientHeight);
-      const next = column
+      const viewportTop = usesWindow ? 0 : next.getBoundingClientRect().top;
+      const viewportBottom = viewportTop + (usesWindow ? window.innerHeight : next.clientHeight);
+      const nextWindow = column
         ? remotePresencePageWindow(
             metrics,
             column.getBoundingClientRect().top,
@@ -129,45 +147,21 @@ export function CanvasTableResizeOverlay({
           )
         : null;
       setPageWindow((previous) =>
-        previous?.start === next?.start && previous?.end === next?.end ? previous : next
+        previous?.start === nextWindow?.start && previous?.end === nextWindow?.end
+          ? previous
+          : nextWindow
       );
     };
-    let frame: number | null = null;
-    const schedule = () => {
-      if (frame !== null) return;
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        update();
-      });
-    };
-    let unbind = () => {};
-    const bind = () => {
-      const usesWindow = scrollsWindow(scrollParent);
-      const target: EventTarget = usesWindow ? window : scrollParent;
-      target.addEventListener('scroll', schedule, { passive: true });
-      const resized = usesWindow ? null : new ResizeObserver(schedule);
-      resized?.observe(scrollParent);
-      unbind = () => {
-        target.removeEventListener('scroll', schedule);
-        resized?.disconnect();
-      };
-    };
-    bind();
-    // A hidden editor finds no scroller; look again once its host resizes.
-    const hostResized = new ResizeObserver(() => {
-      const next = findVerticalScrollParentOrRoot(host);
-      if (next !== scrollParent) {
-        unbind();
-        scrollParent = next;
-        bind();
-      }
-      schedule();
-    });
+    // Scroll events do not bubble; capturing them on the document sees every
+    // scroller, the window's included.
+    document.addEventListener('scroll', schedule, { capture: true, passive: true });
+    const hostResized = new ResizeObserver(schedule);
     hostResized.observe(host);
     window.addEventListener('resize', schedule);
     update();
     return () => {
-      unbind();
+      document.removeEventListener('scroll', schedule, { capture: true });
+      scrollerResized?.disconnect();
       hostResized.disconnect();
       window.removeEventListener('resize', schedule);
       if (frame !== null) cancelAnimationFrame(frame);
