@@ -8,7 +8,8 @@ use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offs
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
 use crate::table_grid::{
     content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
-    resolve_table_column_widths, resolve_table_column_widths_with_content, resolve_table_width_px,
+    resolve_table_column_widths_with_content, resolve_table_intrinsic_widths,
+    resolve_table_width_px,
 };
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
@@ -1824,10 +1825,8 @@ fn cell_content_widths(
                 crate::typed_measure::intrinsic_widths(paragraph, content_width, config)?
             }
             LayoutBlock::Table(table) => {
-                let width: f64 = measure_table_column_widths(table, content_width, config)
-                    .iter()
-                    .sum();
-                (width, width)
+                let content_widths = table_content_widths(table, content_width, config);
+                resolve_table_intrinsic_widths(table, content_width, content_widths.as_deref())
             }
             LayoutBlock::Image(image) if image.anchor.is_none() => (image.width, image.width),
             LayoutBlock::Shape(shape) if !anchored_shape(shape) => (shape.width, shape.width),
@@ -1841,36 +1840,46 @@ fn cell_content_widths(
     Some((minimum + padding, maximum + padding))
 }
 
-fn measure_table_column_widths(
+fn table_content_widths(
     table: &TableBlock,
     content_width: f64,
     config: &MeasurementConfig,
-) -> Vec<f64> {
+) -> Option<Vec<Vec<Option<(f64, f64)>>>> {
     if table
         .width_algorithm
         .as_deref()
         .or(table.layout_mode.as_deref())
         != Some("autofit")
     {
-        return resolve_table_column_widths(table, content_width);
+        return None;
     }
-    let content_widths: Vec<Vec<Option<(f64, f64)>>> = table
-        .rows
-        .iter()
-        .map(|row| {
-            row.cells
-                .iter()
-                .map(|cell| {
-                    if cell.min_content_width.is_some() && cell.max_content_width.is_some() {
-                        None
-                    } else {
-                        cell_content_widths(cell, content_width, config)
-                    }
-                })
-                .collect()
-        })
-        .collect();
-    resolve_table_column_widths_with_content(table, content_width, Some(&content_widths))
+    Some(
+        table
+            .rows
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|cell| {
+                        if cell.min_content_width.is_some() && cell.max_content_width.is_some() {
+                            None
+                        } else {
+                            cell_content_widths(cell, content_width, config)
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+fn measure_table_column_widths(
+    table: &TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Vec<f64> {
+    let content_widths = table_content_widths(table, content_width, config);
+    resolve_table_column_widths_with_content(table, content_width, content_widths.as_deref())
 }
 
 fn measure_table(
@@ -2789,6 +2798,119 @@ mod tests {
             panic!()
         };
         assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 40.0);
+    }
+
+    #[test]
+    fn measured_autofit_content_respects_page_limits_and_preferred_widths() {
+        crate::with_private_measure_fonts(|| {
+            let font = crate::register_measure_font(include_bytes!(
+                "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+            ))
+            .unwrap();
+            let config = MeasurementConfig {
+                font_chains: BTreeMap::from([("arial|0|0".to_owned(), vec![font])]),
+                defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+                authoritative_shaping: true,
+                ..MeasurementConfig::default()
+            };
+            for (text, preferred, expected) in [
+                ("W".repeat(100), None, 600.0),
+                ("hello world ".repeat(3), Some(1500), 100.0),
+            ] {
+                let mut table: TableBlock = serde_json::from_value(json!({
+                    "id": "table", "layoutMode": "autofit", "gridWidths": [100],
+                    "rows": [{"id": "row", "cells": [
+                        {"id": "cell", "widthValue": preferred, "widthType": "dxa",
+                         "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0},
+                         "blocks": [{"kind": "paragraph", "id": "paragraph", "runs": [
+                             {"kind": "text", "text": text}
+                         ]}]}
+                    ]}]
+                }))
+                .unwrap();
+                let (minimum, maximum) =
+                    cell_content_widths(&table.rows[0].cells[0], 600.0, &config).unwrap();
+                if preferred.is_none() {
+                    assert!((minimum - 1510.16).abs() < 0.01);
+                    assert_eq!(minimum, maximum);
+                } else {
+                    assert!(minimum < 100.0);
+                    assert!((maximum - 238.34).abs() < 0.01);
+                }
+                assert_eq!(
+                    measure_table_column_widths(&table, 600.0, &config),
+                    vec![expected]
+                );
+                let measured = measure_table(&mut table, 600.0, &config).unwrap();
+                assert_eq!(measured.rows[0].cells[0].width, expected);
+                let BlockExtent::Paragraph(paragraph) = &measured.rows[0].cells[0].blocks[0] else {
+                    panic!()
+                };
+                assert!(paragraph.lines.len() > 1);
+                assert!(
+                    paragraph
+                        .lines
+                        .iter()
+                        .all(|line| line.synthetic_fallback != Some(true))
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn nested_autofit_tables_keep_separate_intrinsic_minimums_and_maximums() {
+        let child = json!({
+            "kind": "table", "id": "child", "layoutMode": "autofit", "gridWidths": [600],
+            "preferredWidth": {"value": 9000, "type": "dxa"},
+            "rows": [{"id": "child-row", "cells": [
+                {"id": "child-cell", "blocks": [], "minContentWidth": 20, "maxContentWidth": 600}
+            ]}]
+        });
+        let mut outer: TableBlock = serde_json::from_value(json!({
+            "id": "outer", "layoutMode": "autofit", "gridWidths": [600, 100],
+            "rows": [{"id": "outer-row", "cells": [
+                {"id": "nested", "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0},
+                 "blocks": [child]},
+                {"id": "sibling", "blocks": [], "minContentWidth": 100, "maxContentWidth": 100}
+            ]}]
+        }))
+        .unwrap();
+        let config = MeasurementConfig::default();
+        assert_eq!(
+            cell_content_widths(&outer.rows[0].cells[0], 600.0, &config),
+            Some((20.0, 600.0))
+        );
+        assert_eq!(
+            measure_table_column_widths(&outer, 600.0, &config),
+            vec![500.0, 100.0]
+        );
+        outer.rows[0].cells[0].padding = Some(crate::types::BoxEdges {
+            left: 5.0,
+            right: 5.0,
+            top: 0.0,
+            bottom: 0.0,
+        });
+        let LayoutBlock::Table(child) = &mut outer.rows[0].cells[0].blocks[0] else {
+            panic!()
+        };
+        child.indent = Some(10.0);
+        assert_eq!(
+            cell_content_widths(&outer.rows[0].cells[0], 600.0, &config),
+            Some((40.0, 620.0))
+        );
+        assert_eq!(
+            measure_table_column_widths(&outer, 600.0, &config),
+            vec![500.0, 100.0]
+        );
+        let cell: crate::types::TableCell = serde_json::from_value(json!({
+            "id": "grandparent-cell", "blocks": [LayoutBlock::Table(outer)],
+            "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0}
+        }))
+        .unwrap();
+        assert_eq!(
+            cell_content_widths(&cell, 600.0, &config),
+            Some((140.0, 720.0))
+        );
     }
 
     #[test]

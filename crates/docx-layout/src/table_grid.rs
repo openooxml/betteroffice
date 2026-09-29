@@ -248,15 +248,13 @@ fn resolve_fixed_column_widths(
     widths
 }
 
-/// Autofit layout: every cell contributes a minimum and a maximum, and the
-/// slack between them is what the target width is distributed across.
-fn resolve_autofit_column_widths(
+fn autofit_content_widths(
     table_block: &TableBlock,
     content_width: f64,
     col_count: usize,
     explicit_width_px: Option<f64>,
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
-) -> Vec<f64> {
+) -> (Vec<f64>, Vec<f64>) {
     let source = table_block
         .grid_widths
         .as_deref()
@@ -268,8 +266,7 @@ fn resolve_autofit_column_widths(
         explicit_width_px.unwrap_or(content_width),
     );
     let mut minimums = vec![0.0; col_count];
-    let mut maximums = vec![0.0; col_count];
-    let mut preferences = vec![0.0; col_count];
+    let mut constraints = Vec::new();
     for grid_cell in resolve_cell_grid(table_block) {
         let Some(cell) = table_block
             .rows
@@ -297,32 +294,64 @@ fn resolve_autofit_column_widths(
             .unwrap_or(0.0)
             .max(0.0);
         if cell.no_wrap.unwrap_or(false) {
-            minimum = minimum.max(max_content_width.unwrap_or(0.0));
+            let width_type = cell
+                .preferred_width
+                .as_ref()
+                .filter(|width| {
+                    resolve_table_width_px(
+                        width.value,
+                        width.r#type.as_deref(),
+                        explicit_width_px.unwrap_or(content_width),
+                    )
+                    .is_some()
+                })
+                .map(|width| width.r#type.as_deref())
+                .unwrap_or(cell.width_type.as_deref());
+            let absolute =
+                width_type == Some("dxa") || (width_type.is_none() && preferred.is_some());
+            minimum = minimum.max(if absolute {
+                preferred.unwrap_or(0.0)
+            } else {
+                max_content_width.unwrap_or(0.0)
+            });
         }
         let maximum = minimum.max(preferred.or(max_content_width).unwrap_or(0.0));
+        constraints.push((grid_cell, minimum, maximum, preferred));
+    }
+    constraints.sort_by_key(|(cell, _, _, _)| (cell.col_span, cell.column_index));
+    for (grid_cell, minimum, _, _) in &constraints {
         add_span_constraint(
             &mut minimums,
             grid_cell.column_index,
             grid_cell.col_span,
-            minimum,
+            *minimum,
         );
+    }
+    let mut maximums = minimums.clone();
+    let mut preferences = minimums.clone();
+    let mut priced = vec![false; col_count];
+    for (grid_cell, _, maximum, preferred) in &constraints {
         add_span_constraint(
             &mut maximums,
             grid_cell.column_index,
             grid_cell.col_span,
-            maximum,
+            *maximum,
         );
         if let Some(preferred) = preferred {
             add_span_constraint(
                 &mut preferences,
                 grid_cell.column_index,
                 grid_cell.col_span,
-                preferred,
+                *preferred,
             );
+            let end = col_count.min(grid_cell.column_index + grid_cell.col_span);
+            if grid_cell.column_index < end {
+                priced[grid_cell.column_index..end].fill(true);
+            }
         }
     }
     for column in 0..col_count {
-        if preferences[column] > 0.0 {
+        if priced[column] {
             maximums[column] = preferences[column];
         }
         if minimums[column] <= 0.0 {
@@ -337,6 +366,23 @@ fn resolve_autofit_column_widths(
             maximums[column] = base[column];
         }
     }
+    (minimums, maximums)
+}
+
+fn resolve_autofit_column_widths(
+    table_block: &TableBlock,
+    content_width: f64,
+    col_count: usize,
+    explicit_width_px: Option<f64>,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> Vec<f64> {
+    let (minimums, maximums) = autofit_content_widths(
+        table_block,
+        content_width,
+        col_count,
+        explicit_width_px,
+        content_widths,
+    );
     let min_total: f64 = minimums.iter().sum();
     let max_total: f64 = maximums.iter().sum();
     let target = content_width.min(min_total.max(explicit_width_px.unwrap_or(
@@ -368,6 +414,41 @@ fn resolve_autofit_column_widths(
         .enumerate()
         .map(|(index, min)| min + extra * flex[index] / flex_total)
         .collect()
+}
+
+pub(crate) fn resolve_table_intrinsic_widths(
+    table_block: &TableBlock,
+    content_width: f64,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> (f64, f64) {
+    let indent = table_block.indent.unwrap_or(0.0).max(0.0);
+    if table_block
+        .width_algorithm
+        .as_deref()
+        .or(table_block.layout_mode.as_deref())
+        != Some("autofit")
+        || table_block.rows.is_empty()
+    {
+        let width = resolve_table_total_width_px(table_block, content_width) + indent;
+        return (width, width);
+    }
+    let explicit = preferred_width_px(
+        table_block.preferred_width.as_ref(),
+        table_block.width,
+        table_block.width_type.as_deref(),
+        content_width,
+        None,
+    );
+    let (minimums, maximums) = autofit_content_widths(
+        table_block,
+        table_width_budget(table_block, content_width),
+        count_table_columns(table_block),
+        explicit,
+        content_widths,
+    );
+    let minimum: f64 = minimums.iter().sum();
+    let maximum = minimum.max(explicit.unwrap_or_else(|| maximums.iter().sum()));
+    (minimum + indent, maximum + indent)
 }
 
 /// The budget a table may spend, after its own left indent.
@@ -777,9 +858,15 @@ mod tests {
             ]}]
         }))
         .unwrap();
-        assert_eq!(resolve_table_column_widths(&block, 600.0), vec![450.0, 150.0]);
+        assert_eq!(
+            resolve_table_column_widths(&block, 600.0),
+            vec![450.0, 150.0]
+        );
         block.indent = Some(60.0);
-        assert_eq!(resolve_table_column_widths(&block, 600.0), vec![405.0, 135.0]);
+        assert_eq!(
+            resolve_table_column_widths(&block, 600.0),
+            vec![405.0, 135.0]
+        );
     }
 
     #[test]
@@ -819,6 +906,79 @@ mod tests {
         assert_eq!(resolve_table_column_widths(&block, 600.0), vec![100.0]);
         block.rows[1].cells[0].min_content_width = Some(120.0);
         assert_eq!(resolve_table_column_widths(&block, 600.0), vec![120.0]);
+    }
+
+    #[test]
+    fn autofit_applies_individual_constraints_before_spanning_cells_in_any_row_order() {
+        for spanning_preferred in [false, true] {
+            let mut block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+                "rows": [
+                    {"id": 0, "cells": [
+                        {"id": 0, "blocks": [], "colSpan": 2,
+                         "minContentWidth": 300, "maxContentWidth": 300}
+                    ]},
+                    {"id": 1, "cells": [
+                        {"id": 1, "blocks": [], "minContentWidth": 20, "maxContentWidth": 20},
+                        {"id": 2, "blocks": [], "minContentWidth": 280, "maxContentWidth": 280}
+                    ]}
+                ]
+            }))
+            .unwrap();
+            if spanning_preferred {
+                block.rows[0].cells[0].width = Some(300.0);
+            }
+            assert_eq!(
+                resolve_table_column_widths(&block, 600.0),
+                vec![20.0, 280.0]
+            );
+            block.rows.reverse();
+            assert_eq!(
+                resolve_table_column_widths(&block, 600.0),
+                vec![20.0, 280.0]
+            );
+        }
+    }
+
+    #[test]
+    fn autofit_nowrap_protects_absolute_preferences_but_uses_natural_width_for_auto_and_pct() {
+        for (preferred, expected) in [
+            (json!({"value": 1500, "type": "dxa"}), 100.0),
+            (json!({"value": 0, "type": "auto"}), 642.99),
+            (json!({"value": 500, "type": "pct"}), 642.99),
+        ] {
+            let mut block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "autofit", "gridWidths": [100],
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "preferredWidth": preferred,
+                     "minContentWidth": 40, "maxContentWidth": 642.99, "noWrap": true}
+                ]}]
+            }))
+            .unwrap();
+            assert_eq!(resolve_table_column_widths(&block, 1000.0), vec![expected]);
+            let cell = &mut block.rows[0].cells[0];
+            let preferred = cell.preferred_width.take().unwrap();
+            cell.width_value = preferred.value;
+            cell.width_type = preferred.r#type;
+            assert_eq!(resolve_table_column_widths(&block, 1000.0), vec![expected]);
+        }
+    }
+
+    #[test]
+    fn autofit_nowrap_absolute_preferences_are_floors_during_flexible_shrinkage() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [100, 200],
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "blocks": [], "widthValue": 1500, "widthType": "dxa",
+                 "minContentWidth": 40, "maxContentWidth": 642.99, "noWrap": true},
+                {"id": 1, "blocks": [], "minContentWidth": 20, "maxContentWidth": 200}
+            ]}]
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_table_column_widths(&block, 150.0),
+            vec![100.0, 50.0]
+        );
     }
 
     /// `oxi-en-administrative-04`, measured off Word's own `reference.pdf`: an
