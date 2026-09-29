@@ -581,6 +581,77 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
 }
 
 #[test]
+fn a_previewed_page_break_revision_moves_the_following_page() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let two_paragraphs =
+        r#"<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:p><w:r><w:t>After</w:t></w:r></w:p>"#;
+    let with_break = |ctx: &EditCtx| {
+        let engine = EngineSession::new(75106);
+        seed_from_docx(engine.doc(), &document(two_paragraphs)).unwrap();
+        engine
+            .doc()
+            .insert_embed(ctx, Position::new("body", 7), "pageBreak", vec![])
+            .unwrap();
+        engine
+    };
+    let pages = |engine: &EngineSession, env: &RenderEnv| {
+        let output: Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&layout_request(env, font))
+                .unwrap(),
+        )
+        .unwrap();
+        output["layout"]["pages"].as_array().unwrap().len()
+    };
+    let suggest = EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting();
+    let inserted = with_break(&suggest);
+    let id = inserted.doc().list_revisions().unwrap()[0]
+        .change
+        .revision_id
+        .clone();
+    assert_eq!(pages(&inserted, &RenderEnv::default()), 2);
+    assert_eq!(pages(&inserted, &preview(&[(&id, Accepted)])), 2);
+    assert_eq!(pages(&inserted, &preview(&[(&id, Rejected)])), 1);
+
+    let deleted = with_break(&EditCtx::local("", ""));
+    deleted
+        .doc()
+        .delete_range(&suggest, StoryRange::new("body", 7, 8))
+        .unwrap();
+    let id = deleted.doc().list_revisions().unwrap()[0]
+        .change
+        .revision_id
+        .clone();
+    assert_eq!(pages(&deleted, &RenderEnv::default()), 2);
+    assert_eq!(pages(&deleted, &preview(&[(&id, Accepted)])), 1);
+    assert_eq!(pages(&deleted, &preview(&[(&id, Rejected)])), 2);
+    assert_eq!(pages(&deleted, &RenderEnv::default()), 2);
+}
+
+#[test]
+fn a_previewed_block_control_revision_covers_its_blocks() {
+    let body = r#"<w:sdt><w:sdtPr><w:tag w:val="block"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Inside</w:t></w:r></w:p></w:sdtContent></w:sdt><w:p><w:r><w:t>After</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(75107);
+    seed_from_docx(engine.doc(), &document(body)).unwrap();
+    engine
+        .doc()
+        .delete_range(
+            &EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+            StoryRange::new("body", 0, 1),
+        )
+        .unwrap();
+    let id = engine.doc().list_revisions().unwrap()[0]
+        .change
+        .revision_id
+        .clone();
+    let shown = |env: &RenderEnv| lower(&engine, env).to_string();
+    assert!(shown(&RenderEnv::default()).contains("Inside"));
+    assert!(shown(&preview(&[(&id, Rejected)])).contains("Inside"));
+    let accepted = shown(&preview(&[(&id, Accepted)]));
+    assert!(!accepted.contains("Inside") && accepted.contains("After"));
+}
+
+#[test]
 fn hidden_ranges_collapse_to_the_neighbouring_edges() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let (engine, [replace, delete, _]) = proposals();

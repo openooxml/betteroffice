@@ -463,8 +463,9 @@ fn lower_story<T: ReadTxn>(
                             detail: "table embed interrupts paragraph content".to_owned(),
                         });
                     }
-                    let hidden = shared_map_string(&table, txn, "blockId")
-                        .is_some_and(|id| hidden_field_blocks.contains(&id));
+                    let hidden = env.revision_hidden(attributes)
+                        || shared_map_string(&table, txn, "blockId")
+                            .is_some_and(|id| hidden_field_blocks.contains(&id));
                     map.tables.push((pm_cursor, story_slot, table_ordinal));
                     table_ordinal += 1;
                     let (lowered, node_size) = lower_table(
@@ -504,7 +505,9 @@ fn lower_story<T: ReadTxn>(
                         });
                     }
                     let kind = shared_map_string(&page_break, txn, "_kind").unwrap_or_default();
+                    let hidden = env.revision_hidden(attributes);
                     if kind == "pageBreak"
+                        && !hidden
                         && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last_mut()
                         && paragraph.runs.is_empty()
                         && paragraph.pm_end == Some(pm_cursor as f64)
@@ -518,20 +521,24 @@ fn lower_story<T: ReadTxn>(
                     // so an edit before a break leaves its block unchanged.
                     let id = BlockId::Str(format!("{story_id}:{kind}:{break_ordinal}"));
                     break_ordinal += 1;
-                    if kind == "columnBreak" {
-                        blocks.push(LayoutBlock::ColumnBreak(ColumnBreakBlock {
-                            sdt_groups: None,
-                            id,
-                            pm_start: Some(pm_cursor as f64),
-                            pm_end: Some((pm_cursor + 1) as f64),
-                        }));
-                    } else {
-                        blocks.push(LayoutBlock::PageBreak(PageBreakBlock {
-                            sdt_groups: None,
-                            id,
-                            pm_start: Some(pm_cursor as f64),
-                            pm_end: Some((pm_cursor + 1) as f64),
-                        }));
+                    if !hidden {
+                        let (pm_start, pm_end) =
+                            (Some(pm_cursor as f64), Some((pm_cursor + 1) as f64));
+                        blocks.push(if kind == "columnBreak" {
+                            LayoutBlock::ColumnBreak(ColumnBreakBlock {
+                                sdt_groups: None,
+                                id,
+                                pm_start,
+                                pm_end,
+                            })
+                        } else {
+                            LayoutBlock::PageBreak(PageBreakBlock {
+                                sdt_groups: None,
+                                id,
+                                pm_start,
+                                pm_end,
+                            })
+                        });
                     }
                     story_index += 1;
                     paragraph_start = story_index;
@@ -574,7 +581,9 @@ fn lower_story<T: ReadTxn>(
                         map,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
-                    if !hidden_field_blocks.contains(&child_story) {
+                    if !env.revision_hidden(attributes)
+                        && !hidden_field_blocks.contains(&child_story)
+                    {
                         blocks.extend(child_blocks);
                     }
                     story_index += 1;
