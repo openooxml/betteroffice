@@ -193,9 +193,15 @@ function firstPageReaching(
 }
 
 /**
+ * A page-level filter only has to keep every page the exact per-line test can
+ * accept, so its comparisons allow this much slack against rounding.
+ */
+const PAGE_FILTER_SLACK = 1;
+
+/**
  * Every page with a line that can reach the viewport, in page order: the pages
- * the viewport spans, and any other page whose lines overflow its own bounds
- * as far as the viewport. Null when a page rect cannot be resolved.
+ * the viewport spans, and any other page whose lines come near or beyond its
+ * own bounds and near the viewport. Null when a page rect cannot be resolved.
  */
 function pagesReachingViewport(
   queries: DisplayListQueries,
@@ -215,12 +221,24 @@ function pagesReachingViewport(
     }
     const extent = queries.visualLineExtent(pageIndex);
     const size = queries.pageSize(pageIndex);
-    if (!extent || (size && extent.top >= 0 && extent.bottom <= size.height)) continue;
+    if (
+      !extent ||
+      (size &&
+        extent.top >= PAGE_FILTER_SLACK &&
+        extent.bottom <= size.height - PAGE_FILTER_SLACK)
+    ) {
+      continue;
+    }
     const projection = pageProjection(queries, host, pageIndex, projectionCache);
     if (!projection) return null;
     const top = projection.top + extent.top * projection.scaleY;
     const bottom = projection.top + extent.bottom * projection.scaleY;
-    if (bottom >= viewport.top && top <= viewport.bottom) pages.push(pageIndex);
+    if (
+      bottom + PAGE_FILTER_SLACK >= viewport.top &&
+      top - PAGE_FILTER_SLACK <= viewport.bottom
+    ) {
+      pages.push(pageIndex);
+    }
   }
   return pages;
 }

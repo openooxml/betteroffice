@@ -540,6 +540,22 @@ describe('viewport anchoring across a page boundary', () => {
     expect(anchor.viewportOffset).toBe(documentTop(0, 10) - documentTop(2, 18));
   });
 
+  test('keeps an overflowing line whose projected edge rounds onto the viewport', () => {
+    const { host, scroller } = createScene(documentTop(2, 18), 3);
+    // Ends exactly where the viewport starts, up to how the two projections round.
+    const bottom = documentTop(2, 18) - documentTop(0, 10);
+    const lines = [
+      { ...visualLine(paraId, 1, 2, 10, 0), height: bottom },
+      visualLine('below', 9, 10, 100, 2),
+    ];
+    const captured: number[] = [];
+    captureDisplayListViewportAnchor(queries(lines, 3), host, scroller, (position) => {
+      captured.push(position);
+      return STICKY;
+    });
+    expect(captured).toEqual([1]);
+  });
+
   test('looks past the pages around the viewport when they show no line', () => {
     // The pages around the viewport on page 2 have no line.
     const { host, scroller } = createScene(documentTop(2, 50), 6);
