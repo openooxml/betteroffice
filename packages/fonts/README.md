@@ -174,6 +174,7 @@ import {
   BUNDLED_FONTS, // BundledFontFace[] — the full manifest (single source of truth)
   resolveMetricCompatFamily, // "calibri" -> "Carlito" (case-insensitive, aliases included)
   resolveMetricCompatFace, // ("SimHei", bold, italic) -> concrete face (else Regular)
+  resolveBundledFamilyFace, // ("Gelasio" or a Word family, bold, italic) -> exact face or undefined
   resolveScriptFallbackFace, // ('cjk-sc' | 'arabic' | ..., bold, italic) -> coverage face
   resolveLastResortFace, // always-available base face for any (family, bold, italic)
   loadBundledFontBytes, // (face, { baseUrl }?) -> Promise<ArrayBuffer> (cached per face + base)

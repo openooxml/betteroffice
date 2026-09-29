@@ -8,6 +8,11 @@
  * - Font availability detection
  */
 
+import {
+  hasDefaultFontSource,
+  resolveDefaultFontProvider,
+} from '../layout/measure/defaultFontProvider';
+import type { BundledFontProvider } from '../layout/measure/fontRegistry';
 import { resolveFontFamily } from './fontResolver';
 
 // Track loaded fonts to avoid duplicate requests
@@ -38,7 +43,9 @@ let isLoadingAny = false;
 // setGoogleFontsEnabled(false) to suppress the redundant remote fetches at the
 // source. Embedded faces (loadFontFromBuffer) and consumer-hosted faces
 // (loadFontFromUrl / the `fonts` prop) are unaffected — only the implicit
-// Google Fonts lookup in loadFont / loadFontWithMapping is gated.
+// Google Fonts lookup in loadFont / loadFontWithMapping is gated. With a
+// bundled font source configured (configureDefaultFonts), faces come from it
+// and the Google lookup is never made.
 let googleFontsEnabled = true;
 
 // Families registered through this module's face loaders — raw buffers
@@ -94,6 +101,184 @@ function faceKey(
   return `${family.trim()}|${weight}|${style}`;
 }
 
+const DEFAULT_FACE_STYLES: Array<[boolean, boolean]> = [
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+];
+
+/** How long `loadFont` waits for a bundled family; the load continues and a later call reuses it. */
+const BUNDLED_FONT_DEADLINE_MS = 5000;
+/** Faces that finish while others are still loading are announced at least this often. */
+const BUNDLED_ANNOUNCE_BATCH_MS = 500;
+
+// Bundled faces by family|weight|style; a failed face is evicted so a later call retries it.
+const bundledFaces = new Map<string, Promise<boolean>>();
+// Families with at least one bundled face registered; like registeredFamilies,
+// the system-font probe must not stand in for their missing faces.
+const bundledFamilies = new Set<string>();
+// Families whose bundled faces did not all register; a mapped original name
+// is not marked loaded from them, so its next pass retries.
+const partialBundledFamilies = new Set<string>();
+// Families the bundle had no face for on their last attempt.
+const bundledAbsentFamilies = new Set<string>();
+let bundledFacesInFlight = 0;
+let bundledFacesToAnnounce: FontFace[] = [];
+let announceTimer: ReturnType<typeof setTimeout> | null = null;
+
+// A face built from bytes can already be loaded when it joins the set
+// (Chromium parses it synchronously), so the set never fires `loadingdone`
+// for it. Announce such faces in batches, so the editor repaints text that
+// was drawn before they arrived.
+function announceBundledFaces(): void {
+  if (announceTimer !== null) {
+    clearTimeout(announceTimer);
+    announceTimer = null;
+  }
+  if (bundledFacesToAnnounce.length === 0) return;
+  const fontfaces = bundledFacesToAnnounce;
+  bundledFacesToAnnounce = [];
+  document.fonts.dispatchEvent(
+    typeof FontFaceSetLoadEvent === 'function'
+      ? new FontFaceSetLoadEvent('loadingdone', { fontfaces })
+      : new Event('loadingdone')
+  );
+}
+
+function settleBundledFace(): void {
+  bundledFacesInFlight -= 1;
+  if (bundledFacesToAnnounce.length === 0) return;
+  if (bundledFacesInFlight === 0) announceBundledFaces();
+  else announceTimer ??= setTimeout(announceBundledFaces, BUNDLED_ANNOUNCE_BATCH_MS);
+}
+
+// An older provider without resolveFamily hands back Regular bytes for a
+// style the family lacks, so only its Regular face is trusted.
+function bundledLoad(
+  provider: BundledFontProvider,
+  source: string,
+  bold: boolean,
+  italic: boolean
+): (() => Promise<ArrayBuffer>) | undefined {
+  if (provider.resolveFamily) return provider.resolveFamily(source, bold, italic);
+  return !bold && !italic ? provider.resolve(source, false, false) : undefined;
+}
+
+/** `undefined` when the provider has no face of exactly this weight and style. */
+function registerBundledFace(
+  provider: BundledFontProvider,
+  family: string,
+  source: string,
+  bold: boolean,
+  italic: boolean
+): Promise<boolean> | undefined {
+  const key = faceKey(family, bold ? 700 : 400, italic ? 'italic' : 'normal');
+  const existing = bundledFaces.get(key);
+  if (existing) return existing;
+  const load = bundledLoad(provider, source, bold, italic);
+  if (!load) return undefined;
+  bundledFacesInFlight += 1;
+  const promise = (async () => {
+    let face: FontFace | undefined;
+    try {
+      face = new FontFace(family, await load(), {
+        weight: bold ? '700' : '400',
+        style: italic ? 'italic' : 'normal',
+      });
+      const loadedBeforeAdd = face.status === 'loaded';
+      document.fonts.add(face);
+      await face.load();
+      if (loadedBeforeAdd) bundledFacesToAnnounce.push(face);
+      return true;
+    } catch (error) {
+      if (face) document.fonts.delete(face);
+      reportFontError(error, `failed to register bundled "${family}"`);
+      return false;
+    } finally {
+      settleBundledFace();
+    }
+  })();
+  bundledFaces.set(key, promise);
+  void promise.then((registered) => {
+    if (!registered && bundledFaces.get(key) === promise) bundledFaces.delete(key);
+  });
+  return promise;
+}
+
+/** `absent`: the bundle has no face for the family at all, as opposed to faces that failed or are still loading. */
+type BundledRegistration = 'complete' | 'partial' | 'none' | 'absent';
+
+/**
+ * Registers the configured bundled faces for `family` under its own name,
+ * settling after at most {@link BUNDLED_FONT_DEADLINE_MS}. The faces come
+ * from the first of `sources` the bundle carries. A style the bundle does not
+ * ship is left to browser synthesis; a face that failed or is still loading
+ * makes the result `partial`, so a later call retries it.
+ */
+function registerBundledFamily(
+  family: string,
+  sources: string[],
+  weights?: number[],
+  styles?: ('normal' | 'italic')[],
+  deadlineMs = BUNDLED_FONT_DEADLINE_MS
+): Promise<BundledRegistration> {
+  if (typeof FontFace === 'undefined' || document.fonts === undefined) {
+    return Promise.resolve('none');
+  }
+  const faces =
+    weights || styles
+      ? (weights ?? [400, 700]).flatMap((weight) =>
+          (styles ?? ['normal', 'italic']).map(
+            (style): [boolean, boolean] => [weight >= 600, style === 'italic']
+          )
+        )
+      : DEFAULT_FACE_STYLES;
+  const states: Array<'pending' | 'registered' | 'failed' | 'unsupported'> = faces.map(
+    () => 'pending'
+  );
+  let resolvedProvider = false;
+  const summarize = (): BundledRegistration => {
+    if (resolvedProvider && states.every((state) => state === 'unsupported')) return 'absent';
+    if (!states.includes('registered')) return 'none';
+    return resolvedProvider && states.every((state) => state === 'registered' || state === 'unsupported')
+      ? 'complete'
+      : 'partial';
+  };
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(summarize());
+    };
+    const timer = setTimeout(finish, deadlineMs);
+    void (async () => {
+      const provider = await resolveDefaultFontProvider();
+      if (!provider) return;
+      resolvedProvider = true;
+      const source =
+        sources.find((candidate) =>
+          faces.some(([bold, italic]) => bundledLoad(provider, candidate, bold, italic))
+        ) ?? family;
+      await Promise.all(
+        faces.map(async ([bold, italic], index) => {
+          const registration = registerBundledFace(provider, family, source, bold, italic);
+          if (!registration) {
+            states[index] = 'unsupported';
+            return;
+          }
+          bundledFamilies.add(family);
+          states[index] = (await registration) ? 'registered' : 'failed';
+        })
+      );
+    })()
+      .catch(() => undefined)
+      .finally(finish);
+  });
+}
+
 // "A genuine system font satisfies this family" — the decision behind every
 // fetch skip. Self-excludes families registered through our face loaders
 // (subsetted/partial faces — see registeredFamilies); system fonts that
@@ -102,7 +287,7 @@ function faceKey(
 // matching the fetch path's async timing) — consumers gate ready-state UI
 // on that callback, and before the skip existed the fetch guaranteed it.
 function satisfiedBySystemFont(family: string): boolean {
-  if (registeredFamilies.has(family)) {
+  if (registeredFamilies.has(family) || bundledFamilies.has(family)) {
     return false;
   }
   if (probeSatisfied.has(family)) {
@@ -179,12 +364,29 @@ function getGoogleFontsUrl(
  * @param options - Optional configuration
  * @returns Promise resolving to true if font loaded successfully, false otherwise
  */
-export async function loadFont(
+export function loadFont(
   fontFamily: string,
   options?: {
     weights?: number[];
     styles?: ('normal' | 'italic')[];
   }
+): Promise<boolean> {
+  return loadFontFrom(fontFamily, options);
+}
+
+/**
+ * {@link loadFont}, where a bundle lacking `fontFamily` may serve the faces of
+ * `bundledFallback` under the `fontFamily` name instead. `deadlineAt` carries
+ * a retry's original bundled deadline.
+ */
+async function loadFontFrom(
+  fontFamily: string,
+  options?: {
+    weights?: number[];
+    styles?: ('normal' | 'italic')[];
+  },
+  bundledFallback?: string,
+  deadlineAt?: number
 ): Promise<boolean> {
   // Skip font loading in non-browser environments (Node.js, SSR)
   if (typeof document === 'undefined') {
@@ -202,7 +404,16 @@ export async function loadFont(
   // Currently loading? Return existing promise
   const existingLoad = loadingFonts.get(normalizedFamily);
   if (existingLoad) {
-    return existingLoad;
+    // An in-flight load may lack this call's bundled fallback; retry with it
+    // only when the bundle had nothing under this name, not after a timeout,
+    // and within the deadline this call started with.
+    if (!bundledFallback) return existingLoad;
+    const retryDeadline = deadlineAt ?? Date.now() + BUNDLED_FONT_DEADLINE_MS;
+    return existingLoad.then((loaded) =>
+      loaded || !bundledAbsentFamilies.has(normalizedFamily)
+        ? loaded
+        : loadFontFrom(fontFamily, options, bundledFallback, retryDeadline)
+    );
   }
 
   // Already satisfied by a system font — fetching the Google copy would be a
@@ -227,7 +438,8 @@ export async function loadFont(
   // Remote disabled, not locally satisfied, and no in-flight registration
   // that could change the answer — statically false. Skip the promise
   // machinery instead of re-paying it on every loadDocumentFonts pass.
-  if (!googleFontsEnabled && pendingFaces.length === 0) {
+  const bundled = hasDefaultFontSource();
+  if (!googleFontsEnabled && !bundled && pendingFaces.length === 0) {
     return false;
   }
 
@@ -248,6 +460,29 @@ export async function loadFont(
         if (!options && satisfiedBySystemFont(normalizedFamily)) {
           return true;
         }
+      }
+
+      if (bundled) {
+        const registration = await registerBundledFamily(
+          normalizedFamily,
+          bundledFallback ? [normalizedFamily, bundledFallback.trim()] : [normalizedFamily],
+          options?.weights,
+          options?.styles,
+          deadlineAt === undefined
+            ? BUNDLED_FONT_DEADLINE_MS
+            : Math.max(0, deadlineAt - Date.now())
+        );
+        if (registration === 'absent') bundledAbsentFamilies.add(normalizedFamily);
+        else bundledAbsentFamilies.delete(normalizedFamily);
+        if (registration === 'none' || registration === 'absent') return false;
+        if (registration === 'complete') {
+          partialBundledFamilies.delete(normalizedFamily);
+          loadedFonts.add(normalizedFamily);
+        } else {
+          partialBundledFamilies.add(normalizedFamily);
+        }
+        notifyCallbacks([normalizedFamily]);
+        return true;
       }
 
       // Remote fetch disabled (no-egress embedder). The font is not locally
@@ -849,8 +1084,8 @@ export async function loadFontWithMapping(fontFamily: string): Promise<boolean> 
     ) {
       return true;
     }
-    const result = await loadFont(googleFont);
-    if (result) {
+    const result = await loadFontFrom(googleFont, undefined, trimmed);
+    if (result && !partialBundledFamilies.has(googleFont)) {
       loadedFonts.add(trimmed);
     }
     return result;

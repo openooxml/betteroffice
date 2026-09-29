@@ -417,6 +417,39 @@ export function resolveMetricCompatFace(
   );
 }
 
+const bundledFamilyByName = new Map(
+  BUNDLED_FONTS.map((face) => [face.family.toLowerCase(), face.family]),
+);
+
+/** Serif Noto families this package does not vendor; the same region's sans face covers them. */
+const UNVENDORED_NOTO_SERIF: Record<string, string> = {
+  'noto serif tc': 'Noto Sans TC',
+  'noto serif jp': 'Noto Sans JP',
+  'noto serif kr': 'Noto Sans KR',
+};
+
+/**
+ * Resolve a family by its bundled name (`"Gelasio"`, `"Noto Sans SC"`) or as a
+ * Word family, returning only a face whose weight and style match, so a
+ * browser can synthesize the styles a family does not ship.
+ */
+export function resolveBundledFamilyFace(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
+  const key = family.trim().toLowerCase();
+  const bundled =
+    bundledFamilyByName.get(key) ??
+    UNVENDORED_NOTO_SERIF[key] ??
+    resolveMetricCompatFamily(family);
+  const weight = bold ? 700 : 400;
+  const style = italic ? 'italic' : 'normal';
+  return BUNDLED_FONTS.find(
+    (f) => f.family === bundled && f.weight === weight && f.style === style,
+  );
+}
+
 /**
  * Pick the bundled face that provides glyph coverage for a script bucket.
  * Preference order: exact (weight, style) -> same weight upright -> the
