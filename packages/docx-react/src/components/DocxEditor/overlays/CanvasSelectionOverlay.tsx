@@ -24,6 +24,7 @@ import type { SelectionRect, CaretPosition } from '@betteroffice/docx/layout';
 import {
   CANVAS_PAGE_GAP_PX,
   CANVAS_PAGES_PADDING_PX,
+  displayPageCanvas,
   type DisplayList,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -192,9 +193,7 @@ function ProjectedCanvasSelectionOverlay({
     const recompute = () => {
       const targetRect = overlayTarget.getBoundingClientRect();
       const project = (pageIndex: number, x: number, y: number) => {
-        const canvasEl = host.querySelector<HTMLCanvasElement>(
-          `canvas[data-page-index="${pageIndex}"]`
-        );
+        const canvasEl = displayPageCanvas(host, pageIndex);
         const size = displayListQueries.pageSize(pageIndex);
         if (!canvasEl || !size) return null;
         const canvasRect = canvasEl.getBoundingClientRect();

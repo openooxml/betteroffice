@@ -7,7 +7,6 @@
 //! page reaches canvas replay.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::ops::Range;
 use std::rc::Rc;
 
 use docx_layout::display_list::{DisplayList, DisplayPage, DocAttrs, Primitive};
@@ -132,7 +131,7 @@ pub fn encode_frame_delta_incremental(
     previous: &[FramePageSnapshot],
     epochs: FrameEpochs,
     next_page_id: &mut u64,
-    rebuilt_pages: Range<usize>,
+    rebuilt_pages: &HashSet<usize>,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     encode_frame_delta_inner(
         list,
@@ -150,9 +149,9 @@ fn encode_frame_delta_inner(
     epochs: FrameEpochs,
     full: bool,
     next_page_id: &mut u64,
-    rebuilt_pages: Option<Range<usize>>,
+    rebuilt_pages: Option<&HashSet<usize>>,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages.as_ref())?;
+    let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages)?;
     let next_ids: HashSet<u64> = prepared.iter().map(|page| page.snapshot.page_id).collect();
     let previous_by_id: HashMap<u64, &FramePageSnapshot> =
         previous.iter().map(|old| (old.page_id, old)).collect();
@@ -401,7 +400,7 @@ fn prepare_pages<'a>(
     list: &'a DisplayList,
     previous: &[FramePageSnapshot],
     next_page_id: &mut u64,
-    rebuilt_pages: Option<&Range<usize>>,
+    rebuilt_pages: Option<&HashSet<usize>>,
 ) -> Result<Vec<PreparedPage<'a>>, String> {
     let anchors = page_anchors(list);
     // Anchors are unique within one snapshot list (page_anchors suffixes an
