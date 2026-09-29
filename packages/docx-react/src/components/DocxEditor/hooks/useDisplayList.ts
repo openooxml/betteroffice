@@ -117,7 +117,18 @@ export interface UseRustDisplayListResult {
 export type LayoutInWorker = (
   session: YrsSession,
   request: string
-) => Promise<LayoutComputation | null> | null;
+) => Promise<WorkerLayoutComputation | null> | null;
+
+/**
+ * A worker layout. On open it may cover only the first pages: `complete`
+ * then brings the full layout, or null when the worker could not finish it.
+ */
+export interface WorkerLayoutComputation extends LayoutComputation {
+  complete?: Promise<LayoutComputation | null>;
+}
+
+/** Pages the first worker layout covers before the rest of the body. */
+const PROVISIONAL_LAYOUT_PAGES = 3;
 
 interface WorkerLayoutFrame {
   result: ResidentEngineWorkerFrame;
@@ -126,6 +137,8 @@ interface WorkerLayoutFrame {
   /** Content epoch and display extras the worker built the frame for. */
   contentEpoch: number;
   layoutExtras: string;
+  /** The frame shows a layout of the first pages only. */
+  provisional: boolean;
 }
 
 /** The display fallback needs a main-thread layout of a worker-run one. */
@@ -732,6 +745,7 @@ export function useRustDisplayList(
       const options = {
         layoutExtras: JSON.stringify(frameExtrasInputs()),
         stateVector: hostEngine.encodeStateVector(),
+        ...(bootstrapping ? { provisionalPages: PROVISIONAL_LAYOUT_PAGES } : {}),
       };
       const paintCaret =
         !bootstrapping &&
@@ -740,29 +754,53 @@ export function useRustDisplayList(
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
-      return reply
-        .then((result) => {
-          if (result.layoutJson === undefined) {
-            throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
-          }
-          const computation = workerLayoutComputation(result.layoutJson);
-          workerLayoutFramesRef.current.set(computation.layout, {
-            result,
-            previousFrame,
-            engine: hostEngine,
-            contentEpoch,
-            layoutExtras: options.layoutExtras,
-          });
-          return computation;
-        })
-        .catch((cause: unknown) => {
-          console.error(
-            '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
-            cause
-          );
-          dropWorker(hostEngine);
-          return null;
+      const unavailable = (cause: unknown): null => {
+        console.error(
+          '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
+          cause
+        );
+        dropWorker(hostEngine);
+        return null;
+      };
+      // `base` is the frame the reply's frame applies to; without one the
+      // display builds its own frame for the layout.
+      const adopt = (
+        result: ResidentEngineWorkerFrame,
+        base: RetainedFrame | null | undefined
+      ): LayoutComputation => {
+        if (result.layoutJson === undefined) {
+          throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
+        }
+        const computation = workerLayoutComputation(result.layoutJson);
+        if (base === undefined) return computation;
+        workerLayoutFramesRef.current.set(computation.layout, {
+          result,
+          previousFrame: base,
+          engine: hostEngine,
+          contentEpoch,
+          layoutExtras: options.layoutExtras,
+          provisional: result.layoutProvisional === true,
         });
+        return computation;
+      };
+      return reply
+        .then((result): WorkerLayoutComputation => {
+          const computation = adopt(result, previousFrame);
+          if (!result.layoutProvisional) return computation;
+          // The rest is laid out against the provisional frame, which the
+          // display adopts before this answers.
+          const provisionalEpoch = result.caret.frameEpoch;
+          const complete = worker
+            .completeLayout(provisionalEpoch)
+            .then((completed) => {
+              if (!completed) return null;
+              const base = snapshotRef.current.frame;
+              return adopt(completed, base?.frameEpoch === provisionalEpoch ? base : undefined);
+            })
+            .catch(unavailable);
+          return { ...computation, complete };
+        })
+        .catch(unavailable);
     },
     [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine]
   );
@@ -870,6 +908,8 @@ export function useRustDisplayList(
       queryEngine: RustDisplayListEngine | null | undefined;
       workerProduced: boolean;
       caretPainted: boolean;
+      /** Shows a layout of the first pages only, so it does not settle. */
+      provisional?: boolean;
     }>;
     if (!overrides?.build && probe && canUseResidentEngineWorker()) {
       const hostEngine = residentEngine;
@@ -916,6 +956,7 @@ export function useRustDisplayList(
             queryEngine: null,
             workerProduced: true,
             caretPainted: result.caretPainted,
+            provisional: prebuilt.provisional,
           });
         } else {
           if (workerRef.current?.engine !== hostEngine) {
@@ -1006,7 +1047,7 @@ export function useRustDisplayList(
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
-        markSettled(contentEpoch);
+        if (!result.provisional) markSettled(contentEpoch);
         const workerProduced = Boolean(
           result.workerProduced && probe && workerRef.current?.client.isReady()
         );

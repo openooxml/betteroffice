@@ -128,6 +128,12 @@ struct LayoutCapture {
     notes: Rc<Vec<docx_layout::footnotes::NoteContent>>,
 }
 
+struct RegionPass {
+    notes_converged: bool,
+    /// The layout covers only a leading part of the body.
+    provisional: bool,
+}
+
 #[derive(Debug)]
 struct ResidentLayoutInput {
     input: LayoutInput,
@@ -263,6 +269,62 @@ fn initial_float_page_geometry(
         page_height: size.h,
         margin_top: margins.top,
         content_height: size.h - margins.top - margins.bottom,
+    }
+}
+
+/// A block index a measured prefix may end at: the extent of a bare paragraph
+/// mark depends on whether a section break follows it, so no prefix ends just
+/// before one, or just before a mark that precedes one.
+fn prefix_boundary(blocks: &[LayoutBlock], mut end: usize) -> usize {
+    let breaks_at = |index: usize| matches!(blocks.get(index), Some(LayoutBlock::SectionBreak(_)));
+    while end < blocks.len() && (breaks_at(end) || breaks_at(end + 1)) {
+        end += 1;
+    }
+    end
+}
+
+/// Measures leading blocks until their pagination runs two pages past
+/// `pages`, far enough that no later block moves the first `pages` pages.
+/// Returns the extents of the measured prefix; all blocks when it never does.
+fn measure_page_prefix(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    measurement: &docx_layout::measure_blocks::MeasurementConfig,
+    geometry: &docx_layout::measure_blocks::FloatPageGeometry,
+    options: &docx_layout::types::LayoutOptions,
+    pages: usize,
+) -> Result<Vec<BlockExtent>, String> {
+    let mut measures = Vec::new();
+    let mut step = 32;
+    loop {
+        let start = measures.len();
+        let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
+        measures.extend(docx_layout::measure_blocks::measure_blocks_with_floats(
+            &mut blocks[start..end],
+            &widths[start..end],
+            measurement,
+            Some(geometry),
+        )?);
+        if end == blocks.len() {
+            return Ok(measures);
+        }
+        let mut probe = LayoutInput {
+            measured: blocks[..end]
+                .iter()
+                .zip(&measures)
+                .map(|(block, measure)| MeasuredBlock {
+                    block: block.clone(),
+                    measure: measure.clone(),
+                })
+                .collect(),
+            options: options.clone(),
+        };
+        let probed =
+            docx_layout::place::layout_document(&mut probe).map_err(layout_error_message)?;
+        if probed.pages.len() >= pages + 2 {
+            return Ok(measures);
+        }
+        step *= 2;
     }
 }
 
@@ -1263,7 +1325,30 @@ impl EngineSession {
         &self,
         input_json: &str,
     ) -> Result<String, String> {
-        let notes_converged = self.layout_document_with_regions_value(input_json)?;
+        self.layout_regions_retained_json(input_json, None)
+    }
+
+    /// [`Self::layout_document_with_regions_retained_json`] over only as much
+    /// of the body as fills the first `pages` pages. A reply marked
+    /// `provisional` holds a layout of that prefix: its page count and
+    /// NUMPAGES fields are the prefix's, and retained state serves only
+    /// display and caret reads until a full pass replaces it. Edits made
+    /// meanwhile take the full region pass.
+    pub fn layout_document_with_regions_prefix_retained_json(
+        &self,
+        input_json: &str,
+        pages: usize,
+    ) -> Result<String, String> {
+        self.layout_regions_retained_json(input_json, Some(pages))
+    }
+
+    fn layout_regions_retained_json(
+        &self,
+        input_json: &str,
+        prefix_pages: Option<usize>,
+    ) -> Result<String, String> {
+        let pass = self.layout_regions(input_json, prefix_pages)?;
+        let notes_converged = pass.notes_converged;
         let pagination = self.pagination.borrow();
         let regions_state = self.regions.borrow();
         let state = regions_state
@@ -1276,6 +1361,8 @@ impl EngineSession {
             #[serde(skip_serializing_if = "Option::is_none")]
             headers_footers: Option<&'a serde_json::Value>,
             notes_converged: bool,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            provisional: bool,
         }
         serde_json::to_string(&RetainedRegionLayoutOutput {
             layout: pagination
@@ -1284,6 +1371,7 @@ impl EngineSession {
                 .expect("layout retained after successful pagination"),
             headers_footers: state.headers_footers.as_ref(),
             notes_converged,
+            provisional: pass.provisional,
         })
         .map_err(|error| format!("serialize: {error}"))
     }
@@ -1314,6 +1402,14 @@ impl EngineSession {
     /// state. `apply_input`'s fallback consumes this directly so a keystroke
     /// never serializes a layout nobody reads. Returns `notes_converged`.
     fn layout_document_with_regions_value(&self, input_json: &str) -> Result<bool, String> {
+        Ok(self.layout_regions(input_json, None)?.notes_converged)
+    }
+
+    fn layout_regions(
+        &self,
+        input_json: &str,
+        prefix_pages: Option<usize>,
+    ) -> Result<RegionPass, String> {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (mut input, regions, mut notes, measurement, render_env, body_story) = request.split();
@@ -1338,13 +1434,15 @@ impl EngineSession {
             .map_err(|error| format!("fingerprint measurement config: {error}"))?;
         let resident_body = body_story.is_some();
         let mut block_fingerprints: Option<Vec<u64>> = None;
+        let mut provisional = false;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
                 .as_ref()
                 .ok_or_else(|| "resident body layout requires a render environment".to_owned())?;
             enum Arena {
                 Reused(Vec<MeasuredBlock>, Vec<u64>),
-                Full(Vec<LayoutBlock>),
+                /// Blocks to measure, and whether floats tie them to the flow.
+                Full(Vec<LayoutBlock>, bool),
             }
             let arena = self
                 .with_lowered_story(story, render_env, |blocks| -> Result<Arena, String> {
@@ -1359,7 +1457,7 @@ impl EngineSession {
                         &measurement,
                         Some(&geometry),
                     )? {
-                        return Ok(Arena::Full(blocks.to_vec()));
+                        return Ok(Arena::Full(blocks.to_vec(), true));
                     }
                     match self.resident_region_measured(
                         blocks,
@@ -1369,7 +1467,7 @@ impl EngineSession {
                         measurement_fingerprint,
                     )? {
                         Some((measured, fingerprints)) => Ok(Arena::Reused(measured, fingerprints)),
-                        None => Ok(Arena::Full(blocks.to_vec())),
+                        None => Ok(Arena::Full(blocks.to_vec(), false)),
                     }
                 })
                 .map_err(|error| error.to_string())??;
@@ -1379,7 +1477,7 @@ impl EngineSession {
                     block_fingerprints = Some(fingerprints);
                     apply_section_geometry(&mut input, &regions);
                 }
-                Arena::Full(mut blocks) => {
+                Arena::Full(mut blocks, floating) => {
                     let mut section_index = 0;
                     for block in &mut blocks {
                         resolve_line_unit_spacing(
@@ -1397,12 +1495,27 @@ impl EngineSession {
                     apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
                     let widths = region_measurement_widths(blocks.iter(), &input, &regions);
                     let geometry = initial_float_page_geometry(&input, &regions);
-                    let measures = docx_layout::measure_blocks::measure_blocks_with_floats(
-                        &mut blocks,
-                        &widths,
-                        &measurement,
-                        Some(&geometry),
-                    )?;
+                    let measures = match prefix_pages {
+                        Some(pages) if !floating => {
+                            let measures = measure_page_prefix(
+                                &mut blocks,
+                                &widths,
+                                &measurement,
+                                &geometry,
+                                &input.options,
+                                pages,
+                            )?;
+                            provisional = measures.len() < blocks.len();
+                            blocks.truncate(measures.len());
+                            measures
+                        }
+                        _ => docx_layout::measure_blocks::measure_blocks_with_floats(
+                            &mut blocks,
+                            &widths,
+                            &measurement,
+                            Some(&geometry),
+                        )?,
+                    };
                     input.measured = blocks
                         .into_iter()
                         .zip(measures)
@@ -1515,7 +1628,10 @@ impl EngineSession {
         // an unchanged page count implies unchanged labels.
         let single_section = regions.sections.len() <= 1;
         drop(pagination);
-        let regional = match (resident_body && single_section, parsed_render_env.as_ref()) {
+        let regional = match (
+            resident_body && single_section && !provisional,
+            parsed_render_env.as_ref(),
+        ) {
             (true, Some(env)) => Some(self.regional_fingerprint(&regions, env)),
             _ => None,
         };
@@ -1533,8 +1649,8 @@ impl EngineSession {
         }));
         // Only the region-measured arena may seed the next pass's reuse walk.
         self.pagination.borrow_mut().measured_with =
-            resident_body.then_some(measurement_fingerprint);
-        if let (true, Some(render_env)) = (resident_body, parsed_render_env) {
+            (resident_body && !provisional).then_some(measurement_fingerprint);
+        if let (true, Some(render_env)) = (resident_body && !provisional, parsed_render_env) {
             self.capture.replace(Some(LayoutCapture {
                 version: self.doc.version(),
                 serial,
@@ -1545,7 +1661,10 @@ impl EngineSession {
                 notes: Rc::new(notes.contents),
             }));
         }
-        Ok(notes_converged)
+        Ok(RegionPass {
+            notes_converged,
+            provisional,
+        })
     }
 
     /// A fingerprint of the header and footer stories `regions` reference, lowered in `env`,
@@ -3764,6 +3883,143 @@ mod tests {
             fast_json, full_json,
             "resident region fast path state is byte-identical to a full pass"
         );
+    }
+
+    fn paragraphs_engine(client_id: u64, paragraphs: usize) -> EngineSession {
+        let engine = EngineSession::new(client_id);
+        engine
+            .doc()
+            .create_story("body", "", "Normal", "left")
+            .unwrap();
+        let ctx = crate::EditCtx::local("", "");
+        let mut cursor = 0_u32;
+        for index in 0..paragraphs {
+            let text = format!("Paragraph {index}: the quick brown fox jumps over the lazy dog.");
+            engine
+                .doc()
+                .insert_text(
+                    &ctx,
+                    crate::Position::new("body", cursor),
+                    &text,
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            cursor += text.chars().count() as u32;
+            if index + 1 < paragraphs {
+                engine
+                    .doc()
+                    .split_paragraph(&ctx, crate::Position::new("body", cursor), None)
+                    .unwrap();
+                cursor += 1;
+            }
+        }
+        engine
+    }
+
+    fn small_page_request(font_id: u32) -> String {
+        serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 4320,
+                    "pageHeight": 2880,
+                    "marginTop": 300,
+                    "marginRight": 300,
+                    "marginBottom": 300,
+                    "marginLeft": 300
+                }
+            }]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_prefix_layout_lays_out_its_first_pages_like_the_full_pass() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let request = small_page_request(font_id);
+        let engine = paragraphs_engine(142, 400);
+        let full_json = paragraphs_engine(142, 400)
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        let full: serde_json::Value = serde_json::from_str(&full_json).unwrap();
+
+        let prefix: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_prefix_retained_json(&request, 3)
+                .unwrap(),
+        )
+        .unwrap();
+        let prefix_pages = prefix["layout"]["pages"].as_array().unwrap();
+        let full_pages = full["layout"]["pages"].as_array().unwrap();
+        assert_eq!(prefix["provisional"], true);
+        assert!(full.get("provisional").is_none());
+        assert!(prefix_pages.len() >= 5 && prefix_pages.len() < full_pages.len());
+        assert_eq!(prefix_pages[..3], full_pages[..3]);
+
+        assert_eq!(
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap(),
+            full_json,
+            "a full pass after a prefix pass matches a fresh one"
+        );
+        let short = paragraphs_engine(144, 3)
+            .layout_document_with_regions_prefix_retained_json(&request, 3)
+            .unwrap();
+        assert!(
+            !short.contains("provisional"),
+            "a short body is laid out whole"
+        );
+    }
+
+    #[test]
+    fn an_edit_over_a_prefix_layout_lays_out_the_whole_body() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let request = small_page_request(font_id);
+        let extras = serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string();
+        let edit = |engine: &EngineSession| {
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", 4),
+                    "x",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+        };
+        let engine = paragraphs_engine(145, 400);
+        engine
+            .layout_document_with_regions_prefix_retained_json(&request, 3)
+            .unwrap();
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        edit(&engine);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+
+        let reference = paragraphs_engine(145, 400);
+        edit(&reference);
+        reference
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        let pages = |engine: &EngineSession| {
+            serde_json::to_value(&engine.pagination.borrow().layout.as_ref().unwrap().pages)
+                .unwrap()
+        };
+        assert_eq!(pages(&engine), pages(&reference));
     }
 
     /// Compares resident and full region passes on a paragraph-heavy document.
