@@ -4500,6 +4500,20 @@ pub(crate) fn package_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// `digest` as a package digest: the lowercase hex form [`package_digest`] gives.
+#[cfg(feature = "wasm")]
+pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
+    if digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        Ok(digest.to_owned())
+    } else {
+        Err("a package digest is 64 lowercase hex digits".to_owned())
+    }
+}
+
 /// Parses a DOCX for editing with the inflated parts the identity index
 /// reads. `digest` is its [`package_digest`], so the parser does not hash the
 /// package again.

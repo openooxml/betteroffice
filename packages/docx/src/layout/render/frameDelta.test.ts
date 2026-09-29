@@ -767,3 +767,134 @@ describe('FrameDelta note anchor shifts', () => {
     for (const queries of [firstQueries, secondQueries, freshQueries]) queries.dispose();
   });
 });
+
+type WireValue = null | boolean | number | string | WireValue[] | WireObject;
+interface WireObject {
+  entries: [string, WireValue][];
+}
+
+/** One full frame holding a single page whose payload is `page`. */
+function encodeSinglePageFrame(page: WireObject): Uint8Array {
+  const strings: string[] = [];
+  const stringId = (value: string): number => {
+    const index = strings.indexOf(value);
+    if (index >= 0) return index;
+    strings.push(value);
+    return strings.length - 1;
+  };
+  const u32 = (out: number[], value: number): void => {
+    for (let shift = 0; shift < 32; shift += 8) out.push((value >>> shift) & 0xff);
+  };
+  const encode = (out: number[], value: WireValue): void => {
+    if (value === null) out.push(0);
+    else if (typeof value === 'boolean') out.push(value ? 2 : 1);
+    else if (typeof value === 'number') {
+      out.push(3);
+      const bytes = new Uint8Array(8);
+      new DataView(bytes.buffer).setBigInt64(0, BigInt(value), true);
+      out.push(...bytes);
+    } else if (typeof value === 'string') {
+      out.push(6);
+      u32(out, stringId(value));
+    } else {
+      const body: number[] = [];
+      const items = Array.isArray(value) ? value : value.entries;
+      for (const item of items) {
+        if (Array.isArray(value)) {
+          encode(body, item as WireValue);
+        } else {
+          const [key, entry] = item as [string, WireValue];
+          u32(body, stringId(key));
+          encode(body, entry);
+        }
+      }
+      out.push(Array.isArray(value) ? 7 : 8);
+      u32(out, body.length);
+      u32(out, items.length);
+      out.push(...body);
+    }
+  };
+  const payload: number[] = [];
+  encode(payload, page);
+
+  const table: number[] = [];
+  u32(table, strings.length);
+  for (const value of strings) {
+    const bytes = new TextEncoder().encode(value);
+    u32(table, bytes.length);
+    table.push(...bytes);
+  }
+  const stringsOffset = 80 + 48;
+  const dataOffset = Math.ceil((stringsOffset + table.length) / 8) * 8;
+  const total = dataOffset + payload.length;
+  const bytes = new Uint8Array(total);
+  const view = new DataView(bytes.buffer);
+  bytes.set([0x46, 0x44, 0x56, 0x31], 0);
+  view.setUint16(4, FRAME_DELTA_VERSION, true);
+  view.setUint16(6, 80, true);
+  view.setUint32(8, total, true);
+  view.setUint32(12, 1, true);
+  view.setBigUint64(16, 1n, true);
+  view.setBigUint64(24, 1n, true);
+  view.setBigUint64(32, 1n, true);
+  view.setUint32(48, 1, true);
+  view.setUint32(52, 1, true);
+  view.setUint32(56, 80, true);
+  view.setUint32(60, stringsOffset, true);
+  view.setUint32(64, table.length, true);
+  view.setUint32(68, dataOffset, true);
+  bytes[80] = 1;
+  view.setBigUint64(88, 1n, true);
+  view.setUint32(80 + 28, dataOffset, true);
+  view.setUint32(80 + 32, dataOffset, true);
+  view.setUint32(80 + 36, payload.length, true);
+  bytes.set(table, stringsOffset);
+  bytes.set(payload, dataOffset);
+  return bytes;
+}
+
+describe('FrameDelta typed values', () => {
+  const page = (meta: [string, WireValue][]): WireObject => ({
+    entries: [
+      ['pageIndex', 0],
+      ['width', 10],
+      ['height', 20],
+      ['primitives', []],
+      ['meta', { entries: meta }],
+    ],
+  });
+
+  it('decodes a __proto__ key as an own property without touching the prototype', () => {
+    const decoded = decodeFrameDelta(
+      encodeSinglePageFrame(page([['__proto__', { entries: [['polluted', true]] }], ['kept', 'yes']]))
+    );
+    const upsert = decoded.operations[0];
+    if (upsert?.kind !== 'upsert') throw new Error('expected an upsert');
+    const meta = (upsert.page as unknown as { meta: Record<string, unknown> }).meta;
+    expect(Object.getPrototypeOf(meta)).toBe(Object.prototype);
+    expect(Object.keys(meta)).toEqual(['__proto__', 'kept']);
+    expect(Object.getOwnPropertyDescriptor(meta, '__proto__')?.value).toEqual({ polluted: true });
+    expect((meta as { polluted?: unknown }).polluted).toBeUndefined();
+    expect(upsert.page.width).toBe(10);
+  });
+
+  it('keeps a key that Object.prototype defines as an own property', () => {
+    const decoded = decodeFrameDelta(
+      encodeSinglePageFrame(page([['toString', 'wire'], ['constructor', 1]]))
+    );
+    const upsert = decoded.operations[0];
+    if (upsert?.kind !== 'upsert') throw new Error('expected an upsert');
+    const meta = (upsert.page as unknown as { meta: Record<string, unknown> }).meta;
+    expect(Object.getOwnPropertyDescriptor(meta, 'toString')?.value).toBe('wire');
+    expect(Object.getOwnPropertyDescriptor(meta, 'constructor')?.value).toBe(1);
+    expect(() =>
+      decodeFrameDelta(encodeSinglePageFrame(page([['toString', 1], ['toString', 2]])))
+    ).toThrow('duplicate object key toString');
+  });
+
+  it('rejects a duplicate object key', () => {
+    expect(() =>
+      decodeFrameDelta(encodeSinglePageFrame(page([['kept', 1], ['kept', 2]])))
+    ).toThrow('duplicate object key kept');
+  });
+});

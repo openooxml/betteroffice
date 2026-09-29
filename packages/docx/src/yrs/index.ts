@@ -205,6 +205,31 @@ export interface YrsOpeningOptions {
   generation?: string;
 }
 
+/** SHA-256 digests of the byte copies {@link prepareDocxBytes} made, by copy. */
+const preparedDigests = new WeakMap<Uint8Array, string>();
+
+/**
+ * A copy of `bytes` whose SHA-256 the platform takes off the calling thread,
+ * where it has Web Crypto. Opening that copy unchanged skips hashing the
+ * package on the calling thread; any other bytes open as before.
+ * @internal
+ */
+export async function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(bytes);
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return copy;
+  try {
+    const hash = new Uint8Array(await subtle.digest('SHA-256', copy));
+    preparedDigests.set(
+      copy,
+      Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    );
+  } catch {
+    // Opening hashes the copy itself.
+  }
+  return copy;
+}
+
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
 export interface YrsParagraph {
   /** Session key; not the paragraph's Word `w14:paraId`. */
@@ -790,6 +815,14 @@ export interface YrsSession extends CollaborationReplica {
   layoutDocumentWithRegionsRetainedJson(input: string): string;
   /** Retained `{ measured, options }` for the main-thread display fallback. */
   retainedKernelInputsJson(expectedLayoutRevision: number): string;
+  /**
+   * Record region layout `input` as the resident layout without running it
+   * here: a resident worker replica runs it, and snapshots carry it there.
+   * Returns the new layout revision. @internal
+   */
+  adoptResidentWorkerLayout?(input: string): number;
+  /** The current resident layout ran only in a worker replica. @internal */
+  residentLayoutInWorker?(): boolean;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
@@ -1353,6 +1386,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let residentLayoutInput: string | null = null;
   let residentLayoutWithRegions = false;
   let residentLayoutRevision = 0;
+  // The current resident layout ran only in a resident worker replica.
+  let layoutRanInWorker = false;
   let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
   let docxSource: Uint8Array | null = null;
@@ -1458,7 +1493,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    const json = mutate(() => session.open_docx(source, seedStories, options.generation));
+    const json = mutate(() =>
+      session.open_docx(source, seedStories, options.generation, preparedDigests.get(bytes))
+    );
     const host = decodeDocxHost(json, source);
     docxSource = source;
     return host;
@@ -1505,6 +1542,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutInput = input;
       residentLayoutWithRegions = false;
       residentLayoutRevision += 1;
+      layoutRanInWorker = false;
       return output;
     },
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
@@ -1513,6 +1551,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
+      layoutRanInWorker = false;
       return output;
     },
     layoutDocumentWithRegionsRetainedJson: (input) => {
@@ -1520,9 +1559,21 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
+      layoutRanInWorker = false;
       return output;
     },
+    adoptResidentWorkerLayout: (input) => {
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = true;
+      return residentLayoutRevision;
+    },
+    residentLayoutInWorker: () => layoutRanInWorker,
     retainedKernelInputsJson: (expectedLayoutRevision) => {
+      if (layoutRanInWorker) {
+        throw new Error('the retained layout was computed in the resident worker');
+      }
       if (expectedLayoutRevision !== residentLayoutRevision) {
         throw new Error(
           `retained layout revision mismatch: expected ${expectedLayoutRevision}, current ${residentLayoutRevision}`

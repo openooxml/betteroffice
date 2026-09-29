@@ -386,3 +386,69 @@ describe('resident worker page damage', () => {
     expect(w.surfaces.get('2')!.pixels).toBe('2:100|caret:#f00');
   });
 });
+
+describe('resident worker layout ownership', () => {
+  test('returns the layout it ran and completes the frame extras from it', async () => {
+    const w = worker();
+    const extras: string[] = [];
+    const layoutJson = JSON.stringify({
+      layout: { pages: [] },
+      headersFooters: { parts: [] },
+      notesConverged: true,
+    });
+    let epoch = 0;
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsRetainedJson: () => layoutJson,
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      buildDisplayListFrame: (input: string) => {
+        extras.push(input);
+        epoch += 1;
+        w.harness.delta = {
+          protocolVersion: 1,
+          full: true,
+          frameEpoch: epoch,
+          baseFrameEpoch: 0,
+          docEpoch: epoch,
+          layoutEpoch: epoch,
+          pageCount: 0,
+          operations: [],
+          bytes: new Uint8Array(),
+        };
+        return new Uint8Array([0]);
+      },
+    });
+    const snapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    const reply = await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: 'unused',
+      snapshot,
+      layoutExtras: JSON.stringify({ resolvedCommentIds: [4], fontChains: { 'a|0|0': [1] } }),
+    });
+    expect(reply.ok && reply.layoutJson).toBe(layoutJson);
+    expect(extras).toEqual([
+      '{"headersFooters":{"parts":[]},"fontChains":{"a|0|0":[1]},"resolvedCommentIds":[4]}',
+    ]);
+
+    const plain = await w.send({
+      type: 'sync',
+      expectedFrameEpoch: 0,
+      extras: 'given',
+      paintCaret: false,
+      snapshot,
+    });
+    expect(plain.ok && plain.layoutJson).toBeUndefined();
+    expect(extras.at(-1)).toBe('given');
+  });
+});

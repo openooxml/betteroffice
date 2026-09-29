@@ -16,6 +16,10 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
+import {
+  encodeDisplayListFrameExtras,
+  type DisplayListBuildInputs,
+} from '../layout/render/rustDisplayList';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
@@ -94,17 +98,23 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // safely while the main replica applies worker updates with local origin.
     session = await createResidentEngineSession();
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    hydrate(request.snapshot);
+    const layoutJson = hydrate(request.snapshot);
     subscribe();
     const started = performance.now();
-    const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
+    const frame = session.buildDisplayListFrame(
+      frameExtras(request.extras, request.layoutExtras, layoutJson),
+      request.expectedFrameEpoch
+    );
     await replyFrame(
       request.id,
       frame,
       performance.now() - started,
       pendingUpdates,
       undefined,
-      started
+      started,
+      false,
+      false,
+      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined)
     );
     return;
   }
@@ -119,10 +129,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    hydrate(request.snapshot);
+    const layoutJson = hydrate(request.snapshot);
     subscribe();
     const started = performance.now();
-    const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
+    const frame = session.buildDisplayListFrame(
+      frameExtras(request.extras, request.layoutExtras, layoutJson),
+      request.expectedFrameEpoch
+    );
     await replyFrame(
       request.id,
       frame,
@@ -131,7 +144,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       undefined,
       started,
       false,
-      request.paintCaret
+      request.paintCaret,
+      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined)
     );
     return;
   }
@@ -240,6 +254,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       started,
       request.selection.head.story === 'body',
       request.paintCaret,
+      undefined,
       request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
@@ -259,7 +274,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
 }
 
-function hydrate(snapshot: YrsResidentWorkerSnapshot) {
+/** Loads a snapshot and runs its layout; returns the region layout reply. */
+function hydrate(snapshot: YrsResidentWorkerSnapshot): string | null {
   if (!session) throw new Error('Resident engine worker is not initialized');
   session.loadState(snapshot.state);
   if (snapshot.fontsRevision !== fontsRevision) {
@@ -274,16 +290,36 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   }
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
+  let layoutJson: string | null = null;
   if (snapshot.layoutWithRegions) {
-    // the reply is discarded here; the full envelope would serialize the
-    // tens-of-MB measured arena
-    session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
+    // the retained reply leaves out the tens-of-MB measured arena
+    layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
   } else {
     session.layoutDocumentJson(snapshot.layoutInput);
   }
   if (snapshot.selection) session.setSelection(snapshot.selection.anchor, snapshot.selection.head);
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
+  return layoutJson;
+}
+
+/**
+ * The extras a frame is built with. For a layout this worker owns, the host
+ * sends them without the header/footer payload, which only this layout has.
+ */
+function frameExtras(
+  extras: string,
+  layoutExtras: string | undefined,
+  layoutJson: string | null
+): string {
+  if (layoutExtras === undefined) return extras;
+  const headersFooters = layoutJson
+    ? (JSON.parse(layoutJson) as Pick<DisplayListBuildInputs, 'headersFooters'>).headersFooters
+    : undefined;
+  return encodeDisplayListFrameExtras({
+    ...(JSON.parse(layoutExtras) as DisplayListBuildInputs),
+    ...(headersFooters ? { headersFooters } : {}),
+  });
 }
 
 function subscribe(): void {
@@ -329,6 +365,7 @@ async function replyFrame(
   requestStarted = performance.now(),
   requireCaret = false,
   paintCaret = false,
+  layoutJson?: string,
   deletedUnits?: number
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
@@ -389,6 +426,7 @@ async function replyFrame(
       layoutRevision,
       ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
+      ...(layoutJson !== undefined ? { layoutJson } : {}),
     },
     [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );

@@ -182,6 +182,7 @@ export {
   detectDisplayListTableInsertHover,
   deriveDisplayListSelectedCellRects,
   deriveDisplayListTableFragments,
+  deriveDisplayListTableFragmentsOnPages,
   type DisplayListTableInsertHoverHit,
   type DisplayListTableInsertHoverInput,
   type DisplayListSelectedCellRect,
