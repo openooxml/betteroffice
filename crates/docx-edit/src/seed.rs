@@ -5082,54 +5082,173 @@ pub fn seed_from_docx_with_generation(
 }
 
 /// Seeds every story of a DOCX without starting an opening.
-/// Seeds `bytes` with the body cut after its first `paragraphs` paragraphs
-/// and every other story whole, to paint the first pages before the document
-/// is seeded in full. The result is for display only. Its cut is not a real
-/// end of the document, so it is laid out with a prefix pass that stops short
-/// of it (`layout_document_with_regions_prefix_retained_json`); a pass that
-/// reaches it needs more paragraphs.
-pub fn seed_docx_preview(
-    document: &EditingDoc,
-    bytes: &[u8],
-    paragraphs: usize,
-) -> Result<(), String> {
-    let (envelope, _) = parse_docx_package_with_digest(bytes, package_digest(bytes))?;
-    let mut lowered = lower_docx(envelope, None)?;
-    if let Some(body) = lowered
-        .context
-        .plans
-        .iter_mut()
-        .find(|plan| plan.story_id == "body")
-    {
-        truncate_plan(body, paragraphs);
-    }
-    seed_lowered(document, lowered, None).map(|_| ())
+/// Seeds `bytes` with only the body's first `blocks` blocks, parsed and
+/// lowered, and the other stories they or the pages need, to paint the first
+/// pages before the document is seeded in full. The result is for display
+/// only. Its cut is not a real end of the document, so it is laid out with a
+/// prefix pass that stops short of it
+/// (`layout_document_with_regions_prefix_retained_json`); a pass that reaches
+/// it needs more blocks.
+pub fn seed_docx_preview(document: &EditingDoc, bytes: &[u8], blocks: usize) -> Result<(), String> {
+    seed_preview_envelope(document, parse_docx_preview(bytes, blocks)?).map(|_| ())
 }
 
-/// Cuts `plan` after its `paragraphs`-th paragraph mark, with the comment
-/// coverage clipped to what is left.
-fn truncate_plan(plan: &mut StoryPlan, paragraphs: usize) {
-    let Some(last) = plan
-        .units
-        .iter()
-        .enumerate()
-        .filter(|(_, unit)| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "pilcrow"))
-        .nth(paragraphs.max(1) - 1)
-        .map(|(index, _)| index)
-    else {
-        return;
+/// The parse [`seed_docx_preview`] seeds from.
+pub(crate) fn parse_docx_preview(
+    bytes: &[u8],
+    blocks: usize,
+) -> Result<docx_parse::S9WireEnvelope, String> {
+    let is_media = |path: &str| path.to_ascii_lowercase().starts_with("word/media/");
+    let mut parts = ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| !is_media(path))?;
+    let parse = |parts: &[(String, Vec<u8>)]| {
+        docx_parse::parse_docx_s9_wire_from_parts(
+            parts,
+            docx_parse::S9ParseOptions {
+                source_ordinals: true,
+                body_blocks: Some(blocks),
+                determinism_seed: Some(PREVIEW_SEED.to_owned()),
+                ..docx_parse::S9ParseOptions::default()
+            },
+            &docx_parse::xml::ParseLimits::default(),
+        )
+        .map_err(|error| error.to_string())
     };
-    plan.units.truncate(last + 1);
-    plan.measured = (0, 0);
-    let width = plan.width();
-    for (_, ranges) in &mut plan.comment_coverage {
-        ranges.retain(|(start, _)| *start < width);
-        for range in ranges.iter_mut() {
-            range.1 = range.1.min(width);
+    let envelope = parse(&parts)?;
+    // Inflate only the images the parsed prefix and the page stories use.
+    let media = preview_media(&envelope, &parts)?;
+    if media.is_empty() {
+        return Ok(envelope);
+    }
+    parts.extend(ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| {
+        media.contains(&path.to_ascii_lowercase())
+    })?);
+    parse(&parts)
+}
+
+/// Seeds a preview parse; returns the fonts it references.
+pub(crate) fn seed_preview_envelope(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+) -> Result<Vec<String>, String> {
+    let mut lowered = lower_docx(envelope, None)?;
+    retain_referenced_body_stories(&mut lowered.context.plans);
+    seed_lowered(document, lowered, None)
+}
+
+/// The seed for IDs a preview's parse generates. A preview is never saved,
+/// so it does not hash the package for the IDs a full open would generate.
+const PREVIEW_SEED: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+/// Lowercased paths of the media a preview draws: the targets of the relationship
+/// IDs its parsed document mentions, and every medium another part relates to.
+fn preview_media(
+    envelope: &docx_parse::S9WireEnvelope,
+    parts: &[(String, Vec<u8>)],
+) -> Result<HashSet<String>, String> {
+    fn ids<'a>(value: &'a Value, found: &mut HashSet<&'a str>) {
+        match value {
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    if key == "rId"
+                        && let Value::String(id) = value
+                    {
+                        found.insert(id);
+                    }
+                    ids(value, found);
+                }
+            }
+            Value::Array(values) => values.iter().for_each(|value| ids(value, found)),
+            _ => {}
         }
     }
-    plan.comment_coverage
-        .retain(|(_, ranges)| !ranges.is_empty());
+    let media_path = |base: &str, target: &str| {
+        let joined = match target.strip_prefix('/') {
+            Some(absolute) => absolute.to_owned(),
+            None => format!("{base}{target}"),
+        };
+        let mut segments: Vec<&str> = Vec::new();
+        for segment in joined.split('/') {
+            match segment {
+                ".." => {
+                    segments.pop();
+                }
+                "." | "" => {}
+                segment => segments.push(segment),
+            }
+        }
+        let path = segments.join("/").to_ascii_lowercase();
+        path.starts_with("word/media/").then_some(path)
+    };
+    let document = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let mut mentioned = HashSet::new();
+    ids(&document, &mut mentioned);
+    let mut media: HashSet<String> = envelope
+        .document
+        .package
+        .relationship_entries
+        .iter()
+        .filter(|(id, _)| mentioned.contains(id.as_str()))
+        .filter_map(|(_, relationship)| media_path("word/", &relationship.target))
+        .collect();
+    for (path, xml) in parts {
+        let lower = path.to_ascii_lowercase();
+        if !lower.starts_with("word/_rels/") || lower == "word/_rels/document.xml.rels" {
+            continue;
+        }
+        let text = String::from_utf8_lossy(xml);
+        for target in text.split("Target=\"").skip(1) {
+            if let Some(target) = target.split('"').next() {
+                media.extend(media_path("word/", target));
+            }
+        }
+    }
+    Ok(media)
+}
+
+/// Drops the body's nested stories, such as table cells, that the (cut) body
+/// no longer reaches. Headers, footers, notes and comments stay whole.
+fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
+    fn reach<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
+        match value {
+            Value::String(text) => found.push(text),
+            Value::Array(values) => values.iter().for_each(|value| reach(value, found)),
+            Value::Object(fields) => fields.values().for_each(|value| reach(value, found)),
+            _ => {}
+        }
+    }
+    let nested = |id: &str| id.starts_with("body:");
+    let index: HashMap<String, usize> = plans
+        .iter()
+        .enumerate()
+        .map(|(position, plan)| (plan.story_id.clone(), position))
+        .collect();
+    let mut keep: HashSet<usize> = plans
+        .iter()
+        .enumerate()
+        .filter(|(_, plan)| !nested(&plan.story_id))
+        .map(|(position, _)| position)
+        .collect();
+    let mut queue: Vec<usize> = keep.iter().copied().collect();
+    while let Some(position) = queue.pop() {
+        let mut found = Vec::new();
+        for unit in &plans[position].units {
+            if let UnitContent::Embed { payload, .. } = &unit.content {
+                payload.values().for_each(|value| reach(value, &mut found));
+            }
+        }
+        for id in found {
+            if let Some(&child) = index.get(id)
+                && keep.insert(child)
+            {
+                queue.push(child);
+            }
+        }
+    }
+    let mut position = 0;
+    plans.retain(|_| {
+        position += 1;
+        keep.contains(&(position - 1))
+    });
 }
 
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
