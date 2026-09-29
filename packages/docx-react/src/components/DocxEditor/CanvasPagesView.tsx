@@ -18,6 +18,7 @@ import {
   rasterizeDisplayPageToBackBuffer,
   GlyphCache,
   loadGlyphOutlineProvider,
+  displayPageNoteAnchorRevision,
   type DisplayList,
   type DisplayPage,
   type GlyphOutlineProvider,
@@ -132,6 +133,7 @@ function nextPageWindow(
  */
 const CanvasPageSurface = memo(function CanvasPageSurface({
   page,
+  noteAnchorRevision,
   pageKey,
   zoom,
   interactive,
@@ -139,6 +141,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   registerCanvas,
 }: {
   page: DisplayPage;
+  noteAnchorRevision: number;
   pageKey: string;
   zoom: number;
   interactive: boolean;
@@ -162,7 +165,12 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           boxShadow: '0 1px 3px var(--doc-shadow)',
         }}
       />
-      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} />
+      <CanvasPageMirror
+        page={page}
+        zoom={zoom}
+        defer={deferChrome}
+        noteAnchorRevision={noteAnchorRevision}
+      />
       {interactive ? (
         <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
       ) : null}
@@ -622,6 +630,7 @@ export function CanvasPagesView({
             <CanvasPageSurface
               key={surfaceKey}
               page={page}
+              noteAnchorRevision={displayPageNoteAnchorRevision(page)}
               pageKey={pageKey}
               zoom={zoom}
               interactive={interactive}
