@@ -247,7 +247,7 @@ export function createPluginGeometry(
         ranges.push(mapped);
       }
       ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-      const hidden = hiddenRanges(session)
+      const hidden = hiddenRanges(session, layout.version)
         .map(display)
         .filter((range): range is Interval => range !== null);
       const union: Interval[] = [];

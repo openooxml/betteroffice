@@ -49,6 +49,20 @@ export class DisplayPageRegistry {
   private readonly canvases = new Set<HTMLCanvasElement>();
   private ordered: HTMLCanvasElement[] | null = null;
   private byIndex: Map<number, HTMLCanvasElement> | null = null;
+  private materializer: ((pageIndices: readonly number[]) => void) | null = null;
+
+  /**
+   * Lets a renderer that keeps page DOM only near the viewport build the
+   * DOM of other pages when something needs it; see {@link materializeDisplayPages}.
+   */
+  setMaterializer(materializer: ((pageIndices: readonly number[]) => void) | null): void {
+    this.materializer = materializer;
+  }
+
+  /** Builds the DOM of `pageIndices` now, where the renderer keeps it only for some pages. */
+  materialize(pageIndices: readonly number[]): void {
+    this.materializer?.(pageIndices);
+  }
 
   add(canvas: HTMLCanvasElement): void {
     this.canvases.add(canvas);
@@ -103,6 +117,11 @@ export function bindDisplayPageRegistry(
 ): void {
   if (registry) displayPageRegistries.set(host, registry);
   else displayPageRegistries.delete(host);
+}
+
+/** Builds the accessibility DOM of `pageIndices` under `host` before a DOM query reads it. */
+export function materializeDisplayPages(host: HTMLElement, pageIndices: readonly number[]): void {
+  if (pageIndices.length > 0) displayPageRegistries.get(host)?.materialize(pageIndices);
 }
 
 /** The first `<canvas data-page-index>` under `host` for `pageIndex`. */

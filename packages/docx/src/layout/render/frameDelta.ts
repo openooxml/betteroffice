@@ -516,7 +516,8 @@ function applyFrameDeltaInternal(
       pageIndex: operation.pageIndex,
       pageId: operation.pageId,
       fingerprint: operation.fingerprint,
-      primitiveIds: operation.primitiveIds,
+      // A view would keep the whole frame buffer alive for as long as the page.
+      primitiveIds: operation.primitiveIds.slice(),
       page: operation.page,
     });
     damagedPageIds.add(operation.pageId);

@@ -1,5 +1,9 @@
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { DocxProposalSnapshot } from '@betteroffice/docx/yrs';
+import { proposalRevisionPreview, type DocxProposalSnapshot } from '@betteroffice/docx/yrs';
+import {
+  revisionPreviewKey,
+  revisionPreviewKeyOf,
+} from '../components/DocxEditor/internals/layoutProvenance';
 
 export type {
   DocxOccurrence,
@@ -29,11 +33,12 @@ export function observeProposals(
 }
 
 /** The preview key a layout of the session's current preview carries. */
-export function currentPreviewKey(_session: object | null): string {
-  return '';
+export function currentPreviewKey(session: object | null): string {
+  const snapshot = proposalSnapshot(session);
+  return revisionPreviewKey(snapshot ? proposalRevisionPreview(snapshot) : undefined);
 }
 
 /** The preview key of the layout `queries` answer for. */
-export function renderedPreviewKey(_queries: DisplayListQueries): string {
-  return '';
+export function renderedPreviewKey(queries: DisplayListQueries): string {
+  return revisionPreviewKeyOf(queries) ?? '';
 }

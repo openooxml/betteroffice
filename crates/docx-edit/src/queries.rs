@@ -61,7 +61,7 @@ impl ParaView {
     }
 
     /// Appends the view text overlapping the raw interval `[from, to)` to `out`.
-    fn view_slice_of_raw(&self, from: u32, to: u32, out: &mut String) {
+    pub(crate) fn view_slice_of_raw(&self, from: u32, to: u32, out: &mut String) {
         for span in &self.spans {
             let overlap_start = span.raw_start.max(from);
             let overlap_end = (span.raw_start + span.len).min(to);
@@ -581,6 +581,15 @@ impl EditingDoc {
     /// ID merged), paragraph-mark revisions (`pPrIns`/`pPrDel`), and table-row
     /// revisions (`trIns`/`trDel`), ordered by position.
     pub fn list_changes(&self, story_id: &str) -> OpResult<Vec<ChangeInfo>> {
+        Ok(self
+            .story_changes(story_id)?
+            .into_iter()
+            .map(|(change, _)| change)
+            .collect())
+    }
+
+    /// [`Self::list_changes`] with each change's story-global `[start, end)`.
+    pub(crate) fn story_changes(&self, story_id: &str) -> OpResult<Vec<(ChangeInfo, (u32, u32))>> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, story_id)?;
         let chunks = self.chunk_snapshot(story_id, &story, &txn);
@@ -672,21 +681,26 @@ impl EditingDoc {
                 }),
         );
         raw.sort_by_key(|change| change.start);
+        if raw.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bounds = crate::op::para_bounds(&story, &txn);
         raw.into_iter()
             .map(|change| {
-                Ok(ChangeInfo {
-                    revision_id: change.id,
-                    kind: change.kind,
-                    author: change.author,
-                    date: change.date,
-                    range: crate::op::loc_range_in_txn(
-                        story_id,
-                        &story,
-                        &txn,
-                        change.start,
-                        change.end,
-                    )?,
-                })
+                let range = LocRange {
+                    start: crate::op::loc_in_bounds(story_id, &bounds, change.start)?,
+                    end: crate::op::loc_in_bounds(story_id, &bounds, change.end)?,
+                };
+                Ok((
+                    ChangeInfo {
+                        revision_id: change.id,
+                        kind: change.kind,
+                        author: change.author,
+                        date: change.date,
+                        range,
+                    },
+                    (change.start, change.end),
+                ))
             })
             .collect()
     }
