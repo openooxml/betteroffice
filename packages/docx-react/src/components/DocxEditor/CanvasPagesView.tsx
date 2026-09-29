@@ -481,6 +481,12 @@ export function CanvasPagesView({
           // rastering — i.e. on every document load — leaving presentation
           // permanently unpublished while the worker was in fact presenting.
           offscreenAttachedRef.current = attached;
+          if (!attached && pages.length > 0) {
+            // No worker took these canvases, and a canvas transfers only
+            // once: they can never paint, so the pages remount on the DOM path.
+            offscreenFailedRef.current = true;
+            setOffscreenFailed(true);
+          }
           if (!offscreenFailedRef.current) publishWorkerPresentation(attached);
           if (!attached) {
             // transient (no worker client yet) — clear the signature so the
