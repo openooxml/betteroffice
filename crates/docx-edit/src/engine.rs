@@ -35,6 +35,7 @@ use crate::EditingDoc;
 use crate::bridge::{BridgeError, LoweringMap, RenderEnv, yrs_doc_to_mapped_layout_blocks};
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
+    encode_frame_delta_pages,
 };
 use crate::structured::pages::{self, PageLimits};
 use crate::structured::{
@@ -682,6 +683,10 @@ struct DisplayState {
     fresh_base: bool,
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
+    /// Pages a full build compiles besides those already built; the rest stay
+    /// unbuilt placeholders until [`EngineSession::build_display_pages_frame`].
+    /// `None` builds every page.
+    window: Option<std::ops::Range<usize>>,
 }
 
 /// Engine observability snapshot.
@@ -862,6 +867,24 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+/// Which pages a full display build compiles: all of them without a window,
+/// otherwise the window plus every page the previous list had built.
+fn full_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
+    let Some(window) = &display.window else {
+        return vec![true; page_count];
+    };
+    (0..page_count)
+        .map(|index| {
+            window.contains(&index)
+                || display
+                    .list
+                    .as_ref()
+                    .and_then(|list| list.pages.get(index))
+                    .is_some_and(|page| !page.unbuilt)
+        })
+        .collect()
 }
 
 fn measured_fingerprint(measured: &MeasuredBlock) -> Result<u64, String> {
@@ -3199,23 +3222,29 @@ impl EngineSession {
                     false
                 };
                 if !incremental {
-                    let (resident_input, list) = docx_layout::build_resident_display_list_observed(
-                        input,
-                        layout,
-                        extras_json,
-                        observe_display_phase,
-                    )?;
+                    let build = full_build_pages(&display, layout.pages.len());
+                    let (resident_input, list) =
+                        docx_layout::build_resident_display_list_partial_observed(
+                            input,
+                            layout,
+                            extras_json,
+                            &|index| build.get(index).copied().unwrap_or(true),
+                            observe_display_phase,
+                        )?;
                     display.resident_input = Some(resident_input);
                     display.list = Some(list);
                 }
                 (incremental, rebuilt_pages.len(), rebuilt_pages)
             } else {
-                let (resident_input, list) = docx_layout::build_resident_display_list_observed(
-                    input,
-                    layout,
-                    extras_json,
-                    observe_display_phase,
-                )?;
+                let build = full_build_pages(&display, layout.pages.len());
+                let (resident_input, list) =
+                    docx_layout::build_resident_display_list_partial_observed(
+                        input,
+                        layout,
+                        extras_json,
+                        &|index| build.get(index).copied().unwrap_or(true),
+                        observe_display_phase,
+                    )?;
                 display.resident_input = Some(resident_input);
                 display.list = Some(list);
                 (false, layout.pages.len(), HashSet::new())
@@ -3270,6 +3299,78 @@ impl EngineSession {
                 encode_frame_delta(list, previous_pages, epochs, full, &mut next_page_id)?
             };
         display.pages = pages;
+        display.next_page_id = next_page_id;
+        display.binary_frame_epoch = frame_epoch;
+        display.fresh_base = false;
+        Ok(bytes)
+    }
+
+    /// Limit full display builds to `window` plus the pages already built;
+    /// `None` builds every page.
+    pub fn set_display_window(&self, window: Option<std::ops::Range<usize>>) {
+        self.display.borrow_mut().window = window;
+    }
+
+    /// Build the requested pages that are still unbuilt and return a
+    /// FrameDelta v1 carrying them. `expected_frame_epoch` works as for
+    /// [`Self::build_display_list_frame`].
+    pub fn build_display_pages_frame(
+        &self,
+        pages: &[usize],
+        expected_frame_epoch: u64,
+    ) -> Result<Vec<u8>, String> {
+        let built = {
+            let pagination = self.pagination.borrow();
+            let input = pagination
+                .input
+                .as_ref()
+                .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+            let layout = pagination
+                .layout
+                .as_ref()
+                .ok_or_else(|| "resident layout is not built".to_owned())?;
+            let mut display = self.display.borrow_mut();
+            let DisplayState {
+                list: Some(list),
+                resident_input: Some(resident_input),
+                ..
+            } = &mut *display
+            else {
+                return Err("resident display list is not built".to_owned());
+            };
+            docx_layout::build_resident_display_pages(input, layout, resident_input, list, pages)?
+        };
+        let rebuilt: HashSet<usize> = built.into_iter().collect();
+        let mut display = self.display.borrow_mut();
+        display.frame_epoch = display
+            .frame_epoch
+            .max(expected_frame_epoch)
+            .wrapping_add(1);
+        let frame_epoch = display.frame_epoch;
+        let binary_frame_epoch = display.binary_frame_epoch;
+        let full = display.fresh_base
+            || expected_frame_epoch != binary_frame_epoch
+            || binary_frame_epoch == 0;
+        let epochs = FrameEpochs {
+            doc_epoch: self.doc_epoch(),
+            layout_epoch: self.pagination.borrow().layout_epoch,
+            frame_epoch,
+            base_frame_epoch: binary_frame_epoch,
+        };
+        let mut next_page_id = display.next_page_id;
+        let display = &mut *display;
+        let list = display
+            .list
+            .as_ref()
+            .expect("display list built before FrameDelta encoding");
+        let (bytes, snapshots) = if !full && display.pages.len() == list.pages.len() {
+            encode_frame_delta_pages(list, &display.pages, epochs, &mut next_page_id, &|index| {
+                rebuilt.contains(&index)
+            })?
+        } else {
+            encode_frame_delta(list, &display.pages, epochs, full, &mut next_page_id)?
+        };
+        display.pages = snapshots;
         display.next_page_id = next_page_id;
         display.binary_frame_epoch = frame_epoch;
         display.fresh_base = false;
@@ -6829,6 +6930,201 @@ mod tests {
         }
 
         assert!(page_count_changed, "the edit must add a page");
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn unbuilt_display_pages_build_on_request_and_match_a_full_build() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(205);
+        let body = format!(
+            "<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>{}",
+            "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(48)
+        );
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 4320,
+                    "pageHeight": 2880,
+                    "marginTop": 300,
+                    "marginRight": 300,
+                    "marginBottom": 300,
+                    "marginLeft": 300
+                }
+            }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        for measured_block in output["measured"].as_array().unwrap() {
+            let template = serde_json::json!({
+                "block": measured_block["block"],
+                "maxWidth": 248,
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            });
+            engine
+                .measure_paragraph_json(&template.to_string())
+                .unwrap();
+        }
+        engine
+            .layout_document_json(
+                &serde_json::json!({
+                    "measured": output["measured"],
+                    "options": output["options"]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let extras =
+            serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
+        let full_build = |engine: &EngineSession| {
+            let pagination = engine.pagination.borrow();
+            docx_layout::build_display_list_value_from_resident(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                &extras,
+            )
+            .unwrap()
+        };
+
+        engine.set_display_window(Some(0..1));
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let lazy = engine.with_display_list(Clone::clone).unwrap();
+        let last = lazy.pages.len() - 1;
+        assert!(last >= 3, "the fixture must span several pages");
+        assert!(!lazy.pages[0].unbuilt);
+        let expected = full_build(&engine);
+        for (page, full) in lazy.pages.iter().zip(&expected.pages).skip(1) {
+            assert!(page.unbuilt && page.primitives.is_empty());
+            assert_eq!((&page.width, &page.height), (&full.width, &full.height));
+            assert_eq!(page.content_bounds, full.content_bounds);
+        }
+
+        // An edit on the first page shifts every later position; a page built
+        // afterwards must show the shifted positions.
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                " typed",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let shifted = engine.with_display_list(Clone::clone).unwrap();
+        for (page, before) in shifted.pages.iter().zip(&lazy.pages).skip(1) {
+            if page.unbuilt {
+                let [start, end] = before.position_span.unwrap();
+                assert_eq!(page.position_span, Some([start + 6, end + 6]));
+            }
+        }
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_pages_frame(&[last, 1], epoch).unwrap();
+        let built = engine.with_display_list(Clone::clone).unwrap();
+        let expected = full_build(&engine);
+        assert_eq!(built.pages[0], expected.pages[0]);
+        assert_eq!(built.pages[1], expected.pages[1]);
+        assert_eq!(built.pages[last], expected.pages[last]);
+        assert!(built.pages[2].unbuilt);
+
+        // A later full build keeps what is built and leaves the rest unbuilt.
+        engine
+            .build_display_list_frame(&format!("{extras} "), epoch + 1)
+            .unwrap();
+        let rebuilt = engine.with_display_list(Clone::clone).unwrap();
+        assert!(!rebuilt.pages[last].unbuilt && rebuilt.pages[2].unbuilt);
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_unbuilt_page_spans_every_position_a_split_row_places_on_it() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(206);
+        let cell: String = (0..60)
+            .map(|index| format!("<w:p><w:r><w:t>Tall cell line {index}</w:t></w:r></w:p>"))
+            .collect();
+        let body = format!(
+            "<w:p><w:r><w:t>Before the table</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w=\"3600\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"3600\"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w=\"3600\" w:type=\"dxa\"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl><w:p><w:r><w:t>After the table</w:t></w:r></w:p>"
+        );
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 4320,
+                    "pageHeight": 2880,
+                    "marginTop": 300,
+                    "marginRight": 300,
+                    "marginBottom": 300,
+                    "marginLeft": 300
+                }
+            }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let extras =
+            serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
+        engine.set_display_window(Some(0..1));
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let lazy = engine.with_display_list(Clone::clone).unwrap();
+        let full = {
+            let pagination = engine.pagination.borrow();
+            docx_layout::build_display_list_value_from_resident(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                &extras,
+            )
+            .unwrap()
+        };
+        let unbuilt: Vec<usize> = (0..lazy.pages.len())
+            .filter(|&index| lazy.pages[index].unbuilt)
+            .collect();
+        assert!(
+            unbuilt.len() >= 4,
+            "the row must split across several unbuilt pages"
+        );
+        for &index in &unbuilt {
+            let page = serde_json::to_value(&full.pages[index]).unwrap();
+            for primitive in page["primitives"].as_array().unwrap() {
+                let Some(position) = primitive["docStart"].as_i64() else {
+                    continue;
+                };
+                assert!(
+                    lazy.pages[index]
+                        .position_span
+                        .is_some_and(|[low, high]| low <= position && position <= high),
+                    "position {position} on page {index}"
+                );
+            }
+        }
         docx_layout::clear_measure_fonts();
     }
 

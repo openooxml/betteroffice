@@ -338,6 +338,69 @@ describe('createDisplayListQueries page load failures', () => {
   });
 });
 
+describe('createDisplayListQueries unbuilt pages', () => {
+  test('a position on an unbuilt page anchors to its content box', () => {
+    const { engine } = fakeEngine();
+    const unbuilt: DisplayPage = {
+      pageIndex: 1,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      positionSpan: [40, 80],
+      contentBounds: { x: 10, y: 12, width: 80, height: 70 },
+    };
+    const queries = createDisplayListQueries({ pages: [page(0), unbuilt] }, engine);
+    expect(queries.caretRect(50)).toEqual({ pageIndex: 1, x: 10, y: 12, width: 0, height: 0 });
+    expect(queries.anchorRect(50)).toEqual({ pageIndex: 1, x: 10, y: 12, width: 0, height: 0 });
+    expect(queries.caretRect(90)).toBeNull();
+  });
+
+  test('the first position of an unbuilt page anchors to it, not to the page painted before it', () => {
+    const { engine } = fakeEngine();
+    engine.rangeRectsByHandle = (_handle, from, to) =>
+      from === 39 && to === 40
+        ? JSON.stringify([{ pageIndex: 0, x: 20, y: 30, width: 5, height: 10 }])
+        : '[]';
+    const unbuilt = (pageIndex: number, positionSpan: [number, number]): DisplayPage => ({
+      pageIndex,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      positionSpan,
+      contentBounds: { x: 10, y: 12 + pageIndex, width: 80, height: 70 },
+    });
+    const queries = createDisplayListQueries(
+      { pages: [page(0), unbuilt(1, [40, 80]), unbuilt(2, [80, 120])] },
+      engine
+    );
+    expect(queries.caretRect(40)).toEqual({ pageIndex: 1, x: 10, y: 13, width: 0, height: 0 });
+    expect(queries.caretRect(80)).toEqual({ pageIndex: 2, x: 10, y: 14, width: 0, height: 0 });
+  });
+
+  test('a position in a row split across unbuilt pages picks the page by its share of the row', () => {
+    const { engine } = fakeEngine();
+    const unbuilt = (pageIndex: number, positionSpan: [number, number]): DisplayPage => ({
+      pageIndex,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      positionSpan,
+    });
+    const queries = createDisplayListQueries(
+      { pages: [page(0), unbuilt(1, [50, 400]), unbuilt(2, [100, 400]), unbuilt(3, [100, 450])] },
+      engine
+    );
+    expect(queries.caretRect(120)?.pageIndex).toBe(1);
+    expect(queries.caretRect(250)?.pageIndex).toBe(2);
+    expect(queries.caretRect(390)?.pageIndex).toBe(3);
+    expect(queries.caretRect(60)?.pageIndex).toBe(1);
+    expect(queries.caretRect(420)?.pageIndex).toBe(3);
+  });
+});
+
 describe('visual lines', () => {
   const text = (
     x: number,

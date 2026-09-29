@@ -5,7 +5,12 @@ import { resolve } from 'node:path';
 import { useRef } from 'react';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, type DocxEditRequest, type YrsSession } from '@betteroffice/docx/yrs';
+import {
+  createYrsSession,
+  type DocxEditRequest,
+  type DocxProposalRequest,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -62,7 +67,9 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function setup(options: { flush?: () => Promise<void> | void; mode?: EditorMode } = {}) {
+async function setup(
+  options: { flush?: () => Promise<void> | void; mode?: EditorMode; allowHostProposals?: boolean } = {}
+) {
   const session = await createYrsSession();
   sessions.push(session);
   session.openDocx(fixture(), true);
@@ -81,6 +88,7 @@ async function setup(options: { flush?: () => Promise<void> | void; mode?: Edito
   } as unknown as PagedEditorRef;
   const pagedEditorRef = { current: editor as PagedEditorRef | null };
   const modeRef = { current: options.mode ?? ('editing' as EditorMode) };
+  const allowHostProposalsRef = { current: options.allowHostProposals ?? false };
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
@@ -109,6 +117,7 @@ async function setup(options: { flush?: () => Promise<void> | void; mode?: Edito
       commentIdAllocator: createCommentIdAllocator(),
       commands: UNAVAILABLE_DOCX_COMMANDS,
       modeRef,
+      allowHostProposalsRef,
     });
     return ref;
   });
@@ -117,7 +126,16 @@ async function setup(options: { flush?: () => Promise<void> | void; mode?: Edito
     if (!current) throw new Error('the ref API is not mounted');
     return current;
   };
-  return { session, events, editor, pagedEditorRef, modeRef, api, comments };
+  return {
+    session,
+    events,
+    editor,
+    pagedEditorRef,
+    modeRef,
+    allowHostProposalsRef,
+    api,
+    comments,
+  };
 }
 
 const target = { kind: 'search', text: 'Tail', within: { kind: 'paragraph', story: 'body', paraId: '00000002' }, view: 'accepted' } as const;
@@ -270,4 +288,87 @@ test('legacy helpers target the text after a hard break', async () => {
     before: 'Line ',
     after: 'and more',
   });
+});
+
+function proposal(session: YrsSession, id = 'p1', replaceWith = 'Head'): DocxProposalRequest {
+  return {
+    expectVersion: session.version(),
+    proposals: [
+      {
+        id,
+        paragraph: { kind: 'persisted', story: { partUri: '/word/document.xml', kind: 'body' }, paraId: '00000002' },
+        suggest: { author: 'Atira', date: '2026-09-29T00:00:00Z' },
+        op: 'replaceText',
+        search: 'Tail',
+        replaceWith,
+      },
+    ],
+  };
+}
+
+test('host proposals refuse a read-only editor unless allowed, and never enable other writes', async () => {
+  const denied = await setup({ mode: 'viewing' });
+  expect(await denied.api().proposeChanges(proposal(denied.session))).toMatchObject({
+    ok: false,
+    failure: { code: 'read-only' },
+  });
+  expect(
+    await denied.api().setProposalStates({
+      expectVersion: denied.session.version(),
+      expectPreviewVersion: 0,
+      changes: [],
+    })
+  ).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(denied.events).toEqual([]);
+  expect(await denied.api().getProposals()).toMatchObject({ previewVersion: 0, proposals: [] });
+
+  const allowed = await setup({ mode: 'viewing', allowHostProposals: true });
+  const proposed = await allowed.api().proposeChanges(proposal(allowed.session));
+  expect(proposed).toMatchObject({ ok: true, snapshot: { proposals: [{ id: 'p1', changed: true }] } });
+  expect(allowed.events).toEqual(['flush', 'sync:true:body']);
+  expect(bodyTexts(allowed.session, 'original')[1]).toBe('Tail');
+  expect(bodyTexts(allowed.session)[1]).toBe('Head');
+  expect(allowed.session.canUndo()).toBe(false);
+  expect(await allowed.api().applyEdits(request(allowed.session))).toMatchObject({
+    ok: false,
+    failure: { code: 'read-only' },
+  });
+
+  expect(await allowed.api().proposeChanges({ ...proposal(allowed.session), expectVersion: 'old' })).toMatchObject({
+    ok: true,
+  });
+  const version = allowed.session.version();
+  const decided = await allowed.api().setProposalStates({
+    expectVersion: version,
+    expectPreviewVersion: 0,
+    changes: [{ id: 'p1', state: 'rejected' }],
+  });
+  expect(decided).toMatchObject({ ok: true, snapshot: { version, previewVersion: 1 } });
+  expect(allowed.events.filter((event) => event.startsWith('sync'))).toHaveLength(1);
+  expect((await allowed.api().getProposals()).proposals[0]!.state).toBe('rejected');
+});
+
+test('host proposals check the gate again after the flush and abort on a replaced document', async () => {
+  let revoke = () => {};
+  const revoked = await setup({ mode: 'viewing', allowHostProposals: true, flush: () => revoke() });
+  revoke = () => {
+    revoked.allowHostProposalsRef.current = false;
+  };
+  expect(await revoked.api().proposeChanges(proposal(revoked.session))).toMatchObject({
+    ok: false,
+    failure: { code: 'read-only' },
+  });
+  expect(revoked.session.getProposals().proposals).toEqual([]);
+
+  const other = await createYrsSession();
+  sessions.push(other);
+  let replace = () => {};
+  const replaced = await setup({ flush: () => replace() });
+  replace = () => {
+    replaced.pagedEditorRef.current = { ...replaced.editor, getYrsSession: () => other } as PagedEditorRef;
+  };
+  const before = replaced.session.version();
+  await expect(replaced.api().proposeChanges(proposal(replaced.session))).rejects.toThrow('document changed');
+  expect(replaced.session.version()).toBe(before);
+  expect(replaced.session.getProposals().proposals).toEqual([]);
 });
