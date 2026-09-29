@@ -22,7 +22,7 @@ import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
-import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { isPresented, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
@@ -274,7 +274,13 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
             () => {
               const editor = latest.current.pagedEditorRef.current;
               const session = editor?.getYrsSession();
-              return editor && session ? { session, editor } : null;
+              return editor && session
+                ? {
+                    session,
+                    editor,
+                    presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
+                  }
+                : null;
             }
           )
         : null,
@@ -291,7 +297,20 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   useEffect(() => {
     host.geometryChanged();
-  }, [host, geometry]);
+    if (!geometry || !dom) return;
+    let frame = 0;
+    const settle = () => {
+      if (isPresented(dom.context.pagesContainer, dom.queries.displayList)) {
+        host.geometryChanged();
+      } else {
+        frame = requestAnimationFrame(settle);
+      }
+    };
+    if (!isPresented(dom.context.pagesContainer, dom.queries.displayList)) {
+      frame = requestAnimationFrame(settle);
+    }
+    return () => cancelAnimationFrame(frame);
+  }, [host, geometry, dom]);
 
   const place = useCallback(
     (anchor: DocxPluginSidebarItem<unknown>['anchor']) => {

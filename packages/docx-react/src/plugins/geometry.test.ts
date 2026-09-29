@@ -225,6 +225,7 @@ function semanticGeometry(zoom = 1) {
   };
   const session = {
     version: () => 'v1',
+    hasStory: () => true,
     getProposals: () => snapshot,
     resolveParagraphAnchor: () => ({ status: 'found', anchor: PARAGRAPH }),
     paragraphSpans: () => [{ paraId: 'p', length: 4 }],
@@ -270,6 +271,7 @@ function semanticGeometry(zoom = 1) {
   });
   let current = true;
   let available = true;
+  let presented = true;
   const layout = { id: 'layout', version: 'v1', previewVersion: 0, zoom, pageCount: 2 };
   const geometry = createPluginGeometry(
     layout,
@@ -278,7 +280,7 @@ function semanticGeometry(zoom = 1) {
     () => current,
     () => null,
     source,
-    () => (available ? { session, editor } : null)
+    () => (available ? { session, editor, presented } : null)
   );
   return {
     geometry,
@@ -293,6 +295,9 @@ function semanticGeometry(zoom = 1) {
     },
     setAvailable: (value: boolean) => {
       available = value;
+    },
+    setPresented: (value: boolean) => {
+      presented = value;
     },
     setSnapshot: (value: Partial<DocxProposalSnapshot>) => {
       snapshot = { ...snapshot, ...value };
@@ -391,6 +396,44 @@ describe('semantic anchor geometry', () => {
     refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
   });
 
+  test('anchors at the logical end of the last unit, whatever order the fragments come in', () => {
+    const { geometry, source } = semanticGeometry();
+    const target: DocxGeometryTarget = { kind: 'range', version: 'v1', range: TEXT_RANGE };
+    const text = { ...RANGE, x: 30, width: 40 };
+    const image = { ...RANGE, x: 10, width: 20 };
+    const probe = (unit: DisplayListRect[], line: DisplayListRect[]) => {
+      source.rangeRects = (from, to) => (to - from === 1 ? unit : line);
+      return anchored(geometry.getAnchorGeometry(target)).anchor;
+    };
+    expect(probe([{ ...text, x: 66, width: 4 }], [text, image])).toMatchObject({ x: 213 });
+    expect(probe([{ ...text, width: 4 }], [text])).toMatchObject({ x: 173 });
+    expect(probe([], [text, { ...text, y: 70, x: 10, width: 25 }, image])).toMatchObject({
+      x: 178,
+      y: 164,
+    });
+  });
+
+  test('answers only once the pages show the layout', () => {
+    const state = semanticGeometry();
+    state.setPresented(false);
+    refused(state.geometry.getAnchorGeometry(PARAGRAPH_TARGET), 'layout-unavailable');
+    state.setPresented(true);
+    expect(state.geometry.getAnchorGeometry(PARAGRAPH_TARGET).ok).toBe(true);
+  });
+
+  test('refuses a range in a story the document no longer has', () => {
+    const { geometry, session } = semanticGeometry();
+    session.hasStory = () => false;
+    refused(
+      geometry.getAnchorGeometry({
+        kind: 'range',
+        version: 'v1',
+        range: { ...TEXT_RANGE, story: 'body:t9:r0c0' },
+      }),
+      'missing-target'
+    );
+  });
+
   test('refuses unavailable or stale pixels, pending input and preview mismatches', () => {
     const state = semanticGeometry();
     const { geometry, session, editor } = state;
@@ -436,6 +479,7 @@ describe('semantic anchor geometry', () => {
     expect(calls).toEqual([
       [0, 1],
       [2, 4],
+      [3, 4],
     ]);
     session.listRevisions = () => [];
     const fallback = anchored(geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }));
@@ -451,12 +495,18 @@ describe('semantic anchor geometry', () => {
     const target: DocxGeometryTarget = { kind: 'proposal', id: 'proposal' };
     decide('accepted');
     const accepted = anchored(geometry.getAnchorGeometry(target));
-    expect(calls).toEqual([[2, 4]]);
+    expect(calls).toEqual([
+      [2, 4],
+      [3, 4],
+    ]);
     expect(accepted.anchor).toMatchObject({ x: 157, width: 0 });
     calls.length = 0;
     decide('rejected');
     anchored(geometry.getAnchorGeometry(target));
-    expect(calls).toEqual([[0, 1]]);
+    expect(calls).toEqual([
+      [0, 1],
+      [0, 1],
+    ]);
     expect(
       anchored(geometry.getAnchorGeometry({ kind: 'revision', revisionId: 'r2' })).rects
     ).toEqual([]);
@@ -485,7 +535,10 @@ describe('semantic anchor geometry', () => {
     revisions[1]!.range.end.offset = 3;
     session.listRevisions = () => revisions;
     anchored(geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }));
-    expect(calls).toEqual([[0, 4]]);
+    expect(calls).toEqual([
+      [0, 4],
+      [3, 4],
+    ]);
   });
 
   test('anchors no-op proposals at their paragraph and refuses unknown ids', () => {
@@ -565,16 +618,27 @@ describe('semantic anchor geometry', () => {
 
   test('selects first, nth and all non-overlapping search occurrences', () => {
     const { geometry, calls } = semanticGeometry();
+    const first = [
+      [0, 2],
+      [1, 2],
+    ];
     for (const [occurrence, expected] of [
-      [undefined, [[0, 2]]],
-      ['first', [[0, 2]]],
-      [1, [[0, 2]]],
-      [2, [[2, 4]]],
+      [undefined, first],
+      ['first', first],
+      [1, first],
+      [
+        2,
+        [
+          [2, 4],
+          [3, 4],
+        ],
+      ],
       [
         'all',
         [
           [0, 2],
           [2, 4],
+          [3, 4],
         ],
       ],
     ] as const) {
@@ -599,6 +663,21 @@ describe('semantic anchor geometry', () => {
       geometry.getAnchorGeometry({ kind: 'search', paragraph: PARAGRAPH, text: '' }),
       'missing-target'
     );
+  });
+
+  test('answers occurrences a truncated search covers and refuses the rest', () => {
+    const { geometry, session } = semanticGeometry();
+    const target: DocxGeometryTarget = { kind: 'search', paragraph: PARAGRAPH, text: 'aa' };
+    const full = session.findText({
+      text: 'aa',
+      within: { kind: 'paragraph', story: 'body', paraId: 'p' },
+      view: 'accepted',
+    });
+    session.findText = () => ({ ...(full as Extract<typeof full, { ok: true }>), truncated: true });
+    expect(geometry.getAnchorGeometry(target).ok).toBe(true);
+    expect(geometry.getAnchorGeometry({ ...target, occurrence: 2 }).ok).toBe(true);
+    refused(geometry.getAnchorGeometry({ ...target, occurrence: 3 }), 'unsupported');
+    refused(geometry.getAnchorGeometry({ ...target, occurrence: 'all' }), 'unsupported');
   });
 
   test('refuses truncated searches and preserves navigation refusal codes', () => {

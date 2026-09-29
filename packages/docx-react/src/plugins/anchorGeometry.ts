@@ -12,7 +12,12 @@ import type { DocxAnchorGeometryResult, DocxGeometryTarget } from './types';
 export type AnchorFailure = Extract<DocxAnchorGeometryResult, { ok: false }>;
 export type AnchorSession = Pick<
   YrsSession,
-  'resolveParagraphAnchor' | 'paragraphSpans' | 'storySegments' | 'findText' | 'listRevisions'
+  | 'resolveParagraphAnchor'
+  | 'hasStory'
+  | 'paragraphSpans'
+  | 'storySegments'
+  | 'findText'
+  | 'listRevisions'
 >;
 
 export interface RawAnchorRange {
@@ -187,6 +192,9 @@ export function resolveAnchorTarget(
     if (!isBodyStory(target.range.story)) {
       return anchorFailure('unsupported', 'The range has no body display position');
     }
+    if (!session.hasStory(target.range.story)) {
+      return anchorFailure('missing-target', 'The story no longer exists');
+    }
     const mapped = textRangeToRaw(session.storySegments(target.range.story), target.range);
     return mapped.ok
       ? {
@@ -271,7 +279,6 @@ export function resolveAnchorTarget(
       message
     );
   }
-  if (found.truncated) return anchorFailure('unsupported', 'The search returned too many matches');
   const matches: DocxTextRange[] = [];
   for (const { range } of [...found.matches].sort(
     (a, b) => a.range.start.offset - b.range.start.offset
@@ -285,6 +292,9 @@ export function resolveAnchorTarget(
           occurrence === 'first' ? 0 : occurrence - 1,
           occurrence === 'first' ? 1 : occurrence
         );
+  if (found.truncated && (occurrence === 'all' || !selected.length)) {
+    return anchorFailure('unsupported', 'The search returned too many matches');
+  }
   if (!selected.length) {
     return anchorFailure(
       'missing-target',

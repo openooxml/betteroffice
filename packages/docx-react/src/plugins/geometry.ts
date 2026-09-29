@@ -71,6 +71,30 @@ export function toOverlayRect(
 export interface AnchorGeometryAccess {
   session: YrsSession;
   editor: Pick<PagedEditorRef, 'yrsLocToDisplayPosition' | 'hasPendingInput'>;
+  /** Whether the pages show this layout's pixels. */
+  presented: boolean;
+}
+
+const EDGE = 0.5;
+
+function sameLine(a: DisplayListRect, b: DisplayListRect): boolean {
+  return a.pageIndex === b.pageIndex && a.y < b.y + b.height && b.y < a.y + a.height;
+}
+
+/** The last rectangle in reading order: page, then line, then the right edge. */
+function lastInReadingOrder(rects: readonly DisplayListRect[]): DisplayListRect | null {
+  let last: DisplayListRect | null = null;
+  for (const rect of rects) {
+    if (
+      !last ||
+      rect.pageIndex > last.pageIndex ||
+      (rect.pageIndex === last.pageIndex &&
+        (sameLine(rect, last) ? rect.x + rect.width > last.x + last.width : rect.y > last.y))
+    ) {
+      last = rect;
+    }
+  }
+  return last && { ...last, x: last.x + last.width, width: 0 };
 }
 
 /** Geometry of the current frame, resolving targets against the live editor. */
@@ -95,6 +119,25 @@ export function createPluginGeometry(
   };
   const unavailable = () =>
     anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
+  /** The trailing edge of the unit before `to`, on the side its line of `rects` runs toward. */
+  const endEdge = (to: number, rects: readonly DisplayListRect[]): DisplayListRect | null => {
+    const unit = queries
+      .rangeRects(to - 1, to)
+      .filter((rect) => rect.width > 0)
+      .at(-1);
+    if (!unit) return null;
+    const line = rects.find(
+      (rect) =>
+        sameLine(rect, unit) &&
+        rect.x <= unit.x + EDGE &&
+        unit.x + unit.width <= rect.x + rect.width + EDGE
+    );
+    const rtl =
+      !!line &&
+      Math.abs(unit.x - line.x) <= EDGE &&
+      line.x + line.width - (unit.x + unit.width) > EDGE;
+    return { ...unit, x: rtl ? unit.x : unit.x + unit.width, width: 0 };
+  };
   return {
     layout,
     dom,
@@ -108,7 +151,7 @@ export function createPluginGeometry(
     getAnchorGeometry(target) {
       if (!current()) return unavailable();
       const live = access();
-      if (!live || live.editor.hasPendingInput()) return unavailable();
+      if (!live || !live.presented || live.editor.hasPendingInput()) return unavailable();
       const { session, editor } = live;
       if (session.version() !== layout.version) {
         return anchorFailure('stale-version', 'The document changed after that version');
@@ -138,19 +181,21 @@ export function createPluginGeometry(
         else union.push({ from: range.from, to: range.to });
       }
       const rects: DocxAnchorRect[] = [];
+      const drawn: DisplayListRect[] = [];
+      let tail: { to: number; rects: DisplayListRect[] } | null = null;
       for (const { from, to } of union) {
         if (from >= to) continue;
-        for (const rect of queries.rangeRects(from, to)) {
-          if (rect.width <= 0) continue;
+        const visible = queries.rangeRects(from, to).filter((rect) => rect.width > 0);
+        for (const rect of visible) {
           const projected = project(rect);
           if (!projected) return unavailable();
           rects.push(projected);
+          drawn.push(rect);
         }
+        if (visible.length > 0) tail = { to, rects: visible };
       }
-      const last = rects.at(-1);
-      let anchor: DocxAnchorRect | null = last
-        ? { ...last, x: last.x + last.width, width: 0 }
-        : null;
+      const end = tail ? (endEdge(tail.to, tail.rects) ?? lastInReadingOrder(drawn)) : null;
+      let anchor = end ? project(end) : null;
       const lastRange = ranges.at(-1);
       if (!anchor && lastRange) {
         const caret = queries.caretRect(lastRange.from);

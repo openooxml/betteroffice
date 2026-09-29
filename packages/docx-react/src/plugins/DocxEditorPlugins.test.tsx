@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import { StrictMode, createRef } from 'react';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -28,6 +29,8 @@ import {
   type DocxPluginError,
   type DocxPluginEvent,
   type DocxPluginGeometry,
+  type DocxAnchorGeometryResult,
+  type DocxGeometryTarget,
 } from '../index';
 import { isMacPlatform } from '../commands/descriptors';
 
@@ -72,6 +75,32 @@ afterAll(async () => {
 function documentBytes(): ArrayBuffer {
   const bytes = readFileSync(FIXTURE);
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+async function inlineImageDocument(): Promise<ArrayBuffer> {
+  const zip = new JSZip();
+  const office = 'application/vnd.openxmlformats-officedocument';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  zip.file(
+    '[Content_Types].xml',
+    `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="${office}.wordprocessingml.document.main+xml"/></Types>`
+  );
+  zip.file(
+    '_rels/.rels',
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`
+  );
+  zip.file(
+    'word/_rels/document.xml.rels',
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="${rel}/image" Target="media/image1.png"/></Relationships>`
+  );
+  zip.file('word/media/image1.png', new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+  const drawing =
+    '<w:r><w:drawing><wp:inline><wp:extent cx="457200" cy="228600"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+  zip.file(
+    'word/document.xml',
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Before </w:t></w:r>${drawing}<w:r><w:t xml:space="preserve"> and the text after it</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`
+  );
+  return zip.generateAsync({ type: 'arraybuffer' });
 }
 
 async function settle(ms = 20) {
@@ -125,9 +154,12 @@ function recorder(id = 'acme.review', extra: Partial<DocxPluginDefinition<State>
   return { plugin, log, contexts };
 }
 
-async function mount(props: Partial<DocxEditorProps> = {}, strict = false) {
+async function mount(
+  props: Partial<DocxEditorProps> = {},
+  strict = false,
+  buffer: ArrayBuffer = documentBytes()
+) {
   const ref = createRef<DocxEditorRef>();
-  const buffer = documentBytes();
   const element = (next: Partial<DocxEditorProps>) => {
     const editor = <DocxEditor ref={ref} documentBuffer={buffer} {...next} />;
     return strict ? <StrictMode>{editor}</StrictMode> : editor;
@@ -863,6 +895,77 @@ describe('DocxEditor plugins', () => {
         },
       })
     ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  });
+
+  test('an overlay re-anchors once the pages show a new zoom', async () => {
+    const results: DocxAnchorGeometryResult[] = [];
+    let target: DocxGeometryTarget | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.zoom-anchor',
+      createState: () => null,
+      overlay: ({ geometry }) => {
+        if (target) results.push(geometry.getAnchorGeometry(target));
+        return null;
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin] });
+    const { paragraph } = await firstParagraph(ref);
+    const anchor = ref
+      .current!.getEditorRef()!
+      .getYrsSession()!
+      .paragraphIdentities()
+      .paragraphs.find((entry) => entry.session?.paraId === paragraph.paraId)!.session!;
+    target = { kind: 'paragraph', paragraph: anchor };
+    const rect = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 0, 800, 1000)
+    );
+    try {
+      await act(async () => ref.current!.setZoom(1.5));
+      await until(() => {
+        const last = results.at(-1);
+        return !!last?.ok && last.rects.length > 0;
+      });
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  test('an anchor ends at the last unit of its range, not at an inline image drawn after it', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.image-anchor',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin] }, false, await inlineImageDocument());
+    await until(() => geometry !== null);
+    const read = await ref.current!.readParagraphs({ view: 'accepted' });
+    if (!read.ok) throw new Error(read.failure.message);
+    const paragraph = read.paragraphs.find((candidate) => candidate.text.includes('\uFFFC'))!;
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === read.version);
+    const current = geometry! as DocxPluginGeometry;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+    }
+    const result = current.getAnchorGeometry({
+      kind: 'range',
+      version: read.version,
+      range: {
+        story: paragraph.story,
+        start: { paraId: paragraph.paraId, offset: paragraph.text.indexOf('\uFFFC') },
+        end: { paraId: paragraph.paraId, offset: paragraph.text.length },
+        view: 'accepted',
+      },
+    });
+    if (!result.ok) throw new Error(result.failure.message);
+    const ends = result.rects.map((rect) => rect.x + rect.width);
+    expect(result.rects.length).toBeGreaterThan(1);
+    expect(ends.at(-1)).toBeLessThan(Math.max(...ends));
+    expect(result.anchor.x).toBeCloseTo(Math.max(...ends));
   });
 
   test('public presenters and hooks bind contributed commands', async () => {
