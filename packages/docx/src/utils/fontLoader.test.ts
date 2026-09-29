@@ -713,3 +713,39 @@ test('a parsed document an editor shows takes back the name its previous documen
   expect(faceStyles()).toEqual([pageAlias, 'Parsed Collision']);
   shown.dispose();
 });
+
+test('a claim made before a scope was disposed stays obsolete after it revives', async () => {
+  const scope = createFontLoadScope();
+  let arrive!: (faces: BufferFaceInput[]) => void;
+  const pending = registerDocumentFaces(new Promise<BufferFaceInput[]>((resolve) => (arrive = resolve)), scope);
+  scope.dispose();
+  scope.onFontsLoaded(() => {});
+  arrive([{ family: 'Disposed Claim Face', data: fontBytes(19) }]);
+  expect(await pending).toEqual(new Map());
+  expect(faceStyles()).toEqual([]);
+  scope.dispose();
+});
+
+test('a scope joining a bundled face still loading past its deadline hears it fail', async () => {
+  jest.useFakeTimers();
+  let fail!: (error: Error) => void;
+  const overdue = new Promise<ArrayBuffer>((_, reject) => (fail = reject));
+  const load = () => overdue;
+  configureDefaultFonts({
+    fonts: { createFontProvider: () => ({ resolve: () => load, resolveFamily: () => load }) },
+  });
+  const first = createFontLoadScope();
+  const second = createFontLoadScope();
+  const heard: string[] = [];
+  first.onFontError(() => {});
+  second.onFontError((error) => heard.push(error.message));
+  const firstLoad = first.loadFontsWithMapping(['Overdue Sans']);
+  jest.advanceTimersByTime(5000);
+  await firstLoad;
+  first.dispose();
+  const secondLoad = second.loadFontsWithMapping(['Overdue Sans']);
+  fail(new Error('bundle unreachable'));
+  await secondLoad;
+  expect(heard).toHaveLength(4);
+  second.dispose();
+});

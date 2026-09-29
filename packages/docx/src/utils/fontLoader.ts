@@ -204,6 +204,8 @@ const BUNDLED_ANNOUNCE_BATCH_MS = 500;
 
 // Bundled faces by family|weight|style; a failed face is evicted so a later call retries it.
 const bundledFaces = new Map<string, Promise<boolean>>();
+// The requesters of every load that joined a bundled face still loading, which hear it fail.
+const bundledFaceRequesters = new Map<string, Set<Requesters>>();
 // Families with at least one bundled face registered; like registeredFamilies,
 // the system-font probe must not stand in for their missing faces.
 const bundledFamilies = new Set<string>();
@@ -265,10 +267,15 @@ function registerBundledFace(
 ): Promise<boolean> | undefined {
   const key = faceKey(family, bold ? 700 : 400, italic ? 'italic' : 'normal');
   const existing = bundledFaces.get(key);
-  if (existing) return existing;
+  if (existing) {
+    bundledFaceRequesters.get(key)?.add(requesters);
+    return existing;
+  }
   const load = bundledLoad(provider, source, bold, italic);
   if (!load) return undefined;
   bundledFacesInFlight += 1;
+  const joined = new Set([requesters]);
+  bundledFaceRequesters.set(key, joined);
   const promise = (async () => {
     let face: FontFace | undefined;
     try {
@@ -283,9 +290,14 @@ function registerBundledFace(
       return true;
     } catch (error) {
       if (face) document.fonts.delete(face);
-      reportFontError(error, `failed to register bundled "${family}"`, requesters);
+      reportFontError(
+        error,
+        `failed to register bundled "${family}"`,
+        new Set([...joined].flatMap((set) => [...set]))
+      );
       return false;
     } finally {
+      if (bundledFaceRequesters.get(key) === joined) bundledFaceRequesters.delete(key);
       settleBundledFace();
     }
   })();
@@ -1726,6 +1738,8 @@ export function createFontLoadScope(): FontLoadScope {
       releaseFaceOwner(scope.embedded);
       for (const retired of scope.retiring) releaseFaceOwner(retired);
       scope.retiring.clear();
+      // A claim made before disposal stays obsolete after a revival.
+      scope.embedded = { scope };
     },
   };
   // A remount (React StrictMode replays effects) subscribes again: the same
