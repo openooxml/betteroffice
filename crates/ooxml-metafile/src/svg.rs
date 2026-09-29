@@ -129,6 +129,11 @@ pub(crate) fn write(drawing: &Drawing) -> Result<String, Refusal> {
         writer.out.push_str("</g>");
     }
     writer.out.push_str("</svg>");
+    if writer.full || writer.out.len() > MAX_SVG_BYTES {
+        return Err(Refusal(
+            "the metafile's SVG would exceed the display size limit".to_owned(),
+        ));
+    }
     Ok(writer.out)
 }
 
@@ -217,8 +222,8 @@ impl Writer {
                 height,
             } => {
                 let key = format!("t{:p}{width}{height}", Arc::as_ptr(tile));
-                let href = self.bitmap_url(tile).unwrap_or_else(|| Arc::from(""));
                 let id = self.define(key, |writer, id| {
+                    let href = writer.bitmap_url(tile).unwrap_or_else(|| Arc::from(""));
                     let (w, h) = (num(*width), num(*height));
                     let _ = write!(
                         writer.out,

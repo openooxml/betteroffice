@@ -557,3 +557,147 @@ fn a_wmf_region_fills_its_scan_rectangles() {
     assert!(at(&shape.path[0], 10.0, 20.0) && at(&shape.path[2], 30.0, 40.0));
     assert!(at(&shape.path[5], 50.0, 20.0) && at(&shape.path[7], 60.0, 40.0));
 }
+
+fn plus_only(records: Vec<(u16, u16, Vec<u8>)>) -> Vec<u8> {
+    let mut all = vec![plus_header(false)];
+    all.extend(records);
+    all.push(plus_eof());
+    Emf::new(100, 100).rec(70, &plus(&all).1).bytes()
+}
+
+fn shapes(ops: &[Op]) -> Vec<&ooxml_metafile::drawing::Shape> {
+    ops.iter()
+        .filter_map(|op| match op {
+            Op::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_emf_plus_object_split_across_records_draws_like_a_whole_one() {
+    let path = plus_path(1, &[(10.0, 10.0), (60.0, 10.0), (60.0, 60.0)]);
+    let whole = replay(&plus_only(vec![path.clone(), plus_fill_path(1, 2)])).unwrap();
+    let body = path.2.clone();
+    let (head, tail) = body.split_at(body.len() / 2);
+    let mut first = u32s(&[body.len() as u32]);
+    first.extend(head);
+    let split = replay(&plus_only(vec![
+        (0x4008, path.1 | 0x8000, first),
+        (0x4008, path.1, tail.to_vec()),
+        plus_fill_path(1, 2),
+    ]))
+    .unwrap();
+    assert_eq!(shapes(&whole.ops).len(), 1);
+    assert_eq!(shapes(&whole.ops)[0].path, shapes(&split.ops)[0].path);
+}
+
+#[test]
+fn relative_emf_plus_path_points_accumulate() {
+    let mut body = u32s(&[0xDBC0_1002, 3, 0x0800]);
+    body.extend([10, 10, 20, 0, 0, 20]);
+    body.extend([1, 0x00, 2, 0x81]);
+    let drawing = replay(&plus_only(vec![
+        (0x4008, 0x0301, body),
+        plus_fill_path(1, 2),
+    ]))
+    .unwrap();
+    let path = &shapes(&drawing.ops)[0].path;
+    assert!(at(&path[0], 10.0, 10.0) && at(&path[1], 30.0, 10.0) && at(&path[2], 30.0, 30.0));
+}
+
+fn plus_string(font: u8, text: &str, rect: [f32; 4]) -> (u16, u16, Vec<u8>) {
+    let units = utf16(text);
+    let mut body = u32s(&[0xff00_0000, 99, units.len() as u32]);
+    body.extend(f32s(&rect));
+    body.extend(u16s(&units));
+    (0x401C, 0x8000 | u16::from(font), body)
+}
+
+#[test]
+fn emf_plus_strings_wrap_in_their_box_keep_blank_lines_and_clip() {
+    let drawing = replay(&plus_only(vec![
+        plus_font(1, 20.0, 0, "Arial"),
+        plus_string(1, "aaaa bbbb cccc", [0.0, 0.0, 100.0, 80.0]),
+        plus_string(1, "top\n\nthird", [0.0, 0.0, 0.0, 0.0]),
+    ]))
+    .unwrap();
+    let runs = texts(&drawing.ops);
+    let wrapped: Vec<&str> = runs[..2].iter().map(|text| text.text.as_str()).collect();
+    assert_eq!(wrapped, ["aaaa bbbb", "cccc"]);
+    assert!(runs[0].clip.is_some(), "the layout box clips its text");
+    assert_eq!(
+        drawing.omissions[0].what,
+        "EMF+ text wrapped by estimated widths"
+    );
+    let (top, third) = (runs[2], runs[3]);
+    assert_eq!(third.text, "third");
+    let line = 20.0 * (0.905 + 0.212);
+    assert!(close(third.transform[5] - top.transform[5], 2.0 * line));
+    assert!(top.clip.is_none(), "an empty layout box does not clip");
+}
+
+#[test]
+fn physical_emf_plus_units_follow_each_axis_dpi() {
+    let bytes = Emf::new(100, 100)
+        .rec(
+            70,
+            &plus(&[
+                (0x4001, 0, u32s(&[0xDBC0_1002, 1, 300, 600])),
+                (0x4030, 4, f32s(&[1.0])),
+                plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 0.1, 0.1]]),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    let path = &shapes(&drawing.ops)[0].path;
+    let (x, y) = point(&path[2]);
+    assert!(
+        close(y / x, 2.0),
+        "a 0.1 inch square spans 30 by 60 device pixels"
+    );
+}
+
+#[test]
+fn excluding_an_infinite_emf_plus_region_clips_everything() {
+    let drawing = replay(&plus_only(vec![
+        (0x4008, 0x0402, u32s(&[0xDBC0_1002, 0, 0x1000_0003])),
+        (0x4034, (4 << 8) | 2, Vec::new()),
+        plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 50.0, 50.0]]),
+    ]))
+    .unwrap();
+    let clip = shapes(&drawing.ops)[0].clip.as_deref().unwrap();
+    assert!(!clip.region.exclude);
+    assert!(clip.region.path.iter().all(|command| match command {
+        PathCommand::Close => true,
+        command => at(command, 0.0, 0.0),
+    }));
+}
+
+#[test]
+fn a_nested_metafile_is_clipped_to_its_destination() {
+    let inner = Emf::new(10, 10)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(false),
+                plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 10.0, 10.0]]),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .bytes();
+    let mut image = u32s(&[0xDBC0_1002, 2, 3, inner.len() as u32]);
+    image.extend(&inner);
+    let drawing = replay(&plus_only(vec![
+        (0x4008, 0x0500, image),
+        plus_draw_image(0, [2.5, 0.0, 5.0, 10.0], [50.0, 50.0, 20.0, 20.0]),
+    ]))
+    .unwrap();
+    let clip = shapes(&drawing.ops)[0].clip.as_deref().unwrap();
+    assert!(at(&clip.region.path[0], 50.0, 50.0));
+    let (x, y) = point(&clip.region.path[2]);
+    assert!(about(x, 70.0) && about(y, 70.0));
+}

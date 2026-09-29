@@ -129,22 +129,27 @@ impl State {
         }
     }
 
-    /// Device pixels per `unit` (`UnitType`), at the reference device's DPI.
-    fn unit_scale(&self, unit: u32) -> f64 {
-        let dpi = self.dpi.0;
-        match unit {
-            3 => dpi / 72.0,
-            4 => dpi,
-            5 => dpi / 300.0,
-            6 => dpi / 25.4,
-            _ => 1.0,
-        }
+    /// Device pixels per `unit` (`UnitType`) along x and y, at the reference
+    /// device's DPI.
+    fn unit_scale(&self, unit: u32) -> (f64, f64) {
+        let per_inch = match unit {
+            3 => 72.0,
+            4 => 1.0,
+            5 => 300.0,
+            6 => 25.4,
+            _ => return (1.0, 1.0),
+        };
+        (self.dpi.0 / per_inch, self.dpi.1 / per_inch)
     }
 
     /// World units to device pixels.
     fn to_device(&self) -> Xform {
-        let scale = self.unit_scale(self.graphics.page_unit) * self.graphics.page_scale;
-        concat(self.graphics.world, [scale, 0.0, 0.0, scale, 0.0, 0.0])
+        let (x, y) = self.unit_scale(self.graphics.page_unit);
+        let scale = self.graphics.page_scale;
+        concat(
+            self.graphics.world,
+            [x * scale, 0.0, 0.0, y * scale, 0.0, 0.0],
+        )
     }
 }
 
@@ -154,7 +159,9 @@ pub(crate) fn comment<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8])
         return Some(());
     }
     let size = u32_at(bytes, 8)? as usize;
-    let end = 12usize.checked_add(size)?.min(bytes.len());
+    let Some(end) = 12usize.checked_add(size).filter(|end| *end <= bytes.len()) else {
+        return player.refuse("an EMF+ comment runs past its record");
+    };
     let mut at = 16;
     while at + 12 <= end {
         let kind = u16_at(bytes, at)?;
@@ -479,18 +486,23 @@ fn play<const FULL: bool>(
                     finite_at(data, 24)?,
                     finite_at(data, 28)?,
                 );
-                let unit = state.unit_scale(u32::from(flags & 0xff))
-                    / state.unit_scale(state.graphics.page_unit)
-                    / state.graphics.page_scale;
+                let (from, page) = (
+                    state.unit_scale(u32::from(flags & 0xff)),
+                    state.unit_scale(state.graphics.page_unit),
+                );
+                let unit = (
+                    from.0 / page.0 / state.graphics.page_scale,
+                    from.1 / page.1 / state.graphics.page_scale,
+                );
                 if source.2 != 0.0 && source.3 != 0.0 {
-                    let (sx, sy) = (dest.2 / source.2 * unit, dest.3 / source.3 * unit);
+                    let (sx, sy) = (dest.2 / source.2 * unit.0, dest.3 / source.3 * unit.1);
                     let container = [
                         sx,
                         0.0,
                         0.0,
                         sy,
-                        dest.0 * unit - source.0 * sx,
-                        dest.1 * unit - source.1 * sy,
+                        dest.0 * unit.0 - source.0 * sx,
+                        dest.1 * unit.1 - source.1 * sy,
                     ];
                     state.graphics.world = concat(container, state.graphics.world);
                 }
@@ -890,8 +902,15 @@ fn object<const FULL: bool>(
         owned = buffer;
         &owned[..]
     } else {
-        state.continued = None;
-        data
+        match state.continued.take() {
+            Some((pending, total, mut buffer)) if pending & 0x7fff == flags => {
+                buffer.extend_from_slice(data);
+                buffer.truncate(total);
+                owned = buffer;
+                &owned[..]
+            }
+            _ => data,
+        }
     };
     let parsed = match kind {
         1 => parse_brush(player, state, data).map(Object::Brush),
@@ -1153,7 +1172,8 @@ fn parse_pen<const FULL: bool>(
     })
     .map(|mut pen| {
         if !pen.world_width {
-            pen.width *= state.unit_scale(unit);
+            let (x, y) = state.unit_scale(unit);
+            pen.width *= (x * y).sqrt();
         }
         pen
     })
@@ -1174,11 +1194,8 @@ fn parse_path(data: &[u8], limit: usize) -> Option<(Path, usize)> {
     if count > limit || count > data.len() {
         return None;
     }
-    let (compressed, relative, rle) = (
-        flags & 0x4000 != 0,
-        flags & 0x1000 != 0,
-        flags & 0x0800 != 0,
-    );
+    let relative = flags & 0x0800 != 0;
+    let (compressed, relative, rle) = (!relative && flags & 0x4000 != 0, relative, relative);
     let mut at = 12;
     let mut points = Vec::with_capacity(count);
     let mut last = (0.0, 0.0);
@@ -1402,12 +1419,38 @@ fn set_clip<const FULL: bool>(
         0 => None,
         1 => state.graphics.clip.clone(),
         4 => {
-            let mut chain_clip = state.graphics.clip.clone();
-            for mut clip in clips {
-                clip.exclude = !clip.exclude;
-                chain_clip = chain(chain_clip, clip);
+            let mut excluded = match clips.len() {
+                0 => ClipRegion {
+                    path: rect_path([0.0; 4]),
+                    even_odd: false,
+                    exclude: false,
+                },
+                1 => {
+                    let mut clip = clips.pop()?;
+                    clip.exclude = !clip.exclude;
+                    clip
+                }
+                _ => {
+                    exact = false;
+                    let mut path = Vec::new();
+                    for clip in clips.drain(..).filter(|clip| !clip.exclude) {
+                        path.extend(clip.path);
+                    }
+                    ClipRegion {
+                        path,
+                        even_odd: false,
+                        exclude: true,
+                    }
+                }
+            };
+            if !exact {
+                player.omit("EMF+ clip regions approximated")?;
             }
-            state.graphics.clip = chain_clip;
+            if excluded.path.is_empty() {
+                excluded.path = rect_path([0.0; 4]);
+                excluded.exclude = false;
+            }
+            state.graphics.clip = chain(state.graphics.clip.clone(), excluded);
             return check_depth(player, state);
         }
         _ => {
@@ -1694,8 +1737,7 @@ fn draw_image<const FULL: bool>(
             if x1 <= x0 || y1 <= y0 {
                 return Some(());
             }
-            let whole =
-                (x0, y0, x1, y1) == (0.0, 0.0, f64::from(bitmap.width), f64::from(bitmap.height));
+            let whole = source == (0.0, 0.0, f64::from(bitmap.width), f64::from(bitmap.height));
             let mut clip = state.graphics.clip.clone();
             let (placed, (ox, oy)) = match &bitmap.pixels {
                 Pixels::Encoded { .. } => {
@@ -1746,16 +1788,12 @@ fn draw_image<const FULL: bool>(
                 a.0 - u * source.0 - p * source.1,
                 a.1 - v * source.0 - q * source.1,
             ];
-            let covers = source.0 <= 0.5
-                && source.1 <= 0.5
-                && source.0 + sw >= nested.width - 0.5
-                && source.1 + sh >= nested.height - 0.5;
-            let mut clip = state.graphics.clip.clone();
-            if !covers {
-                player.charge(5, 0)?;
-                let d = (b.0 + c.0 - a.0, b.1 + c.1 - a.1);
-                clip = chain(clip, crate::blit::parallelogram([a, b, d, c]));
-            }
+            player.charge(5, 0)?;
+            let d = (b.0 + c.0 - a.0, b.1 + c.1 - a.1);
+            let clip = chain(
+                state.graphics.clip.clone(),
+                crate::blit::parallelogram([a, b, d, c]),
+            );
             let mut cache = std::collections::HashMap::new();
             for op in &nested.ops {
                 let op = crate::transform::op(op.clone(), m, &clip, &mut cache);
@@ -1794,8 +1832,8 @@ fn world_font(state: &State, font: &PlusFont) -> Font {
     let size = if font.unit == 0 {
         font.size
     } else {
-        font.size * state.unit_scale(font.unit)
-            / (state.unit_scale(state.graphics.page_unit) * state.graphics.page_scale)
+        font.size * state.unit_scale(font.unit).1
+            / (state.unit_scale(state.graphics.page_unit).1 * state.graphics.page_scale)
     };
     Font {
         family: font.family.clone(),
@@ -1854,10 +1892,11 @@ fn draw_string<const FULL: bool>(
     }
     let font = world_font(state, &font);
     let text: String = chars.into_iter().collect();
-    let lines: Vec<&str> = text
-        .split(['\n', '\r'])
-        .filter(|line| !line.is_empty())
-        .collect();
+    let wrap = (format.flags & NO_WRAP == 0 && rect.2 > 0.0).then_some(rect.2);
+    let (lines, estimated) = layout_lines(&text, &font, wrap);
+    if estimated {
+        player.omit("EMF+ text wrapped by estimated widths")?;
+    }
     let (ascent, descent) = crate::text::font_metrics(&font.family);
     let line_height = font.size * (ascent + descent);
     let block = line_height * lines.len() as f64;
@@ -1872,13 +1911,22 @@ fn draw_string<const FULL: bool>(
         _ => (rect.0, TextAnchor::Start),
     };
     let world = concat(state.to_device(), player.device_to_output());
-    let clip = state.graphics.clip.clone();
+    let mut clip = state.graphics.clip.clone();
+    if format.flags & NO_CLIP == 0 && rect.2 > 0.0 && rect.3 > 0.0 {
+        let (l, t, r, b) = (rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3);
+        let corners = [(l, t), (r, t), (r, b), (l, b)].map(|corner| apply(world, corner));
+        player.charge(5, 0)?;
+        clip = chain(clip, crate::blit::parallelogram(corners));
+    }
     for (index, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
         let baseline = top + line_height * index as f64 + ascent * font.size;
         let transform = concat([1.0, 0.0, 0.0, 1.0, x, baseline], world);
         player.push_op(Op::Text(Text {
             transform,
-            text: (*line).to_owned(),
+            text: line.clone(),
             positions: None,
             anchor,
             font: font.clone(),
@@ -1887,6 +1935,44 @@ fn draw_string<const FULL: bool>(
         }));
     }
     Some(())
+}
+
+/// `StringFormat` flags: no wrapping at the layout rectangle, and no
+/// clipping to it.
+const NO_WRAP: u32 = 0x0000_1000;
+const NO_CLIP: u32 = 0x0000_4000;
+
+/// `text` split at its line breaks, keeping blank lines, and wrapped at word
+/// boundaries to `width` by estimated character widths; `true` when any
+/// line needed wrapping.
+fn layout_lines(text: &str, font: &Font, width: Option<f64>) -> (Vec<String>, bool) {
+    let face = font.family.to_ascii_lowercase();
+    let per_char = if face.contains("courier") || face.contains("mono") {
+        0.6
+    } else {
+        0.5
+    } * font.size;
+    let estimate = |line: &str| line.chars().count() as f64 * per_char;
+    let mut lines = Vec::new();
+    let mut estimated = false;
+    for paragraph in text.replace("\r\n", "\n").split(['\n', '\r']) {
+        let Some(width) = width.filter(|width| estimate(paragraph) > *width) else {
+            lines.push(paragraph.to_owned());
+            continue;
+        };
+        estimated = true;
+        let mut line = String::new();
+        for word in paragraph.split(' ') {
+            if !line.is_empty() && estimate(&line) + per_char + estimate(word) > width {
+                lines.push(std::mem::take(&mut line));
+            } else if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        lines.push(line);
+    }
+    (lines, estimated)
 }
 
 fn draw_driver_string<const FULL: bool>(

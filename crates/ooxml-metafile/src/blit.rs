@@ -448,7 +448,7 @@ fn crop(
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
-    let full = x0 == 0.0 && y0 == 0.0 && x1 == width && y1 == height;
+    let full = (x, top, w, h) == (0.0, 0.0, width, height);
     let offset = match dib.pixels {
         DibPixels::Encoded { .. } => (-x, -top),
         DibPixels::Rgba(_) => (x0 - x, y0 - top),
