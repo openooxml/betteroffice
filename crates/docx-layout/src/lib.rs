@@ -252,6 +252,53 @@ pub fn build_resident_display_list_observed(
     })
 }
 
+/// [`build_resident_display_list_observed`] building only the pages `build`
+/// selects; the rest are unbuilt placeholders.
+pub fn build_resident_display_list_partial_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    extras: &str,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<
+    (
+        display_list::ResidentDisplayInput,
+        display_list::DisplayList,
+    ),
+    String,
+> {
+    MEASURE_FONTS.with(|store| {
+        display_list::build_resident_display_list_partial_with_fonts_observed(
+            pagination,
+            layout,
+            extras,
+            &store.borrow(),
+            build,
+            observe_phase,
+        )
+    })
+}
+
+/// Build unbuilt pages of an engine-owned display list; returns the pages built.
+pub fn build_resident_display_pages(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    list: &mut display_list::DisplayList,
+    pages: &[usize],
+) -> Result<Vec<usize>, String> {
+    MEASURE_FONTS.with(|store| {
+        display_list::build_resident_display_pages_with_fonts(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            list,
+            pages,
+        )
+    })
+}
+
 /// Incremental resident display build. Only the pagination-dirtied page range
 /// is recompiled; converged suffix pages are retained with body positions
 /// patched from stable block-id deltas.

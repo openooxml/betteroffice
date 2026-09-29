@@ -134,6 +134,13 @@ pub struct DisplayPage {
     pub footer: Option<HfRegion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub note_areas: Vec<NoteRegion>,
+    /// Geometry only: the page's content is built when a host asks for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unbuilt: bool,
+    /// For an unbuilt page, the lowest and highest body position its layout
+    /// places, so a host can find the page a position is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_span: Option<[i64; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -5246,6 +5253,8 @@ fn build_display_list_selected(
             header,
             footer,
             note_areas,
+            unbuilt: false,
+            position_span: None,
         });
     }
 
@@ -10554,6 +10563,187 @@ pub fn build_resident_display_list_with_fonts_observed(
     Ok((ResidentDisplayInput { input }, list))
 }
 
+/// [`build_resident_display_list_with_fonts_observed`] that builds only the
+/// pages `build` selects; every other page is an unbuilt placeholder carrying
+/// its geometry, for [`build_resident_display_pages_with_fonts`] to fill in.
+pub fn build_resident_display_list_partial_with_fonts_observed(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    extras: &str,
+    fonts: &ooxml_text::FontStore,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<(ResidentDisplayInput, DisplayList), String> {
+    let input = resident_build_input(pagination, layout, extras)?;
+    observe_phase();
+    let selected: HashSet<usize> = (0..input.layout.pages.len())
+        .filter(|&index| build(index))
+        .collect();
+    let built = build_display_list_selected(&input, fonts, Some(&selected));
+    let mut built_pages: HashMap<usize, DisplayPage> = built
+        .pages
+        .into_iter()
+        .map(|page| (page.page_index as usize, page))
+        .collect();
+    let blocks = measured_blocks_by_key(&input);
+    let pages = input
+        .layout
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(index, page)| {
+            built_pages
+                .remove(&index)
+                .unwrap_or_else(|| unbuilt_page(page, index, &blocks))
+        })
+        .collect();
+    observe_phase();
+    Ok((
+        ResidentDisplayInput { input },
+        DisplayList {
+            contract_version: built.contract_version,
+            pages,
+        },
+    ))
+}
+
+/// Build the requested pages that are still unbuilt in `list`, refreshing
+/// their layout pages and measured blocks from the current pagination first.
+/// Returns the pages it built.
+pub fn build_resident_display_pages_with_fonts(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    resident: &mut ResidentDisplayInput,
+    list: &mut DisplayList,
+    pages: &[usize],
+) -> Result<Vec<usize>, String> {
+    if list.pages.len() != layout.pages.len()
+        || resident.input.layout.pages.len() != layout.pages.len()
+    {
+        return Err("resident display list does not match the layout".to_owned());
+    }
+    let mut wanted: Vec<usize> = pages
+        .iter()
+        .copied()
+        .filter(|&index| list.pages.get(index).is_some_and(|page| page.unbuilt))
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    if wanted.is_empty() {
+        return Ok(wanted);
+    }
+    refresh_resident_display_pages(
+        &mut resident.input,
+        pagination,
+        layout,
+        wanted.iter().copied(),
+    )?;
+    let selected: HashSet<usize> = wanted.iter().copied().collect();
+    for page in build_display_list_selected(&resident.input, fonts, Some(&selected)).pages {
+        let index = page.page_index as usize;
+        list.pages[index] = page;
+    }
+    Ok(wanted)
+}
+
+fn measured_blocks_by_key(input: &BuildInput) -> HashMap<String, &MeasuredBlockIn> {
+    let mut blocks = HashMap::new();
+    for measured in &input.measured {
+        let key = match &measured.block {
+            BlockIn::Paragraph(block) => block_key(&block.id),
+            BlockIn::Table(block) => block_key(&block.id),
+            BlockIn::Image(block) => block_key(&block.id),
+            BlockIn::TextBox(block) => block_key(&block.id),
+            BlockIn::Shape(block) => block_key(&block.id),
+            BlockIn::Chart(block) => block_key(&block.id),
+            BlockIn::Unsupported => continue,
+        };
+        blocks.entry(key).or_insert(measured);
+    }
+    blocks
+}
+
+/// The lowest and highest body position `page`'s fragments place.
+fn page_position_span(
+    page: &PageIn,
+    blocks: &HashMap<String, &MeasuredBlockIn>,
+) -> Option<[i64; 2]> {
+    let mut span: Option<[i64; 2]> = None;
+    let mut include = |start: Option<i64>, end: Option<i64>| {
+        for value in [start, end].into_iter().flatten() {
+            span = Some(span.map_or([value, value], |[low, high]| {
+                [low.min(value), high.max(value)]
+            }));
+        }
+    };
+    fn block(block: &BlockIn, include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
+        match block {
+            BlockIn::Paragraph(paragraph) => include(paragraph.pm_start, paragraph.pm_end),
+            BlockIn::Image(image) => include(image.pm_start, image.pm_end),
+            BlockIn::Table(table) => rows(&table.rows, include),
+            _ => {}
+        }
+    }
+    fn rows(rows: &[TableRowIn], include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
+        for row in rows {
+            for cell in &row.cells {
+                for nested in &cell.blocks {
+                    block(nested, include);
+                }
+            }
+        }
+    }
+    for fragment in &page.fragments {
+        match fragment {
+            FragmentIn::Paragraph(fragment) => include(fragment.pm_start, fragment.pm_end),
+            FragmentIn::Image(fragment) => include(fragment.pm_start, fragment.pm_end),
+            FragmentIn::TextBox(fragment) => include(fragment.pm_start, fragment.pm_end),
+            FragmentIn::Shape(fragment) => include(fragment.pm_start, fragment.pm_end),
+            FragmentIn::Chart(fragment) => include(fragment.pm_start, fragment.pm_end),
+            FragmentIn::Table(fragment) => {
+                if let Some(measured) = blocks.get(&block_key(&fragment.block_id))
+                    && let BlockIn::Table(table) = &measured.block
+                {
+                    let end = fragment.row_end.min(table.rows.len());
+                    let start = fragment.row_start.min(end);
+                    rows(&table.rows[start..end], &mut include);
+                }
+            }
+            FragmentIn::Unsupported => {}
+        }
+    }
+    span
+}
+
+fn unbuilt_page(
+    page: &PageIn,
+    page_index: usize,
+    blocks: &HashMap<String, &MeasuredBlockIn>,
+) -> DisplayPage {
+    let (content_bounds, column_bounds) = page_content_geometry(page);
+    DisplayPage {
+        page_index: page_index as u64,
+        width: px(page.size.w),
+        height: px(page.size.h),
+        content_bounds: Some(content_bounds),
+        column_bounds,
+        section_id: page.section_id.clone(),
+        section_index: page.section_index,
+        section_page_index: page.section_page_index,
+        section_page_number: page.section_page_number,
+        page_label: page.page_label.clone(),
+        primitives: Vec::new(),
+        background: page.background.clone(),
+        page_borders: Vec::new(),
+        header: None,
+        footer: None,
+        note_areas: Vec::new(),
+        unbuilt: true,
+        position_span: page_position_span(page, blocks),
+    }
+}
+
 fn resident_build_input(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
@@ -10770,7 +10960,7 @@ fn refresh_resident_display_pages(
     input: &mut BuildInput,
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
-    rebuilt_pages: std::ops::Range<usize>,
+    rebuilt_pages: impl IntoIterator<Item = usize>,
 ) -> Result<(), String> {
     let mut selected_blocks = HashSet::new();
     for page_index in rebuilt_pages {

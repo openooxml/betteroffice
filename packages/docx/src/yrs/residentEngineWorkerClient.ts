@@ -36,6 +36,12 @@ export interface ResidentEngineWorkerLayoutOptions {
   stateVector?: Uint8Array;
 }
 
+/** How a bootstrap or sync builds its frame. */
+export interface ResidentEngineWorkerSnapshotOptions {
+  /** Pages `[start, end)` the frame builds; the rest stay unbuilt. */
+  displayWindow?: [number, number];
+}
+
 export interface ResidentEngineOffscreenPage {
   pageId: string;
   canvas: OffscreenCanvas;
@@ -62,6 +68,7 @@ const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
   sync: 15_000,
   attachCanvases: 15_000,
   buildFrame: 5_000,
+  buildPages: 5_000,
   applyInput: 5_000,
   applyDelete: 5_000,
 };
@@ -143,7 +150,7 @@ export class ResidentEngineWorkerClient {
   async bootstrap(
     snapshot: YrsResidentWorkerSnapshot,
     extras: string,
-    options: ResidentEngineWorkerLayoutOptions = {}
+    options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     this.bootstrapped = true;
@@ -154,6 +161,7 @@ export class ResidentEngineWorkerClient {
         extras,
         expectedFrameEpoch: 0,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
       },
       snapshotTransfers(snapshot)
     );
@@ -171,7 +179,7 @@ export class ResidentEngineWorkerClient {
     extras: string,
     expectedFrameEpoch: number,
     paintCaret = false,
-    options: ResidentEngineWorkerLayoutOptions = {}
+    options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const pending = this.request(
@@ -182,6 +190,7 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch,
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
       },
       snapshotTransfers(snapshot)
     );
@@ -203,6 +212,17 @@ export class ResidentEngineWorkerClient {
       await this.request({ type: 'buildFrame', extras, expectedFrameEpoch, paintCaret })
     );
     return result;
+  }
+
+  /** Build unbuilt display pages; the reply frame carries them. */
+  async buildPages(
+    pages: number[],
+    expectedFrameEpoch: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame> {
+    return frameResult(
+      await this.request({ type: 'buildPages', pages, expectedFrameEpoch, paintCaret })
+    );
   }
 
   async applyInput(

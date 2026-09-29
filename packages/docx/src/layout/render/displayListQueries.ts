@@ -954,6 +954,24 @@ export function createDisplayListQueries(
   ): DisplayListRect[] =>
     scopedCaretRects((from, to) => noteRangeRects(region, noteId, from, to), pos);
 
+  // A position on a page whose content is not built yet resolves to the top of
+  // that page's content box, which is enough to scroll it into view (and so
+  // have it built).
+  const unbuiltPageRect = (pos: number): DisplayListRect | null => {
+    for (const page of list.pages) {
+      const span = page.unbuilt ? page.positionSpan : undefined;
+      if (!span || pos < span[0] || pos > span[1]) continue;
+      return {
+        pageIndex: page.pageIndex,
+        x: page.contentBounds?.x ?? 0,
+        y: page.contentBounds?.y ?? 0,
+        width: 0,
+        height: 0,
+      };
+    }
+    return null;
+  };
+
   const caretRect = (pos: number): DisplayListRect | null => {
     const forward = rangeRects(pos, pos + 1);
     if (forward.length > 0) {
@@ -969,7 +987,7 @@ export function createDisplayListQueries(
         return { pageIndex: r.pageIndex, x: r.x + r.width, y: r.y, width: 0, height: r.height };
       }
     }
-    return null;
+    return unbuiltPageRect(pos);
   };
 
   const anchorRect = (pos: number): DisplayListRect | null => {

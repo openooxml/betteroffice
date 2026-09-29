@@ -70,6 +70,7 @@ export function CanvasPagedArea({
           glyphOutlineProvider={renderer.glyphOutlineProvider}
           offscreenReplay={renderer.offscreenReplay}
           onWorkerPresentationChange={renderer.setWorkerPresentationActive}
+          onPageWindowChange={renderer.setDisplayWindow}
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
@@ -177,6 +178,7 @@ export function CanvasPagesView({
   glyphOutlineProvider,
   offscreenReplay,
   onWorkerPresentationChange,
+  onPageWindowChange,
 }: {
   displayList: DisplayList;
   /** Binary retained-frame metadata used to scope page replay. */
@@ -205,6 +207,8 @@ export function CanvasPagesView({
   /** Dedicated worker replay surface; unsupported/media-heavy pages use DOM canvas. */
   offscreenReplay?: UseCanvasRendererResult['offscreenReplay'];
   onWorkerPresentationChange?: (active: boolean) => void;
+  /** The pages `[start, end)` that hold bitmaps, reported as the viewport moves. */
+  onPageWindowChange?: (start: number, end: number) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
   const registerCanvas = useCallback((pageKey: string, el: HTMLCanvasElement | null) => {
@@ -397,6 +401,12 @@ export function CanvasPagesView({
 
   const windowStart = effectiveWindow?.start ?? -1;
   const windowEnd = effectiveWindow?.end ?? -1;
+  const pageCount = displayList.pages.length;
+  useEffect(() => {
+    if (windowPending) return;
+    if (windowStart < 0) onPageWindowChange?.(0, pageCount);
+    else onPageWindowChange?.(windowStart, windowEnd + 1);
+  }, [onPageWindowChange, pageCount, windowEnd, windowPending, windowStart]);
   useEffect(() => {
     // The window measurement lands pre-paint (layout effect) and re-runs this
     // effect; rastering before it exists would process every page.

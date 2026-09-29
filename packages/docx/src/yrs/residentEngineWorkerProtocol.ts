@@ -14,6 +14,8 @@ export type ResidentEngineWorkerRequest =
       extras: string;
       expectedFrameEpoch: number;
       layoutExtras?: string;
+      /** Pages `[start, end)` a full build compiles; the rest stay unbuilt. */
+      displayWindow?: [number, number];
     }
   | {
       id: number;
@@ -28,6 +30,14 @@ export type ResidentEngineWorkerRequest =
        * from the layout it runs and returns that layout as `layoutJson`.
        */
       layoutExtras?: string;
+      displayWindow?: [number, number];
+    }
+  | {
+      id: number;
+      type: 'buildPages';
+      pages: number[];
+      expectedFrameEpoch: number;
+      paintCaret: boolean;
     }
   | {
       id: number;

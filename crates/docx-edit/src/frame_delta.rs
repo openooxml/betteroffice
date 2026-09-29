@@ -140,8 +140,19 @@ pub fn encode_frame_delta_incremental(
         epochs,
         false,
         next_page_id,
-        Some(rebuilt_pages),
+        Some(&|index| rebuilt_pages.contains(&index)),
     )
+}
+
+/// [`encode_frame_delta_incremental`] for an arbitrary set of rebuilt pages.
+pub fn encode_frame_delta_pages(
+    list: &DisplayList,
+    previous: &[FramePageSnapshot],
+    epochs: FrameEpochs,
+    next_page_id: &mut u64,
+    rebuilt: &dyn Fn(usize) -> bool,
+) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
+    encode_frame_delta_inner(list, previous, epochs, false, next_page_id, Some(rebuilt))
 }
 
 fn encode_frame_delta_inner(
@@ -150,9 +161,9 @@ fn encode_frame_delta_inner(
     epochs: FrameEpochs,
     full: bool,
     next_page_id: &mut u64,
-    rebuilt_pages: Option<Range<usize>>,
+    rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages.as_ref())?;
+    let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages)?;
     let next_ids: HashSet<u64> = prepared.iter().map(|page| page.snapshot.page_id).collect();
     let previous_by_id: HashMap<u64, &FramePageSnapshot> =
         previous.iter().map(|old| (old.page_id, old)).collect();
@@ -409,7 +420,7 @@ fn prepare_pages<'a>(
     list: &'a DisplayList,
     previous: &[FramePageSnapshot],
     next_page_id: &mut u64,
-    rebuilt_pages: Option<&Range<usize>>,
+    rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
 ) -> Result<Vec<PreparedPage<'a>>, String> {
     let anchors = page_anchors(list);
     // Anchors are unique within one snapshot list (page_anchors suffixes an
@@ -460,8 +471,7 @@ fn prepare_pages<'a>(
             (*next_page_id, true, false)
         };
         let positions = primitive_positions(page);
-        let full_prepare =
-            is_new || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages.contains(&index));
+        let full_prepare = is_new || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index));
         let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
             let hashes = hash_page(page)?;
             let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();

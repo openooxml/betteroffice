@@ -18,6 +18,7 @@ export type ResidentEngineSession = Pick<
   | 'applyInputProfiled'
   | 'applyUpdate'
   | 'buildDisplayListFrame'
+  | 'buildDisplayPagesFrame'
   | 'clearFonts'
   | 'destroy'
   | 'encodeStateVector'
@@ -32,6 +33,7 @@ export type ResidentEngineSession = Pick<
   | 'registerSubstituteFont'
   | 'residentCaretSnapshot'
   | 'selection'
+  | 'setDisplayWindow'
   | 'setSelection'
   | 'yrsBlocksForStory'
 >;
@@ -76,6 +78,9 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
       session.layout_document_with_regions_retained_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
+      session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,
