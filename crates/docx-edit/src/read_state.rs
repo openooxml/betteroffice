@@ -403,7 +403,6 @@ impl EditingDoc {
             if changes.is_empty() {
                 continue;
             }
-            // One read of the story serves every change's preview.
             let txn = self.yrs_doc().transact();
             let story = crate::story_ref(&txn, &story_id)?;
             let bounds = crate::op::para_bounds(&story, &txn);
