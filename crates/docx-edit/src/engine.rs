@@ -272,15 +272,49 @@ fn initial_float_page_geometry(
     }
 }
 
-/// A block index a measured prefix may end at: the extent of a bare paragraph
+/// A block index a measured prefix may end at. The extent of a bare paragraph
 /// mark depends on whether a section break follows it, so no prefix ends just
-/// before one, or just before a mark that precedes one.
+/// before one, or just before a mark that precedes one. A keep-with-next run
+/// is placed by its height through its follower, so no prefix ends inside one.
 fn prefix_boundary(blocks: &[LayoutBlock], mut end: usize) -> usize {
     let breaks_at = |index: usize| matches!(blocks.get(index), Some(LayoutBlock::SectionBreak(_)));
-    while end < blocks.len() && (breaks_at(end) || breaks_at(end + 1)) {
+    let keeps_with_next = |index: usize| {
+        matches!(
+            blocks.get(index),
+            Some(LayoutBlock::Paragraph(paragraph))
+                if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true)
+        )
+    };
+    while end < blocks.len()
+        && (breaks_at(end) || breaks_at(end + 1) || (end > 0 && keeps_with_next(end - 1)))
+    {
         end += 1;
     }
     end
+}
+
+fn section_breaks(blocks: &[LayoutBlock]) -> usize {
+    blocks
+        .iter()
+        .filter(|block| matches!(block, LayoutBlock::SectionBreak(_)))
+        .count()
+}
+
+/// The layout options of the document cut after section `last`, which then
+/// lays out as the final section.
+fn options_through_section(
+    request: &docx_layout::types::LayoutOptions,
+    regions: &DocumentRegions,
+    last: usize,
+) -> docx_layout::types::LayoutOptions {
+    let through = DocumentRegions {
+        sections: regions.sections.iter().take(last + 1).cloned().collect(),
+        even_and_odd_headers: regions.even_and_odd_headers,
+        ..DocumentRegions::default()
+    };
+    let mut options = request.clone();
+    apply_section_geometry_to_blocks::<LayoutBlock>(&mut [], &mut options, &through);
+    options
 }
 
 /// Measures leading blocks until their pagination runs two pages past
@@ -291,7 +325,8 @@ fn measure_page_prefix(
     widths: &[f64],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
-    options: &docx_layout::types::LayoutOptions,
+    request_options: &docx_layout::types::LayoutOptions,
+    regions: &DocumentRegions,
     pages: usize,
 ) -> Result<Vec<BlockExtent>, String> {
     let mut measures = Vec::new();
@@ -317,7 +352,11 @@ fn measure_page_prefix(
                     measure: measure.clone(),
                 })
                 .collect(),
-            options: options.clone(),
+            options: options_through_section(
+                request_options,
+                regions,
+                section_breaks(&blocks[..end]),
+            ),
         };
         let probed =
             docx_layout::place::layout_document(&mut probe).map_err(layout_error_message)?;
@@ -1412,7 +1451,9 @@ impl EngineSession {
     ) -> Result<RegionPass, String> {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-        let (mut input, regions, mut notes, measurement, render_env, body_story) = request.split();
+        let (mut input, mut regions, mut notes, measurement, render_env, body_story) =
+            request.split();
+        let request_options = input.options.clone();
         let mut parsed_render_env = if render_env.is_null() {
             None
         } else {
@@ -1502,11 +1543,18 @@ impl EngineSession {
                                 &widths,
                                 &measurement,
                                 &geometry,
-                                &input.options,
+                                &request_options,
+                                &regions,
                                 pages,
                             )?;
                             provisional = measures.len() < blocks.len();
                             blocks.truncate(measures.len());
+                            if provisional {
+                                let last = section_breaks(&blocks);
+                                input.options =
+                                    options_through_section(&request_options, &regions, last);
+                                regions.sections.truncate(last + 1);
+                            }
                             measures
                         }
                         _ => docx_layout::measure_blocks::measure_blocks_with_floats(
@@ -3979,6 +4027,90 @@ mod tests {
         assert!(
             !short.contains("provisional"),
             "a short body is laid out whole"
+        );
+    }
+
+    #[test]
+    fn a_prefix_ends_after_a_keep_with_next_run_and_its_follower() {
+        let paragraph = |keep_next: bool| {
+            let mut block: LayoutBlock = serde_json::from_value(serde_json::json!({
+                "kind": "paragraph", "id": "p", "runs": []
+            }))
+            .unwrap();
+            if let LayoutBlock::Paragraph(paragraph) = &mut block {
+                paragraph.attrs = Some(docx_layout::types::ParagraphAttrs {
+                    keep_next: Some(keep_next),
+                    ..Default::default()
+                });
+            }
+            block
+        };
+        let blocks = [
+            paragraph(false),
+            paragraph(true),
+            paragraph(true),
+            paragraph(false),
+            paragraph(false),
+        ];
+        assert_eq!(prefix_boundary(&blocks, 1), 1);
+        assert_eq!(prefix_boundary(&blocks, 2), 4);
+        assert_eq!(prefix_boundary(&blocks, 3), 4);
+    }
+
+    #[test]
+    fn a_prefix_cut_inside_an_earlier_section_lays_it_out_with_its_own_geometry() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let paragraph = |index: usize| {
+            format!("<w:p><w:r><w:t>Paragraph {index} in the first section.</w:t></w:r></w:p>")
+        };
+        let mut body: String = (0..160).map(paragraph).collect();
+        body.push_str(
+            r#"<w:p><w:pPr><w:sectPr><w:pgSz w:w="4320" w:h="2880"/></w:sectPr></w:pPr></w:p>"#,
+        );
+        body.extend((160..200).map(paragraph));
+        let bytes = docx_bytes("", &body);
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [
+                { "sectionId": "first", "properties": {
+                    "pageWidth": 4320, "pageHeight": 2880,
+                    "marginTop": 300, "marginRight": 300, "marginBottom": 300, "marginLeft": 300
+                } },
+                { "sectionId": "last", "properties": {
+                    "pageWidth": 6480, "pageHeight": 1440,
+                    "marginTop": 200, "marginRight": 200, "marginBottom": 200, "marginLeft": 200
+                } }
+            ] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        let seeded = |client_id| {
+            let engine = EngineSession::new(client_id);
+            crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+            engine
+        };
+        let full: serde_json::Value = serde_json::from_str(
+            &seeded(147)
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap(),
+        )
+        .unwrap();
+        let prefix: serde_json::Value = serde_json::from_str(
+            &seeded(147)
+                .layout_document_with_regions_prefix_retained_json(&request, 3)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(prefix["provisional"], true);
+        assert_eq!(
+            prefix["layout"]["pages"].as_array().unwrap()[..3],
+            full["layout"]["pages"].as_array().unwrap()[..3]
         );
     }
 

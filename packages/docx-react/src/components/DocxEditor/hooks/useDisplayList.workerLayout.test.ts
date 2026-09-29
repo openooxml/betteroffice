@@ -244,12 +244,25 @@ test('a provisional layout paints first and settles only once the full layout fo
       layoutProvisional: true,
     });
     const provisional = await pending!;
-    expect(worker.posted[1]).toMatchObject({ type: 'completeLayout', expectedFrameEpoch: 1 });
     await act(async () => {
       rerender({ layout: provisional!.layout, source: engine });
     });
     await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
     expect(result.current.loading).toBe(false);
+    // The rest waits until the first surfaces are attached, so the worker
+    // paints them first.
+    expect(worker.posted).toHaveLength(1);
+    await act(async () => {
+      void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+    });
+    worker.reply({ id: worker.posted[1].id, ok: true });
+    await waitFor(() => expect(worker.posted).toHaveLength(3));
+    expect(worker.posted.map((request) => request.type)).toEqual([
+      'bootstrap',
+      'attachCanvases',
+      'completeLayout',
+    ]);
+    expect(worker.posted[2]).toMatchObject({ expectedFrameEpoch: 1 });
     let settled = false;
     void result.current.settledDisplayList(() => {}).then(() => {
       settled = true;
@@ -258,7 +271,7 @@ test('a provisional layout paints first and settles only once the full layout fo
     expect(settled).toBe(false);
 
     worker.reply({
-      id: worker.posted[1].id,
+      id: worker.posted[2].id,
       ok: true,
       frame: fullFrame.slice().buffer,
       caret: { frameEpoch: 2, caretRect: null },
@@ -272,7 +285,7 @@ test('a provisional layout paints first and settles only once the full layout fo
     });
     await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(2));
     await waitFor(() => expect(settled).toBe(true));
-    expect(worker.posted).toHaveLength(2);
+    expect(worker.posted).toHaveLength(3);
     unmount();
   } finally {
     native.free();

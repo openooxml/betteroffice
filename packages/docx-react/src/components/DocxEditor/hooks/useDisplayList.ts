@@ -129,6 +129,8 @@ export interface WorkerLayoutComputation extends LayoutComputation {
 
 /** Pages the first worker layout covers before the rest of the body. */
 const PROVISIONAL_LAYOUT_PAGES = 3;
+/** How long the rest of the layout waits for the first surfaces to attach. */
+const PROVISIONAL_SURFACE_WAIT_MS = 250;
 
 interface WorkerLayoutFrame {
   result: ResidentEngineWorkerFrame;
@@ -229,6 +231,7 @@ export function useRustDisplayList(
   } | null>(null);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
+  const completionGateRef = useRef<(() => void) | null>(null);
   const resolvedCommentIdsRef = useRef(resolvedCommentIds);
   resolvedCommentIdsRef.current = resolvedCommentIds;
   const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -787,11 +790,16 @@ export function useRustDisplayList(
         .then((result): WorkerLayoutComputation => {
           const computation = adopt(result, previousFrame);
           if (!result.layoutProvisional) return computation;
-          // The rest is laid out against the provisional frame, which the
-          // display adopts before this answers.
+          // The rest is laid out against the provisional frame, once its page
+          // surfaces are attached: the worker answers in order, so asking
+          // sooner would hold back the first paint until it is done.
           const provisionalEpoch = result.caret.frameEpoch;
-          const complete = worker
-            .completeLayout(provisionalEpoch)
+          const surfaced = new Promise<void>((resolve) => {
+            completionGateRef.current = resolve;
+            setTimeout(resolve, PROVISIONAL_SURFACE_WAIT_MS);
+          });
+          const complete = surfaced
+            .then(() => worker.completeLayout(provisionalEpoch))
             .then((completed) => {
               if (!completed) return null;
               const base = snapshotRef.current.frame;
@@ -819,7 +827,16 @@ export function useRustDisplayList(
       // rasters the newly attached surfaces itself. Refusing here would strand
       // already-transferred canvases (they cannot be re-transferred).
       if (!worker) return false;
-      await worker.attachCanvases(pages, activePageIds, devicePixelRatio, zoom, caretStyle);
+      const attached = worker.attachCanvases(
+        pages,
+        activePageIds,
+        devicePixelRatio,
+        zoom,
+        caretStyle
+      );
+      completionGateRef.current?.();
+      completionGateRef.current = null;
+      await attached;
       return true;
     },
     []

@@ -494,17 +494,17 @@ export class EditSession {
      */
     layout_document_with_regions_json(input: string): string;
     /**
+     * The retained region layout of the first `pages` pages only; see
+     * `EngineSession::layout_document_with_regions_prefix_retained_json`.
+     */
+    layout_document_with_regions_prefix_retained_json(input: string, pages: number): string;
+    /**
      * Same full region pass as [`Self::layout_document_with_regions_json`],
      * but the reply carries only `{ layout, headersFooters?, notesConverged }`
      * — the measured arena stays retained wasm-side and is fetched on demand
      * via [`Self::retained_kernel_inputs_json`].
      */
     layout_document_with_regions_retained_json(input: string): string;
-    /**
-     * The retained region layout of the first `pages` pages only; see
-     * `EngineSession::layout_document_with_regions_prefix_retained_json`.
-     */
-    layout_document_with_regions_prefix_retained_json(input: string, pages: number): string;
     /**
      * Region-layout input JSON in, the font families and sizes that input
      * needs as JSON out, so the host can register fonts before laying out.
