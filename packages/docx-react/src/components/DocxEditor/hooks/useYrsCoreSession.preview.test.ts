@@ -186,8 +186,10 @@ test('changing the preview option keeps the open session', async () => {
 });
 
 test('collaboration attached during a preview gets only the full session as its replica', async () => {
-  const replicas: Array<YrsSession | null> = [];
-  const onReplica = (replica: YrsSession | null) => replicas.push(replica);
+  const replicas: unknown[] = [];
+  const onReplica = (replica: unknown) => {
+    replicas.push(replica);
+  };
   const { result, rerender, unmount } = renderHook(
     ({ collaborate }: { collaborate: boolean }) =>
       useYrsCoreSession(
