@@ -1752,16 +1752,28 @@ impl EngineSession {
         // final pass; with notes the final pass carries reserved heights, so
         // the reservation-free pass stays out of the retained pagination state
         // that the next edit paginates against.
-        let base_input = input.clone();
-        let mut initial_layout = if refs.is_empty() {
+        // Placement only zeroes contextual spacing, which every pass applies
+        // again, so the note passes replay the body arena in place. Page-side
+        // wrapping rewrites shapes per pass, so it replays a copy instead.
+        let base_input = (!refs.is_empty()
+            && resident_body
+            && input.measured.iter().any(|measured| {
+                matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
+            }))
+        .then(|| input.clone());
+        let (mut initial_layout, mut arena) = if refs.is_empty() {
             self.layout_document_value_with_fingerprints(input, block_fingerprints.clone())?;
-            self.pagination
+            let layout = self
+                .pagination
                 .borrow_mut()
                 .layout
                 .take()
-                .expect("layout retained after successful pagination")
+                .expect("layout retained after successful pagination");
+            (layout, None)
         } else {
-            docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?
+            let layout =
+                docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?;
+            (layout, Some(input))
         };
         apply_document_regions(&mut initial_layout, &regions);
         let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
@@ -1780,12 +1792,24 @@ impl EngineSession {
         }
         let stabilized = stabilize_note_layout(
             |reserved| {
-                let mut pass = base_input.clone();
+                let mut copy;
+                let pass = match (&base_input, arena.as_mut()) {
+                    (Some(base), _) => {
+                        copy = base.clone();
+                        &mut copy
+                    }
+                    (None, Some(arena)) => arena,
+                    (None, None) => {
+                        return Err(docx_layout::LayoutError::Invalid(
+                            "note passes without a body arena".to_owned(),
+                        ));
+                    }
+                };
                 pass.options.footnote_reserved_heights = reservation_options(reserved);
                 if resident_body {
-                    stabilize_shape_wrapping(&mut pass, &regions, &measurement)?;
+                    stabilize_shape_wrapping(pass, &regions, &measurement)?;
                 }
-                let mut layout = docx_layout::place::layout_document(&mut pass)?;
+                let mut layout = docx_layout::place::layout_document(pass)?;
                 apply_document_regions(&mut layout, &regions);
                 Ok(layout)
             },
@@ -1796,8 +1820,7 @@ impl EngineSession {
         )
         .map_err(layout_error_message)?;
         let notes_converged = stabilized.converged;
-        if !refs.is_empty() {
-            let mut final_input = base_input;
+        if let Some(mut final_input) = base_input.or(arena) {
             final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
             let reshaped = resident_body
