@@ -1322,27 +1322,30 @@ fn segment_content<T: ReadTxn>(value: Out, txn: &T) -> SegmentContent {
                 .collect();
             SegmentContent::Pilcrow(ParagraphProperties { para_id, values })
         }
-        Out::YMap(map) => {
-            let kind = map_string(&map, txn, KIND_KEY).unwrap_or_default();
-            let payload = map
-                .iter(txn)
-                .filter_map(|(key, value)| {
-                    if key == KIND_KEY {
-                        return None;
-                    }
-                    let Out::Any(value) = value else {
-                        return None;
-                    };
-                    Some((key.to_string(), value))
-                })
-                .collect();
-            SegmentContent::OtherEmbed { kind, payload }
-        }
+        Out::YMap(map) => SegmentContent::OtherEmbed {
+            kind: map_string(&map, txn, KIND_KEY).unwrap_or_default(),
+            payload: embed_payload(&map, txn),
+        },
         _ => SegmentContent::OtherEmbed {
             kind: String::new(),
             payload: BTreeMap::new(),
         },
     }
+}
+
+/// An embed's plain values other than its kind: a story segment's `payload`.
+pub(crate) fn embed_payload<T: ReadTxn>(map: &MapRef, txn: &T) -> BTreeMap<String, Any> {
+    map.iter(txn)
+        .filter_map(|(key, value)| {
+            if key == KIND_KEY {
+                return None;
+            }
+            let Out::Any(value) = value else {
+                return None;
+            };
+            Some((key.to_string(), value))
+        })
+        .collect()
 }
 
 fn anchor_value(story: &str, start: &StickyIndex, end: &StickyIndex) -> Any {

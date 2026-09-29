@@ -1041,6 +1041,12 @@ export class EditSession {
      */
     story_segments(story: string): string;
     /**
+     * The `payload` of the story's `table_index`-th table embed, as
+     * `story_segments` gives it, or `None` when the story has no such
+     * table. Errors on an unknown story.
+     */
+    table_payload(story: string, table_index: number): string | undefined;
+    /**
      * Applies one run mark over `[start, end)`. `mark_json`:
      * `{"type":"bold"|"italic"|"underline"|"strike"|"superscript"|"subscript"} |
      * {"type":"fontFamily"|"color","value":string} |
@@ -1492,6 +1498,7 @@ export interface InitOutput {
     readonly editsession_story_segment_unit_digests: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_segment_units: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_table_payload: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;

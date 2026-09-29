@@ -58,10 +58,10 @@ use crate::structured::ExportOptions;
 use crate::{
     AnchorResolution, AnchorUnsupported, CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx,
     EditRefusal, EditRequest, EditTextView, EditingDoc, EngineSession, FindTextRequest,
-    FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, ParaAttrDelta,
-    ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal,
-    ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position, RawOp,
-    ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
+    FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, OpError,
+    ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
+    ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
+    RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
     SourceStory, SourceStoryKind, StoryRange, StorySegment, TabStop, TableLocator, TableRange,
     TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
@@ -4220,6 +4220,23 @@ impl EditSession {
             })
             .collect::<Result<Vec<Vec<Value>>, JsValue>>()?;
         serde_json::to_string(&requested).map_err(js_err)
+    }
+
+    /// The `payload` of the story's `table_index`-th table embed, as
+    /// `story_segments` gives it, or `None` when the story has no such
+    /// table. Errors on an unknown story.
+    pub fn table_payload(&self, story: &str, table_index: u32) -> Result<Option<String>, JsValue> {
+        match self
+            .engine
+            .doc()
+            .table_payload(&TableLocator::new(story, table_index))
+        {
+            Ok(payload) => serde_json::to_string(&attrs_value(&payload)?)
+                .map(Some)
+                .map_err(js_err),
+            Err(OpError::UnknownTable { .. }) => Ok(None),
+            Err(error) => Err(js_err(error)),
+        }
     }
 
     /// `{"start","end"}` — the paragraph's span in story-global UTF-16 units.
