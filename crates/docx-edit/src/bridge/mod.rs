@@ -2994,7 +2994,6 @@ fn revision_meta(value: &Any, env: &RenderEnv) -> Option<RevisionMeta> {
 }
 
 fn lower_revisions(attributes: Option<&Attrs>, env: &RenderEnv, result: &mut RunFormatting) {
-    // A decided revision shows its outcome as plain content, without markup.
     let pending = |key| {
         attribute(attributes, key)
             .filter(|value| env.revision_decision(value).is_none())
