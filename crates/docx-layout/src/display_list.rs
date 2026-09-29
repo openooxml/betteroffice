@@ -1204,6 +1204,25 @@ struct BuildInputWire {
     comment_threads: Vec<CommentThreadIn>,
 }
 
+/// The display-only half of [`BuildInputWire`]; the resident path supplies the
+/// measured blocks, options and layout from typed values.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResidentExtrasWire {
+    #[serde(default)]
+    contract_version: Option<u32>,
+    #[serde(default)]
+    headers_footers: Option<Value>,
+    #[serde(default)]
+    font_chains: HashMap<String, Vec<u32>>,
+    #[serde(default)]
+    resolved_comment_ids: Vec<i64>,
+    #[serde(default)]
+    comment_authors: Vec<CommentAuthorIn>,
+    #[serde(default)]
+    comment_threads: Vec<CommentThreadIn>,
+}
+
 impl<'de> Deserialize<'de> for BuildInput {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -10540,25 +10559,51 @@ fn resident_build_input(
     layout: &crate::types::Layout,
     extras: &str,
 ) -> Result<BuildInput, String> {
-    let mut wire: serde_json::Map<String, Value> =
+    let mut fields: serde_json::Map<String, Value> =
         serde_json::from_str(extras).map_err(|e| format!("parse display extras: {e}"))?;
-    wire.insert(
-        "measured".to_owned(),
-        serde_json::to_value(&pagination.measured)
-            .map_err(|e| format!("encode resident measured blocks: {e}"))?,
-    );
-    wire.insert(
-        "options".to_owned(),
-        serde_json::to_value(&pagination.options)
-            .map_err(|e| format!("encode resident layout options: {e}"))?,
-    );
-    wire.insert(
-        "layout".to_owned(),
-        serde_json::to_value(layout).map_err(|e| format!("encode resident layout: {e}"))?,
-    );
-    let mut wire = Value::Object(wire);
+    for key in ["measured", "options", "layout"] {
+        fields.remove(key);
+    }
+    let mut wire = Value::Object(fields);
     normalize_integral_json_numbers(&mut wire);
-    serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))
+    let extras: ResidentExtrasWire =
+        serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
+    let mut transcoder = crate::transcode::Transcoder::default();
+    let measured = pagination
+        .measured
+        .iter()
+        .map(|measured| transcoder.convert(measured))
+        .collect::<Result<Vec<MeasuredBlockIn>, _>>()
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    let options = transcoder
+        .convert(&pagination.options)
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    let layout = transcoder
+        .convert(layout)
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    let headers_footers = extras
+        .headers_footers
+        .clone()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    let headers_footers_content = extras
+        .headers_footers
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    Ok(BuildInput {
+        contract_version: extras.contract_version,
+        measured,
+        options,
+        layout,
+        headers_footers,
+        headers_footers_content,
+        font_chains: extras.font_chains,
+        resolved_comment_ids: extras.resolved_comment_ids,
+        comment_authors: extras.comment_authors,
+        comment_threads: extras.comment_threads,
+    })
 }
 
 /// Rebuild only pages dirtied by incremental pagination, retain the remaining
@@ -10777,10 +10822,7 @@ fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
     input: &T,
     label: &str,
 ) -> Result<U, String> {
-    let mut value =
-        serde_json::to_value(input).map_err(|error| format!("encode {label}: {error}"))?;
-    normalize_integral_json_numbers(&mut value);
-    serde_json::from_value(value).map_err(|error| format!("parse {label}: {error}"))
+    crate::transcode::transcode(input).map_err(|error| format!("parse {label}: {error}"))
 }
 
 fn crate_block_key(block: &crate::types::LayoutBlock) -> String {
@@ -10906,6 +10948,83 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The resident input as it was built before typed transcoding: every
+    /// value through a JSON tree, integral numbers normalized.
+    fn resident_build_input_via_json(
+        pagination: &crate::types::Input,
+        layout: &crate::types::Layout,
+        extras: &str,
+    ) -> BuildInput {
+        let mut wire: serde_json::Map<String, Value> = serde_json::from_str(extras).unwrap();
+        wire.insert(
+            "measured".to_owned(),
+            serde_json::to_value(&pagination.measured).unwrap(),
+        );
+        wire.insert(
+            "options".to_owned(),
+            serde_json::to_value(&pagination.options).unwrap(),
+        );
+        wire.insert("layout".to_owned(), serde_json::to_value(layout).unwrap());
+        let mut wire = Value::Object(wire);
+        normalize_integral_json_numbers(&mut wire);
+        serde_json::from_value(wire).unwrap()
+    }
+
+    #[test]
+    fn resident_display_input_matches_the_json_round_trip() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut names: Vec<String> = std::fs::read_dir(&fixtures)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.strip_suffix(".input.json").map(str::to_owned)
+            })
+            .collect();
+        names.sort();
+        let extras =
+            r#"{"contractVersion":2,"fontChains":{"arial|0|0":[]},"resolvedCommentIds":[3]}"#;
+        let mut compared = 0;
+        for name in names {
+            let read = |suffix: &str| {
+                std::fs::read_to_string(fixtures.join(format!("{name}.{suffix}.json"))).unwrap()
+            };
+            let Ok(mut pagination) = serde_json::from_str::<crate::types::Input>(&read("input"))
+            else {
+                continue;
+            };
+            let Ok(layout) = crate::compute_layout_input(&mut pagination) else {
+                continue;
+            };
+            let fonts = ooxml_text::FontStore::default();
+            let expected = build_display_list(
+                &resident_build_input_via_json(&pagination, &layout, extras),
+                &fonts,
+            );
+            let actual = build_display_list(
+                &resident_build_input(&pagination, &layout, extras).unwrap(),
+                &fonts,
+            );
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "{name}"
+            );
+            compared += 1;
+        }
+        assert!(compared >= 10, "compared only {compared} fixtures");
+        let pagination: crate::types::Input = serde_json::from_str(
+            &std::fs::read_to_string(fixtures.join("keep-lines-paragraph.input.json")).unwrap(),
+        )
+        .unwrap();
+        let layout = crate::compute_layout_input(&mut pagination.clone()).unwrap();
+        for extras in ["[]", "[2]", "null"] {
+            assert!(
+                resident_build_input(&pagination, &layout, extras).is_err(),
+                "{extras}"
+            );
+        }
+    }
 
     #[test]
     fn body_positions_shift_by_block_key_or_else_block_id() {

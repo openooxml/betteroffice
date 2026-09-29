@@ -220,7 +220,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       pendingUpdates,
       applied.profile,
       started,
-      true,
+      request.selection.head.story === 'body',
       request.paintCaret,
       request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
@@ -232,6 +232,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       ok: false,
       error: message,
       residentUnavailable: message.includes('resident input state is not ready'),
+      // The edit committed here but never reached the host: this replica is
+      // no longer the host's, so the host must replace it.
+      ...(pendingUpdates.length > 0 ? { terminal: true } : {}),
     });
   } finally {
     pendingUpdates = [];

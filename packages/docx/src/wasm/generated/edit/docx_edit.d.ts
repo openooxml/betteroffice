@@ -614,8 +614,10 @@ export class EditSession {
      * styles, theme, settings, fonts and relationships still cross while the
      * bulk of the document stays in Rust. Errors on bytes that are not a
      * readable DOCX.
+     * `digest`, when given, must be the SHA-256 of `bytes` in lowercase hex,
+     * as a host that hashed them off this thread already knows it.
      */
-    open_docx(bytes: Uint8Array, seed_stories: boolean, generation?: string | null): string;
+    open_docx(bytes: Uint8Array, seed_stories: boolean, generation?: string | null, digest?: string | null): string;
     /**
      * One glyph outline from this session's resident font store:
      * `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
@@ -965,6 +967,11 @@ export class EditSession {
      */
     start_update_event_observation(): void;
     /**
+     * `{"revision","stories":[…]}`: the current story revision and the sorted
+     * ids of the stories created, edited, or deleted after revision `since`.
+     */
+    stories_changed_since(since: number): string;
+    /**
      * The story's `canonical-stream-v1` FNV-1a checksum (see
      * [`crate::canonical`]) as a DECIMAL STRING, because a u64 exceeds the
      * JavaScript safe-integer range. Two stories with the same authored
@@ -987,6 +994,17 @@ export class EditSession {
      * array of strings or `null` in document order. Errors on an unknown story.
      */
     story_paragraph_ids(story: string): string;
+    /**
+     * `story_segments` split after each pilcrow into units, as one hex digest
+     * per unit: `["digest", …]`. Equal digests mean equal segments.
+     */
+    story_segment_unit_digests(story: string): string;
+    /**
+     * The segments of the listed units (indices into
+     * `story_segment_unit_digests`), each as `story_segments` gives them:
+     * `[[segment, …], …]`. Errors on an index past the last unit.
+     */
+    story_segment_units(story: string, units: Uint32Array): string;
     /**
      * The story as an ordered run of formatted segments — the same view
      * lowering reads:
@@ -1399,7 +1417,7 @@ export interface InitOutput {
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
-    readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
@@ -1447,10 +1465,13 @@ export interface InitOutput {
     readonly editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
     readonly editsession_start_update_event_observation: (a: number) => [number, number];
+    readonly editsession_stories_changed_since: (a: number, b: number) => [number, number];
     readonly editsession_story_checksum: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_ids: (a: number) => [number, number];
     readonly editsession_story_len: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_story_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_story_segment_unit_digests: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_story_segment_units: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_table_payload: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];

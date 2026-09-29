@@ -67,6 +67,7 @@ pub mod placement;
 pub mod prescan;
 pub mod regions;
 pub mod resolve_lines;
+mod transcode;
 pub mod types;
 
 pub mod break_policy;

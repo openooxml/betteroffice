@@ -224,6 +224,31 @@ export interface YrsOpeningOptions {
   generation?: string;
 }
 
+/** SHA-256 digests of the byte copies {@link prepareDocxBytes} made, by copy. */
+const preparedDigests = new WeakMap<Uint8Array, string>();
+
+/**
+ * A copy of `bytes` whose SHA-256 the platform takes off the calling thread,
+ * where it has Web Crypto. Opening that copy unchanged skips hashing the
+ * package on the calling thread; any other bytes open as before.
+ * @internal
+ */
+export async function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(bytes);
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return copy;
+  try {
+    const hash = new Uint8Array(await subtle.digest('SHA-256', copy));
+    preparedDigests.set(
+      copy,
+      Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    );
+  } catch {
+    // Opening hashes the copy itself.
+  }
+  return copy;
+}
+
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
 export interface YrsParagraph {
   /** Session key; not the paragraph's Word `w14:paraId`. */
@@ -1109,6 +1134,18 @@ export interface YrsSession extends CollaborationReplica {
   /** The raw formatted-segment view (the render bridge's input). */
   storySegments(story: string): YrsStorySegment[];
   /**
+   * The current story revision and the sorted ids of the stories created,
+   * edited, or deleted after revision `since` (0 lists every story).
+   */
+  storiesChangedSince(since: number): { revision: number; stories: string[] };
+  /**
+   * One digest per unit of {@link YrsSession.storySegments}, split after each
+   * pilcrow. Equal digests mean equal segments.
+   */
+  storySegmentUnitDigests(story: string): string[];
+  /** The segments of the listed units, each as {@link YrsSession.storySegments} gives them. */
+  storySegmentUnits(story: string, units: readonly number[]): YrsStorySegment[][];
+  /**
    * The payload of the story's `tableIndex`-th table embed, as
    * {@link YrsSession.storySegments} gives it, or null when there is no such
    * table. Reads the one table rather than the whole story.
@@ -1480,7 +1517,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     const source = bytes.slice();
     markDirty('all');
     const json = mutate(() => {
-      const opened = session.open_docx(source, seedStories, options.generation);
+      const opened = session.open_docx(
+        source,
+        seedStories,
+        options.generation,
+        preparedDigests.get(bytes)
+      );
       proposals.reset();
       return opened;
     });
@@ -2232,6 +2274,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+    storiesChangedSince: (since) =>
+      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
+    storySegmentUnitDigests: (story) =>
+      JSON.parse(session.story_segment_unit_digests(story)) as string[],
+    storySegmentUnits: (story, units) =>
+      JSON.parse(session.story_segment_units(story, Uint32Array.from(units))) as YrsStorySegment[][],
     tablePayload: (story, tableIndex) => {
       // No table has an index the u32 boundary would wrap; the story must still exist.
       if (!Number.isInteger(tableIndex) || tableIndex < 0 || tableIndex > 0xffffffff) {

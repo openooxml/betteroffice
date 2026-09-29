@@ -62,8 +62,8 @@ use crate::{
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
     RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, StoryRange, TabStop, TableLocator, TableRange, TextTarget,
-    TriState, UndoCaptureMode, UndoSession, story_ref,
+    SourceStory, SourceStoryKind, StoryRange, StorySegment, TabStop, TableLocator, TableRange,
+    TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -268,6 +268,13 @@ fn adjacent_story_unit(
         SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
         SegKind::Embed => AdjacentStoryUnit::Content(1),
     }))
+}
+
+fn embed_at(doc: &EditingDoc, story: &str, index: u32) -> Result<bool, JsValue> {
+    let segments = doc.segment_index(story).map_err(js_err)?;
+    Ok(segments
+        .segment_at(index)
+        .is_some_and(|segment| matches!(segment.kind, SegKind::Embed)))
 }
 
 /// Per-peer selection state. These sticky positions are deliberately held
@@ -698,6 +705,34 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
         default_text_formatting,
         other,
     })
+}
+
+fn segments_json(segments: Vec<StorySegment>) -> Result<Vec<Value>, JsValue> {
+    segments
+        .into_iter()
+        .map(|segment| {
+            let attributes = attrs_value(&segment.attributes)?;
+            Ok(match segment.content {
+                SegmentContent::Text(text) => {
+                    json!({ "kind": "text", "text": text, "attributes": attributes })
+                }
+                SegmentContent::Pilcrow(properties) => json!({
+                    "kind": "pilcrow",
+                    "paraId": properties.para_id,
+                    "properties": attrs_value(&properties.values)?,
+                    "attributes": attributes,
+                }),
+                SegmentContent::OtherEmbed { kind, payload } => {
+                    json!({
+                        "kind": "embed",
+                        "embedKind": kind,
+                        "payload": attrs_value(&payload)?,
+                        "attributes": attributes,
+                    })
+                }
+            })
+        })
+        .collect()
 }
 
 fn attrs_value(attrs: &std::collections::BTreeMap<String, Any>) -> Result<Value, JsValue> {
@@ -1133,6 +1168,8 @@ fn persisted_receipt_json(session_id: &str, persisted: &PersistedParagraphIds) -
 pub struct EditSession {
     engine: EngineSession,
     docx_source: RefCell<Option<Arc<[u8]>>>,
+    /// The [`crate::seed::package_digest`] of `docx_source`, when known.
+    docx_digest: RefCell<Option<String>>,
     update_observer: Option<Subscription>,
     update_event_observer: Option<UpdateEventObserver>,
     undo: UndoSession,
@@ -1250,9 +1287,27 @@ impl EditSession {
         bytes: &[u8],
         seed_stories: bool,
         generation: Option<&str>,
+        digest: Option<&str>,
     ) -> Result<String, JsValue> {
+        self.open_docx_retaining(bytes, seed_stories, generation, digest)
+            .map_err(|error| js_err(&error))
+    }
+
+    /// Opens `bytes`, retaining them and their digest only once opening succeeds.
+    fn open_docx_retaining(
+        &self,
+        bytes: &[u8],
+        seed_stories: bool,
+        generation: Option<&str>,
+        digest: Option<&str>,
+    ) -> Result<String, String> {
         let source: Arc<[u8]> = Arc::from(bytes);
-        let (envelope, parts) = crate::seed::parse_docx_package(bytes).map_err(js_err)?;
+        let digest = match digest {
+            Some(digest) => crate::seed::checked_package_digest(digest)?,
+            None => crate::seed::package_digest(bytes),
+        };
+        let (envelope, parts) = crate::seed::parse_docx_package_with_digest(bytes, digest.clone())
+            .map_err(|error| error.to_string())?;
         let host_envelope = thin_docx_envelope(&envelope);
         let referenced_fonts = if seed_stories {
             let fonts = crate::seed::seed_parsed_docx(
@@ -1260,18 +1315,22 @@ impl EditSession {
                 envelope,
                 parts,
                 Arc::clone(&source),
+                digest.clone(),
             )
-            .map_err(js_err)?;
+            .map_err(|error| error.to_string())?;
             self.engine.doc().begin_opening(generation);
             fonts
         } else {
-            let fonts = crate::seed::referenced_fonts(&envelope).map_err(js_err)?;
+            let fonts =
+                crate::seed::referenced_fonts(&envelope).map_err(|error| error.to_string())?;
             let parts = crate::structured::source::SourceParts::new(parts);
-            let mut metadata =
-                crate::seed::source_metadata(&envelope, Some(&parts)).map_err(js_err)?;
+            let mut metadata = crate::seed::source_metadata(&envelope, Some(&parts))
+                .map_err(|error| error.to_string())?;
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
-            self.engine.doc().retain_source_docx(Arc::clone(&source));
+            self.engine
+                .doc()
+                .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
             drop(envelope);
             fonts
         };
@@ -1279,8 +1338,9 @@ impl EditSession {
             envelope: host_envelope,
             referenced_fonts,
         };
-        let json = serde_json::to_string(&host).map_err(js_err)?;
+        let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
+        self.docx_digest.replace(Some(digest));
         self.engine.doc().rotate_version(js_entropy());
         Ok(json)
     }
@@ -1397,6 +1457,15 @@ impl EditSession {
                     .map_err(js_err)?;
             }
             (direction, Some(AdjacentStoryUnit::Pilcrow)) => {
+                // Merging forward over a table or other embed would pull it
+                // into the paragraph; the host path owns that case.
+                if matches!(direction, DeleteDirection::Forward)
+                    && embed_at(self.engine.doc(), &story, head + 1)?
+                {
+                    return Err(js_err(
+                        "resident input state is not ready for this paragraph",
+                    ));
+                }
                 let paragraphs = self.engine.doc().paragraphs(&story).map_err(js_err)?;
                 let paragraph_index = paragraphs
                     .iter()
@@ -1455,6 +1524,7 @@ impl EditSession {
         let session = Self {
             engine: EngineSession::new(client_id as u64),
             docx_source: RefCell::new(None),
+            docx_digest: RefCell::new(None),
             update_observer: None,
             update_event_observer: None,
             undo: UndoSession::with_clock(Arc::new(|| js_sys::Date::now() as u64)),
@@ -1982,7 +2052,7 @@ impl EditSession {
         bytes: &[u8],
         generation: Option<String>,
     ) -> Result<String, JsValue> {
-        self.open_docx_inner(bytes, true, generation.as_deref())
+        self.open_docx_inner(bytes, true, generation.as_deref(), None)
     }
 
     /// Starts a new opening of the document; see [`EditingDoc::begin_opening`].
@@ -2003,13 +2073,21 @@ impl EditSession {
     /// styles, theme, settings, fonts and relationships still cross while the
     /// bulk of the document stays in Rust. Errors on bytes that are not a
     /// readable DOCX.
+    /// `digest`, when given, must be the SHA-256 of `bytes` in lowercase hex,
+    /// as a host that hashed them off this thread already knows it.
     pub fn open_docx(
         &self,
         bytes: &[u8],
         seed_stories: bool,
         generation: Option<String>,
+        digest: Option<String>,
     ) -> Result<String, JsValue> {
-        self.open_docx_inner(bytes, seed_stories, generation.as_deref())
+        self.open_docx_inner(
+            bytes,
+            seed_stories,
+            generation.as_deref(),
+            digest.as_deref(),
+        )
     }
 
     /// Re-parses the DOCX bytes retained by the last
@@ -2021,7 +2099,13 @@ impl EditSession {
         let Some(source) = source.as_ref() else {
             return Ok(None);
         };
-        let envelope = crate::seed::parse_docx_for_edit(source).map_err(js_err)?;
+        let digest = self
+            .docx_digest
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| crate::seed::package_digest(source));
+        let (envelope, _) =
+            crate::seed::parse_docx_package_with_digest(source, digest).map_err(js_err)?;
         let json = serde_json::to_string(&envelope).map_err(js_err)?;
         Ok(Some(json))
     }
@@ -3672,6 +3756,7 @@ impl EditSession {
         let json = outcome.to_json(&options.limits).map_err(js_err)?;
         if let CompareOutcome::Applied(applied) = outcome {
             self.docx_source.replace(Some(Arc::from(original)));
+            self.docx_digest.replace(None);
             self.compared.replace(Some((applied, options.limits)));
         }
         Ok(json)
@@ -3931,6 +4016,13 @@ impl EditSession {
             .is_some_and(|stories| stories.contains_key(&txn, story))
     }
 
+    /// `{"revision","stories":[…]}`: the current story revision and the sorted
+    /// ids of the stories created, edited, or deleted after revision `since`.
+    pub fn stories_changed_since(&self, since: f64) -> String {
+        let (revision, stories) = self.engine.doc().stories_changed_since(since as u64);
+        json!({ "revision": revision, "stories": stories }).to_string()
+    }
+
     /// Every story id in the document, sorted so the order is stable across
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {
@@ -4035,32 +4127,43 @@ impl EditSession {
     /// tracked-change stamps. Errors on an unknown story.
     pub fn story_segments(&self, story: &str) -> Result<String, JsValue> {
         let segments = self.engine.doc().story_segments(story).map_err(js_err)?;
-        let items = segments
+        serde_json::to_string(&segments_json(segments)?).map_err(js_err)
+    }
+
+    /// `story_segments` split after each pilcrow into units, as one hex digest
+    /// per unit: `["digest", …]`. Equal digests mean equal segments.
+    pub fn story_segment_unit_digests(&self, story: &str) -> Result<String, JsValue> {
+        let units = self
+            .engine
+            .doc()
+            .story_segment_units(story)
+            .map_err(js_err)?;
+        let digests: Vec<String> = units
+            .iter()
+            .map(|unit| format!("{:032x}", crate::segments_digest(unit)))
+            .collect();
+        serde_json::to_string(&digests).map_err(js_err)
+    }
+
+    /// The segments of the listed units (indices into
+    /// `story_segment_unit_digests`), each as `story_segments` gives them:
+    /// `[[segment, …], …]`. Errors on an index past the last unit.
+    pub fn story_segment_units(&self, story: &str, units: Vec<u32>) -> Result<String, JsValue> {
+        let all = self
+            .engine
+            .doc()
+            .story_segment_units(story)
+            .map_err(js_err)?;
+        let requested = units
             .into_iter()
-            .map(|segment| {
-                let attributes = attrs_value(&segment.attributes)?;
-                Ok(match segment.content {
-                    SegmentContent::Text(text) => {
-                        json!({ "kind": "text", "text": text, "attributes": attributes })
-                    }
-                    SegmentContent::Pilcrow(properties) => json!({
-                        "kind": "pilcrow",
-                        "paraId": properties.para_id,
-                        "properties": attrs_value(&properties.values)?,
-                        "attributes": attributes,
-                    }),
-                    SegmentContent::OtherEmbed { kind, payload } => {
-                        json!({
-                            "kind": "embed",
-                            "embedKind": kind,
-                            "payload": attrs_value(&payload)?,
-                            "attributes": attributes,
-                        })
-                    }
-                })
+            .map(|index| {
+                let unit = all
+                    .get(index as usize)
+                    .ok_or_else(|| js_err(format!("no segment unit {index} in {story}")))?;
+                segments_json(unit.clone())
             })
-            .collect::<Result<Vec<Value>, JsValue>>()?;
-        serde_json::to_string(&items).map_err(js_err)
+            .collect::<Result<Vec<Vec<Value>>, JsValue>>()?;
+        serde_json::to_string(&requested).map_err(js_err)
     }
 
     /// The `payload` of the story's `table_index`-th table embed, as
@@ -4407,7 +4510,7 @@ mod tests {
         assert!(!expected.document.package.media_entries.is_empty());
         let session = EditSession::new(7.0).unwrap();
         let host: Value =
-            serde_json::from_str(&session.open_docx(&source, true, None).unwrap()).unwrap();
+            serde_json::from_str(&session.open_docx(&source, true, None, None).unwrap()).unwrap();
         assert_eq!(
             host["envelope"]["document"]["package"]["mediaEntries"],
             json!([])
@@ -4491,7 +4594,7 @@ mod tests {
     #[test]
     fn batch_envelopes_default_and_refuse_as_data() {
         let session = EditSession::new(71.0).unwrap();
-        session.open_docx(&batch_docx(), true, None).unwrap();
+        session.open_docx(&batch_docx(), true, None, None).unwrap();
         let version = session.version();
         let read = envelope(
             &session
@@ -4542,7 +4645,7 @@ mod tests {
     #[test]
     fn export_envelopes_carry_versions_and_refusals_as_data() {
         let session = EditSession::new(73.0).unwrap();
-        session.open_docx(&batch_docx(), true, None).unwrap();
+        session.open_docx(&batch_docx(), true, None, None).unwrap();
         let version = session.version();
         let read = envelope(
             &session
@@ -4599,7 +4702,7 @@ mod tests {
     fn paged_export_envelopes_carry_versions_maps_and_refusals() {
         let font: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
         let session = EditSession::new(75.0).unwrap();
-        session.open_docx(&batch_docx(), true, None).unwrap();
+        session.open_docx(&batch_docx(), true, None, None).unwrap();
         let options = r#"{"revisionView":"markup"}"#;
         let unavailable = envelope(
             &session
@@ -4665,7 +4768,7 @@ mod tests {
         );
         assert_eq!(read["content"]["structured"]["anchorScope"], "session");
         let private = EditSession::new(76.0).unwrap();
-        private.open_docx(&batch_docx(), true, None).unwrap();
+        private.open_docx(&batch_docx(), true, None, None).unwrap();
         let snapshot = envelope(
             &private
                 .export_snapshot_with_private_fonts_json(
@@ -4738,7 +4841,7 @@ mod tests {
     #[test]
     fn untracked_batches_keep_history_and_source_is_echoed() {
         let session = EditSession::new(72.0).unwrap();
-        session.open_docx(&batch_docx(), true, None).unwrap();
+        session.open_docx(&batch_docx(), true, None, None).unwrap();
         let request = replace_request(
             &session.version(),
             json!({"source": "agent", "history": "none"}),
@@ -4748,20 +4851,98 @@ mod tests {
         assert!(!session.can_undo());
     }
 
+    /// A package whose paragraph text id is invalid, so parsing generates
+    /// one from the package digest.
+    fn unidentified_docx(text: &str) -> Vec<u8> {
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:textId="invalid"><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn a_failed_reopen_keeps_the_open_package_and_its_digest() {
+        let opened = unidentified_docx("Alpha");
+        let session = EditSession::new(75.0).unwrap();
+        session.open_docx(&opened, true, None, None).unwrap();
+        let materialized = session.materialize_docx().unwrap();
+        assert!(
+            session
+                .open_docx_retaining(&unidentified_docx("Beta"), true, None, None)
+                .is_err()
+        );
+        assert_eq!(session.materialize_docx().unwrap(), materialized);
+        let fresh = EditSession::new(76.0).unwrap();
+        fresh.open_docx(&opened, true, None, None).unwrap();
+        assert_eq!(fresh.materialize_docx().unwrap(), materialized);
+    }
+
+    #[test]
+    fn an_open_with_the_package_digest_matches_one_that_hashes_the_package() {
+        let bytes = unidentified_docx("Alpha");
+        let generation = Some("fixed".to_owned());
+        let hashed = EditSession::new(77.0).unwrap();
+        hashed
+            .open_docx(&bytes, true, generation.clone(), None)
+            .unwrap();
+        let given = EditSession::new(77.0).unwrap();
+        given
+            .open_docx(
+                &bytes,
+                true,
+                generation,
+                Some(crate::seed::package_digest(&bytes)),
+            )
+            .unwrap();
+        assert!(hashed.encode_state() == given.encode_state());
+        assert_eq!(
+            hashed.docx_digest.borrow().clone(),
+            given.docx_digest.borrow().clone()
+        );
+        assert_eq!(
+            hashed.materialize_docx().unwrap(),
+            given.materialize_docx().unwrap()
+        );
+        let other = EditSession::new(77.0).unwrap();
+        other
+            .open_docx(&bytes, true, Some("fixed".to_owned()), Some("0".repeat(64)))
+            .unwrap();
+        assert_ne!(
+            hashed.materialize_docx().unwrap(),
+            other.materialize_docx().unwrap(),
+            "the digest seeds the generated ids"
+        );
+
+        let refused = EditSession::new(78.0).unwrap();
+        for malformed in ["", "ABC", &"A".repeat(64), &"g".repeat(64)] {
+            assert!(
+                refused
+                    .open_docx_retaining(&bytes, true, None, Some(malformed))
+                    .is_err()
+            );
+        }
+        assert!(refused.materialize_docx().unwrap().is_none());
+    }
+
     #[test]
     fn reopening_and_hydrating_invalidate_versions() {
         let bytes = batch_docx();
         let origin = EditSession::new(73.0).unwrap();
-        origin.open_docx(&bytes, true, None).unwrap();
+        origin.open_docx(&bytes, true, None, None).unwrap();
         let joined = EditSession::new(74.0).unwrap();
         let before_open = joined.version();
-        joined.open_docx(&bytes, false, None).unwrap();
+        joined.open_docx(&bytes, false, None, None).unwrap();
         assert_ne!(joined.version(), before_open);
         let before_load = joined.version();
         joined.load(&origin.encode_state()).unwrap();
         assert_ne!(joined.version(), before_load);
         let before_reopen = joined.version();
-        joined.open_docx(&bytes, false, None).unwrap();
+        joined.open_docx(&bytes, false, None, None).unwrap();
         assert_ne!(joined.version(), before_reopen);
         let structural = json!({
             "expectVersion": joined.version(),
@@ -4781,7 +4962,7 @@ mod tests {
     #[test]
     fn compatibility_helpers_resolve_targets_after_atoms() {
         let session = EditSession::new(75.0).unwrap();
-        session.open_docx(&batch_docx(), true, None).unwrap();
+        session.open_docx(&batch_docx(), true, None, None).unwrap();
         let target = r#"{"kind":"search","text":"beta","within":{"kind":"paragraph","story":"body","paraId":"00000001"},"view":"accepted"}"#;
         let formatted = envelope(
             &session
@@ -5023,7 +5204,7 @@ mod tests {
     fn content_control_envelopes_refuse_as_data() {
         let bytes = content_controls_docx();
         let session = EditSession::new(72.0).unwrap();
-        session.open_docx(&bytes, true, None).unwrap();
+        session.open_docx(&bytes, true, None, None).unwrap();
         let listed = envelope(&session.list_content_controls_json("{}").unwrap());
         assert_eq!(listed["ok"], true);
         assert_eq!(listed["version"], session.version().as_str());
@@ -5084,7 +5265,7 @@ mod tests {
     fn loading_shared_state_keeps_legacy_values_as_they_are() {
         let bytes = content_controls_docx();
         let author = EditSession::new(73.0).unwrap();
-        author.open_docx(&bytes, true, None).unwrap();
+        author.open_docx(&bytes, true, None, None).unwrap();
         {
             let doc = author.engine.doc();
             let stories = doc.yrs_doc().transact().get_map(crate::STORIES).unwrap();
@@ -5107,7 +5288,7 @@ mod tests {
             map.insert(&mut txn, "value", "REF-LEGACY");
         }
         let joiner = EditSession::new(74.0).unwrap();
-        joiner.open_docx(&bytes, false, None).unwrap();
+        joiner.open_docx(&bytes, false, None, None).unwrap();
         joiner.load(&author.encode_state()).unwrap();
         assert_eq!(
             control_text(&joiner, "account.reference")["text"],
@@ -5129,7 +5310,7 @@ mod tests {
     fn unpaired_surrogates_in_fill_text_are_invalid_text() {
         let session = EditSession::new(75.0).unwrap();
         session
-            .open_docx(&content_controls_docx(), true, None)
+            .open_docx(&content_controls_docx(), true, None, None)
             .unwrap();
         let request = |text: &str| {
             format!(
