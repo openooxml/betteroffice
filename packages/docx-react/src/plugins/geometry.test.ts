@@ -132,6 +132,34 @@ describe('plugin overlay geometry', () => {
     expect(geometry.getPositionAtPoint(1, 1)).toBeNull();
   });
 
+  test('the mirror fallback answers in container pixels under an ancestor CSS zoom', () => {
+    for (const ancestor of [0.713, 1.25]) {
+      const parent = document.createElement('div');
+      const pages = document.createElement('div');
+      const page = document.createElement('div');
+      page.className = 'layout-page';
+      page.dataset.pageIndex = '0';
+      pages.appendChild(page);
+      parent.appendChild(pages);
+      for (const element of [parent, pages, page]) {
+        Object.defineProperty(element, 'currentCSSZoom', { value: ancestor });
+      }
+      place(parent, rectAt(20, 10, 900 * ancestor, 2100 * ancestor));
+      place(pages, rectAt(20 + 40 * ancestor, 10 + 16 * ancestor, 800 * ancestor, 2000 * ancestor));
+      const pageLeft = 20 + (40 + 30) * ancestor;
+      place(page, rectAt(pageLeft, 10 + (16 + 24) * ancestor, 100 * ancestor, 200 * ancestor));
+      const dom = createRenderedDomContext(pages);
+      const bounds = dom.getPageBounds(0)!;
+      expect(bounds.x).toBeCloseTo(30, 9);
+      expect(bounds.y).toBeCloseTo(24, 9);
+      expect(bounds.width).toBeCloseTo(100, 9);
+      expect(bounds.height).toBeCloseTo(200, 9);
+      const offset = dom.getContainerOffset();
+      expect(offset.x).toBeCloseTo(40, 9);
+      expect(offset.y).toBeCloseTo(16, 9);
+    }
+  });
+
   test('measures origins when called, so moved pages move the overlay', () => {
     const pages = document.createElement('div');
     const layer = document.createElement('div');
