@@ -94,6 +94,7 @@ struct ConvergenceInput<'a> {
     /// Every dirty block, ascending, when placement may skip the clean pages between them.
     skippable_dirty: Option<&'a [usize]>,
     keep_with_next: &'a crate::keep_together::KeepWithNextScan,
+    measured: &'a [MeasuredBlock],
 }
 
 /// Where a placement walk met the retained layout.
@@ -142,13 +143,37 @@ impl ConvergenceInput<'_> {
             .previous_checkpoints
             .iter()
             .rev()
-            .find(|resume| resume.block_index < restart)?;
+            .find(|resume| resume.block_index < restart && resumable(resume, self.measured))?;
         (resume.page_index > previous.page_index).then(|| Convergence::Skip {
             previous: previous.clone(),
             resume: resume.clone(),
             dirty_index: next_dirty,
         })
     }
+}
+
+/// Whether placement restarted at `checkpoint` lays out what follows as the walk
+/// that recorded it did. A queued section geometry belongs to the page after the
+/// checkpoint's, and a floating or anchored object that opened its page would be
+/// placed again from its anchor's offset.
+fn resumable(checkpoint: &LayoutCheckpoint, measured: &[MeasuredBlock]) -> bool {
+    let flow = &checkpoint.flow;
+    flow.pending_page_size.is_none()
+        && flow.pending_margins.is_none()
+        && flow.pending_columns.is_none()
+        && measured
+            .get(checkpoint.block_index)
+            .is_some_and(|block| match &block.block {
+                LayoutBlock::Paragraph(_) => true,
+                LayoutBlock::Table(table) => table.floating.is_none(),
+                _ => false,
+            })
+}
+
+/// Checkpoints in placement order: by block, then by page for a block that
+/// opens two.
+fn checkpoint_order(checkpoint: &LayoutCheckpoint) -> (usize, usize) {
+    (checkpoint.block_index, checkpoint.page_index)
 }
 
 /// The block placement resumes before for a change at `dirty_index`. A dirty
@@ -440,7 +465,10 @@ pub fn layout_document_incremental_ranges(
     let resume = previous_checkpoints
         .iter()
         .rev()
-        .find(|checkpoint| checkpoint.block_index < restart || checkpoint.block_index == 0)
+        .find(|checkpoint| {
+            (checkpoint.block_index < restart && resumable(checkpoint, &input.measured))
+                || checkpoint.block_index == 0
+        })
         .ok_or_else(|| LayoutError::Unsupported("no clean pagination checkpoint".into()))?;
     let dirty: Vec<usize> = (previous_fingerprints.len() == next_fingerprints.len())
         .then(|| {
@@ -485,7 +513,7 @@ pub fn layout_document_incremental_ranges(
     )> = Vec::new();
     let mut checkpoints: Vec<_> = previous_checkpoints
         .iter()
-        .filter(|checkpoint| checkpoint.block_index < resume.block_index)
+        .filter(|checkpoint| checkpoint_order(checkpoint) < checkpoint_order(resume))
         .cloned()
         .collect();
     let mut placed_blocks = 0;
@@ -505,6 +533,7 @@ pub fn layout_document_incremental_ranges(
             dirty_index: segment_dirty,
             skippable_dirty: skippable.then_some(dirty.as_slice()),
             keep_with_next: &plan.keep_with_next,
+            measured: &input.measured,
         };
         let placement = place(
             &input.measured,
@@ -528,8 +557,8 @@ pub fn layout_document_incremental_ranges(
                     previous_checkpoints
                         .iter()
                         .filter(|checkpoint| {
-                            (previous.block_index..resume.block_index)
-                                .contains(&checkpoint.block_index)
+                            (checkpoint_order(previous)..checkpoint_order(resume))
+                                .contains(&checkpoint_order(checkpoint))
                         })
                         .cloned(),
                 );
@@ -581,7 +610,9 @@ pub fn layout_document_incremental_ranges(
                 checkpoints.extend(
                     previous_checkpoints
                         .iter()
-                        .filter(|checkpoint| checkpoint.block_index >= previous.block_index)
+                        .filter(|checkpoint| {
+                            checkpoint_order(checkpoint) >= checkpoint_order(&previous)
+                        })
                         .cloned()
                         .map(|mut checkpoint| {
                             checkpoint.page_index =
@@ -1846,6 +1877,13 @@ mod pagination_rule_tests {
             ]
         };
         let previous = layout_document_checkpointed(&mut input(measured())).unwrap();
+        let table_page = previous
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.block_index == 1)
+            .unwrap();
+        assert_eq!(table_page.page_index, 1);
+        assert_eq!(table_page.flow.leading_spacing_spent, f64::INFINITY);
         let mut previous_layout = previous.layout.clone();
         let incremental = layout_document_incremental(
             &mut input(measured()),
@@ -1856,11 +1894,110 @@ mod pagination_rule_tests {
             2,
         )
         .unwrap();
-        assert_eq!(incremental.rebuilt_page_start, 1);
         assert_eq!(
             serde_json::to_string(&incremental.layout).unwrap(),
             serde_json::to_string(&previous.layout).unwrap()
         );
+    }
+
+    /// Lays `previous` out in full, then `next` incrementally with the blocks
+    /// `dirty` changed, and checks it against a full pass over `next`.
+    fn assert_incremental_matches_full(
+        previous: Vec<serde_json::Value>,
+        next: Vec<serde_json::Value>,
+        dirty: &[usize],
+    ) -> CheckpointedLayout {
+        let retained = layout_document_checkpointed(&mut input(previous)).unwrap();
+        let previous_fingerprints = vec![1_u64; next.len()];
+        let mut next_fingerprints = previous_fingerprints.clone();
+        for &index in dirty {
+            next_fingerprints[index] = 2;
+        }
+        let mut previous_layout = retained.layout.clone();
+        let incremental = layout_document_incremental(
+            &mut input(next.clone()),
+            &mut previous_layout,
+            &retained.checkpoints,
+            &previous_fingerprints,
+            &next_fingerprints,
+            dirty[0],
+        )
+        .unwrap();
+        let full = layout_document_checkpointed(&mut input(next)).unwrap();
+        assert_eq!(
+            serde_json::to_string(&incremental.layout).unwrap(),
+            serde_json::to_string(&full.layout).unwrap()
+        );
+        assert_eq!(incremental.checkpoints, full.checkpoints);
+        retained
+    }
+
+    #[test]
+    fn placement_does_not_resume_where_section_geometry_is_queued() {
+        let blocks = || {
+            vec![
+                paragraph(0, 1, 10.0, json!({})),
+                paragraph(1, 1, 10.0, json!({ "pageBreakBefore": true })),
+                json!({"block":{"kind":"pageBreak","id":"page"},"measure":{"kind":"pageBreak"}}),
+                json!({
+                    "block": {
+                        "kind": "sectionBreak", "id": "section", "type": "continuous",
+                        "margins": { "top": 20, "right": 10, "bottom": 10, "left": 10 },
+                    },
+                    "measure": { "kind": "sectionBreak" },
+                }),
+                paragraph(2, 1, 10.0, json!({})),
+                paragraph(3, 1, 10.0, json!({})),
+            ]
+        };
+        let retained = assert_incremental_matches_full(blocks(), blocks(), &[0, 5]);
+        assert!(
+            retained
+                .checkpoints
+                .iter()
+                .any(|checkpoint| checkpoint.flow.pending_margins.is_some())
+        );
+    }
+
+    fn text_anchored_table() -> serde_json::Value {
+        json!({
+            "block": {
+                "kind": "table", "id": 90,
+                "rows": [{ "id": 91, "cantSplit": true, "cells": [{ "id": 92, "blocks": [] }] }],
+                "columnWidths": [180],
+                "floating": {
+                    "vertAnchor": "text", "tblpY": 95,
+                    "topFromText": 0, "bottomFromText": 0, "leftFromText": 0, "rightFromText": 0,
+                },
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [180],
+                "totalWidth": 180, "totalHeight": 20,
+                "rows": [{ "height": 20, "cells": [
+                    { "width": 180, "height": 20, "blocks": [] }
+                ] }],
+            },
+        })
+    }
+
+    #[test]
+    fn placement_does_not_resume_at_a_floating_table_that_opened_its_page() {
+        let blocks = |page_break: bool| {
+            vec![
+                paragraph(0, 1, 10.0, json!({})),
+                paragraph(1, 1, 10.0, json!({ "pageBreakBefore": true })),
+                if page_break {
+                    json!({"block":{"kind":"pageBreak","id":"page"},"measure":{"kind":"pageBreak"}})
+                } else {
+                    json!({"block":{"kind":"columnBreak","id":"column"},"measure":{"kind":"columnBreak"}})
+                },
+                text_anchored_table(),
+                paragraph(2, 1, 10.0, json!({})),
+            ]
+        };
+        let retained = assert_incremental_matches_full(blocks(true), blocks(true), &[0, 4]);
+        assert_eq!(retained.layout.pages.len(), 4);
+        assert_incremental_matches_full(blocks(true), blocks(false), &[2]);
     }
 
     #[test]
