@@ -30,6 +30,7 @@ import {
   type DocxPluginEvent,
   type DocxPluginGeometry,
   type DocxAnchorGeometryResult,
+  type DocxAnchorRect,
   type DocxGeometryTarget,
 } from '../index';
 import { isMacPlatform } from '../commands/descriptors';
@@ -102,7 +103,7 @@ async function inlineImageDocument(
   zip.file('word/media/image1.png', new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
   zip.file(
     'word/document.xml',
-    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body}<w:sectPr/></w:body></w:document>`
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`
   );
   return zip.generateAsync({ type: 'arraybuffer' });
 }
@@ -1058,6 +1059,82 @@ describe('DocxEditor plugins', () => {
     expect(anchor(picture!.paraId, 0, 1).anchor.x).toBeCloseTo(image.x + image.width);
     expect(anchor(picture!.paraId, 1, 1).anchor.x).toBeCloseTo(image.x + image.width);
     expect(anchor(picture!.paraId, 0, 0).anchor.x).toBeCloseTo(image.x);
+  });
+
+  test('anchors a table cell, an empty paragraph and a paragraph across two pages', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.page-anchor',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const body = [
+      '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>',
+      '<w:p w14:paraId="00000011"><w:r><w:t>In the cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+      '<w:p w14:paraId="00000012"/>',
+      `<w:p w14:paraId="00000013"><w:r>${'<w:t>line</w:t><w:br/>'.repeat(80)}<w:t>end</w:t></w:r></w:p>`,
+    ].join('');
+    const { ref } = await mount({ plugins: [plugin] }, false, await inlineImageDocument(body));
+    await until(() => geometry !== null);
+    const session = ref.current!.getEditorRef()!.getYrsSession()!;
+    const version = session.version();
+    await until(() => {
+      const layout = (geometry as DocxPluginGeometry | null)?.layout;
+      return layout?.version === version && layout.pageCount > 1;
+    });
+    const current = geometry! as DocxPluginGeometry;
+    const PAGE_GAP = 1200;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 900, 4000);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll<HTMLCanvasElement>(
+      'canvas[data-page-index]'
+    )) {
+      const page = Number(canvas.dataset.pageIndex);
+      canvas.getBoundingClientRect = () => new DOMRect(0, page * PAGE_GAP, 816, 1056);
+    }
+    const byWordId = (ooxmlParaId: string) =>
+      session
+        .paragraphIdentities()
+        .paragraphs.find((entry) => entry.ooxmlParaId === ooxmlParaId)!.session!;
+    const at = (ooxmlParaId: string) => {
+      const result = current.getAnchorGeometry({
+        kind: 'paragraph',
+        paragraph: byWordId(ooxmlParaId),
+      });
+      if (!result.ok) throw new Error(result.failure.message);
+      return result;
+    };
+    const inside = (anchor: DocxAnchorRect, page: { x: number; y: number; height: number }) =>
+      anchor.y >= page.y && anchor.y + anchor.height <= page.y + page.height;
+
+    const cell = at('00000011');
+    expect(byWordId('00000011').story).toStartWith('body:');
+    expect(cell.rects.length).toBeGreaterThan(0);
+    expect(cell.rects.every((rect) => rect.pageIndex === 0)).toBe(true);
+    const cellEnd = cell.rects.at(-1)!;
+    expect(cell.anchor).toMatchObject({ pageIndex: 0, width: 0 });
+    expect(cell.anchor.x).toBeCloseTo(cellEnd.x + cellEnd.width);
+    expect(inside(cell.anchor, cell.pageRect)).toBe(true);
+
+    const empty = at('00000012');
+    expect(empty.rects).toEqual([]);
+    expect(empty.anchor.width).toBe(0);
+    expect(empty.anchor.y).toBeGreaterThan(cell.anchor.y);
+
+    const spanning = at('00000013');
+    const pages = new Set(spanning.rects.map((rect) => rect.pageIndex));
+    expect(pages.size).toBeGreaterThan(1);
+    const last = spanning.rects.at(-1)!;
+    expect(spanning.anchor.pageIndex).toBe(Math.max(...pages));
+    expect(spanning.anchor.pageIndex).toBe(last.pageIndex);
+    expect(spanning.pageRect.y).toBeCloseTo(spanning.anchor.pageIndex * PAGE_GAP);
+    expect(inside(spanning.anchor, spanning.pageRect)).toBe(true);
+    for (const rect of spanning.rects) {
+      expect(rect.y).toBeGreaterThanOrEqual(rect.pageIndex * PAGE_GAP);
+      expect(rect.y).toBeLessThan(rect.pageIndex * PAGE_GAP + 1056);
+    }
   });
 
   test('an anchor ends where the text of its last unit ends, left in right-to-left runs', async () => {
