@@ -46,7 +46,6 @@ export interface UsePagedScrollApiReturn {
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
 }
 
-/** Farther scrolls jump: animating them paints every page on the way. */
 const SMOOTH_SCROLL_VIEWPORTS = 2;
 const REFINE_WINDOW_MS = 3000;
 const USER_SCROLL_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
