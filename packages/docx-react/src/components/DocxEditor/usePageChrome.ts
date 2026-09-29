@@ -17,9 +17,19 @@ export interface PageChromeOptions {
    * at idle time.
    */
   urgentRevision: number;
-  /** Receives a function that builds the chrome at once, for a page needed before it is active. */
-  registerBuild?: (build: (() => void) | null) => void;
+  /** Receives the handle that builds the chrome at once, for a page needed before it is active. */
+  register?: (handle: PageChromeHandle | null) => void;
   make: (page: DisplayPage, t: TFunction) => HTMLElement;
+}
+
+/** Builds one page's chrome outside its render cycle. */
+export interface PageChromeHandle {
+  /** Builds the chrome for the current page now, unless it already shows it. */
+  build(): void;
+  /** Whether the chrome shows the current page. */
+  current(): boolean;
+  /** Clears chrome built while the page is inactive. */
+  release(): void;
 }
 
 interface BuiltFor {
@@ -32,7 +42,7 @@ interface BuiltFor {
 /** Builds one page's mirror or overlay into `hostRef`, and rebuilds it with the page. */
 export function usePageChrome(
   hostRef: RefObject<HTMLDivElement | null>,
-  { page, t, active, defer, rebuildAtOnce, urgentRevision, registerBuild, make }: PageChromeOptions
+  { page, t, active, defer, rebuildAtOnce, urgentRevision, register, make }: PageChromeOptions
 ): void {
   // Owned deltas shift primitive positions in place: identity alone is stale.
   const revision = displayPageRevision(page);
@@ -48,6 +58,8 @@ export function usePageChrome(
     make,
   });
   latest.current = { page, revision, urgentRevision, t, make };
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const builtForRef = useRef<BuiltFor | null>(null);
   const current = (): boolean => {
     const built = builtForRef.current;
@@ -70,9 +82,19 @@ export function usePageChrome(
   }, [hostRef]);
 
   useEffect(() => {
-    registerBuild?.(build);
-    return () => registerBuild?.(null);
-  }, [build, registerBuild]);
+    register?.({
+      build,
+      current,
+      release: () => {
+        const host = hostRef.current;
+        if (!host || activeRef.current || !builtForRef.current) return;
+        host.replaceChildren();
+        builtForRef.current = null;
+      },
+    });
+    return () => register?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [build, hostRef, register]);
 
   useEffect(() => {
     const host = hostRef.current;

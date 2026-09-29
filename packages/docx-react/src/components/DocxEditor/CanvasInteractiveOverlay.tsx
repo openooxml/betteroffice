@@ -24,7 +24,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
-import { usePageChrome } from './usePageChrome';
+import { usePageChrome, type PageChromeHandle } from './usePageChrome';
 
 const makeOverlay = (page: DisplayPage, t: TFunction): HTMLElement =>
   buildInteractiveOverlayPage(page, {
@@ -40,7 +40,7 @@ export function CanvasInteractiveOverlay({
   zoom = 1,
   active = true,
   defer = false,
-  registerBuild,
+  register,
 }: {
   page: DisplayPage;
   zoom?: number;
@@ -48,8 +48,8 @@ export function CanvasInteractiveOverlay({
   active?: boolean;
   /** The first build may wait for idle time. */
   defer?: boolean;
-  /** Receives a function that builds the overlay at once. */
-  registerBuild?: (build: (() => void) | null) => void;
+  /** Receives the handle that builds the overlay at once. */
+  register?: (handle: PageChromeHandle | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
@@ -61,7 +61,7 @@ export function CanvasInteractiveOverlay({
     rebuildAtOnce: true,
     // Its buttons carry the positions a shift moves.
     urgentRevision: displayPageRevision(page),
-    registerBuild,
+    register,
     make: makeOverlay,
   });
 

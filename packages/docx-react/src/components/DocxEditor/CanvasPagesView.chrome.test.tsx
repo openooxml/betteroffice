@@ -19,6 +19,7 @@ import {
 import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasPagesView } from './CanvasPagesView';
+import type { PageChromeHandle } from './usePageChrome';
 
 const { act, cleanup, render } = await import('@testing-library/react');
 
@@ -293,7 +294,7 @@ test('a position shift in place moves a control at once, and the mirror by idle 
     width: 100,
     height: 100,
     primitives: [
-      { ...widget('shifted'), docStart: 1, docEnd: 2, blockId: 'p' } as DisplayPrimitive,
+      { ...widget('shifted'), docStart: 1, docEnd: 2, blockId: 'p' } as unknown as DisplayPrimitive,
     ],
   } as DisplayPage;
   const first: RetainedFrame = {
@@ -356,4 +357,149 @@ test('a position shift in place moves a control at once, and the mirror by idle 
   expect(controlPos()).toBe('6');
   await idle();
   expect(mirrorStart()).toBe('6');
+});
+
+test('Tab into the pages from outside them reaches the nearest control, built or not', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const pages = blankPages(40, (index) =>
+    index === 1 ? [widget('near')] : index === 38 ? [widget('last')] : []
+  );
+  render(
+    <>
+      <button type="button" id="before">
+        before
+      </button>
+      <CanvasPagesView
+        displayList={{ pages }}
+        hostRef={hostRef}
+        interactive
+        glyphOutlineProvider={() => ''}
+      />
+      <button type="button" id="after">
+        after
+      </button>
+    </>
+  );
+  await act(async () => {});
+  const press = (id: string, shiftKey = false) => {
+    const event = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      shiftKey,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.getElementById(id)!.dispatchEvent(event);
+    return event;
+  };
+  const control = (groupId: string) =>
+    hostRef.current!.querySelector(`button[data-sdt-group-id="${groupId}"]`);
+  // Nothing is built yet: the first build waits for idle time.
+  expect(control('near')).toBeNull();
+  await act(async () => {
+    expect(press('before').defaultPrevented).toBe(true);
+  });
+  expect(document.activeElement).toBe(control('near'));
+  await act(async () => {
+    expect(press('after', true).defaultPrevented).toBe(true);
+  });
+  expect(document.activeElement).toBe(control('last'));
+});
+
+test('Tab from a page whose chrome is still pending reaches that page first', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const link = {
+    kind: 'text',
+    x: 10,
+    y: 10,
+    text: 'link',
+    font: '11px sans-serif',
+    color: '#000',
+    href: '#somewhere',
+  } as unknown as DisplayPrimitive;
+  const pages = blankPages(40, (index) => (index === 1 ? [link, widget('own')] : []));
+  render(
+    <CanvasPagesView
+      displayList={{ pages }}
+      hostRef={hostRef}
+      interactive
+      glyphOutlineProvider={() => ''}
+    />
+  );
+  await act(async () => {});
+  const canvas = hostRef.current!.querySelector<HTMLElement>(
+    '.canvas-page[data-page-index="1"] canvas'
+  )!;
+  canvas.tabIndex = 0;
+  canvas.focus();
+  const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+  await act(async () => {
+    canvas.dispatchEvent(event);
+  });
+  expect(event.defaultPrevented).toBe(true);
+  expect(document.activeElement?.getAttribute('href')).toBe('#somewhere');
+});
+
+test('elements a plugin query returned stay connected through other queries', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const run = (docStart: number) =>
+    ({
+      kind: 'text',
+      x: 10,
+      y: 10,
+      text: 'far',
+      font: '11px sans-serif',
+      color: '#000',
+      blockId: `p${docStart}`,
+      docStart,
+      docEnd: docStart + 3,
+    }) as unknown as DisplayPrimitive;
+  const pages = blankPages(40, (index) => [run(index * 10)]);
+  render(<CanvasPagesView displayList={{ pages }} hostRef={hostRef} glyphOutlineProvider={() => ''} />);
+  await idle();
+  const host = hostRef.current!;
+  const queries = {
+    rangeRects: (from: number) => [
+      { pageIndex: Math.floor(from / 10), x: 0, y: 0, width: 1, height: 1 },
+    ],
+  } as unknown as DisplayListQueries;
+  const context = createRenderedDomContext(host, 1, {
+    displayListQueries: queries,
+    projector: { projectRect: () => null, getPageBounds: () => null },
+  });
+  let first: Element[] = [];
+  await act(async () => {
+    first = context.findElementsForRange(300, 303);
+  });
+  for (let page = 31; page < 39; page += 1) {
+    await act(async () => {
+      context.findElementsForRange(page * 10, page * 10 + 3);
+    });
+  }
+  await idle();
+  expect(first).toHaveLength(1);
+  expect(first[0]!.isConnected).toBe(true);
+});
+
+test('chrome built on demand for an inactive page is cleared on release', async () => {
+  const page: DisplayPage = { pageIndex: 0, width: 100, height: 100, primitives: [] };
+  let handle: PageChromeHandle | null = null;
+  const register = (next: PageChromeHandle | null) => {
+    handle = next;
+  };
+  const { container, rerender } = render(
+    <CanvasPageMirror page={page} active={false} register={register} />
+  );
+  await act(async () => {});
+  const content = () => container.firstElementChild!.firstElementChild;
+  expect(content()).toBeNull();
+  act(() => handle!.build());
+  expect(content()).not.toBeNull();
+  expect(handle!.current()).toBe(true);
+  act(() => handle!.release());
+  expect(content()).toBeNull();
+
+  rerender(<CanvasPageMirror page={page} active register={register} />);
+  await act(async () => {});
+  act(() => handle!.release());
+  expect(content()).not.toBeNull();
 });

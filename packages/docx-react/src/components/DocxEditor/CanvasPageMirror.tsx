@@ -14,7 +14,7 @@ import { useRef } from 'react';
 import { buildMirrorPage, type DisplayPage } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
-import { usePageChrome } from './usePageChrome';
+import { usePageChrome, type PageChromeHandle } from './usePageChrome';
 
 const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
   buildMirrorPage(page, {
@@ -31,7 +31,7 @@ export function CanvasPageMirror({
   active = true,
   defer = false,
   visible = true,
-  registerBuild,
+  register,
   noteAnchorRevision = 0,
 }: {
   page: DisplayPage;
@@ -47,8 +47,8 @@ export function CanvasPageMirror({
   defer?: boolean;
   /** In the page window: a rebuild after a content change never waits. */
   visible?: boolean;
-  /** Receives a function that builds the mirror at once. */
-  registerBuild?: (build: (() => void) | null) => void;
+  /** Receives the handle that builds the mirror at once. */
+  register?: (handle: PageChromeHandle | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
@@ -59,7 +59,7 @@ export function CanvasPageMirror({
     defer,
     rebuildAtOnce: visible,
     urgentRevision: noteAnchorRevision,
-    registerBuild,
+    register,
     make: makeMirror,
   });
 

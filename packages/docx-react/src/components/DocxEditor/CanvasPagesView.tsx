@@ -31,6 +31,7 @@ import {
 import type { UseCanvasRendererResult } from './hooks/useDisplayList';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
+import type { PageChromeHandle } from './usePageChrome';
 import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA11yLiveRegion';
 import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
@@ -104,9 +105,6 @@ const PAGE_WINDOW_MIN_PAGES = 12;
 // A page already mounted stays mounted until it drifts one page beyond the
 // mount band, so slow scrolling at a boundary cannot thrash mount/unmount.
 const PAGE_WINDOW_HYSTERESIS = 1;
-// Pages outside the window whose chrome something asked for (keyboard
-// navigation, a link, a plugin DOM query) keep it, the most recent first.
-const ON_DEMAND_PAGES = 4;
 const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';
 
 /** The elements under `root` that Tab stops at, in document order. */
@@ -117,6 +115,7 @@ function tabStops(root: ParentNode): HTMLElement[] {
 }
 
 type ChromeKind = 'mirror' | 'overlay';
+type ChromeHandles = Partial<Record<ChromeKind, PageChromeHandle>>;
 
 interface PageWindowRange {
   start: number;
@@ -174,14 +173,14 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   inWindow: boolean;
   deferChrome: boolean;
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
-  registerChrome: (pageKey: string, kind: ChromeKind, build: (() => void) | null) => void;
+  registerChrome: (pageKey: string, kind: ChromeKind, handle: PageChromeHandle | null) => void;
 }) {
   const registerMirror = useCallback(
-    (build: (() => void) | null) => registerChrome(pageKey, 'mirror', build),
+    (handle: PageChromeHandle | null) => registerChrome(pageKey, 'mirror', handle),
     [pageKey, registerChrome]
   );
   const registerOverlay = useCallback(
-    (build: (() => void) | null) => registerChrome(pageKey, 'overlay', build),
+    (handle: PageChromeHandle | null) => registerChrome(pageKey, 'overlay', handle),
     [pageKey, registerChrome]
   );
   return (
@@ -208,7 +207,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
         active={chrome}
         defer={deferChrome}
         visible={inWindow}
-        registerBuild={registerMirror}
+        register={registerMirror}
         noteAnchorRevision={noteAnchorRevision}
       />
       {interactive ? (
@@ -217,7 +216,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           zoom={zoom}
           active={chrome}
           defer={deferChrome}
-          registerBuild={registerOverlay}
+          register={registerOverlay}
         />
       ) : null}
     </div>
@@ -481,42 +480,40 @@ export function CanvasPagesView({
   pageKeysRef.current = pageKeys;
   const displayListRef = useRef(displayList);
   displayListRef.current = displayList;
-  const chromeBuildersRef = useRef(new Map<string, Partial<Record<ChromeKind, () => void>>>());
+  const chromeHandlesRef = useRef(new Map<string, ChromeHandles>());
   const registerChrome = useCallback(
-    (pageKey: string, kind: ChromeKind, build: (() => void) | null) => {
-      const builders = chromeBuildersRef.current;
-      const entry = builders.get(pageKey) ?? {};
-      if (build) entry[kind] = build;
+    (pageKey: string, kind: ChromeKind, handle: PageChromeHandle | null) => {
+      const registry = chromeHandlesRef.current;
+      const entry = registry.get(pageKey) ?? {};
+      if (handle) entry[kind] = handle;
       else delete entry[kind];
-      if (entry.mirror || entry.overlay) builders.set(pageKey, entry);
-      else builders.delete(pageKey);
+      if (entry.mirror || entry.overlay) registry.set(pageKey, entry);
+      else registry.delete(pageKey);
     },
     []
   );
-  const [onDemandPageKeys, setOnDemandPageKeys] = useState<readonly string[]>([]);
+  const chromeCurrent = (pageKey: string): boolean => {
+    const handles = chromeHandlesRef.current.get(pageKey);
+    return Boolean(handles) && Object.values(handles!).every((handle) => handle.current());
+  };
+  // Pages built on demand keep their chrome until the page window moves, so
+  // what a plugin query returned stays connected while the view stays put.
+  const onDemandKeysRef = useRef(new Set<string>());
+  const [onDemandPageKeys, setOnDemandPageKeys] = useState<ReadonlySet<string>>(
+    () => new Set()
+  );
   const materializePages = useCallback((pageIndices: readonly number[]) => {
-    const keys = [
-      ...new Set(
-        pageIndices
-          .map((index) => pageKeysRef.current[index])
-          .filter((key): key is string => key !== undefined)
-      ),
-    ];
-    if (keys.length === 0) return;
-    for (const key of keys) {
-      const builders = chromeBuildersRef.current.get(key);
-      builders?.mirror?.();
-      builders?.overlay?.();
+    const onDemand = onDemandKeysRef.current;
+    const size = onDemand.size;
+    for (const index of pageIndices) {
+      const key = pageKeysRef.current[index];
+      if (key === undefined) continue;
+      const handles = chromeHandlesRef.current.get(key);
+      handles?.mirror?.build();
+      handles?.overlay?.build();
+      onDemand.add(key);
     }
-    setOnDemandPageKeys((previous) => {
-      const next = [...keys, ...previous.filter((key) => !keys.includes(key))].slice(
-        0,
-        Math.max(keys.length, ON_DEMAND_PAGES)
-      );
-      return next.length === previous.length && next.every((key, i) => key === previous[i])
-        ? previous
-        : next;
-    });
+    if (onDemand.size !== size) setOnDemandPageKeys(new Set(onDemand));
   }, []);
   useEffect(() => {
     pageRegistry.setMaterializer(materializePages);
@@ -528,35 +525,40 @@ export function CanvasPagesView({
   useEffect(() => {
     const host = innerHostRef.current;
     if (!host) return;
-    const pageElement = (index: number): HTMLElement | null =>
-      host.querySelector<HTMLElement>(`.canvas-page[data-page-index="${index}"]`);
+    const doc = host.ownerDocument;
+    const follows = (a: Node, b: Node): boolean =>
+      Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey) return;
-      if (event.defaultPrevented || !(event.target instanceof HTMLElement)) return;
+      if (event.defaultPrevented || !(event.target instanceof Node)) return;
       const target = event.target;
-      const from = Number(target.closest<HTMLElement>('.canvas-page')?.dataset.pageIndex);
-      if (!Number.isInteger(from)) return;
       const step = event.shiftKey ? -1 : 1;
-      const following = (element: HTMLElement): boolean =>
-        Boolean(
-          target.compareDocumentPosition(element) &
-            (step > 0 ? Node.DOCUMENT_POSITION_FOLLOWING : Node.DOCUMENT_POSITION_PRECEDING)
-        ) && !target.contains(element);
-      const stops = tabStops(host).filter(following);
+      // Whether `node` lies past `from` in the direction Tab moves.
+      const past = (from: Node, node: Node): boolean =>
+        !from.contains(node) && (step > 0 ? follows(from, node) : follows(node, from));
+      const stops = tabStops(doc).filter((stop) => past(target, stop));
       const next = step > 0 ? stops[0] : stops[stops.length - 1];
+      const beforeNext = (node: Node): boolean => !next || past(node, next);
+      const pageElements = Array.from(
+        host.querySelectorAll<HTMLElement>('.canvas-pages__column > .canvas-page')
+      );
+      if (step < 0) pageElements.reverse();
       const pages = displayListRef.current.pages;
-      // A stop outside every page lies beyond the page column.
-      const nextPage = Number(next?.closest<HTMLElement>('.canvas-page')?.dataset.pageIndex);
-      const nextIndex = Number.isInteger(nextPage) ? nextPage : step > 0 ? pages.length : -1;
-      const before = (index: number) => (step > 0 ? index < nextIndex : index > nextIndex);
-      for (let index = from + step; before(index); index += step) {
+      for (const element of pageElements) {
+        const onPath =
+          (element.contains(target) || past(target, element)) &&
+          (!next || element.contains(next) || beforeNext(element));
+        if (!onPath) continue;
+        const index = Number(element.dataset.pageIndex);
+        const key = element.dataset.pageKey;
         const page = pages[index];
-        if (!page) break;
+        if (!page || key === undefined || chromeCurrent(key)) continue;
         if (!displayPageMayHoldTabStops(page)) continue;
         materializePages([index]);
-        const element = pageElement(index);
-        const candidates = element ? tabStops(element) : [];
-        const stop = step > 0 ? candidates[0] : candidates[candidates.length - 1];
+        const reached = tabStops(element).filter(
+          (stop) => past(target, stop) && beforeNext(stop)
+        );
+        const stop = step > 0 ? reached[0] : reached[reached.length - 1];
         if (stop) {
           event.preventDefault();
           stop.focus();
@@ -576,18 +578,20 @@ export function CanvasPagesView({
       } catch {
         return;
       }
-      if (!id || link.ownerDocument.getElementById(id)) return;
+      if (!id || doc.getElementById(id)) return;
       const index = displayListRef.current.pages.findIndex((page) =>
         displayPageHoldsMirrorId(page, id)
       );
       if (index >= 0) materializePages([index]);
     };
-    host.addEventListener('keydown', onKeyDown);
+    // Bubbling to the document, after the editor's own Tab handling.
+    doc.addEventListener('keydown', onKeyDown);
     host.addEventListener('click', onClick, true);
     return () => {
-      host.removeEventListener('keydown', onKeyDown);
+      doc.removeEventListener('keydown', onKeyDown);
       host.removeEventListener('click', onClick, true);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [materializePages]);
 
   // One glyph-outline cache for the canvas lifetime (task contract: not
@@ -628,6 +632,17 @@ export function CanvasPagesView({
 
   const windowStart = effectiveWindow?.start ?? -1;
   const windowEnd = effectiveWindow?.end ?? -1;
+  useEffect(() => {
+    const onDemand = onDemandKeysRef.current;
+    if (onDemand.size === 0) return;
+    for (const key of onDemand) {
+      const handles = chromeHandlesRef.current.get(key);
+      handles?.mirror?.release();
+      handles?.overlay?.release();
+    }
+    onDemand.clear();
+    setOnDemandPageKeys(new Set());
+  }, [windowStart, windowEnd]);
   useEffect(() => {
     // The window measurement lands pre-paint (layout effect) and re-runs this
     // effect; rastering before it exists would process every page.
@@ -830,7 +845,7 @@ export function CanvasPagesView({
               chrome={
                 chromeInWindow(i) ||
                 pageKey === focusedPageKey ||
-                onDemandPageKeys.includes(pageKey)
+                onDemandPageKeys.has(pageKey)
               }
               inWindow={chromeInWindow(i)}
               deferChrome={windowingEnabled}
