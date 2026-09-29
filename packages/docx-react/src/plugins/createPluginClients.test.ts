@@ -319,6 +319,7 @@ describe('plugin read and navigation clients', () => {
 test('a paragraph id present twice in its story is ambiguous', () => {
   const session = {
     storyIds: () => ['body'],
+    hasStory: (story: string) => story === 'body',
     paragraphs: () => [{ paraId: 'dup' }, { paraId: 'dup' }],
   } as unknown as YrsSession;
   expect(resolveParagraph(session, { story: 'body', paraId: 'dup' })).toBe('ambiguous-target');

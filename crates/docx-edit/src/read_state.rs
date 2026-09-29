@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use yrs::{Any, Map, Out, ReadTxn, Transact};
+use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
 
 use crate::op::{LocRange, OpError, OpResult, para_bounds};
 use crate::ops::{Chunk, ChunkKind, capture_pilcrow};
@@ -136,35 +136,71 @@ pub(crate) fn table_cell_stories<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> HashS
         let Out::YText(story) = value else {
             continue;
         };
-        for chunk in doc.chunk_snapshot(story_id, &story, txn).iter() {
-            let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+        collect_table_cell_stories(doc, txn, story_id, &story, &mut cells);
+    }
+    cells
+}
+
+/// Whether `story` is a table cell story. Cell stories are named
+/// `{parent}:t{table}:r{row}c{cell}`, so that parent's tables are read first;
+/// only a story they do not list costs the whole-document scan.
+pub(crate) fn is_table_cell_story<T: ReadTxn>(doc: &EditingDoc, txn: &T, story: &str) -> bool {
+    if let Some(parent) = cell_story_parent(story)
+        && let Some(Out::YText(parent_story)) = txn
+            .get_map(crate::STORIES)
+            .and_then(|stories| stories.get(txn, parent))
+    {
+        let mut cells = HashSet::new();
+        collect_table_cell_stories(doc, txn, parent, &parent_story, &mut cells);
+        if cells.contains(story) {
+            return true;
+        }
+    }
+    table_cell_stories(doc, txn).contains(story)
+}
+
+fn cell_story_parent(story: &str) -> Option<&str> {
+    let (rest, cell) = story.rsplit_once(':')?;
+    let (parent, table) = rest.rsplit_once(':')?;
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    let (row, column) = cell.strip_prefix('r')?.split_once('c')?;
+    (digits(table.strip_prefix('t')?) && digits(row) && digits(column)).then_some(parent)
+}
+
+fn collect_table_cell_stories<T: ReadTxn>(
+    doc: &EditingDoc,
+    txn: &T,
+    story_id: &str,
+    story: &TextRef,
+    cells: &mut HashSet<String>,
+) {
+    for chunk in doc.chunk_snapshot(story_id, story, txn).iter() {
+        let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+            continue;
+        };
+        if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
+            continue;
+        }
+        let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
+            continue;
+        };
+        for row in rows.iter() {
+            let Any::Map(row) = row else {
                 continue;
             };
-            if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
-                continue;
-            }
-            let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
+            let Some(Any::Array(row_cells)) = row.get("cells") else {
                 continue;
             };
-            for row in rows.iter() {
-                let Any::Map(row) = row else {
+            for cell in row_cells.iter() {
+                let Any::Map(cell) = cell else {
                     continue;
                 };
-                let Some(Any::Array(row_cells)) = row.get("cells") else {
-                    continue;
-                };
-                for cell in row_cells.iter() {
-                    let Any::Map(cell) = cell else {
-                        continue;
-                    };
-                    if let Some(Any::String(story_id)) = cell.get("story") {
-                        cells.insert(story_id.to_string());
-                    }
+                if let Some(Any::String(story_id)) = cell.get("story") {
+                    cells.insert(story_id.to_string());
                 }
             }
         }
     }
-    cells
 }
 
 impl EditingDoc {
@@ -342,7 +378,7 @@ impl EditingDoc {
             paragraph_properties,
             has_selection: range.start != range.end,
             is_multi_paragraph,
-            in_table: table_cell_stories(self, &txn).contains(&range.story),
+            in_table: is_table_cell_story(self, &txn, &range.story),
             embed_kind,
             in_insertion: ins == Some(TriState::On),
             in_deletion: del == Some(TriState::On),
@@ -627,6 +663,53 @@ mod tests {
                 .in_table
         );
         assert!(!context(&doc, 1, 4).in_table);
+    }
+
+    #[test]
+    fn in_table_reads_the_tables_that_list_the_cell() {
+        let doc = seed("body text");
+        let table = |doc: &EditingDoc, parent: &str, cell_story: &str| {
+            let cell = Any::Map(Arc::new(HashMap::from([(
+                "story".into(),
+                Any::from(cell_story),
+            )])));
+            let row = Any::Map(Arc::new(HashMap::from([(
+                "cells".into(),
+                Any::Array(Arc::from(vec![cell])),
+            )])));
+            doc.apply_raw_ops(
+                parent,
+                vec![RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "table".into(),
+                    payload: vec![("rows".into(), Any::Array(Arc::from(vec![row])))],
+                    attrs: yrs::types::Attrs::new(),
+                }],
+                &local(),
+            )
+            .unwrap();
+        };
+        for story in [
+            "body:t0:r0c0",
+            "body:t0:r0c0:t0:r0c0",
+            "body:t1:r0c0",
+            "custom-cell",
+        ] {
+            doc.create_story(story, "cell", "Normal", "left").unwrap();
+        }
+        table(&doc, "body", "body:t0:r0c0");
+        table(&doc, "body:t0:r0c0", "body:t0:r0c0:t0:r0c0");
+        table(&doc, "body:t0:r0c0", "custom-cell");
+        let in_table = |story: &str| {
+            doc.selection_context(&StoryRange::new(story, 0, 1))
+                .unwrap()
+                .in_table
+        };
+        assert!(in_table("body:t0:r0c0"));
+        assert!(in_table("body:t0:r0c0:t0:r0c0"), "a nested table's cell");
+        assert!(in_table("custom-cell"), "a cell whose name names no parent");
+        assert!(!in_table("body:t1:r0c0"), "no table lists it");
+        assert!(!in_table("body"));
     }
 
     #[test]

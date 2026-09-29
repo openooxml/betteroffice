@@ -1335,11 +1335,14 @@ impl EngineSession {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (input, regions, notes, measurement, render_env, body_story) = request.split();
-        let mut blocks = input
-            .measured
-            .into_iter()
-            .map(|measured| measured.block)
-            .collect::<Vec<_>>();
+        let default_family =
+            docx_layout::measure_blocks::default_font_family(&measurement.defaults);
+        let mut requirements = BTreeMap::new();
+        docx_layout::measure_blocks::collect_font_requirements_into(
+            input.measured.iter().map(|measured| &measured.block),
+            default_family,
+            &mut requirements,
+        );
         if let Some(body_story) = body_story {
             let render_env: RenderEnv = serde_json::from_value(render_env)
                 .map_err(|error| format!("parse render environment: {error}"))?;
@@ -1370,17 +1373,18 @@ impl EngineSession {
                 format!("{prefix}:{}", content.id)
             }));
             for story in stories {
-                let mut story_blocks = self
-                    .with_lowered_story(&story, &render_env, <[LayoutBlock]>::to_vec)
-                    .map_err(|error| error.to_string())?;
-                blocks.append(&mut story_blocks);
+                self.with_lowered_story(&story, &render_env, |blocks| {
+                    docx_layout::measure_blocks::collect_font_requirements_into(
+                        blocks,
+                        default_family,
+                        &mut requirements,
+                    );
+                })
+                .map_err(|error| error.to_string())?;
             }
         }
-        serde_json::to_string(&docx_layout::measure_blocks::collect_font_requirements(
-            &blocks,
-            docx_layout::measure_blocks::default_font_family(&measurement.defaults),
-        ))
-        .map_err(|error| format!("serialize: {error}"))
+        serde_json::to_string(&requirements.into_values().collect::<Vec<_>>())
+            .map_err(|error| format!("serialize: {error}"))
     }
 
     /// Full-document pagination with section/page region orchestration owned

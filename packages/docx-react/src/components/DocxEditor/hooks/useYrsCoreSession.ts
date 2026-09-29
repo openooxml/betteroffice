@@ -296,7 +296,7 @@ export function useYrsCoreSession(
     if (!enabledRef.current) return null;
     try {
       const live = sessionRef.current;
-      if (!live || !live.storyIds().includes(storyId)) return null;
+      if (!live || !live.hasStory(storyId)) return null;
       return live.yrsBlocksForStory(storyId, env) as LayoutBlock[];
     } catch (error) {
       console.error(`[yrs] failed to lower story ${storyId}`, error);
@@ -312,7 +312,7 @@ export function useYrsCoreSession(
   const inputPositionMap = useCallback((storyId = 'body'): YrsInputPositionMap | null => {
     const live = sessionRef.current;
     const facade = facadeRef.current;
-    if (!enabledRef.current || !live || !facade || !live.storyIds().includes(storyId)) return null;
+    if (!enabledRef.current || !live || !facade || !live.hasStory(storyId)) return null;
     const cached = inputPositionMapsRef.current.get(storyId);
     if (cached) return cached;
     const map = facade.createYrsInputPositionMap(storyId, live.paragraphSpans(storyId));
@@ -366,7 +366,7 @@ export function useYrsCoreSession(
 
   const publishDirectInput = useCallback((stories?: string | readonly string[]): void => {
     const live = sessionRef.current;
-    if (!live || !live.storyIds().includes('body')) return;
+    if (!live || !live.hasStory('body')) return;
     inputPositionMapsRef.current.clear();
     const dirty =
       stories === undefined
