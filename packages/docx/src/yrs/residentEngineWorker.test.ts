@@ -465,6 +465,41 @@ describe('resident worker layout ownership', () => {
     expect(extras.at(-1)).toBe('given');
   });
 
+  test('marks a preview replica as part of a document before it lays it out', async () => {
+    const w = worker();
+    const calls: string[] = [];
+    Object.assign(w.harness.session, {
+      loadState: () => calls.push('load'),
+      markPartialDocument: () => calls.push('partial'),
+      layoutDocumentWithRegionsRetainedJson: () => {
+        calls.push('layout');
+        return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
+      },
+    });
+    const snapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    await w.send({ type: 'bootstrap', expectedFrameEpoch: 0, extras: '{}', snapshot });
+    expect(calls).toEqual(['load', 'layout']);
+    calls.length = 0;
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '{}',
+      snapshot: { ...snapshot, partialDocument: true },
+    });
+    expect(calls).toEqual(['load', 'partial', 'layout']);
+  });
+
   test('finishes a provisional layout on request and before other work', async () => {
     const w = worker();
     const extras: string[] = [];

@@ -853,6 +853,7 @@ mod tests {
             headers: None,
             footers: None,
             page_gap: Some(20.0),
+            partial: false,
         };
         let regions = DocumentRegions {
             sections: vec![
@@ -915,6 +916,7 @@ mod tests {
             headers: None,
             footers: None,
             page_gap: None,
+            partial: false,
         };
         let regions = DocumentRegions {
             sections: vec![RegionSection::default(), RegionSection::default()],
@@ -939,6 +941,7 @@ mod tests {
             headers: None,
             footers: None,
             page_gap: Some(20.0),
+            partial: false,
         };
         let regions = DocumentRegions {
             sections: vec![

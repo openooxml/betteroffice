@@ -20,8 +20,8 @@ const PAGES = new Uint8Array(
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
-/** The first page of a prefix layout, as the resident engine lays it out. */
-function firstPage(session: YrsSession, host: YrsDocxHost): unknown {
+/** The region request the editor would lay `host`'s document out with. */
+function layoutRequest(session: YrsSession, host: YrsDocxHost): string {
   const font = session.registerFont(FONT);
   const request = buildResidentRegionLayoutRequest(host.document, 24, {});
   const requirements = JSON.parse(
@@ -33,8 +33,13 @@ function firstPage(session: YrsSession, host: YrsDocxHost): unknown {
     compat: { noLeading: false, doNotExpandShiftReturn: false },
     authoritativeShaping: true,
   };
+  return JSON.stringify(request);
+}
+
+/** The first page of a prefix layout, as the resident engine lays it out. */
+function firstPage(session: YrsSession, host: YrsDocxHost): unknown {
   const layout = JSON.parse(
-    session.layoutDocumentWithRegionsPrefixRetainedJson(JSON.stringify(request), 1)
+    session.layoutDocumentWithRegionsPrefixRetainedJson(layoutRequest(session, host), 1)
   ) as { layout: { pages: unknown[] } };
   return layout.layout.pages[0];
 }
@@ -48,4 +53,28 @@ test('a preview open lays out the first page of the document it previews', async
   expect(firstPage(preview, previewHost)).toEqual(fullPage);
   full.destroy();
   preview.destroy();
+});
+
+test('a preview and a worker replica of it lay out as part of a document', async () => {
+  const full = await createYrsSession({ clientId: 98101 });
+  const preview = await createYrsSession({ clientId: 98102 });
+  const fullHost = full.openDocx(PAGES, true);
+  const previewHost = preview.openDocxPreview(PAGES, 6);
+  const layoutOf = (session: YrsSession, host: YrsDocxHost) =>
+    JSON.parse(session.layoutDocumentWithRegionsRetainedJson(layoutRequest(session, host))) as {
+      layout: { partial?: boolean };
+    };
+  expect(layoutOf(full, fullHost).layout.partial).toBeUndefined();
+  expect(layoutOf(preview, previewHost).layout.partial).toBe(true);
+
+  expect(full.residentWorkerSnapshot({})?.partialDocument).toBeUndefined();
+  const snapshot = preview.residentWorkerSnapshot({})!;
+  expect(snapshot.partialDocument).toBe(true);
+  // What the resident worker does with a preview's snapshot.
+  const replica = await createYrsSession({ clientId: 98103 });
+  replica.loadState(snapshot.state);
+  replica.markPartialDocument();
+  expect(layoutOf(replica, previewHost).layout.partial).toBe(true);
+  expect(replica.residentWorkerSnapshot({})?.partialDocument).toBe(true);
+  for (const session of [full, preview, replica]) session.destroy();
 });

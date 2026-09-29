@@ -884,6 +884,7 @@ mod tests {
             headers: None,
             footers: None,
             page_gap: None,
+            partial: false,
         }
     }
 
