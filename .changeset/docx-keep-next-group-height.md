@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Weigh a keep-with-next run against the page by the height placement gives it. The run counted every member's space-before and space-after twice and never collapsed adjacent spacing, so a heading whose run fitted above the page bottom in Word moved to the next page and left the page short.
+A heading kept with the next paragraph no longer moves to the next page when it fits there in Word: its spacing counts once and adjacent spacing collapses.
