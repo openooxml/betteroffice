@@ -178,14 +178,13 @@ test('a stalled load settles false at the deadline, without Google, and a later 
   const stalled = new Promise<void>((resolve) => {
     release = resolve;
   });
+  const stalledBytes = async () => {
+    await stalled;
+    return new ArrayBuffer(8);
+  };
   configureDefaultFonts({
     fonts: {
-      createFontProvider: () => ({
-        resolve: () => async () => {
-          await stalled;
-          return new ArrayBuffer(8);
-        },
-      }),
+      createFontProvider: () => ({ resolve: () => stalledBytes, resolveFamily: () => stalledBytes }),
     },
   });
   const first = loadFont('Stalled Sans');
@@ -218,6 +217,66 @@ test('faces loaded before joining the set are announced once, after concurrent f
   expect(dispatched).toHaveLength(1);
   expect(dispatched[0].type).toBe('loadingdone');
   expect(dispatched[0].fontfaces).toHaveLength(8);
+});
+
+test('a face that never loads does not hold back announcing the others', async () => {
+  jest.useFakeTimers();
+  let release!: () => void;
+  const stalled = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  configureDefaultFonts({
+    fonts: {
+      createFontProvider: () => ({
+        resolve: () => bytes,
+        resolveFamily: (family: string) =>
+          family === 'Stuck Sans'
+            ? async () => {
+                await stalled;
+                return new ArrayBuffer(8);
+              }
+            : bytes,
+      }),
+    },
+  });
+  const stuck = loadFont('Stuck Sans');
+  expect(await loadFont('Quick Sans')).toBe(true);
+  expect(dispatched).toHaveLength(0);
+  jest.advanceTimersByTime(500);
+  expect(dispatched).toHaveLength(1);
+  expect(new Set(dispatched[0].fontfaces.map((face) => face.family))).toEqual(
+    new Set(['Quick Sans'])
+  );
+  jest.advanceTimersByTime(5000);
+  expect(await stuck).toBe(false);
+  release();
+  expect(await loadFont('Stuck Sans')).toBe(true);
+});
+
+test('a family with one failed face renders, and the next call registers only that face', async () => {
+  const unsubscribe = onFontError(() => undefined);
+  configureDefaultFonts({ fonts: bundle(['Partial Serif']) });
+  failNextFaceLoad = true;
+  expect(await loadFont('Partial Serif')).toBe(true);
+  expect(added).toHaveLength(3);
+  expect(await loadFont('Partial Serif')).toBe(true);
+  expect(added).toHaveLength(4);
+  expect(await loadFont('Partial Serif')).toBe(true);
+  expect(added).toHaveLength(4);
+  unsubscribe();
+});
+
+test('an older provider without resolveFamily registers only the Regular face it can vouch for', async () => {
+  configureDefaultFonts({
+    fonts: {
+      createFontProvider: () => ({
+        resolve: (family: string) => (family === 'Legacy Sans' ? bytes : undefined),
+      }),
+    },
+  });
+  expect(await loadFont('Legacy Sans')).toBe(true);
+  expect(added).toEqual([{ family: 'Legacy Sans', weight: '400', style: 'normal' }]);
+  expect(await loadFont('Gelasio Legacy')).toBe(false);
 });
 
 test('faces the set sees loading are left to the set to announce', async () => {
