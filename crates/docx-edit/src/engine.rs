@@ -5915,6 +5915,90 @@ mod tests {
         docx_layout::clear_measure_fonts();
     }
 
+    #[test]
+    fn an_unbuilt_page_of_a_row_split_across_pages_spans_only_the_blocks_it_shows() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(206);
+        let cell: String = (0..60)
+            .map(|index| format!("<w:p><w:r><w:t>Tall cell line {index}</w:t></w:r></w:p>"))
+            .collect();
+        let body = format!(
+            "<w:p><w:r><w:t>Before the table</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w=\"3600\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"3600\"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w=\"3600\" w:type=\"dxa\"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl><w:p><w:r><w:t>After the table</w:t></w:r></w:p>"
+        );
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 4320,
+                    "pageHeight": 2880,
+                    "marginTop": 300,
+                    "marginRight": 300,
+                    "marginBottom": 300,
+                    "marginLeft": 300
+                }
+            }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let extras =
+            serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
+        engine.set_display_window(Some(0..1));
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let lazy = engine.with_display_list(Clone::clone).unwrap();
+        let full = {
+            let pagination = engine.pagination.borrow();
+            docx_layout::build_display_list_value_from_resident(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                &extras,
+            )
+            .unwrap()
+        };
+        let unbuilt: Vec<usize> = (0..lazy.pages.len())
+            .filter(|&index| lazy.pages[index].unbuilt)
+            .collect();
+        assert!(
+            unbuilt.len() >= 4,
+            "the row must split across several unbuilt pages"
+        );
+        for &index in &unbuilt {
+            let page = serde_json::to_value(&full.pages[index]).unwrap();
+            for primitive in page["primitives"].as_array().unwrap() {
+                let Some(position) = primitive["docStart"].as_i64() else {
+                    continue;
+                };
+                let holders: Vec<usize> = unbuilt
+                    .iter()
+                    .copied()
+                    .filter(|&candidate| {
+                        lazy.pages[candidate]
+                            .position_span
+                            .is_some_and(|[low, high]| low <= position && position <= high)
+                    })
+                    .collect();
+                assert!(
+                    holders.contains(&index),
+                    "position {position} on page {index}"
+                );
+                assert!(
+                    holders.iter().all(|holder| holder.abs_diff(index) <= 1),
+                    "position {position} on page {index} is also spanned by {holders:?}"
+                );
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
     const WIDOW_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0"/></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:basedOn w:val="Normal"/></w:style>"#;
 

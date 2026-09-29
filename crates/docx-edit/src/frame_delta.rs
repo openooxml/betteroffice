@@ -466,6 +466,20 @@ fn prepare_pages<'a>(
         }
     }
 
+    // Clean pages keep their index before the first rebuilt page and shift by
+    // the page-count change after it. A page built in this frame can renumber
+    // the anchors after it, so a clean page whose anchor match disagrees is
+    // prepared afresh.
+    let first_rebuilt =
+        rebuilt_pages.and_then(|rebuilt| (0..list.pages.len()).find(|&index| rebuilt(index)));
+    let page_count_change = list.pages.len() as i64 - previous.len() as i64;
+    let retained_index = |index: usize| -> i64 {
+        if first_rebuilt.is_some_and(|first| index >= first) {
+            index as i64 - page_count_change
+        } else {
+            index as i64
+        }
+    };
     let mut prepared = Vec::with_capacity(list.pages.len());
     for ((index, page), anchor) in list.pages.iter().enumerate().zip(anchors) {
         let page_index = checked_u32(index, "page index")?;
@@ -483,7 +497,8 @@ fn prepare_pages<'a>(
         // position span only reaches the host through a fresh fingerprint.
         let full_prepare = is_new
             || page.unbuilt
-            || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index));
+            || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index))
+            || matched.is_none_or(|old| i64::from(old.page_index) != retained_index(index));
         let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
             let hashes = hash_page(page)?;
             let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
@@ -1573,6 +1588,68 @@ mod tests {
                 index == 5
             })
             .unwrap();
+        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0).unwrap();
+        for (retained, fresh) in snapshots.iter().zip(&fresh) {
+            assert_eq!(retained.page_index, fresh.page_index);
+            assert_eq!(retained.fingerprint, fresh.fingerprint);
+            assert_eq!(retained.primitive_ids, fresh.primitive_ids);
+        }
+    }
+
+    #[test]
+    fn an_incremental_frame_that_builds_a_placeholder_keeps_later_pages_their_own_content() {
+        // Every built page opens with the same header paragraph, so building
+        // page 6 in an edit frame renumbers the anchors of pages 8 and 9.
+        let pages = |built: &[usize]| -> DisplayList {
+            let pages: Vec<_> = (0..10)
+                .map(|index| {
+                    if built.contains(&index) {
+                        serde_json::json!({
+                            "pageIndex": index, "width": 816, "height": 1056,
+                            "primitives": [{
+                                "kind": "text", "text": format!("page {index}"), "x": 96,
+                                "baselineY": 120, "width": 40, "font": "16px serif",
+                                "color": "#000000", "blockId": 7, "paraId": "HEADER"
+                            }]
+                        })
+                    } else {
+                        serde_json::json!({
+                            "pageIndex": index, "width": 816, "height": 1056,
+                            "primitives": [], "unbuilt": true
+                        })
+                    }
+                })
+                .collect();
+            serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": pages }))
+                .unwrap()
+        };
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: frame_epoch,
+            layout_epoch: frame_epoch,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let mut next_id = 0;
+        let (_, snapshots) =
+            encode_frame_delta(&pages(&[0, 1, 2, 3, 4]), &[], epochs(1), true, &mut next_id)
+                .unwrap();
+        let (_, snapshots) = encode_frame_delta_pages(
+            &pages(&[0, 1, 2, 3, 4, 8, 9]),
+            &snapshots,
+            epochs(2),
+            &mut next_id,
+            &|index| index == 8 || index == 9,
+        )
+        .unwrap();
+        let built = pages(&[0, 1, 2, 3, 4, 6, 8, 9]);
+        let (_, snapshots) = encode_frame_delta_incremental(
+            &built,
+            &snapshots,
+            epochs(3),
+            &mut next_id,
+            &HashSet::from([6]),
+        )
+        .unwrap();
         let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0).unwrap();
         for (retained, fresh) in snapshots.iter().zip(&fresh) {
             assert_eq!(retained.page_index, fresh.page_index);

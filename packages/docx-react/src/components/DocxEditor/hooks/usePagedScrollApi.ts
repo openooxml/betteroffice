@@ -40,6 +40,10 @@ export interface UsePagedScrollApiReturn {
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
 }
 
+function isUnbuiltPage(queries: DisplayListQueries, pageIndex: number): boolean {
+  return queries.displayList?.pages[pageIndex]?.unbuilt === true;
+}
+
 export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrollApiReturn {
   const {
     pagesContainerRef,
@@ -53,6 +57,9 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     requestCanvasParagraphFlash,
   } = opts;
   const scrollAbortRef = useRef<AbortController | null>(null);
+  // A position on a page that is not built yet scrolls to that page's content
+  // top; once the page is built, the scroll moves to the position itself.
+  const pendingRefineRef = useRef<{ position: number; pageIndex: number } | null>(null);
 
   useEffect(
     () => () => {
@@ -83,6 +90,34 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef]
   );
 
+  const scrollAnchorIntoView = useCallback(
+    (queries: DisplayListQueries, rect: DisplayListRect, position: number, smooth: boolean) => {
+      pendingRefineRef.current = isUnbuiltPage(queries, rect.pageIndex)
+        ? { position, pageIndex: rect.pageIndex }
+        : null;
+      return scrollRectIntoView(rect, smooth);
+    },
+    [scrollRectIntoView]
+  );
+
+  useEffect(() => {
+    const pending = pendingRefineRef.current;
+    if (!pending || !displayListQueries || isUnbuiltPage(displayListQueries, pending.pageIndex)) {
+      return;
+    }
+    pendingRefineRef.current = null;
+    const host = canvasHostRef?.current ?? pagesContainerRef.current;
+    const pageRect = host
+      ? resolveDisplayPageClientRect(host, displayListQueries, pending.pageIndex)
+      : null;
+    if (!host || !pageRect) return;
+    const scroller = getScrollContainer() ?? findVerticalScrollParentOrRoot(host);
+    const viewport = scroller.getBoundingClientRect();
+    if (pageRect.bottom < viewport.top || pageRect.top > viewport.bottom) return;
+    const rect = displayListQueries.anchorRect(pending.position);
+    if (rect) scrollRectIntoView(rect, false);
+  }, [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef, scrollRectIntoView]);
+
   const scrollToPositionImpl = useCallback(
     (pmPos: number, forParaIdScroll = false) => {
       if (!Number.isInteger(pmPos) || pmPos < 0 || !displayListQueries) return;
@@ -90,9 +125,9 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = new AbortController();
       const rect = displayListQueries.anchorRect(pmPos);
-      if (rect) scrollRectIntoView(rect, !forParaIdScroll);
+      if (rect) scrollAnchorIntoView(displayListQueries, rect, pmPos, !forParaIdScroll);
     },
-    [displayListQueries, onNavigationIntent, scrollRectIntoView]
+    [displayListQueries, onNavigationIntent, scrollAnchorIntoView]
   );
 
   const revealPositionImpl = useCallback(
@@ -104,9 +139,11 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       onNavigationIntent?.();
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = new AbortController();
-      return scrollRectIntoView(rect, true) ? 'scrolled' : 'layout-unavailable';
+      return scrollAnchorIntoView(displayListQueries, rect, position, true)
+        ? 'scrolled'
+        : 'layout-unavailable';
     },
-    [displayListQueries, onNavigationIntent, scrollRectIntoView]
+    [displayListQueries, onNavigationIntent, scrollAnchorIntoView]
   );
 
   const scrollToPageImpl = useCallback(
@@ -120,6 +157,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
         return;
       }
       onNavigationIntent?.();
+      pendingRefineRef.current = null;
       const bounds = displayListQueries.pageBounds(pageNumber - 1);
       if (bounds) scrollRectIntoView(bounds, true);
     },
