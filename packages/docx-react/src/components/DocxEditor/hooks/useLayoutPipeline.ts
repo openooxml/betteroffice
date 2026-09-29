@@ -22,6 +22,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
+import { documentPageCount } from './documentPageCount';
 import type { LayoutInWorker } from './useDisplayList';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
@@ -102,6 +103,8 @@ export interface UseLayoutPipelineReturn {
   runLayoutPipeline: (options?: { onHost?: boolean }) => void;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
   cancelPendingScrollRestore: () => void;
+  /** Counts navigation intents, the user's and programmatic scrolls alike. */
+  navigationEpoch: () => number;
   /**
    * The region layout request the pipeline would lay the current document out with now, or
    * `null` while it has no session or the fonts the document needs are not ready.
@@ -175,7 +178,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const lastTotalPagesRef = useRef<number>(0);
   useEffect(() => {
     onLayoutComputedRef.current?.(layout);
-    const total = layout?.pages.length ?? 0;
+    const total = documentPageCount(layout);
     if (total === lastTotalPagesRef.current) return;
     lastTotalPagesRef.current = total;
     onTotalPagesChangeRef.current?.(total);
@@ -300,7 +303,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       const sourceVersion = readSessionVersion(session);
 
       // Step 4+: paint + scroll/events with the computed values.
-      const applyComputation = (computation: LayoutComputation, version = sourceVersion) => {
+      const applyComputation = (
+        computation: LayoutComputation,
+        origin: LayoutUpdateOrigin = layoutUpdateOrigin,
+        version = sourceVersion
+      ) => {
         const { layout: newLayout } = computation;
         stampSourceVersion(newLayout, version);
 
@@ -312,7 +319,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         const currentViewportAnchor = currentViewportAnchorRef.current;
         const anchor =
           scrollParent?.isConnected && interactionHost && queries
-            ? layoutUpdateOrigin === 'remote'
+            ? origin === 'remote'
               ? currentViewportAnchor?.navigationEpoch === navigationEpochRef.current
                 ? {
                     kind: 'viewport' as const,
@@ -331,7 +338,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             : null;
 
         viewportAnchorCaptureReadyRef.current = false;
-        layoutUpdateOriginRef.current = layoutUpdateOrigin;
+        layoutUpdateOriginRef.current = origin;
         setLayout(newLayout);
 
         const vp = viewportLayoutRef.current;
@@ -352,7 +359,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           // An edit may have landed since the pass began.
           const version = readSessionVersion(session);
           const computation = computeLayout(computeInputs);
-          applyComputation(computation, version);
+          applyComputation(computation, layoutUpdateOrigin, version);
           const totalTime = performance.now() - pipelineStart;
           if (totalTime > 2000) {
             console.warn(
@@ -374,7 +381,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       if (openedVersionRef.current?.session !== session) {
         openedVersionRef.current = { session, version: sourceVersion };
       }
-      let workerPass: Promise<LayoutComputation | null> | null = null;
+      let workerPass: ReturnType<LayoutInWorker> = null;
       if (
         !onHost &&
         sourceVersion !== null &&
@@ -403,11 +410,21 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           (computation) => {
             if (pass !== passRef.current || sessionRef.current !== session) return;
             // A change that landed meanwhile makes the worker's layout stale.
-            if (computation && readSessionVersion(session) === sourceVersion) {
-              applyComputation(computation);
-            } else {
+            if (!computation || readSessionVersion(session) !== sourceVersion) {
               layOutHere();
+              return;
             }
+            applyComputation(computation);
+            // The first pages paint now; the full layout replaces them.
+            void computation.complete?.then((complete) => {
+              if (pass !== passRef.current || sessionRef.current !== session) return;
+              if (complete && readSessionVersion(session) === sourceVersion) {
+                // Nothing the user did changed: keep their viewport.
+                applyComputation(complete, 'remote');
+              } else {
+                layOutHere();
+              }
+            });
           },
           (error: unknown) => {
             if (pass !== passRef.current) return;
@@ -598,12 +615,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     return JSON.stringify(request);
   }, [document, pageGap, renderEnv, residentMeasurementConfig, session]);
 
+  const navigationEpoch = useCallback(() => navigationEpochRef.current, []);
+
   return {
     layout,
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
     scheduleLayout,
     cancelPendingScrollRestore,
+    navigationEpoch,
     getLayoutRequest,
   };
 }

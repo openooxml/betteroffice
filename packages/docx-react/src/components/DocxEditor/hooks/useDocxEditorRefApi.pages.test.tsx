@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { useRef } from 'react';
 import { buildResidentRegionLayoutRequest } from '@betteroffice/docx/editor';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
@@ -136,6 +137,16 @@ async function setup(options: {
   };
   return { events, pagedEditorRef, api };
 }
+
+test('a partial layout has no page contents yet', async () => {
+  const { session, request } = await openSession();
+  const { layout } = JSON.parse(session.layoutDocumentWithRegionsRetainedJson(request)) as {
+    layout: Layout;
+  };
+  const { pagedEditorRef, api } = await setup({ session, request: () => request });
+  Object.assign(pagedEditorRef.current!, { getLayout: () => ({ ...layout, partial: true }) });
+  expect(api().getPageContent(1)).toBeNull();
+});
 
 test('flushed input is laid out before its pages are exported', async () => {
   const { session, request, layout } = await openSession();

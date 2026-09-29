@@ -59,6 +59,14 @@ let paintedCaretKey: string | null = null;
 let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
 let trap: WebAssembly.RuntimeError | null = null;
+// A bootstrap laid out only the body's first pages: the request to finish
+// it, then the finished layout until `completeLayout` hands it over.
+interface LayoutRequest {
+  extras: string;
+  layoutExtras?: string;
+}
+let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
+let completedLayout: (LayoutRequest & { layoutJson: string }) | null = null;
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
@@ -97,7 +105,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // corrupt the update; a fresh id lets yrs merge queued/local operations
     // safely while the main replica applies worker updates with local origin.
     session = await createResidentEngineSession();
-    const layoutJson = hydrate(request.snapshot);
+    const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
+    if (provisional) {
+      incompleteLayout = {
+        layoutInput: request.snapshot.layoutInput,
+        extras: request.extras,
+        layoutExtras: request.layoutExtras,
+      };
+    }
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
@@ -113,7 +128,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       started,
       false,
       false,
-      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined)
+      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
+      provisional
     );
     return;
   }
@@ -127,7 +143,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
-    const layoutJson = hydrate(request.snapshot);
+    const { layoutJson } = hydrate(request.snapshot);
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
@@ -147,7 +163,35 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     );
     return;
   }
+  if (request.type === 'completeLayout') {
+    completeProvisionalLayout();
+    const completed = completedLayout;
+    completedLayout = null;
+    if (!completed) {
+      reply({ id: request.id, ok: true });
+      return;
+    }
+    pendingUpdates = [];
+    const started = performance.now();
+    const frame = session.buildDisplayListFrame(
+      frameExtras(completed.extras, completed.layoutExtras, completed.layoutJson),
+      request.expectedFrameEpoch
+    );
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      pendingUpdates,
+      undefined,
+      started,
+      false,
+      request.paintCaret,
+      completed.layoutJson
+    );
+    return;
+  }
   if (request.type === 'buildFrame') {
+    completeProvisionalLayout();
     pendingUpdates = [];
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
@@ -201,6 +245,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true });
     return;
   }
+  completeProvisionalLayout();
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
@@ -237,6 +282,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.selection.head.story === 'body',
       request.paintCaret,
       undefined,
+      false,
       request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
@@ -256,9 +302,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
 }
 
-/** Loads a snapshot and runs its layout; returns the region layout reply. */
-function hydrate(snapshot: YrsResidentWorkerSnapshot): string | null {
+/**
+ * Loads a snapshot and runs its layout, over the first `provisionalPages`
+ * pages only when given; returns the region layout reply.
+ */
+function hydrate(
+  snapshot: YrsResidentWorkerSnapshot,
+  provisionalPages?: number
+): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
+  incompleteLayout = null;
+  completedLayout = null;
   session.loadState(snapshot.state);
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
@@ -273,7 +327,14 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot): string | null {
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   let layoutJson: string | null = null;
-  if (snapshot.layoutWithRegions) {
+  let provisional = false;
+  if (snapshot.layoutWithRegions && provisionalPages !== undefined) {
+    layoutJson = session.layoutDocumentWithRegionsPrefixRetainedJson(
+      snapshot.layoutInput,
+      provisionalPages
+    );
+    provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+  } else if (snapshot.layoutWithRegions) {
     // the retained reply leaves out the tens-of-MB measured arena
     layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
   } else {
@@ -282,7 +343,18 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot): string | null {
   if (snapshot.selection) session.setSelection(snapshot.selection.anchor, snapshot.selection.head);
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
-  return layoutJson;
+  return { layoutJson, provisional };
+}
+
+/** Replaces a provisional layout with the full one before anything reads it. */
+function completeProvisionalLayout(): void {
+  if (!session || !incompleteLayout) return;
+  const { layoutInput, ...request } = incompleteLayout;
+  incompleteLayout = null;
+  completedLayout = {
+    ...request,
+    layoutJson: session.layoutDocumentWithRegionsRetainedJson(layoutInput),
+  };
 }
 
 /**
@@ -317,6 +389,8 @@ function destroySession(): void {
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
+  incompleteLayout = null;
+  completedLayout = null;
   retainedFrame = null;
   glyphCache = null;
   offscreenCanvases.clear();
@@ -348,6 +422,7 @@ async function replyFrame(
   requireCaret = false,
   paintCaret = false,
   layoutJson?: string,
+  layoutProvisional = false,
   deletedUnits?: number
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
@@ -409,6 +484,7 @@ async function replyFrame(
       ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),
+      ...(layoutProvisional ? { layoutProvisional } : {}),
     },
     [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );
