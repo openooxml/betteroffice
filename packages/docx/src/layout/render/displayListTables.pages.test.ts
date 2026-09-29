@@ -47,3 +47,23 @@ test('fragments on a page window match the whole-list fragments of those pages',
   }
   expect(deriveDisplayListTableFragmentsOnPages(list, tableKeyOf, 1, 1)).toHaveLength(1);
 });
+
+test('a page window without table cells reads no other page', () => {
+  let read = false;
+  const list = {
+    pages: [
+      {
+        pageIndex: 0,
+        width: 600,
+        height: 800,
+        get primitives() {
+          read = true;
+          return [cell('A', 0, 10, 5)];
+        },
+      },
+      { pageIndex: 1, width: 600, height: 800, primitives: [] },
+    ],
+  } as DisplayList;
+  expect(deriveDisplayListTableFragmentsOnPages(list, () => 'A', 1, 1)).toEqual([]);
+  expect(read).toBe(false);
+});
