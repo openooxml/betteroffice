@@ -10768,11 +10768,7 @@ fn resident_build_input(
     let extras: ResidentExtrasWire =
         serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
     let mut transcoder = crate::transcode::Transcoder::default();
-    let measured = pagination
-        .measured
-        .iter()
-        .map(|measured| transcoder.convert(measured))
-        .collect::<Result<Vec<MeasuredBlockIn>, _>>()
+    let measured: Vec<MeasuredBlockIn> = crate::transcode::transcode_batch(&pagination.measured)
         .map_err(|e| format!("parse resident display input: {e}"))?;
     let options = transcoder
         .convert(&pagination.options)
@@ -10996,10 +10992,15 @@ fn refresh_resident_display_pages(
     layout: &crate::types::Layout,
     rebuilt_pages: impl IntoIterator<Item = usize>,
 ) -> Result<(), String> {
+    let page_indices: Vec<usize> = rebuilt_pages.into_iter().collect();
+    let layout_pages: Vec<&crate::types::Page> = page_indices
+        .iter()
+        .map(|&index| &layout.pages[index])
+        .collect();
+    let pages = crate::transcode::transcode_batch::<_, PageIn>(&layout_pages)
+        .map_err(|error| format!("parse resident display layout page: {error}"))?;
     let mut selected_blocks = HashSet::new();
-    for page_index in rebuilt_pages {
-        let page: PageIn =
-            convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
+    for (page_index, page) in page_indices.into_iter().zip(pages) {
         for fragment in &page.fragments {
             if let Some(key) = fragment_block_key(fragment) {
                 selected_blocks.insert(key);
@@ -11015,6 +11016,7 @@ fn refresh_resident_display_pages(
         .filter_map(|(index, measured)| measured_block_key(measured).map(|key| (key, index)))
         .collect();
     let mut pending_blocks = selected_blocks;
+    let mut block_jobs: Vec<(usize, &crate::types::MeasuredBlock)> = Vec::new();
     for measured in &pagination.measured {
         let key = crate_block_key(&measured.block);
         if !pending_blocks.remove(&key) {
@@ -11024,22 +11026,21 @@ fn refresh_resident_display_pages(
             .get(&key)
             .copied()
             .ok_or_else(|| format!("resident display measured block {key:?} is missing"))?;
-        input.measured[index] =
-            convert_resident_value(measured, "resident display measured block")?;
+        block_jobs.push((index, measured));
     }
     if let Some(key) = pending_blocks.into_iter().next() {
         return Err(format!(
             "resident pagination measured block {key:?} is missing"
         ));
     }
+    let block_refs: Vec<&crate::types::MeasuredBlock> =
+        block_jobs.iter().map(|(_, block)| *block).collect();
+    let converted = crate::transcode::transcode_batch::<_, MeasuredBlockIn>(&block_refs)
+        .map_err(|error| format!("parse resident display measured block: {error}"))?;
+    for ((index, _), block) in block_jobs.into_iter().zip(converted) {
+        input.measured[index] = block;
+    }
     Ok(())
-}
-
-fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
-    input: &T,
-    label: &str,
-) -> Result<U, String> {
-    crate::transcode::transcode(input).map_err(|error| format!("parse {label}: {error}"))
 }
 
 fn crate_block_key(block: &crate::types::LayoutBlock) -> String {
