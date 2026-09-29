@@ -1699,6 +1699,38 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Limit full display builds to pages `start..end` plus the pages already
+    /// built; the others stay unbuilt placeholders carrying their geometry
+    /// until [`Self::build_display_pages_frame`] builds them.
+    pub fn set_display_window(&self, start: u32, end: u32) {
+        self.engine
+            .set_display_window(Some(start as usize..(end.max(start)) as usize));
+    }
+
+    /// Build the listed pages that are still unbuilt and return a FrameDelta
+    /// v1 carrying them; `expected_frame_epoch` works as for
+    /// [`Self::build_display_list_frame`].
+    pub fn build_display_pages_frame(
+        &self,
+        pages: Vec<u32>,
+        expected_frame_epoch: f64,
+    ) -> Result<Vec<u8>, JsValue> {
+        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        if !(expected_frame_epoch.is_finite()
+            && expected_frame_epoch >= 0.0
+            && expected_frame_epoch.fract() == 0.0
+            && expected_frame_epoch <= MAX_SAFE_INTEGER)
+        {
+            return Err(js_err(
+                "expected_frame_epoch must be a non-negative safe integer",
+            ));
+        }
+        let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
+        self.engine
+            .build_display_pages_frame(&pages, expected_frame_epoch as u64)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// `{"frameEpoch", "caretRect": {…}|null}` for the session's own collapsed
     /// body selection. `caretRect` is null whenever there is no selection, the
     /// selection is not a collapsed body caret, or the retained layout has no

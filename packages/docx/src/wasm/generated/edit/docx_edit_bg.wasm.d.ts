@@ -20,6 +20,7 @@ export const editsession_apply_update_with_inference: (a: number, b: number, c: 
 export const editsession_begin_opening: (a: number, b: number, c: number) => void;
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_can_redo: (a: number) => number;
 export const editsession_can_undo: (a: number) => number;
 export const editsession_cell_selection: (a: number) => [number, number, number, number];
@@ -121,6 +122,7 @@ export const editsession_set_column_width: (a: number, b: number, c: number, d: 
 export const editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+export const editsession_set_display_window: (a: number, b: number, c: number) => void;
 export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];

@@ -133,6 +133,7 @@ async function setup(options: {
       commands: UNAVAILABLE_DOCX_COMMANDS,
       modeRef: { current: 'editing' as EditorMode },
       openingRef: options.opening,
+      allowHostProposalsRef: { current: false },
     });
     return ref;
   });

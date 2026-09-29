@@ -107,6 +107,7 @@ import {
   type PagedEditorCommandBridge,
 } from './hooks/usePagedEditorRefApi';
 import { useLayoutTriggers } from './hooks/useLayoutTriggers';
+import { useRevisionPreview } from './hooks/useRevisionPreview';
 import { TableInsertButton } from './overlays/TableInsertButton';
 import { HyperlinkPopup, type HyperlinkPopupData } from '../ui/HyperlinkPopup';
 import {
@@ -564,6 +565,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const viewportLayoutRef = useRef<HTMLDivElement>(null);
     const yrsInputRef = useRef<YrsInputRef>(null);
 
+    const proposalPreview = useRevisionPreview(yrsCore.session);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
       const themeColors: Record<string, string> = {};
       for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {
@@ -574,8 +576,16 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
         numericIds: {},
         showHiddenText,
+        ...(proposalPreview.revisionPreview
+          ? { revisionPreview: proposalPreview.revisionPreview }
+          : {}),
       };
-    }, [_theme?.colorScheme, document?.package.settings?.defaultTabStop, showHiddenText]);
+    }, [
+      _theme?.colorScheme,
+      document?.package.settings?.defaultTabStop,
+      showHiddenText,
+      proposalPreview,
+    ]);
     const activeYrsRootStory = partEditStory(partEdit);
     const yrsInputPositionMap = useCallback(
       (storyId = activeYrsRootStory) => yrsCore.inputPositionMap(storyId),
