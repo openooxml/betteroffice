@@ -55,6 +55,7 @@ export function CanvasInteractiveOverlay({
     active,
     defer,
     rebuildAtOnce: true,
+    urgentRevision: 0,
     registerBuild,
     make: makeOverlay,
   });

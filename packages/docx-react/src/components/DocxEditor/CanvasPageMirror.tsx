@@ -32,14 +32,20 @@ export function CanvasPageMirror({
   defer = false,
   visible = true,
   registerBuild,
+  noteAnchorRevision = 0,
 }: {
   page: DisplayPage;
+  /**
+   * `displayPageNoteAnchorRevision(page)`: an owned shift moves the note
+   * anchors the mirror renders without replacing the page.
+   */
+  noteAnchorRevision?: number;
   zoom?: number;
   /** Holds the mirror; an inactive page keeps only its empty host. */
   active?: boolean;
   /** The first build may wait for idle time. */
   defer?: boolean;
-  /** The page is in the page window, so a rebuild never waits. */
+  /** In the page window: a rebuild after a content change never waits. */
   visible?: boolean;
   /** Receives a function that builds the mirror at once. */
   registerBuild?: (build: (() => void) | null) => void;
@@ -52,6 +58,7 @@ export function CanvasPageMirror({
     active,
     defer,
     rebuildAtOnce: visible,
+    urgentRevision: noteAnchorRevision,
     registerBuild,
     make: makeMirror,
   });

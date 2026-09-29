@@ -205,6 +205,31 @@ export interface YrsOpeningOptions {
   generation?: string;
 }
 
+/** SHA-256 digests of the byte copies {@link prepareDocxBytes} made, by copy. */
+const preparedDigests = new WeakMap<Uint8Array, string>();
+
+/**
+ * A copy of `bytes` whose SHA-256 the platform takes off the calling thread,
+ * where it has Web Crypto. Opening that copy unchanged skips hashing the
+ * package on the calling thread; any other bytes open as before.
+ * @internal
+ */
+export async function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(bytes);
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return copy;
+  try {
+    const hash = new Uint8Array(await subtle.digest('SHA-256', copy));
+    preparedDigests.set(
+      copy,
+      Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    );
+  } catch {
+    // Opening hashes the copy itself.
+  }
+  return copy;
+}
+
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
 export interface YrsParagraph {
   /** Session key; not the paragraph's Word `w14:paraId`. */
@@ -1451,7 +1476,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    const json = mutate(() => session.open_docx(source, seedStories, options.generation));
+    const json = mutate(() =>
+      session.open_docx(source, seedStories, options.generation, preparedDigests.get(bytes))
+    );
     const host = decodeDocxHost(json, source);
     docxSource = source;
     return host;

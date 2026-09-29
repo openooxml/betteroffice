@@ -31,6 +31,9 @@ const POSITION_DOC_END: u8 = 1 << 1;
 const POSITION_FRAGMENT_START: u8 = 1 << 2;
 const POSITION_FRAGMENT_END: u8 = 1 << 3;
 const POSITION_INLINE_WIDGET: u8 = 1 << 4;
+/// Run flag: shift only the masked fields each primitive has, so one run
+/// covers primitives that carry different position fields.
+const POSITION_PRESENT_ONLY: u8 = 1 << 7;
 const POSITION_FIELDS: [u8; 5] = [
     POSITION_DOC_START,
     POSITION_DOC_END,
@@ -55,6 +58,17 @@ pub struct FramePageSnapshot {
     /// identity is unchanged — cloning a snapshot never copies the id array.
     pub primitive_ids: Rc<[u64]>,
     pub positions: Vec<PrimitivePositionSnapshot>,
+    /// Every note region note's anchor, in area then note order.
+    pub note_anchors: Vec<NoteAnchorSnapshot>,
+}
+
+/// One note region note's backlink anchor, addressed by area and note index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NoteAnchorSnapshot {
+    pub area: u32,
+    pub note: u32,
+    pub start: Option<i64>,
+    pub end: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,7 +102,11 @@ enum PageOp<'a, 'b> {
     Remove(&'a FramePageSnapshot),
     Move(&'a PreparedPage<'b>),
     PatchPositions(&'a PreparedPage<'b>, Vec<PositionPatch>),
-    ShiftPositions(&'a PreparedPage<'b>, Vec<PositionShiftRun>),
+    ShiftPositions(
+        &'a PreparedPage<'b>,
+        Vec<PositionShiftRun>,
+        Vec<NoteAnchorSnapshot>,
+    ),
 }
 
 #[derive(Debug)]
@@ -176,12 +194,21 @@ fn encode_frame_delta_inner(
                     && old.primitive_ids == page.snapshot.primitive_ids
                 {
                     let patches = position_patches(old, &page.snapshot);
-                    if patches.is_empty() {
-                        ops.push(PageOp::Upsert(page));
-                    } else if let Some(runs) = position_shift_runs(old, &page.snapshot) {
-                        ops.push(PageOp::ShiftPositions(page, runs));
+                    let anchors =
+                        changed_note_anchors(&old.note_anchors, &page.snapshot.note_anchors);
+                    let runs = if patches.is_empty() {
+                        Some(Vec::new())
                     } else {
-                        ops.push(PageOp::PatchPositions(page, patches));
+                        position_shift_runs(&old.positions, &page.snapshot.positions)
+                    };
+                    match (anchors, runs) {
+                        (Some(anchors), Some(runs)) if !anchors.is_empty() || !runs.is_empty() => {
+                            ops.push(PageOp::ShiftPositions(page, runs, anchors));
+                        }
+                        (Some(anchors), None) if anchors.is_empty() => {
+                            ops.push(PageOp::PatchPositions(page, patches));
+                        }
+                        _ => ops.push(PageOp::Upsert(page)),
                     }
                 } else {
                     ops.push(PageOp::Upsert(page));
@@ -319,7 +346,7 @@ fn encode_frame_delta_inner(
                     checked_u32(payload_length, "position patch payload length")?,
                 );
             }
-            PageOp::ShiftPositions(page, runs) => {
+            PageOp::ShiftPositions(page, runs, anchors) => {
                 out[record] = PAGE_OP_SHIFT_POSITIONS;
                 patch_u32(&mut out, record + 4, page.snapshot.page_index);
                 patch_u64(&mut out, record + 8, page.snapshot.page_id);
@@ -328,6 +355,11 @@ fn encode_frame_delta_inner(
                     &mut out,
                     record + 24,
                     checked_u32(runs.len(), "position shift run count")?,
+                );
+                patch_u32(
+                    &mut out,
+                    record + 40,
+                    checked_u32(anchors.len(), "note anchor count")?,
                 );
                 align(&mut out, 8);
                 let payload_offset = out.len();
@@ -342,6 +374,16 @@ fn encode_frame_delta_inner(
                     out.push(run.changed_mask);
                     out.extend_from_slice(&[0; 7]);
                     write_i64(&mut out, run.delta);
+                }
+                if !anchors.is_empty() {
+                    write_u32(&mut out, checked_u32(anchors.len(), "note anchor count")?);
+                    write_u32(&mut out, 0);
+                    for anchor in anchors {
+                        write_u32(&mut out, anchor.area);
+                        write_u32(&mut out, anchor.note);
+                        write_i64(&mut out, anchor.start.unwrap_or(i64::MIN));
+                        write_i64(&mut out, anchor.end.unwrap_or(i64::MIN));
+                    }
                 }
                 patch_u32(
                     &mut out,
@@ -451,6 +493,7 @@ fn prepare_pages<'a>(
             (*next_page_id, true, false)
         };
         let positions = primitive_positions(page);
+        let note_anchors = note_anchors(page)?;
         let full_prepare =
             is_new || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages.contains(&index));
         let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
@@ -459,10 +502,10 @@ fn prepare_pages<'a>(
             (hashes.fingerprint, hashes.visual_fingerprint, primitive_ids)
         } else {
             let old = matched.expect("clean incremental pages retain a previous snapshot");
-            let fingerprint = if positions == old.positions {
+            let fingerprint = if positions == old.positions && note_anchors == old.note_anchors {
                 old.fingerprint
             } else {
-                hash_positions(old.visual_fingerprint, &positions)
+                hash_positions(old.visual_fingerprint, &positions, &note_anchors)
             };
             (
                 fingerprint,
@@ -479,6 +522,7 @@ fn prepare_pages<'a>(
                 page_index,
                 primitive_ids,
                 positions,
+                note_anchors,
             },
             page,
             is_new,
@@ -488,8 +532,18 @@ fn prepare_pages<'a>(
     Ok(prepared)
 }
 
-fn hash_positions(visual_fingerprint: u64, positions: &[PrimitivePositionSnapshot]) -> u64 {
+fn hash_positions(
+    visual_fingerprint: u64,
+    positions: &[PrimitivePositionSnapshot],
+    note_anchors: &[NoteAnchorSnapshot],
+) -> u64 {
     let mut hash = visual_fingerprint;
+    for anchor in note_anchors {
+        for value in [anchor.start, anchor.end] {
+            hash ^= value.unwrap_or(i64::MIN) as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
     for position in positions {
         for value in [
             position.doc_start,
@@ -560,6 +614,45 @@ fn primitive_positions(page: &DisplayPage) -> Vec<PrimitivePositionSnapshot> {
         .collect()
 }
 
+fn note_anchors(page: &DisplayPage) -> Result<Vec<NoteAnchorSnapshot>, String> {
+    let mut anchors = Vec::new();
+    for (area, region) in page.note_areas.iter().enumerate() {
+        for (note, entry) in region.notes.iter().enumerate() {
+            anchors.push(NoteAnchorSnapshot {
+                area: checked_u32(area, "note area index")?,
+                note: checked_u32(note, "note index")?,
+                start: entry.anchor_doc_start,
+                end: entry.anchor_doc_end,
+            });
+        }
+    }
+    Ok(anchors)
+}
+
+/// The anchors that changed between two snapshots of the same note regions,
+/// with their new values; None when the regions hold different notes.
+fn changed_note_anchors(
+    previous: &[NoteAnchorSnapshot],
+    next: &[NoteAnchorSnapshot],
+) -> Option<Vec<NoteAnchorSnapshot>> {
+    if previous.len() != next.len()
+        || previous
+            .iter()
+            .zip(next)
+            .any(|(before, after)| (before.area, before.note) != (after.area, after.note))
+    {
+        return None;
+    }
+    Some(
+        previous
+            .iter()
+            .zip(next)
+            .filter(|(before, after)| before != after)
+            .map(|(_, after)| *after)
+            .collect(),
+    )
+}
+
 fn position_patches(previous: &FramePageSnapshot, next: &FramePageSnapshot) -> Vec<PositionPatch> {
     previous
         .positions
@@ -602,14 +695,14 @@ fn position_patches(previous: &FramePageSnapshot, next: &FramePageSnapshot) -> V
 }
 
 fn position_shift_runs(
-    previous: &FramePageSnapshot,
-    next: &FramePageSnapshot,
+    previous: &[PrimitivePositionSnapshot],
+    next: &[PrimitivePositionSnapshot],
 ) -> Option<Vec<PositionShiftRun>> {
-    if previous.positions.len() != next.positions.len() {
+    if previous.len() != next.len() {
         return None;
     }
     let mut runs: Vec<PositionShiftRun> = Vec::new();
-    for (index, (previous, next)) in previous.positions.iter().zip(&next.positions).enumerate() {
+    for (index, (previous, next)) in previous.iter().zip(next).enumerate() {
         let before = [
             previous.doc_start,
             previous.doc_end,
@@ -625,8 +718,12 @@ fn position_shift_runs(
             next.inline_widget_pos,
         ];
         let mut changed_mask = 0;
+        let mut present_mask = 0;
         let mut common_delta = None;
         for (field_index, field) in POSITION_FIELDS.iter().enumerate() {
+            if after[field_index].is_some() {
+                present_mask |= field;
+            }
             if before[field_index] == after[field_index] {
                 continue;
             }
@@ -640,26 +737,47 @@ fn position_shift_runs(
             common_delta = Some(delta);
             changed_mask |= field;
         }
+        let index = checked_u32(index, "position shift primitive index").ok()?;
+        let last = runs
+            .last_mut()
+            .filter(|last| last.start.checked_add(last.count) == Some(index));
         let Some(delta) = common_delta else {
+            // A primitive without positions changes nothing inside a
+            // present-only run, so it does not have to end one.
+            if present_mask == 0
+                && let Some(last) = last
+                && last.changed_mask & POSITION_PRESENT_ONLY != 0
+            {
+                last.count = last.count.checked_add(1)?;
+            }
             continue;
         };
         if delta == 0 {
             return None;
         }
-        let index = checked_u32(index, "position shift primitive index").ok()?;
-        if let Some(last) = runs.last_mut()
-            && last.start.checked_add(last.count) == Some(index)
-            && last.changed_mask == changed_mask
-            && last.delta == delta
-        {
-            last.count = last.count.checked_add(1)?;
+        let changed_mask = if changed_mask == present_mask {
+            changed_mask | POSITION_PRESENT_ONLY
         } else {
-            runs.push(PositionShiftRun {
+            changed_mask
+        };
+        match last {
+            Some(last)
+                if last.delta == delta
+                    && last.changed_mask & POSITION_PRESENT_ONLY != 0
+                    && changed_mask & POSITION_PRESENT_ONLY != 0 =>
+            {
+                last.count = last.count.checked_add(1)?;
+                last.changed_mask |= changed_mask;
+            }
+            Some(last) if last.delta == delta && last.changed_mask == changed_mask => {
+                last.count = last.count.checked_add(1)?;
+            }
+            _ => runs.push(PositionShiftRun {
                 start: index,
                 count: 1,
                 changed_mask,
                 delta,
-            });
+            }),
         }
     }
     (!runs.is_empty()).then_some(runs)
@@ -1613,12 +1731,146 @@ mod tests {
         assert_eq!(u32_at(&delta, payload + 12), 1);
         assert_eq!(
             delta[payload + 16],
-            POSITION_DOC_START | POSITION_DOC_END | POSITION_FRAGMENT_START | POSITION_FRAGMENT_END
+            POSITION_DOC_START
+                | POSITION_DOC_END
+                | POSITION_FRAGMENT_START
+                | POSITION_FRAGMENT_END
+                | POSITION_PRESENT_ONLY
         );
         assert_eq!(
             i64::from_le_bytes(delta[payload + 24..payload + 32].try_into().unwrap()),
             10
         );
+    }
+
+    #[test]
+    fn a_uniform_shift_of_mixed_primitives_is_one_present_only_run() {
+        let at = |doc: Option<(i64, i64)>, fragment: Option<(i64, i64)>, widget: Option<i64>| {
+            PrimitivePositionSnapshot {
+                doc_start: doc.map(|range| range.0),
+                doc_end: doc.map(|range| range.1),
+                fragment_doc_start: fragment.map(|range| range.0),
+                fragment_doc_end: fragment.map(|range| range.1),
+                inline_widget_pos: widget,
+            }
+        };
+        let moved = |delta: i64| {
+            vec![
+                at(Some((10 + delta, 14 + delta)), None, None),
+                at(None, Some((9 + delta, 20 + delta)), None),
+                at(None, None, None),
+                at(Some((15 + delta, 16 + delta)), None, Some(15 + delta)),
+                // A header primitive in its own story does not move.
+                at(Some((3, 4)), None, None),
+            ]
+        };
+        for delta in [7, -5] {
+            let runs = position_shift_runs(&moved(0), &moved(delta)).unwrap();
+            assert_eq!(runs.len(), 1, "delta {delta}");
+            assert_eq!((runs[0].start, runs[0].count, runs[0].delta), (0, 4, delta));
+            assert_eq!(
+                runs[0].changed_mask,
+                POSITION_DOC_START
+                    | POSITION_DOC_END
+                    | POSITION_FRAGMENT_START
+                    | POSITION_FRAGMENT_END
+                    | POSITION_INLINE_WIDGET
+                    | POSITION_PRESENT_ONLY
+            );
+        }
+
+        // A present field that stays put keeps its primitive on an exact run.
+        let before = [at(Some((10, 14)), Some((9, 20)), None)];
+        let after = [at(Some((12, 16)), Some((9, 20)), None)];
+        let runs = position_shift_runs(&before, &after).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].changed_mask, POSITION_DOC_START | POSITION_DOC_END);
+    }
+
+    fn list_with_note(body_start: i64, anchor: Option<i64>, label: &str) -> DisplayList {
+        let mut value = serde_json::to_value(list_at_position(body_start)).unwrap();
+        let mut note = serde_json::json!({"id": 7, "label": label});
+        if let Some(anchor) = anchor {
+            note["anchorDocStart"] = serde_json::json!(anchor);
+            note["anchorDocEnd"] = serde_json::json!(anchor + 1);
+        }
+        value["pages"][0]["noteAreas"] = serde_json::json!([{
+            "kind": "footnote",
+            "primitives": [{"kind": "rect", "x": 96, "y": 900, "w": 10, "h": 10, "fill": "#000"}],
+            "noteIds": [7],
+            "notes": [note],
+        }]);
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn delta_between(before: &DisplayList, after: &DisplayList) -> Vec<u8> {
+        let mut next_id = 0;
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: frame_epoch,
+            layout_epoch: frame_epoch,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let (_, snapshot) = encode_frame_delta(before, &[], epochs(1), true, &mut next_id).unwrap();
+        encode_frame_delta(after, &snapshot, epochs(2), false, &mut next_id)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn a_moved_note_anchor_is_a_shift_not_an_upsert() {
+        let record = FRAME_HEADER_LEN;
+        let i64_at = |bytes: &[u8], offset: usize| {
+            i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+        };
+
+        // The body and the note's reference move together.
+        let delta = delta_between(
+            &list_with_note(2, Some(3), "1"),
+            &list_with_note(12, Some(13), "1"),
+        );
+        assert_eq!(delta[record], PAGE_OP_SHIFT_POSITIONS);
+        assert_eq!(u32_at(&delta, record + 24), 1);
+        assert_eq!(u32_at(&delta, record + 40), 1);
+        let payload = u32_at(&delta, record + 32) as usize;
+        let anchors = payload + 8 + 24;
+        assert_eq!(u32_at(&delta, anchors), 1);
+        assert_eq!(u32_at(&delta, anchors + 4), 0);
+        assert_eq!(
+            (u32_at(&delta, anchors + 8), u32_at(&delta, anchors + 12)),
+            (0, 0)
+        );
+        assert_eq!(
+            (i64_at(&delta, anchors + 16), i64_at(&delta, anchors + 24)),
+            (13, 14)
+        );
+        assert_eq!(u32_at(&delta, record + 36) as usize, 8 + 24 + 8 + 24);
+
+        // Only the reference moves, then it goes away.
+        for (anchor, expected) in [(Some(40), (40, 41)), (None, (i64::MIN, i64::MIN))] {
+            let delta = delta_between(
+                &list_with_note(2, Some(3), "1"),
+                &list_with_note(2, anchor, "1"),
+            );
+            assert_eq!(delta[record], PAGE_OP_SHIFT_POSITIONS);
+            assert_eq!(u32_at(&delta, record + 24), 0);
+            assert_eq!(u32_at(&delta, record + 40), 1);
+            let payload = u32_at(&delta, record + 32) as usize;
+            assert_eq!(u32_at(&delta, payload), 0);
+            let anchors = payload + 8;
+            assert_eq!(
+                (i64_at(&delta, anchors + 16), i64_at(&delta, anchors + 24)),
+                expected
+            );
+        }
+
+        // A relabelled note redraws its page.
+        let delta = delta_between(
+            &list_with_note(2, Some(3), "1"),
+            &list_with_note(12, Some(13), "2"),
+        );
+        assert_eq!(delta[record], PAGE_OP_UPSERT);
+        assert_eq!(u32_at(&delta, record + 40), 0);
     }
 
     #[test]
