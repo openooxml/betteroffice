@@ -3201,13 +3201,14 @@ impl EngineSession {
                     ..pagination.rebuilt_page_end)
                     .chain(note_pages.iter().copied())
                     .collect();
+                let build = full_build_pages(&display, layout.pages.len());
                 let incremental = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
                     ..
                 } = &mut *display
                 {
-                    docx_layout::update_resident_display_list_incremental_observed(
+                    docx_layout::update_resident_display_list_incremental_partial_observed(
                         input,
                         layout,
                         resident_input,
@@ -3216,6 +3217,7 @@ impl EngineSession {
                         pagination.rebuilt_page_end,
                         &note_pages,
                         &pagination.position_deltas,
+                        &|index| build.get(index).copied().unwrap_or(true),
                         observe_display_phase,
                     )?
                 } else {
@@ -6939,14 +6941,15 @@ mod tests {
         docx_layout::clear_measure_fonts();
     }
 
-    #[test]
-    fn unbuilt_display_pages_build_on_request_and_match_a_full_build() {
+    /// An engine laid out over small pages: an editable first paragraph, then `fillers`
+    /// one-line paragraphs. Returns it with the display extras.
+    fn paged_filler_engine(client_id: u64, fillers: usize) -> (EngineSession, String) {
         docx_layout::clear_measure_fonts();
         let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
-        let engine = EngineSession::new(205);
+        let engine = EngineSession::new(client_id);
         let body = format!(
             "<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>{}",
-            "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(48)
+            "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(fillers)
         );
         crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
         let request = serde_json::json!({
@@ -6998,15 +7001,26 @@ mod tests {
             .unwrap();
         let extras =
             serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
-        let full_build = |engine: &EngineSession| {
-            let pagination = engine.pagination.borrow();
-            docx_layout::build_display_list_value_from_resident(
-                pagination.input.as_ref().unwrap(),
-                pagination.layout.as_ref().unwrap(),
-                &extras,
-            )
-            .unwrap()
-        };
+        (engine, extras)
+    }
+
+    fn full_display_build(
+        engine: &EngineSession,
+        extras: &str,
+    ) -> docx_layout::display_list::DisplayList {
+        let pagination = engine.pagination.borrow();
+        docx_layout::build_display_list_value_from_resident(
+            pagination.input.as_ref().unwrap(),
+            pagination.layout.as_ref().unwrap(),
+            extras,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unbuilt_display_pages_build_on_request_and_match_a_full_build() {
+        let (engine, extras) = paged_filler_engine(205, 48);
+        let full_build = |engine: &EngineSession| full_display_build(engine, &extras);
 
         engine.set_display_window(Some(0..1));
         engine.build_display_list_frame(&extras, 0).unwrap();
@@ -7062,10 +7076,63 @@ mod tests {
     }
 
     #[test]
-    fn an_unbuilt_page_spans_every_position_a_split_row_places_on_it() {
+    fn an_edit_that_moves_every_later_page_leaves_unbuilt_pages_unbuilt() {
+        let (engine, extras) = paged_filler_engine(206, 40);
+        engine.set_display_window(Some(0..1));
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
+        assert!(pages >= 4, "the fixture must span several pages");
+
+        // A second line in the first paragraph moves the start of every later page.
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                " that now runs long enough to wrap onto a second line of the page",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let incremental_builds = engine.stats().incremental_display_builds;
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            incremental_builds + 1
+        );
+        assert_eq!(engine.pagination.borrow().rebuilt_page_end, pages);
+
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        let windowed = {
+            let pagination = engine.pagination.borrow();
+            docx_layout::build_resident_display_list_partial_observed(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                &extras,
+                &|index| index == 0,
+                &mut || {},
+            )
+            .unwrap()
+            .1
+        };
+        assert_eq!(edited.pages, windowed.pages);
+        assert!(edited.pages[1..].iter().all(|page| page.unbuilt));
+
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let rest: Vec<usize> = (1..pages).collect();
+        engine.build_display_pages_frame(&rest, epoch).unwrap();
+        let built = engine.with_display_list(Clone::clone).unwrap();
+        assert_eq!(built.pages, full_display_build(&engine, &extras).pages);
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// An engine laid out over small pages whose one table row splits across several.
+    fn split_row_engine(client_id: u64) -> (EngineSession, String) {
         docx_layout::clear_measure_fonts();
         let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
-        let engine = EngineSession::new(206);
+        let engine = EngineSession::new(client_id);
         let cell: String = (0..60)
             .map(|index| format!("<w:p><w:r><w:t>Tall cell line {index}</w:t></w:r></w:p>"))
             .collect();
@@ -7098,6 +7165,12 @@ mod tests {
             .unwrap();
         let extras =
             serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
+        (engine, extras)
+    }
+
+    #[test]
+    fn an_unbuilt_page_spans_every_position_a_split_row_places_on_it() {
+        let (engine, extras) = split_row_engine(206);
         engine.set_display_window(Some(0..1));
         engine.build_display_list_frame(&extras, 0).unwrap();
         let lazy = engine.with_display_list(Clone::clone).unwrap();
@@ -7130,6 +7203,53 @@ mod tests {
                     "position {position} on page {index}"
                 );
             }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_before_a_split_row_leaves_its_pages_unbuilt_with_moved_spans() {
+        let (engine, extras) = split_row_engine(208);
+        engine.set_display_window(Some(0..1));
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let before = engine.with_display_list(Clone::clone).unwrap();
+
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 0),
+                "Moved ",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let incremental_builds = engine.stats().incremental_display_builds;
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            incremental_builds + 1
+        );
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        let windowed = {
+            let pagination = engine.pagination.borrow();
+            docx_layout::build_resident_display_list_partial_observed(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                &extras,
+                &|index| index == 0,
+                &mut || {},
+            )
+            .unwrap()
+            .1
+        };
+        assert_eq!(edited.pages, windowed.pages);
+        let moved = edited.pages.iter().zip(&before.pages).skip(1);
+        assert!(moved.len() >= 4);
+        for (page, previous) in moved {
+            let [low, high] = previous.position_span.unwrap();
+            assert!(page.unbuilt);
+            assert_eq!(page.position_span, Some([low + 6, high + 6]));
         }
         docx_layout::clear_measure_fonts();
     }

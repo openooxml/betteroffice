@@ -388,7 +388,7 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
-        let host: ReturnType<typeof seedYrsSession>;
+        let host: YrsDocxHost | null;
         try {
           host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
             bytes,
