@@ -423,6 +423,41 @@ describe('semantic anchor geometry', () => {
     refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
   });
 
+  test('anchors adjacent hidden revisions at the visible edge they share', () => {
+    const { geometry, session, source, setSnapshot } = semanticGeometry();
+    session.listRevisions = () =>
+      [
+        ['cd', 1, 2],
+        ['ef', 2, 4],
+      ].map(([revisionId, start, end]) => ({
+        revisionId,
+        kind: 'deletion',
+        story: 'body',
+        range: { start: { paraId: 'p', offset: start }, end: { paraId: 'p', offset: end } },
+      })) as ReturnType<YrsSession['listRevisions']>;
+    setSnapshot({
+      proposals: [
+        {
+          id: 'proposal',
+          paragraph: PARAGRAPH,
+          state: 'accepted',
+          changed: true,
+          revisionIds: ['cd', 'ef'],
+        },
+      ],
+    });
+    textLine(source, [1, 2, 3]);
+    for (const revisionId of ['cd', 'ef']) {
+      expect(
+        anchored(geometry.getAnchorGeometry({ kind: 'revision', revisionId }))
+      ).toMatchObject({ rects: [], anchor: { x: 154, width: 0 } });
+    }
+    textLine(source, [0, 1, 2, 3]);
+    expect(
+      anchored(geometry.getAnchorGeometry({ kind: 'revision', revisionId: 'ef' })).anchor
+    ).toMatchObject({ x: 153 });
+  });
+
   test('puts collapsed boundaries on the caret stop, in either direction', () => {
     const { geometry, source } = semanticGeometry();
     const at = (offset: number) =>

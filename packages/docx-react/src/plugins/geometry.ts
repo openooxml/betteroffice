@@ -87,6 +87,25 @@ interface Interval {
   to: number;
 }
 
+/** `range` grown over every hidden interval it touches, directly or through another. */
+function widen(range: Interval, hidden: readonly Interval[]): Interval {
+  const span = { ...range };
+  for (let grown = true; grown; ) {
+    grown = false;
+    for (const hole of hidden) {
+      if (hole.from < span.from && hole.to >= span.from) {
+        span.from = hole.from;
+        grown = true;
+      }
+      if (hole.to > span.to && hole.from <= span.to) {
+        span.to = hole.to;
+        grown = true;
+      }
+    }
+  }
+  return span;
+}
+
 /** `ranges` without the parts `holes` cover, in document order. */
 function subtract(ranges: readonly Interval[], holes: readonly Interval[]): Interval[] {
   let pieces = [...ranges];
@@ -248,11 +267,12 @@ export function createPluginGeometry(
         if (visible.length > 0) tail = { from, to };
       }
       const last = ranges.at(-1);
+      const gap = last && widen(last, hidden);
       const paragraph = editor.yrsLocToDisplayPosition(resolved.paragraph);
       const end =
         tail !== null
           ? (endOf(tail) ?? lastInReadingOrder(drawn))
-          : ((last && (caretAt(last.from, true) ?? caretAt(last.to))) ??
+          : ((gap && (caretAt(gap.from, true) ?? caretAt(gap.to))) ??
             (paragraph === null ? null : caretAt(paragraph)));
       const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
       const anchor = end ? project(end) : fallback ? project({ ...fallback, width: 0 }) : null;
