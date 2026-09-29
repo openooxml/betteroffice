@@ -49,11 +49,14 @@
 //! must be minted only while serializing OOXML. A paragraph's Word `w14:paraId` is a separate
 //! binding on its pilcrow, never derived from its internal ID; see [`ParagraphIdentity`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use yrs::branch::BranchPtr;
 use yrs::types::text::YChange;
 use yrs::types::{Attrs, Delta};
 use yrs::updates::decoder::Decode;
@@ -458,13 +461,88 @@ impl<T> Default for EpochCache<T> {
     }
 }
 
-/// The revision each story last changed at. Every committed change to the
-/// stories map stamps the stories it touched (content, embedded maps, the
-/// story entry itself) with the next revision.
+/// The revision each story last changed at, plus the earliest unit position
+/// a change may have reached — a fence everything before it is provably
+/// clean behind. Every committed change to the stories map stamps the
+/// stories it touched (content, embedded maps, the story entry itself) with
+/// the next revision.
 #[derive(Default)]
 struct StoryRevisions {
     current: u64,
     stamped: HashMap<Arc<str>, u64>,
+    /// `(epoch, dirty unit position)` per content change, positions always
+    /// kept in the latest frame — the clean-prefix fence for any window is
+    /// the minimum mark newer than its start.
+    dirty_marks: HashMap<Arc<str>, Vec<(u64, u64)>>,
+}
+
+/// First possibly-dirty unit `deltas` introduce; also remaps `marks` from
+/// the pre-transaction frame into the post one. Every approximation errs
+/// toward earlier positions, never past real dirt.
+fn stamp_dirty_marks(marks: &mut Vec<(u64, u64)>, epoch: u64, deltas: &[yrs::types::Delta]) {
+    let mut new_pos = 0_u64;
+    let mut first_dirty = None;
+    for delta in deltas {
+        match delta {
+            yrs::types::Delta::Retain(len, attrs) => {
+                let len = *len as u64;
+                if attrs.is_some() && first_dirty.is_none() {
+                    first_dirty = Some(new_pos);
+                }
+                new_pos += len;
+            }
+            yrs::types::Delta::Inserted(..) => {
+                if first_dirty.is_none() {
+                    first_dirty = Some(new_pos);
+                }
+                new_pos += 1;
+            }
+            yrs::types::Delta::Deleted(_) => {
+                if first_dirty.is_none() {
+                    first_dirty = Some(new_pos);
+                }
+            }
+        }
+    }
+    for (_, mark) in marks.iter_mut() {
+        *mark = map_dirty_mark(*mark, deltas);
+    }
+    if let Some(dirty) = first_dirty {
+        marks.push((epoch, dirty));
+    }
+}
+
+/// `mark` (a unit position in the pre-transaction frame) mapped through
+/// `deltas` into the post one.
+fn map_dirty_mark(mark: u64, deltas: &[yrs::types::Delta]) -> u64 {
+    let mut old_pos = 0_u64;
+    let mut new_pos = 0_u64;
+    for delta in deltas {
+        match delta {
+            yrs::types::Delta::Retain(len, _) => {
+                let len = *len as u64;
+                if mark <= old_pos + len {
+                    return new_pos + (mark - old_pos);
+                }
+                old_pos += len;
+                new_pos += len;
+            }
+            yrs::types::Delta::Inserted(..) => {
+                if mark <= old_pos {
+                    return new_pos;
+                }
+                new_pos += 1;
+            }
+            yrs::types::Delta::Deleted(len) => {
+                let len = *len as u64;
+                if mark <= old_pos + len {
+                    return new_pos;
+                }
+                old_pos += len;
+            }
+        }
+    }
+    new_pos
 }
 
 impl StoryRevisions {
@@ -474,12 +552,25 @@ impl StoryRevisions {
             match event.path().front() {
                 Some(yrs::types::PathSegment::Key(story)) => {
                     self.stamped.insert(Arc::clone(story), self.current);
+                    if let yrs::types::Event::Text(text) = event
+                        && event.path().len() == 1
+                    {
+                        stamp_dirty_marks(
+                            self.dirty_marks.entry(Arc::clone(story)).or_default(),
+                            self.current,
+                            text.delta(txn),
+                        );
+                    }
                 }
                 Some(yrs::types::PathSegment::Index(_)) => {}
                 None => {
                     if let yrs::types::Event::Map(entries) = event {
                         for story in entries.keys(txn).keys() {
                             self.stamped.insert(Arc::clone(story), self.current);
+                            self.dirty_marks
+                                .entry(Arc::clone(story))
+                                .or_default()
+                                .push((self.current, 0));
                         }
                     }
                 }
@@ -529,6 +620,7 @@ pub struct EditingDoc {
     /// Parser-minted image URLs interned out of yrs payloads at seed; see
     /// [`media_srcs`]. The frame encoder resolves the tokens back on the wire.
     media_srcs: Mutex<Arc<[Arc<str>]>>,
+    dirty_branches: Rc<RefCell<HashSet<BranchPtr>>>,
     _update_sub: Subscription,
     _story_revision_sub: Subscription,
     _seen_subs: Vec<Subscription>,
@@ -549,9 +641,14 @@ impl EditingDoc {
         doc.get_or_insert_map(identity::SESSION);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
+        let dirty_branches = Rc::new(RefCell::new(HashSet::new()));
+        let branches = Rc::clone(&dirty_branches);
         // after_transaction: bumps on any store-changing commit without encoding an update.
         let update_sub = doc
             .observe_after_transaction(move |txn| {
+                branches
+                    .borrow_mut()
+                    .extend(txn.changed_parent_types().iter().copied());
                 if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
                     observed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -578,6 +675,7 @@ impl EditingDoc {
             source: Mutex::new(None),
             seen,
             story_revisions,
+            dirty_branches,
             _update_sub: update_sub,
             _story_revision_sub: story_revision_sub,
             _seen_subs: seen_subs,
@@ -1029,6 +1127,11 @@ impl EditingDoc {
         Ok(story.len(&txn))
     }
 
+    /// Shared types touched by any commit since the last drain.
+    pub(crate) fn take_dirty_branches(&self) -> HashSet<BranchPtr> {
+        std::mem::take(&mut *self.dirty_branches.borrow_mut())
+    }
+
     /// The current story revision, and the stories that changed after `since`
     /// (created, edited, or deleted), sorted.
     pub fn stories_changed_since(&self, since: u64) -> (u64, Vec<String>) {
@@ -1041,6 +1144,32 @@ impl EditingDoc {
             .collect();
         stories.sort();
         (revisions.current, stories)
+    }
+
+    /// The clean-prefix fence per story changed since `since`: units below
+    /// it are provably untouched, so equal items ending before it need no
+    /// fingerprint to verify. Marks older than `since` can no longer be
+    /// queried and drop out here.
+    pub(crate) fn story_dirty_from(&self, since: u64) -> HashMap<String, u64> {
+        let mut revisions = self.story_revisions.lock().unwrap();
+        let dirty: Vec<Arc<str>> = revisions
+            .stamped
+            .iter()
+            .filter(|(_, revision)| **revision > since)
+            .map(|(story, _)| Arc::clone(story))
+            .collect();
+        dirty
+            .iter()
+            .filter_map(|story| {
+                let marks = revisions.dirty_marks.get_mut(story)?;
+                marks.retain(|(epoch, _)| *epoch > since);
+                marks
+                    .iter()
+                    .map(|(_, mark)| *mark)
+                    .min()
+                    .map(|bound| (story.to_string(), bound))
+            })
+            .collect()
     }
 
     /// [`Self::story_segments`] split after each pilcrow into units.
