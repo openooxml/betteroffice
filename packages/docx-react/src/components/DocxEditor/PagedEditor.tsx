@@ -39,9 +39,7 @@ import {
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import {
   computeAnchorPositionsFromYrs,
-  createYrsSidebarProjection,
   displayPageCanvases,
-  extractTrackedChangesFromYrs,
   resolveDisplayPageClientRect,
   type TrackedChangesResult,
   type DisplayList,
@@ -136,6 +134,7 @@ import {
   projectYrsDisplayPosition,
   type YrsPositionProjection,
 } from './internals/yrsPositionProjection';
+import { SidebarRevisionReads } from './internals/sidebarRevisionReads';
 import { YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
@@ -1606,11 +1605,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const anchorEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastAnchorEmitAtRef = useRef(0);
     const lastAnchorPositionsRef = useRef<Map<string, number> | null>(null);
+    const sidebarReadsRef = useRef<SidebarRevisionReads | null>(null);
+    sidebarReadsRef.current ??= new SidebarRevisionReads();
     useEffect(() => {
       const session = yrsCore.session;
       if (!session || !displayListQueries || !onAnchorPositionsChange) {
         return;
       }
+      const sidebarReads = sidebarReadsRef.current!;
       let cancelled = false;
       let hostRaf: number | null = null;
       const emit = (): void => {
@@ -1636,17 +1638,22 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           if (!pageRect || !pageSize || pageSize.height <= 0) return null;
           return pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height);
         };
-        const revisions = session.listRevisions();
+        const { version, revisions } = sidebarReads.revisions(session);
         if (sidebarCommentIds.length === 0 && revisions.length === 0) {
-          onYrsTrackedChangesChange?.(EMPTY_TRACKED_CHANGES_RESULT);
+          sidebarReads.deliver(
+            onYrsTrackedChangesChange,
+            EMPTY_TRACKED_CHANGES_RESULT,
+            session,
+            version
+          );
           if (lastAnchorPositionsRef.current !== EMPTY_ANCHOR_POSITIONS) {
             lastAnchorPositionsRef.current = EMPTY_ANCHOR_POSITIONS;
             onAnchorPositionsChange(EMPTY_ANCHOR_POSITIONS);
           }
           return;
         }
-        const projection = createYrsSidebarProjection(session);
-        onYrsTrackedChangesChange?.(extractTrackedChangesFromYrs(revisions, projection));
+        const { tracked, projection } = sidebarReads.tracked(session);
+        sidebarReads.deliver(onYrsTrackedChangesChange, tracked, session, version);
         const hfRegions = new Map<string, 'header' | 'footer'>();
         for (const rId of document?.package?.headers?.keys() ?? []) {
           hfRegions.set(rId, 'header');

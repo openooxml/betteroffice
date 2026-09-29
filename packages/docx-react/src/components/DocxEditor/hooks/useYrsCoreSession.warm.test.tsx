@@ -1,9 +1,9 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
-import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
 import { useCompatibilityWarm, useYrsCoreSession } from './useYrsCoreSession';
 
@@ -65,6 +65,26 @@ async function openedSession() {
 }
 
 const idle = () => new Promise((resolve) => setTimeout(resolve, 300));
+
+test('a session whose document fails to open is freed at once', async () => {
+  const probe = createEditSession(1);
+  const free = spyOn(Object.getPrototypeOf(probe) as { free(): void }, 'free');
+  const errors: Error[] = [];
+  const logged = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    renderHook(() =>
+      useYrsCoreSession(true, null, null, Uint8Array.of(1, 2, 3), 1, undefined, {
+        onError: (error) => errors.push(error),
+      })
+    );
+    await waitFor(() => expect(errors).toHaveLength(1));
+    expect(free).toHaveBeenCalledTimes(1);
+  } finally {
+    logged.mockRestore();
+    free.mockRestore();
+    probe.free();
+  }
+});
 
 test('opening never materializes the compatibility document by itself', async () => {
   const { project, materializations } = await openedSession();

@@ -26,7 +26,7 @@ pub(crate) struct Unrenderable {
 }
 
 /// List numbering carried across the whole story.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ListState {
     /// The current number of every level of each list, keyed by [`List::key`].
     pub(crate) counters: BTreeMap<String, Vec<i64>>,
