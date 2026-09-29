@@ -4999,13 +4999,8 @@ fn build_display_list_selected(
     } else {
         input.layout.pages.len() as u64
     };
-    let mut pages =
-        Vec::with_capacity(selected_pages.map_or(input.layout.pages.len(), HashSet::len));
 
-    for (page_index, page) in input.layout.pages.iter().enumerate() {
-        if selected_pages.is_some_and(|selected| !selected.contains(&page_index)) {
-            continue;
-        }
+    let build_page = |page_index: usize, page: &PageIn| -> DisplayPage {
         let ctx = RenderCtx {
             page_number: page.number.unwrap_or(page_index as u64 + 1),
             page_label: page.page_label.clone(),
@@ -5275,7 +5270,7 @@ fn build_display_list_selected(
         let note_areas = emit_note_regions(page, &ctx);
         let (content_bounds, column_bounds) = page_content_geometry(page);
 
-        pages.push(DisplayPage {
+        DisplayPage {
             page_index: page_index as u64,
             width: px(page.size.w),
             height: px(page.size.h),
@@ -5294,8 +5289,10 @@ fn build_display_list_selected(
             note_areas,
             unbuilt: false,
             position_span: None,
-        });
-    }
+        }
+    };
+
+    let pages = build_selected_pages(input, selected_pages, &build_page);
 
     let mut display_list = DisplayList {
         contract_version: input.contract_version,
@@ -5308,6 +5305,60 @@ fn build_display_list_selected(
         &input.comment_threads,
     );
     display_list
+}
+
+/// Run `build_page` over the selected page indices. Pages build from shared
+/// read-only inputs, so native splits the index list across scoped threads
+/// and re-sorts by page index; wasm stays sequential.
+fn build_selected_pages(
+    input: &BuildInput,
+    selected_pages: Option<&HashSet<usize>>,
+    build_page: &(dyn Fn(usize, &PageIn) -> DisplayPage + Sync),
+) -> Vec<DisplayPage> {
+    let indices: Vec<usize> = (0..input.layout.pages.len())
+        .filter(|index| selected_pages.is_none_or(|selected| selected.contains(index)))
+        .collect();
+    #[cfg(target_arch = "wasm32")]
+    {
+        indices
+            .iter()
+            .map(|&index| build_page(index, &input.layout.pages[index]))
+            .collect()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::num::NonZeroUsize;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let workers = std::thread::available_parallelism()
+            .map_or(1, NonZeroUsize::get)
+            .min(indices.len());
+        if workers <= 1 {
+            return indices
+                .iter()
+                .map(|&index| build_page(index, &input.layout.pages[index]))
+                .collect();
+        }
+        let next = AtomicUsize::new(0);
+        let mut pages: Vec<DisplayPage> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut local = Vec::new();
+                        while let Some(&index) = indices.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            local.push(build_page(index, &input.layout.pages[index]));
+                        }
+                        local
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("display page build panicked"))
+                .collect()
+        });
+        pages.sort_unstable_by_key(|page| page.page_index);
+        pages
+    }
 }
 
 fn reviewer_palette_color(index: u64) -> &'static str {
