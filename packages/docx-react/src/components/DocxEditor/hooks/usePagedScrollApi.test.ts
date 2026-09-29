@@ -1,10 +1,12 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type {
   DisplayListQueries,
   DisplayListRect,
   DisplayPage,
 } from '@betteroffice/docx/layout/render';
+import type { YrsSession } from '@betteroffice/docx/yrs';
 import { usePagedScrollApi } from './usePagedScrollApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -14,6 +16,71 @@ const { act, cleanup, renderHook } = await import('@testing-library/react');
 afterEach(() => cleanup());
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+const layout = (pages: number, partial = false) =>
+  ({ pageSize: { w: 1, h: 1 }, pages: Array(pages).fill({}), ...(partial ? { partial } : {}) }) as Layout;
+const queries = (pages: number) =>
+  ({ pageCount: () => pages, pageBounds: () => null }) as unknown as DisplayListQueries;
+
+type Props = { layout: Layout; queries: DisplayListQueries; session?: YrsSession };
+
+function scrollApi() {
+  const scrolled: number[] = [];
+  let page = 0;
+  const navigation = { epoch: 0 };
+  const hook = renderHook(
+    (props: Props) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: null },
+        yrsInputRef: { current: null },
+        yrsSession: props.session ?? null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => null,
+        displayListQueries: props.queries,
+        layout: props.layout,
+        onNavigationIntent: () => scrolled.push(page),
+        navigationEpoch: () => navigation.epoch,
+      }),
+    { initialProps: { layout: layout(7, true), queries: queries(7) } as Props }
+  );
+  const scrollTo = (target: number) => {
+    page = target;
+    act(() => hook.result.current.scrollToPageImpl(target));
+  };
+  return { hook, scrolled, scrollTo, navigation };
+}
+
+test('a page past a partial layout waits for the full one', () => {
+  const { hook, scrolled, scrollTo } = scrollApi();
+  scrollTo(20);
+  expect(scrolled).toEqual([]);
+  // The full layout lands before its pages are displayed.
+  hook.rerender({ layout: layout(29), queries: queries(7) });
+  expect(scrolled).toEqual([]);
+  hook.rerender({ layout: layout(29), queries: queries(29) });
+  expect(scrolled).toEqual([20]);
+});
+
+test('a page past the full layout is dropped', () => {
+  const { hook, scrolled, scrollTo } = scrollApi();
+  scrollTo(40);
+  hook.rerender({ layout: layout(29), queries: queries(29) });
+  hook.rerender({ layout: layout(45), queries: queries(45) });
+  expect(scrolled).toEqual([]);
+});
+
+test('a newer navigation or another session drops a waiting page', () => {
+  const navigated = scrollApi();
+  navigated.scrollTo(20);
+  navigated.navigation.epoch += 1;
+  navigated.hook.rerender({ layout: layout(29), queries: queries(29) });
+  expect(navigated.scrolled).toEqual([]);
+
+  const reopened = scrollApi();
+  reopened.scrollTo(20);
+  reopened.hook.rerender({ layout: layout(29), queries: queries(29), session: {} as YrsSession });
+  expect(reopened.scrolled).toEqual([]);
 });
 
 function pagedDom() {
@@ -48,7 +115,7 @@ function pagedDom() {
   return { scroller, host, scrolls };
 }
 
-function queries(built: boolean | number[], anchor: DisplayListRect): DisplayListQueries {
+function unbuiltQueries(built: boolean | number[], anchor: DisplayListRect): DisplayListQueries {
   const pages: DisplayPage[] = Array.from({ length: 10 }, (_, pageIndex) => {
     const page: DisplayPage = { pageIndex, width: 800, height: 1000, primitives: [] };
     const isBuilt = Array.isArray(built) ? built.includes(pageIndex) : built || pageIndex < 6;
@@ -76,21 +143,21 @@ test('a position on an unbuilt page is scrolled to again once the page is built'
         getScrollContainer: () => scroller,
         displayListQueries,
       }),
-    { initialProps: { displayListQueries: queries(false, placeholder) } }
+    { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
   );
   await act(async () => result.current.scrollToPositionImpl(500));
   expect(scrolls).toHaveLength(1);
 
-  await act(async () => rerender({ displayListQueries: queries(false, placeholder) }));
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(false, placeholder) }));
   expect(scrolls).toHaveLength(1);
 
-  await act(async () => rerender({ displayListQueries: queries(true, match) }));
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
   expect(scrolls).toHaveLength(2);
   const matchTop = 6000 - scroller.scrollTop + 900;
   expect(matchTop).toBeGreaterThanOrEqual(0);
   expect(matchTop).toBeLessThanOrEqual(400);
 
-  await act(async () => rerender({ displayListQueries: queries(true, match) }));
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
   expect(scrolls).toHaveLength(2);
 });
 
@@ -109,12 +176,14 @@ test('a scroll to an unbuilt page follows its position to the page that holds it
         getScrollContainer: () => scroller,
         displayListQueries,
       }),
-    { initialProps: { displayListQueries: queries([0, 1, 2, 3, 4, 5], guess) } }
+    { initialProps: { displayListQueries: unbuiltQueries([0, 1, 2, 3, 4, 5], guess) } }
   );
   await act(async () => result.current.scrollToPositionImpl(700));
-  await act(async () => rerender({ displayListQueries: queries([0, 1, 2, 3, 4, 5, 6, 7], next) }));
+  await act(async () =>
+    rerender({ displayListQueries: unbuiltQueries([0, 1, 2, 3, 4, 5, 6, 7], next) })
+  );
   expect(scrolls).toHaveLength(2);
-  await act(async () => rerender({ displayListQueries: queries(true, match) }));
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
   expect(scrolls).toHaveLength(3);
   const matchTop = 8000 - scroller.scrollTop + 500;
   expect(matchTop).toBeGreaterThanOrEqual(0);
@@ -135,20 +204,20 @@ test('a user scroll or a later navigation drops the pending refinement', async (
         getScrollContainer: () => scroller,
         displayListQueries,
       }),
-    { initialProps: { displayListQueries: queries(false, placeholder) } }
+    { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
   );
   await act(async () => result.current.scrollToPositionImpl(500));
   scroller.dispatchEvent(new Event('wheel'));
-  await act(async () => rerender({ displayListQueries: queries(true, match) }));
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
   expect(scrolls).toHaveLength(1);
 
   const onlyFirst = {
-    ...queries(false, placeholder),
+    ...unbuiltQueries(false, placeholder),
     anchorRect: (position: number) => (position === 500 ? placeholder : null),
   } as unknown as DisplayListQueries;
   await act(async () => rerender({ displayListQueries: onlyFirst }));
   await act(async () => result.current.scrollToPositionImpl(500));
   expect(result.current.revealPositionImpl(600)).toBe('unsupported');
-  await act(async () => rerender({ displayListQueries: queries(true, match) }));
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
   expect(scrolls).toHaveLength(2);
 });

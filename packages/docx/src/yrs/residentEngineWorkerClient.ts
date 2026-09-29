@@ -28,6 +28,8 @@ export interface ResidentEngineWorkerFrame {
   deletedUnits: number;
   /** The region layout the worker ran, when the request handed it the layout. */
   layoutJson?: string;
+  /** `layoutJson` covers only the first pages; `completeLayout` finishes it. */
+  layoutProvisional?: boolean;
 }
 
 /** A bootstrap/sync whose snapshot layout the worker runs as the only layout. */
@@ -36,6 +38,8 @@ export interface ResidentEngineWorkerLayoutOptions {
   layoutExtras?: string;
   /** The host state vector the snapshot brings the worker to. */
   stateVector?: Uint8Array;
+  /** Bootstrap only: lay out just the body's first pages before replying. */
+  provisionalPages?: number;
 }
 
 /** How a bootstrap or sync builds its frame. */
@@ -165,6 +169,9 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch: 0,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
         ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
+        ...(options.provisionalPages !== undefined
+          ? { provisionalPages: options.provisionalPages }
+          : {}),
       },
       snapshotTransfers(snapshot)
     );
@@ -204,6 +211,18 @@ export class ResidentEngineWorkerClient {
     this.ready = true;
     this.revision = result.layoutRevision;
     return result;
+  }
+
+  /**
+   * Lay out the rest of a provisional bootstrap layout: its frame and full
+   * layout, or null when a later snapshot already replaced it.
+   */
+  async completeLayout(
+    expectedFrameEpoch: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame | null> {
+    const response = await this.request({ type: 'completeLayout', expectedFrameEpoch, paintCaret });
+    return response.frame ? frameResult(response) : null;
   }
 
   async buildFrame(
@@ -431,6 +450,7 @@ function frameResult(
     layoutRevision: response.layoutRevision ?? 0,
     deletedUnits: response.deletedUnits ?? 0,
     ...(response.layoutJson !== undefined ? { layoutJson: response.layoutJson } : {}),
+    ...(response.layoutProvisional ? { layoutProvisional: true } : {}),
   };
 }
 

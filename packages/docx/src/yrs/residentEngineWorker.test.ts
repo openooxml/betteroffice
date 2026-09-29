@@ -451,4 +451,86 @@ describe('resident worker layout ownership', () => {
     expect(plain.ok && plain.layoutJson).toBeUndefined();
     expect(extras.at(-1)).toBe('given');
   });
+
+  test('finishes a provisional layout on request and before other work', async () => {
+    const w = worker();
+    const extras: string[] = [];
+    const calls: string[] = [];
+    let epoch = 0;
+    const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
+    const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
+    Object.assign(w.harness.session, {
+      layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
+        calls.push(`prefix:${pages}`);
+        return provisional;
+      },
+      layoutDocumentWithRegionsRetainedJson: () => {
+        calls.push('full');
+        return full;
+      },
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      buildDisplayListFrame: (input: string) => {
+        extras.push(input);
+        epoch += 1;
+        w.harness.delta = {
+          protocolVersion: 1,
+          full: true,
+          frameEpoch: epoch,
+          baseFrameEpoch: 0,
+          docEpoch: epoch,
+          layoutEpoch: epoch,
+          pageCount: 0,
+          operations: [],
+          bytes: new Uint8Array(),
+        };
+        return new Uint8Array([0]);
+      },
+    });
+    const snapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    const bootstrap = await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '',
+      snapshot,
+      layoutExtras: '{}',
+      provisionalPages: 3,
+    });
+    expect(bootstrap.ok && bootstrap.layoutJson).toBe(provisional);
+    expect(bootstrap.ok && bootstrap.layoutProvisional).toBe(true);
+    expect(calls).toEqual(['prefix:3']);
+
+    const completed = await w.send({ type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(completed.ok && completed.layoutProvisional).toBeUndefined();
+    expect(calls).toEqual(['prefix:3', 'full']);
+    expect(extras).toHaveLength(2);
+
+    const again = await w.send({ type: 'completeLayout', expectedFrameEpoch: 2, paintCaret: false });
+    expect(again.ok && again.frame).toBeUndefined();
+
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '',
+      snapshot,
+      layoutExtras: '{}',
+      provisionalPages: 3,
+    });
+    await w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 3, paintCaret: false });
+    expect(calls.slice(2)).toEqual(['prefix:3', 'full']);
+    const late = await w.send({ type: 'completeLayout', expectedFrameEpoch: 4, paintCaret: false });
+    expect(late.ok && late.layoutJson).toBe(full);
+    expect(calls).toHaveLength(4);
+  });
 });

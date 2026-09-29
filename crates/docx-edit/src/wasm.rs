@@ -1617,6 +1617,18 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// The retained region layout of the first `pages` pages only; see
+    /// `EngineSession::layout_document_with_regions_prefix_retained_json`.
+    pub fn layout_document_with_regions_prefix_retained_json(
+        &self,
+        input: &str,
+        pages: u32,
+    ) -> Result<String, JsValue> {
+        self.engine
+            .layout_document_with_regions_prefix_retained_json(input, pages as usize)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Retained `{ measured, options }` for the main-thread display-list
     /// fallback after a retained-only region layout.
     pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {
