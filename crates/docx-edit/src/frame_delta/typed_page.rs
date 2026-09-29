@@ -38,11 +38,14 @@ use docx_layout::display_list::DisplayPage;
 use serde::Serialize;
 use serde::ser::{self, Serializer};
 
+use std::sync::Arc;
+
 use super::{
     GLYPH_BIDI_LEVEL, GLYPH_LOGICAL_ORDER, StringTable, VALUE_ARRAY, VALUE_F64, VALUE_FALSE,
     VALUE_GLYPH_ARRAY, VALUE_I64, VALUE_NULL, VALUE_OBJECT, VALUE_STRING, VALUE_TRUE, VALUE_U64,
     checked_u32, hash_write, patch_u32, write_f64, write_i64, write_u32, write_u64,
 };
+use crate::media_srcs::resolve_token;
 
 pub(super) struct PageHashes {
     /// Changes whenever the page's content changes, ignoring only its index.
@@ -53,7 +56,7 @@ pub(super) struct PageHashes {
 }
 
 /// Structural + visual fingerprints in one streaming pass.
-pub(super) fn hash_page(page: &DisplayPage) -> Result<PageHashes, String> {
+pub(super) fn hash_page(page: &DisplayPage, srcs: &[Arc<str>]) -> Result<PageHashes, String> {
     let mut state = HashState {
         fingerprint: super::FNV_OFFSET,
         visual: super::FNV_OFFSET,
@@ -64,6 +67,8 @@ pub(super) fn hash_page(page: &DisplayPage) -> Result<PageHashes, String> {
         vfp_on: true,
         root: true,
         slot: Slot::None,
+        srcs,
+        media: false,
     })
     .map_err(|error| format!("hash display page: {error}"))?;
     Ok(PageHashes {
@@ -77,9 +82,25 @@ pub(super) fn encode_page(
     page: &DisplayPage,
     ids: &mut StringTable,
     out: &mut Vec<u8>,
+    srcs: &[Arc<str>],
 ) -> Result<(), String> {
-    page.serialize(EmitSer { ids, out })
-        .map_err(|error| format!("encode display page: {error}"))
+    page.serialize(EmitSer {
+        ids,
+        out,
+        srcs,
+        media: false,
+    })
+    .map_err(|error| format!("encode display page: {error}"))
+}
+
+/// Field and object keys whose string leaves can hold `media:` tokens.
+/// Keeping token resolution scoped to them means a body-text string that
+/// happens to spell one can never be rewritten.
+fn is_media_src_key(key: &str) -> bool {
+    matches!(
+        key,
+        "src" | "dataUrl" | "data_url" | "pictureSrc" | "relId" | "rel_id"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +333,10 @@ struct HashSer<'a> {
     root: bool,
     /// The key this value sits under (drives the `inlineSdtWidget.pos` rule).
     slot: Slot,
+    /// Interned media URLs `media:` tokens resolve against.
+    srcs: &'a [Arc<str>],
+    /// True when this value sits under a media-source key.
+    media: bool,
 }
 
 impl HashSer<'_> {
@@ -326,6 +351,8 @@ struct HashContainer<'a> {
     vfp_on: bool,
     fields_root: bool,
     slot: Slot,
+    srcs: &'a [Arc<str>],
+    media: bool,
     key_buf: String,
 }
 
@@ -346,6 +373,8 @@ impl HashContainer<'_> {
             vfp_on,
             root: false,
             slot: classify(key),
+            srcs: self.srcs,
+            media: is_media_src_key(key),
         })
     }
 
@@ -358,6 +387,8 @@ impl HashContainer<'_> {
             // Array elements inherit the array's slot, so a glyph object
             // still counts as sitting under "glyphs".
             slot: self.slot,
+            srcs: self.srcs,
+            media: self.media,
         })
     }
 }
@@ -431,6 +462,11 @@ impl<'a> Serializer for HashSer<'a> {
     }
     fn serialize_str(mut self, value: &str) -> Result<(), SerError> {
         self.write(&[VALUE_STRING]);
+        let value = if self.media {
+            resolve_token(value, self.srcs)
+        } else {
+            value
+        };
         self.write(value.as_bytes());
         Ok(())
     }
@@ -488,6 +524,8 @@ impl<'a> Serializer for HashSer<'a> {
             vfp_on: self.vfp_on,
             root: false,
             slot: Slot::None,
+            srcs: self.srcs,
+            media: false,
         })
     }
 
@@ -501,6 +539,8 @@ impl<'a> Serializer for HashSer<'a> {
             vfp_on: self.vfp_on,
             fields_root: false,
             slot: self.slot,
+            srcs: self.srcs,
+            media: self.media,
             key_buf: String::new(),
         })
     }
@@ -531,6 +571,8 @@ impl<'a> Serializer for HashSer<'a> {
             vfp_on: self.vfp_on,
             fields_root: self.root,
             slot: self.slot,
+            srcs: self.srcs,
+            media: false,
             key_buf: String::new(),
         })
     }
@@ -653,11 +695,16 @@ impl ser::SerializeStructVariant for HashContainer<'_> {
 struct EmitSer<'a> {
     ids: &'a mut StringTable,
     out: &'a mut Vec<u8>,
+    srcs: &'a [Arc<str>],
+    media: bool,
 }
 
 struct EmitContainer<'a> {
     ids: &'a mut StringTable,
     out: &'a mut Vec<u8>,
+    srcs: &'a [Arc<str>],
+    /// Sequences inherit it; maps and structs re-derive from their own keys.
+    media: bool,
     length_at: usize,
     count_at: usize,
     payload_at: usize,
@@ -671,7 +718,13 @@ struct EmitContainer<'a> {
 }
 
 impl<'a> EmitContainer<'a> {
-    fn open(opcode: u8, ids: &'a mut StringTable, out: &'a mut Vec<u8>) -> Self {
+    fn open(
+        opcode: u8,
+        ids: &'a mut StringTable,
+        out: &'a mut Vec<u8>,
+        srcs: &'a [Arc<str>],
+        media: bool,
+    ) -> Self {
         out.push(opcode);
         let length_at = out.len();
         write_u32(out, 0);
@@ -681,6 +734,8 @@ impl<'a> EmitContainer<'a> {
         EmitContainer {
             ids,
             out,
+            srcs,
+            media,
             length_at,
             count_at,
             payload_at,
@@ -746,6 +801,8 @@ impl<'a> EmitContainer<'a> {
         value.serialize(EmitSer {
             ids: &mut *self.ids,
             out: &mut *self.out,
+            srcs: self.srcs,
+            media: self.media,
         })
     }
 
@@ -765,6 +822,8 @@ impl<'a> EmitContainer<'a> {
         value.serialize(EmitSer {
             ids: &mut *self.ids,
             out: &mut *self.out,
+            srcs: self.srcs,
+            media: is_media_src_key(key),
         })
     }
 }
@@ -840,6 +899,11 @@ impl<'a> Serializer for EmitSer<'a> {
     }
     fn serialize_str(self, value: &str) -> Result<(), SerError> {
         self.out.push(VALUE_STRING);
+        let value = if self.media {
+            resolve_token(value, self.srcs)
+        } else {
+            value
+        };
         write_u32(self.out, self.ids.id(value).map_err(SerError)?);
         Ok(())
     }
@@ -887,12 +951,18 @@ impl<'a> Serializer for EmitSer<'a> {
         value: &T,
     ) -> Result<(), SerError> {
         // serde_json shape: {variant: value}
-        let mut container = EmitContainer::open(VALUE_OBJECT, self.ids, self.out);
+        let mut container = EmitContainer::open(VALUE_OBJECT, self.ids, self.out, self.srcs, false);
         container.field(variant, value)?;
         container.close()
     }
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, SerError> {
-        Ok(EmitContainer::open(VALUE_ARRAY, self.ids, self.out))
+        Ok(EmitContainer::open(
+            VALUE_ARRAY,
+            self.ids,
+            self.out,
+            self.srcs,
+            self.media,
+        ))
     }
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, SerError> {
         self.serialize_seq(Some(len))
@@ -914,7 +984,13 @@ impl<'a> Serializer for EmitSer<'a> {
         unsupported("tuple variants")
     }
     fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, SerError> {
-        Ok(EmitContainer::open(VALUE_OBJECT, self.ids, self.out))
+        Ok(EmitContainer::open(
+            VALUE_OBJECT,
+            self.ids,
+            self.out,
+            self.srcs,
+            false,
+        ))
     }
     fn serialize_struct(
         self,

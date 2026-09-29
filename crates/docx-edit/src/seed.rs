@@ -4652,6 +4652,11 @@ fn seed_lowered(
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
+    let mut media = crate::media_srcs::MediaSrcTable::default();
+    for (_, ops) in &mut batches {
+        crate::media_srcs::intern_ops_media(ops, &mut media);
+    }
+    document.set_media_srcs(media.into_srcs());
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
@@ -4813,6 +4818,11 @@ pub(crate) fn seed_blocks(
         let (story_id, ops, _) = seed_plan(plan)?;
         batches.push((story_id, ops));
     }
+    let mut media = crate::media_srcs::MediaSrcTable::from_srcs(doc.media_srcs());
+    for (_, ops) in &mut batches {
+        crate::media_srcs::intern_ops_media(ops, &mut media);
+    }
+    doc.set_media_srcs(media.into_srcs());
     doc.apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
     provenance.pin(doc);
@@ -5995,9 +6005,12 @@ mod tests {
             let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
                 panic!("image paragraph must remain a paragraph");
             };
+            let srcs = with_media_doc.media_srcs();
             assert!(paragraph.runs.iter().any(|run| {
                 matches!(run, docx_layout::types::Run::Image(image)
-                    if image.src == src && image.width == 96.0 && image.height == 48.0)
+                    if crate::media_srcs::resolve_token(&image.src, &srcs) == src
+                        && image.width == 96.0
+                        && image.height == 48.0)
             }));
         }
     }

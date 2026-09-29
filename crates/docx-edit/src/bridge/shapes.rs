@@ -284,7 +284,11 @@ fn shape_fill(shape: &Value) -> Option<Value> {
                     if let Some(src) = object_value(picture)
                         .and_then(|value| value.get("src"))
                         .and_then(Value::as_str)
-                        .filter(|value| value.starts_with("data:") || value.starts_with("blob:"))
+                        .filter(|value| {
+                            value.starts_with("data:")
+                                || value.starts_with("blob:")
+                                || value.starts_with("media:")
+                        })
                     {
                         fill.insert("pictureSrc".to_owned(), Value::String(src.to_owned()));
                     }
