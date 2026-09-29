@@ -51,6 +51,8 @@ export function useSelectionOverlay(opts: UseSelectionOverlayOptions): UseSelect
   const [queriedCaretPosition, setQueriedCaretPosition] = useState<CaretPosition | null>(null);
   const [sampledFrameEpoch, setSampledFrameEpoch] = useState<number | null>(null);
   const sampledFrameEpochRef = useRef<number | null>(null);
+  const overlayClearRef = useRef(true);
+  overlayClearRef.current = queriedCaretPosition === null && selectionRects.length === 0;
   const setSelectionRects: React.Dispatch<React.SetStateAction<SelectionRect[]>> = useCallback(
     (next) => {
       sampledFrameEpochRef.current = displayListFrameEpoch;
@@ -70,6 +72,17 @@ export function useSelectionOverlay(opts: UseSelectionOverlayOptions): UseSelect
 
   const updateSelectionOverlay = useCallback(
     () => {
+      // Without display-list geometry the overlay can only be cleared. When it
+      // already is, resolving the selection, which maps it through a position
+      // projection of the whole document, would change nothing.
+      if (
+        !displayListQueries &&
+        !(residentCaretAuthoritative && residentCaret?.caretRect) &&
+        (residentCaretAuthoritative ||
+          (overlayClearRef.current && sampledFrameEpochRef.current === displayListFrameEpoch))
+      ) {
+        return;
+      }
       const yrsSelection = getYrsDisplaySelection();
       if (!yrsSelection) return;
       const anchor = yrsSelection.anchor;

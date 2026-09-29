@@ -373,6 +373,8 @@ export interface PagedEditorRef {
   selectAll(): void;
   /** Get the current display-position selection. */
   getSelectionRange(): { from: number; to: number } | null;
+  /** Whether the selection is a caret, found without mapping it to display positions. */
+  isSelectionCollapsed(): boolean;
   /**
    * Resolve a body position or region-aware hit into an authoritative Yrs location, against the
    * current document. A hit from a layout behind the document maps to the wrong place; prefer

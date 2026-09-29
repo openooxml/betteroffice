@@ -29,6 +29,10 @@ describe('useFloatingCommentBtn', () => {
           selectionReads += 1;
           return { from: 1, to: 2 };
         },
+        isSelectionCollapsed: () => {
+          selectionReads += 1;
+          return false;
+        },
       } as PagedEditorRef,
     };
     const { result, rerender } = renderHook(

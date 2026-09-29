@@ -181,6 +181,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     insertText: (text) => yrsInputRef.current?.insertText(text),
     deleteSelection: () => yrsInputRef.current?.deleteSelection(),
     selectAll: () => yrsInputRef.current?.selectAll(),
+    isSelectionCollapsed: () => yrsInputRef.current?.selectionIsCollapsed() ?? false,
     getSelectionRange: () => {
       const selection = yrsInputRef.current?.displaySelection();
       return selection
@@ -412,6 +413,8 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
       },
       selectedImage() {
         const current = latest.current;
+        // A caret selects no image, and telling needs no position projection.
+        if (current.yrsInputRef.current?.selectionIsCollapsed()) return null;
         const selection = current.yrsInputRef.current?.displaySelection();
         if (!selection || Math.abs(selection.anchor - selection.head) !== 1) return null;
         const pos = Math.min(selection.anchor, selection.head);

@@ -66,6 +66,12 @@ export function useFloatingCommentBtn({
       setFloatingCommentBtn(null);
       return;
     }
+    if (!displayListQueries || !canvasHostRef?.current) {
+      // Nothing to place the button against: only a caret changes it, and
+      // telling a caret needs no position projection of the document.
+      if (pagedEditorRef.current?.isSelectionCollapsed()) setFloatingCommentBtn(null);
+      return;
+    }
     const selection = pagedEditorRef.current?.getSelectionRange();
     if (!selection) return;
     const { from, to } = selection;
