@@ -400,8 +400,93 @@ pub fn measure_blocks_with_shape_offsets(
     let default_width = widths.first().copied().unwrap_or(0.0);
     let extracted =
         extract_floating_zones(blocks, default_width, config, page_geometry, shape_offsets)?;
+    let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
+    let marks = section_break_marks(blocks);
+    measure_float_flow(
+        blocks,
+        widths,
+        default_width,
+        config,
+        &paragraph_zones,
+        &zones_by_anchor,
+        &marks,
+    )
+}
+
+/// Whether float measurement clears its floating zones at `block`: page,
+/// column and section breaks and a paragraph that breaks the page before it.
+pub fn resets_float_flow(block: &LayoutBlock) -> bool {
+    matches!(
+        block,
+        LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) | LayoutBlock::SectionBreak(_)
+    ) || crate::keep_together::paragraph_breaks_before(block)
+}
+
+/// `(anchors a floating zone, anchors a margin-relative one)` for `blocks`.
+/// Margin-relative zones are shared across the document; paragraph-relative
+/// ones never reach past the next [`resets_float_flow`] block.
+pub fn floating_zone_kinds(
+    blocks: &[LayoutBlock],
+    content_width: f64,
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+) -> Result<(bool, bool), String> {
+    let zones = extract_floating_zones(
+        blocks,
+        content_width,
+        config,
+        page_geometry,
+        &BTreeMap::new(),
+    )?;
+    Ok((
+        !zones.is_empty(),
+        zones.iter().any(|zone| zone.margin_relative),
+    ))
+}
+
+/// Float-aware extents for one flow segment, equal to what
+/// [`measure_blocks_with_floats`] gives those blocks within their document
+/// when it has no margin-relative zones. The segment starts at the document
+/// start or a [`resets_float_flow`] block and stops before the next one;
+/// `default_width` and `section_break_marks` come from the whole document.
+/// `Ok(None)` when the segment anchors a margin-relative zone.
+pub fn measure_float_segment(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    section_break_marks: &[bool],
+) -> Result<Option<Vec<BlockExtent>>, String> {
+    let extracted = extract_floating_zones(
+        blocks,
+        default_width,
+        config,
+        page_geometry,
+        &BTreeMap::new(),
+    )?;
+    if extracted.iter().any(|zone| zone.margin_relative) {
+        return Ok(None);
+    }
+    let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
+    measure_float_flow(
+        blocks,
+        widths,
+        default_width,
+        config,
+        &paragraph_zones,
+        &zones_by_anchor,
+        section_break_marks,
+    )
+    .map(Some)
+}
+
+type ParagraphZones = BTreeMap<usize, Vec<FloatingZone>>;
+type AnchorZones = HashMap<usize, Vec<FloatingZone>>;
+
+fn group_floating_zones(extracted: Vec<AnchoredFloatingZone>) -> (ParagraphZones, AnchorZones) {
     let mut margin_groups = BTreeMap::<u64, Vec<AnchoredFloatingZone>>::new();
-    let mut paragraph_zones = BTreeMap::<usize, Vec<FloatingZone>>::new();
+    let mut paragraph_zones = ParagraphZones::new();
     for anchored in extracted {
         if anchored.margin_relative {
             margin_groups
@@ -415,7 +500,7 @@ pub fn measure_blocks_with_shape_offsets(
                 .push(anchored.zone);
         }
     }
-    let mut zones_by_anchor = HashMap::<usize, Vec<FloatingZone>>::new();
+    let mut zones_by_anchor = AnchorZones::new();
     for group in margin_groups.into_values() {
         let earliest = group
             .iter()
@@ -434,8 +519,12 @@ pub fn measure_blocks_with_shape_offsets(
                 .push(anchored.zone);
         }
     }
+    (paragraph_zones, zones_by_anchor)
+}
 
-    let section_break_marks = blocks
+/// Bare paragraph marks that carry a section break and print no line.
+pub fn section_break_marks(blocks: &[LayoutBlock]) -> Vec<bool> {
+    blocks
         .iter()
         .enumerate()
         .map(|(index, block)| {
@@ -445,17 +534,23 @@ pub fn measure_blocks_with_shape_offsets(
                 && matches!(blocks.get(index + 1), Some(LayoutBlock::SectionBreak(_)))
                 && !opens_its_section
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
+fn measure_float_flow(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    config: &MeasurementConfig,
+    paragraph_zones: &ParagraphZones,
+    zones_by_anchor: &AnchorZones,
+    section_break_marks: &[bool],
+) -> Result<Vec<BlockExtent>, String> {
     let mut cumulative_y = 0.0;
     let mut active_zones = Vec::new();
     let mut measured = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter_mut().enumerate() {
-        if matches!(
-            block,
-            LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) | LayoutBlock::SectionBreak(_)
-        ) || crate::keep_together::paragraph_breaks_before(block)
-        {
+        if resets_float_flow(block) {
             active_zones.clear();
             cumulative_y = 0.0;
         }
@@ -486,7 +581,7 @@ pub fn measure_blocks_with_shape_offsets(
         // A bare paragraph mark carrying section properties is the section
         // break itself and prints no line, unless it is everything its section
         // holds: Word lays such a section out one line tall.
-        let extent = if section_break_marks[index] {
+        let extent = if section_break_marks.get(index).copied().unwrap_or(false) {
             BlockExtent::Paragraph(ParagraphExtent {
                 lines: Vec::new(),
                 total_height: 0.0,
