@@ -85,7 +85,7 @@ interface Interval {
   to: number;
 }
 
-/** `ranges` without the parts `holes` cover. */
+/** `ranges` without the parts `holes` cover, in document order. */
 function subtract(ranges: readonly Interval[], holes: readonly Interval[]): Interval[] {
   let pieces = [...ranges];
   for (const hole of holes) {
@@ -98,7 +98,7 @@ function subtract(ranges: readonly Interval[], holes: readonly Interval[]): Inte
           ].filter((part) => part.from < part.to)
     );
   }
-  return pieces;
+  return pieces.sort((a, b) => a.from - b.from || a.to - b.to);
 }
 
 function sameLine(a: DisplayListRect, b: DisplayListRect): boolean {
