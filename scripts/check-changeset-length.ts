@@ -7,7 +7,7 @@ const DIR = '.changeset';
 const SKIP = new Set(['README.md', 'config.json']);
 
 function body(text: string): string {
-  const lines = text.split('\n');
+  const lines = text.split(/\r?\n/);
   if (lines[0] !== '---') return text;
   const end = lines.indexOf('---', 1);
   return end === -1 ? text : lines.slice(end + 1).join('\n');
