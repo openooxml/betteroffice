@@ -150,7 +150,9 @@ describe('FrameDelta wire round-trip', () => {
       verticalMoveByHandle: () => 'null',
     };
     const firstQueries = createDisplayListQueries(retained.displayList, engine);
-    firstQueries.prime();
+    // parse every page into the store, so adoption has retained pages to shift
+    firstQueries.rangeRects(0, Number.MAX_SAFE_INTEGER);
+    expect(updates.length).toBe(1);
 
     session.insert_text('body', paraId, 5, 'x', undefined, undefined);
     const second = envelopeFor();
@@ -173,8 +175,8 @@ describe('FrameDelta wire round-trip', () => {
     // the page's serialized payload
     const secondQueries = createDisplayListQueries(next.displayList, engine, firstQueries);
     secondQueries.prime();
-    expect(updates.length).toBe(1);
-    const update = JSON.parse(updates[0]!) as {
+    expect(updates.length).toBe(2);
+    const update = JSON.parse(updates[1]!) as {
       total: number;
       replace?: Array<[number, unknown]>;
       shift?: Array<[number, number, number[][][]]>;
