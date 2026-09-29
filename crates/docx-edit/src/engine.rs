@@ -706,6 +706,30 @@ fn section_breaks_match_but_margins(next: &LayoutBlock, retained: &LayoutBlock) 
     *next == retained
 }
 
+/// `dirty`, or the start of the section whose closing break changed first, if
+/// that is earlier: a section break carries geometry (margins a header
+/// widens, page size, columns) that the whole section was laid out under, so
+/// pagination has to resume where the section begins.
+fn section_start_of_first_changed_break(
+    measured: &[MeasuredBlock],
+    previous: &[u64],
+    next: &[u64],
+    dirty: usize,
+) -> usize {
+    let Some(changed) = (dirty..measured.len()).find(|&index| {
+        matches!(measured[index].block, LayoutBlock::SectionBreak(_))
+            && previous.get(index) != next.get(index)
+    }) else {
+        return dirty;
+    };
+    // From the break that opens the section: the section's first page starts there.
+    let section_start = measured[..changed]
+        .iter()
+        .rposition(|block| matches!(block.block, LayoutBlock::SectionBreak(_)))
+        .unwrap_or(0);
+    dirty.min(section_start)
+}
+
 fn measured_fingerprints(input: &LayoutInput) -> Result<Vec<u64>, String> {
     input.measured.iter().map(measured_fingerprint).collect()
 }
@@ -1855,7 +1879,15 @@ impl EngineSession {
                 .block_fingerprints
                 .iter()
                 .zip(&block_fingerprints)
-                .position(|(previous, next)| previous != next);
+                .position(|(previous, next)| previous != next)
+                .map(|dirty| {
+                    section_start_of_first_changed_break(
+                        &input.measured,
+                        &previous.block_fingerprints,
+                        &block_fingerprints,
+                        dirty,
+                    )
+                });
             if let Some(dirty_index) = first_dirty
                 && incremental_eligible(&previous, &input, input_options_fingerprint)
             {
@@ -5189,6 +5221,51 @@ mod tests {
         assert_fingerprints_as_paginated(&engine);
 
         let reference = open_sectioned(&bytes, 145);
+        grow(&reference);
+        reference
+            .layout_document_with_regions_json(&request)
+            .unwrap();
+        assert_eq!(retained_pages(&engine), retained_pages(&reference));
+    }
+
+    #[test]
+    fn a_middle_section_whose_header_grows_repaginates_from_its_start() {
+        let (bytes, request) = sectioned_header_fixture();
+        let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        for (index, section) in request["regions"]["sections"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            section["headerFooterRefs"]["headerDefault"] = format!("rId{}", index + 1).into();
+        }
+        let request = request.to_string();
+        let open = |client_id| {
+            let engine = open_sectioned(&bytes, client_id);
+            for story in ["hf:rId2", "hf:rId3"] {
+                engine
+                    .doc()
+                    .create_story(story, "A header", "Normal", "left")
+                    .unwrap();
+            }
+            engine
+        };
+        let grow = |engine: &EngineSession| {
+            let ctx = crate::EditCtx::local("", "");
+            for _ in 0..3 {
+                engine
+                    .doc()
+                    .split_paragraph(&ctx, crate::Position::new("hf:rId2", 1), None)
+                    .unwrap();
+            }
+        };
+        let engine = open(146);
+        engine.layout_document_with_regions_json(&request).unwrap();
+        grow(&engine);
+        engine.layout_document_with_regions_json(&request).unwrap();
+
+        let reference = open(147);
         grow(&reference);
         reference
             .layout_document_with_regions_json(&request)
