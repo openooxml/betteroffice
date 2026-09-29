@@ -184,3 +184,35 @@ test('changing the preview option keeps the open session', async () => {
   expect(result.current.session).toBe(session);
   unmount();
 });
+
+test('collaboration attached during a preview gets only the full session as its replica', async () => {
+  const replicas: Array<YrsSession | null> = [];
+  const onReplica = (replica: YrsSession | null) => replicas.push(replica);
+  const { result, rerender, unmount } = renderHook(
+    ({ collaborate }: { collaborate: boolean }) =>
+      useYrsCoreSession(
+        true,
+        null,
+        null,
+        PAGES,
+        1,
+        collaborate ? { onReplica } : undefined,
+        { isCurrentLoad: () => true },
+        { previewFirstPage: true }
+      ),
+    { initialProps: { collaborate: false } }
+  );
+  await waitFor(() => expect(result.current.previewing).toBe(true));
+  const preview = result.current.session!;
+  rerender({ collaborate: true });
+  await act(async () => {});
+  expect(replicas).toEqual([]);
+  await act(async () => {
+    result.current.notifyFramePresented(preview);
+  });
+  await waitFor(() => expect(result.current.previewing).toBe(false));
+  const full = result.current.session;
+  expect(full).not.toBe(preview);
+  expect(replicas).toEqual([full]);
+  unmount();
+});

@@ -391,7 +391,8 @@ export function useYrsCoreSession(
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;
-    if (!onReplica || !session) return;
+    // A preview is display-only, never a replica; the full session follows.
+    if (!onReplica || !session || session.isDisplayOnly()) return;
     onReplica(session);
     return () => onReplica(null);
   }, [collaboration?.onReplica, session]);
