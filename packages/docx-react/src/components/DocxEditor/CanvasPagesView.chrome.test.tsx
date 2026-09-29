@@ -273,31 +273,36 @@ test('a page leaving the window keeps the links it built', async () => {
 });
 
 test('a rebuild keeps focus on the same link when links before it change', async () => {
-  const link = (href: string, y: number) =>
-    ({
-      kind: 'text',
-      x: 10,
-      y,
-      text: `link ${href}`,
-      font: '11px sans-serif',
-      color: '#000',
-      href,
-    }) as unknown as DisplayPrimitive;
-  const page = (primitives: DisplayPrimitive[]): DisplayPage => ({
-    pageIndex: 0,
-    width: 100,
-    height: 100,
-    primitives,
-  });
-  const { container, rerender } = render(
-    <CanvasPageMirror page={page([link('#a', 10), link('#b', 30), link('#c', 50)])} />
-  );
-  await act(async () => {});
-  container.querySelector<HTMLElement>('a[href="#b"]')!.focus();
-  rerender(<CanvasPageMirror page={page([link('#b', 10), link('#c', 30)])} />);
-  await act(async () => {});
-  expect(document.activeElement?.getAttribute('href')).toBe('#b');
-  expect(container.contains(document.activeElement)).toBe(true);
+  // Links in a block content control carry its group too.
+  for (const sdt of [undefined, { groupId: 'sdt@5', sdtType: 'richText' }]) {
+    const link = (href: string, y: number) =>
+      ({
+        kind: 'text',
+        x: 10,
+        y,
+        text: `link ${href}`,
+        font: '11px sans-serif',
+        color: '#000',
+        href,
+        sdt,
+      }) as unknown as DisplayPrimitive;
+    const page = (primitives: DisplayPrimitive[]): DisplayPage => ({
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      primitives,
+    });
+    const { container, rerender, unmount } = render(
+      <CanvasPageMirror page={page([link('#a', 10), link('#b', 30), link('#c', 50)])} />
+    );
+    await act(async () => {});
+    container.querySelector<HTMLElement>('a[href="#b"]')!.focus();
+    rerender(<CanvasPageMirror page={page([link('#b', 10), link('#c', 30)])} />);
+    await act(async () => {});
+    expect(document.activeElement?.getAttribute('href')).toBe('#b');
+    expect(container.contains(document.activeElement)).toBe(true);
+    unmount();
+  }
 });
 
 test('a rebuild keeps focus on a control that changed, moved or lost a neighbour', async () => {

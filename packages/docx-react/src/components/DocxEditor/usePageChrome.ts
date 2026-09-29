@@ -59,8 +59,8 @@ function tabStops(root: ParentNode): HTMLElement[] {
  * text shows its state, so only its control id names it.
  */
 const stopKey = (stop: HTMLElement): string | null => {
-  const { sdtGroupId, sdtControlId, sdtWidget, sdtRepeat } = stop.dataset;
-  if (sdtGroupId !== undefined) {
+  const { sdtControlId, sdtWidget, sdtRepeat } = stop.dataset;
+  if (sdtWidget !== undefined || sdtRepeat !== undefined) {
     return sdtControlId === undefined
       ? null
       : ['control', sdtControlId, sdtWidget, sdtRepeat].join('\u0000');
