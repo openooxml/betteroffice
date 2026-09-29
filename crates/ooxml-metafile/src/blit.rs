@@ -45,8 +45,7 @@ struct Blit<'a> {
 }
 
 fn slice(bytes: &[u8], offset: u32, size: u32) -> Option<&[u8]> {
-    let start = offset as usize;
-    bytes.get(start..start.checked_add(size as usize)?)
+    crate::read::record_span(bytes, offset as usize, size as usize, 1)
 }
 
 pub(crate) fn blit<const FULL: bool>(
@@ -527,12 +526,9 @@ pub(crate) fn pattern_brush<const FULL: bool>(
 ) -> Option<()> {
     let handle = u32_at(bytes, body)? as usize;
     let usage = u32_at(bytes, body + 4)?;
-    let bmi = slice(bytes, u32_at(bytes, body + 8)?, u32_at(bytes, body + 12)?);
-    let bits = slice(bytes, u32_at(bytes, body + 16)?, u32_at(bytes, body + 20)?);
-    let brush = bmi
-        .zip(bits)
-        .and_then(|(bmi, bits)| tile(player, bmi, bits, usage));
-    let brush = match brush {
+    let bmi = slice(bytes, u32_at(bytes, body + 8)?, u32_at(bytes, body + 12)?)?;
+    let bits = slice(bytes, u32_at(bytes, body + 16)?, u32_at(bytes, body + 20)?)?;
+    let brush = match tile(player, bmi, bits, usage) {
         Some(brush) => brush,
         None => {
             player.omit("pattern brushes that could not be decoded")?;

@@ -113,7 +113,7 @@ fn has_plus_header(bytes: &[u8]) -> bool {
             return false;
         }
         match kind {
-            emf::EMF_COMMENT if u32_at(bytes, offset + 12) == Some(emf::EMF_PLUS) => {
+            emf::EMF_COMMENT if size >= 20 && u32_at(bytes, offset + 12) == Some(emf::EMF_PLUS) => {
                 return u16_at(bytes, offset + 16) == Some(0x4001);
             }
             emf::EMF_COMMENT => {}

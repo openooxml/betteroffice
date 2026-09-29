@@ -89,6 +89,38 @@ fn slack_after_each_record_changes_nothing() {
 }
 
 #[test]
+fn data_a_record_addresses_past_its_bounds_refuses() {
+    let text = |edit: fn(&mut Vec<u8>)| {
+        let (kind, mut body) = text_out(0, 0, "ab", Some(&[5, 5]), 0, [0, 0, -1, -1]);
+        edit(&mut body);
+        Emf::new(10, 10).rec(kind, &body).bytes()
+    };
+    let (bmi, bits) = dib24(&[&[0]]);
+    let mut pattern = u32s(&[1, 0, 32, bmi.len() as u32]);
+    pattern.extend(u32s(&[32 + bmi.len() as u32, bits.len() as u32 + 4]));
+    pattern.extend(bmi.iter().chain(&bits));
+    let (kind, mut comment) = plus(&[plus_header(false), plus_eof()]);
+    comment[0] += 4;
+    let (_, mut short_font) = font(1, 16, 400, [0; 3], 0, 0, "Arial");
+    short_font.truncate(36);
+    let (_, mut short_brush) = brush(1, 2, 0, 5);
+    short_brush.truncate(12);
+    for (name, bytes) in [
+        ("advances", text(|body| body.truncate(body.len() - 4))),
+        (
+            "string",
+            text(|body| body[40..44].copy_from_slice(&4u32.to_le_bytes())),
+        ),
+        ("pattern", Emf::new(10, 10).rec(94, &pattern).bytes()),
+        ("comment", Emf::new(10, 10).rec(kind, &comment).bytes()),
+        ("font", Emf::new(10, 10).rec(82, &short_font).bytes()),
+        ("brush", Emf::new(10, 10).rec(39, &short_brush).bytes()),
+    ] {
+        assert!(to_svg(&bytes).is_err(), "{name}");
+    }
+}
+
+#[test]
 fn hostile_counts_sizes_and_budgets_refuse() {
     let huge_polygon = Emf::new(10, 10)
         .rec(86, &i32s(&[0, 0, 0, 0, i32::MAX]))

@@ -38,3 +38,9 @@ pub(crate) fn span(bytes: &[u8], offset: usize, count: usize, size: usize) -> Op
     let end = offset.checked_add(count.checked_mul(size)?)?;
     bytes.get(offset..end)
 }
+
+/// Like [`span`], for data an EMF record addresses by offset from its start:
+/// a non-empty span must also lie past the record's type and size.
+pub(crate) fn record_span(bytes: &[u8], offset: usize, count: usize, size: usize) -> Option<&[u8]> {
+    span(bytes, offset, count, size).filter(|span| span.is_empty() || offset >= 8)
+}

@@ -161,9 +161,7 @@ pub(crate) fn logfont(bytes: &[u8], at: usize, wide: bool) -> Option<LogFont> {
     let face = if wide {
         let mut units = Vec::with_capacity(32);
         for index in 0..32 {
-            let Some(unit) = u16_at(bytes, at + 28 + index * 2) else {
-                break;
-            };
+            let unit = u16_at(bytes, at + 28 + index * 2)?;
             if unit == 0 {
                 break;
             }
@@ -372,7 +370,7 @@ pub(crate) fn emf_record<const FULL: bool>(
                 return None;
             };
             let brush = if FULL {
-                full_brush(style, color, u32_at(bytes, body + 12).unwrap_or(0))
+                full_brush(style, color, u32_at(bytes, body + 12)?)
             } else {
                 brush_from_style(style, color)?
             };

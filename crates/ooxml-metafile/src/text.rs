@@ -245,7 +245,7 @@ pub(crate) fn emf_text<const FULL: bool>(
 }
 
 fn wide_units(bytes: &[u8], offset: usize, count: usize) -> Option<Vec<u16>> {
-    crate::read::span(bytes, offset, count, 2)?;
+    crate::read::record_span(bytes, offset, count, 2)?;
     (0..count)
         .map(|index| u16_at(bytes, offset + index * 2))
         .collect()
@@ -283,11 +283,15 @@ fn emr_text<const FULL: bool>(
     if count > player.limits.text_chars {
         return player.refuse("a text record holds more characters than the limit");
     }
-    let advances = read_advances(bytes, dx as usize, count, options & ETO_PDY != 0, true);
+    let pairs = options & ETO_PDY != 0;
+    if dx != 0 && count > 0 {
+        crate::read::record_span(bytes, dx as usize, count << usize::from(pairs), 4)?;
+    }
+    let advances = read_advances(bytes, dx as usize, count, pairs, true);
     let (chars, advances) = if wide {
         decode_wide(&wide_units(bytes, string, count)?, advances)
     } else {
-        let raw = crate::read::span(bytes, string, count, 1)?;
+        let raw = crate::read::record_span(bytes, string, count, 1)?;
         let charset = player.dc.font.as_ref().map_or(0, |font| font.charset);
         match decode_narrow(raw, charset) {
             Some(chars) => (chars, advances),
