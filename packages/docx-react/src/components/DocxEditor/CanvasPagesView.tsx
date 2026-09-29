@@ -31,7 +31,7 @@ import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA11yLiveRegion';
 import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
-import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
+import { ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
@@ -79,11 +79,7 @@ export function CanvasPagedArea({
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
           <ParseError message={renderer.error?.message ?? 'Canvas renderer failed.'} />
         </div>
-      ) : (
-        <div data-testid="canvas-renderer-loading" role="status" style={{ minHeight: 240 }}>
-          <DefaultLoadingIndicator />
-        </div>
-      )}
+      ) : null}
       {children}
       {a11y ? <CanvasA11yLiveRegion active={renderer.status === 'ready'} {...a11y} /> : null}
     </>

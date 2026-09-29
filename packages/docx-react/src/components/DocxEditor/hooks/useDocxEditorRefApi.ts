@@ -373,7 +373,8 @@ export function useDocxEditorRefApi({
       getPageContent: (pageNumber) => {
         const editor = pagedEditorRef.current;
         const session = editor?.getYrsSession();
-        const page = editor?.getLayout()?.pages[pageNumber - 1];
+        const layout = editor?.getLayout();
+        const page = layout && !layout.partial ? layout.pages[pageNumber - 1] : undefined;
         if (!editor || !session || !page) return null;
         const seen = new Set<string>();
         const paragraphs: Array<{ paraId: string; text: string; styleId?: string }> = [];

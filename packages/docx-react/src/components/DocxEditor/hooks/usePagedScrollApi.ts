@@ -6,6 +6,7 @@ import {
   type DisplayListQueries,
   type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { ParagraphHighlightOptions, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
@@ -20,8 +21,12 @@ export interface UsePagedScrollApiOptions {
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
   getScrollContainer: () => HTMLDivElement | null;
   displayListQueries?: DisplayListQueries | null;
+  /** The current layout: a page past a partial one's last waits for the full layout. */
+  layout?: Layout | null;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   onNavigationIntent?: () => void;
+  /** Counts navigation intents; a scroll waiting for the full layout drops on a newer one. */
+  navigationEpoch?: () => number;
   requestCanvasParagraphFlash?: (req: {
     from: number;
     to: number;
@@ -48,8 +53,10 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     yrsLocToDisplayPosition,
     getScrollContainer,
     displayListQueries = null,
+    layout = null,
     canvasHostRef,
     onNavigationIntent,
+    navigationEpoch,
     requestCanvasParagraphFlash,
   } = opts;
   const scrollAbortRef = useRef<AbortController | null>(null);
@@ -109,22 +116,43 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     [displayListQueries, onNavigationIntent, scrollRectIntoView]
   );
 
+  const pendingPageRef = useRef<{
+    page: number;
+    epoch: number | undefined;
+    session: YrsSession | null;
+  } | null>(null);
   const scrollToPageImpl = useCallback(
     (pageNumber: number): void => {
-      if (
-        !Number.isInteger(pageNumber) ||
-        pageNumber < 1 ||
-        !displayListQueries ||
-        pageNumber > displayListQueries.pageCount()
-      ) {
+      pendingPageRef.current = null;
+      if (!Number.isInteger(pageNumber) || pageNumber < 1 || !displayListQueries) return;
+      if (pageNumber > displayListQueries.pageCount()) {
+        if (layout?.partial) {
+          pendingPageRef.current = {
+            page: pageNumber,
+            epoch: navigationEpoch?.(),
+            session: yrsSession,
+          };
+        }
         return;
       }
       onNavigationIntent?.();
       const bounds = displayListQueries.pageBounds(pageNumber - 1);
       if (bounds) scrollRectIntoView(bounds, true);
     },
-    [displayListQueries, onNavigationIntent, scrollRectIntoView]
+    [displayListQueries, layout, navigationEpoch, onNavigationIntent, scrollRectIntoView, yrsSession]
   );
+
+  useEffect(() => {
+    const pending = pendingPageRef.current;
+    if (!pending || !displayListQueries) return;
+    if (pending.session !== yrsSession || pending.epoch !== navigationEpoch?.()) {
+      pendingPageRef.current = null;
+      return;
+    }
+    const pages = displayListQueries.pageCount();
+    const complete = layout !== null && !layout.partial && pages === layout.pages.length;
+    if (pending.page <= pages || complete) scrollToPageImpl(pending.page);
+  }, [displayListQueries, layout, navigationEpoch, scrollToPageImpl, yrsSession]);
 
   const scrollToParaIdImpl = useCallback(
     (paraId: string, options?: ScrollToParaIdOptions): boolean => {

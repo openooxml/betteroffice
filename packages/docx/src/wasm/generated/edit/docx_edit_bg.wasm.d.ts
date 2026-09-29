@@ -70,6 +70,7 @@ export const editsession_insert_text: (a: number, b: number, c: number, d: numbe
 export const editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_list_comments: (a: number) => [number, number, number, number];
@@ -84,6 +85,7 @@ export const editsession_merge_cells: (a: number, b: number, c: number) => [numb
 export const editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_new: (a: number) => [number, number, number];
 export const editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+export const editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_paragraph_identities: (a: number) => [number, number, number, number];
 export const editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
@@ -124,6 +126,7 @@ export const editsession_set_image_geometry: (a: number, b: number, c: number, d
 export const editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
+export const editsession_set_partial_document: (a: number, b: number) => void;
 export const editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
 export const editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];

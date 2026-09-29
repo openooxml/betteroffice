@@ -109,12 +109,31 @@ impl StoryParser<'_, '_> {
         depth: usize,
         in_header_footer: bool,
     ) -> Result<Vec<BlockContent>, ParseError> {
+        self.parse_blocks_until(parent, depth, in_header_footer, None)
+            .map(|(content, _)| content)
+    }
+
+    /// [`Self::parse_blocks`] that stops once it holds `limit` blocks and no
+    /// field it opened is still open. Also returns how many of the parent's
+    /// children it read.
+    pub fn parse_blocks_until(
+        &mut self,
+        parent: &XmlElement,
+        depth: usize,
+        in_header_footer: bool,
+        limit: Option<usize>,
+    ) -> Result<(Vec<BlockContent>, usize), ParseError> {
         self.budget.check_nesting_depth(depth, self.part)?;
         let mut content = Vec::new();
         let mut records: Vec<FieldRecord> = Vec::new();
         let mut open_fields: Vec<OpenField> = Vec::new();
+        let mut read = 0;
 
         for child in transparent_children(parent, false) {
+            if limit.is_some_and(|limit| content.len() >= limit) && open_fields.is_empty() {
+                break;
+            }
+            read += 1;
             if !typed_block(child) {
                 if let Some(raw) = crate::inline::raw_foreign_node(child, self.budget) {
                     content.push(BlockContent::RawXml(Arc::new(raw)));
@@ -208,7 +227,7 @@ impl StoryParser<'_, '_> {
         }
 
         attach_recorded_field_blocks(&mut content, records);
-        Ok(content)
+        Ok((content, read))
     }
 
     fn parse_block_sdt(

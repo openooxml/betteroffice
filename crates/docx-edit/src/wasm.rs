@@ -1349,8 +1349,30 @@ impl EditSession {
         let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
         self.docx_digest.replace(Some(digest));
+        self.engine.set_partial_document(false);
         self.engine.doc().rotate_version(js_entropy());
         Ok(json)
+    }
+
+    fn open_preview(&self, bytes: &[u8], blocks: usize) -> Result<Option<String>, String> {
+        // A preview holds a cut of the document and must never be saved, so
+        // it only opens into a session with nothing to save.
+        if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
+            return Err("a preview opens only into an empty session".to_owned());
+        }
+        let Some(envelope) = crate::seed::parse_docx_preview(bytes, blocks)? else {
+            return Ok(None);
+        };
+        let host_envelope = thin_docx_envelope(&envelope);
+        let referenced_fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope)?;
+        self.engine.set_partial_document(true);
+        self.engine.doc().rotate_version(js_entropy());
+        serde_json::to_string(&DocxHostWire {
+            envelope: host_envelope,
+            referenced_fonts,
+        })
+        .map(Some)
+        .map_err(|error| error.to_string())
     }
 
     fn collapsed_resident_input_selection(&self) -> Result<(String, String, u32), JsValue> {
@@ -1631,6 +1653,18 @@ impl EditSession {
         let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_retained_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// The retained region layout of the first `pages` pages only; see
+    /// `EngineSession::layout_document_with_regions_prefix_retained_json`.
+    pub fn layout_document_with_regions_prefix_retained_json(
+        &self,
+        input: &str,
+        pages: u32,
+    ) -> Result<String, JsValue> {
+        self.engine
+            .layout_document_with_regions_prefix_retained_json(input, pages as usize)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -2119,6 +2153,22 @@ impl EditSession {
             generation.as_deref(),
             digest.as_deref(),
         )
+    }
+
+    /// Opens `bytes` for display only, seeded from the body's first `blocks`
+    /// blocks (see `seed::seed_docx_preview`): the reply is the host metadata
+    /// of that parse. The session keeps no source package, so it cannot save.
+    /// Opens nothing and replies with nothing for a document the preview
+    /// refuses, which opens with [`EditSession::open_docx`] instead.
+    pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<Option<String>, JsValue> {
+        self.open_preview(bytes, blocks as usize)
+            .map_err(|error| js_err(&error))
+    }
+
+    /// Marks whether the session's document is part of a package, as a
+    /// replica of a preview is: its layouts render NUMPAGES empty.
+    pub fn set_partial_document(&self, partial: bool) {
+        self.engine.set_partial_document(partial);
     }
 
     /// Re-parses the DOCX bytes retained by the last
@@ -5119,6 +5169,160 @@ mod tests {
             );
         }
         assert!(refused.materialize_docx().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_preview_renders_numpages_empty_however_much_of_it_is_laid_out() {
+        let mut body = String::from(
+            r#"<w:p><w:r><w:t>Of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>"#,
+        );
+        for index in 0..60 {
+            body.push_str(&format!(
+                "<w:p><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>"
+            ));
+        }
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+        );
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .unwrap();
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let request = json!({
+            "bodyStory": "body",
+            "regions": { "sections": [{ "sectionId": "main", "properties": {
+                "pageWidth": 5760, "pageHeight": 2880,
+                "marginTop": 360, "marginRight": 360, "marginBottom": 360, "marginLeft": 360
+            } }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        let numpages = |session: &EditSession| {
+            let layout: Value = serde_json::from_str(
+                &session
+                    .engine
+                    .layout_document_with_regions_retained_json(&request)
+                    .unwrap(),
+            )
+            .unwrap();
+            session.engine.build_display_list_frame("{}", 0).unwrap();
+            let text = session
+                .engine
+                .with_display_list(|list| {
+                    let page = serde_json::to_value(&list.pages[0]).unwrap();
+                    page["primitives"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|primitive| primitive["field"]["category"] == "NUMPAGES")
+                        .map(|primitive| primitive["text"].as_str().unwrap_or("").to_owned())
+                        .collect::<String>()
+                })
+                .unwrap();
+            (text, layout["layout"]["pages"].as_array().unwrap().len())
+        };
+        let full = EditSession::new(80.0).unwrap();
+        full.open_docx(&bytes, true, None, None).unwrap();
+        let (text, pages) = numpages(&full);
+        assert!(pages > 1);
+        assert_eq!(text, pages.to_string());
+        // The preview's blocks fit its pages whole; its page count is still not the document's.
+        let preview = EditSession::new(81.0).unwrap();
+        preview.open_preview(&bytes, 20).unwrap().unwrap();
+        let (text, preview_pages) = numpages(&preview);
+        assert!(preview_pages < pages);
+        assert_eq!(text, "");
+
+        // An edit's resident pass lays out part of the package too.
+        preview
+            .engine
+            .doc()
+            .insert_text(
+                &EditCtx::local("", ""),
+                Position::new("body", 40),
+                "x",
+                FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = preview.engine.stats().frame_epoch;
+        preview.engine.apply_and_layout("body", epoch).unwrap();
+        assert!(preview.engine.stats().incremental_pagination_calls > 0);
+        preview
+            .engine
+            .build_display_list_frame("{\"changed\":1}", 0)
+            .unwrap();
+        let text = preview
+            .engine
+            .with_display_list(|list| {
+                serde_json::to_value(&list.pages[0]).unwrap()["primitives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|primitive| primitive["field"]["category"] == "NUMPAGES")
+                    .map(|primitive| primitive["text"].as_str().unwrap_or("").to_owned())
+                    .collect::<String>()
+            })
+            .unwrap();
+        assert_eq!(text, "");
+
+        // A complete open over the preview counts the whole document again.
+        preview.delete_story("body").unwrap();
+        preview.open_docx(&bytes, true, None, None).unwrap();
+        assert_eq!(numpages(&preview), (pages.to_string(), pages));
+    }
+
+    #[test]
+    fn a_preview_refuses_a_document_whose_later_body_reaches_its_first_pages() {
+        let anchor = r#"<w:p><w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapTopAndBottom/><wp:docPr id="1" name="Float"/></wp:anchor></w:drawing></w:r></w:p>"#;
+        let section_break = r#"<w:p><w:pPr><w:sectPr/></w:pPr></w:p>"#;
+        let columns = r#"<w:sectPr><w:cols w:num="2"/></w:sectPr>"#;
+        for (late, end) in [(anchor, ""), (section_break, columns)] {
+            let body = (0..200)
+                .map(|index| {
+                    let late = if index == 149 { late } else { "" };
+                    format!("{late}<w:p><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>")
+                })
+                .collect::<String>();
+            let document = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body>{body}{end}</w:body></w:document>"#
+            );
+            let bytes = ooxml_opc::rezip_parts(&[
+                ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+                ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+                ("word/document.xml".to_owned(), document.into_bytes()),
+            ])
+            .unwrap();
+            let preview = EditSession::new(82.0).unwrap();
+            assert!(preview.open_preview(&bytes, 60).unwrap().is_none());
+            assert!(preview.story_ids().is_empty());
+            preview.open_docx(&bytes, true, None, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_preview_opens_only_into_an_empty_session() {
+        let bytes = batch_docx();
+        let opened = EditSession::new(77.0).unwrap();
+        opened.open_docx(&bytes, false, None, None).unwrap();
+        assert!(opened.open_preview(&bytes, 1).is_err());
+        let seeded = EditSession::new(78.0).unwrap();
+        seeded.open_docx(&bytes, true, None, None).unwrap();
+        assert!(seeded.open_preview(&bytes, 1).is_err());
+        let preview = EditSession::new(79.0).unwrap();
+        preview.open_preview(&bytes, 1).unwrap().unwrap();
+        assert!(preview.materialize_docx().unwrap().is_none());
     }
 
     #[test]

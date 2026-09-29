@@ -594,6 +594,8 @@ export interface YrsResidentWorkerSnapshot {
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;
+  /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
+  partialDocument?: boolean;
 }
 
 /**
@@ -889,6 +891,25 @@ export interface YrsSession extends CollaborationReplica {
    * one seeded alike by the same client; see {@link beginOpening}.
    */
   openDocx(bytes: Uint8Array, seedStories: boolean, options?: YrsOpeningOptions): YrsDocxHost;
+  /**
+   * Opens a DOCX for display only, from the body's first `blocks` blocks:
+   * enough to lay out its first pages with a prefix pass before the whole
+   * document is opened. The session cannot save. `null`, opening nothing,
+   * for a document with a float placed from outside the text or a section
+   * with columns, which no cut of the body lays out like the whole: open it
+   * with {@link openDocx}. @internal
+   */
+  openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
+  /**
+   * Marks whether the document is a preview's, as a replica of one is: its
+   * layouts render NUMPAGES empty. @internal
+   */
+  setPartialDocument(partial: boolean): void;
+  /**
+   * The region layout of only as much of the body as fills `pages` pages;
+   * a reply marked `provisional` covers a prefix. @internal
+   */
+  layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /**
    * Starts a new opening of the document: its generation, replicated to
    * every replica, becomes part of every session anchor. Every seeding entry
@@ -1410,6 +1431,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     }
   };
 
+  // A preview's cut of a package, whose layouts count only its own pages.
+  let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
     invalidateReadCaches();
     wasmCallDepth += 1;
@@ -1490,11 +1513,31 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     );
     const host = decodeDocxHost(json, source);
     docxSource = source;
+    partialDocument = false;
     return host;
   };
 
   const facade: YrsSession = {
     clientId,
+    openDocxPreview: (bytes, blocks) => {
+      markDirty('all');
+      const json = mutate(() => session.open_docx_preview(bytes, blocks));
+      if (json === undefined) return null;
+      partialDocument = true;
+      return decodeDocxHost(json, bytes);
+    },
+    setPartialDocument: (partial) => {
+      partialDocument = partial;
+      session.set_partial_document(partial);
+    },
+    layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) => {
+      const output = session.layout_document_with_regions_prefix_retained_json(input, pages);
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = false;
+      return output;
+    },
 
     registerFont: (bytes) => {
       const id = session.register_measure_font(bytes);
@@ -1630,6 +1673,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutInput: residentLayoutInput,
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
+        ...(partialDocument ? { partialDocument: true } : {}),
       };
     },
     residentWorkerProbe: () => {
