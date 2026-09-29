@@ -1733,8 +1733,9 @@ export function useCanvasRenderer(
     setEngine(null);
     release();
   }, [release]);
-  // Decoded images of one session's document; the next session starts empty.
-  const resolveImage = useMemo(() => createCanvasImageResolver(), [engine]);
+  // Decoded images of the session whose pages are shown; the next session starts empty.
+  const imageSession = presentedEngine ?? engine;
+  const resolveImage = useMemo(() => createCanvasImageResolver(), [imageSession]);
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
     : loading || displayList == null

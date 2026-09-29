@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import type { DisplayList } from '@betteroffice/docx/layout/render';
+import type { DisplayList, ImageResolver } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type {
@@ -154,19 +154,20 @@ test('a session handed over keeps its worker and shows the old pages until the n
   }
 });
 
-test('glyph outlines come from the session whose pages are shown', async () => {
+test('glyph outlines and decoded images come from the session whose pages are shown', async () => {
   FakeWorker.created = [];
   globalThis.Worker = FakeWorker as unknown as typeof Worker;
   const preview = hostWithPage(9520, 'Preview page');
   const full = hostWithPage(9521, 'Full page');
   const handoffFrom = { current: null as YrsSession | null };
-  const shown: Array<[string, string | undefined]> = [];
+  const shown: Array<[string, string | undefined, ImageResolver]> = [];
   try {
     const { result, unmount } = renderHook(() => {
       const renderer = useCanvasRenderer(undefined, undefined, undefined, handoffFrom);
       shown.push([
         text(renderer.displayList),
         (renderer.glyphOutlineProvider as ((json: string) => string) | null)?.(''),
+        renderer.resolveImage,
       ]);
       return renderer;
     });
@@ -195,9 +196,16 @@ test('glyph outlines come from the session whose pages are shown', async () => {
     handoffFrom.current = preview.engine;
     await layOut(full, 1);
     await waitFor(() => expect(text(result.current.displayList)).toContain('Full'));
-    for (const [pages, outlines] of shown) {
-      if (pages.includes('Preview')) expect(outlines).toBe('Preview page');
-      if (pages.includes('Full')) expect(outlines).toBe('Full page');
+    const previewImages = shown.find(([pages]) => pages.includes('Preview'))![2];
+    for (const [pages, outlines, images] of shown) {
+      if (pages.includes('Preview')) {
+        expect(outlines).toBe('Preview page');
+        expect(images).toBe(previewImages);
+      }
+      if (pages.includes('Full')) {
+        expect(outlines).toBe('Full page');
+        expect(images).not.toBe(previewImages);
+      }
     }
     unmount();
   } finally {
