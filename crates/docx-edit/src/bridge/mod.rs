@@ -642,7 +642,7 @@ fn lower_story<T: ReadTxn>(
                     let hidden = instruction
                         .as_deref()
                         .is_some_and(super::seed::numeric_field_instruction);
-                    if hidden {
+                    if hidden && !env.revision_hidden(attributes) {
                         pending_hidden_field_blocks
                             .append(&mut hidden_field_result_blocks(&field, txn));
                     }
@@ -796,6 +796,7 @@ fn lower_story<T: ReadTxn>(
                 Out::YMap(sdt)
                     if shared_map_string(&sdt, txn, "_kind").as_deref() == Some("sdt") =>
                 {
+                    let first = paragraph_runs.len();
                     let node_size = lower_inline_sdt(
                         &sdt,
                         txn,
@@ -806,6 +807,9 @@ fn lower_story<T: ReadTxn>(
                         None,
                         &mut paragraph_runs,
                     );
+                    if env.revision_hidden(attributes) {
+                        hide_runs(&mut paragraph_runs[first..]);
+                    }
                     story_index += 1;
                     paragraph_pm_units += node_size;
                     at_block_boundary = false;
@@ -1942,7 +1946,8 @@ fn lower_inline_sdt_values(
                 1
             }
             "sdt" => payload.map_or(2, |payload| {
-                lower_inline_sdt_values(
+                let first = runs.len();
+                let size = lower_inline_sdt_values(
                     payload,
                     env,
                     story_index,
@@ -1950,7 +1955,11 @@ fn lower_inline_sdt_values(
                     child_pm_start,
                     widget.clone(),
                     runs,
-                )
+                );
+                if env.revision_hidden(Some(&attrs)) {
+                    hide_runs(&mut runs[first..]);
+                }
+                size
             }),
             // A shape or chart nested in an inline SDT produces no run; every
             // other leaf still occupies one position even without one.
@@ -2113,6 +2122,13 @@ struct RawRun {
     atom: bool,
     /// Content the previewed revision decisions leave out of layout.
     revision_hidden: bool,
+}
+
+/// Leaves out the content of a control whose own revision the preview hides.
+fn hide_runs(runs: &mut [RawRun]) {
+    for run in runs {
+        run.revision_hidden = true;
+    }
 }
 
 /// A paragraph's shape or chart child, at the offset it occupied.

@@ -696,10 +696,14 @@ export function useRustDisplayList(
       return;
     }
     queryEpochGate.invalidate();
+    const previewKey = revisionPreviewKeyOf(layout);
+    // A new preview repaints unchanged content: frames and settlement from the old one are stale.
+    if (layoutPreviewKeyRef.current !== null && previewKey !== layoutPreviewKeyRef.current) {
+      contentEpochRef.current += 1;
+    }
+    layoutPreviewKeyRef.current = previewKey;
     const contentEpoch = contentEpochRef.current;
     const sourceVersion = sourceVersionOf(layout);
-    const previewKey = revisionPreviewKeyOf(layout);
-    layoutPreviewKeyRef.current = previewKey;
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
     if (!inputs) {

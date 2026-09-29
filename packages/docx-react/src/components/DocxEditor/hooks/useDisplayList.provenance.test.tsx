@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
+import type { DisplayList } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type YrsRenderEnv, type YrsSession } from '@betteroffice/docx/yrs';
 import {
@@ -71,7 +72,7 @@ function Harness({
   overrides: RustDisplayListHookOverrides;
   display: { current: UseRustDisplayListResult | null };
   requestLayout: () => void;
-  previewKeys: (string | null)[];
+  previewKeys: [string | null, string][];
 }) {
   display.current = useRustDisplayList(
     layout,
@@ -81,7 +82,10 @@ function Harness({
     session,
     requestLayout
   );
-  previewKeys.push(revisionPreviewKeyOf(display.current.queries));
+  previewKeys.push([
+    revisionPreviewKeyOf(display.current.queries),
+    paintedText(display.current.displayList),
+  ]);
   return null;
 }
 
@@ -117,7 +121,7 @@ async function setup(renderEnv: { current: YrsRenderEnv } = { current: {} }) {
   } as unknown as typeof Worker;
   const display: { current: UseRustDisplayListResult | null } = { current: null };
   const layoutRequests: number[] = [];
-  const previewKeys: (string | null)[] = [];
+  const previewKeys: [string | null, string][] = [];
   const overrides: RustDisplayListHookOverrides = { getInputs: () => inputs as never };
   const harness = () => (
     <Harness
@@ -193,11 +197,9 @@ test('a worker frame overtaken by a remote change stays unpublished and unsettle
 });
 
 /** Painted text, each tracked stretch followed by its revision kind. */
-function paintedText(display: { current: UseRustDisplayListResult | null }): string {
+function paintedText(displayList: DisplayList | null): string {
   const segments: [string, string][] = [];
-  for (const primitive of (display.current?.displayList?.pages ?? []).flatMap(
-    (page) => page.primitives
-  )) {
+  for (const primitive of (displayList?.pages ?? []).flatMap((page) => page.primitives)) {
     if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') continue;
     const kind = primitive.revision?.kind ?? '';
     const last = segments.at(-1);
@@ -207,9 +209,11 @@ function paintedText(display: { current: UseRustDisplayListResult | null }): str
   return segments.map(([text, kind]) => (kind ? `${text}[${kind}]` : text)).join('');
 }
 
-test('a frame carries the revision preview of its layout, and a superseded preview never lands', async () => {
+/** "Seed" with a suggested " more", shown through a preview the test switches by relayout. */
+async function previewSetup() {
   const renderEnv: { current: YrsRenderEnv } = { current: {} };
-  const { session, paraId, display, worker, previewKeys, relayout } = await setup(renderEnv);
+  const harness = await setup(renderEnv);
+  const { session, paraId, display, relayout } = harness;
   const applied = session.applyEdits({
     expectVersion: session.version(),
     history: 'none',
@@ -225,36 +229,79 @@ test('a frame carries the revision preview of its layout, and a superseded previ
   });
   if (!applied.ok) throw new Error(applied.failure.message);
   const [revision] = applied.receipts[0].revisionIds;
-  const show = async (revisionPreview?: YrsRenderEnv['revisionPreview']) => {
-    renderEnv.current = revisionPreview ? { revisionPreview } : {};
+  const key = (decision?: 'accepted' | 'rejected') =>
+    revisionPreviewKey(decision ? { [revision]: decision } : undefined);
+  const show = async (decision?: 'accepted' | 'rejected') => {
+    renderEnv.current = decision ? { revisionPreview: { [revision]: decision } } : {};
     await act(async () => relayout());
   };
+  const shown = () => [
+    revisionPreviewKeyOf(display.current!.queries),
+    paintedText(display.current!.displayList),
+  ];
+  await show('accepted');
+  await until(() => shown()[0] === key('accepted'));
+  expect(shown()).toEqual([key('accepted'), 'Seed more']);
+  return { ...harness, key, show, shown };
+}
 
-  await show({ [revision]: 'accepted' });
-  const acceptedKey = revisionPreviewKey({ [revision]: 'accepted' });
-  await until(() => revisionPreviewKeyOf(display.current!.queries) === acceptedKey);
-  expect(paintedText(display)).toBe('Seed more');
+test('a frame carries the revision preview of its layout, typed frames included', async () => {
+  const { display, previewKeys, worker, key, show, shown } = await previewSetup();
   const acceptedQueries = display.current!.queries;
   await act(async () => {
     await display.current!.applyInput('!');
   });
-  expect(revisionPreviewKeyOf(display.current!.queries)).toBe(acceptedKey);
+  expect(shown()).toEqual([key('accepted'), 'Seed more!']);
 
   worker().hold();
-  await show({ [revision]: 'rejected' });
+  await show('rejected');
   await show();
   const released = previewKeys.length;
   await act(async () => worker().release());
-  await until(
-    () =>
-      revisionPreviewKeyOf(display.current!.queries) === '' &&
-      sourceVersionOf(display.current!.queries) === session.version()
-  );
-  expect(paintedText(display)).toBe('Seed more[ins]!');
-  expect(previewKeys.slice(released)).not.toContain(revisionPreviewKey({ [revision]: 'rejected' }));
-  expect(revisionPreviewKeyOf(acceptedQueries)).toBe(acceptedKey);
+  await until(() => shown()[0] === key());
+  expect(shown()).toEqual([key(), 'Seed more[ins]!']);
+  expect(previewKeys.slice(released).map(([shownKey]) => shownKey)).not.toContain(key('rejected'));
+  expect(revisionPreviewKeyOf(acceptedQueries)).toBe(key('accepted'));
   expect(revisionPreviewKey({ b: 'rejected', a: 'accepted' })).toBe(
     revisionPreviewKey({ a: 'accepted', b: 'rejected' })
   );
-  expect(revisionPreviewKey({})).toBe('');
+});
+
+test('a typed frame from the previous preview never publishes under the new one', async () => {
+  const { display, previewKeys, worker, key, show, shown } = await previewSetup();
+  worker().hold();
+  let typed!: Promise<unknown>;
+  act(() => {
+    typed = display.current!.applyInput('!');
+  });
+  await until(() => worker().requests.includes('applyInput'));
+  await show('rejected');
+  const released = previewKeys.length;
+  await act(async () => {
+    worker().release();
+    await typed;
+  });
+  await until(() => shown()[0] === key('rejected'));
+  expect(shown()).toEqual([key('rejected'), 'Seed!']);
+  for (const [shownKey, text] of previewKeys.slice(released)) {
+    if (shownKey === key('rejected')) expect(text).toBe('Seed!');
+  }
+});
+
+test('settling waits for the frame of the current preview', async () => {
+  const { display, worker, key, show, shown } = await previewSetup();
+  worker().hold();
+  await show('rejected');
+  let settled: DisplayList | null = null;
+  void display.current!.settledDisplayList(() => {}).then((list) => {
+    settled = list;
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(settled).toBeNull();
+  await act(async () => worker().release());
+  await until(() => settled !== null);
+  expect(paintedText(settled)).toBe('Seed');
+  expect(shown()).toEqual([key('rejected'), 'Seed']);
 });

@@ -355,6 +355,92 @@ fn a_deleted_insertion_shows_whichever_side_is_still_pending() {
 }
 
 #[test]
+fn a_previewed_control_revision_covers_the_controls_content() {
+    let body = r#"<w:p><w:r><w:t xml:space="preserve">A </w:t></w:r><w:sdt><w:sdtPr><w:tag w:val="outer"/></w:sdtPr><w:sdtContent><w:r><w:t>SECRET</w:t></w:r><w:sdt><w:sdtPr><w:tag w:val="inner"/></w:sdtPr><w:sdtContent><w:r><w:t>nested</w:t></w:r></w:sdtContent></w:sdt></w:sdtContent></w:sdt><w:r><w:t xml:space="preserve"> Z</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(75104);
+    seed_from_docx(engine.doc(), &document(body)).unwrap();
+    engine
+        .doc()
+        .delete_range(
+            &EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+            StoryRange::new("body", 2, 3),
+        )
+        .unwrap();
+    let revisions = engine.doc().list_revisions().unwrap();
+    assert_eq!(revisions.len(), 1);
+    let id = revisions[0].change.revision_id.clone();
+    let texts = |entries: &[(&str, RevisionPreview)]| -> Vec<String> {
+        runs(&lower(&engine, &preview(entries)), 0)
+            .into_iter()
+            .map(|run| run.0)
+            .collect()
+    };
+    assert_eq!(texts(&[]), texts(&[(&id, Rejected)]));
+    assert!(texts(&[]).concat().contains("SECRETnested"));
+    let accepted = texts(&[(&id, Accepted)]);
+    assert_eq!(accepted.concat(), "A  Z");
+    let native = lower(&engine, &RenderEnv::default());
+    let hidden = lower(&engine, &preview(&[(&id, Accepted)]));
+    assert_eq!(hidden[0]["pmEnd"], native[0]["pmEnd"]);
+    assert_eq!(
+        hidden[0]["runs"].as_array().unwrap().last().unwrap()["pmStart"],
+        native[0]["runs"].as_array().unwrap().last().unwrap()["pmStart"]
+    );
+}
+
+#[test]
+fn a_table_cell_previews_its_own_revisions() {
+    let body = r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="00000010"><w:r><w:t>cell beta</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p w14:paraId="00000011"><w:r><w:t>After</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(75105);
+    seed_from_docx(engine.doc(), &document(body)).unwrap();
+    let request = EditRequest {
+        expect_version: engine.doc().version(),
+        source: EditSource::Host,
+        history: EditHistory::None,
+        steps: vec![suggested(EditOperation::ReplaceText {
+            target: TextTarget::Search {
+                text: "beta".to_owned(),
+                within: SearchScope::Paragraph(ParagraphTarget {
+                    story: "body:t0:r0c0".to_owned(),
+                    para_id: "00000010".to_owned(),
+                }),
+                view: EditTextView::Accepted,
+            },
+            text: "BETA".to_owned(),
+        })],
+    };
+    let applied = engine
+        .doc()
+        .apply_edits(&request, &UndoSession::new())
+        .unwrap()
+        .unwrap();
+    let id = applied.receipts[0].revision_ids[0].clone();
+    let cell_runs = |env: &RenderEnv| {
+        let blocks = lower(&engine, env);
+        runs(&blocks[0]["rows"][0]["cells"][0]["blocks"], 0)
+            .into_iter()
+            .map(|run| (run.0, run.3))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        cell_runs(&RenderEnv::default()),
+        [
+            ("cell ".to_owned(), ""),
+            ("BETA".to_owned(), "ins"),
+            ("beta".to_owned(), "del")
+        ]
+    );
+    assert_eq!(
+        cell_runs(&preview(&[(&id, Accepted)])),
+        [("cell BETA".to_owned(), "")]
+    );
+    assert_eq!(
+        cell_runs(&preview(&[(&id, Rejected)])),
+        [("cell ".to_owned(), ""), ("beta".to_owned(), "")]
+    );
+}
+
+#[test]
 fn the_preview_parses_leniently_and_keys_the_lowering_cache() {
     let parsed: RenderEnv = serde_json::from_value(json!({
         "revisionPreview": {"a": "accepted", "b": "rejected", "c": "proposed", "d": 1, "e": null}
