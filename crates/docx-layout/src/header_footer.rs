@@ -6,7 +6,7 @@ use crate::measure_blocks::{MeasurementConfig, extent_height, measure_blocks, me
 use crate::paragraph_spacing::apply_contextual_spacing_blocks;
 use crate::types::{
     BlockExtent, BlockId, FieldRun, ImageRun, Layout, LayoutBlock, MeasuredBlock, PageMargins,
-    ParagraphBlock, Run, RunFormatting, Size,
+    ParagraphBlock, Run, Size,
 };
 
 const DEFAULT_HF_DISTANCE_PX: f64 = 48.0;
@@ -251,13 +251,7 @@ fn measure_field_text(
         id: BlockId::Num(0.0),
         para_id: None,
         runs: vec![Run::Field(FieldRun {
-            fmt: RunFormatting {
-                bold: field.fmt.bold,
-                italic: field.fmt.italic,
-                font_family: field.fmt.font_family.clone(),
-                font_size: field.fmt.font_size,
-                ..RunFormatting::default()
-            },
+            fmt: field.fmt.clone(),
             field_type: field.field_type.clone(),
             raw_type: None,
             instruction: None,
