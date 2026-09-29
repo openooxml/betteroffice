@@ -28,6 +28,42 @@ export interface RawAnchorRange {
 
 type AnchorResolution = { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc } | AnchorFailure;
 
+/** Whole-story reads of one document version; each runs once while the document stays at it. */
+interface VersionReads {
+  version: string;
+  revisions?: ReturnType<AnchorSession['listRevisions']>;
+  spans: Map<string, ReturnType<AnchorSession['paragraphSpans']>>;
+  segments: Map<string, readonly YrsStorySegment[]>;
+  anchors: Map<string, ReturnType<AnchorSession['resolveParagraphAnchor']>>;
+}
+
+const versionReads = new WeakMap<AnchorSession, VersionReads>();
+
+function readsAt(session: AnchorSession, version: string): VersionReads {
+  let reads = versionReads.get(session);
+  if (reads?.version !== version) {
+    reads = { version, spans: new Map(), segments: new Map(), anchors: new Map() };
+    versionReads.set(session, reads);
+  }
+  return reads;
+}
+
+function once<K, V>(cache: Map<K, V>, key: K, read: () => V): V {
+  if (cache.has(key)) return cache.get(key)!;
+  const value = read();
+  cache.set(key, value);
+  return value;
+}
+
+function revisionsAt(session: AnchorSession, version: string) {
+  const reads = readsAt(session, version);
+  return (reads.revisions ??= session.listRevisions());
+}
+
+function segmentsAt(session: AnchorSession, version: string, story: string) {
+  return once(readsAt(session, version).segments, story, () => session.storySegments(story));
+}
+
 export function anchorFailure(
   code: AnchorFailure['failure']['code'],
   message: string
@@ -154,9 +190,13 @@ export function textRangeToRaw(
 
 function resolveParagraph(
   session: AnchorSession,
-  anchor: DocxParagraphAnchor
+  anchor: DocxParagraphAnchor,
+  version: string
 ): { ok: true; loc: YrsLoc; length: number } | AnchorFailure {
-  const resolved = session.resolveParagraphAnchor(anchor);
+  const reads = readsAt(session, version);
+  const resolved = once(reads.anchors, JSON.stringify(anchor), () =>
+    session.resolveParagraphAnchor(anchor)
+  );
   if (resolved.status === 'missing') {
     return anchorFailure('missing-target', 'The paragraph no longer exists');
   }
@@ -171,7 +211,9 @@ function resolveParagraph(
     return anchorFailure('unsupported', 'The paragraph has no body display position');
   }
   const { story, paraId } = resolved.anchor;
-  const spans = session.paragraphSpans(story).filter((paragraph) => paragraph.paraId === paraId);
+  const spans = once(reads.spans, story, () => session.paragraphSpans(story)).filter(
+    (paragraph) => paragraph.paraId === paraId
+  );
   if (spans.length > 1) {
     return anchorFailure('ambiguous-target', 'The paragraph cannot be resolved uniquely');
   }
@@ -180,12 +222,11 @@ function resolveParagraph(
 }
 
 /** The revisions the proposal preview hides: accepted deletions and rejected insertions. */
-export function hiddenRanges(session: AnchorSession): RawAnchorRange[] {
+export function hiddenRanges(session: AnchorSession, version: string): RawAnchorRange[] {
   const snapshot = proposalSnapshot(session);
   const preview = snapshot ? proposalRevisionPreview(snapshot) : undefined;
   if (!preview) return [];
-  return session
-    .listRevisions()
+  return revisionsAt(session, version)
     .filter(
       ({ revisionId, kind }) =>
         (kind === 'deletion' && preview[revisionId] === 'accepted') ||
@@ -212,7 +253,7 @@ export function resolveAnchorTarget(
     if (!session.hasStory(target.range.story)) {
       return anchorFailure('missing-target', 'The story no longer exists');
     }
-    const mapped = textRangeToRaw(session.storySegments(target.range.story), target.range);
+    const mapped = textRangeToRaw(segmentsAt(session, version, target.range.story), target.range);
     return mapped.ok
       ? {
           ok: true,
@@ -230,13 +271,11 @@ export function resolveAnchorTarget(
     if (target.kind === 'proposal' && !proposal) {
       return anchorFailure('unknown-proposal', 'The proposal is not registered in this document');
     }
-    const revisions = session
-      .listRevisions()
-      .filter((revision) =>
-        target.kind === 'revision'
-          ? revision.revisionId === target.revisionId
-          : proposal!.revisionIds.includes(revision.revisionId)
-      );
+    const revisions = revisionsAt(session, version).filter((revision) =>
+      target.kind === 'revision'
+        ? revision.revisionId === target.revisionId
+        : proposal!.revisionIds.includes(revision.revisionId)
+    );
     if (target.kind === 'revision' && !revisions.length) {
       return anchorFailure('missing-target', 'The revision no longer exists');
     }
@@ -248,13 +287,13 @@ export function resolveAnchorTarget(
       return anchorFailure('unsupported', 'The revision has no body display position');
     }
     if (proposal) {
-      const paragraph = resolveParagraph(session, proposal.paragraph);
+      const paragraph = resolveParagraph(session, proposal.paragraph, version);
       return paragraph.ok ? { ok: true, ranges, paragraph: paragraph.loc } : paragraph;
     }
     return { ok: true, ranges, paragraph: { ...ranges[0]!.start, offset: 0 } };
   }
 
-  const paragraph = resolveParagraph(session, target.paragraph);
+  const paragraph = resolveParagraph(session, target.paragraph, version);
   if (!paragraph.ok) return paragraph;
   if (target.kind === 'paragraph') {
     return {
@@ -313,7 +352,7 @@ export function resolveAnchorTarget(
       `The requested search occurrence (${occurrence}) is unavailable`
     );
   }
-  const paragraphs = viewParagraphs(session.storySegments(story), 'accepted').filter(
+  const paragraphs = viewParagraphs(segmentsAt(session, version, story), 'accepted').filter(
     (entry) => entry.paraId === paraId
   );
   const ranges: RawAnchorRange[] = [];

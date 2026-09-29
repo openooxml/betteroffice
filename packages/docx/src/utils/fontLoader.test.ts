@@ -5,13 +5,17 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { configureDefaultFonts } = await import('../layout/measure/defaultFontProvider');
 const {
+  createFontLoadScope,
+  isFontLoaded,
   loadFont,
   loadFontFromBuffer,
   loadFontWithMapping,
   onFontError,
   onFontsLoaded,
+  registerDocumentFaces,
   setGoogleFontsEnabled,
 } = await import('./fontLoader');
+type BufferFaceInput = import('./fontLoader').BufferFaceInput;
 
 type Face = { family: string; weight?: string; style?: string };
 
@@ -473,4 +477,284 @@ test('without the FontFace API a bundled family settles false', async () => {
   } finally {
     Object.assign(globalThis, { FontFace: fontFace });
   }
+});
+
+const faceStyles = () =>
+  [...document.head.querySelectorAll('style')].map(
+    (style) => /font-family: "([^"]+)"/.exec(style.textContent ?? '')?.[1]
+  );
+const fontBytes = (...bytes: number[]) => new Uint8Array(bytes).buffer;
+
+test('a family Google does not serve is asked for once, and its link removed', async () => {
+  const pending = loadFont('Unserved Office Face');
+  const [link] = googleLinks();
+  link.onerror?.(new Event('error'));
+  expect(await pending).toBe(false);
+  expect(googleLinks()).toHaveLength(0);
+  expect(await loadFont('Unserved Office Face')).toBe(false);
+  expect(googleLinks()).toHaveLength(0);
+  const now = Date.now;
+  Date.now = () => now() + 5 * 60_000;
+  try {
+    void loadFont('Unserved Office Face');
+    expect(googleLinks()).toHaveLength(1);
+    googleLinks()[0].onerror?.(new Event('error'));
+  } finally {
+    Date.now = now;
+  }
+});
+
+test('documents embedding different faces under one name each keep their own', async () => {
+  const first = createFontLoadScope();
+  const second = createFontLoadScope();
+  const faces = (data: ArrayBuffer) => [{ family: 'Shared Body', data, weight: 'normal' as const }];
+  expect(await registerDocumentFaces(faces(fontBytes(1, 2, 3)), first)).toEqual(
+    new Map([['Shared Body', 'Shared Body']])
+  );
+  const aliased = await registerDocumentFaces(faces(fontBytes(4, 5, 6)), second);
+  const alias = aliased.get('Shared Body')!;
+  expect(alias).not.toBe('Shared Body');
+  expect(await registerDocumentFaces(faces(fontBytes(1, 2, 3)), createFontLoadScope())).toEqual(
+    new Map([['Shared Body', 'Shared Body']])
+  );
+  expect(faceStyles()).toEqual(['Shared Body', alias]);
+  first.dispose();
+  second.dispose();
+});
+
+test("a scope's next document takes the family name its previous one held", async () => {
+  const scope = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Swapped Face', data: fontBytes(1) }], scope);
+  expect(await registerDocumentFaces([{ family: 'Swapped Face', data: fontBytes(2) }], scope)).toEqual(
+    new Map([['Swapped Face', 'Swapped Face']])
+  );
+  expect(faceStyles()).toEqual(['Swapped Face']);
+  scope.dispose();
+});
+
+test('embedded faces live as long as a scope holds them', async () => {
+  const revoked: string[] = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = (url) => void revoked.push(url);
+  try {
+    const shown = createFontLoadScope();
+    const other = createFontLoadScope();
+    const face = { family: 'Held Face', data: fontBytes(7, 7, 7) };
+    await registerDocumentFaces([face], shown);
+    await registerDocumentFaces([face], other);
+    shown.dispose();
+    expect(faceStyles()).toEqual(['Held Face']);
+    await registerDocumentFaces([{ family: 'Next Face', data: fontBytes(8) }], other);
+    expect(faceStyles()).toEqual(['Next Face']);
+    expect(revoked).toHaveLength(1);
+    other.dispose();
+    expect(faceStyles()).toEqual([]);
+    expect(revoked).toHaveLength(2);
+    expect(await loadFontFromBuffer('Kept Face', fontBytes(9))).toBe(true);
+    expect(faceStyles()).toEqual(['Kept Face']);
+  } finally {
+    URL.revokeObjectURL = revoke;
+  }
+});
+
+test('a scope hears its own loads and module-level ones, not another scope\'s', async () => {
+  configureDefaultFonts({ fonts: bundle(['Scoped Serif', 'Module Serif', 'Broken Serif']) });
+  const mine = createFontLoadScope();
+  const theirs = createFontLoadScope();
+  const heard = { mine: [] as string[], theirs: [] as string[], errors: [] as string[] };
+  mine.onFontsLoaded((fonts) => heard.mine.push(...fonts));
+  theirs.onFontsLoaded((fonts) => heard.theirs.push(...fonts));
+  theirs.onFontError((error) => heard.errors.push(error.message));
+  const unsubscribe = onFontError(() => {});
+  await mine.loadFontsWithMapping(['Scoped Serif']);
+  await loadFont('Module Serif');
+  failNextFaceLoad = true;
+  await mine.loadFontsWithMapping(['Broken Serif']);
+  expect(heard).toEqual({ mine: ['Scoped Serif', 'Module Serif', 'Broken Serif'], theirs: ['Module Serif'], errors: [] });
+  unsubscribe();
+  mine.dispose();
+  theirs.dispose();
+});
+
+test('a document reclaiming its faces mid-replacement keeps them marked as its name', async () => {
+  const scope = createFontLoadScope();
+  const face = (byte: number) => [{ family: 'Reclaimed Face', data: fontBytes(byte, byte) }];
+  await registerDocumentFaces(face(1), scope);
+  const replacing = registerDocumentFaces(face(2), scope);
+  const reclaiming = registerDocumentFaces(face(1), scope);
+  await Promise.all([replacing, reclaiming]);
+  const other = createFontLoadScope();
+  const [alias] = (await registerDocumentFaces(face(3), other)).values();
+  expect(alias).not.toBe('Reclaimed Face');
+  expect(faceStyles()).toEqual(['Reclaimed Face', alias]);
+  scope.dispose();
+  other.dispose();
+});
+
+test('names collide regardless of case, as CSS matches them', async () => {
+  const first = createFontLoadScope();
+  const second = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Cased Face', data: fontBytes(4) }], first);
+  const [alias] = (
+    await registerDocumentFaces([{ family: 'cased face', data: fontBytes(5) }], second)
+  ).values();
+  expect(alias.toLowerCase()).not.toBe('cased face');
+  first.dispose();
+  second.dispose();
+});
+
+test('a scope joining another scope\'s pending face hears it load, and a revived scope hears again', async () => {
+  const registering = createFontLoadScope();
+  const joining = createFontLoadScope();
+  const heard: string[] = [];
+  joining.onFontsLoaded((fonts) => heard.push(...fonts));
+  const registered = registerDocumentFaces([{ family: 'Joined Face', data: fontBytes(6) }], registering);
+  await Promise.all([registered, joining.loadFontsWithMapping(['Joined Face'])]);
+  expect(heard).toEqual(['Joined Face']);
+  joining.dispose();
+  joining.onFontsLoaded((fonts) => heard.push(...fonts));
+  expect(joining.disposed).toBe(false);
+  await registerDocumentFaces([{ family: 'Revived Face', data: fontBytes(7) }], joining);
+  expect(heard).toEqual(['Joined Face', 'Revived Face']);
+  registering.dispose();
+  joining.dispose();
+});
+
+test('a disposed scope\'s face that another scope registers again still loads', async () => {
+  const dropped = createFontLoadScope();
+  const next = createFontLoadScope();
+  const heard: string[] = [];
+  next.onFontsLoaded((fonts) => heard.push(...fonts));
+  const first = registerDocumentFaces([{ family: 'Churned Face', data: fontBytes(8) }], dropped);
+  dropped.dispose();
+  const second = registerDocumentFaces([{ family: 'Churned Face', data: fontBytes(8) }], next);
+  await Promise.all([first, second]);
+  expect(heard).toEqual(['Churned Face']);
+  expect(faceStyles()).toEqual(['Churned Face']);
+  next.dispose();
+});
+
+test('a mapped family is no longer loaded once the scoped face it relied on is released', async () => {
+  const scope = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Arimo', data: fontBytes(9) }], scope);
+  await scope.loadFontsWithMapping(['Arial']);
+  expect(isFontLoaded('Arial')).toBe(true);
+  scope.dispose();
+  expect(isFontLoaded('Arimo')).toBe(false);
+  expect(isFontLoaded('Arial')).toBe(false);
+});
+
+test('a face joined by a family load is announced once to each listener', async () => {
+  const mine = createFontLoadScope();
+  const other = createFontLoadScope();
+  const heard = { module: [] as string[], mine: [] as string[], other: [] as string[] };
+  const unsubscribe = onFontsLoaded((fonts) => heard.module.push(...fonts));
+  mine.onFontsLoaded((fonts) => heard.mine.push(...fonts));
+  other.onFontsLoaded((fonts) => heard.other.push(...fonts));
+  await Promise.all([
+    registerDocumentFaces([{ family: 'Joined Once', data: fontBytes(10) }], mine),
+    loadFont('Joined Once'),
+    mine.loadFontsWithMapping(['Joined Once']),
+  ]);
+  expect(heard).toEqual({ module: ['Joined Once'], mine: ['Joined Once'], other: ['Joined Once'] });
+  unsubscribe();
+  mine.dispose();
+  other.dispose();
+});
+
+test('a mapped family released while its load waited is not marked loaded', async () => {
+  const scope = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Libre Franklin', data: fontBytes(11) }], scope);
+  const mapping = loadFontWithMapping('Franklin Gothic');
+  scope.dispose();
+  await mapping;
+  expect(isFontLoaded('Libre Franklin')).toBe(false);
+  expect(isFontLoaded('Franklin Gothic')).toBe(false);
+});
+
+test('the same face under another spelling of its name is loaded under that spelling too', async () => {
+  setGoogleFontsEnabled(false);
+  expect(await loadFontFromBuffer('Review Casing', fontBytes(12))).toBe(true);
+  expect(await loadFontFromBuffer('review casing', fontBytes(12))).toBe(true);
+  expect(faceStyles()).toEqual(['Review Casing']);
+  expect(isFontLoaded('review casing')).toBe(true);
+  expect(await loadFont('review casing')).toBe(true);
+});
+
+test('weights CSS treats as equal collide', async () => {
+  const first = createFontLoadScope();
+  const second = createFontLoadScope();
+  for (const [weight, same] of [['normal', 400], ['bold', '700']] as const) {
+    const family = `Weighted ${weight}`;
+    await registerDocumentFaces([{ family, data: fontBytes(13), weight }], first);
+    const [cssFamily] = (
+      await registerDocumentFaces([{ family, data: fontBytes(14), weight: same }], second)
+    ).values();
+    expect(cssFamily).not.toBe(family);
+  }
+  first.dispose();
+  second.dispose();
+});
+
+test('of two documents loading into one scope the later call wins, whichever faces arrive first', async () => {
+  const scope = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Shown Face', data: fontBytes(15) }], scope);
+  let arrive!: (faces: BufferFaceInput[]) => void;
+  const older = registerDocumentFaces(new Promise<BufferFaceInput[]>((resolve) => (arrive = resolve)), scope);
+  expect(await registerDocumentFaces([], scope)).toEqual(new Map());
+  expect(isFontLoaded('Shown Face')).toBe(false);
+  expect(faceStyles()).toEqual([]);
+  arrive([{ family: 'Overtaken Face', data: fontBytes(16) }]);
+  expect(await older).toEqual(new Map());
+  expect(faceStyles()).toEqual([]);
+  scope.dispose();
+});
+
+test('a parsed document an editor shows takes back the name its previous document held', async () => {
+  const shown = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Parsed Collision', data: fontBytes(17) }], shown);
+  const parsed = [{ family: 'Parsed Collision', data: fontBytes(18) }];
+  const [pageAlias] = (await registerDocumentFaces(parsed)).values();
+  expect(pageAlias).not.toBe('Parsed Collision');
+  expect(await registerDocumentFaces(parsed, shown)).toEqual(
+    new Map([['Parsed Collision', 'Parsed Collision']])
+  );
+  expect(faceStyles()).toEqual([pageAlias, 'Parsed Collision']);
+  shown.dispose();
+});
+
+test('a claim made before a scope was disposed stays obsolete after it revives', async () => {
+  const scope = createFontLoadScope();
+  let arrive!: (faces: BufferFaceInput[]) => void;
+  const pending = registerDocumentFaces(new Promise<BufferFaceInput[]>((resolve) => (arrive = resolve)), scope);
+  scope.dispose();
+  scope.onFontsLoaded(() => {});
+  arrive([{ family: 'Disposed Claim Face', data: fontBytes(19) }]);
+  expect(await pending).toEqual(new Map());
+  expect(faceStyles()).toEqual([]);
+  scope.dispose();
+});
+
+test('a scope joining a bundled face still loading past its deadline hears it fail', async () => {
+  jest.useFakeTimers();
+  let fail!: (error: Error) => void;
+  const overdue = new Promise<ArrayBuffer>((_, reject) => (fail = reject));
+  const load = () => overdue;
+  configureDefaultFonts({
+    fonts: { createFontProvider: () => ({ resolve: () => load, resolveFamily: () => load }) },
+  });
+  const first = createFontLoadScope();
+  const second = createFontLoadScope();
+  const heard: string[] = [];
+  first.onFontError(() => {});
+  second.onFontError((error) => heard.push(error.message));
+  const firstLoad = first.loadFontsWithMapping(['Overdue Sans']);
+  jest.advanceTimersByTime(5000);
+  await firstLoad;
+  first.dispose();
+  const secondLoad = second.loadFontsWithMapping(['Overdue Sans']);
+  fail(new Error('bundle unreachable'));
+  await secondLoad;
+  expect(heard).toHaveLength(4);
+  second.dispose();
 });

@@ -170,9 +170,8 @@ function renderBoundary(
     box.appendChild(chip);
   }
 
-  const kind = blockWidgetKind(attrs.sdtType);
-  const mutable = !attrs.bound && !isLocked(attrs.lock);
-  if (kind && mutable) {
+  const { kind, repeat } = boundaryControls(attrs);
+  if (kind) {
     const trigger = doc.createElement('button');
     trigger.type = 'button';
     trigger.className = 'layout-sdt-widget';
@@ -195,7 +194,7 @@ function renderBoundary(
     box.appendChild(trigger);
   }
 
-  if (attrs.repeatingItem && mutable) {
+  if (repeat) {
     const controls = doc.createElement('div');
     controls.className = 'layout-sdt-repeat-controls';
     controls.style.pointerEvents = 'auto';
@@ -292,6 +291,31 @@ function blockWidgetKind(sdtType: string): 'checkbox' | 'dropdown' | 'date' | nu
   if (sdtType === 'dropDownList' || sdtType === 'comboBox') return 'dropdown';
   if (sdtType === 'date') return 'date';
   return null;
+}
+
+/** The buttons a content-control boundary shows: a widget trigger and repeat buttons. */
+function boundaryControls(attrs: SdtAttrs): {
+  kind: ReturnType<typeof blockWidgetKind>;
+  repeat: boolean;
+} {
+  const mutable = !attrs.bound && !isLocked(attrs.lock);
+  return {
+    kind: mutable ? blockWidgetKind(attrs.sdtType) : null,
+    repeat: Boolean(attrs.repeatingItem) && mutable,
+  };
+}
+
+/** Whether `buildInteractiveOverlayPage(page)` holds a control Tab stops at. */
+export function interactiveOverlayHasTabStops(page: DisplayPage): boolean {
+  const primitives = pagePrimitives(page);
+  for (const extent of collectSdtExtents(primitives).values()) {
+    const { kind, repeat } = boundaryControls(extent.attrs);
+    if (kind || repeat) return true;
+  }
+  for (const extent of collectWidgetExtents(primitives).values()) {
+    if (extent.attrs.locked !== true) return true;
+  }
+  return false;
 }
 
 function isLocked(lock: string | undefined): boolean {

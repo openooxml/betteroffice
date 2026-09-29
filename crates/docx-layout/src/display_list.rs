@@ -10730,6 +10730,14 @@ fn unbuilt_page(
     page_index: usize,
     blocks: &HashMap<String, &MeasuredBlockIn>,
 ) -> DisplayPage {
+    unbuilt_page_with_span(page, page_index, page_position_span(page, blocks))
+}
+
+fn unbuilt_page_with_span(
+    page: &PageIn,
+    page_index: usize,
+    position_span: Option<[i64; 2]>,
+) -> DisplayPage {
     let (content_bounds, column_bounds) = page_content_geometry(page);
     DisplayPage {
         page_index: page_index as u64,
@@ -10749,8 +10757,72 @@ fn unbuilt_page(
         footer: None,
         note_areas: Vec::new(),
         unbuilt: true,
-        position_span: page_position_span(page, blocks),
+        position_span,
     }
+}
+
+/// [`page_position_span`] read from a pagination page and its measured blocks,
+/// converting positions as the resident transcoder does: a non-finite one is
+/// absent and a fractional or out-of-range one is an error.
+fn layout_page_position_span(
+    page: &crate::types::Page,
+    blocks: &HashMap<String, &crate::types::MeasuredBlock>,
+) -> Result<Option<[i64; 2]>, String> {
+    use crate::types::{Fragment, LayoutBlock, TableRow};
+    fn block(block: &LayoutBlock, positions: &mut Vec<Option<f64>>) {
+        match block {
+            LayoutBlock::Paragraph(paragraph) => {
+                positions.extend([paragraph.pm_start, paragraph.pm_end]);
+            }
+            LayoutBlock::Image(image) => positions.extend([image.pm_start, image.pm_end]),
+            LayoutBlock::Table(table) => rows(&table.rows, positions),
+            _ => {}
+        }
+    }
+    fn rows(rows: &[TableRow], positions: &mut Vec<Option<f64>>) {
+        for row in rows {
+            for cell in &row.cells {
+                for nested in &cell.blocks {
+                    block(nested, positions);
+                }
+            }
+        }
+    }
+    let mut positions = Vec::new();
+    for fragment in &page.fragments {
+        match fragment {
+            Fragment::Paragraph(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::Image(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::TextBox(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::Shape(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::Chart(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::Table(fragment) => {
+                if let Some(measured) = blocks.get(&crate_block_id_key(&fragment.block_id))
+                    && let LayoutBlock::Table(table) = &measured.block
+                {
+                    let end = fragment.row_end.min(table.rows.len());
+                    let start = fragment.row_start.min(end);
+                    rows(&table.rows[start..end], &mut positions);
+                }
+            }
+        }
+    }
+    let mut span: Option<[i64; 2]> = None;
+    for value in positions.into_iter().flatten() {
+        if !value.is_finite() {
+            continue;
+        }
+        if value.fract() != 0.0 || value < i64::MIN as f64 || value > i64::MAX as f64 {
+            return Err(format!(
+                "resident display body position {value} is not an integer"
+            ));
+        }
+        let value = value as i64;
+        span = Some(span.map_or([value, value], |[low, high]| {
+            [low.min(value), high.max(value)]
+        }));
+    }
+    Ok(span)
 }
 
 fn resident_build_input(
@@ -10943,6 +11015,38 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
     position_deltas: &HashMap<String, i64>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
+    update_resident_display_list_incremental_partial_with_fonts_observed(
+        pagination,
+        layout,
+        fonts,
+        resident,
+        previous,
+        rebuilt_page_start,
+        rebuilt_page_end,
+        extra_pages,
+        position_deltas,
+        &|_| true,
+        observe_phase,
+    )
+}
+
+/// [`update_resident_display_list_incremental_with_fonts_observed`] that builds
+/// only the rebuilt pages `build` selects; the others become unbuilt
+/// placeholders of their new layout pages.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    resident: &mut ResidentDisplayInput,
+    previous: &mut DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<bool, String> {
     if previous.pages.len() != layout.pages.len()
         || resident.input.layout.pages.len() != layout.pages.len()
     {
@@ -10958,20 +11062,42 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
         .chain(extra_pages.iter().copied())
         .collect();
 
-    refresh_resident_display_pages(
+    let built: HashSet<usize> = selected
+        .iter()
+        .copied()
+        .filter(|&page| build(page))
+        .collect();
+    // Only a built page reads its blocks' display form; a placeholder takes its
+    // position span from the pagination blocks directly.
+    refresh_resident_display_pages_reading(
         &mut resident.input,
         pagination,
         layout,
         selected.iter().copied(),
+        &built,
     )?;
     observe_phase();
 
-    let rebuilt = build_display_list_selected(&resident.input, fonts, Some(&selected));
+    let rebuilt = build_display_list_selected(&resident.input, fonts, Some(&built));
     observe_phase();
     previous.contract_version = rebuilt.contract_version;
     for page in rebuilt.pages {
         let page_index = page.page_index as usize;
         previous.pages[page_index] = page;
+    }
+    if built.len() < selected.len() {
+        let blocks: HashMap<String, &crate::types::MeasuredBlock> = pagination
+            .measured
+            .iter()
+            .map(|measured| (crate_block_key(&measured.block), measured))
+            .collect();
+        for &page_index in selected.difference(&built) {
+            previous.pages[page_index] = unbuilt_page_with_span(
+                &resident.input.layout.pages[page_index],
+                page_index,
+                layout_page_position_span(&layout.pages[page_index], &blocks)?,
+            );
+        }
     }
     for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
         if selected.contains(&page_index) {
@@ -10996,13 +11122,29 @@ fn refresh_resident_display_pages(
     layout: &crate::types::Layout,
     rebuilt_pages: impl IntoIterator<Item = usize>,
 ) -> Result<(), String> {
+    let pages: Vec<usize> = rebuilt_pages.into_iter().collect();
+    let reading: HashSet<usize> = pages.iter().copied().collect();
+    refresh_resident_display_pages_reading(input, pagination, layout, pages, &reading)
+}
+
+/// Refreshes the layout pages `rebuilt_pages`, and the measured blocks of those
+/// among them in `reading`.
+fn refresh_resident_display_pages_reading(
+    input: &mut BuildInput,
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    rebuilt_pages: impl IntoIterator<Item = usize>,
+    reading: &HashSet<usize>,
+) -> Result<(), String> {
     let mut selected_blocks = HashSet::new();
     for page_index in rebuilt_pages {
         let page: PageIn =
             convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
-        for fragment in &page.fragments {
-            if let Some(key) = fragment_block_key(fragment) {
-                selected_blocks.insert(key);
+        if reading.contains(&page_index) {
+            for fragment in &page.fragments {
+                if let Some(key) = fragment_block_key(fragment) {
+                    selected_blocks.insert(key);
+                }
             }
         }
         input.layout.pages[page_index] = page;
