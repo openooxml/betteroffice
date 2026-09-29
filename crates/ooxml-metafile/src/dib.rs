@@ -283,7 +283,7 @@ fn rle(
         let (count, value) = (bits[at] as usize, bits[at + 1]);
         at += 2;
         if count > 0 {
-            for step in 0..count {
+            for step in 0..count.min(width.saturating_sub(x)) {
                 let index = if four {
                     if step % 2 == 0 {
                         value >> 4
@@ -293,9 +293,9 @@ fn rle(
                 } else {
                     value
                 };
-                put(x, y, usize::from(index));
-                x += 1;
+                put(x + step, y, usize::from(index));
             }
+            x = x.saturating_add(count);
             continue;
         }
         match value {
@@ -310,7 +310,7 @@ fn rle(
                     *bits.get(at + 1).ok_or("a bitmap's bits are truncated")? as usize,
                 );
                 at += 2;
-                x += dx;
+                x = x.saturating_add(dx);
                 y += dy;
             }
             literal => {
@@ -319,7 +319,7 @@ fn rle(
                 let run = bits
                     .get(at..at + bytes)
                     .ok_or("a bitmap's bits are truncated")?;
-                for step in 0..literal {
+                for step in 0..literal.min(width.saturating_sub(x)) {
                     let index = if four {
                         let byte = run[step / 2];
                         if step % 2 == 0 {
@@ -330,9 +330,9 @@ fn rle(
                     } else {
                         run[step]
                     };
-                    put(x, y, usize::from(index));
-                    x += 1;
+                    put(x + step, y, usize::from(index));
                 }
+                x = x.saturating_add(literal);
                 at += bytes.div_ceil(2) * 2;
             }
         }

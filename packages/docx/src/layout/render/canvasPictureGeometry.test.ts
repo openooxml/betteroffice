@@ -111,6 +111,19 @@ test('an embedded picture that does not decode paints a placeholder inside its t
   expect(recorder.depth()).toBe(0);
 });
 
+test('an ellipse picture that does not decode clips its placeholder to the ellipse', async () => {
+  const recorder = recordingContext();
+  await drawPrimitive(recorder.ctx, {
+    ...image('ellipse'),
+    relId: 'data:image/x-emf;base64,AQAAAA==',
+  }, { resolveImage: async () => null });
+  const clip = recorder.calls.findIndex((call) => call[0] === 'clip');
+  const fill = recorder.calls.findIndex((call) => call[0] === 'fillRect');
+  expect(recorder.calls[clip - 1]).toEqual(['ellipse', 60, 60, 50, 40, 0, 0, 2 * Math.PI]);
+  expect(fill).toBeGreaterThan(clip);
+  expect(recorder.depth()).toBe(0);
+});
+
 test.each(['rId7', 'https://example.com/picture.png'])(
   'a source the resolver refuses (%s) paints nothing',
   async (relId) => {

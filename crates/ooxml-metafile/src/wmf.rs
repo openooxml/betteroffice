@@ -333,7 +333,12 @@ fn wmf_record<const FULL: bool>(
             };
             store_object(player, object);
         }
-        0x0103 if FULL || u16_at(bytes, body)? == 8 => {}
+        0x0103 if FULL => {
+            if (2..=6).contains(&u16_at(bytes, body)?) {
+                player.omit("WMF fixed mapping modes drawn in the picture frame")?;
+            }
+        }
+        0x0103 if u16_at(bytes, body)? == 8 => {}
         // SETROP2, SETRELABS, SETTEXTALIGN and ESCAPE set state the strict
         // replay never reads.
         0x0102 | 0x0104 | 0x0105 | 0x0107 | 0x0108 | 0x012E | 0x0201 | 0x0209 | 0x020A | 0x0626
@@ -481,7 +486,9 @@ fn full_record<const FULL: bool>(
             {
                 player.dc.brush = Some(brush);
             }
-            player.path = region_path(player, &rects);
+            let path = region_path(player, &rects);
+            player.charge(path.len(), 0)?;
+            player.path = path;
             let fill = player.brush_fill();
             if function == 0x0429 {
                 let width = word(6).unwrap_or(1.0).max(1.0) * player.device_pixel();
@@ -515,8 +522,8 @@ fn full_record<const FULL: bool>(
 
 /// A `META_CREATEREGION` object's scan rectangles in logical units.
 fn region_rects(bytes: &[u8], body: usize, limit: usize) -> Option<Arc<[[f64; 4]]>> {
-    let scans = u16_at(bytes, body + 12)? as usize;
-    let mut at = body + 24;
+    let scans = u16_at(bytes, body + 10)? as usize;
+    let mut at = body + 22;
     let mut rects = Vec::new();
     for _ in 0..scans {
         let count = u16_at(bytes, at)? as usize;

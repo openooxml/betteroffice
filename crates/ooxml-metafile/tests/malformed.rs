@@ -249,3 +249,99 @@ fn a_last_pending_line_past_the_strict_op_limit_refuses() {
     assert!(decode(&drawing(4_095)).is_some());
     assert!(decode(&drawing(4_096)).is_none());
 }
+
+#[test]
+fn repainting_one_wmf_region_spends_the_budget() {
+    let mut region = u16s(&[0, 6]);
+    region.extend(u32s(&[0]));
+    region.extend(i16s(&[0, 1, 0, 0, 0, 1000, 1000]));
+    region.extend(u16s(&[20_000]));
+    region.extend(i16s(&[0, 10]));
+    for pair in 0..10_000i16 {
+        region.extend(i16s(&[pair % 1000, pair % 1000 + 1]));
+    }
+    region.extend(u16s(&[20_000]));
+    let wmf = |paints: usize| {
+        let mut records = vec![
+            (
+                0x02FC,
+                [u16s(&[0]), u32s(&[0x00ff_0000]), u16s(&[0])].concat(),
+            ),
+            (0x012D, u16s(&[0])),
+            (0x06FF, region.clone()),
+        ];
+        records.extend((0..paints).map(|_| (0x012B, u16s(&[1]))));
+        Wmf::new(1000, 1000, 1440).recs(records).bytes()
+    };
+    assert!(to_svg(&wmf(3)).is_ok());
+    assert!(to_svg(&wmf(100)).is_err());
+}
+
+#[test]
+fn a_wide_emf_plus_region_tree_refuses_before_chaining_its_clips() {
+    fn tree(depth: u32, out: &mut Vec<u8>) {
+        if depth == 0 {
+            out.extend(u32s(&[0x1000_0002]));
+            return;
+        }
+        out.extend(u32s(&[1]));
+        tree(depth - 1, out);
+        tree(depth - 1, out);
+    }
+    let mut region = u32s(&[0xDBC0_1002, (1 << 16) - 2]);
+    tree(15, &mut region);
+    let bytes = Emf::new(10, 10)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(false),
+                (0x4008, 0x0400, region),
+                (0x4034, 0, Vec::new()),
+                plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 5.0, 5.0]]),
+            ])
+            .1,
+        )
+        .bytes();
+    assert!(to_svg(&bytes).is_err());
+}
+
+#[test]
+fn a_compressed_dib_is_charged_its_real_size() {
+    let mut bmi = u32s(&[40, 1, 1]);
+    bmi.extend(u16s(&[1, 0]));
+    bmi.extend(u32s(&[5, 0, 0, 0, 0, 0]));
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(4096u32.to_be_bytes());
+    png.extend(4096u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0]);
+    let dib = (bmi, png);
+    let blits = |count: usize| {
+        Emf::new(10, 10)
+            .recs(
+                (0..count)
+                    .map(|_| stretch_dibits([0, 0, 10, 10], &dib, 0x00CC_0020))
+                    .collect(),
+            )
+            .bytes()
+    };
+    assert!(to_svg(&blits(1)).is_ok());
+    assert!(to_svg(&blits(2)).is_err());
+}
+
+#[test]
+fn run_length_bitmaps_stop_expanding_past_their_width() {
+    let mut bmi = u32s(&[40, 1, 1]);
+    bmi.extend(u16s(&[1, 8]));
+    bmi.extend(u32s(&[1, 0, 0, 0, 2, 0]));
+    bmi.extend(u32s(&[0, 0x00ff_ffff]));
+    let runs: Vec<u8> = std::iter::repeat_n([255u8, 1], 200_000).flatten().collect();
+    check(
+        &Emf::new(10, 10)
+            .recs(vec![stretch_dibits(
+                [0, 0, 10, 10],
+                &(bmi, runs),
+                0x00CC_0020,
+            )])
+            .bytes(),
+    );
+}

@@ -1314,7 +1314,13 @@ async function drawImagePrimitive(
     ctx.translate(-cx, -cy);
   }
   if (!source) {
+    ctx.save();
+    if (image.shapeType === 'ellipse') {
+      traceImageEllipse(ctx, frame);
+      ctx.clip();
+    }
     drawImagePlaceholder(ctx, frame);
+    ctx.restore();
   } else if (image.shapeType === 'ellipse') {
     ctx.save();
     traceImageEllipse(ctx, frame);

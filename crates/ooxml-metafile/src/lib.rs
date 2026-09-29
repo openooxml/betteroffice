@@ -99,19 +99,26 @@ fn play_full_emf(bytes: &[u8], depth: usize) -> Result<Player<true>, String> {
     }
 }
 
-/// Whether the EMF's first comment opens an EMF+ stream.
+/// Whether an EMF+ header comment comes before the EMF's first drawing record.
 fn has_plus_header(bytes: &[u8]) -> bool {
     let mut offset = 0usize;
-    for _ in 0..player::FULL_LIMITS.records {
-        let (Some(kind), Some(size)) = (u32_at(bytes, offset), u32_at(bytes, offset + 4)) else {
+    for index in 0..player::FULL_LIMITS.records {
+        let (Some(kind), Some(size)) = (
+            u32_at(bytes, offset),
+            u32_at(bytes, offset.saturating_add(4)),
+        ) else {
             return false;
         };
-        if kind == emf::EMF_EOF || size < 8 {
+        if size < 8 {
             return false;
         }
-        if kind == emf::EMF_COMMENT {
-            return u32_at(bytes, offset + 12) == Some(emf::EMF_PLUS)
-                && u16_at(bytes, offset + 16) == Some(0x4001);
+        match kind {
+            emf::EMF_COMMENT if u32_at(bytes, offset + 12) == Some(emf::EMF_PLUS) => {
+                return u16_at(bytes, offset + 16) == Some(0x4001);
+            }
+            emf::EMF_COMMENT => {}
+            1 if index == 0 => {}
+            _ => return false,
         }
         offset = offset.saturating_add(size as usize);
     }
@@ -172,7 +179,10 @@ pub(crate) fn play_emf<const FULL: bool>(
     }
     let mut offset = 0usize;
     for index in 0..player.limits.records {
-        let (Some(kind), Some(size)) = (u32_at(bytes, offset), u32_at(bytes, offset + 4)) else {
+        let (Some(kind), Some(size)) = (
+            u32_at(bytes, offset),
+            u32_at(bytes, offset.saturating_add(4)),
+        ) else {
             return Err("the EMF ends before its EOF record".to_owned());
         };
         let size = size as usize;
@@ -220,7 +230,10 @@ pub(crate) fn play_emf<const FULL: bool>(
 fn has_gdi_records(bytes: &[u8], limit: usize) -> bool {
     let mut offset = 0usize;
     for _ in 0..limit {
-        let (Some(kind), Some(size)) = (u32_at(bytes, offset), u32_at(bytes, offset + 4)) else {
+        let (Some(kind), Some(size)) = (
+            u32_at(bytes, offset),
+            u32_at(bytes, offset.saturating_add(4)),
+        ) else {
             return false;
         };
         match kind {

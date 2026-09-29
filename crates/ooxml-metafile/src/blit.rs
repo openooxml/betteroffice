@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crate::dib::{Dib, DibPixels, decode, packed_bits_offset};
-use crate::drawing::{Bitmap, Image, Op, Paint, Pixels, Rgba};
-use crate::player::{Brush, GdiObject, Player, Xform, concat};
+use crate::drawing::{Bitmap, ClipRegion, Image, Op, Paint, PathCommand, Pixels, Rgba};
+use crate::player::{Brush, GdiObject, Player, Xform, apply, chain, concat};
 use crate::read::{finite_at, i16_at, i32_at, u16_at, u32_at};
 
 const SRCCOPY: u32 = 0x00CC_0020;
@@ -332,7 +332,9 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
         Ok(dib) => dib,
         Err(_) => return player.omit("bitmaps that could not be decoded"),
     };
-    let Some((bitmap, offset)) = crop(
+    let actual = u64::from(dib.width) * u64::from(dib.height);
+    player.charge(0, actual.saturating_sub(declared))?;
+    let Some((bitmap, offset, whole)) = crop(
         dib,
         job.source,
         job.rows,
@@ -356,8 +358,23 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
             [kx, 0.0, 0.0, ky, x + ox * kx, y + oy * ky]
         }
     };
-    let transform = concat(placed, player.logical_to_output());
-    let clip = player.dc.clip.clone();
+    let to_output = player.logical_to_output();
+    let transform = concat(placed, to_output);
+    let mut clip = player.dc.clip.clone();
+    if whole {
+        let corners = match job.corners {
+            Some([a, b, c]) => [a, b, (b.0 + c.0 - a.0, b.1 + c.1 - a.1), c],
+            None => {
+                let (x, y, w, h) = job.dest;
+                [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+            }
+        };
+        player.charge(5, 0)?;
+        clip = chain(
+            clip,
+            parallelogram(corners.map(|corner| apply(to_output, corner))),
+        );
+    }
     player.push_op(Op::Image(Image {
         transform,
         bitmap: Arc::new(bitmap),
@@ -385,8 +402,30 @@ enum Recolor {
     Stencil(Rgba),
 }
 
+/// A clip region bounded by four corners in output units.
+pub(crate) fn parallelogram(corners: [(f64, f64); 4]) -> ClipRegion {
+    let mut path: Vec<PathCommand> = corners
+        .iter()
+        .enumerate()
+        .map(|(index, &(x, y))| {
+            if index == 0 {
+                PathCommand::Move { x, y }
+            } else {
+                PathCommand::Line { x, y }
+            }
+        })
+        .collect();
+    path.push(PathCommand::Close);
+    ClipRegion {
+        path,
+        even_odd: false,
+        exclude: false,
+    }
+}
+
 /// The part of `dib` a source rectangle selects, recoloured for its raster
-/// operation, with where that part starts inside the rectangle.
+/// operation, with where that part starts inside the rectangle, and whether
+/// it is the whole of a compressed bitmap that the destination must clip.
 fn crop(
     dib: Dib,
     source: (f64, f64, f64, f64),
@@ -394,7 +433,7 @@ fn crop(
     recolor: Recolor,
     alpha: bool,
     transparent: Option<u32>,
-) -> Option<(Bitmap, (f64, f64))> {
+) -> Option<(Bitmap, (f64, f64), bool)> {
     let (width, height) = (f64::from(dib.width), f64::from(dib.height));
     let (x, y, w, h) = source;
     let (x, w) = if w < 0.0 { (x + w, -w) } else { (x, w) };
@@ -409,11 +448,13 @@ fn crop(
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
-    let offset = (x0 - x, y0 - top);
     let full = x0 == 0.0 && y0 == 0.0 && x1 == width && y1 == height;
+    let offset = match dib.pixels {
+        DibPixels::Encoded { .. } => (-x, -top),
+        DibPixels::Rgba(_) => (x0 - x, y0 - top),
+    };
     let pixels = match dib.pixels {
-        DibPixels::Encoded { mime, bytes } if full => Pixels::Encoded { mime, bytes },
-        DibPixels::Encoded { .. } => return None,
+        DibPixels::Encoded { mime, bytes } => Pixels::Encoded { mime, bytes },
         DibPixels::Rgba(rgba) => {
             let (cw, ch) = ((x1 - x0) as usize, (y1 - y0) as usize);
             let stride = dib.width as usize * 4;
@@ -462,9 +503,9 @@ fn crop(
             Pixels::Rgba(out)
         }
     };
-    let (width, height) = match &pixels {
-        Pixels::Encoded { .. } => (dib.width, dib.height),
-        Pixels::Rgba(_) => ((x1 - x0) as u32, (y1 - y0) as u32),
+    let (width, height, encoded) = match &pixels {
+        Pixels::Encoded { .. } => (dib.width, dib.height, true),
+        Pixels::Rgba(_) => ((x1 - x0) as u32, (y1 - y0) as u32, false),
     };
     Some((
         Bitmap {
@@ -473,6 +514,7 @@ fn crop(
             pixels,
         },
         offset,
+        encoded && !full,
     ))
 }
 

@@ -821,6 +821,7 @@ fn full_record<const FULL: bool>(
             };
             player.flush_pending();
             let path = region_path(player, bytes, data, size)?;
+            player.charge(path.len(), 0)?;
             let selected = match brush {
                 Some(handle) if handle & 0x8000_0000 != 0 => stock_object(handle & 0x7fff_ffff),
                 Some(handle) => player.objects.get(handle as usize).cloned().flatten(),

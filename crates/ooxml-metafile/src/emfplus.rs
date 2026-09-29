@@ -108,6 +108,7 @@ pub(crate) struct State {
     graphics: Graphics,
     stack: Vec<(u32, Graphics)>,
     continued: Option<(u16, usize, Vec<u8>)>,
+    records: usize,
 }
 
 impl State {
@@ -124,6 +125,7 @@ impl State {
             },
             stack: Vec::new(),
             continued: None,
+            records: 0,
         }
     }
 
@@ -179,9 +181,19 @@ pub(crate) fn comment<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8])
             None => return Some(()),
             Some(state) if state.dual => return Some(()),
             Some(_) => {
+                let records = player.plus.as_deref_mut().map_or(0, |state| {
+                    state.records += 1;
+                    state.records
+                });
+                if records > player.limits.records {
+                    return player.refuse("the EMF+ records exceed the replay limit");
+                }
                 player.plus_gdi = false;
                 if !record(player, kind, flags, data)? {
                     return player.refuse(format!("EMF+ record type {kind:#06x} is not supported"));
+                }
+                if player.overflowed {
+                    return player.refuse("the metafile draws more than the replay limits");
                 }
             }
         }
@@ -575,7 +587,7 @@ fn push_shape<const FULL: bool>(
     if path.is_empty() || (fill.is_none() && stroke.is_none()) {
         return;
     }
-    player.commands += path.len();
+    player.commands = player.commands.saturating_add(path.len());
     if player.commands > player.limits.commands {
         player.overflowed = true;
         return;
@@ -1150,7 +1162,9 @@ fn parse_pen<const FULL: bool>(
 /// The offset past a `u32` count at `at` and that many `unit`-byte items.
 fn skip_counted(data: &[u8], at: usize, unit: usize) -> Option<usize> {
     let count = u32_at(data, at)? as usize;
-    at.checked_add(4)?.checked_add(count.checked_mul(unit)?)
+    at.checked_add(4)?
+        .checked_add(count.checked_mul(unit)?)
+        .filter(|end| *end <= data.len())
 }
 
 /// An `EmfPlusPath` object, and the bytes it spans.
@@ -1376,6 +1390,14 @@ fn set_clip<const FULL: bool>(
     let mut clips = Vec::new();
     let mut exact = region_clips(state, player, region, &mut clips);
     player.charge(clips.iter().map(|clip| clip.path.len()).sum(), 0)?;
+    let kept = if mode == 1 || mode == 4 {
+        ClipChain::depth(&state.graphics.clip)
+    } else {
+        0
+    };
+    if kept.saturating_add(clips.len()) > player.limits.clip_depth {
+        return player.refuse("clip regions nest past the depth limit");
+    }
     let base = match mode {
         0 => None,
         1 => state.graphics.clip.clone(),
@@ -1506,20 +1528,31 @@ fn nested<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8]) -> Option<N
     let mut pixels = 0;
     let mut clips = std::collections::HashSet::new();
     let mut bitmaps = std::collections::HashSet::new();
+    let mut bitmap = |bitmap: &Arc<Bitmap>| {
+        if bitmaps.insert(Arc::as_ptr(bitmap)) {
+            pixels += u64::from(bitmap.width) * u64::from(bitmap.height);
+        }
+    };
     for op in &drawing.ops {
+        let mut paint = |paint: &Paint| {
+            if let Paint::Pattern { tile, .. } = paint {
+                bitmap(tile);
+            }
+        };
         let clip = match op {
             Op::Shape(shape) => {
                 commands += shape.path.len();
+                shape.fill.iter().for_each(&mut paint);
+                shape.stroke.iter().for_each(|stroke| paint(&stroke.paint));
                 &shape.clip
             }
             Op::Text(text) => {
                 commands += text.text.len();
+                paint(&text.fill);
                 &text.clip
             }
             Op::Image(image) => {
-                if bitmaps.insert(Arc::as_ptr(&image.bitmap)) {
-                    pixels += u64::from(image.bitmap.width) * u64::from(image.bitmap.height);
-                }
+                bitmap(&image.bitmap);
                 &image.clip
             }
         };
@@ -1661,24 +1694,38 @@ fn draw_image<const FULL: bool>(
             if x1 <= x0 || y1 <= y0 {
                 return Some(());
             }
-            if (x1 - x0, y1 - y0) != (f64::from(bitmap.width), f64::from(bitmap.height)) {
-                player.charge(0, ((x1 - x0) * (y1 - y0)) as u64)?;
-            }
-            let cropped = crop(
-                bitmap,
-                x0 as u32,
-                y0 as u32,
-                (x1 - x0) as u32,
-                (y1 - y0) as u32,
-            )?;
+            let whole =
+                (x0, y0, x1, y1) == (0.0, 0.0, f64::from(bitmap.width), f64::from(bitmap.height));
+            let mut clip = state.graphics.clip.clone();
+            let (placed, (ox, oy)) = match &bitmap.pixels {
+                Pixels::Encoded { .. } => {
+                    if !whole {
+                        player.charge(5, 0)?;
+                        let d = (b.0 + c.0 - a.0, b.1 + c.1 - a.1);
+                        clip = chain(clip, crate::blit::parallelogram([a, b, d, c]));
+                    }
+                    (Arc::clone(bitmap), (-source.0, -source.1))
+                }
+                Pixels::Rgba(_) => {
+                    if !whole {
+                        player.charge(0, ((x1 - x0) * (y1 - y0)) as u64)?;
+                    }
+                    let cropped = crop(
+                        bitmap,
+                        x0 as u32,
+                        y0 as u32,
+                        (x1 - x0) as u32,
+                        (y1 - y0) as u32,
+                    )?;
+                    (cropped, (x0 - source.0, y0 - source.1))
+                }
+            };
             let (u, v) = ((b.0 - a.0) / sw, (b.1 - a.1) / sw);
             let (p, q) = ((c.0 - a.0) / sh, (c.1 - a.1) / sh);
-            let (ox, oy) = (x0 - source.0, y0 - source.1);
             let transform = [u, v, p, q, a.0 + u * ox + p * oy, a.1 + v * ox + q * oy];
-            let clip = state.graphics.clip.clone();
             player.push_op(Op::Image(Image {
                 transform,
-                bitmap: cropped,
+                bitmap: placed,
                 opacity: 1.0,
                 clip,
             }));
@@ -1689,16 +1736,26 @@ fn draw_image<const FULL: bool>(
         }
         PlusImage::Metafile(Nested::Drawn(nested, commands)) => {
             player.charge(*commands, 0)?;
-            let (nw, nh) = (nested.width, nested.height);
+            let (u, v) = ((b.0 - a.0) / sw, (b.1 - a.1) / sw);
+            let (p, q) = ((c.0 - a.0) / sh, (c.1 - a.1) / sh);
             let m = [
-                (b.0 - a.0) / nw,
-                (b.1 - a.1) / nw,
-                (c.0 - a.0) / nh,
-                (c.1 - a.1) / nh,
-                a.0,
-                a.1,
+                u,
+                v,
+                p,
+                q,
+                a.0 - u * source.0 - p * source.1,
+                a.1 - v * source.0 - q * source.1,
             ];
-            let clip = state.graphics.clip.clone();
+            let covers = source.0 <= 0.5
+                && source.1 <= 0.5
+                && source.0 + sw >= nested.width - 0.5
+                && source.1 + sh >= nested.height - 0.5;
+            let mut clip = state.graphics.clip.clone();
+            if !covers {
+                player.charge(5, 0)?;
+                let d = (b.0 + c.0 - a.0, b.1 + c.1 - a.1);
+                clip = chain(clip, crate::blit::parallelogram([a, b, d, c]));
+            }
             let mut cache = std::collections::HashMap::new();
             for op in &nested.ops {
                 let op = crate::transform::op(op.clone(), m, &clip, &mut cache);

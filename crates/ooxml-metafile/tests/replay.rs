@@ -503,3 +503,57 @@ fn a_nested_emf_plus_metafile_is_placed_in_its_destination() {
     let (x, y) = point(&shape.path[2]);
     assert!(about(x, 70.0) && about(y, 70.0));
 }
+
+#[test]
+fn an_emf_plus_header_after_another_comment_still_counts() {
+    let bytes = Emf::new(100, 100)
+        .rec(70, &u32s(&[4, 0x4344_4947]))
+        .rec(
+            70,
+            &plus(&[
+                plus_header(true),
+                plus_fill_rects(0xff00_ff00, &[[0.0, 0.0, 10.0, 10.0]]),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .recs(vec![
+            bare(33),
+            (37, u32s(&[0x8000_0004])),
+            rect(0, 0, 50, 50),
+            (34, i32s(&[-1])),
+        ])
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    let [Op::Shape(shape)] = &drawing.ops[..] else {
+        panic!("only the EMF+ fill");
+    };
+    assert_eq!(shape.fill, Some(Paint::Solid(Rgba::opaque(0, 255, 0))));
+}
+
+#[test]
+fn a_wmf_region_fills_its_scan_rectangles() {
+    let mut region = u16s(&[0, 6]);
+    region.extend(u32s(&[0]));
+    region.extend(i16s(&[0, 1, 0, 10, 20, 60, 40]));
+    region.extend(u16s(&[4]));
+    region.extend(i16s(&[20, 40, 10, 30, 50, 60]));
+    region.extend(u16s(&[4]));
+    let bytes = Wmf::new(100, 100, 96)
+        .recs(vec![
+            (
+                0x02FC,
+                [u16s(&[0]), u32s(&[rgb(0x00ff00)]), u16s(&[0])].concat(),
+            ),
+            (0x06FF, region),
+            (0x0228, u16s(&[1, 0])),
+        ])
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    let [Op::Shape(shape)] = &drawing.ops[..] else {
+        panic!("one region fill");
+    };
+    assert_eq!(shape.fill, Some(Paint::Solid(Rgba::opaque(0, 255, 0))));
+    assert!(at(&shape.path[0], 10.0, 20.0) && at(&shape.path[2], 30.0, 40.0));
+    assert!(at(&shape.path[5], 50.0, 20.0) && at(&shape.path[7], 60.0, 40.0));
+}

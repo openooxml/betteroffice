@@ -204,3 +204,35 @@ fn saving_keeps_the_original_metafile_part_byte_identical() {
         );
     }
 }
+
+#[test]
+fn a_metafile_part_with_a_damaged_signature_shows_a_placeholder_and_warns() {
+    let mut damaged = WMF.to_vec();
+    damaged[..4].copy_from_slice(b"\0\0\0\0");
+    let path = "word/media/image1.wmf";
+    let wire =
+        parse_docx_s9_wire(&package(path, &damaged, DRAWING), S9ParseOptions::default()).unwrap();
+    let warnings = wire.document.warnings.clone().unwrap_or_default();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].starts_with(&format!(
+            "WMF image {path} could not be converted for display: "
+        )),
+        "{}",
+        warnings[0]
+    );
+    let json = serde_json::to_value(&wire).unwrap();
+    let svg = svg_of(find_images(&json)[0]["src"].as_str().unwrap());
+    assert!(svg.contains(r##"fill="#f1f3f4""##), "{svg}");
+}
+
+#[test]
+fn a_raster_saved_under_a_metafile_name_passes_through() {
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    let path = "word/media/image1.emf";
+    let wire = parse_docx_s9_wire(&package(path, png, DRAWING), S9ParseOptions::default()).unwrap();
+    assert_eq!(wire.document.warnings, None);
+    let json = serde_json::to_value(&wire).unwrap();
+    let src = find_images(&json)[0]["src"].as_str().unwrap().to_owned();
+    assert!(src.starts_with("data:image/x-emf;base64,"), "{src}");
+}

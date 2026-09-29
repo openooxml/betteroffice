@@ -124,23 +124,28 @@ fn display_form<'a>(
         return tiff_display_form(data, mime_type, path);
     }
     #[cfg(feature = "metafile")]
-    if ooxml_metafile::is_metafile(data) {
-        return metafile_display_form(data, path, budget);
+    if ooxml_metafile::is_metafile(data)
+        || (matches!(mime_type, "image/x-emf" | "image/x-wmf") && !is_browser_image(data))
+    {
+        return metafile_display_form(data, mime_type, path, budget);
     }
     let _ = (path, &budget);
     (Cow::Borrowed(data), mime_type, None)
 }
 
-/// SVG bytes one document's metafile transcodes may take together.
+/// The metafile bytes one document's transcodes may replay, and the SVG
+/// bytes they may produce, together.
 #[derive(Debug)]
+#[cfg_attr(not(feature = "metafile"), allow(dead_code))]
 struct DisplayBudget {
-    #[cfg_attr(not(feature = "metafile"), allow(dead_code))]
+    metafile_bytes: usize,
     svg_bytes: usize,
 }
 
 impl Default for DisplayBudget {
     fn default() -> Self {
         Self {
+            metafile_bytes: 64 * 1024 * 1024,
             svg_bytes: 64 * 1024 * 1024,
         }
     }
@@ -176,10 +181,13 @@ const MAX_METAFILE_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(feature = "metafile")]
 fn metafile_display_form<'a>(
     data: &'a [u8],
+    mime_type: &str,
     path: &str,
     budget: &mut DisplayBudget,
 ) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
-    let kind = if ooxml_metafile::is_wmf(data) {
+    let kind = if ooxml_metafile::is_wmf(data)
+        || (!ooxml_metafile::is_metafile(data) && mime_type == "image/x-wmf")
+    {
         "WMF"
     } else {
         "EMF"
@@ -197,6 +205,10 @@ fn metafile_display_form<'a>(
     if data.len() > MAX_METAFILE_BYTES {
         return placeholder("it exceeds the display size limit".to_owned());
     }
+    if data.len() > budget.metafile_bytes {
+        return placeholder("the document's pictures exceed the display size limit".to_owned());
+    }
+    budget.metafile_bytes -= data.len();
     match ooxml_metafile::to_svg(data) {
         Ok(svg) if svg.markup.len() <= budget.svg_bytes => {
             budget.svg_bytes -= svg.markup.len();
@@ -220,6 +232,17 @@ fn metafile_display_form<'a>(
         Ok(_) => placeholder("the document's pictures exceed the display size limit".to_owned()),
         Err(refusal) => placeholder(refusal.to_string()),
     }
+}
+
+/// Whether `data` starts like a raster format browsers decode, whatever its
+/// part name says.
+#[cfg(feature = "metafile")]
+fn is_browser_image(data: &[u8]) -> bool {
+    data.starts_with(b"\x89PNG")
+        || data.starts_with(&[0xFF, 0xD8, 0xFF])
+        || data.starts_with(b"GIF8")
+        || data.starts_with(b"BM")
+        || (data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP"))
 }
 
 #[cfg(feature = "tiff")]

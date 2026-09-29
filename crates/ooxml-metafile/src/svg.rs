@@ -72,7 +72,9 @@ struct Writer {
     clips: HashMap<*const ClipChain, usize>,
     paints: HashMap<String, usize>,
     /// Each bitmap's `data:` URL, encoded once however often it is drawn.
-    bitmaps: HashMap<*const Bitmap, Option<Arc<str>>>,
+    bitmaps: HashMap<*const Bitmap, Result<Arc<str>, Oversize>>,
+    /// Set when a write stopped at the size limit.
+    full: bool,
     next: usize,
     width: f64,
     height: f64,
@@ -84,6 +86,7 @@ pub(crate) fn write(drawing: &Drawing) -> Result<String, Refusal> {
         clips: HashMap::new(),
         paints: HashMap::new(),
         bitmaps: HashMap::new(),
+        full: false,
         next: 0,
         width: drawing.width,
         height: drawing.height,
@@ -116,7 +119,7 @@ pub(crate) fn write(drawing: &Drawing) -> Result<String, Refusal> {
             Op::Text(text) => writer.text(text),
             Op::Image(image) => writer.image(image),
         }
-        if writer.out.len() > MAX_SVG_BYTES {
+        if writer.full || writer.out.len() > MAX_SVG_BYTES {
             return Err(Refusal(
                 "the metafile's SVG would exceed the display size limit".to_owned(),
             ));
@@ -214,13 +217,12 @@ impl Writer {
                 height,
             } => {
                 let key = format!("t{:p}{width}{height}", Arc::as_ptr(tile));
-                let href = data_url(tile);
+                let href = self.bitmap_url(tile).unwrap_or_else(|| Arc::from(""));
                 let id = self.define(key, |writer, id| {
                     let (w, h) = (num(*width), num(*height));
                     let _ = write!(
                         writer.out,
-                        r#"<pattern id="p{id}" patternUnits="userSpaceOnUse" width="{w}" height="{h}"><image width="{w}" height="{h}" preserveAspectRatio="none" href="{}"/></pattern>"#,
-                        href.as_deref().unwrap_or("")
+                        r#"<pattern id="p{id}" patternUnits="userSpaceOnUse" width="{w}" height="{h}"><image width="{w}" height="{h}" preserveAspectRatio="none" href="{href}"/></pattern>"#,
                     );
                 });
                 (format!("url(#p{id})"), None)
@@ -426,13 +428,30 @@ impl Writer {
         self.out.push_str("</text>");
     }
 
-    fn image(&mut self, image: &Image) {
-        let Some(href) = self
+    /// `bitmap` as a `data:` URL, encoded on first use; `None` when it
+    /// cannot be encoded or would not fit the size limit.
+    fn bitmap_url(&mut self, bitmap: &Arc<Bitmap>) -> Option<Arc<str>> {
+        let href = match self
             .bitmaps
-            .entry(Arc::as_ptr(&image.bitmap))
-            .or_insert_with(|| data_url(&image.bitmap).map(Arc::from))
+            .entry(Arc::as_ptr(bitmap))
+            .or_insert_with(|| data_url(bitmap).map(Arc::from))
             .clone()
-        else {
+        {
+            Ok(href) => href,
+            Err(Oversize(oversize)) => {
+                self.full |= oversize;
+                return None;
+            }
+        };
+        if self.out.len().saturating_add(href.len()) > MAX_SVG_BYTES {
+            self.full = true;
+            return None;
+        }
+        Some(href)
+    }
+
+    fn image(&mut self, image: &Image) {
+        let Some(href) = self.bitmap_url(&image.bitmap) else {
             return;
         };
         let m = image.transform;
@@ -463,7 +482,12 @@ fn opacity(color: Rgba) -> Option<f64> {
 }
 
 /// A bitmap as a `data:` URL, PNG-encoding raw pixels.
-fn data_url(bitmap: &Bitmap) -> Option<String> {
+/// Why a bitmap has no `data:` URL: `true` when it would not fit the size
+/// limit, `false` when it could not be encoded.
+#[derive(Clone, Copy)]
+struct Oversize(bool);
+
+fn data_url(bitmap: &Bitmap) -> Result<String, Oversize> {
     let (mime, bytes) = match &bitmap.pixels {
         Pixels::Encoded { mime, bytes } => (*mime, bytes.clone()),
         Pixels::Rgba(rgba) => {
@@ -478,17 +502,24 @@ fn data_url(bitmap: &Bitmap) -> Option<String> {
             } else {
                 ooxml_drawingml::png_encode::encode_rgba8(rgba, bitmap.width, bitmap.height)
             };
-            ("image/png", encoded.ok()?)
+            ("image/png", encoded.map_err(|_| Oversize(false))?)
         }
     };
-    Some(format!(
+    if bytes.len() / 3 * 4 > MAX_SVG_BYTES {
+        return Err(Oversize(true));
+    }
+    Ok(format!(
         "data:{mime};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
 }
 
+/// Writes `path`, stopping once `out` passes the size limit.
 fn path_data(out: &mut String, path: &[PathCommand]) {
     for command in path {
+        if out.len() > MAX_SVG_BYTES {
+            return;
+        }
         match command {
             PathCommand::Move { x, y } => {
                 let _ = write!(out, "M{} {}", num(*x), num(*y));
@@ -525,6 +556,9 @@ fn path_data(out: &mut String, path: &[PathCommand]) {
 
 fn list(out: &mut String, values: impl Iterator<Item = f64>) {
     for (index, value) in values.enumerate() {
+        if out.len() > MAX_SVG_BYTES {
+            return;
+        }
         if index > 0 {
             out.push(' ');
         }

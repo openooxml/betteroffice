@@ -471,7 +471,19 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, mut run: Run) -> Option<()>
         );
     }
     if align & TA_UPDATECP != 0 {
-        let advance = total.map_or(0.0, |total| total.0);
+        let advance = match total {
+            Some(total) => total.0,
+            None if !run.chars.is_empty() => {
+                player.omit("text advanced by estimated widths")?;
+                let per_char = if font.face.to_ascii_lowercase().contains("courier") {
+                    0.6
+                } else {
+                    0.5
+                };
+                per_char * em * run.chars.len() as f64
+            }
+            None => 0.0,
+        };
         player.current = (
             run.reference.0 + advance * cos,
             run.reference.1 - advance * sin * if down { 1.0 } else { -1.0 },
