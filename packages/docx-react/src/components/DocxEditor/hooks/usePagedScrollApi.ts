@@ -41,6 +41,9 @@ export interface UsePagedScrollApiReturn {
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
 }
 
+/** Farther scrolls jump: animating them paints every page on the way. */
+const SMOOTH_SCROLL_VIEWPORTS = 2;
+
 export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrollApiReturn {
   const {
     pagesContainerRef,
@@ -75,12 +78,15 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const scrollerRect = scroller.getBoundingClientRect();
       const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
       const clientY = pageRect.top + (rect.y + rect.height / 2) * scaleY;
+      const distance =
+        (clientY - scrollerRect.top) / renderedScale(scroller, scrollerRect) -
+        scroller.clientHeight / 2;
       scroller.scrollTo({
-        top:
-          scroller.scrollTop +
-          (clientY - scrollerRect.top) / renderedScale(scroller, scrollerRect) -
-          scroller.clientHeight / 2,
-        behavior: smooth ? 'smooth' : 'auto',
+        top: scroller.scrollTop + distance,
+        behavior:
+          smooth && Math.abs(distance) <= scroller.clientHeight * SMOOTH_SCROLL_VIEWPORTS
+            ? 'smooth'
+            : 'auto',
       });
       return true;
     },
