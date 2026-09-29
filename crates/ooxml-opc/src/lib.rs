@@ -23,7 +23,8 @@ pub use sanitize::{
 };
 
 /// A well-formed document stays far under this; a decompression bomb blows past it.
-const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+/// The most bytes one package may inflate to.
+pub const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 /// No legitimate package carries this many parts.
 const MAX_ENTRY_COUNT: usize = 5000;
@@ -73,6 +74,16 @@ pub fn unzip_parts_with_limits(
     data: &[u8],
     max_expanded_bytes: u64,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
+    unzip_parts_where(data, max_expanded_bytes, |_| true)
+}
+
+/// As [`unzip_parts_with_limits`], inflating only the entries `keep` accepts.
+/// Every entry's path is still checked.
+pub fn unzip_parts_where(
+    data: &[u8],
+    max_expanded_bytes: u64,
+    keep: impl Fn(&str) -> bool,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let budget = max_expanded_bytes.min(MAX_TOTAL_UNCOMPRESSED_BYTES);
     let mut archive =
         zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("bad zip: {e}"))?;
@@ -98,6 +109,9 @@ pub fn unzip_parts_with_limits(
         };
         if !seen_paths.insert(security_path) {
             return Err(format!("duplicate normalized zip entry path: {name}"));
+        }
+        if !keep(&name) {
+            continue;
         }
 
         // read at most (budget - total) + 1 bytes: one over the limit proves a bomb

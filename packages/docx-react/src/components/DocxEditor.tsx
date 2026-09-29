@@ -24,6 +24,10 @@ import type {
   DocxLayoutMap,
   DocxPageExportOptions,
   DocxPagedStructuredContent,
+  DocxProposalRequest,
+  DocxProposalResult,
+  DocxProposalSnapshot,
+  DocxProposalStateRequest,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
   DocxValidationResult,
@@ -205,6 +209,11 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
+   * Lets the ref's proposal methods run while the editor is read-only or viewing. Typing,
+   * `applyEdits`, commands and plugin writes stay blocked. Default: false.
+   */
+  allowHostProposals?: boolean;
+  /**
    * When true, the editor does not intercept Cmd/Ctrl+F or Cmd/Ctrl+H.
    * This lets the browser or host app handle native find/history shortcuts.
    */
@@ -385,6 +394,20 @@ export interface DocxEditorRef {
    * is replaced while input is flushing.
    */
   applyEdits: (request: DocxEditRequest) => Promise<DocxEditResult>;
+  /**
+   * Flushes pending input, then proposes a round of tracked changes grouped by proposal id; see
+   * `YrsSession.proposeChanges`. Read-only editors refuse with `read-only` unless
+   * `allowHostProposals` is set. Never saves or opens the comments sidebar. Throws when the
+   * document is replaced while input is flushing.
+   */
+  proposeChanges: (request: DocxProposalRequest) => Promise<DocxProposalResult>;
+  /**
+   * Flushes pending input, then sets how proposals render; see `YrsSession.setProposalStates`.
+   * Gated like {@link proposeChanges}.
+   */
+  setProposalStates: (request: DocxProposalStateRequest) => Promise<DocxProposalResult>;
+  /** Flushes pending input, then reads the proposals of the loaded document. */
+  getProposals: () => Promise<DocxProposalSnapshot>;
   /**
    * Flushes pending input, then lists the document's content controls with the version they were
    * read at. Fill text controls with `setContentControlText` steps through {@link applyEdits}.
@@ -656,6 +679,17 @@ function displayRangeToYrsRange(
   };
 }
 
+/** Sidebar anchor keys of host proposals' revisions, which never open the sidebar themselves. */
+function proposalAnchorKeys(session: YrsSession | null): Set<string> {
+  const keys = new Set<string>();
+  for (const proposal of session?.getProposals().proposals ?? []) {
+    for (const revisionId of proposal.revisionIds) {
+      keys.add(`revision-${yrsIdToNumericId(revisionId)}`);
+    }
+  }
+  return keys;
+}
+
 function yrsStoryOffset(session: YrsSession, loc: YrsLoc): number {
   return session.locateParagraph(loc.story, loc.paraId).start + loc.offset;
 }
@@ -705,6 +739,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     initialZoom = 1.0,
     showHiddenText = false,
     readOnly: readOnlyProp = false,
+    allowHostProposals = false,
     disableFindReplaceShortcuts = false,
     toolbarExtra,
     toolbar,
@@ -863,6 +898,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const commandBridgeRef = useRef<PagedEditorCommandBridge | null>(null);
   const writeModeRef = useRef<EditorMode>(editingMode);
   writeModeRef.current = readOnly ? 'viewing' : editingMode;
+  const allowHostProposalsRef = useRef(allowHostProposals);
+  allowHostProposalsRef.current = allowHostProposals;
 
   // Bridge / agent event subscribers — fan-out from the existing onChange and
   // onSelectionChange paths so multiple listeners (host app, MCP server, etc.)
@@ -1552,6 +1589,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentIdAllocator: commentIdAllocatorRef.current,
     commands: commandController.store,
     modeRef: writeModeRef,
+    allowHostProposalsRef,
   });
 
   const initialSectionProperties = useMemo(
@@ -1880,8 +1918,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // cursor-driven open above doesn't fire. Latches via a ref so a later
   // manual close stays closed.
   useEffect(() => {
-    if (sidebarAutoOpenedRef.current) return;
-    if (commentSidebarItems.length === 0) return;
+    if (sidebarAutoOpenedRef.current || commentSidebarItems.length === 0) return;
+    const proposed = proposalAnchorKeys(pagedEditorRef.current?.getYrsSession() ?? null);
+    if (commentSidebarItems.every((item) => proposed.has(item.anchorKey ?? ''))) return;
     sidebarAutoOpenedRef.current = true;
     setShowCommentsSidebar(true);
   }, [commentSidebarItems]);
