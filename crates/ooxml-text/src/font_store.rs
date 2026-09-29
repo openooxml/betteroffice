@@ -466,7 +466,7 @@ impl FontStore {
                 data,
                 metrics: entry.metrics,
                 advance_scale: entry.advance_scale,
-                char_cache: RefCell::new(HashMap::new()),
+                char_cache: Mutex::new(HashMap::new()),
             });
         }
         store
