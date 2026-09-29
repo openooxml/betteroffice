@@ -1028,9 +1028,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     externalContent: false,
     history,
     pagedEditorRef,
-    setLoadingState: useCallback((s: { isLoading: boolean; parseError: string | null }) => {
-      setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
-    }, []),
+    setLoadingState: useCallback(
+      (s: { isLoading: boolean; parseError: string | null }) => {
+        setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
+        // Each failed load fails the wait, also one repeating the previous message.
+        if (s.parseError) resetSettled(new Error(s.parseError));
+      },
+      [resetSettled]
+    ),
     setComments,
     setShowCommentsSidebar,
     onError,
@@ -1051,10 +1056,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     },
     [reportDocumentLayoutError, resetSettled, yrsSeedGeneration]
   );
-  useEffect(() => {
-    if (state.parseError) resetSettled(new Error(state.parseError));
-  }, [resetSettled, state.parseError]);
-
   const yrsCore = useYrsCoreSession(
     true,
     history.state,

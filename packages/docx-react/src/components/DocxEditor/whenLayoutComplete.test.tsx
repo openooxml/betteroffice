@@ -134,3 +134,15 @@ test('a reload waits for the new document and reports no pages while it loads', 
   expect(next).toBe(3);
   expect(ref.current!.getTotalPages()).toBe(3);
 }, 30_000);
+
+test('each failed load rejects the wait', async () => {
+  const ref = await mountTwoPages();
+  const detached = await pagedDocx(1);
+  structuredClone(detached, { transfer: [detached] });
+  for (let load = 0; load < 2; load += 1) {
+    await act(async () => {
+      await ref.current!.loadDocumentBuffer(detached);
+    });
+    expect(await layoutComplete(ref)).toBeInstanceOf(Error);
+  }
+}, 30_000);
