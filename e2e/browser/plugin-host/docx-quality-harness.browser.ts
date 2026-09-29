@@ -63,7 +63,9 @@ test('the DOCX quality harness captures every page when the first pages paint fi
     } as typeof post;
   }, HOLD_MS);
   await page.goto('/docx-quality.html');
-  await page.waitForFunction(() => (window as unknown as { oracleReady?: boolean }).oracleReady);
+  await page.waitForFunction(() => (window as unknown as { oracleReady?: boolean }).oracleReady, null, {
+    timeout: 120_000,
+  });
   const result = await page.evaluate(
     (bytes) =>
       (

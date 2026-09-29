@@ -293,7 +293,7 @@ test('a provisional layout paints first and settles only once the full layout fo
   }
 });
 
-test('a layout of part of the document never settles', async () => {
+function settleHarness() {
   const displayList = { pages: [] };
   const overrides = {
     build: async () => displayList,
@@ -301,19 +301,53 @@ test('a layout of part of the document never settles', async () => {
   };
   const layout = (partial: boolean) =>
     ({ pageSize: { w: 816, h: 1056 }, pages: [], ...(partial ? { partial } : {}) }) as Layout;
-  const { result, rerender } = renderHook(
-    ({ layout }) => useRustDisplayList(layout, overrides),
-    { initialProps: { layout: layout(true) } }
-  );
-  await waitFor(() => expect(result.current.displayList).toBe(displayList));
-  let settled = false;
-  void result.current.settledDisplayList(null, null).then(() => {
-    settled = true;
+  const hook = renderHook(({ layout }) => useRustDisplayList(layout, overrides), {
+    initialProps: { layout: layout(false) },
   });
+  const settle = () => {
+    const state = { settled: false, failure: null as Error | null };
+    void hook.result.current.settledDisplayList(null, null).then(
+      () => {
+        state.settled = true;
+      },
+      (error: Error) => {
+        state.failure = error;
+      }
+    );
+    return state;
+  };
+  return { ...hook, layout, settle };
+}
+
+test('a layout of part of the document never settles, even after a full one did', async () => {
+  const { rerender, layout, settle } = settleHarness();
+  const first = settle();
+  await waitFor(() => expect(first.settled).toBe(true));
+  await act(async () => {
+    rerender({ layout: layout(true) });
+  });
+  const partial = settle();
   await act(async () => {});
-  expect(settled).toBe(false);
+  expect(partial.settled).toBe(false);
   await act(async () => {
     rerender({ layout: layout(false) });
   });
-  await waitFor(() => expect(settled).toBe(true));
+  await waitFor(() => expect(partial.settled).toBe(true));
+});
+
+test('a reset waits for the next layout and a failure rejects', async () => {
+  const { result, rerender, layout, settle } = settleHarness();
+  const first = settle();
+  await waitFor(() => expect(first.settled).toBe(true));
+  act(() => result.current.resetSettled());
+  const next = settle();
+  await act(async () => {});
+  expect(next.settled).toBe(false);
+  await act(async () => {
+    rerender({ layout: layout(false) });
+  });
+  await waitFor(() => expect(next.settled).toBe(true));
+  act(() => result.current.resetSettled(new Error('parse failed')));
+  const failed = settle();
+  await waitFor(() => expect(failed.failure?.message).toBe('parse failed'));
 });

@@ -79,6 +79,11 @@ export interface UseRustDisplayListResult {
     relayout: (() => void) | null,
     timeoutMs?: number | null
   ): Promise<DisplayList>;
+  /**
+   * Drops the settled display list. Without `failure` a new document is on its way, so waiters
+   * wait for its display list; with one they reject.
+   */
+  resetSettled(failure?: Error | null): void;
   /** Worker-computed caret tagged to `frame`. */
   caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
@@ -407,8 +412,9 @@ export function useRustDisplayList(
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
+      markSettled(null, new Error('The editor was unmounted'));
     },
-    [queryEpochGate]
+    [markSettled, queryEpochGate]
   );
 
   const publishQuerySnapshot = useCallback(
@@ -883,14 +889,18 @@ export function useRustDisplayList(
       return;
     }
     queryEpochGate.invalidate();
+    // A new layout settles with its own display list, not with the last one.
+    settledEpochRef.current = null;
     const contentEpoch = contentEpochRef.current;
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
     if (!inputs) {
+      const failure = new Error('No display-list inputs were recorded for the current layout.');
       queryEpochGate.clear();
-      setError(new Error('No display-list inputs were recorded for the current layout.'));
+      setError(failure);
       setLoading(false);
+      markSettled(null, failure);
       return;
     }
     const build = overrides?.build ?? buildRustDisplayList;
@@ -1141,6 +1151,17 @@ export function useRustDisplayList(
     requestSettleRelayout,
   ]);
 
+  const resetSettled = useCallback(
+    (failure: Error | null = null): void => {
+      if (!failure) {
+        contentEpochRef.current += 1;
+        queryEpochGate.invalidate();
+      }
+      markSettled(null, failure);
+    },
+    [markSettled, queryEpochGate]
+  );
+
   const settledDisplayList = useCallback(
     (relayout: (() => void) | null, timeoutMs: number | null = 15_000): Promise<DisplayList> =>
       new Promise<DisplayList>((resolve, reject) => {
@@ -1182,6 +1203,7 @@ export function useRustDisplayList(
     queries: snapshot.queries,
     resolveQueries,
     settledDisplayList,
+    resetSettled,
     caret: snapshot.caret,
     applyInput,
     applyDelete,
@@ -1296,6 +1318,8 @@ export interface UseCanvasRendererResult {
   resolveQueries: ResolveDisplayListQueries;
   /** See {@link UseRustDisplayListResult.settledDisplayList}. */
   settledDisplayList: UseRustDisplayListResult['settledDisplayList'];
+  /** See {@link UseRustDisplayListResult.resetSettled}. */
+  resetSettled: UseRustDisplayListResult['resetSettled'];
   /** Worker caret from the same atomic renderer snapshot. */
   caret: YrsResidentCaretSnapshot | null;
   /** Whether worker-presented pixels make `caret` authoritative. */
@@ -1370,6 +1394,7 @@ export function useCanvasRenderer(
     queries: snapshotQueries,
     resolveQueries,
     settledDisplayList,
+    resetSettled,
     caret,
     applyInput,
     applyDelete,
@@ -1464,6 +1489,7 @@ export function useCanvasRenderer(
     queries: geometryReady ? snapshotQueries : null,
     resolveQueries,
     settledDisplayList,
+    resetSettled,
     caret,
     authoritativeCaretActive,
     canvasHostRef,

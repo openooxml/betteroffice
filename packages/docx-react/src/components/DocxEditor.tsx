@@ -1003,10 +1003,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     clearFindReplaceMatches: useCallback(() => findReplace.setMatches([], 0), [findReplace]),
     cleanOrphanedCommentsTimerRef,
   });
+  const { resetSettled } = canvasRenderer;
   const resetForNewDocument = useCallback(() => {
     beginPluginLoadRef.current();
     resetEditorState();
-  }, [resetEditorState]);
+    resetSettled();
+  }, [resetEditorState, resetSettled]);
 
   const {
     loadParsedDocument,
@@ -1017,7 +1019,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     isCurrentLoad,
     acceptHostDocument,
     failHostDocument,
-    reportLayoutError,
+    reportLayoutError: reportDocumentLayoutError,
   } = useDocumentLoader({
     documentBuffer,
     initialDocument,
@@ -1035,6 +1037,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentIdAllocator: commentIdAllocatorRef.current,
     setDocumentFonts,
   });
+
+  const reportLayoutError = useCallback(
+    (error: Error) => reportDocumentLayoutError(error, resetSettled),
+    [reportDocumentLayoutError, resetSettled]
+  );
+  useEffect(() => {
+    if (state.parseError) resetSettled(new Error(state.parseError));
+  }, [resetSettled, state.parseError]);
 
   const yrsCore = useYrsCoreSession(
     true,
