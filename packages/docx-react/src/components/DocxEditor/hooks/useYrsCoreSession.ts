@@ -57,6 +57,8 @@ interface YrsCoreSessionCallbacks {
 export interface YrsCoreSessionOptions {
   /** Open a display-only preview of the first pages before the full document. */
   previewFirstPage?: boolean;
+  /** How long a preview waits for the full document to open and paint; see {@link FULL_OPEN_TIMEOUT_MS}. */
+  fullOpenTimeoutMs?: number;
 }
 
 /** Body blocks a first-page preview parses. */
@@ -65,6 +67,12 @@ const PREVIEW_BODY_BLOCKS = 200;
 const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 /** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
 const PREVIEW_FRAME_WAIT_MS = 100;
+/**
+ * How long a preview waits for the full document, from the start of its open
+ * to its first frame. A full session that exists by then takes over at once;
+ * a full open that has not produced one fails the load.
+ */
+const FULL_OPEN_TIMEOUT_MS = 10_000;
 
 function mergeHeaderFooterMaps(
   full: Map<string, HeaderFooter> | undefined,
@@ -241,6 +249,16 @@ export function useYrsCoreSession(
   const previewFirstPageRef = useRef(false);
   previewFirstPageRef.current =
     options?.previewFirstPage === true && !collaboration && !collaborationInitialUpdate;
+  const fullOpenTimeoutRef = useRef(FULL_OPEN_TIMEOUT_MS);
+  fullOpenTimeoutRef.current = options?.fullOpenTimeoutMs ?? FULL_OPEN_TIMEOUT_MS;
+  // The preview leaves once components have let go of it, on the next commit.
+  const retire = useCallback((retiring: YrsSession): void => {
+    if (retiringRef.current === retiring) {
+      retiringRef.current = null;
+      setHandoffFrom(null);
+    }
+    setTimeout(() => retiring.destroy(), 0);
+  }, []);
 
   useEffect(() => {
     setSession(null);
@@ -252,36 +270,62 @@ export function useYrsCoreSession(
     projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
 
+    let abandoned = false;
+    let shown: { session: YrsSession; host: YrsDocxHost } | null = null;
+    let fullOpenTimer: ReturnType<typeof setTimeout> | null = null;
     const stale = () =>
-      cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false;
+      cancelled ||
+      abandoned ||
+      callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false;
     const previewFirstPage = previewFirstPageRef.current;
+    // A failed full open takes the preview down with it, as a failed open
+    // without one would leave no session.
+    const dropPreview = (preview: YrsSession): void => {
+      if (sessionRef.current === preview) {
+        sessionRef.current = null;
+        setSession(null);
+      }
+      previewingRef.current = false;
+      setPreviewing(false);
+      retire(preview);
+    };
+    const fail = (error: unknown): void => {
+      if (shown) dropPreview(shown.session);
+      if (!cancelled && callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false) {
+        callbacksRef.current?.onError?.(
+          error instanceof Error ? error : new Error(String(error)),
+          seedGeneration
+        );
+      }
+    };
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
         // A preview paints the first pages first; the full open, which
         // blocks this thread for the whole package, waits until they have.
-        const shown =
+        const opened =
           previewFirstPage && seedBytes
             ? await openPreview(yrs, seedBytes, collaborationClientId)
             : null;
-        if (shown && stale()) {
-          shown.session.destroy();
+        shown = opened;
+        if (opened && stale()) {
+          opened.session.destroy();
           return;
         }
-        if (shown) {
+        if (opened) {
           const painted = new Promise<void>((resolve) => {
-            paintWaitRef.current = { session: shown.session, resolve };
+            paintWaitRef.current = { session: opened.session, resolve };
             setTimeout(resolve, PREVIEW_PAINT_TIMEOUT_MS);
           });
-          sessionRef.current = shown.session;
+          sessionRef.current = opened.session;
           facadeRef.current = yrs;
           previewingRef.current = true;
-          setSession(shown.session);
+          setSession(opened.session);
           setPreviewing(true);
           setSessionGeneration(seedGeneration);
-          callbacksRef.current?.onHostDocument?.(shown.host, seedGeneration, { preview: true });
+          callbacksRef.current?.onHostDocument?.(opened.host, seedGeneration, { preview: true });
           await painted;
-          if (paintWaitRef.current?.session === shown.session) paintWaitRef.current = null;
+          if (paintWaitRef.current?.session === opened.session) paintWaitRef.current = null;
           await new Promise<void>((resolve) => {
             const bound = setTimeout(resolve, PREVIEW_FRAME_WAIT_MS);
             requestAnimationFrame(() =>
@@ -292,6 +336,16 @@ export function useYrsCoreSession(
             );
           });
           if (stale()) return;
+          const preview = opened.session;
+          fullOpenTimer = setTimeout(() => {
+            fullOpenTimer = null;
+            if (sessionRef.current === preview) {
+              abandoned = true;
+              fail(new Error('The document did not finish opening in time'));
+            } else if (retiringRef.current === preview) {
+              retire(preview);
+            }
+          }, fullOpenTimeoutRef.current);
         }
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
         if (stale()) {
@@ -311,14 +365,14 @@ export function useYrsCoreSession(
         }
         sessionRef.current = next;
         facadeRef.current = yrs;
-        if (shown) {
+        if (opened) {
           // Maps and projections of the preview do not describe this session.
           inputPositionMapsRef.current.clear();
           projectionStoriesRef.current.clear();
           compatibilityBaseRef.current = null;
           previewingRef.current = false;
-          retiringRef.current = shown.session;
-          setHandoffFrom(shown.session);
+          retiringRef.current = opened.session;
+          setHandoffFrom(opened.session);
         }
         setSession(next);
         setPreviewing(false);
@@ -327,19 +381,13 @@ export function useYrsCoreSession(
       })
       .catch((error) => {
         console.error('[yrs] failed to start the editing session', error);
-        if (
-          !cancelled &&
-          callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false
-        ) {
-          callbacksRef.current?.onError?.(
-            error instanceof Error ? error : new Error(String(error)),
-            seedGeneration
-          );
-        }
+        if (abandoned) return;
+        fail(error);
       });
 
     return () => {
       cancelled = true;
+      if (fullOpenTimer !== null) clearTimeout(fullOpenTimer);
       paintWaitRef.current?.resolve();
       paintWaitRef.current = null;
       if (retiringRef.current !== sessionRef.current) retiringRef.current?.destroy();
@@ -366,13 +414,8 @@ export function useYrsCoreSession(
       waiting.resolve();
     }
     const retiring = retiringRef.current;
-    if (retiring && engine === sessionRef.current && engine !== retiring) {
-      retiringRef.current = null;
-      setHandoffFrom(null);
-      // Components let go of the preview on this commit.
-      setTimeout(() => retiring.destroy(), 0);
-    }
-  }, []);
+    if (retiring && engine === sessionRef.current && engine !== retiring) retire(retiring);
+  }, [retire]);
 
   // Off the interaction path: the first host onChange, ruler drag or save would
   // otherwise re-parse the source document mid-keystroke.
