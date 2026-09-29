@@ -62,6 +62,8 @@ const kernelInputsByLayout = new WeakMap<
     measured: MeasuredBlock[];
     options: LayoutOptions;
     headersFooters?: DisplayListHeadersFooters;
+    /** The session layout revision that produced the layout. */
+    layoutRevision?: number;
   }
 >();
 
@@ -141,6 +143,7 @@ export function getLayoutKernelInputs(layout: Layout):
       measured: MeasuredBlock[];
       options: unknown;
       headersFooters?: DisplayListHeadersFooters;
+      layoutRevision?: number;
     }
   | undefined {
   return kernelInputsByLayout.get(layout);
@@ -171,6 +174,7 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
       return fetchKernel().options;
     },
     ...(output.headersFooters ? { headersFooters: output.headersFooters } : {}),
+    layoutRevision,
   });
   return {
     layout: output.layout,
@@ -183,7 +187,10 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
  * measured blocks stay in the worker, so the main-thread display fallback has
  * to lay the document out on this thread first.
  */
-export function workerLayoutComputation(layoutJson: string): LayoutComputation {
+export function workerLayoutComputation(
+  layoutJson: string,
+  layoutRevision?: number
+): LayoutComputation {
   const output = JSON.parse(layoutJson) as ResidentRegionLayoutRetainedOutput;
   const unavailable = (): never => {
     throw new Error('the measured blocks of a worker-run layout live in the worker');
@@ -196,6 +203,7 @@ export function workerLayoutComputation(layoutJson: string): LayoutComputation {
       return unavailable();
     },
     ...(output.headersFooters ? { headersFooters: output.headersFooters } : {}),
+    ...(layoutRevision !== undefined ? { layoutRevision } : {}),
   });
   return { layout: output.layout, notesConverged: output.notesConverged };
 }

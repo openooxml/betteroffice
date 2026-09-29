@@ -641,7 +641,8 @@ fn compose_region(
                 attrs.doc_start = block.pm_start;
                 attrs.doc_end = block.pm_end;
                 attrs.href = sanitized_href(block.hlink_href.as_deref());
-                attrs.sdt = crate::display_list::sdt_attrs_from_groups(&block.sdt_groups);
+                attrs.sdt =
+                    crate::display_list::sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
                 prims.push(Primitive::Image(ImagePrimitive {
                     rel_id: block.src.clone(),
                     x: px(origin_x),
