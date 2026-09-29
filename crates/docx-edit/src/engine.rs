@@ -320,8 +320,9 @@ fn options_through_section(
 /// Measures leading blocks until their pagination runs two pages past
 /// `pages`, far enough that no later block moves the first `pages` pages.
 /// Returns the extents of the measured prefix; all blocks when it never does.
-/// With floats anchored in the text, a float applies from its anchor on, so
-/// the prefix is measured whole each time it grows.
+/// With `anchored` objects the prefix is measured whole each time it grows: a
+/// float applies from its anchor on, and zones are extracted at the body's
+/// first width, which a batch opening in a later section would not use.
 #[allow(clippy::too_many_arguments)]
 fn measure_page_prefix(
     blocks: &mut [LayoutBlock],
@@ -331,14 +332,14 @@ fn measure_page_prefix(
     request_options: &docx_layout::types::LayoutOptions,
     regions: &DocumentRegions,
     pages: usize,
-    floats: bool,
+    anchored: bool,
 ) -> Result<Vec<BlockExtent>, String> {
     let mut measures = Vec::new();
     let mut step = 32;
     loop {
         let start = measures.len();
         let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
-        if floats {
+        if anchored {
             let mut prefix = blocks[..end].to_vec();
             measures = docx_layout::measure_blocks::measure_blocks_with_floats(
                 &mut prefix,
@@ -400,6 +401,25 @@ fn wraps_by_page_side(shape: &docx_layout::types::ShapeBlock) -> bool {
             horizontal.relative_to.as_deref(),
             Some("insideMargin" | "outsideMargin")
         ))
+}
+
+/// Whether any block holds an object that may float, whether or not it forms
+/// a zone at the body's first width.
+fn anchors_objects(blocks: &[LayoutBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().any(|run| {
+            matches!(
+                run,
+                docx_layout::types::Run::Image(image)
+                    if image.position.is_some()
+                        || image.wrap_type.is_some()
+                        || image.display_mode.as_deref() == Some("float")
+            )
+        }),
+        LayoutBlock::Table(table) => table.floating.is_some(),
+        LayoutBlock::TextBox(_) | LayoutBlock::Shape(_) => true,
+        _ => false,
+    })
 }
 
 /// Whether every float in `blocks` hangs from the text before it, so a float
@@ -1532,7 +1552,6 @@ impl EngineSession {
         let resident_body = body_story.is_some();
         let mut block_fingerprints: Option<Vec<u64>> = None;
         let mut provisional = false;
-        let mut floats = false;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
                 .as_ref()
@@ -1556,7 +1575,6 @@ impl EngineSession {
                             &measurement,
                             Some(&geometry),
                         )?;
-                    floats = anchors_floats;
                     if anchors_floats {
                         return Ok(Arena::Full(blocks.to_vec(), couples_flow));
                     }
@@ -1600,6 +1618,7 @@ impl EngineSession {
                         // Floats whose zones only settle later, such as shapes that page-side
                         // wrapping brings into the body, rule a prefix out too.
                         Some(pages) if !coupled && floats_follow_the_text(&blocks) => {
+                            let anchored = anchors_objects(&blocks);
                             let measures = measure_page_prefix(
                                 &mut blocks,
                                 &widths,
@@ -1608,7 +1627,7 @@ impl EngineSession {
                                 &request_options,
                                 &regions,
                                 pages,
-                                floats,
+                                anchored,
                             )?;
                             provisional = measures.len() < blocks.len();
                             blocks.truncate(measures.len());
@@ -4448,6 +4467,57 @@ mod tests {
             prefix["layout"]["pages"].as_array().unwrap()[..3],
             full["layout"]["pages"].as_array().unwrap()[..3]
         );
+    }
+
+    #[test]
+    fn a_float_past_a_narrow_first_section_lays_out_the_first_pages_like_the_full_pass() {
+        // 200 px in: past the first section's 96 px column, within the second's.
+        let shape = INSIDE_SHAPE
+            .replace(
+                r#"<wp:positionH relativeFrom="margin"><wp:align>inside</wp:align></wp:positionH>"#,
+                r#"<wp:positionH relativeFrom="margin"><wp:posOffset>1905000</wp:posOffset></wp:positionH>"#,
+            )
+            .replace(
+                r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+                "<wp:wrapTopAndBottom/>",
+            );
+        let mut body = String::new();
+        for index in 0..400 {
+            if index == 10 {
+                body.push_str(
+                    r#"<w:p><w:pPr><w:sectPr><w:pgSz w:w="2160" w:h="8000"/></w:sectPr></w:pPr></w:p>"#,
+                );
+            }
+            if index == 40 {
+                body.push_str(&format!("<w:p>{shape}</w:p>"));
+            }
+            body.push_str(&format!(
+                "<w:p><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>"
+            ));
+        }
+        let bytes = docx_bytes("", &body);
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let section = |id: &str, width: u32| {
+            serde_json::json!({ "sectionId": id, "properties": {
+                "pageWidth": width, "pageHeight": 8000,
+                "marginTop": 360, "marginRight": 360, "marginBottom": 360, "marginLeft": 360
+            } })
+        };
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [section("first", 2160), section("last", 5760)] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        let (full, prefix) = full_and_prefix(&bytes, &request, &|_| {});
+        assert_eq!(prefix["provisional"], true);
+        assert_eq!(first_pages(&prefix), first_pages(&full));
     }
 
     #[test]
