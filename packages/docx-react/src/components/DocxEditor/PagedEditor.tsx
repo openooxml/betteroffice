@@ -93,7 +93,7 @@ import {
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
-import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
@@ -107,6 +107,7 @@ import {
   type PagedEditorCommandBridge,
 } from './hooks/usePagedEditorRefApi';
 import { useLayoutTriggers } from './hooks/useLayoutTriggers';
+import { useRevisionPreview } from './hooks/useRevisionPreview';
 import { TableInsertButton } from './overlays/TableInsertButton';
 import { HyperlinkPopup, type HyperlinkPopupData } from '../ui/HyperlinkPopup';
 import {
@@ -294,6 +295,8 @@ export interface PagedEditorProps {
   onTotalPagesChange?: (totalPages: number) => void;
   /** Layout of each pass (null on reset) — canvas renderer plumbing. */
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
+  /** Hands layout passes to the resident worker, which then owns them. */
+  layoutInWorker?: LayoutInWorker;
   onError?: (error: Error) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
@@ -413,8 +416,8 @@ export interface PagedEditorRef {
    * `null` while the fonts it needs are not ready. @internal
    */
   getLayoutRequest(): string | null;
-  /** Force re-layout. */
-  relayout(): void;
+  /** Force re-layout; `onHost` keeps the pass on this thread. */
+  relayout(options?: { onHost?: boolean }): void;
   /** Scroll the visible pages to bring a display position into view. */
   scrollToPosition(position: number): void;
   /** Scrolls a display position into view without moving focus or selection, saying why not. */
@@ -508,6 +511,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onYrsTrackedChangesChange,
       onTotalPagesChange,
       onLayoutComputed,
+      layoutInWorker,
       onError,
       applyResidentInput,
       applyResidentDelete,
@@ -561,6 +565,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const viewportLayoutRef = useRef<HTMLDivElement>(null);
     const yrsInputRef = useRef<YrsInputRef>(null);
 
+    const proposalPreview = useRevisionPreview(yrsCore.session);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
       const themeColors: Record<string, string> = {};
       for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {
@@ -571,8 +576,16 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
         numericIds: {},
         showHiddenText,
+        ...(proposalPreview.revisionPreview
+          ? { revisionPreview: proposalPreview.revisionPreview }
+          : {}),
       };
-    }, [_theme?.colorScheme, document?.package.settings?.defaultTabStop, showHiddenText]);
+    }, [
+      _theme?.colorScheme,
+      document?.package.settings?.defaultTabStop,
+      showHiddenText,
+      proposalPreview,
+    ]);
     const activeYrsRootStory = partEditStory(partEdit);
     const yrsInputPositionMap = useCallback(
       (storyId = activeYrsRootStory) => yrsCore.inputPositionMap(storyId),
@@ -691,6 +704,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       runLayoutPipeline,
       scheduleLayout,
       cancelPendingScrollRestore,
+      navigationEpoch,
       getLayoutRequest,
     } = useLayoutPipeline({
       onError,
@@ -712,6 +726,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       getScrollContainer,
       onTotalPagesChange,
       onLayoutComputed: publishResidentLayout,
+      layoutInWorker,
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;
@@ -1338,8 +1353,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsLocToDisplayPosition,
         getScrollContainer,
         displayListQueries,
+        layout,
         canvasHostRef,
         onNavigationIntent: cancelPendingScrollRestore,
+        navigationEpoch,
         requestCanvasParagraphFlash,
       });
 

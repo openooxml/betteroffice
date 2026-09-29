@@ -34,7 +34,7 @@ import type { PageChromeHandle } from './usePageChrome';
 import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA11yLiveRegion';
 import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
-import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
+import { ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
@@ -77,16 +77,13 @@ export function CanvasPagedArea({
           glyphOutlineProvider={renderer.glyphOutlineProvider}
           offscreenReplay={renderer.offscreenReplay}
           onWorkerPresentationChange={renderer.setWorkerPresentationActive}
+          onPageWindowChange={renderer.setDisplayWindow}
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
           <ParseError message={renderer.error?.message ?? 'Canvas renderer failed.'} />
         </div>
-      ) : (
-        <div data-testid="canvas-renderer-loading" role="status" style={{ minHeight: 240 }}>
-          <DefaultLoadingIndicator />
-        </div>
-      )}
+      ) : null}
       {children}
       {a11y ? <CanvasA11yLiveRegion active={renderer.status === 'ready'} {...a11y} /> : null}
     </>
@@ -224,6 +221,7 @@ export function CanvasPagesView({
   glyphOutlineProvider,
   offscreenReplay,
   onWorkerPresentationChange,
+  onPageWindowChange,
 }: {
   displayList: DisplayList;
   /** Binary retained-frame metadata used to scope page replay. */
@@ -252,6 +250,8 @@ export function CanvasPagesView({
   /** Dedicated worker replay surface; unsupported/media-heavy pages use DOM canvas. */
   offscreenReplay?: UseCanvasRendererResult['offscreenReplay'];
   onWorkerPresentationChange?: (active: boolean) => void;
+  /** The pages `[start, end)` that hold bitmaps, reported as the viewport moves. */
+  onPageWindowChange?: (start: number, end: number) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
   // Page lookups (pointer, overlays, caret) read this instead of searching
@@ -276,6 +276,7 @@ export function CanvasPagesView({
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
   const [replayState] = useState(() => new CanvasReplayState());
   const offscreenSignatureRef = useRef('');
+  const surfaceRef = useRef('');
   const replayGenerationRef = useRef(0);
   const [offscreenFailed, setOffscreenFailed] = useState(false);
   const offscreenFailedRef = useRef(false);
@@ -571,6 +572,12 @@ export function CanvasPagesView({
 
   const windowStart = effectiveWindow?.start ?? -1;
   const windowEnd = effectiveWindow?.end ?? -1;
+  const pageCount = displayList.pages.length;
+  useEffect(() => {
+    if (windowPending) return;
+    if (windowStart < 0) onPageWindowChange?.(0, pageCount);
+    else onPageWindowChange?.(windowStart, windowEnd + 1);
+  }, [onPageWindowChange, pageCount, windowEnd, windowPending, windowStart]);
   useEffect(() => {
     const onDemand = onDemandKeysRef.current;
     if (onDemand.size === 0) return;
@@ -662,6 +669,11 @@ export function CanvasPagesView({
         if (offscreenAttachedRef.current) publishWorkerPresentation(true);
       }
       return;
+    }
+    const surface = `${dpr}|${zoom}`;
+    if (surface !== surfaceRef.current) {
+      surfaceRef.current = surface;
+      if (innerHostRef.current) clearPresented(innerHostRef.current);
     }
     const glyphCache = glyphCacheRef.current ?? undefined;
     replayState.updateFrame(frame);

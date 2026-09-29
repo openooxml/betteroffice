@@ -1188,12 +1188,16 @@ class ValueCursor {
           const key = this.string(this.readU32('object key id'));
           if (Object.prototype.hasOwnProperty.call(value, key))
             invalid(`duplicate object key ${key}`);
-          Object.defineProperty(value, key, {
-            value: this.value(depth + 1),
-            enumerable: true,
-            configurable: true,
-            writable: true,
-          });
+          if (key in Object.prototype) {
+            Object.defineProperty(value, key, {
+              value: this.value(depth + 1),
+              enumerable: true,
+              configurable: true,
+              writable: true,
+            });
+          } else {
+            value[key] = this.value(depth + 1);
+          }
         }
         if (this.offset !== containerEnd) invalid('object byte length/count mismatch');
         return value;

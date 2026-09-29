@@ -86,7 +86,7 @@ const selection: YrsSelection = {
   head: { story: 'body', paraId: 'p1', offset: 0 },
 };
 
-function frameReply(id: number): ResidentEngineWorkerResponse {
+function frameReply(id: number): Extract<ResidentEngineWorkerResponse, { ok: true }> {
   return {
     id,
     ok: true,
@@ -265,5 +265,73 @@ describe('wasm trap', () => {
     expect(worker.terminated).toBe(false);
     void client.buildFrame('', 0);
     expect(worker.posted).toHaveLength(3);
+  });
+});
+
+describe('queued snapshots', () => {
+  test('a sync sent before the bootstrap answers diffs against the bootstrap state', async () => {
+    const { worker, client } = setup();
+    const sent = new Uint8Array([7, 7]);
+    const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 3 }, '', {
+      stateVector: sent,
+      layoutExtras: '{}',
+    });
+    expect(client.bootstrapSent()).toBe(true);
+    expect(client.remoteStateVector()).toEqual(sent);
+    expect(client.syncedFontsRevision()).toBe(3);
+    expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', layoutExtras: '{}' });
+
+    const sync = client.sync(snapshot, '', 0, false, { stateVector: new Uint8Array([8]) });
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([8]));
+    expect(worker.posted[1]).not.toHaveProperty('layoutExtras');
+
+    const layoutReply = frameReply(worker.posted[0].id);
+    if (layoutReply.ok) layoutReply.layoutJson = '{"layout":{}}';
+    worker.reply(layoutReply);
+    expect((await bootstrap).layoutJson).toBe('{"layout":{}}');
+    worker.reply(frameReply(worker.posted[1].id));
+    expect((await sync).layoutJson).toBeUndefined();
+  });
+});
+
+describe('sent snapshot state', () => {
+  test('a reply to an earlier request does not replace a later snapshot hint', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '', {
+      stateVector: new Uint8Array([1]),
+    });
+    const sync = client.sync({ ...snapshot, fontsRevision: 2 }, '', 0, false, {
+      stateVector: new Uint8Array([2]),
+    });
+    const early = frameReply(worker.posted[0].id);
+    if (early.ok) early.stateVector = new Uint8Array([9]).buffer;
+    worker.reply(early);
+    await bootstrap;
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([2]));
+    expect(client.syncedFontsRevision()).toBe(2);
+    const late = frameReply(worker.posted[1].id);
+    if (late.ok) late.stateVector = new Uint8Array([3]).buffer;
+    worker.reply(late);
+    await sync;
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([3]));
+  });
+});
+
+describe('provisional layout', () => {
+  test('a bootstrap asks for the first pages and completeLayout brings the rest', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap(snapshot, '', { layoutExtras: '{}', provisionalPages: 3 });
+    expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', provisionalPages: 3 });
+    worker.reply({ ...frameReply(worker.lastId()), layoutJson: '{}', layoutProvisional: true });
+    expect((await bootstrap).layoutProvisional).toBe(true);
+
+    const complete = client.completeLayout(4);
+    expect(worker.posted[1]).toMatchObject({ type: 'completeLayout', expectedFrameEpoch: 4 });
+    worker.reply({ ...frameReply(worker.lastId()), layoutJson: '{"full":1}' });
+    expect(await complete).toMatchObject({ layoutJson: '{"full":1}' });
+
+    const superseded = client.completeLayout(5);
+    worker.reply({ id: worker.lastId(), ok: true });
+    expect(await superseded).toBeNull();
   });
 });

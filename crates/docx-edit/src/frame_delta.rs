@@ -6,7 +6,7 @@
 //! counts and byte lengths; the browser decoder rejects any mismatch before a
 //! page reaches canvas replay.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use docx_layout::display_list::{DisplayList, DisplayPage, DocAttrs, Primitive};
@@ -14,7 +14,7 @@ use docx_layout::display_list::{DisplayList, DisplayPage, DocAttrs, Primitive};
 use serde_json::Value;
 
 mod typed_page;
-use typed_page::{collect_page_strings, encode_page, hash_page};
+use typed_page::{encode_page, hash_page};
 
 pub const FRAME_DELTA_VERSION: u16 = 1;
 pub const FRAME_HEADER_LEN: usize = 80;
@@ -157,8 +157,23 @@ pub fn encode_frame_delta_incremental(
         epochs,
         false,
         next_page_id,
-        Some(rebuilt_pages),
+        Some(&|index| rebuilt_pages.contains(&index)),
     )
+}
+
+/// [`encode_frame_delta_incremental`] for pages built into an unchanged
+/// layout: every page keeps its index, so pages match their previous snapshot
+/// by index. Semantic anchors count occurrences across built pages, and
+/// building an earlier page renumbers the ones after it.
+pub fn encode_frame_delta_pages(
+    list: &DisplayList,
+    previous: &[FramePageSnapshot],
+    epochs: FrameEpochs,
+    next_page_id: &mut u64,
+    rebuilt: &dyn Fn(usize) -> bool,
+) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
+    let prepared = prepare_pages(list, previous, next_page_id, Some(rebuilt), false)?;
+    encode_prepared(list, previous, epochs, false, prepared)
 }
 
 fn encode_frame_delta_inner(
@@ -167,9 +182,19 @@ fn encode_frame_delta_inner(
     epochs: FrameEpochs,
     full: bool,
     next_page_id: &mut u64,
-    rebuilt_pages: Option<&HashSet<usize>>,
+    rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages)?;
+    let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages, true)?;
+    encode_prepared(list, previous, epochs, full, prepared)
+}
+
+fn encode_prepared(
+    list: &DisplayList,
+    previous: &[FramePageSnapshot],
+    epochs: FrameEpochs,
+    full: bool,
+    prepared: Vec<PreparedPage<'_>>,
+) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     let next_ids: HashSet<u64> = prepared.iter().map(|page| page.snapshot.page_id).collect();
     let previous_by_id: HashMap<u64, &FramePageSnapshot> =
         previous.iter().map(|old| (old.page_id, old)).collect();
@@ -219,23 +244,6 @@ fn encode_frame_delta_inner(
         }
     }
 
-    let mut strings = BTreeSet::new();
-    for op in &ops {
-        if let PageOp::Upsert(page) = op {
-            collect_page_strings(page.page, &mut strings)?;
-        }
-    }
-    let strings: Vec<String> = strings.into_iter().collect();
-    let string_ids: HashMap<&str, u32> = strings
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            u32::try_from(index)
-                .map(|id| (value.as_str(), id))
-                .map_err(|_| "FrameDelta string table exceeds u32")
-        })
-        .collect::<Result<_, _>>()?;
-
     let op_count = checked_u32(ops.len(), "page operation count")?;
     let page_count = checked_u32(list.pages.len(), "page count")?;
     let ops_bytes = ops
@@ -246,69 +254,69 @@ fn encode_frame_delta_inner(
         .checked_add(ops_bytes)
         .ok_or_else(|| "FrameDelta header overflow".to_owned())?;
 
-    let mut out = vec![0; strings_offset];
-    write_u32(&mut out, checked_u32(strings.len(), "string count")?);
-    for value in &strings {
-        write_u32(&mut out, checked_u32(value.len(), "string byte length")?);
-        out.extend_from_slice(value.as_bytes());
-    }
-    let strings_len = out.len() - strings_offset;
-    align(&mut out, 8);
-    let data_offset = out.len();
-
+    // Page payloads intern their strings while they are written, so the data
+    // section is built first and placed after the finished string table.
+    // Offsets recorded here are relative to the data section, whose start is
+    // 8-byte aligned, so relative alignment is absolute alignment.
+    let mut records = vec![0_u8; ops_bytes];
+    let mut data_offsets = Vec::new();
+    let mut strings = StringTable::default();
+    let mut out = Vec::new();
     for (op_index, op) in ops.iter().enumerate() {
-        let record = FRAME_HEADER_LEN + op_index * PAGE_OP_LEN;
+        let record = op_index * PAGE_OP_LEN;
         match op {
             PageOp::Upsert(page) => {
-                out[record] = PAGE_OP_UPSERT;
-                patch_u32(&mut out, record + 4, page.snapshot.page_index);
-                patch_u64(&mut out, record + 8, page.snapshot.page_id);
-                patch_u64(&mut out, record + 16, page.snapshot.fingerprint);
+                records[record] = PAGE_OP_UPSERT;
+                patch_u32(&mut records, record + 4, page.snapshot.page_index);
+                patch_u64(&mut records, record + 8, page.snapshot.page_id);
+                patch_u64(&mut records, record + 16, page.snapshot.fingerprint);
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 24,
                     checked_u32(page.snapshot.primitive_ids.len(), "primitive id count")?,
                 );
 
                 align(&mut out, 8);
                 let primitive_id_offset = checked_u32(out.len(), "primitive id offset")?;
-                patch_u32(&mut out, record + 28, primitive_id_offset);
+                data_offsets.push(record + 28);
+                patch_u32(&mut records, record + 28, primitive_id_offset);
                 for id in page.snapshot.primitive_ids.iter() {
                     write_u64(&mut out, *id);
                 }
 
                 let payload_offset = out.len();
-                encode_page(page.page, &string_ids, &mut out)?;
+                encode_page(page.page, &mut strings, &mut out)?;
                 let payload_len = out.len() - payload_offset;
+                data_offsets.push(record + 32);
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 32,
                     checked_u32(payload_offset, "page payload offset")?,
                 );
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 36,
                     checked_u32(payload_len, "page payload length")?,
                 );
             }
             PageOp::Remove(page) => {
-                out[record] = PAGE_OP_REMOVE;
-                patch_u32(&mut out, record + 4, page.page_index);
-                patch_u64(&mut out, record + 8, page.page_id);
+                records[record] = PAGE_OP_REMOVE;
+                patch_u32(&mut records, record + 4, page.page_index);
+                patch_u64(&mut records, record + 8, page.page_id);
             }
             PageOp::Move(page) => {
-                out[record] = PAGE_OP_MOVE;
-                patch_u32(&mut out, record + 4, page.snapshot.page_index);
-                patch_u64(&mut out, record + 8, page.snapshot.page_id);
-                patch_u64(&mut out, record + 16, page.snapshot.fingerprint);
+                records[record] = PAGE_OP_MOVE;
+                patch_u32(&mut records, record + 4, page.snapshot.page_index);
+                patch_u64(&mut records, record + 8, page.snapshot.page_id);
+                patch_u64(&mut records, record + 16, page.snapshot.fingerprint);
             }
             PageOp::PatchPositions(page, patches) => {
-                out[record] = PAGE_OP_PATCH_POSITIONS;
-                patch_u32(&mut out, record + 4, page.snapshot.page_index);
-                patch_u64(&mut out, record + 8, page.snapshot.page_id);
-                patch_u64(&mut out, record + 16, page.snapshot.fingerprint);
+                records[record] = PAGE_OP_PATCH_POSITIONS;
+                patch_u32(&mut records, record + 4, page.snapshot.page_index);
+                patch_u64(&mut records, record + 8, page.snapshot.page_id);
+                patch_u64(&mut records, record + 16, page.snapshot.fingerprint);
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 24,
                     checked_u32(patches.len(), "position patch count")?,
                 );
@@ -334,30 +342,31 @@ fn encode_frame_delta_inner(
                         }
                     }
                 }
+                data_offsets.push(record + 32);
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 32,
                     checked_u32(payload_offset, "position patch payload offset")?,
                 );
                 let payload_length = out.len() - payload_offset;
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 36,
                     checked_u32(payload_length, "position patch payload length")?,
                 );
             }
             PageOp::ShiftPositions(page, runs, anchors) => {
-                out[record] = PAGE_OP_SHIFT_POSITIONS;
-                patch_u32(&mut out, record + 4, page.snapshot.page_index);
-                patch_u64(&mut out, record + 8, page.snapshot.page_id);
-                patch_u64(&mut out, record + 16, page.snapshot.fingerprint);
+                records[record] = PAGE_OP_SHIFT_POSITIONS;
+                patch_u32(&mut records, record + 4, page.snapshot.page_index);
+                patch_u64(&mut records, record + 8, page.snapshot.page_id);
+                patch_u64(&mut records, record + 16, page.snapshot.fingerprint);
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 24,
                     checked_u32(runs.len(), "position shift run count")?,
                 );
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 40,
                     checked_u32(anchors.len(), "note anchor count")?,
                 );
@@ -385,20 +394,44 @@ fn encode_frame_delta_inner(
                         write_i64(&mut out, anchor.end.unwrap_or(i64::MIN));
                     }
                 }
+                data_offsets.push(record + 32);
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 32,
                     checked_u32(payload_offset, "position shift payload offset")?,
                 );
                 let payload_length = out.len() - payload_offset;
                 patch_u32(
-                    &mut out,
+                    &mut records,
                     record + 36,
                     checked_u32(payload_length, "position shift payload length")?,
                 );
             }
         }
     }
+
+    let mut prefix = vec![0; FRAME_HEADER_LEN];
+    prefix.extend_from_slice(&records);
+    let strings = strings.into_strings();
+    write_u32(&mut prefix, checked_u32(strings.len(), "string count")?);
+    for value in &strings {
+        write_u32(&mut prefix, checked_u32(value.len(), "string byte length")?);
+        prefix.extend_from_slice(value.as_bytes());
+    }
+    let strings_len = prefix.len() - strings_offset;
+    align(&mut prefix, 8);
+    let data_offset = prefix.len();
+    for offset in data_offsets {
+        let at = FRAME_HEADER_LEN + offset;
+        let relative = u32::from_le_bytes(prefix[at..at + 4].try_into().expect("u32 field"));
+        patch_u32(
+            &mut prefix,
+            at,
+            checked_u32(data_offset + relative as usize, "data offset")?,
+        );
+    }
+    out.reserve_exact(prefix.len());
+    out.splice(0..0, prefix);
 
     if out.len() > MAX_U32 {
         return Err("FrameDelta exceeds the v1 u32 byte-length limit".to_owned());
@@ -442,7 +475,8 @@ fn prepare_pages<'a>(
     list: &'a DisplayList,
     previous: &[FramePageSnapshot],
     next_page_id: &mut u64,
-    rebuilt_pages: Option<&HashSet<usize>>,
+    rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
+    match_anchors: bool,
 ) -> Result<Vec<PreparedPage<'a>>, String> {
     let anchors = page_anchors(list);
     // Anchors are unique within one snapshot list (page_anchors suffixes an
@@ -462,10 +496,12 @@ fn prepare_pages<'a>(
     // Reserve every semantic anchor before considering the index fallback. A
     // newly inserted leading page must not steal the id of the old page at
     // index zero and shift every retained surface identity after it.
-    for (next_index, anchor) in anchors.iter().enumerate() {
-        if let Some(previous_index) = previous_by_anchor.remove(anchor.as_str()) {
-            claimed.insert(previous[previous_index].page_id);
-            matched_previous[next_index] = Some(previous_index);
+    if match_anchors {
+        for (next_index, anchor) in anchors.iter().enumerate() {
+            if let Some(previous_index) = previous_by_anchor.remove(anchor.as_str()) {
+                claimed.insert(previous[previous_index].page_id);
+                matched_previous[next_index] = Some(previous_index);
+            }
         }
     }
     for (next_index, matched) in matched_previous.iter_mut().enumerate() {
@@ -480,6 +516,20 @@ fn prepare_pages<'a>(
         }
     }
 
+    // Clean pages keep their index before the first rebuilt page and shift by
+    // the page-count change after it. A page built in this frame can renumber
+    // the anchors after it, so a clean page whose anchor match disagrees is
+    // prepared afresh.
+    let first_rebuilt =
+        rebuilt_pages.and_then(|rebuilt| (0..list.pages.len()).find(|&index| rebuilt(index)));
+    let page_count_change = list.pages.len() as i64 - previous.len() as i64;
+    let retained_index = |index: usize| -> i64 {
+        if first_rebuilt.is_some_and(|first| index >= first) {
+            index as i64 - page_count_change
+        } else {
+            index as i64
+        }
+    };
     let mut prepared = Vec::with_capacity(list.pages.len());
     for ((index, page), anchor) in list.pages.iter().enumerate().zip(anchors) {
         let page_index = checked_u32(index, "page index")?;
@@ -494,8 +544,12 @@ fn prepare_pages<'a>(
         };
         let positions = primitive_positions(page);
         let note_anchors = note_anchors(page)?;
-        let full_prepare =
-            is_new || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages.contains(&index));
+        // An unbuilt page has no primitive positions to shift, so its
+        // position span only reaches the host through a fresh fingerprint.
+        let full_prepare = is_new
+            || page.unbuilt
+            || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index))
+            || matched.is_none_or(|old| i64::from(old.page_index) != retained_index(index));
         let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
             let hashes = hash_page(page)?;
             let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
@@ -858,7 +912,7 @@ fn primitive_owner(primitive: &Primitive) -> Option<String> {
 }
 
 #[cfg(test)]
-fn collect_strings(value: &Value, strings: &mut BTreeSet<String>) {
+fn collect_strings(value: &Value, strings: &mut std::collections::BTreeSet<String>) {
     match value {
         Value::String(value) => {
             strings.insert(value.clone());
@@ -895,6 +949,13 @@ const VALUE_GLYPH_ARRAY: u8 = 9;
 
 const GLYPH_LOGICAL_ORDER: u8 = 1 << 0;
 const GLYPH_BIDI_LEVEL: u8 = 1 << 1;
+
+#[cfg(test)]
+fn string_id(ids: &HashMap<&str, u32>, value: &str) -> Result<u32, String> {
+    ids.get(value)
+        .copied()
+        .ok_or_else(|| "FrameDelta string table missed a value".to_owned())
+}
 
 #[cfg(test)]
 fn encode_value(
@@ -1054,10 +1115,33 @@ fn encode_glyph_array(glyphs: &[Value], out: &mut Vec<u8>) -> Result<(), String>
     Ok(())
 }
 
-fn string_id(ids: &HashMap<&str, u32>, value: &str) -> Result<u32, String> {
-    ids.get(value)
-        .copied()
-        .ok_or_else(|| "FrameDelta string table missed a value".to_owned())
+/// A frame's string table, filled in first-use order while pages are encoded.
+/// The strings come from the document, so the table keeps std's randomized
+/// hashing.
+#[derive(Default)]
+pub(crate) struct StringTable {
+    ids: HashMap<String, u32>,
+}
+
+impl StringTable {
+    pub(crate) fn id(&mut self, value: &str) -> Result<u32, String> {
+        if let Some(id) = self.ids.get(value) {
+            return Ok(*id);
+        }
+        let id = u32::try_from(self.ids.len())
+            .map_err(|_| "FrameDelta string table exceeds u32".to_owned())?;
+        self.ids.insert(value.to_owned(), id);
+        Ok(id)
+    }
+
+    /// The strings indexed by their ids.
+    pub(crate) fn into_strings(self) -> Vec<String> {
+        let mut strings = vec![String::new(); self.ids.len()];
+        for (value, id) in self.ids {
+            strings[id as usize] = value;
+        }
+        strings
+    }
 }
 
 #[cfg(test)]
@@ -1226,6 +1310,7 @@ fn patch_u64(out: &mut [u8], offset: usize, value: u64) {
 mod tests {
     use super::*;
     use docx_layout::display_list::DisplayList;
+    use std::collections::BTreeSet;
 
     fn list(text: &str) -> DisplayList {
         list_pages(&[("P1", text)])
@@ -1467,20 +1552,17 @@ mod tests {
             for page in &list.pages {
                 let value = serde_json::to_value(page).unwrap();
 
-                let mut typed_strings = BTreeSet::new();
-                collect_page_strings(page, &mut typed_strings).unwrap();
+                let mut table = StringTable::default();
+                let mut out = Vec::new();
+                encode_page(page, &mut table, &mut out).unwrap();
+                let strings = table.into_strings();
                 let mut reference_strings = BTreeSet::new();
                 collect_strings(&value, &mut reference_strings);
-                assert_eq!(typed_strings, reference_strings, "string tables differ");
-
-                let strings: Vec<String> = typed_strings.into_iter().collect();
-                let ids: HashMap<&str, u32> = strings
-                    .iter()
-                    .enumerate()
-                    .map(|(index, value)| (value.as_str(), index as u32))
-                    .collect();
-                let mut out = Vec::new();
-                encode_page(page, &ids, &mut out).unwrap();
+                assert_eq!(
+                    strings.iter().cloned().collect::<BTreeSet<_>>(),
+                    reference_strings,
+                    "string tables differ"
+                );
                 let mut cursor = 0;
                 let decoded = decode_typed(&out, &mut cursor, &strings);
                 assert_eq!(cursor, out.len(), "typed stream has trailing bytes");
@@ -1519,16 +1601,10 @@ mod tests {
         shape.attrs.decorative = Some(true);
 
         let page = &list.pages[0];
-        let mut typed_strings = BTreeSet::new();
-        collect_page_strings(page, &mut typed_strings).unwrap();
-        let strings: Vec<String> = typed_strings.into_iter().collect();
-        let ids: HashMap<&str, u32> = strings
-            .iter()
-            .enumerate()
-            .map(|(index, value)| (value.as_str(), index as u32))
-            .collect();
+        let mut table = StringTable::default();
         let mut out = Vec::new();
-        encode_page(page, &ids, &mut out).unwrap();
+        encode_page(page, &mut table, &mut out).unwrap();
+        let strings = table.into_strings();
         let mut cursor = 0;
         let decoded = decode_typed(&out, &mut cursor, &strings);
         assert_eq!(cursor, out.len());
@@ -1607,6 +1683,178 @@ mod tests {
         assert_eq!(out[41], GLYPH_LOGICAL_ORDER | GLYPH_BIDI_LEVEL);
         assert_eq!(u64_at(&out, 42), 4);
         assert_eq!(out[50], 1);
+    }
+
+    #[test]
+    fn pages_built_out_of_order_keep_their_own_content() {
+        // Every built page opens with the same header paragraph, so semantic
+        // anchors count occurrences, and building page 5 renumbers 7 and 8.
+        let pages = |built: &[usize]| -> DisplayList {
+            let pages: Vec<_> = (0..10)
+                .map(|index| {
+                    if built.contains(&index) {
+                        serde_json::json!({
+                            "pageIndex": index, "width": 816, "height": 1056,
+                            "primitives": [{
+                                "kind": "text", "text": format!("page {index}"), "x": 96,
+                                "baselineY": 120, "width": 40, "font": "16px serif",
+                                "color": "#000000", "blockId": 7, "paraId": "HEADER"
+                            }]
+                        })
+                    } else {
+                        serde_json::json!({
+                            "pageIndex": index, "width": 816, "height": 1056,
+                            "primitives": [], "unbuilt": true
+                        })
+                    }
+                })
+                .collect();
+            serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": pages }))
+                .unwrap()
+        };
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: 1,
+            layout_epoch: 1,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let mut next_id = 0;
+        let (_, snapshots) =
+            encode_frame_delta(&pages(&[0, 1, 2, 3, 4]), &[], epochs(1), true, &mut next_id)
+                .unwrap();
+        let (_, snapshots) = encode_frame_delta_pages(
+            &pages(&[0, 1, 2, 3, 4, 7, 8]),
+            &snapshots,
+            epochs(2),
+            &mut next_id,
+            &|index| index == 7 || index == 8,
+        )
+        .unwrap();
+        let built = pages(&[0, 1, 2, 3, 4, 5, 7, 8]);
+        let (_, snapshots) =
+            encode_frame_delta_pages(&built, &snapshots, epochs(3), &mut next_id, &|index| {
+                index == 5
+            })
+            .unwrap();
+        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0).unwrap();
+        for (retained, fresh) in snapshots.iter().zip(&fresh) {
+            assert_eq!(retained.page_index, fresh.page_index);
+            assert_eq!(retained.fingerprint, fresh.fingerprint);
+            assert_eq!(retained.primitive_ids, fresh.primitive_ids);
+        }
+    }
+
+    #[test]
+    fn an_incremental_frame_that_builds_a_placeholder_keeps_later_pages_their_own_content() {
+        // Every built page opens with the same header paragraph, so building
+        // page 6 in an edit frame renumbers the anchors of pages 8 and 9.
+        let pages = |built: &[usize]| -> DisplayList {
+            let pages: Vec<_> = (0..10)
+                .map(|index| {
+                    if built.contains(&index) {
+                        serde_json::json!({
+                            "pageIndex": index, "width": 816, "height": 1056,
+                            "primitives": [{
+                                "kind": "text", "text": format!("page {index}"), "x": 96,
+                                "baselineY": 120, "width": 40, "font": "16px serif",
+                                "color": "#000000", "blockId": 7, "paraId": "HEADER"
+                            }]
+                        })
+                    } else {
+                        serde_json::json!({
+                            "pageIndex": index, "width": 816, "height": 1056,
+                            "primitives": [], "unbuilt": true
+                        })
+                    }
+                })
+                .collect();
+            serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": pages }))
+                .unwrap()
+        };
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: frame_epoch,
+            layout_epoch: frame_epoch,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let mut next_id = 0;
+        let (_, snapshots) =
+            encode_frame_delta(&pages(&[0, 1, 2, 3, 4]), &[], epochs(1), true, &mut next_id)
+                .unwrap();
+        let (_, snapshots) = encode_frame_delta_pages(
+            &pages(&[0, 1, 2, 3, 4, 8, 9]),
+            &snapshots,
+            epochs(2),
+            &mut next_id,
+            &|index| index == 8 || index == 9,
+        )
+        .unwrap();
+        let built = pages(&[0, 1, 2, 3, 4, 6, 8, 9]);
+        let (_, snapshots) = encode_frame_delta_incremental(
+            &built,
+            &snapshots,
+            epochs(3),
+            &mut next_id,
+            &HashSet::from([6]),
+        )
+        .unwrap();
+        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0).unwrap();
+        for (retained, fresh) in snapshots.iter().zip(&fresh) {
+            assert_eq!(retained.page_index, fresh.page_index);
+            assert_eq!(retained.fingerprint, fresh.fingerprint);
+            assert_eq!(retained.primitive_ids, fresh.primitive_ids);
+        }
+    }
+
+    #[test]
+    fn an_unbuilt_page_whose_position_span_moves_is_sent_again() {
+        let list = |span: [i64; 2]| -> DisplayList {
+            serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": [
+                {
+                    "pageIndex": 0, "width": 816, "height": 1056,
+                    "primitives": [{
+                        "kind": "text", "text": "built", "x": 96, "baselineY": 120,
+                        "width": 40, "font": "16px serif", "color": "#000000",
+                        "blockId": 7, "docStart": 1, "docEnd": 6
+                    }]
+                },
+                {
+                    "pageIndex": 1, "width": 816, "height": 1056,
+                    "primitives": [], "unbuilt": true, "positionSpan": span
+                }
+            ]}))
+            .unwrap()
+        };
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: frame_epoch,
+            layout_epoch: frame_epoch,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let mut next_id = 0;
+        let (_, snapshots) =
+            encode_frame_delta(&list([8, 30]), &[], epochs(1), true, &mut next_id).unwrap();
+
+        let (unchanged, snapshots) = encode_frame_delta_incremental(
+            &list([8, 30]),
+            &snapshots,
+            epochs(2),
+            &mut next_id,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(u32_at(&unchanged, 52), 0);
+
+        let (moved, _) = encode_frame_delta_incremental(
+            &list([14, 36]),
+            &snapshots,
+            epochs(3),
+            &mut next_id,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(u32_at(&moved, 52), 1);
+        assert_eq!(moved[FRAME_HEADER_LEN], PAGE_OP_UPSERT);
     }
 
     #[test]

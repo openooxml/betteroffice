@@ -131,7 +131,7 @@ pub use queries::{
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
-pub use seed::{seed_from_docx, seed_from_docx_with_generation};
+pub use seed::{seed_docx_preview, seed_from_docx, seed_from_docx_with_generation};
 use segments::SegmentIndex;
 pub use target::{
     AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,

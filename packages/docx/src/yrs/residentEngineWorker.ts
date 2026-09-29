@@ -16,6 +16,10 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
+import {
+  encodeDisplayListFrameExtras,
+  type DisplayListBuildInputs,
+} from '../layout/render/rustDisplayList';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
@@ -55,6 +59,14 @@ let paintedCaretKey: string | null = null;
 let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
 let trap: WebAssembly.RuntimeError | null = null;
+// A bootstrap laid out only the body's first pages: the request to finish
+// it, then the finished layout until `completeLayout` hands it over.
+interface LayoutRequest {
+  extras: string;
+  layoutExtras?: string;
+}
+let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
+let completedLayout: (LayoutRequest & { layoutJson: string }) | null = null;
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
@@ -93,17 +105,32 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // corrupt the update; a fresh id lets yrs merge queued/local operations
     // safely while the main replica applies worker updates with local origin.
     session = await createResidentEngineSession();
-    hydrate(request.snapshot);
+    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
+    const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
+    if (provisional) {
+      incompleteLayout = {
+        layoutInput: request.snapshot.layoutInput,
+        extras: request.extras,
+        layoutExtras: request.layoutExtras,
+      };
+    }
     subscribe();
     const started = performance.now();
-    const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
+    const frame = session.buildDisplayListFrame(
+      frameExtras(request.extras, request.layoutExtras, layoutJson),
+      request.expectedFrameEpoch
+    );
     await replyFrame(
       request.id,
       frame,
       performance.now() - started,
       pendingUpdates,
       undefined,
-      started
+      started,
+      false,
+      false,
+      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
+      provisional
     );
     return;
   }
@@ -117,10 +144,31 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
-    hydrate(request.snapshot);
+    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
+    const { layoutJson } = hydrate(request.snapshot);
     subscribe();
     const started = performance.now();
-    const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
+    const frame = session.buildDisplayListFrame(
+      frameExtras(request.extras, request.layoutExtras, layoutJson),
+      request.expectedFrameEpoch
+    );
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      pendingUpdates,
+      undefined,
+      started,
+      false,
+      request.paintCaret,
+      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined)
+    );
+    return;
+  }
+  if (request.type === 'buildPages') {
+    pendingUpdates = [];
+    const started = performance.now();
+    const frame = session.buildDisplayPagesFrame(request.pages, request.expectedFrameEpoch);
     await replyFrame(
       request.id,
       frame,
@@ -133,7 +181,35 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     );
     return;
   }
+  if (request.type === 'completeLayout') {
+    completeProvisionalLayout();
+    const completed = completedLayout;
+    completedLayout = null;
+    if (!completed) {
+      reply({ id: request.id, ok: true });
+      return;
+    }
+    pendingUpdates = [];
+    const started = performance.now();
+    const frame = session.buildDisplayListFrame(
+      frameExtras(completed.extras, completed.layoutExtras, completed.layoutJson),
+      request.expectedFrameEpoch
+    );
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      pendingUpdates,
+      undefined,
+      started,
+      false,
+      request.paintCaret,
+      completed.layoutJson
+    );
+    return;
+  }
   if (request.type === 'buildFrame') {
+    completeProvisionalLayout();
     pendingUpdates = [];
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
@@ -187,6 +263,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true });
     return;
   }
+  completeProvisionalLayout();
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
@@ -222,6 +299,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       started,
       request.selection.head.story === 'body',
       request.paintCaret,
+      undefined,
+      false,
       request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
@@ -241,9 +320,19 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
 }
 
-function hydrate(snapshot: YrsResidentWorkerSnapshot) {
+/**
+ * Loads a snapshot and runs its layout, over the first `provisionalPages`
+ * pages only when given; returns the region layout reply.
+ */
+function hydrate(
+  snapshot: YrsResidentWorkerSnapshot,
+  provisionalPages?: number
+): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
+  incompleteLayout = null;
+  completedLayout = null;
   session.loadState(snapshot.state);
+  session.setPartialDocument(snapshot.partialDocument === true);
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
     // omits fonts when it knows this session's applied revision matches).
@@ -256,16 +345,54 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   }
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
-  if (snapshot.layoutWithRegions) {
-    // the reply is discarded here; the full envelope would serialize the
-    // tens-of-MB measured arena
-    session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
+  let layoutJson: string | null = null;
+  let provisional = false;
+  if (snapshot.layoutWithRegions && provisionalPages !== undefined) {
+    layoutJson = session.layoutDocumentWithRegionsPrefixRetainedJson(
+      snapshot.layoutInput,
+      provisionalPages
+    );
+    provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+  } else if (snapshot.layoutWithRegions) {
+    // the retained reply leaves out the tens-of-MB measured arena
+    layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
   } else {
     session.layoutDocumentJson(snapshot.layoutInput);
   }
   if (snapshot.selection) session.setSelection(snapshot.selection.anchor, snapshot.selection.head);
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
+  return { layoutJson, provisional };
+}
+
+/** Replaces a provisional layout with the full one before anything reads it. */
+function completeProvisionalLayout(): void {
+  if (!session || !incompleteLayout) return;
+  const { layoutInput, ...request } = incompleteLayout;
+  incompleteLayout = null;
+  completedLayout = {
+    ...request,
+    layoutJson: session.layoutDocumentWithRegionsRetainedJson(layoutInput),
+  };
+}
+
+/**
+ * The extras a frame is built with. For a layout this worker owns, the host
+ * sends them without the header/footer payload, which only this layout has.
+ */
+function frameExtras(
+  extras: string,
+  layoutExtras: string | undefined,
+  layoutJson: string | null
+): string {
+  if (layoutExtras === undefined) return extras;
+  const headersFooters = layoutJson
+    ? (JSON.parse(layoutJson) as Pick<DisplayListBuildInputs, 'headersFooters'>).headersFooters
+    : undefined;
+  return encodeDisplayListFrameExtras({
+    ...(JSON.parse(layoutExtras) as DisplayListBuildInputs),
+    ...(headersFooters ? { headersFooters } : {}),
+  });
 }
 
 function subscribe(): void {
@@ -281,6 +408,8 @@ function destroySession(): void {
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
+  incompleteLayout = null;
+  completedLayout = null;
   retainedFrame = null;
   glyphCache = null;
   offscreenCanvases.clear();
@@ -311,6 +440,8 @@ async function replyFrame(
   requestStarted = performance.now(),
   requireCaret = false,
   paintCaret = false,
+  layoutJson?: string,
+  layoutProvisional = false,
   deletedUnits?: number
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
@@ -371,6 +502,8 @@ async function replyFrame(
       layoutRevision,
       ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
+      ...(layoutJson !== undefined ? { layoutJson } : {}),
+      ...(layoutProvisional ? { layoutProvisional } : {}),
     },
     [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );
