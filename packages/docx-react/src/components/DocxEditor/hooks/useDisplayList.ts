@@ -1074,7 +1074,8 @@ export function useRustDisplayList(
       setError(null);
       setLoading(true);
       settledEpochRef.current = null;
-      settleErrorRef.current = null;
+      // A failure of the document being loaded holds until its layout or the next load.
+      if (!replacedLayoutRef.current) settleErrorRef.current = null;
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
       notifyCaretInterrupt();

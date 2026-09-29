@@ -146,3 +146,30 @@ test('each failed load rejects the wait', async () => {
     expect(await layoutComplete(ref)).toBeInstanceOf(Error);
   }
 }, 30_000);
+
+test('a failed load before any layout rejects the wait', async () => {
+  const ref = createRef<DocxEditorRef>();
+  render(<DocxEditor ref={ref} />);
+  for (let attempt = 0; attempt < 300 && !ref.current; attempt += 1) await tick();
+  const detached = await pagedDocx(1);
+  structuredClone(detached, { transfer: [detached] });
+  await act(async () => {
+    await ref.current!.loadDocumentBuffer(detached);
+  });
+  await tick(200);
+  expect(await layoutComplete(ref)).toBeInstanceOf(Error);
+}, 30_000);
+
+test('a failure without a message rejects waits during and after the load', async () => {
+  const ref = await mountTwoPages();
+  let fail = () => {};
+  const blob = new Blob([]);
+  blob.arrayBuffer = () => new Promise((_, reject) => (fail = () => reject(new Error())));
+  await act(async () => {
+    void ref.current!.loadDocumentBuffer(blob);
+  });
+  const during = layoutComplete(ref);
+  fail();
+  expect(await during).toBeInstanceOf(Error);
+  expect(await layoutComplete(ref)).toBeInstanceOf(Error);
+}, 30_000);

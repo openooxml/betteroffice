@@ -1032,7 +1032,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       (s: { isLoading: boolean; parseError: string | null }) => {
         setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
         // Each failed load fails the wait, also one repeating the previous message.
-        if (s.parseError) resetSettled(new Error(s.parseError));
+        if (s.parseError !== null) resetSettled(new Error(s.parseError));
       },
       [resetSettled]
     ),
