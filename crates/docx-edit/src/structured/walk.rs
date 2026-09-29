@@ -4379,14 +4379,19 @@ fn content_fingerprint<T: ReadTxn>(
     Some(Value::Array(stories))
 }
 
-/// Blanks the identity fields of an embed payload: paragraph ids, the block ids a field hides,
-/// and the child story and block ids under `prefix`, which name the story they belong to.
+/// Blanks the identity fields of an embed payload: paragraph ids, the block ids a field hides or
+/// joins, and the child story and block ids under `prefix`, which name the story they belong to.
 fn set_identities_aside(value: &mut Value, prefix: &str) {
     match value {
         Value::Object(object) => {
             object.remove(crate::PARA_ID);
-            if let Some(Value::Array(ids)) = object.get_mut("fieldResultBlocks") {
-                ids.iter_mut().for_each(|id| *id = Value::Null);
+            for key in ["fieldResultBlocks", "fieldCodeMarks"] {
+                if let Some(Value::Array(ids)) = object.get_mut(key) {
+                    ids.iter_mut().for_each(|id| *id = Value::Null);
+                }
+            }
+            if let Some(target) = object.get_mut("fieldCodeTarget") {
+                *target = Value::Null;
             }
             for (key, value) in object.iter_mut() {
                 match value {

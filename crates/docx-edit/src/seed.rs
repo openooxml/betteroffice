@@ -3770,10 +3770,11 @@ fn bind_field_result_blocks(
     }
 }
 
-/// Binds each field whose code runs past its paragraph's mark to the paragraphs whose marks
-/// that code hides. Word joins such a paragraph with the next one whose mark is visible: the
-/// paragraph holding the field's separator, or the code's last paragraph when the field ends
-/// there. Tables among those blocks leave the field unbound.
+/// Binds each field whose code runs past its paragraph's mark to the paragraph that paragraph
+/// joins (`fieldCodeTarget`) and the paragraphs in between whose marks the code hides
+/// (`fieldCodeMarks`). Word shows the field's paragraph and the target, the paragraph holding the
+/// field's separator or, when the field ends within its code, its code's last paragraph, as one
+/// paragraph. Tables among those blocks leave the field unbound.
 fn bind_field_code_blocks(
     units: &mut [InlineUnit],
     story_id: &str,
@@ -3791,17 +3792,25 @@ fn bind_field_code_blocks(
         let Some(data) = payload
             .get("fieldData")
             .and_then(Value::as_str)
-            .filter(|data| data.contains("\"structuredCode\"") && data.contains("\"blocks\""))
+            .filter(|data| data.contains("\"blocks\""))
             .and_then(|data| serde_json::from_str::<Value>(data).ok())
         else {
             continue;
         };
         let code = array(field(field(Some(&data), "structuredCode"), "blocks")).len();
-        if code == 0 {
-            continue;
-        }
         let has_result = !array(field(field(Some(&data), "structuredResult"), "blocks")).is_empty();
-        let hidden = if has_result { code } else { code - 1 };
+        let hidden = match (code, has_result) {
+            (0, true)
+                if blocks
+                    .get(owner + 1)
+                    .is_some_and(opens_with_field_separator) =>
+            {
+                0
+            }
+            (0, _) => continue,
+            (code, true) => code,
+            (code, false) => code - 1,
+        };
         let Some(joined) = blocks.get(owner + 1..owner + 1 + hidden + 1) else {
             continue;
         };
@@ -3812,13 +3821,29 @@ fn bind_field_code_blocks(
             continue;
         }
         let mut cursor = after_owner;
-        let ids = joined[..hidden]
+        let mut ids: Vec<Value> = joined
             .iter()
             .filter_map(|block| cursor.take(story_id, block))
             .map(Value::String)
             .collect();
+        let Some(target) = ids.pop() else {
+            continue;
+        };
         payload.insert("fieldCodeMarks".to_owned(), Value::Array(ids));
+        payload.insert("fieldCodeTarget".to_owned(), target);
     }
+}
+
+/// Whether a paragraph holds, outside any field of its own, the separator of a field that began
+/// before it.
+fn opens_with_field_separator(block: &Value) -> bool {
+    array(field(Some(block), "content")).iter().any(|content| {
+        string(field(Some(content), "type")) == Some("run")
+            && array(field(Some(content), "content")).iter().any(|item| {
+                string(field(Some(item), "type")) == Some("fieldChar")
+                    && string(field(Some(item), "charType")) == Some("separate")
+            })
+    })
 }
 
 fn add_comment_coverage(plan: &mut StoryPlan) {

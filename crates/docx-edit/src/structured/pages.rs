@@ -1325,6 +1325,7 @@ impl NodeIndex {
 }
 
 /// A laid-out paragraph's source: its story and paragraph id, in the exported story's names.
+#[derive(Clone)]
 struct Source {
     story: String,
     para_id: String,
@@ -1610,7 +1611,10 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         let Some(start) = placed.block.pm_start.map(|value| value as u64) else {
             return self.unmapped(occurrence, "A laid-out paragraph has no document position.");
         };
-        let Some(source) = self.source(occurrence, map, start) else {
+        let Some(block_paragraph) = map.paragraph_at(start) else {
+            return self.unmapped(occurrence, "A laid-out paragraph has no recorded source.");
+        };
+        let Some(source) = self.source_of(occurrence, map, block_paragraph) else {
             return self.unmapped(occurrence, "A laid-out paragraph has no recorded source.");
         };
         let index: &'a NodeIndex = self.index;
@@ -1657,7 +1661,7 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         let units = self.atom_units(&occurrence.root, map);
         // Text runs as contiguous story intervals with their display start, atoms with the
         // display units shown here.
-        let mut texts: Vec<(u32, u32, u64)> = Vec::new();
+        let mut texts: Vec<(u32, u32, u32, u64)> = Vec::new();
         let mut atoms: Vec<(u32, u32, u64, Vec<(i64, i64)>)> = Vec::new();
         for slice in &slices {
             let (from, to) = (slice.pm_start as u64, slice.pm_end as u64);
@@ -1689,15 +1693,112 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 let raw_lo = span.raw_start + (lo - span.pm_start) as u32;
                 let raw_hi = span.raw_start + (hi - span.pm_start) as u32;
                 match texts.last_mut() {
-                    Some(last) if last.1 == raw_lo && last.2 + u64::from(last.1 - last.0) == lo => {
-                        last.1 = raw_hi;
+                    Some(last)
+                        if last.0 == span.paragraph
+                            && last.2 == raw_lo
+                            && last.3 + u64::from(last.2 - last.1) == lo =>
+                    {
+                        last.2 = raw_hi;
                     }
-                    _ => texts.push((raw_lo, raw_hi, lo)),
+                    _ => texts.push((span.paragraph, raw_lo, raw_hi, lo)),
                 }
             }
         }
+        let mut paragraphs: Vec<u32> = vec![block_paragraph];
+        for paragraph in texts
+            .iter()
+            .map(|text| text.0)
+            .chain(atoms.iter().map(|atom| atom.0))
+        {
+            if !paragraphs.contains(&paragraph) {
+                paragraphs.push(paragraph);
+            }
+        }
+        for paragraph_index in paragraphs {
+            let (source, node) = if paragraph_index == block_paragraph {
+                (source.clone(), node)
+            } else {
+                let Some(source) = self.source_of(occurrence, map, paragraph_index) else {
+                    continue;
+                };
+                let Some(node) = index
+                    .paragraphs
+                    .get(&(source.story.clone(), source.para_id.clone()))
+                else {
+                    continue;
+                };
+                // A paragraph whose mark a field's code hides shows inside the one it joins.
+                let ranges: Vec<(i64, i64)> = texts
+                    .iter()
+                    .filter(|text| text.0 == paragraph_index)
+                    .map(|text| (text.3 as i64, (text.3 + u64::from(text.2 - text.1)) as i64))
+                    .chain(
+                        atoms
+                            .iter()
+                            .filter(|atom| atom.0 == paragraph_index)
+                            .flat_map(|atom| atom.3.iter().copied()),
+                    )
+                    .collect();
+                let (Some(low), Some(high)) = (
+                    ranges.iter().map(|range| range.0).min(),
+                    ranges.iter().map(|range| range.1).max(),
+                ) else {
+                    continue;
+                };
+                self.wrap(occurrence, &node.controls, placed.repeated_header);
+                self.placed_nodes.insert(node.id.clone());
+                self.fragment(
+                    occurrence,
+                    node.id.clone(),
+                    node.id.clone(),
+                    node.anchor.clone(),
+                    FragmentSlice::Block,
+                    Some((placed.continued_from_previous, placed.continued_on_next)),
+                    placed.repeated_header,
+                    Geometry::Ranges(region.clone(), vec![(low, high)]),
+                );
+                (source, node)
+            };
+            self.paragraph_inlines(
+                occurrence,
+                placed,
+                &region,
+                &units,
+                (&source, node),
+                texts
+                    .iter()
+                    .filter(|text| text.0 == paragraph_index)
+                    .map(|text| (text.1, text.2, text.3)),
+                atoms
+                    .iter()
+                    .filter(|atom| atom.0 == paragraph_index)
+                    .map(|atom| (atom.0, atom.1, atom.2, atom.3.clone())),
+            );
+        }
+        if placed.clipped {
+            self.diagnostics.push(PageDiagnostic {
+                code: PageDiagnosticCode::ClippedContent,
+                node_id: Some(node.id.clone()),
+                page_index: Some(occurrence.record.page_index),
+                message: "Its table cell cuts through a line of this paragraph on this page; the line's text is listed, though only part of it shows.".to_owned(),
+            });
+        }
+    }
+
+    /// Emits the text and atom fragments one source paragraph shows in a placed paragraph.
+    #[allow(clippy::too_many_arguments)]
+    fn paragraph_inlines(
+        &mut self,
+        occurrence: &Occurrence,
+        placed: &PlacedParagraph<'_>,
+        region: &RegionKey,
+        units: &HashMap<(u32, u32), u64>,
+        (source, node): (&Source, &'a ParagraphNode),
+        texts: impl Iterator<Item = (u32, u32, u64)>,
+        atoms: impl Iterator<Item = (u32, u32, u64, Vec<(i64, i64)>)>,
+    ) {
         let mut inlines: Vec<(i64, String, Anchor, FragmentSlice, Geometry)> = Vec::new();
-        for &(raw_start, raw_end, pm_start) in &texts {
+        for (raw_start, raw_end, pm_start) in texts {
             for &view in self.export_views {
                 let Some((projection, by_id)) = self.projection(&source.story, view) else {
                     continue;
@@ -1806,14 +1907,6 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 placed.repeated_header,
                 geometry,
             );
-        }
-        if placed.clipped {
-            self.diagnostics.push(PageDiagnostic {
-                code: PageDiagnosticCode::ClippedContent,
-                node_id: Some(node.id.clone()),
-                page_index: Some(occurrence.record.page_index),
-                message: "Its table cell cuts through a line of this paragraph on this page; the line's text is listed, though only part of it shows.".to_owned(),
-            });
         }
     }
 
