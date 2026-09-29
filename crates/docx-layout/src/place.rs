@@ -75,6 +75,9 @@ pub struct CheckpointedLayout {
     pub placed_blocks: usize,
     pub rebuilt_page_start: usize,
     pub rebuilt_page_end: usize,
+    /// The page ranges placed afresh, ascending within
+    /// `rebuilt_page_start..rebuilt_page_end`; the pages between them are retained.
+    pub rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
 }
 
 struct ConvergenceInput<'a> {
@@ -82,23 +85,85 @@ struct ConvergenceInput<'a> {
     previous_fingerprints: &'a [u64],
     next_fingerprints: &'a [u64],
     dirty_index: usize,
+    /// Every dirty block, ascending, when placement may skip the clean pages between them.
+    skippable_dirty: Option<&'a [usize]>,
+    keep_with_next: &'a crate::keep_together::KeepWithNextScan,
+}
+
+/// Where a placement walk met the retained layout.
+enum Convergence {
+    /// Every later block and page start matches: the retained suffix follows.
+    Suffix {
+        next: LayoutCheckpoint,
+        previous: LayoutCheckpoint,
+    },
+    /// The retained pages up to `resume` follow unchanged, and placement
+    /// resumes there ahead of the next dirty block.
+    Skip {
+        previous: LayoutCheckpoint,
+        resume: LayoutCheckpoint,
+        dirty_index: usize,
+    },
 }
 
 impl ConvergenceInput<'_> {
-    fn retained_match(&self, checkpoint: &LayoutCheckpoint) -> Option<&LayoutCheckpoint> {
-        if checkpoint.block_index <= self.dirty_index
-            || self.previous_fingerprints.get(checkpoint.block_index..)
-                != self.next_fingerprints.get(checkpoint.block_index..)
-        {
+    fn retained_match(&self, checkpoint: &LayoutCheckpoint) -> Option<Convergence> {
+        if checkpoint.block_index <= self.dirty_index {
             return None;
         }
-        self.previous_checkpoints.iter().find(|previous| {
+        let previous = self.previous_checkpoints.iter().find(|previous| {
             previous.block_index == checkpoint.block_index
                 && previous.section_index == checkpoint.section_index
                 && previous.page_number == checkpoint.page_number
                 && previous.flow == checkpoint.flow
+        })?;
+        if self.previous_fingerprints.get(checkpoint.block_index..)
+            == self.next_fingerprints.get(checkpoint.block_index..)
+        {
+            return Some(Convergence::Suffix {
+                next: checkpoint.clone(),
+                previous: previous.clone(),
+            });
+        }
+        let dirty = self.skippable_dirty?;
+        if previous.page_index != checkpoint.page_index {
+            return None;
+        }
+        let next_dirty =
+            *dirty.get(dirty.partition_point(|&index| index < checkpoint.block_index))?;
+        let restart = restart_index(self.keep_with_next, next_dirty);
+        let resume = self
+            .previous_checkpoints
+            .iter()
+            .rev()
+            .find(|resume| resume.block_index < restart)?;
+        (resume.page_index > previous.page_index).then(|| Convergence::Skip {
+            previous: previous.clone(),
+            resume: resume.clone(),
+            dirty_index: next_dirty,
         })
     }
+}
+
+/// The block placement resumes before for a change at `dirty_index`. A dirty
+/// block that opened a page may now start on the one before it (a removed page
+/// break, a paragraph that now fits), and one inside or right after a
+/// keep-with-next run can move that run's head, so resume strictly before either.
+fn restart_index(
+    keep_with_next: &crate::keep_together::KeepWithNextScan,
+    dirty_index: usize,
+) -> usize {
+    keep_with_next
+        .groups_by_head
+        .range(..=dirty_index)
+        .rev()
+        .take(2)
+        .filter(|(_, group)| {
+            group.members.contains(&dirty_index) || group.follower == Some(dirty_index)
+        })
+        .map(|(&head, _)| head)
+        .min()
+        .unwrap_or(dirty_index)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -293,6 +358,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
         placed_blocks: placement.placed_blocks,
         rebuilt_page_start: 0,
         rebuilt_page_end: page_count,
+        rebuilt_page_ranges: std::iter::once(0..page_count).collect(),
     })
 }
 
@@ -344,92 +410,166 @@ pub fn layout_document_incremental(
     )?;
     plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
-    // A dirty block that opened a page may now start on the one before it (a
-    // removed page break, a paragraph that now fits), and one inside or right
-    // after a keep-with-next run can move that run's head, so resume strictly
-    // before either; only the document's first page cannot move back.
-    let restart_index = plan
-        .keep_with_next
-        .groups_by_head
-        .range(..=dirty_index)
-        .rev()
-        .take(2)
-        .filter(|(_, group)| {
-            group.members.contains(&dirty_index) || group.follower == Some(dirty_index)
-        })
-        .map(|(&head, _)| head)
-        .min()
-        .unwrap_or(dirty_index);
+    // Only the document's first page cannot move back.
+    let restart = restart_index(&plan.keep_with_next, dirty_index);
     let resume = previous_checkpoints
         .iter()
         .rev()
-        .find(|checkpoint| checkpoint.block_index < restart_index || checkpoint.block_index == 0)
+        .find(|checkpoint| checkpoint.block_index < restart || checkpoint.block_index == 0)
         .ok_or_else(|| LayoutError::Unsupported("no clean pagination checkpoint".into()))?;
-    let prefix_checkpoints: Vec<_> = previous_checkpoints
+    let dirty: Vec<usize> = (previous_fingerprints.len() == next_fingerprints.len())
+        .then(|| {
+            previous_fingerprints
+                .iter()
+                .zip(next_fingerprints)
+                .enumerate()
+                .filter(|(_, (previous, next))| previous != next)
+                .map(|(index, _)| index)
+                .collect()
+        })
+        .unwrap_or_default();
+    // Clean stretches between dirty blocks are skipped only where a page start
+    // alone decides what follows: one column throughout, no reserved note
+    // space, and no later section break that changed.
+    let skippable = !dirty.is_empty()
+        && options
+            .footnote_reserved_heights
+            .as_ref()
+            .is_none_or(|heights| heights.is_empty())
+        && plan
+            .section_configs
+            .iter()
+            .chain([&initial_config])
+            .all(|config| {
+                config
+                    .columns
+                    .as_ref()
+                    .is_none_or(|columns| columns.count <= 1.0)
+            })
+        && !dirty
+            .iter()
+            .skip(1)
+            .any(|&index| matches!(input.measured[index].block, LayoutBlock::SectionBreak(_)));
+
+    // Place each dirty stretch in turn without touching the retained pages, so
+    // a failure leaves the caller's layout as it was.
+    let mut segments: Vec<(
+        LayoutCheckpoint,
+        Vec<crate::types::Page>,
+        Option<Convergence>,
+    )> = Vec::new();
+    let mut checkpoints: Vec<_> = previous_checkpoints
         .iter()
         .filter(|checkpoint| checkpoint.page_index < resume.page_index)
         .cloned()
         .collect();
-    let mut paginator = Paginator::resume(
-        &resume.flow,
-        resume.page_number,
-        options.footnote_reserved_heights.clone(),
-    )?;
-    paginator.set_section_index(resume.section_index);
-    // move retained pages out; restored on failure so the caller's stays valid
-    let mut previous_pages = std::mem::take(&mut previous_layout.pages);
-    let convergence = ConvergenceInput {
-        previous_checkpoints,
-        previous_fingerprints,
-        next_fingerprints,
-        dirty_index,
-    };
-    let placement = match place(
-        &input.measured,
-        &plan,
-        &mut paginator,
-        &initial_config,
-        resume.block_index,
-        resume.section_index,
-        resume.page_index,
-        Some(&convergence),
-    ) {
-        Ok(placement) => placement,
-        Err(error) => {
-            previous_layout.pages = previous_pages;
-            return Err(error);
+    let mut placed_blocks = 0;
+    let mut start = resume.clone();
+    let mut segment_dirty = dirty_index;
+    loop {
+        let mut paginator = Paginator::resume(
+            &start.flow,
+            start.page_number,
+            options.footnote_reserved_heights.clone(),
+        )?;
+        paginator.set_section_index(start.section_index);
+        let convergence = ConvergenceInput {
+            previous_checkpoints,
+            previous_fingerprints,
+            next_fingerprints,
+            dirty_index: segment_dirty,
+            skippable_dirty: skippable.then_some(dirty.as_slice()),
+            keep_with_next: &plan.keep_with_next,
+        };
+        let placement = place(
+            &input.measured,
+            &plan,
+            &mut paginator,
+            &initial_config,
+            start.block_index,
+            start.section_index,
+            start.page_index,
+            Some(&convergence),
+        )?;
+        placed_blocks += placement.placed_blocks;
+        checkpoints.extend(placement.checkpoints);
+        let next = match &placement.converged {
+            Some(Convergence::Skip {
+                previous,
+                resume,
+                dirty_index,
+            }) => {
+                checkpoints.extend(
+                    previous_checkpoints
+                        .iter()
+                        .filter(|checkpoint| {
+                            (previous.page_index..resume.page_index)
+                                .contains(&checkpoint.page_index)
+                        })
+                        .cloned(),
+                );
+                segment_dirty = *dirty_index;
+                Some(resume.clone())
+            }
+            _ => None,
+        };
+        segments.push((start, paginator.pages, placement.converged));
+        match next {
+            Some(resume) => start = resume,
+            None => break,
+        }
+    }
+
+    let mut retained = std::mem::take(&mut previous_layout.pages)
+        .into_iter()
+        .enumerate()
+        .peekable();
+    let mut take_retained = |from: usize, to: usize, pages: &mut Vec<crate::types::Page>| {
+        while let Some((index, _)) = retained.peek() {
+            if *index >= to {
+                break;
+            }
+            let (index, page) = retained.next().expect("peeked page");
+            if index >= from {
+                pages.push(page);
+            }
         }
     };
-
-    let rebuilt_page_end = placement
-        .converged
-        .as_ref()
-        .map_or(resume.page_index + paginator.pages.len(), |(next, _)| {
-            next.page_index
-        });
-    let mut pages: Vec<_> = previous_pages.drain(..resume.page_index).collect();
-    pages.append(&mut paginator.pages);
-    let mut checkpoints = prefix_checkpoints;
-    checkpoints.extend(placement.checkpoints);
-
-    if let Some((next_checkpoint, previous_checkpoint)) = placement.converged {
-        debug_assert_eq!(pages.len(), next_checkpoint.page_index);
-        let reused_page_start = pages.len();
-        pages.extend(previous_pages.drain(previous_checkpoint.page_index - resume.page_index..));
-        refresh_reused_pages(&mut pages[reused_page_start..], &input.measured);
-        let page_shift =
-            next_checkpoint.page_index as isize - previous_checkpoint.page_index as isize;
-        checkpoints.extend(
-            previous_checkpoints
-                .iter()
-                .filter(|checkpoint| checkpoint.page_index >= previous_checkpoint.page_index)
-                .cloned()
-                .map(|mut checkpoint| {
-                    checkpoint.page_index = (checkpoint.page_index as isize + page_shift) as usize;
-                    checkpoint
-                }),
-        );
+    let mut pages = Vec::new();
+    take_retained(0, resume.page_index, &mut pages);
+    let mut rebuilt_page_ranges = Vec::with_capacity(segments.len());
+    let mut reused_ranges = Vec::new();
+    for (start, mut placed, converged) in segments {
+        debug_assert_eq!(pages.len(), start.page_index);
+        let rebuilt_start = pages.len();
+        pages.append(&mut placed);
+        rebuilt_page_ranges.push(rebuilt_start..pages.len());
+        let reused_start = pages.len();
+        match converged {
+            Some(Convergence::Skip {
+                previous, resume, ..
+            }) => take_retained(previous.page_index, resume.page_index, &mut pages),
+            Some(Convergence::Suffix { next, previous }) => {
+                debug_assert_eq!(pages.len(), next.page_index);
+                take_retained(previous.page_index, usize::MAX, &mut pages);
+                let page_shift = next.page_index as isize - previous.page_index as isize;
+                checkpoints.extend(
+                    previous_checkpoints
+                        .iter()
+                        .filter(|checkpoint| checkpoint.page_index >= previous.page_index)
+                        .cloned()
+                        .map(|mut checkpoint| {
+                            checkpoint.page_index =
+                                (checkpoint.page_index as isize + page_shift) as usize;
+                            checkpoint
+                        }),
+                );
+            }
+            None => {}
+        }
+        reused_ranges.push(reused_start..pages.len());
     }
+    refresh_reused_page_ranges(&mut pages, &reused_ranges, &input.measured);
 
     Ok(CheckpointedLayout {
         layout: Layout {
@@ -442,16 +582,19 @@ pub fn layout_document_incremental(
             partial: false,
         },
         checkpoints,
-        placed_blocks: placement.placed_blocks,
+        placed_blocks,
         rebuilt_page_start: resume.page_index,
-        rebuilt_page_end,
+        rebuilt_page_end: rebuilt_page_ranges
+            .last()
+            .map_or(resume.page_index, |range| range.end),
+        rebuilt_page_ranges,
     })
 }
 
 struct PlacementOutcome {
     checkpoints: Vec<LayoutCheckpoint>,
     placed_blocks: usize,
-    converged: Option<(LayoutCheckpoint, LayoutCheckpoint)>,
+    converged: Option<Convergence>,
 }
 
 fn break_type_after_section(plan: &LayoutPlan, section_index: usize) -> Option<SectionBreakType> {
@@ -516,13 +659,13 @@ fn place(
                 page_number,
                 flow,
             };
-            if let Some(previous) = convergence.and_then(|value| value.retained_match(&checkpoint))
+            if let Some(converged) = convergence.and_then(|value| value.retained_match(&checkpoint))
             {
                 paginator.pages.truncate(page_index);
                 return Ok(PlacementOutcome {
                     checkpoints,
                     placed_blocks,
-                    converged: Some((checkpoint, previous.clone())),
+                    converged: Some(converged),
                 });
             }
             checkpointed_page = Some(page_index);
@@ -714,13 +857,13 @@ fn place(
                 page_number,
                 flow,
             };
-            if let Some(previous) = convergence.and_then(|value| value.retained_match(&checkpoint))
+            if let Some(converged) = convergence.and_then(|value| value.retained_match(&checkpoint))
             {
                 paginator.pages.truncate(page_index);
                 return Ok(PlacementOutcome {
                     checkpoints,
                     placed_blocks,
-                    converged: Some((checkpoint, previous.clone())),
+                    converged: Some(converged),
                 });
             }
             checkpoints.push(checkpoint);
@@ -741,7 +884,14 @@ fn block_id_key(id: &crate::types::BlockId) -> String {
 /// Retained suffix pages keep their geometry but absolute document positions move
 /// after an earlier edit. Refresh fragment ranges and resolved run slices from
 /// the new measured arena before the display list consumes them.
-fn refresh_reused_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBlock]) {
+fn refresh_reused_page_ranges(
+    pages: &mut [crate::types::Page],
+    ranges: &[std::ops::Range<usize>],
+    measured: &[MeasuredBlock],
+) {
+    if ranges.iter().all(std::ops::Range::is_empty) {
+        return;
+    }
     let blocks: std::collections::HashMap<_, _> = measured
         .iter()
         .filter_map(|measured| {
@@ -751,6 +901,15 @@ fn refresh_reused_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBl
                 .map(|id| (block_id_key(id), measured))
         })
         .collect();
+    for range in ranges {
+        refresh_reused_pages(&mut pages[range.clone()], &blocks);
+    }
+}
+
+fn refresh_reused_pages(
+    pages: &mut [crate::types::Page],
+    blocks: &std::collections::HashMap<String, &MeasuredBlock>,
+) {
     for page in pages {
         for fragment in &mut page.fragments {
             let key = match fragment {
@@ -1549,6 +1708,85 @@ mod pagination_rule_tests {
         assert!(incremental.placed_blocks < full.placed_blocks);
         assert_eq!(incremental.rebuilt_page_start, 0);
         assert_eq!(incremental.rebuilt_page_end, 1);
+    }
+
+    #[test]
+    fn incremental_layout_skips_the_clean_pages_between_changes() {
+        let keep_next = 41;
+        let measured = |lines: &[usize]| -> Vec<serde_json::Value> {
+            lines
+                .iter()
+                .enumerate()
+                .map(|(id, &count)| {
+                    let attrs = if id == keep_next {
+                        json!({ "keepNext": true })
+                    } else {
+                        json!({})
+                    };
+                    paragraph(id as u32, count, 20.0, attrs)
+                })
+                .collect()
+        };
+        let base: Vec<usize> = (0..60).map(|id| if id == 12 { 2 } else { 1 }).collect();
+        let mut previous_input = input(measured(&base));
+        let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+        let previous_fingerprints = vec![1_u64; base.len()];
+
+        // Each change is a block and its new line count; a same count changes only text.
+        let cases: [&[(usize, usize)]; 5] = [
+            &[(7, 1), (42, 1)],
+            &[(7, 1), (42, 2)],
+            &[(7, 2), (42, 1)],
+            &[(7, 2), (12, 1), (42, 1), (50, 1)],
+            &[(3, 1), (20, 2), (26, 1), (41, 2), (57, 1)],
+        ];
+        for changes in cases {
+            let mut lines = base.clone();
+            let mut next_fingerprints = previous_fingerprints.clone();
+            for &(index, count) in changes {
+                lines[index] = count;
+                next_fingerprints[index] = 2;
+            }
+            let mut previous_layout = previous.layout.clone();
+            let mut incremental_input = input(measured(&lines));
+            let incremental = layout_document_incremental(
+                &mut incremental_input,
+                &mut previous_layout,
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                changes[0].0,
+            )
+            .unwrap();
+            let mut full_input = input(measured(&lines));
+            let full = layout_document_checkpointed(&mut full_input).unwrap();
+            assert_eq!(
+                serde_json::to_string(&incremental.layout).unwrap(),
+                serde_json::to_string(&full.layout).unwrap(),
+                "{changes:?}"
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints, "{changes:?}");
+        }
+
+        let mut previous_layout = previous.layout.clone();
+        let mut next_fingerprints = previous_fingerprints.clone();
+        next_fingerprints[7] = 2;
+        next_fingerprints[42] = 2;
+        let incremental = layout_document_incremental(
+            &mut input(measured(&base)),
+            &mut previous_layout,
+            &previous.checkpoints,
+            &previous_fingerprints,
+            &next_fingerprints,
+            7,
+        )
+        .unwrap();
+        assert_eq!(incremental.rebuilt_page_ranges, vec![1..2, 8..9]);
+        assert_eq!(
+            (incremental.rebuilt_page_start, incremental.rebuilt_page_end),
+            (1, 9)
+        );
+        assert!(incremental.placed_blocks * 4 < base.len());
     }
 
     fn oversized_cant_split_table() -> serde_json::Value {

@@ -660,6 +660,8 @@ struct PaginationState {
     options_fingerprint: u64,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
+    /// The pages the last pass placed afresh, within the range above.
+    rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
     position_deltas: HashMap<String, i64>,
     last_incremental: bool,
     layout_epoch: u64,
@@ -1402,8 +1404,10 @@ impl EngineSession {
             pagination_blocks_placed: pagination.pagination_blocks_placed,
             retained_checkpoints: pagination.checkpoints.len(),
             rebuilt_pages: pagination
-                .rebuilt_page_end
-                .saturating_sub(pagination.rebuilt_page_start),
+                .rebuilt_page_ranges
+                .iter()
+                .map(ExactSizeIterator::len)
+                .sum(),
             frame_epoch: display.frame_epoch,
             retained_display_pages: display.list.as_ref().map_or(0, |list| list.pages.len()),
             retained_display_primitives: display.list.as_ref().map_or(0, |list| {
@@ -2345,6 +2349,7 @@ impl EngineSession {
         pagination.options_fingerprint = input_options_fingerprint;
         pagination.rebuilt_page_start = run.rebuilt_page_start;
         pagination.rebuilt_page_end = run.rebuilt_page_end;
+        pagination.rebuilt_page_ranges = run.rebuilt_page_ranges;
         pagination.position_deltas = deltas;
         pagination.last_incremental = incremental;
         pagination.layout_epoch = pagination.layout_epoch.wrapping_add(1);
@@ -3187,20 +3192,26 @@ impl EngineSession {
                 .ok_or_else(|| "resident layout is not built".to_owned())?;
             let mut display = self.display.borrow_mut();
             if pagination.last_incremental && display.extras_fingerprint == extras_fingerprint {
-                // Pages elsewhere whose notes anchor to references the edit moved.
+                // The first range is rebuilt as a range; the pages after it shift,
+                // but later ranges and the pages elsewhere whose notes anchor to
+                // references the edit moved are rebuilt too.
+                let first = pagination
+                    .rebuilt_page_ranges
+                    .first()
+                    .cloned()
+                    .unwrap_or(pagination.rebuilt_page_start..pagination.rebuilt_page_end);
                 let note_pages: Vec<usize> = pagination
-                    .note_changed_pages
+                    .rebuilt_page_ranges
                     .iter()
-                    .copied()
-                    .filter(|&index| {
-                        !(pagination.rebuilt_page_start..pagination.rebuilt_page_end)
-                            .contains(&index)
-                    })
+                    .skip(1)
+                    .flat_map(Clone::clone)
+                    .chain(pagination.note_changed_pages.iter().copied())
+                    .filter(|&index| !first.contains(&index))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
                     .collect();
-                let rebuilt_pages: HashSet<usize> = (pagination.rebuilt_page_start
-                    ..pagination.rebuilt_page_end)
-                    .chain(note_pages.iter().copied())
-                    .collect();
+                let rebuilt_pages: HashSet<usize> =
+                    first.clone().chain(note_pages.iter().copied()).collect();
                 let build = full_build_pages(&display, layout.pages.len());
                 let incremental = if let DisplayState {
                     list: Some(previous),
@@ -3213,8 +3224,8 @@ impl EngineSession {
                         layout,
                         resident_input,
                         previous,
-                        pagination.rebuilt_page_start,
-                        pagination.rebuilt_page_end,
+                        first.start,
+                        first.end,
                         &note_pages,
                         &pagination.position_deltas,
                         &|index| build.get(index).copied().unwrap_or(true),
@@ -7119,6 +7130,56 @@ mod tests {
         engine.build_display_pages_frame(&rest, epoch).unwrap();
         let built = engine.with_display_list(Clone::clone).unwrap();
         assert_eq!(built.pages, full_display_build(&engine, &extras).pages);
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn edits_pages_apart_rebuild_only_their_own_pages() {
+        let (engine, extras) = paged_filler_engine(207, 48);
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let pages = engine.with_display_list(|list| list.pages.len()).unwrap();
+        assert!(pages >= 4, "the fixture must span several pages");
+
+        // A word at the end of the second and the last paragraph wraps neither.
+        let ends: Vec<u32> = engine
+            .doc()
+            .paragraphs("body")
+            .unwrap()
+            .iter()
+            .scan(0_u32, |start, paragraph| {
+                let length = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+                let end = *start + length;
+                *start = end + 1;
+                Some(end)
+            })
+            .collect();
+        for end in [ends[ends.len() - 1], ends[1]] {
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", end),
+                    " too",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+        }
+        let incremental_builds = engine.stats().incremental_display_builds;
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            incremental_builds + 1
+        );
+        assert_eq!(
+            engine.pagination.borrow().rebuilt_page_ranges,
+            vec![0..1, pages - 1..pages]
+        );
+        assert_eq!(engine.stats().rebuilt_pages, 2);
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap().pages,
+            full_display_build(&engine, &extras).pages
+        );
         docx_layout::clear_measure_fonts();
     }
 
