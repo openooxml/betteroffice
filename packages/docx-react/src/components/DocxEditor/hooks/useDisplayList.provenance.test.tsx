@@ -438,8 +438,8 @@ test('a host frame of pagination a newer layout replaced claims no preview', asy
   expect(shown()).toEqual([UNKNOWN_REVISION_PREVIEW_KEY, 'Seed']);
 });
 
-test('input replayed on the host after a worker failure claims no preview', async () => {
-  const { session, display, worker, revision, shown } = await previewSetup();
+test('input replayed on the host after a worker failure claims no preview until a relayout', async () => {
+  const { session, display, worker, layoutRequests, revision, shown } = await previewSetup();
   session.buildDisplayListFrame('{}', 0);
   await act(async () => {
     await display.current!.layoutInWorker(
@@ -453,11 +453,13 @@ test('input replayed on the host after a worker failure claims no preview', asyn
     typed = display.current!.applyInput('!');
   });
   await until(() => worker().requests.includes('applyInput'));
+  const requested = layoutRequests.length;
   await act(async () => {
     worker().onerror?.({ message: 'worker crashed' } as ErrorEvent);
     await typed;
   });
   expect(shown()).toEqual([UNKNOWN_REVISION_PREVIEW_KEY, 'Seed more!']);
+  await until(() => layoutRequests.length > requested);
 });
 
 test('a worker frame of a forgotten layout revision claims no preview', async () => {

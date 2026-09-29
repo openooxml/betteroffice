@@ -568,6 +568,8 @@ export function useRustDisplayList(
         setLoading(false);
         markSettled(contentEpochRef.current);
         applyPaintedCaretReply(false, paintToken);
+        // The host's retained layout may show another preview: lay out again for a known one.
+        setTimeout(() => requestLayoutRef.current?.(), 0);
         return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false, deletedUnits };
       };
       const run = async (): Promise<ResidentFrameApplyResult | null> => {
