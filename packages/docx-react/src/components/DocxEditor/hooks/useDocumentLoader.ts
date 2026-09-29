@@ -3,14 +3,13 @@ import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { YrsDocxHost } from '@betteroffice/docx/yrs';
 import {
-  loadEmbeddedFonts,
-  loadDocumentFonts,
-  loadFontsWithMapping,
+  loadEmbeddedFontFamilies,
   getRenderableDocumentFonts,
   getEmbeddedFontFamilies,
   selectRenderableFonts,
   toArrayBuffer,
   type DocxInput,
+  type FontLoadScope,
 } from '@betteroffice/docx/utils';
 import type { FontOption } from '@betteroffice/docx/utils/fontOptions';
 import type { UseHistoryReturn } from '../../../hooks/useHistory';
@@ -41,6 +40,7 @@ export function useDocumentLoader({
   commentsLoadedRef,
   commentIdAllocator,
   setDocumentFonts,
+  fontScope,
 }: {
   documentBuffer: DocxInput | null | undefined;
   initialDocument: Document | null | undefined;
@@ -63,6 +63,8 @@ export function useDocumentLoader({
   // (embedded or system-resolved), surfaced in the picker's "Document fonts"
   // group.
   setDocumentFonts: (fonts: FontOption[]) => void;
+  /** The editor instance's font loads, see `useFontLoadScope`. */
+  fontScope: FontLoadScope;
 }) {
   // The live history document changes after every edit, but yrs must only be
   // reseeded when a new source document is loaded. Keep that load boundary
@@ -74,6 +76,9 @@ export function useDocumentLoader({
   const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
   const [yrsSeedGeneration, setYrsSeedGeneration] = useState(0);
   const [loadGeneration] = useState(() => new DocumentLoadGeneration());
+  // Embedded families registered under an alias because another live document
+  // registered different faces under the same name.
+  const [fontAliases, setFontAliases] = useState<ReadonlyMap<string, string>>(NO_FONT_ALIASES);
 
   const loadParsedDocument = useCallback(
     (doc: Document, seedBytes?: Uint8Array) => {
@@ -84,7 +89,7 @@ export function useDocumentLoader({
       setYrsSeedGeneration(generation);
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
-      loadDocumentFonts(doc).catch((err) => {
+      fontScope.loadDocumentFonts(doc).catch((err) => {
         console.warn('Failed to load document fonts:', err);
       });
       // Offer the document's own renderable fonts (embedded faces are loaded by
@@ -95,7 +100,7 @@ export function useDocumentLoader({
         })
       );
     },
-    [loadGeneration, resetForNewDocument, history, setLoadingState, setDocumentFonts]
+    [loadGeneration, resetForNewDocument, history, setLoadingState, setDocumentFonts, fontScope]
   );
 
   const loadBuffer = useCallback(
@@ -136,22 +141,33 @@ export function useDocumentLoader({
       setDocumentFonts(
         [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
       );
-      void loadEmbeddedFonts(
+      void loadEmbeddedFontFamilies(
         doc.package.fontTable,
         host.embeddedFonts,
-        host.fontTableRelationshipsXml
+        host.fontTableRelationshipsXml,
+        fontScope
       )
+        .then((families) => {
+          if (!loadGeneration.isCurrent(generation)) return;
+          const aliases = [...families].filter(([family, cssFamily]) => family !== cssFamily);
+          setFontAliases((current) =>
+            aliases.length === 0 && current.size === 0 ? current : new Map(aliases)
+          );
+        })
         .catch((error) => {
           console.warn('Failed to load embedded document fonts:', error);
         })
         .then(() =>
-          Promise.all([loadFontsWithMapping(host.referencedFonts), loadDocumentFonts(doc)])
+          Promise.all([
+            fontScope.loadFontsWithMapping(host.referencedFonts),
+            fontScope.loadDocumentFonts(doc),
+          ])
         )
         .catch((error) => {
           console.warn('Failed to load document fonts:', error);
         });
     },
-    [loadGeneration, history, setDocumentFonts, setLoadingState]
+    [loadGeneration, history, setDocumentFonts, setLoadingState, fontScope]
   );
 
   const failHostDocument = useCallback(
@@ -237,5 +253,8 @@ export function useDocumentLoader({
     acceptHostDocument,
     failHostDocument,
     reportLayoutError,
+    fontAliases,
   };
 }
+
+const NO_FONT_ALIASES: ReadonlyMap<string, string> = new Map();

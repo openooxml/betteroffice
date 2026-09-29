@@ -47,9 +47,12 @@ export function CanvasPagedArea({
   sidebarOpen = false,
   zoom = 1,
   interactive = false,
+  fontFamilies,
   children,
 }: {
   renderer: UseCanvasRendererResult;
+  /** The CSS family each document font family paints browser text with, where they differ. */
+  fontFamilies?: ReadonlyMap<string, string>;
   /** live-region wiring (host notify ref + Yrs session getter) — see CanvasA11yLiveRegion */
   a11y?: Omit<CanvasA11yLiveRegionProps, 'active'>;
   /** shifts the canvas pages left to make room for the comments sidebar, mirroring the DOM painter's viewport transform */
@@ -72,6 +75,7 @@ export function CanvasPagedArea({
           zoom={zoom}
           interactive={interactive}
           glyphOutlineProvider={renderer.glyphOutlineProvider}
+          fontFamilies={fontFamilies}
           offscreenReplay={renderer.offscreenReplay}
           onWorkerPresentationChange={renderer.setWorkerPresentationActive}
         />
@@ -186,6 +190,7 @@ export function CanvasPagesView({
   zoom = 1,
   interactive = false,
   glyphOutlineProvider,
+  fontFamilies,
   offscreenReplay,
   onWorkerPresentationChange,
 }: {
@@ -213,6 +218,8 @@ export function CanvasPagesView({
   interactive?: boolean;
   /** Outline source sharing the display engine's resident font store. */
   glyphOutlineProvider?: GlyphOutlineProvider | null;
+  /** The CSS family each document font family paints browser text with, where they differ. */
+  fontFamilies?: ReadonlyMap<string, string>;
   /** Dedicated worker replay surface; unsupported/media-heavy pages use DOM canvas. */
   offscreenReplay?: UseCanvasRendererResult['offscreenReplay'];
   onWorkerPresentationChange?: (active: boolean) => void;
@@ -516,7 +523,7 @@ export function CanvasPagesView({
     }
     const glyphCache = glyphCacheRef.current ?? undefined;
     replayState.updateFrame(frame);
-    const environment = { dpr, zoom, glyphCache, resolveImage };
+    const environment = { dpr, zoom, glyphCache, resolveImage, fontFamilies };
     const preparations: CanvasReplayPreparation[] = [];
     for (const [i, page] of displayList.pages.entries()) {
       const retainedPage = frame?.pages[i];
@@ -547,7 +554,7 @@ export function CanvasPagesView({
         ready: rasterizeDisplayPageToBackBuffer(
           buffer,
           page,
-          { resolveImage, glyphCache },
+          { resolveImage, glyphCache, fontFamilies },
           dpr,
           zoom
         ),
@@ -582,6 +589,7 @@ export function CanvasPagesView({
     displayList,
     frame,
     resolveImage,
+    fontFamilies,
     glyphCacheReady,
     offscreenEligible,
     offscreenFailed,

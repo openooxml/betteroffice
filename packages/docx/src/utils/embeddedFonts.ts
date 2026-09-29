@@ -16,7 +16,7 @@ import { readDocxContainer } from '../docx/zipContainer';
 import { preloadParseWasm } from '../docx/parseWasm';
 import { preloadOpcWasm } from '../docx/wasm';
 import { deobfuscateFont, isValidFontKey } from './fontDeobfuscation';
-import { loadFontFromBuffer } from './fontLoader';
+import { registerDocumentFaces, type FontLoadScope } from './fontLoader';
 import type { FontTable, FontInfo, FontEmbed } from '../types/styles';
 import type { Document } from '../types/document';
 
@@ -201,31 +201,40 @@ export async function loadEmbeddedFonts(
   rawFonts: ReadonlyMap<string, ArrayBuffer>,
   fontTableRelsXml: string | null | undefined
 ): Promise<Set<string>> {
-  if (!fontTable || !fontTableRelsXml || rawFonts.size === 0) return new Set();
+  return new Set((await loadEmbeddedFontFamilies(fontTable, rawFonts, fontTableRelsXml)).keys());
+}
+
+/**
+ * {@link loadEmbeddedFonts}, resolving to the CSS family each embedded family
+ * was registered under: its own name, or an alias when another live document
+ * registered different faces under that name (see {@link registerDocumentFaces}).
+ * With a scope, the faces are held until its next document or its disposal.
+ *
+ * @public
+ */
+export async function loadEmbeddedFontFamilies(
+  fontTable: FontTable | undefined,
+  rawFonts: ReadonlyMap<string, ArrayBuffer>,
+  fontTableRelsXml: string | null | undefined,
+  scope?: FontLoadScope
+): Promise<Map<string, string>> {
+  if (!fontTable || !fontTableRelsXml || rawFonts.size === 0) {
+    return registerDocumentFaces([], scope);
+  }
   await preloadParseWasm();
   const faces = getEmbeddedFontFaces(fontTable, rawFonts, fontTableRelsXml);
-  const families = new Set<string>();
-  if (faces.length === 0) return families;
-
-  await Promise.all(
-    faces.map(async (face) => {
-      const ok = await loadFontFromBuffer(face.family, face.data, {
-        weight: face.weight,
-        style: face.style,
-      });
-      if (ok) {
-        families.add(face.family);
-      } else if (typeof document !== 'undefined') {
-        // In a browser, a false result means the face genuinely failed to load
-        // (corrupt bytes, timeout) rather than headless no-op. Surface it: the
-        // picker may still list this family (see getEmbeddedFontFamilies), and
-        // text using it will fall back to the CSS stack.
+  const registered = await registerDocumentFaces(faces, scope);
+  if (typeof document !== 'undefined' && !scope?.disposed) {
+    for (const family of new Set(faces.map((face) => face.family.trim()))) {
+      // A missing family genuinely failed (corrupt bytes, timeout); the picker
+      // may still list it (see getEmbeddedFontFamilies), and its text falls
+      // back to the CSS stack.
+      if (!registered.has(family)) {
         console.warn(
-          `[embeddedFonts] embedded face "${face.family}" (${face.weight} ${face.style}) ` +
-            'failed to load; text using it falls back to the CSS stack'
+          `[embeddedFonts] embedded font "${family}" failed to load; text using it falls back to the CSS stack`
         );
       }
-    })
-  );
-  return families;
+    }
+  }
+  return registered;
 }
