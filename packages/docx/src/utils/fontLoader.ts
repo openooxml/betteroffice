@@ -51,9 +51,9 @@ export interface FontLoadScope {
   loadFontsWithMapping(families: string[]): Promise<void>;
   /** {@link loadFontDefinitions} on behalf of this scope. */
   loadFontDefinitions(defs: ReadonlyArray<FontDefinition> | undefined): Promise<void>;
-  /** Drops the listeners and releases the embedded faces this scope holds. */
+  /** Drops the listeners and releases the embedded faces this scope holds; a later listener revives it. */
   dispose(): void;
-  /** Whether {@link FontLoadScope.dispose} ran. */
+  /** Whether it is disposed and not revived since. */
   readonly disposed: boolean;
 }
 
@@ -142,8 +142,8 @@ const registeredFamilies = new Set<string>();
 // measureText calls on a shared canvas.
 const probeSatisfied = new Set<string>();
 
-// Google Fonts stylesheet URLs that failed or timed out: families Google does
-// not serve (Calibri, Cambria, Aptos, …). Kept for the page's lifetime.
+// Google Fonts stylesheet URLs that failed: families Google does not serve
+// (Calibri, Cambria, Aptos, …). Kept for the page's lifetime.
 const failedGoogleStylesheets = new Set<string>();
 
 function reportFontError(
@@ -399,10 +399,10 @@ function satisfiedBySystemFont(family: string, requesters: Requesters): boolean 
 // In-flight buffer/URL registrations for a family (loadingFaces is keyed
 // `family|weight`).
 function inFlightFacePromises(family: string): Promise<boolean>[] {
-  const prefix = `${family}|`;
+  const prefix = `${family.toLowerCase()}|`;
   const pending: Promise<boolean>[] = [];
   for (const [key, promise] of loadingFaces) {
-    if (key.startsWith(prefix)) {
+    if (key.toLowerCase().startsWith(prefix)) {
       pending.push(promise);
     }
   }
@@ -559,6 +559,7 @@ async function loadFontFrom(
       if (pendingFaces.length > 0) {
         await Promise.all(pendingFaces);
         if (loadedFonts.has(normalizedFamily)) {
+          notifyCallbacks([normalizedFamily], requesters);
           return true;
         }
         if (!options && satisfiedBySystemFont(normalizedFamily, requesters)) {
@@ -605,6 +606,7 @@ async function loadFontFrom(
       // Wait for load or error, with a 5s timeout. Clear the timer once
       // settled so no handle dangles past the load (keeps test runners and
       // watch cycles from waiting on dead timers).
+      let failed = false;
       const loaded = await new Promise<boolean>((resolve) => {
         const timer = setTimeout(() => resolve(false), 5000);
         link.onload = () => {
@@ -613,6 +615,7 @@ async function loadFontFrom(
         };
         link.onerror = () => {
           clearTimeout(timer);
+          failed = true;
           resolve(false);
         };
 
@@ -633,11 +636,12 @@ async function loadFontFrom(
       }
 
       // A family Google does not serve fails the same way on every call;
-      // remember it so later mounts neither re-request it nor add a link.
+      // remember it so later mounts neither re-request it nor add a link. A
+      // timeout only drops the link, so a later call can try again.
       link.onload = null;
       link.onerror = null;
       link.remove();
-      failedGoogleStylesheets.add(googleUrl);
+      if (failed) failedGoogleStylesheets.add(googleUrl);
       return false;
     } catch (error) {
       reportFontError(error, `failed to load "${normalizedFamily}"`, requesters);
@@ -946,8 +950,15 @@ export interface BufferFaceInput {
 /** One registered `@font-face` over one font file's bytes, held by its owners. */
 interface BufferFace {
   readonly key: string;
+  /** `family|weight|style` of the document family, case-folded. */
   readonly slot: string;
+  /** The same of the CSS family it registers under. */
+  readonly cssSlot: string;
   readonly cssFamily: string;
+  /** Whether it registers under the document family's own name. */
+  readonly realName: boolean;
+  /** Scopes that asked for it while it loaded. */
+  readonly requesters: Set<ScopeState | null>;
   readonly bytes: Uint8Array<ArrayBuffer>;
   readonly owners: Set<FaceOwner>;
   promise: Promise<boolean>;
@@ -961,10 +972,13 @@ const bufferFaces = new Map<string, BufferFace>();
 const realNameFaces = new Map<string, BufferFace>();
 // Families loadedFonts holds only because buffer faces are registered.
 const bufferOnlyFamilies = new Set<string>();
+// Mapped originals loadedFonts holds only because their equivalent is such a family.
+const mappedOriginals = new Map<string, string>();
 
 function markFamilyLoaded(family: string): void {
   loadedFonts.add(family);
   bufferOnlyFamilies.delete(family);
+  mappedOriginals.delete(family);
 }
 
 function bytesOf(face: BufferFaceInput): Uint8Array<ArrayBuffer> {
@@ -988,6 +1002,11 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return true;
 }
 
+/** CSS matches family names case-insensitively, so keys and collisions do too. */
+function familySlot(family: string, weight: number | string | undefined, style: string): string {
+  return faceKey(family.toLowerCase(), weight, style as 'normal' | 'italic');
+}
+
 function bufferFaceKey(slot: string, bytes: Uint8Array): string {
   const base = `${slot}|${fingerprint(bytes)}`;
   for (let attempt = 0; ; attempt += 1) {
@@ -995,6 +1014,22 @@ function bufferFaceKey(slot: string, bytes: Uint8Array): string {
     const existing = bufferFaces.get(key);
     if (!existing || sameBytes(existing.bytes, bytes)) return key;
   }
+}
+
+/** Whether a live registration other than `replacing`'s holds different bytes for `face` under `cssFamily`. */
+function heldByOthers(
+  cssFamily: string,
+  face: BufferFaceInput,
+  replacing: FaceOwner | undefined
+): boolean {
+  const slot = familySlot(cssFamily, face.weight, face.style ?? 'normal');
+  const bytes = bytesOf(face);
+  return [...bufferFaces.values()].some(
+    (entry) =>
+      entry.cssSlot === slot &&
+      !sameBytes(entry.bytes, bytes) &&
+      [...entry.owners].some((owner) => owner !== replacing)
+  );
 }
 
 /**
@@ -1008,16 +1043,12 @@ function cssFamilyFor(
   faces: readonly BufferFaceInput[],
   replacing?: FaceOwner
 ): string {
-  const collides = faces.some((face) => {
-    const holder = realNameFaces.get(faceKey(family, face.weight, face.style ?? 'normal'));
-    return (
-      holder !== undefined &&
-      !sameBytes(holder.bytes, bytesOf(face)) &&
-      [...holder.owners].some((owner) => owner !== replacing)
-    );
-  });
-  if (!collides) return family;
-  return `${family}#${fingerprint(new TextEncoder().encode(faces.map((face) => fingerprint(bytesOf(face))).join()))}`;
+  if (!faces.some((face) => heldByOthers(family, face, replacing))) return family;
+  const base = `${family}#${fingerprint(new TextEncoder().encode(faces.map((face) => fingerprint(bytesOf(face))).join()))}`;
+  for (let attempt = 0; ; attempt += 1) {
+    const alias = attempt === 0 ? base : `${base}~${attempt}`;
+    if (!faces.some((face) => heldByOthers(alias, face, undefined))) return alias;
+  }
 }
 
 function registerBufferFace(
@@ -1027,7 +1058,8 @@ function registerBufferFace(
 ): Promise<boolean> {
   const family = input.family.trim();
   const style = input.style ?? 'normal';
-  const key = bufferFaceKey(faceKey(cssFamily, input.weight, style), bytesOf(input));
+  const cssSlot = familySlot(cssFamily, input.weight, style);
+  const key = bufferFaceKey(cssSlot, bytesOf(input));
 
   // Provenance: mark before the async work so an in-flight registration
   // already counts as registered (see loadFontWithMapping). Marking a family
@@ -1035,27 +1067,31 @@ function registerBufferFace(
   // equivalent — the safe direction.
   registeredFamilies.add(family);
 
-  const requesters = joinRequesters(faceRequesters, key, owner.scope);
   const existing = bufferFaces.get(key);
   if (existing) {
     existing.owners.add(owner);
-    if (loadedFaces.has(key)) faceRequesters.delete(key);
+    if (existing.realName) realNameFaces.set(existing.slot, existing);
+    if (!loadedFaces.has(key)) existing.requesters.add(owner.scope);
     return existing.promise;
   }
 
   const bytes = bytesOf(input).slice();
+  const realName = cssFamily.toLowerCase() === family.toLowerCase();
   const entry: BufferFace = {
     key,
-    slot: faceKey(family, input.weight, style),
+    slot: familySlot(family, input.weight, style),
+    cssSlot,
     cssFamily,
+    realName,
     bytes,
     owners: new Set([owner]),
+    requesters: new Set([owner.scope]),
     promise: Promise.resolve(false),
     style: null,
     url: null,
   };
   bufferFaces.set(key, entry);
-  if (cssFamily === family) realNameFaces.set(entry.slot, entry);
+  if (realName) realNameFaces.set(entry.slot, entry);
 
   entry.promise = (async (): Promise<boolean> => {
     isLoadingAny = true;
@@ -1076,22 +1112,21 @@ function registerBufferFace(
       await waitForFontAvailable(cssFamily, 3000);
 
       if (bufferFaces.get(key) !== entry) return false;
-      if (cssFamily === family) {
+      if (realName) {
         if (!loadedFonts.has(family)) bufferOnlyFamilies.add(family);
-        markFaceLoaded(key, family, requesters);
+        markFaceLoaded(key, family, entry.requesters);
       } else {
         loadedFaces.add(key);
-        notifyCallbacks([family], requesters);
+        notifyCallbacks([family], entry.requesters);
       }
 
       return true;
     } catch (error) {
-      reportFontError(error, `failed to load "${family}" from buffer`, requesters);
+      reportFontError(error, `failed to load "${family}" from buffer`, entry.requesters);
       dropBufferFace(entry);
       return false;
     } finally {
-      loadingFaces.delete(key);
-      faceRequesters.delete(key);
+      if (loadingFaces.get(key) === entry.promise) loadingFaces.delete(key);
       if (loadingFonts.size === 0 && loadingFaces.size === 0) {
         isLoadingAny = false;
       }
@@ -1106,7 +1141,13 @@ function dropBufferFace(entry: BufferFace): void {
   if (bufferFaces.get(entry.key) !== entry) return;
   bufferFaces.delete(entry.key);
   loadedFaces.delete(entry.key);
-  if (realNameFaces.get(entry.slot) === entry) realNameFaces.delete(entry.slot);
+  if (realNameFaces.get(entry.slot) === entry) {
+    const successor = [...bufferFaces.values()].find(
+      (face) => face.realName && face.slot === entry.slot
+    );
+    if (successor) realNameFaces.set(entry.slot, successor);
+    else realNameFaces.delete(entry.slot);
+  }
   entry.style?.remove();
   if (entry.url) URL.revokeObjectURL(entry.url);
   entry.style = null;
@@ -1118,6 +1159,11 @@ function dropBufferFace(entry: BufferFace): void {
   ) {
     bufferOnlyFamilies.delete(family);
     loadedFonts.delete(family);
+    for (const [original, source] of mappedOriginals) {
+      if (source !== family) continue;
+      mappedOriginals.delete(original);
+      loadedFonts.delete(original);
+    }
   }
 }
 
@@ -1414,7 +1460,12 @@ async function loadWithMapping(fontFamily: string, requester: ScopeState | null)
     }
     const result = await loadFontFrom(googleFont, undefined, trimmed, undefined, requester);
     if (result && !partialBundledFamilies.has(googleFont)) {
-      markFamilyLoaded(trimmed);
+      if (!bufferOnlyFamilies.has(googleFont)) {
+        markFamilyLoaded(trimmed);
+      } else if (!loadedFonts.has(trimmed)) {
+        loadedFonts.add(trimmed);
+        mappedOriginals.set(trimmed, googleFont);
+      }
     }
     return result;
   }
@@ -1555,7 +1606,7 @@ export function createFontLoadScope(): FontLoadScope {
     embedded: PERMANENT,
     disposed: false,
     onFontsLoaded(callback) {
-      if (scope.disposed) return () => {};
+      revive();
       scope.loadCallbacks.add(callback);
       syncListening(scope);
       return () => {
@@ -1564,7 +1615,7 @@ export function createFontLoadScope(): FontLoadScope {
       };
     },
     onFontError(callback) {
-      if (scope.disposed) return () => {};
+      revive();
       scope.errorCallbacks.add(callback);
       syncListening(scope);
       return () => {
@@ -1572,9 +1623,9 @@ export function createFontLoadScope(): FontLoadScope {
         syncListening(scope);
       };
     },
-    loadDocumentFonts: (document) => loadDocumentFontsFor(document, liveOrNull(scope)),
-    loadFontsWithMapping: (families) => loadAllWithMapping(families, liveOrNull(scope)),
-    loadFontDefinitions: (defs) => loadDefinitionsFor(defs, liveOrNull(scope)),
+    loadDocumentFonts: (document) => loadDocumentFontsFor(document, scope),
+    loadFontsWithMapping: (families) => loadAllWithMapping(families, scope),
+    loadFontDefinitions: (defs) => loadDefinitionsFor(defs, scope),
     dispose() {
       if (scope.disposed) return;
       (scope as { disposed: boolean }).disposed = true;
@@ -1584,10 +1635,11 @@ export function createFontLoadScope(): FontLoadScope {
       releaseFaceOwner(scope.embedded);
     },
   };
+  // A remount (React StrictMode replays effects) subscribes again: the same
+  // scope serves it, holding new faces from then on.
+  const revive = (): void => {
+    (scope as { disposed: boolean }).disposed = false;
+  };
   scope.embedded = { scope };
   return scope;
-}
-
-function liveOrNull(scope: ScopeState): ScopeState | null {
-  return scope.disposed ? null : scope;
 }

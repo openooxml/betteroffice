@@ -4,6 +4,7 @@ import type { Comment } from '@betteroffice/docx/types/content';
 import type { YrsDocxHost } from '@betteroffice/docx/yrs';
 import {
   loadEmbeddedFontFamilies,
+  registerDocumentFaces,
   getRenderableDocumentFonts,
   getEmbeddedFontFamilies,
   selectRenderableFonts,
@@ -89,6 +90,10 @@ export function useDocumentLoader({
       setYrsSeedGeneration(generation);
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
+      // A parsed document's embedded faces were registered when it was
+      // parsed; release the ones the previous document held here.
+      void registerDocumentFaces([], fontScope);
+      setFontAliases(NO_FONT_ALIASES);
       fontScope.loadDocumentFonts(doc).catch((err) => {
         console.warn('Failed to load document fonts:', err);
       });

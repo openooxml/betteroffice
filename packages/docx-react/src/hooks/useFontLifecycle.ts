@@ -8,17 +8,11 @@ import {
 /**
  * The editor instance's font load scope: its loads notify only its own
  * listeners, and its embedded faces are released on unmount. A StrictMode
- * remount replaces the scope its simulated unmount disposed.
+ * remount's replayed subscriptions revive the scope its cleanup disposed.
  */
 export function useFontLoadScope(): FontLoadScope {
-  const [scope, setScope] = useState(createFontLoadScope);
-  useEffect(() => {
-    if (scope.disposed) {
-      setScope(createFontLoadScope());
-      return;
-    }
-    return () => scope.dispose();
-  }, [scope]);
+  const [scope] = useState(createFontLoadScope);
+  useEffect(() => () => scope.dispose(), [scope]);
   return scope;
 }
 

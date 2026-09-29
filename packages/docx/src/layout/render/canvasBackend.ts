@@ -1576,7 +1576,10 @@ export function withFontFamilies(font: string, families: ReadonlyMap<string, str
   let changed = false;
   const list = match[2].split(',').map((entry) => {
     const name = entry.trim().replace(/^(["'])(.*)\1$/, '$2');
-    const mapped = families.get(name);
+    const folded = name.toLowerCase();
+    const mapped =
+      families.get(name) ??
+      [...families].find(([family]) => family.toLowerCase() === folded)?.[1];
     if (mapped === undefined || mapped === name) return entry;
     changed = true;
     return ` "${mapped.replace(/["\\]/g, '\\$&')}"`;
