@@ -1640,7 +1640,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           if (!pageRect || !pageSize || pageSize.height <= 0) return null;
           return (
             (pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height)) /
-            targetZoom
+            (zoom * targetZoom)
           );
         };
         const { version, revisions } = sidebarReads.revisions(session);
@@ -1717,6 +1717,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       pagesContainerRef,
       sidebarCommentIds,
       yrsCore.session,
+      zoom,
     ]);
 
     // Canvas renderer (H2): re-back the plugin-facing RenderedDomContext with

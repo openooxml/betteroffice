@@ -568,6 +568,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         scheduleHide();
         return;
       }
+      const targetZoom = effectiveZoom(overlayTarget);
       const hit = detectDisplayListTableInsertHover({
         list: queries.displayList,
         pageIndex: point.pageIndex,
@@ -578,13 +579,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         tableKeyOf: createTableKeyResolver(projection),
         cellPmPosOf: createCellPmPosResolver(projection),
         region,
+        buttonZoom: targetZoom,
       });
       if (!hit) {
         scheduleHide();
         return;
       }
       const targetRect = overlayTarget.getBoundingClientRect();
-      const targetZoom = effectiveZoom(overlayTarget);
       setTableInsertButton({
         type: hit.type,
         x: (hit.clientX - targetRect.left) / targetZoom,
