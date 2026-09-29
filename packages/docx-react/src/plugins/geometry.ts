@@ -1,4 +1,8 @@
-import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
+import {
+  effectiveZoom,
+  type DisplayListQueries,
+  type DisplayListRect,
+} from '@betteroffice/docx/layout/render';
 import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import type { YrsSession } from '@betteroffice/docx/yrs';
@@ -52,8 +56,8 @@ export function pluginLayout(
 
 /**
  * Converts a rectangle in `RenderedDomContext` units (pages-container pixels divided by zoom)
- * into pixels of the unscaled `layer`, measuring both origins, the layer's border and its
- * scroll offset now.
+ * into the `layer`'s own CSS pixels, measuring both origins, the layer's border and its
+ * scroll offset now. Client offsets carry any ancestor CSS `zoom`; the result does not.
  */
 export function toOverlayRect(
   pages: HTMLElement,
@@ -63,13 +67,16 @@ export function toOverlayRect(
 ): DocxPluginRect {
   const pagesRect = pages.getBoundingClientRect();
   const layerRect = layer.getBoundingClientRect();
-  const originX = pagesRect.left - layerRect.left - layer.clientLeft + layer.scrollLeft;
-  const originY = pagesRect.top - layerRect.top - layer.clientTop + layer.scrollTop;
+  const layerZoom = effectiveZoom(layer);
+  const scale = zoom * (effectiveZoom(pages) / layerZoom);
+  const originX =
+    (pagesRect.left - layerRect.left) / layerZoom - layer.clientLeft + layer.scrollLeft;
+  const originY = (pagesRect.top - layerRect.top) / layerZoom - layer.clientTop + layer.scrollTop;
   return {
-    x: originX + rect.x * zoom,
-    y: originY + rect.y * zoom,
-    width: rect.width * zoom,
-    height: rect.height * zoom,
+    x: originX + rect.x * scale,
+    y: originY + rect.y * scale,
+    width: rect.width * scale,
+    height: rect.height * scale,
   };
 }
 
