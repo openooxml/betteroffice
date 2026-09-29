@@ -5114,14 +5114,17 @@ pub(crate) fn parse_docx_preview(
         .map_err(|error| error.to_string())
     };
     let envelope = parse(&parts)?;
-    // Inflate only the images the parsed prefix and the page stories use.
+    // Inflate only the images the parsed prefix and the other parts use.
     let media = preview_media(&envelope, &parts)?;
     if media.is_empty() {
         return Ok(envelope);
     }
-    parts.extend(ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| {
-        media.contains(&path.to_ascii_lowercase())
-    })?);
+    let inflated: u64 = parts.iter().map(|(_, data)| data.len() as u64).sum();
+    parts.extend(ooxml_opc::unzip_parts_where(
+        bytes,
+        ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES.saturating_sub(inflated),
+        |path| media.contains(&path.to_ascii_lowercase()),
+    )?);
     parse(&parts)
 }
 
@@ -5139,32 +5142,28 @@ pub(crate) fn seed_preview_envelope(
 /// so it does not hash the package for the IDs a full open would generate.
 const PREVIEW_SEED: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
-/// Lowercased paths of the media a preview draws: the targets of the relationship
-/// IDs its parsed document mentions, and every medium another part relates to.
+/// Lowercased paths of the media a preview draws: the targets of the document
+/// relationships its parsed document names, and every medium another part
+/// relates to.
 fn preview_media(
     envelope: &docx_parse::S9WireEnvelope,
     parts: &[(String, Vec<u8>)],
 ) -> Result<HashSet<String>, String> {
-    fn ids<'a>(value: &'a Value, found: &mut HashSet<&'a str>) {
+    fn strings<'a>(value: &'a Value, found: &mut HashSet<&'a str>) {
         match value {
-            Value::Object(fields) => {
-                for (key, value) in fields {
-                    if key == "rId"
-                        && let Value::String(id) = value
-                    {
-                        found.insert(id);
-                    }
-                    ids(value, found);
-                }
+            Value::String(text) => {
+                found.insert(text);
             }
-            Value::Array(values) => values.iter().for_each(|value| ids(value, found)),
+            Value::Object(fields) => fields.values().for_each(|value| strings(value, found)),
+            Value::Array(values) => values.iter().for_each(|value| strings(value, found)),
             _ => {}
         }
     }
-    let media_path = |base: &str, target: &str| {
+    let media_path = |directory: &str, target: &str| {
+        let target = percent_decoded(target);
         let joined = match target.strip_prefix('/') {
             Some(absolute) => absolute.to_owned(),
-            None => format!("{base}{target}"),
+            None => format!("{directory}{target}"),
         };
         let mut segments: Vec<&str> = Vec::new();
         for segment in joined.split('/') {
@@ -5179,9 +5178,13 @@ fn preview_media(
         let path = segments.join("/").to_ascii_lowercase();
         path.starts_with("word/media/").then_some(path)
     };
-    let document = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let mut document =
+        serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    if let Some(package) = document.get_mut("package").and_then(Value::as_object_mut) {
+        package.remove("relationshipEntries");
+    }
     let mut mentioned = HashSet::new();
-    ids(&document, &mut mentioned);
+    strings(&document, &mut mentioned);
     let mut media: HashSet<String> = envelope
         .document
         .package
@@ -5190,19 +5193,52 @@ fn preview_media(
         .filter(|(id, _)| mentioned.contains(id.as_str()))
         .filter_map(|(_, relationship)| media_path("word/", &relationship.target))
         .collect();
+    let limits = docx_parse::xml::ParseLimits::default();
     for (path, xml) in parts {
         let lower = path.to_ascii_lowercase();
-        if !lower.starts_with("word/_rels/") || lower == "word/_rels/document.xml.rels" {
+        let Some((directory, _)) = lower.split_once("_rels/") else {
+            continue;
+        };
+        if !lower.ends_with(".rels")
+            || lower == "_rels/.rels"
+            || lower == "word/_rels/document.xml.rels"
+        {
             continue;
         }
-        let text = String::from_utf8_lossy(xml);
-        for target in text.split("Target=\"").skip(1) {
-            if let Some(target) = target.split('"').next() {
-                media.extend(media_path("word/", target));
+        let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+        let relationships = docx_parse::relationships::parse_relationships(xml, path, &mut budget)
+            .map_err(|error| error.to_string())?;
+        media.extend(relationships.values().filter_map(|relationship| {
+            (relationship.target_mode != Some(docx_parse::relationships::TargetMode::External))
+                .then(|| media_path(directory, &relationship.target))
+                .flatten()
+        }));
+    }
+    Ok(media)
+}
+
+/// `%XX` escapes in a relationship target, decoded.
+fn percent_decoded(target: &str) -> String {
+    let bytes = target.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let hex = bytes
+            .get(index + 1..index + 3)
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match (bytes[index], hex) {
+            (b'%', Some(byte)) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            (byte, _) => {
+                decoded.push(byte);
+                index += 1;
             }
         }
     }
-    Ok(media)
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// Drops the body's nested stories, such as table cells, that the (cut) body
@@ -5259,6 +5295,58 @@ pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_preview_inflates_the_media_its_document_and_other_parts_use() {
+        const IMAGE: &str =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+        let drawing = |id: &str| {
+            format!(
+                r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="p"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="{id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+            )
+        };
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>{}<w:p><w:r><w:t>After the cut</w:t></w:r></w:p>{}</w:body></w:document>"#,
+            drawing("rIdUsed"),
+            drawing("rIdLater")
+        );
+        let parts = vec![
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdUsed" Type="{IMAGE}" Target="media/used.png"/><Relationship Id="rIdLater" Type="{IMAGE}" Target="media/later.png"/><Relationship Id="rIdMark" Type="{IMAGE}" Target="/word/media/Mark.PNG"/></Relationships>"#).into_bytes()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+            ("word/headers/_rels/header1.xml.rels".to_owned(), format!("<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='{IMAGE}' Target = '../media/logo%201.png'/></Relationships>").into_bytes()),
+        ];
+        let parsed = |blocks| {
+            docx_parse::parse_docx_s9_wire_from_parts(
+                &parts,
+                docx_parse::S9ParseOptions {
+                    body_blocks: Some(blocks),
+                    determinism_seed: Some(PREVIEW_SEED.to_owned()),
+                    ..docx_parse::S9ParseOptions::default()
+                },
+                &docx_parse::xml::ParseLimits::default(),
+            )
+            .unwrap()
+        };
+        let mut envelope = parsed(1);
+        let media = preview_media(&envelope, &parts).unwrap();
+        assert!(media.contains("word/media/used.png"));
+        assert!(media.contains("word/media/logo 1.png"));
+        assert!(!media.contains("word/media/later.png"));
+        // A document relationship named under any key, as a watermark's `relId` is.
+        envelope.document.warnings = Some(vec!["rIdMark".to_owned()]);
+        assert!(
+            preview_media(&envelope, &parts)
+                .unwrap()
+                .contains("word/media/mark.png")
+        );
+        assert!(
+            preview_media(&parsed(3), &parts)
+                .unwrap()
+                .contains("word/media/later.png")
+        );
+    }
+
     fn seed_body(blocks: &[Value]) -> EditingDoc {
         let mut context = LoweringContext {
             styles: StyleResolver::new(None),
