@@ -238,7 +238,7 @@ impl Paginator {
                 self.section_started = true;
                 self.displayed_parity_offset =
                     self.page_parity_offset(true, self.pages[page_index].number);
-                if self.promote_pending_geometry() {
+                if self.states[idx].column_index == 0 && self.promote_pending_geometry() {
                     self.restamp_pristine_page();
                 } else {
                     self.restamp_pristine_band();
@@ -379,6 +379,7 @@ impl Paginator {
         let content_limit = self.page_size.h - margins.bottom - self.footnote_reservation(number);
         self.pages[page_index].size = self.page_size.clone();
         self.pages[page_index].margins = margins;
+        self.pages[page_index].columns = (self.columns.count > 1.0).then(|| self.columns.clone());
         self.pages[page_index].region_section_index = self.section_index;
         let state = &mut self.states[idx];
         state.pen_y = content_top;

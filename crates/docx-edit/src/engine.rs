@@ -620,9 +620,8 @@ fn extend_input_for_header_footer(
                 let footer = height(HeaderFooterKind::Footer, hf_type).unwrap_or(0.0);
                 extend_body_margins(&page_size, &margins, header, footer)
             };
-            let even_and_odd = section
-                .even_and_odd_headers
-                .unwrap_or(regions.even_and_odd_headers);
+            let even_and_odd =
+                regions.even_and_odd_headers || section.even_and_odd_headers == Some(true);
             (
                 extend(HeaderFooterType::Default),
                 SectionPageMargins {
@@ -631,8 +630,7 @@ fn extend_input_for_header_footer(
                     restart: section
                         .page_numbering
                         .as_ref()
-                        .and_then(|numbering| numbering.start)
-                        .filter(|_| even_and_odd),
+                        .and_then(|numbering| numbering.start),
                 },
             )
         })
