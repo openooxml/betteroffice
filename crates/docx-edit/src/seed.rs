@@ -4501,6 +4501,7 @@ pub(crate) fn package_digest(bytes: &[u8]) -> String {
 }
 
 /// `digest` as a package digest: the lowercase hex form [`package_digest`] gives.
+#[cfg(feature = "wasm")]
 pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
     if digest.len() == 64
         && digest

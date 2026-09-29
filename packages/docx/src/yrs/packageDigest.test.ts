@@ -1,12 +1,13 @@
-import { beforeAll, expect, test } from 'bun:test';
+import { afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer } from '../docx/rezip/parts';
-import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
-import { createYrsSession, docxPackageDigest } from './index';
+import { unzipContainer } from '../wasm/opc';
+import { createYrsSession, prepareDocxBytes, saveYrsDocx } from './index';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
+const crypto = globalThis.crypto;
 let DOCX: Uint8Array;
 
 beforeAll(async () => {
@@ -34,37 +35,57 @@ beforeAll(async () => {
   DOCX = new Uint8Array(rezipPartsToArrayBuffer(new Map(Object.entries(parts))));
 });
 
-async function opened(digest?: string): Promise<{ state: Uint8Array; package: string }> {
+afterEach(() => {
+  Object.defineProperty(globalThis, 'crypto', { value: crypto, configurable: true });
+});
+
+/** What opening `bytes` gives: its state, package and the save of one edit. */
+async function opened(bytes: Uint8Array) {
   const session = await createYrsSession({ clientId: 91 });
   try {
-    const host = session.openDocx(DOCX, true, {
-      generation: 'digest',
-      ...(digest ? { digest } : {}),
-    });
+    const host = session.openDocx(bytes, true, { generation: 'digest' });
+    const before = { state: session.encodeState(), package: session.materializeDocx() };
+    const paragraph = session.paragraphs('body')[0]!;
+    session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'Edited ');
+    const saved = await saveYrsDocx(session);
     return {
-      state: session.encodeState(),
-      package: JSON.stringify([host.document, session.materializeDocx()]),
+      state: Buffer.from(before.state).toString('base64'),
+      package: JSON.stringify([host.document, before.package]),
+      saved: Buffer.from(saved.bytes).toString('base64'),
     };
   } finally {
     session.destroy();
   }
 }
 
-test('an open given the Web Crypto digest matches an open that hashes the package', async () => {
-  const digest = await docxPackageDigest(DOCX);
-  expect(digest).toMatch(/^[0-9a-f]{64}$/);
-  const hashed = await opened();
-  const given = await opened(digest);
-  expect(Buffer.from(given.state).equals(Buffer.from(hashed.state))).toBe(true);
-  expect(given.package).toBe(hashed.package);
-  expect((await opened('0'.repeat(64))).package).not.toBe(hashed.package);
+test('a prepared copy opens, edits and saves as the bytes it copies', async () => {
+  const prepared = await prepareDocxBytes(DOCX);
+  expect(prepared).not.toBe(DOCX);
+  expect(await opened(prepared)).toEqual(await opened(DOCX));
 });
 
-test('an open refuses a digest that is not one', async () => {
-  const session = await createYrsSession({ clientId: 92 });
-  try {
-    expect(() => session.openDocx(DOCX, true, { digest: 'ABC' })).toThrow();
-  } finally {
-    session.destroy();
-  }
+test('an open uses the digest prepared with the copy', async () => {
+  const prepared = await prepareDocxBytes(DOCX);
+  // A zip entry's local modification time: the package parses alike, but hashes differently.
+  const changed = prepared.slice();
+  changed[10] ^= 1;
+  // The copy is the caller's: an open trusts the digest taken of it.
+  prepared.set(changed);
+  expect((await opened(prepared)).package).not.toBe((await opened(changed)).package);
+  expect((await opened(prepared)).package).toBe((await opened(DOCX)).package);
+});
+
+test('the bytes prepared are copied before hashing', async () => {
+  const source = DOCX.slice();
+  const pending = prepareDocxBytes(source);
+  source[10] ^= 1;
+  expect(await opened(await pending)).toEqual(await opened(DOCX));
+});
+
+test('without Web Crypto a prepared copy opens by hashing it', async () => {
+  Object.defineProperty(globalThis, 'crypto', { value: undefined, configurable: true });
+  const prepared = await prepareDocxBytes(DOCX);
+  Object.defineProperty(globalThis, 'crypto', { value: crypto, configurable: true });
+  prepared[10] ^= 1;
+  expect((await opened(prepared)).package).toBe((await opened(prepared.slice())).package);
 });

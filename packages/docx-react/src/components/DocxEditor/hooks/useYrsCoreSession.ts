@@ -159,8 +159,6 @@ export interface YrsSeedSources {
   bytes: Uint8Array | null;
   document: Document | null;
   initialUpdate?: Uint8Array;
-  /** The SHA-256 of `bytes`, when already taken; see `docxPackageDigest`. */
-  digest?: string;
 }
 
 /**
@@ -172,9 +170,9 @@ export function seedYrsSession(
   seedDocumentIntoYrs: (document: Document) => void,
   seed: YrsSeedSources
 ): YrsDocxHost | null {
-  const { bytes, document, initialUpdate, digest } = seed;
+  const { bytes, document, initialUpdate } = seed;
   if (bytes) {
-    const host = session.openDocx(bytes, !initialUpdate, digest ? { digest } : undefined);
+    const host = session.openDocx(bytes, !initialUpdate);
     if (initialUpdate) session.loadState(initialUpdate.slice());
     return host;
   }
@@ -263,11 +261,9 @@ export function useYrsCoreSession(
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
-        // Hashing the package with Web Crypto keeps it off this thread; a
-        // preview paints while it runs.
-        const pendingDigest = seedBytes
-          ? yrs.docxPackageDigest(seedBytes)
-          : Promise.resolve(undefined);
+        // A copy hashed with Web Crypto keeps the package's hash off this
+        // thread; a preview paints while it runs.
+        const pendingBytes = seedBytes ? yrs.prepareDocxBytes(seedBytes) : Promise.resolve(null);
         // A preview paints the first pages first; the full open, which
         // blocks this thread for the whole package, waits until they have.
         const shown =
@@ -303,7 +299,7 @@ export function useYrsCoreSession(
           });
           if (stale()) return;
         }
-        const digest = await pendingDigest;
+        const bytes = await pendingBytes;
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
         if (stale()) {
           next.destroy();
@@ -312,10 +308,9 @@ export function useYrsCoreSession(
         let host: ReturnType<typeof seedYrsSession>;
         try {
           host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
-            bytes: seedBytes,
+            bytes,
             document: seedDocument,
             initialUpdate: collaborationInitialUpdate,
-            ...(digest ? { digest } : {}),
           });
         } catch (error) {
           next.destroy();
