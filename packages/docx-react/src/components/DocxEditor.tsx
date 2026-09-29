@@ -1137,7 +1137,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useCommentLifecycle({
     commentToRevision,
     setComments,
-    isLoading: state.isLoading,
+    isLoading: state.isLoading || opening,
     trackedChangesCount: trackedChanges.length,
     setShowCommentsSidebar,
     trackedChangesLoadedRef,
@@ -1821,7 +1821,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     return map;
   }, [trackedChanges]);
 
-  const sidebarOpen = allSidebarItems.some((item) => !item.hidden);
+  // An opening document's comment cards arrive with the full document: keep their space meanwhile.
+  const sidebarOpen =
+    allSidebarItems.some((item) => !item.hidden) || (opening && showCommentsSidebar);
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.
   const outlineLeftAllowance =
