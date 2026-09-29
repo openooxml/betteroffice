@@ -157,12 +157,17 @@ export function CanvasTableResizeOverlay({
     document.addEventListener('scroll', schedule, { capture: true, passive: true });
     const hostResized = new ResizeObserver(schedule);
     hostResized.observe(host);
+    // Layout elsewhere can move pages into view without scrolling or resizing.
+    const pagesShown =
+      typeof IntersectionObserver === 'function' ? new IntersectionObserver(schedule) : null;
+    host.querySelectorAll('.canvas-page').forEach((page) => pagesShown?.observe(page));
     window.addEventListener('resize', schedule);
     update();
     return () => {
       document.removeEventListener('scroll', schedule, { capture: true });
       scrollerResized?.disconnect();
       hostResized.disconnect();
+      pagesShown?.disconnect();
       window.removeEventListener('resize', schedule);
       if (frame !== null) cancelAnimationFrame(frame);
     };
