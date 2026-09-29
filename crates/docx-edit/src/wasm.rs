@@ -4820,7 +4820,6 @@ mod tests {
         let anchor = r#"<w:p><w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapTopAndBottom/><wp:docPr id="1" name="Float"/></wp:anchor></w:drawing></w:r></w:p>"#;
         let section_break = r#"<w:p><w:pPr><w:sectPr/></w:pPr></w:p>"#;
         let columns = r#"<w:sectPr><w:cols w:num="2"/></w:sectPr>"#;
-        // A margin float late in the body, and a late section with columns.
         for (late, end) in [(anchor, ""), (section_break, columns)] {
             let body = (0..200)
                 .map(|index| {
