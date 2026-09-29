@@ -1267,6 +1267,9 @@ export function useRustDisplayList(
     } else if (!overrides?.build && probe && canUseResidentEngineWorker()) {
       const hostEngine = residentEngine;
       if (!hostEngine) throw new Error('Resident worker snapshot requires a host engine');
+      // The worker this build asks; a failure of one that was since replaced
+      // (a StrictMode remount's destroyed worker) must not tear down its successor.
+      let requested = workerRef.current;
       const fallback = (
         cause: unknown,
         client: ResidentEngineWorkerClient | null = null
@@ -1280,6 +1283,11 @@ export function useRustDisplayList(
           } catch (error) {
             return fallback(error);
           }
+        }
+        if (requested !== workerRef.current) {
+          return generation === generationRef.current
+            ? buildOnMainThread()
+            : Promise.reject(cause);
         }
         const nextError =
           cause instanceof Error
@@ -1300,6 +1308,7 @@ export function useRustDisplayList(
             client: new ResidentEngineWorkerClient(),
           };
         }
+        requested = workerRef.current;
         const worker = workerRef.current.client;
         const extras = encodeDisplayListFrameExtras(buildInputs);
         const bootstrapping = !worker.bootstrapSent();
@@ -1792,7 +1801,8 @@ export function useCanvasRenderer(
     requestLayout,
     workerHeapLimitBytes
   );
-  const resolveImage = useMemo(() => createCanvasImageResolver(), []);
+  // Decoded images of one session's document; the next session starts empty.
+  const resolveImage = useMemo(() => createCanvasImageResolver(), [engine]);
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
     : loading || displayList == null

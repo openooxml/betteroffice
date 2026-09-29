@@ -214,11 +214,17 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
-        const host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
-          bytes,
-          document: seedDocument,
-          initialUpdate: collaborationInitialUpdate,
-        });
+        let host: YrsDocxHost | null;
+        try {
+          host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
+            bytes,
+            document: seedDocument,
+            initialUpdate: collaborationInitialUpdate,
+          });
+        } catch (error) {
+          next.destroy();
+          throw error;
+        }
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
