@@ -9,10 +9,7 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import {
-  revisionPreviewKeyOf,
-  stampRevisionPreviewKey,
-} from '../internals/layoutProvenance';
+import { revisionPreviewKey, revisionPreviewKeyOf } from '../internals/layoutProvenance';
 import { useRustDisplayList } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -116,6 +113,8 @@ class EngineWorker {
   terminate(): void {}
 }
 
+const PREVIEW = { r1: 'accepted' } as const;
+
 function lazyFixture() {
   const engine = createEditSession(9401);
   engine.create_story('body', 'Lazy pages. '.repeat(400), 'Normal', 'left');
@@ -162,7 +161,13 @@ function lazyFixture() {
   globalThis.Worker = EngineWorker as unknown as typeof Worker;
   const host = {
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
-    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    residentWorkerSnapshot: () => ({
+      state: new Uint8Array(),
+      fonts: [],
+      fontsRevision: 0,
+      layoutRevision: 1,
+      layoutInput: JSON.stringify({ renderEnv: { revisionPreview: PREVIEW } }),
+    }),
     resetFrameBase: () => {},
     encodeStateVector: () => new Uint8Array(),
     onUpdate: () => () => {},
@@ -175,7 +180,6 @@ function lazyFixture() {
 test('a worker frame builds only the pages near the viewport', async () => {
   const { engine, inputs, host } = lazyFixture();
   try {
-    stampRevisionPreviewKey(inputs.layout, 'preview');
     const overrides = { getInputs: () => inputs };
     const { result, unmount } = renderHook(() =>
       useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
@@ -193,7 +197,7 @@ test('a worker frame builds only the pages near the viewport', async () => {
     });
     await waitFor(() => expect(pages()[last]?.unbuilt).toBeFalsy());
     expect(pages().slice(5, last).every((page) => page.unbuilt)).toBe(true);
-    expect(revisionPreviewKeyOf(result.current.queries)).toBe('preview');
+    expect(revisionPreviewKeyOf(result.current.queries)).toBe(revisionPreviewKey(PREVIEW));
     const span = pages()[5]!.positionSpan!;
     expect(span[0]).toBeLessThanOrEqual(span[1]);
     expect(

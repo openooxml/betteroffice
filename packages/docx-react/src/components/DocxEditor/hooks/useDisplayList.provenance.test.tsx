@@ -135,10 +135,11 @@ async function setup(renderEnv: { current: YrsRenderEnv } = { current: {} }) {
   );
   const view = render(harness());
   await until(() => display.current?.workerSurfacesActive === true && !!display.current.queries);
-  const relayout = () => {
-    inputs = layOut();
+  const show = (next: { layout: Layout }) => {
+    inputs = next;
     view.rerender(harness());
   };
+  const relayout = () => show(layOut());
   return {
     session,
     paraId,
@@ -146,6 +147,8 @@ async function setup(renderEnv: { current: YrsRenderEnv } = { current: {} }) {
     worker: () => worker,
     layoutRequests,
     previewKeys,
+    layOut,
+    show,
     relayout,
   };
 }
@@ -242,11 +245,11 @@ async function previewSetup() {
   await show('accepted');
   await until(() => shown()[0] === key('accepted'));
   expect(shown()).toEqual([key('accepted'), 'Seed more']);
-  return { ...harness, revision, key, show, shown };
+  return { ...harness, revision, key, decide: show, shown };
 }
 
 test('a frame carries the revision preview of its layout, typed frames included', async () => {
-  const { display, previewKeys, worker, key, show, shown } = await previewSetup();
+  const { display, previewKeys, worker, key, decide, shown } = await previewSetup();
   const acceptedQueries = display.current!.queries;
   await act(async () => {
     await display.current!.applyInput('!');
@@ -254,8 +257,8 @@ test('a frame carries the revision preview of its layout, typed frames included'
   expect(shown()).toEqual([key('accepted'), 'Seed more!']);
 
   worker().hold();
-  await show('rejected');
-  await show();
+  await decide('rejected');
+  await decide();
   const released = previewKeys.length;
   await act(async () => worker().release());
   await until(() => shown()[0] === key());
@@ -268,14 +271,14 @@ test('a frame carries the revision preview of its layout, typed frames included'
 });
 
 test('a typed frame from the previous preview never publishes under the new one', async () => {
-  const { display, previewKeys, worker, key, show, shown } = await previewSetup();
+  const { display, previewKeys, worker, key, decide, shown } = await previewSetup();
   worker().hold();
   let typed!: Promise<unknown>;
   act(() => {
     typed = display.current!.applyInput('!');
   });
   await until(() => worker().requests.includes('applyInput'));
-  await show('rejected');
+  await decide('rejected');
   const released = previewKeys.length;
   await act(async () => {
     worker().release();
@@ -289,9 +292,9 @@ test('a typed frame from the previous preview never publishes under the new one'
 });
 
 test('settling waits for the frame of the current preview', async () => {
-  const { display, worker, key, show, shown } = await previewSetup();
+  const { display, worker, key, decide, shown } = await previewSetup();
   worker().hold();
-  await show('rejected');
+  await decide('rejected');
   let settled: DisplayList | null = null;
   void display.current!.settledDisplayList(() => {}).then((list) => {
     settled = list;
@@ -329,5 +332,36 @@ test('frames the worker builds after a preview layout was sent carry that previe
   expect(shown()[0]).not.toBe(key('accepted'));
   for (const [shownKey, text] of previewKeys.slice(released)) {
     if (shownKey === key('accepted')) expect(text).toContain('more');
+  }
+});
+
+test('a layout that lands after a newer worker layout does not relabel what the worker shows', async () => {
+  const { session, display, worker, previewKeys, revision, key, shown, layOut, show } =
+    await previewSetup();
+  const older = layOut();
+  worker().hold();
+  let laidOut!: ReturnType<UseRustDisplayListResult['layoutInWorker']>;
+  act(() => {
+    laidOut = display.current!.layoutInWorker(
+      session,
+      layoutRequest({ revisionPreview: { [revision]: 'rejected' } })
+    );
+  });
+  await act(async () => show(older));
+  let typed!: Promise<unknown>;
+  act(() => {
+    typed = display.current!.applyInput('!');
+  });
+  const released = previewKeys.length;
+  await act(async () => {
+    worker().release();
+    await laidOut;
+    await typed;
+  });
+  await until(() => shown()[1] === 'Seed!');
+  expect(shown()[0]).toBe(key('rejected'));
+  for (const [shownKey, text] of previewKeys.slice(released)) {
+    if (shownKey === key('accepted')) expect(text).toContain('more');
+    if (shownKey === key('rejected')) expect(text).not.toContain('more');
   }
 });

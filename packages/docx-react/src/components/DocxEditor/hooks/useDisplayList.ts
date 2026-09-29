@@ -34,6 +34,7 @@ import {
   type ResidentEngineWorkerFrame,
   type YrsResidentCaretSnapshot,
   type YrsRenderEnv,
+  type YrsResidentWorkerSnapshot,
   type YrsSelection,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -240,6 +241,7 @@ export function useRustDisplayList(
   const queryEpochGate = queryEpochGateRef.current;
   const contentEpochRef = useRef(0);
   const layoutPreviewKeyRef = useRef<string | null>(null);
+  const workerPreviewKeysRef = useRef(new Map<number, string>());
   const settledEpochRef = useRef<number | null>(null);
   const settleErrorRef = useRef<Error | null>(null);
   const settleWaitersRef = useRef(new Set<() => void>());
@@ -668,7 +670,7 @@ export function useRustDisplayList(
           null,
           previous,
           readSessionVersion(worker.engine),
-          layoutPreviewKeyRef.current
+          workerPreviewKeysRef.current.get(result.layoutRevision) ?? null
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -833,7 +835,7 @@ export function useRustDisplayList(
                     null,
                     previous,
                     readSessionVersion(worker.engine),
-                    layoutPreviewKeyRef.current
+                    workerPreviewKeysRef.current.get(result.layoutRevision) ?? null
                   )
                 : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
             snapshotRef.current = nextSnapshot;
@@ -918,9 +920,8 @@ export function useRustDisplayList(
             }
       );
       if (!snapshot) return null;
-      const previewKey = revisionPreviewKey(
-        (JSON.parse(request) as { renderEnv?: YrsRenderEnv }).renderEnv?.revisionPreview
-      );
+      const previewKey = layoutPreviewKey(request) ?? '';
+      rememberWorkerPreview(workerPreviewKeysRef.current, snapshot, previewKey);
       if (layoutPreviewKeyRef.current !== null && previewKey !== layoutPreviewKeyRef.current) {
         contentEpochRef.current += 1;
         queryEpochGate.invalidate();
@@ -1126,6 +1127,8 @@ export function useRustDisplayList(
       caretPainted: boolean;
       /** Shows a layout of the first pages only, so it does not settle. */
       provisional?: boolean;
+      /** The preview a worker frame was built with; absent for a frame of `layout` itself. */
+      previewKey?: string | null;
     }>;
     if (!overrides?.build && probe && canUseResidentEngineWorker()) {
       const hostEngine = residentEngine;
@@ -1173,6 +1176,7 @@ export function useRustDisplayList(
             workerProduced: true,
             caretPainted: result.caretPainted,
             provisional: prebuilt.provisional,
+            previewKey: workerPreviewKeysRef.current.get(result.layoutRevision) ?? null,
           });
         } else {
           if (workerRef.current?.engine !== hostEngine) {
@@ -1195,6 +1199,7 @@ export function useRustDisplayList(
               knownFontsRevision: worker.syncedFontsRevision(),
             });
             if (!snapshot) throw new Error('Resident worker snapshot was not available');
+            rememberWorkerPreview(workerPreviewKeysRef.current, snapshot);
             return snapshot;
           };
           const sent = () => ({ stateVector: hostEngine.encodeStateVector() });
@@ -1231,6 +1236,7 @@ export function useRustDisplayList(
                 queryEngine: null,
                 workerProduced: true,
                 caretPainted: result.caretPainted,
+                previewKey: workerPreviewKeysRef.current.get(result.layoutRevision) ?? null,
               };
             })
             .catch(fallback);
@@ -1257,7 +1263,7 @@ export function useRustDisplayList(
           result.queryEngine,
           snapshotRef.current,
           sourceVersion,
-          previewKey
+          result.previewKey === undefined ? previewKey : result.previewKey
         );
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
@@ -1371,6 +1377,32 @@ export function useRustDisplayList(
     notifyCaretInputDispatched,
     notifyCaretInterrupt,
   };
+}
+
+/** The preview key a region layout request renders with, or null when it cannot be read. */
+function layoutPreviewKey(request: unknown): string | null {
+  if (typeof request !== 'string') return null;
+  try {
+    return revisionPreviewKey(
+      (JSON.parse(request) as { renderEnv?: YrsRenderEnv }).renderEnv?.revisionPreview
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Records the preview key of the layout a worker snapshot carries, by its layout revision. */
+function rememberWorkerPreview(
+  keys: Map<number, string>,
+  snapshot: YrsResidentWorkerSnapshot,
+  key = layoutPreviewKey(snapshot.layoutInput)
+): void {
+  if (key === null || typeof snapshot.layoutRevision !== 'number') return;
+  keys.set(snapshot.layoutRevision, key);
+  for (const revision of keys.keys()) {
+    if (keys.size <= 8) break;
+    keys.delete(revision);
+  }
 }
 
 /**
