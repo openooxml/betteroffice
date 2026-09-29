@@ -166,16 +166,9 @@ pub fn resolve_header_footer_field_widths(
     for variant in &mut payload.variants {
         let mut widths = Vec::new();
         for measured in &variant.measured {
-            let LayoutBlock::Paragraph(paragraph) = &measured.block else {
-                continue;
-            };
-            for run in &paragraph.runs {
-                let Run::Field(field) = run else {
-                    continue;
-                };
-                if !matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES") {
-                    continue;
-                }
+            let mut fields = Vec::new();
+            page_fields(&measured.block, &mut fields);
+            for field in fields {
                 let Some(pm_start) = integral_position(field.pm_start) else {
                     continue;
                 };
@@ -215,6 +208,28 @@ pub fn resolve_header_footer_field_widths(
         variant.field_widths = widths;
     }
     Ok(())
+}
+
+/// The PAGE and NUMPAGES fields of a block, table cells included.
+fn page_fields<'a>(block: &'a LayoutBlock, fields: &mut Vec<&'a FieldRun>) {
+    match block {
+        LayoutBlock::Paragraph(paragraph) => {
+            fields.extend(paragraph.runs.iter().filter_map(|run| match run {
+                Run::Field(field) if matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES") => {
+                    Some(field)
+                }
+                _ => None,
+            }));
+        }
+        LayoutBlock::Table(table) => {
+            for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                for block in &cell.blocks {
+                    page_fields(block, fields);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn integral_position(value: Option<f64>) -> Option<i64> {
