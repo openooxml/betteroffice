@@ -180,12 +180,13 @@ function worker() {
       harness.rasterized = [];
       harness.presented = [];
     },
-    async bootstrap(pageCount = 3) {
+    async bootstrap(pageCount = 3, keepSurfaces = false) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
         type: 'bootstrap',
         expectedFrameEpoch: 0,
         extras: '',
+        ...(keepSurfaces ? { keepSurfaces } : {}),
         snapshot: {
           clientId: 1,
           state: new Uint8Array(),
@@ -246,6 +247,18 @@ function deferred() {
 }
 
 describe('resident worker page damage', () => {
+  test('a bootstrap that keeps surfaces paints the next document into the attached canvases', async () => {
+    const w = worker();
+    await w.bootstrap(3);
+    await w.attach([1, 2]);
+    w.resetCalls();
+    expect((await w.bootstrap(3, true)).ok).toBe(true);
+    expect(w.harness.presented).toEqual([1, 2]);
+    w.resetCalls();
+    await w.bootstrap(3);
+    expect(w.harness.presented).toEqual([]);
+  });
+
   test('paints each page once while a three-page window crosses twelve pages', async () => {
     const w = worker();
     await w.bootstrap(12);

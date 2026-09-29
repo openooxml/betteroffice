@@ -99,6 +99,7 @@ export class ResidentEngineWorkerClient {
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
+  private keepSurfaces = false;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
@@ -148,6 +149,20 @@ export class ResidentEngineWorkerClient {
     return this.bootstrapped;
   }
 
+  /**
+   * Starts over with another document in the same worker: the next request
+   * is a bootstrap, which keeps the page surfaces already attached so the
+   * new document's pages paint where the old ones were.
+   */
+  rebootstrap(): void {
+    this.bootstrapped = false;
+    this.remoteVector = null;
+    this.appliedFontsRevision = null;
+    this.lastSnapshotId = 0;
+    this.revision = 0;
+    this.keepSurfaces = true;
+  }
+
   async bootstrap(
     snapshot: YrsResidentWorkerSnapshot,
     extras: string,
@@ -155,6 +170,8 @@ export class ResidentEngineWorkerClient {
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     this.bootstrapped = true;
+    const keepSurfaces = this.keepSurfaces;
+    this.keepSurfaces = false;
     const pending = this.request(
       {
         type: 'bootstrap',
@@ -165,6 +182,7 @@ export class ResidentEngineWorkerClient {
         ...(options.provisionalPages !== undefined
           ? { provisionalPages: options.provisionalPages }
           : {}),
+        ...(keepSurfaces ? { keepSurfaces: true } : {}),
       },
       snapshotTransfers(snapshot)
     );

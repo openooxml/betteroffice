@@ -205,6 +205,13 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
+   * Experimental: paint a display-only preview of a document's first pages
+   * before the whole document is opened, then hand them over to it. The editor
+   * is read-only and plugins wait until the full document is open. Ignored
+   * with collaboration. Default false.
+   */
+  previewFirstPage?: boolean;
+  /**
    * When true, the editor does not intercept Cmd/Ctrl+F or Cmd/Ctrl+H.
    * This lets the browser or host app handle native find/history shortcuts.
    */
@@ -702,6 +709,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     initialZoom = 1.0,
     showHiddenText = false,
     readOnly: readOnlyProp = false,
+    previewFirstPage = false,
     disableFindReplaceShortcuts = false,
     toolbarExtra,
     toolbar,
@@ -829,8 +837,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // Canvas renderer plumbing. `resolvedIdsForRender` reaches the Rust
   // display-list build so the canvas drops the comment wash of resolved
   // threads (and re-tints the one whose sidebar card is expanded).
-  const canvasRenderer = useCanvasRenderer(rustFontChainsProviderRef, resolvedIdsForRender, () =>
-    pagedEditorRef.current?.relayout()
+  const handoffFromRef = useRef<YrsSession | null>(null);
+  const canvasRenderer = useCanvasRenderer(
+    rustFontChainsProviderRef,
+    resolvedIdsForRender,
+    () => pagedEditorRef.current?.relayout(),
+    handoffFromRef
   );
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
@@ -856,10 +868,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onModeChange?.(mode);
   };
   // 'viewing' mode acts as read-only
-  const readOnly = readOnlyProp || editingMode === 'viewing';
+  const modeReadOnly = readOnlyProp || editingMode === 'viewing';
   const commandBridgeRef = useRef<PagedEditorCommandBridge | null>(null);
   const writeModeRef = useRef<EditorMode>(editingMode);
-  writeModeRef.current = readOnly ? 'viewing' : editingMode;
+  writeModeRef.current = modeReadOnly ? 'viewing' : editingMode;
 
   // Bridge / agent event subscribers — fan-out from the existing onChange and
   // onSelectionChange paths so multiple listeners (host app, MCP server, etc.)
@@ -996,8 +1008,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       isCurrentLoad,
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
-    }
+    },
+    { previewFirstPage }
   );
+  // A preview is for display only: nothing edits it before the full document.
+  const readOnly = modeReadOnly || yrsCore.previewing;
+  if (yrsCore.previewing) writeModeRef.current = 'viewing';
+  handoffFromRef.current = yrsCore.handoffFrom;
+  const { notifyFramePresented } = yrsCore;
+  const presentedEngine = canvasRenderer.presentedEngine;
+  useEffect(() => {
+    if (presentedEngine) notifyFramePresented(presentedEngine);
+  }, [presentedEngine, canvasRenderer.displayList, notifyFramePresented]);
 
   const {
     imageInputRef,
@@ -1412,6 +1434,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commands: commandController,
     session:
       yrsCore.session &&
+      !yrsCore.previewing &&
       yrsCore.sessionGeneration === yrsSeedGeneration &&
       history.state &&
       !state.isLoading &&

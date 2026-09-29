@@ -58,6 +58,9 @@ function yrsCore(): YrsCoreSession {
     locToDisplayPosition: () => null,
     documentFromYrs: () => null,
     publishDirectInput: () => {},
+    previewing: false,
+    handoffFrom: null,
+    notifyFramePresented: () => {},
   };
 }
 
