@@ -131,6 +131,7 @@ export function createPluginGeometry(
   queries: DisplayListQueries,
   access: () => AnchorGeometryAccess | null
 ): DocxPluginGeometry {
+  const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
   const project = (rect: DisplayListRect): DocxAnchorRect | null => {
     const projected = projector.projectRect(rect);
@@ -148,22 +149,26 @@ export function createPluginGeometry(
       .rangeRects(from, from + 1)
       .filter((rect) => rect.width > 0)
       .at(-1) ?? null;
+  const stopAt = (unit: DisplayListRect, x: number): number | null => {
+    const hit = queries.hitTestRegions(unit.pageIndex, x, unit.y + unit.height / 2);
+    return hit?.region === 'body' ? hit.pos : null;
+  };
   /**
-   * The collapsed caret at `pos`, on the edge of a neighbouring unit whose caret stop is `pos`:
-   * the unit after it first unless `before`, which prefers the unit before it.
+   * The collapsed caret at `pos`, on the edge of a neighbouring unit whose caret stop is nearest
+   * `pos`: the unit before it first when `before`, else the unit after it first.
    */
   const caretAt = (pos: number, before = false): DisplayListRect | null => {
-    const units = before ? [pos - 1, pos] : [pos, pos - 1];
-    for (const from of units) {
+    for (const from of before ? [pos - 1, pos] : [pos, pos - 1]) {
       const unit = unitAt(from);
       if (!unit) continue;
-      const hit = queries.hitTestRegions(
-        unit.pageIndex,
-        unit.x + Math.min(1, unit.width / 4),
-        unit.y + unit.height / 2
-      );
-      const left = hit?.region === 'body' && hit.pos !== null ? hit.pos === pos : from === pos;
-      return { ...unit, x: left ? unit.x : unit.x + unit.width, width: 0 };
+      const inset = Math.min(1, unit.width / 4);
+      const left = stopAt(unit, unit.x + inset);
+      const right = stopAt(unit, unit.x + unit.width - inset);
+      const atLeft =
+        left === null || right === null
+          ? from === pos
+          : Math.abs(left - pos) <= Math.abs(right - pos);
+      return { ...unit, x: atLeft ? unit.x : unit.x + unit.width, width: 0 };
     }
     return null;
   };
@@ -171,14 +176,14 @@ export function createPluginGeometry(
     layout,
     dom,
     toOverlayRect: (rect) =>
-      current() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,
+      shown() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,
     getPositionAtPoint(clientX, clientY) {
-      if (!current()) return null;
+      if (!shown()) return null;
       const position = resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
       return position ? { ...position, layoutId: layout.id } : null;
     },
     getAnchorGeometry(target) {
-      if (!current()) return unavailable();
+      if (!shown()) return unavailable();
       const live = access();
       if (!live || !live.presented || live.editor.hasPendingInput()) return unavailable();
       const { session, editor } = live;
@@ -232,7 +237,7 @@ export function createPluginGeometry(
       const end =
         tail !== null
           ? (caretAt(tail, true) ?? lastInReadingOrder(drawn))
-          : ((last && (caretAt(last.to) ?? caretAt(last.from, true))) ??
+          : ((last && (caretAt(last.from, true) ?? caretAt(last.to))) ??
             (paragraph === null ? null : caretAt(paragraph)));
       const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
       const anchor = end ? project(end) : fallback ? project({ ...fallback, width: 0 }) : null;

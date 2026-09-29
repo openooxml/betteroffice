@@ -261,6 +261,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
             () =>
               host.layoutId() === currentLayout.id &&
               host.previewVersion() === currentLayout.previewVersion &&
+              latest.current.zoom === currentLayout.zoom &&
               domRef.current === dom &&
               dom.context.pagesContainer.isConnected,
             (hit) =>

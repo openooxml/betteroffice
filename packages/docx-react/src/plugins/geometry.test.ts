@@ -317,11 +317,14 @@ function refused(result: DocxAnchorGeometryResult, code: string) {
 
 /**
  * Lays units 0..3 out one pixel wide from x=10 on one line, left to right or right to left,
- * dropping `hidden` units as a preview does; hit tests answer each unit's left caret stop.
+ * dropping `hidden` units as a preview does; with all of them hidden the line keeps a 4px mark
+ * at position 0. Hit tests answer the caret stop nearest the point.
  */
 function textLine(source: DisplayListQueries, hidden: number[] = [], rtl = false) {
   const x = (unit: number) => 10 + (rtl ? 3 - unit : unit);
+  const blank = hidden.length === 4;
   source.rangeRects = (from, to) => {
+    if (blank) return from <= 0 && to > 0 ? [{ ...RANGE, x: 10, width: 4 }] : [];
     const rects: DisplayListRect[] = [];
     for (let unit = Math.max(0, from); unit < Math.min(4, to); unit += 1) {
       if (!hidden.includes(unit)) rects.push({ ...RANGE, x: x(unit), width: 1 });
@@ -329,8 +332,11 @@ function textLine(source: DisplayListQueries, hidden: number[] = [], rtl = false
     return rects;
   };
   source.hitTestRegions = (_page, at) => {
+    if (blank) return { region: 'body', pos: 0, target: 'text' };
     const unit = [0, 1, 2, 3].find((candidate) => at >= x(candidate) && at < x(candidate) + 1);
-    return unit === undefined ? null : { region: 'body', pos: rtl ? unit + 1 : unit, target: 'text' };
+    if (unit === undefined) return null;
+    const leftHalf = at < x(unit) + 0.5;
+    return { region: 'body', pos: leftHalf !== rtl ? unit : unit + 1, target: 'text' };
   };
 }
 
@@ -404,6 +410,11 @@ describe('semantic anchor geometry', () => {
     textLine(source, [0, 1, 2, 3]);
     expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
       rects: [],
+      anchor: { pageIndex: 0, x: 153, width: 0 },
+    });
+    source.rangeRects = () => [];
+    expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+      rects: [],
       anchor: { pageIndex: 0, x: 146, width: 0 },
     });
     source.anchorRect = () => null;
@@ -436,24 +447,44 @@ describe('semantic anchor geometry', () => {
     const target: DocxGeometryTarget = { kind: 'range', version: 'v1', range: TEXT_RANGE };
     const text = { ...RANGE, x: 30, width: 40 };
     const image = { ...RANGE, x: 10, width: 20 };
-    const probes: [number, number, number][] = [];
-    const probe = (unit: DisplayListRect[], line: DisplayListRect[], stop: number | null = 3) => {
+    const probe = (unit: DisplayListRect[], line: DisplayListRect[], stops: [number, number]) => {
       source.rangeRects = (from, to) => (to - from === 1 ? unit : line);
-      source.hitTestRegions = (pageIndex, x, y) => {
-        probes.push([pageIndex, x, y]);
-        return stop === null ? null : { region: 'body', pos: stop, target: 'text' };
-      };
+      source.hitTestRegions = (_page, at) => ({
+        region: 'body',
+        pos: at < unit[0]!.x + unit[0]!.width / 2 ? stops[0] : stops[1],
+        target: 'text',
+      });
       return anchored(geometry.getAnchorGeometry(target)).anchor;
     };
-    expect(probe([{ ...text, x: 66, width: 4 }], [text, image])).toMatchObject({ x: 213 });
-    expect(probes.at(-1)).toEqual([0, 67, 40]);
-    expect(probe([{ ...text, width: 4 }], [text], 4)).toMatchObject({ x: 173 });
-    expect(probe([{ ...text, x: 66, width: 4 }], [text], 4)).toMatchObject({ x: 209 });
-    expect(probe([{ ...text, width: 4 }], [text], null)).toMatchObject({ x: 177 });
-    expect(probe([], [text, { ...text, y: 70, x: 10, width: 25 }, image])).toMatchObject({
+    const last = { ...text, x: 66, width: 4 };
+    expect(probe([last], [text, image], [3, 4])).toMatchObject({ x: 213 });
+    expect(probe([last], [text], [4, 3])).toMatchObject({ x: 209 });
+    source.hitTestRegions = () => null;
+    source.rangeRects = (from, to) => (to - from === 1 ? [last] : [text]);
+    expect(anchored(geometry.getAnchorGeometry(target)).anchor).toMatchObject({ x: 213 });
+    source.rangeRects = (from, to) =>
+      to - from === 1 ? [] : [text, { ...text, y: 70, x: 10, width: 25 }, image];
+    expect(anchored(geometry.getAnchorGeometry(target)).anchor).toMatchObject({
       x: 178,
       y: 164,
     });
+  });
+
+  test('refuses while the rendered context is at another zoom than the layout', () => {
+    const pages = document.createElement('div');
+    const layer = document.createElement('div');
+    const source = queries();
+    const dom = createRenderedDomContext(pages, 1, {
+      displayListQueries: source,
+      projector: createCanvasHostProjector(pages, source, 1),
+    });
+    const layout = { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1.5, pageCount: 1 };
+    const geometry = createPluginGeometry(layout, dom, layer, () => true, () => null, source, () => {
+      throw new Error('a stale context must not reach the editor');
+    });
+    refused(geometry.getAnchorGeometry(PARAGRAPH_TARGET), 'layout-unavailable');
+    expect(geometry.toOverlayRect({ x: 0, y: 0, width: 1, height: 1 })).toBeNull();
+    expect(geometry.getPositionAtPoint(0, 0)).toBeNull();
   });
 
   test('answers only once the pages show the layout', () => {
