@@ -22,6 +22,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
+import type { LayoutInWorker } from './useDisplayList';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import { readSessionVersion, stampSourceVersion } from '../internals/layoutProvenance';
@@ -89,13 +90,16 @@ export interface UseLayoutPipelineOptions {
   onTotalPagesChange?: (totalPages: number) => void;
   /** Receives each computed layout and resets with null. */
   onLayoutComputed?: (layout: Layout | null) => void;
+  /** Hands passes to the resident worker, which then runs the only layout. */
+  layoutInWorker?: LayoutInWorker;
   onAnchorPositionsChange?: (positions: Map<string, number>) => void;
 }
 
 export interface UseLayoutPipelineReturn {
   layout: Layout | null;
   layoutUpdateOrigin: LayoutUpdateOrigin;
-  runLayoutPipeline: () => void;
+  /** `onHost` lays out on this thread even when a worker could. */
+  runLayoutPipeline: (options?: { onHost?: boolean }) => void;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
   cancelPendingScrollRestore: () => void;
   /**
@@ -126,6 +130,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     onError,
     onTotalPagesChange,
     onLayoutComputed,
+    layoutInWorker,
     onAnchorPositionsChange,
   } = opts;
 
@@ -147,6 +152,17 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const deferLayoutPassRef = useRef(deferLayoutPass);
   const displayPositionToYrsLocRef = useRef(displayPositionToYrsLoc);
   const yrsLocToDisplayPositionRef = useRef(yrsLocToDisplayPosition);
+  const layoutInWorkerRef = useRef(layoutInWorker);
+  layoutInWorkerRef.current = layoutInWorker;
+  // Bumped by every pass, so a worker pass answering late never overwrites a
+  // newer layout.
+  const passRef = useRef(0);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  // The document version the first pass of this session laid out.
+  const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
+  // A deferred pass that had to run on this thread keeps that requirement.
+  const pendingOnHostRef = useRef(false);
   onTotalPagesChangeRef.current = onTotalPagesChange;
   onLayoutComputedRef.current = onLayoutComputed;
   onAnchorPositionsChangeRef.current = onAnchorPositionsChange;
@@ -235,7 +251,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // =========================================================================
 
   const runLayoutPipeline = useCallback(
-    () => {
+    (options?: { onHost?: boolean }) => {
+      const pass = ++passRef.current;
+      const onHost = options?.onHost === true || pendingOnHostRef.current;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
       pendingLayoutOriginRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
@@ -249,6 +267,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           pendingLayoutOriginRef.current,
           layoutUpdateOrigin
         );
+        pendingOnHostRef.current = onHost;
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
@@ -271,17 +290,19 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           pendingLayoutOriginRef.current,
           layoutUpdateOrigin
         );
+        pendingOnHostRef.current = onHost;
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
+      pendingOnHostRef.current = false;
 
       const computeInputs = { document, pageGap, session, renderEnv, measurement };
       const sourceVersion = readSessionVersion(session);
 
       // Step 4+: paint + scroll/events with the computed values.
-      const applyComputation = (computation: LayoutComputation) => {
+      const applyComputation = (computation: LayoutComputation, version = sourceVersion) => {
         const { layout: newLayout } = computation;
-        stampSourceVersion(newLayout, sourceVersion);
+        stampSourceVersion(newLayout, version);
 
         const pagesEl = pagesContainerRef.current;
         const scrollParent =
@@ -324,24 +345,79 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         } else {
           scrollRestoreController.cancel();
         }
+      };
 
-        const totalTime = performance.now() - pipelineStart;
-        if (totalTime > 2000) {
-          console.warn(
-            `[PagedEditor] Layout pipeline took ${Math.round(totalTime)}ms total ` +
-              `(${newLayout.pages.length} pages)`
-          );
+      const layOutHere = (): void => {
+        try {
+          // An edit may have landed since the pass began.
+          const version = readSessionVersion(session);
+          const computation = computeLayout(computeInputs);
+          applyComputation(computation, version);
+          const totalTime = performance.now() - pipelineStart;
+          if (totalTime > 2000) {
+            console.warn(
+              `[PagedEditor] Layout pipeline took ${Math.round(totalTime)}ms total ` +
+                `(${computation.layout.pages.length} pages)`
+            );
+          }
+        } catch (error) {
+          console.error('[PagedEditor] Layout pipeline error:', error);
+          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
         }
       };
 
-      // Every pagination pass performs a full relayout.
-      try {
-        applyComputation(computeLayout(computeInputs));
-      } catch (error) {
-        console.error('[PagedEditor] Layout pipeline error:', error);
-        onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+      // A resident worker, when one can take the pass, runs the only layout
+      // and answers with it and its first frame.
+      // The document as opened is laid out by the resident worker alone: that
+      // pass also builds its first frame, so the main thread runs no layout
+      // before the first paint. Once the document changes, passes run here.
+      if (openedVersionRef.current?.session !== session) {
+        openedVersionRef.current = { session, version: sourceVersion };
       }
-      syncCoordinator.onLayoutComplete(currentEpoch);
+      let workerPass: Promise<LayoutComputation | null> | null = null;
+      if (
+        !onHost &&
+        sourceVersion !== null &&
+        sourceVersion === openedVersionRef.current.version
+      ) {
+        try {
+          workerPass =
+            layoutInWorkerRef.current?.(
+              session,
+              JSON.stringify({
+                ...buildResidentRegionLayoutRequest(document, pageGap, renderEnv),
+                measurement,
+              })
+            ) ?? null;
+        } catch (error) {
+          console.error('[PagedEditor] Resident worker layout could not start:', error);
+        }
+      }
+      if (!workerPass) {
+        layOutHere();
+        syncCoordinator.onLayoutComplete(currentEpoch);
+        return;
+      }
+      void workerPass
+        .then(
+          (computation) => {
+            if (pass !== passRef.current || sessionRef.current !== session) return;
+            // A change that landed meanwhile makes the worker's layout stale.
+            if (computation && readSessionVersion(session) === sourceVersion) {
+              applyComputation(computation);
+            } else {
+              layOutHere();
+            }
+          },
+          (error: unknown) => {
+            if (pass !== passRef.current) return;
+            console.error('[PagedEditor] Layout pipeline error:', error);
+            onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+          }
+        )
+        .finally(() => {
+          if (pass === passRef.current) syncCoordinator.onLayoutComplete(currentEpoch);
+        });
     },
     [
       pageGap,

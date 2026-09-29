@@ -1,12 +1,12 @@
 //! Streaming typed-page serialization for the FrameDelta encoder.
 //!
-//! Three `serde::Serializer` implementations walk a typed [`DisplayPage`]
-//! directly, so a rebuilt page costs three allocation-free passes instead of
-//! materializing an intermediate value tree:
+//! Two `serde::Serializer` implementations walk a typed [`DisplayPage`]
+//! directly, so a rebuilt page costs two passes instead of materializing an
+//! intermediate value tree:
 //!
 //! - [`hash_page`] — the structural and visual fingerprints, in one pass;
-//! - [`collect_page_strings`] — string-table population, for upsert pages;
-//! - [`encode_page`] — the typed value stream, for upsert pages.
+//! - [`encode_page`] — the typed value stream for upsert pages, interning
+//!   every string it references into the frame's string table.
 //!
 //! The two fingerprints answer different questions, so each excludes what it
 //! must not notice. The structural one ignores the root `pageIndex`, since a
@@ -32,7 +32,6 @@
 //!   fields emits the compact `VALUE_GLYPH_ARRAY` payload instead of a
 //!   generic array.
 
-use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use docx_layout::display_list::DisplayPage;
@@ -40,9 +39,9 @@ use serde::Serialize;
 use serde::ser::{self, Serializer};
 
 use super::{
-    GLYPH_BIDI_LEVEL, GLYPH_LOGICAL_ORDER, VALUE_ARRAY, VALUE_F64, VALUE_FALSE, VALUE_GLYPH_ARRAY,
-    VALUE_I64, VALUE_NULL, VALUE_OBJECT, VALUE_STRING, VALUE_TRUE, VALUE_U64, checked_u32,
-    hash_write, patch_u32, string_id, write_f64, write_i64, write_u32, write_u64,
+    GLYPH_BIDI_LEVEL, GLYPH_LOGICAL_ORDER, StringTable, VALUE_ARRAY, VALUE_F64, VALUE_FALSE,
+    VALUE_GLYPH_ARRAY, VALUE_I64, VALUE_NULL, VALUE_OBJECT, VALUE_STRING, VALUE_TRUE, VALUE_U64,
+    checked_u32, hash_write, patch_u32, write_f64, write_i64, write_u32, write_u64,
 };
 
 pub(super) struct PageHashes {
@@ -73,19 +72,10 @@ pub(super) fn hash_page(page: &DisplayPage) -> Result<PageHashes, String> {
     })
 }
 
-/// Collect every string the wire encoding of `page` will reference.
-pub(super) fn collect_page_strings(
-    page: &DisplayPage,
-    strings: &mut BTreeSet<String>,
-) -> Result<(), String> {
-    page.serialize(StrSer { strings })
-        .map_err(|error| format!("collect display page strings: {error}"))
-}
-
 /// Emit the typed value stream for `page` using the prepared string table.
 pub(super) fn encode_page(
     page: &DisplayPage,
-    ids: &HashMap<&str, u32>,
+    ids: &mut StringTable,
     out: &mut Vec<u8>,
 ) -> Result<(), String> {
     page.serialize(EmitSer { ids, out })
@@ -657,286 +647,16 @@ impl ser::SerializeStructVariant for HashContainer<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// pass 2: string-table collection (upsert pages only)
-// ---------------------------------------------------------------------------
-
-struct StrSer<'a> {
-    strings: &'a mut BTreeSet<String>,
-}
-
-struct StrContainer<'a> {
-    strings: &'a mut BTreeSet<String>,
-    key_buf: String,
-}
-
-impl StrContainer<'_> {
-    fn field<T: Serialize + ?Sized>(&mut self, key: &str, value: &T) -> Result<(), SerError> {
-        if !self.strings.contains(key) {
-            self.strings.insert(key.to_owned());
-        }
-        // compact glyph arrays carry no strings on the wire
-        if key == "glyphs" && probe_glyphs(value).is_some() {
-            return Ok(());
-        }
-        value.serialize(StrSer {
-            strings: &mut *self.strings,
-        })
-    }
-}
-
-impl<'a> Serializer for StrSer<'a> {
-    type Ok = ();
-    type Error = SerError;
-    type SerializeSeq = StrContainer<'a>;
-    type SerializeTuple = Self::SerializeSeq;
-    type SerializeTupleStruct = Self::SerializeSeq;
-    type SerializeTupleVariant = Self::SerializeSeq;
-    type SerializeMap = Self::SerializeSeq;
-    type SerializeStruct = Self::SerializeSeq;
-    type SerializeStructVariant = Self::SerializeSeq;
-
-    fn serialize_bool(self, _: bool) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_i8(self, _: i8) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_i16(self, _: i16) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_i32(self, _: i32) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_i64(self, _: i64) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_u8(self, _: u8) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_u16(self, _: u16) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_u32(self, _: u32) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_u64(self, _: u64) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_f32(self, _: f32) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_f64(self, _: f64) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_char(self, value: char) -> Result<(), SerError> {
-        self.serialize_str(value.encode_utf8(&mut [0; 4]))
-    }
-    fn serialize_str(self, value: &str) -> Result<(), SerError> {
-        if !self.strings.contains(value) {
-            self.strings.insert(value.to_owned());
-        }
-        Ok(())
-    }
-    fn serialize_bytes(self, _: &[u8]) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_none(self) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<(), SerError> {
-        value.serialize(self)
-    }
-    fn serialize_unit(self) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_unit_struct(self, _: &'static str) -> Result<(), SerError> {
-        Ok(())
-    }
-    fn serialize_unit_variant(
-        self,
-        _: &'static str,
-        _: u32,
-        variant: &'static str,
-    ) -> Result<(), SerError> {
-        self.serialize_str(variant)
-    }
-    fn serialize_newtype_struct<T: Serialize + ?Sized>(
-        self,
-        _: &'static str,
-        value: &T,
-    ) -> Result<(), SerError> {
-        value.serialize(self)
-    }
-    fn serialize_newtype_variant<T: Serialize + ?Sized>(
-        self,
-        _: &'static str,
-        _: u32,
-        variant: &'static str,
-        value: &T,
-    ) -> Result<(), SerError> {
-        if !self.strings.contains(variant) {
-            self.strings.insert(variant.to_owned());
-        }
-        value.serialize(StrSer {
-            strings: self.strings,
-        })
-    }
-    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, SerError> {
-        Ok(StrContainer {
-            strings: self.strings,
-            key_buf: String::new(),
-        })
-    }
-    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, SerError> {
-        self.serialize_seq(Some(len))
-    }
-    fn serialize_tuple_struct(
-        self,
-        _: &'static str,
-        len: usize,
-    ) -> Result<Self::SerializeTupleStruct, SerError> {
-        self.serialize_seq(Some(len))
-    }
-    fn serialize_tuple_variant(
-        self,
-        _: &'static str,
-        _: u32,
-        _: &'static str,
-        _: usize,
-    ) -> Result<Self::SerializeTupleVariant, SerError> {
-        unsupported("tuple variants")
-    }
-    fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, SerError> {
-        Ok(StrContainer {
-            strings: self.strings,
-            key_buf: String::new(),
-        })
-    }
-    fn serialize_struct(
-        self,
-        _: &'static str,
-        _: usize,
-    ) -> Result<Self::SerializeStruct, SerError> {
-        self.serialize_map(None)
-    }
-    fn serialize_struct_variant(
-        self,
-        _: &'static str,
-        _: u32,
-        _: &'static str,
-        _: usize,
-    ) -> Result<Self::SerializeStructVariant, SerError> {
-        unsupported("struct variants")
-    }
-}
-
-impl ser::SerializeSeq for StrContainer<'_> {
-    type Ok = ();
-    type Error = SerError;
-    fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), SerError> {
-        value.serialize(StrSer {
-            strings: &mut *self.strings,
-        })
-    }
-    fn end(self) -> Result<(), SerError> {
-        Ok(())
-    }
-}
-
-impl ser::SerializeTuple for StrContainer<'_> {
-    type Ok = ();
-    type Error = SerError;
-    fn serialize_element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), SerError> {
-        ser::SerializeSeq::serialize_element(self, value)
-    }
-    fn end(self) -> Result<(), SerError> {
-        Ok(())
-    }
-}
-
-impl ser::SerializeTupleStruct for StrContainer<'_> {
-    type Ok = ();
-    type Error = SerError;
-    fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), SerError> {
-        ser::SerializeSeq::serialize_element(self, value)
-    }
-    fn end(self) -> Result<(), SerError> {
-        Ok(())
-    }
-}
-
-impl ser::SerializeTupleVariant for StrContainer<'_> {
-    type Ok = ();
-    type Error = SerError;
-    fn serialize_field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), SerError> {
-        ser::SerializeSeq::serialize_element(self, value)
-    }
-    fn end(self) -> Result<(), SerError> {
-        Ok(())
-    }
-}
-
-impl ser::SerializeMap for StrContainer<'_> {
-    type Ok = ();
-    type Error = SerError;
-    fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), SerError> {
-        let mut buf = std::mem::take(&mut self.key_buf);
-        key.serialize(KeySer(&mut buf))?;
-        self.key_buf = buf;
-        Ok(())
-    }
-    fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), SerError> {
-        let key = std::mem::take(&mut self.key_buf);
-        let result = self.field(&key, value);
-        self.key_buf = key;
-        result
-    }
-    fn end(self) -> Result<(), SerError> {
-        Ok(())
-    }
-}
-
-impl ser::SerializeStruct for StrContainer<'_> {
-    type Ok = ();
-    type Error = SerError;
-    fn serialize_field<T: Serialize + ?Sized>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), SerError> {
-        self.field(key, value)
-    }
-    fn end(self) -> Result<(), SerError> {
-        Ok(())
-    }
-}
-
-impl ser::SerializeStructVariant for StrContainer<'_> {
-    type Ok = ();
-    type Error = SerError;
-    fn serialize_field<T: Serialize + ?Sized>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), SerError> {
-        self.field(key, value)
-    }
-    fn end(self) -> Result<(), SerError> {
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // pass 3: wire emission (upsert pages only)
 // ---------------------------------------------------------------------------
 
 struct EmitSer<'a> {
-    ids: &'a HashMap<&'a str, u32>,
+    ids: &'a mut StringTable,
     out: &'a mut Vec<u8>,
 }
 
 struct EmitContainer<'a> {
-    ids: &'a HashMap<&'a str, u32>,
+    ids: &'a mut StringTable,
     out: &'a mut Vec<u8>,
     length_at: usize,
     count_at: usize,
@@ -951,7 +671,7 @@ struct EmitContainer<'a> {
 }
 
 impl<'a> EmitContainer<'a> {
-    fn open(opcode: u8, ids: &'a HashMap<&'a str, u32>, out: &'a mut Vec<u8>) -> Self {
+    fn open(opcode: u8, ids: &'a mut StringTable, out: &'a mut Vec<u8>) -> Self {
         out.push(opcode);
         let length_at = out.len();
         write_u32(out, 0);
@@ -1024,7 +744,7 @@ impl<'a> EmitContainer<'a> {
             .checked_add(1)
             .ok_or_else(|| SerError("container element count exceeds u32".to_owned()))?;
         value.serialize(EmitSer {
-            ids: self.ids,
+            ids: &mut *self.ids,
             out: &mut *self.out,
         })
     }
@@ -1034,7 +754,7 @@ impl<'a> EmitContainer<'a> {
             .count
             .checked_add(1)
             .ok_or_else(|| SerError("object field count exceeds u32".to_owned()))?;
-        let key_id = string_id(self.ids, key).map_err(SerError)?;
+        let key_id = self.ids.id(key).map_err(SerError)?;
         self.entries.push((key_id, self.out.len()));
         write_u32(self.out, key_id);
         if key == "glyphs"
@@ -1043,7 +763,7 @@ impl<'a> EmitContainer<'a> {
             return emit_glyph_array(&glyphs, self.out);
         }
         value.serialize(EmitSer {
-            ids: self.ids,
+            ids: &mut *self.ids,
             out: &mut *self.out,
         })
     }
@@ -1115,12 +835,12 @@ impl<'a> Serializer for EmitSer<'a> {
         let mut buf = [0; 4];
         let text: &str = value.encode_utf8(&mut buf);
         self.out.push(VALUE_STRING);
-        write_u32(self.out, string_id(self.ids, text).map_err(SerError)?);
+        write_u32(self.out, self.ids.id(text).map_err(SerError)?);
         Ok(())
     }
     fn serialize_str(self, value: &str) -> Result<(), SerError> {
         self.out.push(VALUE_STRING);
-        write_u32(self.out, string_id(self.ids, value).map_err(SerError)?);
+        write_u32(self.out, self.ids.id(value).map_err(SerError)?);
         Ok(())
     }
     fn serialize_bytes(self, value: &[u8]) -> Result<(), SerError> {

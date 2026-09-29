@@ -100,7 +100,7 @@ async function exportWithPages(
   let result = attempt();
   if (options.expectLayoutVersion !== undefined) return result;
   if (!result.ok && LAYOUT_REFUSALS.has(result.failure.code)) {
-    editor().relayout();
+    editor().relayout({ onHost: true });
     result = attempt();
   }
   const deadline = Date.now() + LAYOUT_WAIT_MS;

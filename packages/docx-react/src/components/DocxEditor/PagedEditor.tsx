@@ -93,7 +93,7 @@ import {
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
-import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
@@ -295,6 +295,8 @@ export interface PagedEditorProps {
   onTotalPagesChange?: (totalPages: number) => void;
   /** Layout of each pass (null on reset) — canvas renderer plumbing. */
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
+  /** Hands layout passes to the resident worker, which then owns them. */
+  layoutInWorker?: LayoutInWorker;
   onError?: (error: Error) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
@@ -414,8 +416,8 @@ export interface PagedEditorRef {
    * `null` while the fonts it needs are not ready. @internal
    */
   getLayoutRequest(): string | null;
-  /** Force re-layout. */
-  relayout(): void;
+  /** Force re-layout; `onHost` keeps the pass on this thread. */
+  relayout(options?: { onHost?: boolean }): void;
   /** Scroll the visible pages to bring a display position into view. */
   scrollToPosition(position: number): void;
   /** Scrolls a display position into view without moving focus or selection, saying why not. */
@@ -509,6 +511,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onYrsTrackedChangesChange,
       onTotalPagesChange,
       onLayoutComputed,
+      layoutInWorker,
       onError,
       applyResidentInput,
       applyResidentDelete,
@@ -722,6 +725,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       getScrollContainer,
       onTotalPagesChange,
       onLayoutComputed: publishResidentLayout,
+      layoutInWorker,
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;

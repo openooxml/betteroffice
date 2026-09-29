@@ -1,4 +1,5 @@
 import {
+  resolveBundledFamilyFace,
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
   resolveLastResortFace,
@@ -10,6 +11,12 @@ import {
 /** Structural provider contract keeps this package independent of the engine. */
 export interface BundledFontSource {
   resolve(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+  ): (() => Promise<ArrayBuffer>) | undefined;
+  /** Like `resolve`, but also accepts bundled family names such as `"Gelasio"`, and never substitutes another style. */
+  resolveFamily(
     family: string,
     bold: boolean,
     italic: boolean,
@@ -34,6 +41,10 @@ export function fontProvider(
   return {
     resolve(family, bold, italic) {
       const face = resolveMetricCompatFace(family, bold, italic);
+      return face ? load(face) : undefined;
+    },
+    resolveFamily(family, bold, italic) {
+      const face = resolveBundledFamilyFace(family, bold, italic);
       return face ? load(face) : undefined;
     },
     resolveScriptFallback(script, bold, italic) {
