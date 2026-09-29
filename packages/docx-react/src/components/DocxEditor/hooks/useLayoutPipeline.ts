@@ -103,6 +103,8 @@ export interface UseLayoutPipelineReturn {
   runLayoutPipeline: (options?: { onHost?: boolean }) => void;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
   cancelPendingScrollRestore: () => void;
+  /** Counts navigation intents, the user's and programmatic scrolls alike. */
+  navigationEpoch: () => number;
   /**
    * The region layout request the pipeline would lay the current document out with now, or
    * `null` while it has no session or the fonts the document needs are not ready.
@@ -610,12 +612,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     return JSON.stringify(request);
   }, [document, pageGap, renderEnv, residentMeasurementConfig, session]);
 
+  const navigationEpoch = useCallback(() => navigationEpochRef.current, []);
+
   return {
     layout,
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
     scheduleLayout,
     cancelPendingScrollRestore,
+    navigationEpoch,
     getLayoutRequest,
   };
 }

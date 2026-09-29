@@ -25,6 +25,8 @@ export interface UsePagedScrollApiOptions {
   layout?: Layout | null;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   onNavigationIntent?: () => void;
+  /** Counts navigation intents; a scroll waiting for the full layout drops on a newer one. */
+  navigationEpoch?: () => number;
   requestCanvasParagraphFlash?: (req: {
     from: number;
     to: number;
@@ -54,6 +56,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     layout = null,
     canvasHostRef,
     onNavigationIntent,
+    navigationEpoch,
     requestCanvasParagraphFlash,
   } = opts;
   const scrollAbortRef = useRef<AbortController | null>(null);
@@ -113,29 +116,43 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     [displayListQueries, onNavigationIntent, scrollRectIntoView]
   );
 
-  const pendingPageRef = useRef<number | null>(null);
+  const pendingPageRef = useRef<{
+    page: number;
+    epoch: number | undefined;
+    session: YrsSession | null;
+  } | null>(null);
   const scrollToPageImpl = useCallback(
     (pageNumber: number): void => {
       pendingPageRef.current = null;
       if (!Number.isInteger(pageNumber) || pageNumber < 1 || !displayListQueries) return;
       if (pageNumber > displayListQueries.pageCount()) {
-        if (layout?.partial) pendingPageRef.current = pageNumber;
+        if (layout?.partial) {
+          pendingPageRef.current = {
+            page: pageNumber,
+            epoch: navigationEpoch?.(),
+            session: yrsSession,
+          };
+        }
         return;
       }
       onNavigationIntent?.();
       const bounds = displayListQueries.pageBounds(pageNumber - 1);
       if (bounds) scrollRectIntoView(bounds, true);
     },
-    [displayListQueries, layout, onNavigationIntent, scrollRectIntoView]
+    [displayListQueries, layout, navigationEpoch, onNavigationIntent, scrollRectIntoView, yrsSession]
   );
 
   useEffect(() => {
-    const page = pendingPageRef.current;
-    if (page === null || !displayListQueries) return;
+    const pending = pendingPageRef.current;
+    if (!pending || !displayListQueries) return;
+    if (pending.session !== yrsSession || pending.epoch !== navigationEpoch?.()) {
+      pendingPageRef.current = null;
+      return;
+    }
     const pages = displayListQueries.pageCount();
     const complete = layout !== null && !layout.partial && pages === layout.pages.length;
-    if (page <= pages || complete) scrollToPageImpl(page);
-  }, [displayListQueries, layout, scrollToPageImpl]);
+    if (pending.page <= pages || complete) scrollToPageImpl(pending.page);
+  }, [displayListQueries, layout, navigationEpoch, scrollToPageImpl, yrsSession]);
 
   const scrollToParaIdImpl = useCallback(
     (paraId: string, options?: ScrollToParaIdOptions): boolean => {

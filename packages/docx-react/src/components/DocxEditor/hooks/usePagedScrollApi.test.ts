@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import type { YrsSession } from '@betteroffice/docx/yrs';
 import { usePagedScrollApi } from './usePagedScrollApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -18,28 +19,32 @@ const layout = (pages: number, partial = false) =>
 const queries = (pages: number) =>
   ({ pageCount: () => pages, pageBounds: () => null }) as unknown as DisplayListQueries;
 
+type Props = { layout: Layout; queries: DisplayListQueries; session?: YrsSession };
+
 function scrollApi() {
   const scrolled: number[] = [];
   let page = 0;
+  const navigation = { epoch: 0 };
   const hook = renderHook(
-    (props: { layout: Layout; queries: DisplayListQueries }) =>
+    (props: Props) =>
       usePagedScrollApi({
         pagesContainerRef: { current: null },
         yrsInputRef: { current: null },
-        yrsSession: null,
+        yrsSession: props.session ?? null,
         yrsLocToDisplayPosition: () => null,
         getScrollContainer: () => null,
         displayListQueries: props.queries,
         layout: props.layout,
         onNavigationIntent: () => scrolled.push(page),
+        navigationEpoch: () => navigation.epoch,
       }),
-    { initialProps: { layout: layout(7, true), queries: queries(7) } }
+    { initialProps: { layout: layout(7, true), queries: queries(7) } as Props }
   );
   const scrollTo = (target: number) => {
     page = target;
     act(() => hook.result.current.scrollToPageImpl(target));
   };
-  return { hook, scrolled, scrollTo };
+  return { hook, scrolled, scrollTo, navigation };
 }
 
 test('a page past a partial layout waits for the full one', () => {
@@ -59,4 +64,17 @@ test('a page past the full layout is dropped', () => {
   hook.rerender({ layout: layout(29), queries: queries(29) });
   hook.rerender({ layout: layout(45), queries: queries(45) });
   expect(scrolled).toEqual([]);
+});
+
+test('a newer navigation or another session drops a waiting page', () => {
+  const navigated = scrollApi();
+  navigated.scrollTo(20);
+  navigated.navigation.epoch += 1;
+  navigated.hook.rerender({ layout: layout(29), queries: queries(29) });
+  expect(navigated.scrolled).toEqual([]);
+
+  const reopened = scrollApi();
+  reopened.scrollTo(20);
+  reopened.hook.rerender({ layout: layout(29), queries: queries(29), session: {} as YrsSession });
+  expect(reopened.scrolled).toEqual([]);
 });
