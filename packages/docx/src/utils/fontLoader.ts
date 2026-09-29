@@ -151,23 +151,30 @@ function settleBundledFace(): void {
   else announceTimer ??= setTimeout(announceBundledFaces, BUNDLED_ANNOUNCE_BATCH_MS);
 }
 
+// An older provider without resolveFamily hands back Regular bytes for a
+// style the family lacks, so only its Regular face is trusted.
+function bundledLoad(
+  provider: BundledFontProvider,
+  source: string,
+  bold: boolean,
+  italic: boolean
+): (() => Promise<ArrayBuffer>) | undefined {
+  if (provider.resolveFamily) return provider.resolveFamily(source, bold, italic);
+  return !bold && !italic ? provider.resolve(source, false, false) : undefined;
+}
+
 /** `undefined` when the provider has no face of exactly this weight and style. */
 function registerBundledFace(
   provider: BundledFontProvider,
   family: string,
+  source: string,
   bold: boolean,
   italic: boolean
 ): Promise<boolean> | undefined {
   const key = faceKey(family, bold ? 700 : 400, italic ? 'italic' : 'normal');
   const existing = bundledFaces.get(key);
   if (existing) return existing;
-  // An older provider without resolveFamily hands back Regular bytes for a
-  // style the family lacks, so only its Regular face is trusted.
-  const load = provider.resolveFamily
-    ? provider.resolveFamily(family, bold, italic)
-    : !bold && !italic
-      ? provider.resolve(family, false, false)
-      : undefined;
+  const load = bundledLoad(provider, source, bold, italic);
   if (!load) return undefined;
   bundledFacesInFlight += 1;
   const promise = (async () => {
@@ -201,12 +208,14 @@ type BundledRegistration = 'complete' | 'partial' | 'none';
 
 /**
  * Registers the configured bundled faces for `family` under its own name,
- * settling after at most {@link BUNDLED_FONT_DEADLINE_MS}. A style the bundle
- * does not ship is left to browser synthesis; a face that failed or is still
- * loading makes the result `partial`, so a later call retries it.
+ * settling after at most {@link BUNDLED_FONT_DEADLINE_MS}. The faces come
+ * from the first of `sources` the bundle carries. A style the bundle does not
+ * ship is left to browser synthesis; a face that failed or is still loading
+ * makes the result `partial`, so a later call retries it.
  */
 function registerBundledFamily(
   family: string,
+  sources: string[],
   weights?: number[],
   styles?: ('normal' | 'italic')[]
 ): Promise<BundledRegistration> {
@@ -244,13 +253,18 @@ function registerBundledFamily(
       const provider = await resolveDefaultFontProvider();
       if (!provider) return;
       resolvedProvider = true;
+      const source =
+        sources.find((candidate) =>
+          faces.some(([bold, italic]) => bundledLoad(provider, candidate, bold, italic))
+        ) ?? family;
       await Promise.all(
         faces.map(async ([bold, italic], index) => {
-          const registration = registerBundledFace(provider, family, bold, italic);
+          const registration = registerBundledFace(provider, family, source, bold, italic);
           if (!registration) {
             states[index] = 'unsupported';
             return;
           }
+          bundledFamilies.add(family);
           states[index] = (await registration) ? 'registered' : 'failed';
         })
       );
@@ -345,12 +359,27 @@ function getGoogleFontsUrl(
  * @param options - Optional configuration
  * @returns Promise resolving to true if font loaded successfully, false otherwise
  */
-export async function loadFont(
+export function loadFont(
   fontFamily: string,
   options?: {
     weights?: number[];
     styles?: ('normal' | 'italic')[];
   }
+): Promise<boolean> {
+  return loadFontFrom(fontFamily, options);
+}
+
+/**
+ * {@link loadFont}, where a bundle lacking `fontFamily` may serve the faces of
+ * `bundledFallback` under the `fontFamily` name instead.
+ */
+async function loadFontFrom(
+  fontFamily: string,
+  options?: {
+    weights?: number[];
+    styles?: ('normal' | 'italic')[];
+  },
+  bundledFallback?: string
 ): Promise<boolean> {
   // Skip font loading in non-browser environments (Node.js, SSR)
   if (typeof document === 'undefined') {
@@ -420,11 +449,11 @@ export async function loadFont(
       if (bundled) {
         const registration = await registerBundledFamily(
           normalizedFamily,
+          bundledFallback ? [normalizedFamily, bundledFallback.trim()] : [normalizedFamily],
           options?.weights,
           options?.styles
         );
         if (registration === 'none') return false;
-        bundledFamilies.add(normalizedFamily);
         if (registration === 'complete') {
           partialBundledFamilies.delete(normalizedFamily);
           loadedFonts.add(normalizedFamily);
@@ -1034,7 +1063,7 @@ export async function loadFontWithMapping(fontFamily: string): Promise<boolean> 
     ) {
       return true;
     }
-    const result = await loadFont(googleFont);
+    const result = await loadFontFrom(googleFont, undefined, trimmed);
     if (result && !partialBundledFamilies.has(googleFont)) {
       loadedFonts.add(trimmed);
     }

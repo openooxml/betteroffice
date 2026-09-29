@@ -16,6 +16,7 @@ const {
 type Face = { family: string; weight?: string; style?: string };
 
 const added: Face[] = [];
+const renderable = new Set<string>();
 const dispatched: Array<{ type: string; fontfaces: Face[] }> = [];
 let statusAtConstruction: 'loaded' | 'unloaded' = 'loaded';
 let failNextFaceLoad = false;
@@ -59,6 +60,14 @@ class FakeFontFaceSetLoadEvent extends Event {
 
 beforeAll(() => {
   Object.assign(globalThis, { FontFace: FakeFontFace, FontFaceSetLoadEvent: FakeFontFaceSetLoadEvent });
+  const probe = {
+    font: '',
+    textBaseline: 'top',
+    measureText() {
+      return { width: [...renderable].some((family) => probe.font.includes(`"${family}"`)) ? 90 : 60 };
+    },
+  };
+  HTMLCanvasElement.prototype.getContext = (() => probe) as never;
   Object.defineProperty(document, 'fonts', {
     configurable: true,
     value: {
@@ -90,6 +99,7 @@ afterEach(() => {
   dispatched.length = 0;
   statusAtConstruction = 'loaded';
   failNextFaceLoad = false;
+  renderable.clear();
   document.head.innerHTML = '';
 });
 
@@ -264,6 +274,61 @@ test('a family with one failed face renders, and the next call registers only th
   expect(await loadFont('Partial Serif')).toBe(true);
   expect(added).toHaveLength(4);
   unsubscribe();
+});
+
+test('a face that arrives after the deadline keeps the family off the system-font shortcut', async () => {
+  jest.useFakeTimers();
+  let release!: () => void;
+  const stalled = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  configureDefaultFonts({
+    fonts: {
+      createFontProvider: () => ({
+        resolve: () => bytes,
+        resolveFamily: (_family: string, bold: boolean, italic: boolean) =>
+          !bold && !italic
+            ? async () => {
+                await stalled;
+                return new ArrayBuffer(8);
+              }
+            : bold && !italic
+              ? bytes
+              : undefined,
+      }),
+    },
+  });
+  failNextFaceLoad = true;
+  const unsubscribe = onFontError(() => undefined);
+  const first = loadFont('Late Serif');
+  await Promise.resolve();
+  jest.advanceTimersByTime(5000);
+  expect(await first).toBe(false);
+  release();
+  await stalled;
+  await new Promise((resolve) => setImmediate(resolve));
+  renderable.add('Late Serif');
+  expect(await loadFont('Late Serif')).toBe(true);
+  expect(added.map((face) => face.weight).sort()).toEqual(['400', '700']);
+  unsubscribe();
+});
+
+test('a mapped family the bundle lacks under its equivalent name registers the original family faces', async () => {
+  configureDefaultFonts({
+    fonts: {
+      createFontProvider: () => ({
+        resolve: () => undefined,
+        resolveFamily: (family: string, _bold: boolean, italic: boolean) =>
+          family === 'Comic Sans MS' && !italic ? bytes : undefined,
+      }),
+    },
+  });
+  expect(await loadFontWithMapping('Comic Sans MS')).toBe(true);
+  expect(added).toEqual([
+    { family: 'Comic Neue', weight: '400', style: 'normal' },
+    { family: 'Comic Neue', weight: '700', style: 'normal' },
+  ]);
+  expect(googleLinks()).toHaveLength(0);
 });
 
 test('an older provider without resolveFamily registers only the Regular face it can vouch for', async () => {
