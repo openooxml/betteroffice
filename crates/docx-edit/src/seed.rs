@@ -4488,19 +4488,30 @@ fn entry_parts(entry: &Value) -> Option<(&str, &Value)> {
 }
 
 /// Parses a DOCX for editing, each paragraph carrying its source occurrence.
-#[cfg(any(feature = "wasm", test))]
+#[cfg(test)]
 pub(crate) fn parse_docx_for_edit(bytes: &[u8]) -> Result<docx_parse::S9WireEnvelope, String> {
-    parse_docx_package(bytes).map(|(envelope, _)| envelope)
+    parse_docx_package_with_digest(bytes, package_digest(bytes)).map(|(envelope, _)| envelope)
 }
 
-/// [`parse_docx_for_edit`], with the inflated parts the identity index reads.
-pub(crate) fn parse_docx_package(
+/// The SHA-256 of a whole package, hex encoded: the seed of its generated
+/// IDs and the identity of its source index.
+pub(crate) fn package_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Parses a DOCX for editing with the inflated parts the identity index
+/// reads. `digest` is its [`package_digest`], so the parser does not hash the
+/// package again.
+pub(crate) fn parse_docx_package_with_digest(
     bytes: &[u8],
+    digest: String,
 ) -> Result<(docx_parse::S9WireEnvelope, Vec<(String, Vec<u8>)>), String> {
     docx_parse::parse_docx_s9_wire_parts_with_limits(
         bytes,
         docx_parse::S9ParseOptions {
             source_ordinals: true,
+            determinism_seed: Some(digest),
             ..docx_parse::S9ParseOptions::default()
         },
         &docx_parse::xml::ParseLimits::default(),
@@ -4934,6 +4945,7 @@ impl PackageIds {
 /// root stories seeded from it, and the IDs `ids` read from the whole package.
 fn build_source_index(
     bytes: Arc<[u8]>,
+    digest: String,
     parts: &SourceParts,
     ids: PackageIds,
     roots: Vec<SourceRoot>,
@@ -4941,7 +4953,6 @@ fn build_source_index(
     paragraphs: Vec<SeededParagraph>,
 ) -> SourceIndex {
     use crate::structured::source::{COMMENTS_PART, ENDNOTES_PART, FOOTNOTES_PART};
-    use sha2::{Digest, Sha256};
     let document_path = &parts.document;
     let find = |path: &str| {
         parts
@@ -4994,7 +5005,7 @@ fn build_source_index(
     add(ENDNOTES_PART, SourceStoryKind::Endnote, None);
     add(COMMENTS_PART, SourceStoryKind::Comment, None);
     SourceIndex::new(
-        format!("{:x}", Sha256::digest(&bytes)),
+        digest,
         bytes,
         ids.occupied,
         inputs,
@@ -5004,13 +5015,18 @@ fn build_source_index(
 }
 
 /// The identity index of a package, lowered without seeding.
-pub(crate) fn source_index(bytes: Arc<[u8]>) -> Result<SourceIndex, String> {
-    let (envelope, parts) = parse_docx_package(&bytes)?;
+pub(crate) fn source_index(
+    bytes: Arc<[u8]>,
+    digest: Option<String>,
+) -> Result<SourceIndex, String> {
+    let digest = digest.unwrap_or_else(|| package_digest(&bytes));
+    let (envelope, parts) = parse_docx_package_with_digest(&bytes, digest.clone())?;
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
     let lowered = lower_docx(envelope, None)?;
     Ok(build_source_index(
         bytes,
+        digest,
         &parts,
         ids,
         lowered.roots,
@@ -5021,17 +5037,20 @@ pub(crate) fn source_index(bytes: Arc<[u8]>) -> Result<SourceIndex, String> {
 
 /// Seeds every story of the parsed package, resolving source provenance against `parts`, and
 /// retains its identity index.
+/// `digest` is the package's [`package_digest`].
 pub(crate) fn seed_parsed_docx(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
     parts: Vec<(String, Vec<u8>)>,
     bytes: Arc<[u8]>,
+    digest: String,
 ) -> Result<Vec<String>, String> {
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
     let mut lowered = lower_docx(envelope, Some(&parts))?;
     let index = build_source_index(
         bytes,
+        digest,
         &parts,
         ids,
         std::mem::take(&mut lowered.roots),
@@ -5064,8 +5083,9 @@ pub fn seed_from_docx_with_generation(
 
 /// Seeds every story of a DOCX without starting an opening.
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
-    let (envelope, parts) = parse_docx_package(bytes)?;
-    seed_parsed_docx(document, envelope, parts, Arc::from(bytes)).map(|_| ())
+    let digest = package_digest(bytes);
+    let (envelope, parts) = parse_docx_package_with_digest(bytes, digest.clone())?;
+    seed_parsed_docx(document, envelope, parts, Arc::from(bytes), digest).map(|_| ())
 }
 
 #[cfg(test)]
@@ -5612,6 +5632,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_passed_package_digest_parses_like_the_parser_hashing_it() {
+        let bytes = include_bytes!("../../../apps/demo/public/betteroffice-demo.docx");
+        let (hashed, _) = docx_parse::parse_docx_s9_wire_parts_with_limits(
+            bytes,
+            docx_parse::S9ParseOptions {
+                source_ordinals: true,
+                ..docx_parse::S9ParseOptions::default()
+            },
+            &docx_parse::xml::ParseLimits::default(),
+        )
+        .unwrap();
+        let (passed, _) = parse_docx_package_with_digest(bytes, package_digest(bytes)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&passed).unwrap(),
+            serde_json::to_value(&hashed).unwrap()
+        );
+    }
 
     #[test]
     fn resolved_images_and_fonts_survive_media_projection() {

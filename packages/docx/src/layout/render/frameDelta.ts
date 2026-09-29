@@ -1,4 +1,4 @@
-import type { DisplayList, DisplayPage, DisplayPrimitive } from './displayList';
+import type { DisplayList, DisplayPage, DisplayPrimitive, NoteRegionNote } from './displayList';
 
 export const FRAME_DELTA_VERSION = 1;
 export const FRAME_DELTA_HEADER_BYTES = 80;
@@ -21,6 +21,10 @@ const POSITION_MASK =
   POSITION_FRAGMENT_START |
   POSITION_FRAGMENT_END |
   POSITION_INLINE_WIDGET;
+/** Run flag: shift only the masked fields each primitive has. */
+const POSITION_PRESENT_ONLY = 1 << 7;
+/** Note anchor value meaning the field is absent. */
+const ABSENT_ANCHOR = -(2n ** 63n);
 const MAX_VALUE_DEPTH = 64;
 const MAX_CONTAINER_ITEMS = 10_000_000;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
@@ -102,12 +106,27 @@ export interface FramePositionShiftRun {
   readonly delta: number;
 }
 
+/** A note region note's new backlink anchor; null clears the field. */
+export interface FrameNoteAnchor {
+  readonly area: number;
+  readonly note: number;
+  readonly start: number | null;
+  readonly end: number | null;
+}
+
 export interface FramePagePositionShift {
   readonly kind: 'shift-positions';
   readonly pageIndex: number;
   readonly pageId: bigint;
   readonly fingerprint: bigint;
   readonly runs: readonly FramePositionShiftRun[];
+  readonly anchors: readonly FrameNoteAnchor[];
+}
+
+/** One applied position shift: its runs, then its note anchors. */
+export interface DisplayPageShift {
+  readonly runs: readonly FramePositionShiftRun[];
+  readonly anchors: readonly FrameNoteAnchor[];
 }
 
 export type FramePageOperation =
@@ -162,6 +181,7 @@ interface RawPageOp {
   primitiveIdsOffset: number;
   payloadOffset: number;
   payloadLength: number;
+  anchorCount: number;
 }
 
 /**
@@ -242,9 +262,12 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
     for (let reserved = 1; reserved < 4; reserved++) {
       if (reader.u8(offset + reserved) !== 0) invalid('page operation reserved bytes are nonzero');
     }
-    for (let reserved = 40; reserved < FRAME_DELTA_PAGE_OP_BYTES; reserved++) {
+    // A shift's note anchor count is the only field the tail carries.
+    const tailStart = opcode === PAGE_OP_SHIFT_POSITIONS ? 44 : 40;
+    for (let reserved = tailStart; reserved < FRAME_DELTA_PAGE_OP_BYTES; reserved++) {
       if (reader.u8(offset + reserved) !== 0) invalid('page operation tail is nonzero');
     }
+    const anchorCount = opcode === PAGE_OP_SHIFT_POSITIONS ? reader.u32(offset + 40) : 0;
     const pageIndex = reader.u32(offset + 4);
     const pageId = reader.u64(offset + 8);
     const fingerprint = reader.u64(offset + 16);
@@ -301,6 +324,7 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
       primitiveIdsOffset,
       payloadOffset,
       payloadLength,
+      anchorCount,
     });
   }
   if (full && rawOperations.some((operation) => operation.opcode !== PAGE_OP_UPSERT)) {
@@ -336,7 +360,7 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
         pageIndex: operation.pageIndex,
         pageId: operation.pageId,
         fingerprint: operation.fingerprint,
-        runs: decodePositionShiftRuns(reader, operation),
+        ...decodePositionShift(reader, operation),
       };
     }
     const payloadEnd = operation.payloadOffset + operation.payloadLength;
@@ -483,8 +507,8 @@ function applyFrameDeltaInternal(
         pageIndex: operation.pageIndex,
         fingerprint: operation.fingerprint,
         page: reusePositionPages
-          ? shiftDisplayPagePositionsOwned(current.page, operation.runs, operation.pageIndex)
-          : shiftDisplayPagePositions(current.page, operation.runs, operation.pageIndex),
+          ? shiftDisplayPagePositionsOwned(current.page, operation, operation.pageIndex)
+          : shiftDisplayPagePositions(current.page, operation, operation.pageIndex),
       });
       continue;
     }
@@ -556,15 +580,28 @@ function bumpDisplayPageRevision(page: DisplayPage): void {
   });
 }
 
+const DISPLAY_PAGE_NOTE_ANCHOR_REVISION = '__betterofficeNoteAnchorRevision';
+
+/**
+ * Counts the owned shifts that moved this page's note anchors in place, for
+ * consumers that render the anchors (the accessibility mirror) and otherwise
+ * key on page identity.
+ */
+export function displayPageNoteAnchorRevision(page: DisplayPage): number {
+  return ((page as unknown as Record<string, unknown>)[DISPLAY_PAGE_NOTE_ANCHOR_REVISION] as
+    | number
+    | undefined) ?? 0;
+}
+
 const DISPLAY_PAGE_SHIFT_LOG = '__betterofficePageShiftLog';
 // Deep enough that a long typing burst between two query-store primes (one
 // recorded shift per applied frame) still replays as compact ops.
 const SHIFT_LOG_LIMIT = 64;
 
 interface DisplayPageShiftLogEntry {
-  /** Revision the page reached when these runs were applied. */
+  /** Revision the page reached when this shift was applied. */
   readonly revision: number;
-  readonly runs: readonly FramePositionShiftRun[];
+  readonly shift: DisplayPageShift;
 }
 
 function displayPageShiftLog(page: DisplayPage): DisplayPageShiftLogEntry[] {
@@ -573,9 +610,12 @@ function displayPageShiftLog(page: DisplayPage): DisplayPageShiftLogEntry[] {
     | undefined) ?? [];
 }
 
-function recordDisplayPageShift(page: DisplayPage, runs: readonly FramePositionShiftRun[]): void {
+function recordDisplayPageShift(page: DisplayPage, shift: DisplayPageShift): void {
   const log = displayPageShiftLog(page);
-  log.push({ revision: displayPageRevision(page), runs });
+  log.push({
+    revision: displayPageRevision(page),
+    shift: { runs: shift.runs, anchors: shift.anchors },
+  });
   if (log.length > SHIFT_LOG_LIMIT) log.splice(0, log.length - SHIFT_LOG_LIMIT);
   Object.defineProperty(page, DISPLAY_PAGE_SHIFT_LOG, {
     value: log,
@@ -586,26 +626,41 @@ function recordDisplayPageShift(page: DisplayPage, runs: readonly FramePositionS
 }
 
 /**
- * Ordered shift-run lists advancing the page from `sinceRevision` to its
- * current revision, or null when the bounded log no longer covers that span.
+ * Ordered shifts advancing the page from `sinceRevision` to its current
+ * revision, or null when the bounded log no longer covers that span.
  */
 export function displayPageShiftsSince(
   page: DisplayPage,
   sinceRevision: number
-): ReadonlyArray<readonly FramePositionShiftRun[]> | null {
+): ReadonlyArray<DisplayPageShift> | null {
   const current = displayPageRevision(page);
   if (current === sinceRevision) return [];
   if (current < sinceRevision) return null;
   const entries = displayPageShiftLog(page).filter((entry) => entry.revision > sinceRevision);
   if (entries.length !== current - sinceRevision) return null;
-  return entries.map((entry) => entry.runs);
+  return entries.map((entry) => entry.shift);
+}
+
+function noteAnchorTarget(page: DisplayPage, anchor: FrameNoteAnchor): NoteRegionNote {
+  const note = page.noteAreas?.[anchor.area]?.notes?.[anchor.note];
+  if (!note) invalid('note anchor shift references an unknown note');
+  return note;
+}
+
+function setNoteAnchor(note: NoteRegionNote, anchor: FrameNoteAnchor): void {
+  if (anchor.start === null) delete note.anchorDocStart;
+  else note.anchorDocStart = anchor.start;
+  if (anchor.end === null) delete note.anchorDocEnd;
+  else note.anchorDocEnd = anchor.end;
 }
 
 function shiftDisplayPagePositionsOwned(
   page: DisplayPage,
-  runs: readonly FramePositionShiftRun[],
+  shift: DisplayPageShift,
   pageIndex: number
 ): DisplayPage {
+  const { runs } = shift;
+  const notes = shift.anchors.map((anchor) => noteAnchorTarget(page, anchor));
   // primitives are mutated through this object below, whether or not a new
   // page wrapper is returned
   let primitiveIndex = 0;
@@ -635,8 +690,17 @@ function shiftDisplayPagePositionsOwned(
   if (runs.some((run) => run.start + run.count > primitiveIndex)) {
     invalid('position shift range exceeds retained primitive count');
   }
+  shift.anchors.forEach((anchor, index) => setNoteAnchor(notes[index]!, anchor));
+  if (shift.anchors.length > 0) {
+    Object.defineProperty(page, DISPLAY_PAGE_NOTE_ANCHOR_REVISION, {
+      value: displayPageNoteAnchorRevision(page) + 1,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
   bumpDisplayPageRevision(page);
-  recordDisplayPageShift(page, runs);
+  recordDisplayPageShift(page, shift);
   return page.pageIndex === pageIndex ? page : { ...page, pageIndex };
 }
 
@@ -645,12 +709,14 @@ function shiftPrimitivePositionsOwned(
   changedMask: number,
   delta: number
 ): void {
+  const presentOnly = (changedMask & POSITION_PRESENT_ONLY) !== 0;
   const shift = (
     mask: number,
     field: 'docStart' | 'docEnd' | 'fragmentDocStart' | 'fragmentDocEnd'
   ): void => {
     if ((changedMask & mask) === 0) return;
     const current = primitive[field];
+    if (presentOnly && current === undefined) return;
     if (typeof current !== 'number') invalid(`position shift requires retained ${field}`);
     const value = current + delta;
     if (!Number.isSafeInteger(value)) invalid(`position shift overflows ${field}`);
@@ -660,7 +726,10 @@ function shiftPrimitivePositionsOwned(
   shift(POSITION_DOC_END, 'docEnd');
   shift(POSITION_FRAGMENT_START, 'fragmentDocStart');
   shift(POSITION_FRAGMENT_END, 'fragmentDocEnd');
-  if ((changedMask & POSITION_INLINE_WIDGET) !== 0) {
+  if (
+    (changedMask & POSITION_INLINE_WIDGET) !== 0 &&
+    !(presentOnly && primitive.inlineSdtWidget === undefined)
+  ) {
     if (
       !primitive.inlineSdtWidget ||
       !Number.isSafeInteger(primitive.inlineSdtWidget.pos + delta)
@@ -737,10 +806,7 @@ function validateDataRegions(
   if (cursor !== reader.bytes.byteLength) invalid('data section has trailing bytes');
 }
 
-function decodePositionShiftRuns(
-  reader: BinaryReader,
-  operation: RawPageOp
-): FramePositionShiftRun[] {
+function decodePositionShift(reader: BinaryReader, operation: RawPageOp): DisplayPageShift {
   let offset = operation.payloadOffset;
   const end = operation.payloadOffset + operation.payloadLength;
   const require = (length: number, label: string): number => {
@@ -751,7 +817,11 @@ function decodePositionShiftRuns(
     return current;
   };
   const count = reader.u32(require(4, 'position shift run count'));
-  if (count !== operation.primitiveCount || count === 0 || count > MAX_CONTAINER_ITEMS) {
+  if (
+    count !== operation.primitiveCount ||
+    count + operation.anchorCount === 0 ||
+    count > MAX_CONTAINER_ITEMS
+  ) {
     invalid('position shift run count mismatch');
   }
   if (reader.u32(require(4, 'position shift reserved word')) !== 0) {
@@ -772,8 +842,8 @@ function decodePositionShiftRuns(
     if (
       runCount === 0 ||
       start < previousEnd ||
-      changedMask === 0 ||
-      (changedMask & ~POSITION_MASK) !== 0 ||
+      (changedMask & POSITION_MASK) === 0 ||
+      (changedMask & ~(POSITION_MASK | POSITION_PRESENT_ONLY)) !== 0 ||
       delta === 0
     ) {
       invalid('position shift run is invalid');
@@ -781,8 +851,33 @@ function decodePositionShiftRuns(
     previousEnd = runEnd;
     runs.push({ start, count: runCount, changedMask, delta });
   }
+  const anchors: FrameNoteAnchor[] = [];
+  if (operation.anchorCount > 0) {
+    const anchorCount = reader.u32(require(4, 'note anchor count'));
+    if (anchorCount !== operation.anchorCount || anchorCount > MAX_CONTAINER_ITEMS) {
+      invalid('note anchor count mismatch');
+    }
+    if (reader.u32(require(4, 'note anchor reserved word')) !== 0) {
+      invalid('note anchor reserved word is nonzero');
+    }
+    const anchorValue = (label: string): number | null => {
+      const at = require(8, label);
+      return reader.i64(at) === ABSENT_ANCHOR ? null : reader.safeI64(at, label);
+    };
+    for (let index = 0; index < anchorCount; index++) {
+      const area = reader.u32(require(4, 'note anchor area'));
+      const note = reader.u32(require(4, 'note anchor note'));
+      const start = anchorValue('note anchor start');
+      const end = anchorValue('note anchor end');
+      const previous = anchors.at(-1);
+      if (previous && (area < previous.area || (area === previous.area && note <= previous.note))) {
+        invalid('note anchors are not in strictly increasing order');
+      }
+      anchors.push({ area, note, start, end });
+    }
+  }
   if (offset !== end) invalid('position shift byte length/count mismatch');
-  return runs;
+  return { runs, anchors };
 }
 
 function assertZeroPadding(reader: BinaryReader, start: number, end: number): void {
@@ -916,9 +1011,10 @@ function patchDisplayPagePositions(
 
 function shiftDisplayPagePositions(
   page: DisplayPage,
-  runs: readonly FramePositionShiftRun[],
+  shift: DisplayPageShift,
   pageIndex: number
 ): DisplayPage {
+  const { runs } = shift;
   let primitiveIndex = 0;
   let runIndex = 0;
   const shiftPrimitives = (primitives: readonly DisplayPrimitive[]): DisplayPrimitive[] =>
@@ -955,6 +1051,16 @@ function shiftDisplayPagePositions(
   if (runs.some((run) => run.start + run.count > primitiveIndex)) {
     invalid('position shift range exceeds retained primitive count');
   }
+  const notes = shift.anchors.map((anchor) => noteAnchorTarget(page, anchor));
+  const copiedAreas = new Set<number>();
+  shift.anchors.forEach((anchor, index) => {
+    const area = noteAreas![anchor.area]!;
+    if (!copiedAreas.has(anchor.area)) area.notes = area.notes!.slice();
+    copiedAreas.add(anchor.area);
+    const note = { ...notes[index]! };
+    setNoteAnchor(note, anchor);
+    area.notes![anchor.note] = note;
+  });
   return {
     ...page,
     pageIndex,
@@ -971,12 +1077,14 @@ function shiftPrimitivePositions(
   delta: number
 ): DisplayPrimitive {
   const next: DisplayPrimitive = { ...primitive };
+  const presentOnly = (changedMask & POSITION_PRESENT_ONLY) !== 0;
   const shift = (
     mask: number,
     field: 'docStart' | 'docEnd' | 'fragmentDocStart' | 'fragmentDocEnd'
   ): void => {
     if ((changedMask & mask) === 0) return;
     const current = next[field];
+    if (presentOnly && current === undefined) return;
     if (typeof current !== 'number') invalid(`position shift requires retained ${field}`);
     const value = current + delta;
     if (!Number.isSafeInteger(value)) invalid(`position shift overflows ${field}`);
@@ -986,7 +1094,10 @@ function shiftPrimitivePositions(
   shift(POSITION_DOC_END, 'docEnd');
   shift(POSITION_FRAGMENT_START, 'fragmentDocStart');
   shift(POSITION_FRAGMENT_END, 'fragmentDocEnd');
-  if ((changedMask & POSITION_INLINE_WIDGET) !== 0) {
+  if (
+    (changedMask & POSITION_INLINE_WIDGET) !== 0 &&
+    !(presentOnly && next.inlineSdtWidget === undefined)
+  ) {
     if (!next.inlineSdtWidget || !Number.isSafeInteger(next.inlineSdtWidget.pos + delta)) {
       invalid('position shift requires retained inline widget metadata');
     }

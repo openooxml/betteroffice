@@ -62,8 +62,8 @@ use crate::{
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
     RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, StoryRange, TabStop, TableLocator, TableRange, TextTarget,
-    TriState, UndoCaptureMode, UndoSession, story_ref,
+    SourceStory, SourceStoryKind, StoryRange, StorySegment, TabStop, TableLocator, TableRange,
+    TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -707,6 +707,34 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
     })
 }
 
+fn segments_json(segments: Vec<StorySegment>) -> Result<Vec<Value>, JsValue> {
+    segments
+        .into_iter()
+        .map(|segment| {
+            let attributes = attrs_value(&segment.attributes)?;
+            Ok(match segment.content {
+                SegmentContent::Text(text) => {
+                    json!({ "kind": "text", "text": text, "attributes": attributes })
+                }
+                SegmentContent::Pilcrow(properties) => json!({
+                    "kind": "pilcrow",
+                    "paraId": properties.para_id,
+                    "properties": attrs_value(&properties.values)?,
+                    "attributes": attributes,
+                }),
+                SegmentContent::OtherEmbed { kind, payload } => {
+                    json!({
+                        "kind": "embed",
+                        "embedKind": kind,
+                        "payload": attrs_value(&payload)?,
+                        "attributes": attributes,
+                    })
+                }
+            })
+        })
+        .collect()
+}
+
 fn attrs_value(attrs: &std::collections::BTreeMap<String, Any>) -> Result<Value, JsValue> {
     serde_json::to_value(attrs).map_err(js_err)
 }
@@ -1140,6 +1168,8 @@ fn persisted_receipt_json(session_id: &str, persisted: &PersistedParagraphIds) -
 pub struct EditSession {
     engine: EngineSession,
     docx_source: RefCell<Option<Arc<[u8]>>>,
+    /// The [`crate::seed::package_digest`] of `docx_source`, when known.
+    docx_digest: RefCell<Option<String>>,
     update_observer: Option<Subscription>,
     update_event_observer: Option<UpdateEventObserver>,
     undo: UndoSession,
@@ -1258,8 +1288,21 @@ impl EditSession {
         seed_stories: bool,
         generation: Option<&str>,
     ) -> Result<String, JsValue> {
+        self.open_docx_retaining(bytes, seed_stories, generation)
+            .map_err(|error| js_err(&error))
+    }
+
+    /// Opens `bytes`, retaining them and their digest only once opening succeeds.
+    fn open_docx_retaining(
+        &self,
+        bytes: &[u8],
+        seed_stories: bool,
+        generation: Option<&str>,
+    ) -> Result<String, String> {
         let source: Arc<[u8]> = Arc::from(bytes);
-        let (envelope, parts) = crate::seed::parse_docx_package(bytes).map_err(js_err)?;
+        let digest = crate::seed::package_digest(bytes);
+        let (envelope, parts) = crate::seed::parse_docx_package_with_digest(bytes, digest.clone())
+            .map_err(|error| error.to_string())?;
         let host_envelope = thin_docx_envelope(&envelope);
         let referenced_fonts = if seed_stories {
             let fonts = crate::seed::seed_parsed_docx(
@@ -1267,18 +1310,22 @@ impl EditSession {
                 envelope,
                 parts,
                 Arc::clone(&source),
+                digest.clone(),
             )
-            .map_err(js_err)?;
+            .map_err(|error| error.to_string())?;
             self.engine.doc().begin_opening(generation);
             fonts
         } else {
-            let fonts = crate::seed::referenced_fonts(&envelope).map_err(js_err)?;
+            let fonts =
+                crate::seed::referenced_fonts(&envelope).map_err(|error| error.to_string())?;
             let parts = crate::structured::source::SourceParts::new(parts);
-            let mut metadata =
-                crate::seed::source_metadata(&envelope, Some(&parts)).map_err(js_err)?;
+            let mut metadata = crate::seed::source_metadata(&envelope, Some(&parts))
+                .map_err(|error| error.to_string())?;
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
-            self.engine.doc().retain_source_docx(Arc::clone(&source));
+            self.engine
+                .doc()
+                .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
             drop(envelope);
             fonts
         };
@@ -1286,8 +1333,9 @@ impl EditSession {
             envelope: host_envelope,
             referenced_fonts,
         };
-        let json = serde_json::to_string(&host).map_err(js_err)?;
+        let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
+        self.docx_digest.replace(Some(digest));
         self.engine.doc().rotate_version(js_entropy());
         Ok(json)
     }
@@ -1471,6 +1519,7 @@ impl EditSession {
         let session = Self {
             engine: EngineSession::new(client_id as u64),
             docx_source: RefCell::new(None),
+            docx_digest: RefCell::new(None),
             update_observer: None,
             update_event_observer: None,
             undo: UndoSession::with_clock(Arc::new(|| js_sys::Date::now() as u64)),
@@ -2037,7 +2086,13 @@ impl EditSession {
         let Some(source) = source.as_ref() else {
             return Ok(None);
         };
-        let envelope = crate::seed::parse_docx_for_edit(source).map_err(js_err)?;
+        let digest = self
+            .docx_digest
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| crate::seed::package_digest(source));
+        let (envelope, _) =
+            crate::seed::parse_docx_package_with_digest(source, digest).map_err(js_err)?;
         let json = serde_json::to_string(&envelope).map_err(js_err)?;
         Ok(Some(json))
     }
@@ -3688,6 +3743,7 @@ impl EditSession {
         let json = outcome.to_json(&options.limits).map_err(js_err)?;
         if let CompareOutcome::Applied(applied) = outcome {
             self.docx_source.replace(Some(Arc::from(original)));
+            self.docx_digest.replace(None);
             self.compared.replace(Some((applied, options.limits)));
         }
         Ok(json)
@@ -3947,6 +4003,13 @@ impl EditSession {
             .is_some_and(|stories| stories.contains_key(&txn, story))
     }
 
+    /// `{"revision","stories":[…]}`: the current story revision and the sorted
+    /// ids of the stories created, edited, or deleted after revision `since`.
+    pub fn stories_changed_since(&self, since: f64) -> String {
+        let (revision, stories) = self.engine.doc().stories_changed_since(since as u64);
+        json!({ "revision": revision, "stories": stories }).to_string()
+    }
+
     /// Every story id in the document, sorted so the order is stable across
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {
@@ -4051,32 +4114,43 @@ impl EditSession {
     /// tracked-change stamps. Errors on an unknown story.
     pub fn story_segments(&self, story: &str) -> Result<String, JsValue> {
         let segments = self.engine.doc().story_segments(story).map_err(js_err)?;
-        let items = segments
+        serde_json::to_string(&segments_json(segments)?).map_err(js_err)
+    }
+
+    /// `story_segments` split after each pilcrow into units, as one hex digest
+    /// per unit: `["digest", …]`. Equal digests mean equal segments.
+    pub fn story_segment_unit_digests(&self, story: &str) -> Result<String, JsValue> {
+        let units = self
+            .engine
+            .doc()
+            .story_segment_units(story)
+            .map_err(js_err)?;
+        let digests: Vec<String> = units
+            .iter()
+            .map(|unit| format!("{:032x}", crate::segments_digest(unit)))
+            .collect();
+        serde_json::to_string(&digests).map_err(js_err)
+    }
+
+    /// The segments of the listed units (indices into
+    /// `story_segment_unit_digests`), each as `story_segments` gives them:
+    /// `[[segment, …], …]`. Errors on an index past the last unit.
+    pub fn story_segment_units(&self, story: &str, units: Vec<u32>) -> Result<String, JsValue> {
+        let all = self
+            .engine
+            .doc()
+            .story_segment_units(story)
+            .map_err(js_err)?;
+        let requested = units
             .into_iter()
-            .map(|segment| {
-                let attributes = attrs_value(&segment.attributes)?;
-                Ok(match segment.content {
-                    SegmentContent::Text(text) => {
-                        json!({ "kind": "text", "text": text, "attributes": attributes })
-                    }
-                    SegmentContent::Pilcrow(properties) => json!({
-                        "kind": "pilcrow",
-                        "paraId": properties.para_id,
-                        "properties": attrs_value(&properties.values)?,
-                        "attributes": attributes,
-                    }),
-                    SegmentContent::OtherEmbed { kind, payload } => {
-                        json!({
-                            "kind": "embed",
-                            "embedKind": kind,
-                            "payload": attrs_value(&payload)?,
-                            "attributes": attributes,
-                        })
-                    }
-                })
+            .map(|index| {
+                let unit = all
+                    .get(index as usize)
+                    .ok_or_else(|| js_err(format!("no segment unit {index} in {story}")))?;
+                segments_json(unit.clone())
             })
-            .collect::<Result<Vec<Value>, JsValue>>()?;
-        serde_json::to_string(&items).map_err(js_err)
+            .collect::<Result<Vec<Vec<Value>>, JsValue>>()?;
+        serde_json::to_string(&requested).map_err(js_err)
     }
 
     /// The `payload` of the story's `table_index`-th table embed, as
@@ -4762,6 +4836,37 @@ mod tests {
         let applied = envelope(&session.apply_edits_json(&request).unwrap());
         assert_eq!(applied["source"], "agent");
         assert!(!session.can_undo());
+    }
+
+    /// A package whose paragraph text id is invalid, so parsing generates
+    /// one from the package digest.
+    fn unidentified_docx(text: &str) -> Vec<u8> {
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:textId="invalid"><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn a_failed_reopen_keeps_the_open_package_and_its_digest() {
+        let opened = unidentified_docx("Alpha");
+        let session = EditSession::new(75.0).unwrap();
+        session.open_docx(&opened, true, None).unwrap();
+        let materialized = session.materialize_docx().unwrap();
+        assert!(
+            session
+                .open_docx_retaining(&unidentified_docx("Beta"), true, None)
+                .is_err()
+        );
+        assert_eq!(session.materialize_docx().unwrap(), materialized);
+        let fresh = EditSession::new(76.0).unwrap();
+        fresh.open_docx(&opened, true, None).unwrap();
+        assert_eq!(fresh.materialize_docx().unwrap(), materialized);
     }
 
     #[test]

@@ -42,11 +42,7 @@
  */
 
 import type { DisplayList, DisplayPage, DisplayPrimitive } from './displayList';
-import {
-  displayPageRevision,
-  displayPageShiftsSince,
-  type FramePositionShiftRun,
-} from './frameDelta';
+import { displayPageRevision, displayPageShiftsSince, type DisplayPageShift } from './frameDelta';
 import { displayPrimitiveRect, type GeoRect } from './displayListGeometry';
 import {
   findImagePrimitiveAtPoint,
@@ -360,6 +356,7 @@ function isWasmTrap(error: unknown): boolean {
 }
 
 type StoreShiftRun = [start: number, count: number, mask: number, delta: number];
+type StoreNoteAnchor = [area: number, note: number, start: number | null, end: number | null];
 
 /** The baseline of a primitive that forms part of a visual line, or null. */
 function visualLineBaseline(primitive: DisplayPrimitive): number | null {
@@ -409,7 +406,9 @@ function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): s
   seed.list.pages.forEach((page, index) => previousIndex.set(page, index));
   const reuse: Array<[number, number]> = [];
   const replace: Array<[number, unknown]> = [];
-  const shift: Array<[number, number, StoreShiftRun[][]]> = [];
+  const shift: Array<
+    [number, number, StoreShiftRun[][]] | [number, number, StoreShiftRun[][], StoreNoteAnchor[][]]
+  > = [];
   next.pages.forEach((page, index) => {
     const from = previousIndex.get(page);
     if (from === undefined) {
@@ -422,22 +421,28 @@ function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): s
       replace.push([index, page]);
       return;
     }
-    const runLists =
+    const shifts =
       displayPageRevision(page) === storeRevision
         ? []
         : displayPageShiftsSince(page, storeRevision);
-    if (runLists === null) {
+    if (shifts === null) {
       replace.push([index, page]);
-    } else if (runLists.length === 0) {
+    } else if (shifts.length === 0) {
       reuse.push([index, from]);
     } else {
-      shift.push([
-        index,
-        from,
-        runLists.map((runs: readonly FramePositionShiftRun[]) =>
-          runs.map((run): StoreShiftRun => [run.start, run.count, run.changedMask, run.delta])
-        ),
-      ]);
+      const runLists = shifts.map((step: DisplayPageShift) =>
+        step.runs.map((run): StoreShiftRun => [run.start, run.count, run.changedMask, run.delta])
+      );
+      if (shifts.some((step: DisplayPageShift) => step.anchors.length > 0)) {
+        const anchorLists = shifts.map((step: DisplayPageShift) =>
+          step.anchors.map(
+            (anchor): StoreNoteAnchor => [anchor.area, anchor.note, anchor.start, anchor.end]
+          )
+        );
+        shift.push([index, from, runLists, anchorLists]);
+      } else {
+        shift.push([index, from, runLists]);
+      }
     }
   });
   if (reuse.length === 0 && shift.length === 0) return null;
