@@ -3624,6 +3624,12 @@ impl EngineSession {
                 "Note placement did not settle in the retained layout.",
             ));
         }
+        if !capture.render_env.revision_preview.is_empty() {
+            return Err(refuse(
+                ExportFailureCode::UnsupportedRevisionLayout,
+                "The retained layout previews revision decisions instead of their markup.",
+            ));
+        }
         let env = &capture.render_env;
         let request: serde_json::Value =
             serde_json::from_str(&region_state.request_json).map_err(|error| {
