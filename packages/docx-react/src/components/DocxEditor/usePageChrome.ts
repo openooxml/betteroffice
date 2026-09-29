@@ -53,19 +53,19 @@ function tabStops(root: ParentNode): HTMLElement[] {
   );
 }
 
-/** What identifies a tab stop across a rebuild, whatever changed around it. */
-const stopKey = (stop: HTMLElement): string => {
-  const { sdtGroupId, sdtWidget, sdtRepeat } = stop.dataset;
-  return [
-    stop.tagName,
-    stop.getAttribute('href'),
-    stop.id,
-    sdtGroupId,
-    sdtWidget,
-    sdtRepeat,
-    // A control's text shows its state; its group names it.
-    sdtGroupId === undefined ? stop.textContent : '',
-  ].join('\u0000');
+/**
+ * What identifies a tab stop across a rebuild, whatever changed around it;
+ * null when only its place does. A control's group is its position and its
+ * text shows its state, so only its control id names it.
+ */
+const stopKey = (stop: HTMLElement): string | null => {
+  const { sdtGroupId, sdtControlId, sdtWidget, sdtRepeat } = stop.dataset;
+  if (sdtGroupId !== undefined) {
+    return sdtControlId === undefined
+      ? null
+      : ['control', sdtControlId, sdtWidget, sdtRepeat].join('\u0000');
+  }
+  return [stop.tagName, stop.getAttribute('href'), stop.id, stop.textContent].join('\u0000');
 };
 
 /**
@@ -77,15 +77,14 @@ function replaceKeepingFocus(host: HTMLElement, next: HTMLElement | null): void 
   const focused = host.ownerDocument.activeElement;
   const stops = focused instanceof HTMLElement && host.contains(focused) ? tabStops(host) : [];
   const at = stops.indexOf(focused as HTMLElement);
-  const key = at >= 0 ? stopKey(stops[at]!) : '';
+  const key = at >= 0 ? stopKey(stops[at]!) : null;
   const nth = stops.slice(0, at).filter((stop) => stopKey(stop) === key).length;
   if (next) host.replaceChildren(next);
   else host.replaceChildren();
   if (at < 0) return;
   const rebuilt = tabStops(host);
-  (rebuilt.filter((stop) => stopKey(stop) === key)[nth] ?? rebuilt[at])?.focus({
-    preventScroll: true,
-  });
+  const same = key === null ? [] : rebuilt.filter((stop) => stopKey(stop) === key);
+  (same[nth] ?? rebuilt[at])?.focus({ preventScroll: true });
 }
 
 /** Builds one page's mirror or overlay into `hostRef`, and rebuilds it with the page. */

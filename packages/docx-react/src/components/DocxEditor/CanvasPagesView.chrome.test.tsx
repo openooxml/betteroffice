@@ -300,28 +300,40 @@ test('a rebuild keeps focus on the same link when links before it change', async
   expect(container.contains(document.activeElement)).toBe(true);
 });
 
-test('a rebuild keeps focus on a control whose state changed', async () => {
-  const checkbox = (groupId: string, x: number, checked: boolean): DisplayPrimitive =>
+test('a rebuild keeps focus on a control that changed, moved or lost a neighbour', async () => {
+  const checkbox = (controlId: number, pos: number, checked = false): DisplayPrimitive =>
     ({
       kind: 'rect',
-      x,
+      x: pos,
       y: 10,
       w: 10,
       h: 10,
-      inlineSdtWidget: { kind: 'checkbox', groupId, pos: x, checked },
+      inlineSdtWidget: { kind: 'checkbox', groupId: `sdt@${pos}`, pos, controlId, checked },
     }) as DisplayPrimitive;
-  const page = (checked: boolean): DisplayPage => ({
+  const page = (...primitives: DisplayPrimitive[]): DisplayPage => ({
     pageIndex: 0,
     width: 100,
     height: 100,
-    primitives: [checkbox('first', 10, checked), checkbox('second', 40, false)],
+    primitives,
   });
-  const { container, rerender } = render(<CanvasInteractiveOverlay page={page(false)} />);
+  const focusedControl = () => (document.activeElement as HTMLElement | null)?.dataset.sdtControlId;
+  const { container, rerender } = render(
+    <CanvasInteractiveOverlay page={page(checkbox(101, 10), checkbox(102, 40))} />
+  );
   await act(async () => {});
-  container.querySelector<HTMLElement>('[data-sdt-group-id="first"]')!.focus();
-  rerender(<CanvasInteractiveOverlay page={page(true)} />);
+  container.querySelector<HTMLElement>('[data-sdt-control-id="102"]')!.focus();
+  // Toggled.
+  rerender(<CanvasInteractiveOverlay page={page(checkbox(101, 10), checkbox(102, 40, true))} />);
   await act(async () => {});
-  expect((document.activeElement as HTMLElement | null)?.dataset.sdtGroupId).toBe('first');
+  expect(focusedControl()).toBe('102');
+  // Moved by content inserted before both: its old group is now the other's.
+  rerender(<CanvasInteractiveOverlay page={page(checkbox(101, 40), checkbox(102, 70, true))} />);
+  await act(async () => {});
+  expect(focusedControl()).toBe('102');
+  // The control before it removed.
+  rerender(<CanvasInteractiveOverlay page={page(checkbox(102, 40, true))} />);
+  await act(async () => {});
+  expect(focusedControl()).toBe('102');
 });
 
 test('a link to a note on a page whose chrome is not built builds that page first', async () => {
