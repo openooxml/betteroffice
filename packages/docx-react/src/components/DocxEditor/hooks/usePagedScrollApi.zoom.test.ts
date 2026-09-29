@@ -15,9 +15,10 @@ afterAll(async () => {
 });
 
 const PAGE = { width: 100, height: 200 };
+const PAGES = 12;
 const GAP = 24;
-const SCROLLER_TOP = 40;
-const SCROLLER_HEIGHT = 300;
+const SCROLLER_TOP = 40.25;
+const SCROLLER_HEIGHT = 300.4;
 
 function rect(top: number, height: number, width = 0): DOMRect {
   return {
@@ -32,21 +33,28 @@ function rect(top: number, height: number, width = 0): DOMRect {
   } as DOMRect;
 }
 
-/** A scroller and pages drawn under an ancestor CSS `zoom`. */
-function scene(zoom: number, scrollTop: number) {
+/** Pages under `scroller`, drawn at `zoom`, with `scroller` at client top `scrollerTop`. */
+function pagesUnder(zoom: number, scrollTop: number, scrollerTop: number) {
   const host = document.createElement('div');
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < PAGES; index += 1) {
     const canvas = document.createElement('canvas');
     canvas.dataset.pageIndex = String(index);
     const top = GAP + index * (PAGE.height + GAP);
     canvas.getBoundingClientRect = () =>
-      rect(SCROLLER_TOP + (top - scrollTop) * zoom, PAGE.height * zoom, PAGE.width * zoom);
+      rect(scrollerTop + (top - scrollTop) * zoom, PAGE.height * zoom, PAGE.width * zoom);
     host.appendChild(canvas);
   }
+  return host;
+}
+
+/** A scroller drawn under an ancestor CSS `zoom`, recording where it is asked to scroll. */
+function scene(zoom: number, scrollTop: number) {
+  const host = pagesUnder(zoom, scrollTop, SCROLLER_TOP);
   const moves: number[] = [];
   const scroller = document.createElement('div');
   Object.defineProperties(scroller, {
-    offsetHeight: { value: SCROLLER_HEIGHT },
+    currentCSSZoom: { value: zoom },
+    offsetHeight: { value: Math.round(SCROLLER_HEIGHT) },
     clientHeight: { value: SCROLLER_HEIGHT },
     scrollTop: { value: scrollTop },
   });
@@ -57,28 +65,50 @@ function scene(zoom: number, scrollTop: number) {
 }
 
 const queries = {
-  pageCount: () => 3,
+  pageCount: () => PAGES,
   pageSize: () => PAGE,
   pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, ...PAGE }),
 } as unknown as DisplayListQueries;
 
+function scrollApi(host: HTMLElement, scroller: HTMLElement) {
+  return renderHook(() =>
+    usePagedScrollApi({
+      pagesContainerRef: { current: host as HTMLDivElement },
+      yrsInputRef: { current: null },
+      yrsSession: null,
+      yrsLocToDisplayPosition: () => null,
+      getScrollContainer: () => scroller as HTMLDivElement,
+      displayListQueries: queries,
+      canvasHostRef: { current: host as HTMLDivElement },
+    })
+  ).result.current;
+}
+
+const pageCentre = (page: number) => GAP + (page - 1) * (PAGE.height + GAP) + PAGE.height / 2;
+
 test('scrollToPage centres the page under an ancestor CSS zoom', () => {
   for (const zoom of [0.8, 1, 1.25]) {
-    const { host, scroller, moves } = scene(zoom, 100);
-    const { result } = renderHook(() =>
-      usePagedScrollApi({
-        pagesContainerRef: { current: host },
-        yrsInputRef: { current: null },
-        yrsSession: null,
-        yrsLocToDisplayPosition: () => null,
-        getScrollContainer: () => scroller,
-        displayListQueries: queries,
-        canvasHostRef: { current: host },
-      })
-    );
-    result.current.scrollToPageImpl(3);
-    const pageCentre = GAP + 2 * (PAGE.height + GAP) + PAGE.height / 2;
+    const { host, scroller, moves } = scene(zoom, 100.5);
+    scrollApi(host, scroller).scrollToPageImpl(3);
     expect(moves).toHaveLength(1);
-    expect(moves[0]).toBeCloseTo(pageCentre - SCROLLER_HEIGHT / 2);
+    expect(moves[0]).toBeCloseTo(pageCentre(3) - SCROLLER_HEIGHT / 2, 9);
+  }
+});
+
+test('scrollToPage centres the page in the window when the root scrolls', () => {
+  const root = document.documentElement;
+  const scrollTop = 1_000;
+  const host = pagesUnder(1, scrollTop, 0);
+  const moves: number[] = [];
+  const scrollTo = root.scrollTo;
+  Object.defineProperty(root, 'scrollTop', { value: scrollTop, configurable: true });
+  root.scrollTo = ((options: ScrollToOptions) =>
+    moves.push(options.top ?? NaN)) as typeof root.scrollTo;
+  try {
+    scrollApi(host, root).scrollToPageImpl(9);
+    expect(moves[0]).toBeCloseTo(pageCentre(9) - window.innerHeight / 2);
+  } finally {
+    root.scrollTo = scrollTo;
+    delete (root as { scrollTop?: number }).scrollTop;
   }
 });

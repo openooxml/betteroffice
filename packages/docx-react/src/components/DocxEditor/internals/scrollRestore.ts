@@ -1,5 +1,4 @@
 import {
-  renderedScale,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
   type DisplayListRect,
@@ -10,6 +9,10 @@ import {
   computeViewportAnchoredScrollTop,
   type ViewportAnchorSnapshot,
 } from './viewportAnchoring';
+import { scrollViewport } from './viewportBand';
+
+/** Client-pixel bounds of the band a scroller shows. */
+type ViewportBounds = { top: number; bottom: number };
 
 export interface DisplayListScrollAnchor {
   pmPos: number;
@@ -133,7 +136,7 @@ function viewportTargetClientY(
 function nearestLineAnchor(
   queries: DisplayListQueries,
   host: HTMLElement,
-  viewport: DOMRect,
+  viewport: ViewportBounds,
   lines: Iterable<DisplayListVisualLine>,
   capturePosition: CaptureViewportPosition,
   visibleOnly = false
@@ -207,7 +210,7 @@ const PAGE_FILTER_SLACK = 1;
 function pagesReachingViewport(
   queries: DisplayListQueries,
   host: HTMLElement,
-  viewport: DOMRect,
+  viewport: ViewportBounds,
   projectionCache: Map<number, PageProjection | null>
 ): number[] | null {
   const pageCount = queries.pageCount();
@@ -254,7 +257,7 @@ function* linesOnPages(
 function visiblePageAnchor(
   queries: DisplayListQueries,
   host: HTMLElement,
-  viewport: DOMRect
+  viewport: ViewportBounds
 ): { target: PageViewportTarget; clientY: number } | null {
   for (let pageIndex = 0; pageIndex < queries.pageCount(); pageIndex += 1) {
     const pageRect = resolveDisplayPageClientRect(host, queries, pageIndex);
@@ -291,12 +294,10 @@ export function captureDisplayListScrollAnchor(
     scrollParent.style.setProperty('overflow-anchor', 'none');
   }
   const projected = projectedAnchorRect(queries, host, pmPos);
-  const scrollerRect = scrollParent.getBoundingClientRect();
+  const viewport = scrollViewport(scrollParent);
   return {
     pmPos,
-    clientOffset: projected
-      ? (projected.clientY - scrollerRect.top) / renderedScale(scrollParent, scrollerRect)
-      : null,
+    clientOffset: projected ? (projected.clientY - viewport.top) / viewport.zoom : null,
     pageIndex: projected?.pageIndex ?? null,
     scrollTopSnapshot: scrollParent.scrollTop,
   };
@@ -311,7 +312,7 @@ export function captureDisplayListViewportAnchor(
   if (!scrollParent.style.overflowAnchor) {
     scrollParent.style.setProperty('overflow-anchor', 'none');
   }
-  const viewport = scrollParent.getBoundingClientRect();
+  const viewport = scrollViewport(scrollParent);
   // Scanning the pages whose lines can reach the viewport finds the visible
   // lines a scan of every line would. The full scan remains for a viewport
   // showing no line, where the nearest line anywhere wins.
@@ -330,9 +331,7 @@ export function captureDisplayListViewportAnchor(
     visiblePageAnchor(queries, host, viewport);
   return {
     target: resolved?.target ?? null,
-    viewportOffset: resolved
-      ? (resolved.clientY - viewport.top) / renderedScale(scrollParent, viewport)
-      : 0,
+    viewportOffset: resolved ? (resolved.clientY - viewport.top) / viewport.zoom : 0,
     scrollTopSnapshot: scrollParent.scrollTop,
   };
 }
@@ -359,10 +358,9 @@ export function restoreDisplayListScrollAnchor(
     (anchor.pageIndex == null || anchor.pageIndex === projected.pageIndex)
       ? projected
       : null;
-  const scrollerRect = scrollParent.getBoundingClientRect();
+  const viewport = scrollViewport(scrollParent);
   const nextTargetTop = pinned
-    ? scrollParent.scrollTop +
-      (pinned.clientY - scrollerRect.top) / renderedScale(scrollParent, scrollerRect)
+    ? scrollParent.scrollTop + (pinned.clientY - viewport.top) / viewport.zoom
     : null;
   const maxScroll = Math.max(0, scrollParent.scrollHeight - scrollParent.clientHeight);
   scrollParent.scrollTop = computeViewportAnchoredScrollTop(
@@ -380,12 +378,9 @@ export function restoreDisplayListViewportAnchor(
   resolvePosition: ResolveViewportPosition
 ): void {
   const clientY = viewportTargetClientY(anchor, queries, host, resolvePosition);
-  const scrollerRect = scrollParent.getBoundingClientRect();
+  const viewport = scrollViewport(scrollParent);
   const nextTargetTop =
-    clientY == null
-      ? null
-      : scrollParent.scrollTop +
-        (clientY - scrollerRect.top) / renderedScale(scrollParent, scrollerRect);
+    clientY == null ? null : scrollParent.scrollTop + (clientY - viewport.top) / viewport.zoom;
   const maxScroll = Math.max(0, scrollParent.scrollHeight - scrollParent.clientHeight);
   scrollParent.scrollTop = computeViewportAnchoredScrollTop(anchor, nextTargetTop, maxScroll);
 }

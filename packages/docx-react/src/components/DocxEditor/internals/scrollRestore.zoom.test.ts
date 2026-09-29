@@ -62,7 +62,7 @@ function zoomedScene(zoom: number, scrollTop: number, pageCount: number) {
       return height();
     },
     clientHeight: SCROLLER_HEIGHT,
-    offsetHeight: SCROLLER_HEIGHT,
+    currentCSSZoom: zoom,
     getBoundingClientRect: () => domRect(SCROLLER_TOP, 600 * zoom, SCROLLER_HEIGHT * zoom),
   } as unknown as HTMLElement;
   const clientTop = (pageIndex: number, pageY: number) =>
