@@ -93,12 +93,20 @@ test('a full open that never finishes fails the load once its wait runs out', as
   unmount();
 });
 
-test('a full session whose first frame never shows takes over once the wait runs out', async () => {
+test('a full session keeps the preview until its first frame shows, past the wait', async () => {
   const { result, errors, preview, unmount } = await previewThen('open', 50);
   await waitFor(() => expect(result.current.previewing).toBe(false));
   const full = result.current.session;
   expect(full).not.toBe(preview);
-  await waitFor(() => expect(result.current.opening).toBe(false));
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 150));
+  });
+  expect(result.current.opening).toBe(true);
+  expect(result.current.handoffFrom).toBe(preview);
+  await act(async () => {
+    result.current.notifyFramePresented(full);
+  });
+  expect(result.current.opening).toBe(false);
   expect(result.current.handoffFrom).toBeNull();
   expect(result.current.session).toBe(full);
   expect(errors).toEqual([]);

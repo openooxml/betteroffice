@@ -63,7 +63,7 @@ interface YrsCoreSessionCallbacks {
 export interface YrsCoreSessionOptions {
   /** Open a display-only preview of the first pages before the full document. */
   previewFirstPage?: boolean;
-  /** How long a preview waits for the full document to open and paint; see {@link FULL_OPEN_TIMEOUT_MS}. */
+  /** How long a preview waits for the full document to open; see {@link FULL_OPEN_TIMEOUT_MS}. */
   fullOpenTimeoutMs?: number;
 }
 
@@ -74,9 +74,9 @@ const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 /** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
 const PREVIEW_FRAME_WAIT_MS = 100;
 /**
- * How long a preview waits for the full document, from the start of its open
- * to its first frame. A full session that exists by then takes over at once;
- * a full open that has not produced one fails the load.
+ * How long a preview waits for the full session, from the end of its own
+ * paint. A full open that has not produced one by then fails the load; once
+ * it exists, the preview stays until the full session's first frame shows.
  */
 const FULL_OPEN_TIMEOUT_MS = 10_000;
 
@@ -353,12 +353,9 @@ export function useYrsCoreSession(
           const preview = opened.session;
           fullOpenTimer = setTimeout(() => {
             fullOpenTimer = null;
-            if (sessionRef.current === preview) {
-              abandoned = true;
-              fail(new Error('The document did not finish opening in time'));
-            } else if (retiringRef.current === preview) {
-              retire(preview);
-            }
+            if (sessionRef.current !== preview) return;
+            abandoned = true;
+            fail(new Error('The document did not finish opening in time'));
           }, fullOpenTimeoutRef.current);
         }
         const bytes = await prepared;
@@ -381,6 +378,10 @@ export function useYrsCoreSession(
         }
         sessionRef.current = next;
         facadeRef.current = yrs;
+        if (fullOpenTimer !== null) {
+          clearTimeout(fullOpenTimer);
+          fullOpenTimer = null;
+        }
         if (opened) {
           // Maps and projections of the preview do not describe this session.
           inputPositionMapsRef.current.clear();
