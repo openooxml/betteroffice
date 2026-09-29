@@ -10,7 +10,11 @@
 
 import type { RenderedDomContext, PositionCoordinates, PointPosition } from './types';
 import type { DisplayListQueries, DisplayListRect } from '../layout/render/displayListQueries';
-import { resolveCanvasPoint, resolveDisplayPageClientRect } from '../layout/render/canvasPointer';
+import {
+  materializeDisplayPages,
+  resolveCanvasPoint,
+  resolveDisplayPageClientRect,
+} from '../layout/render/canvasPointer';
 
 /** One data-doc-* bearing run span in the a11y mirror, with parsed positions. */
 interface MirrorSpanEntry {
@@ -233,6 +237,10 @@ export class RenderedDomContextImpl implements RenderedDomContext {
    * Find DOM elements that overlap with a display-position range.
    */
   findElementsForRange(from: number, to: number): Element[] {
+    if (this.queries) {
+      const pages = new Set(this.queries.rangeRects(from, to).map((rect) => rect.pageIndex));
+      materializeDisplayPages(this.pagesContainer, [...pages]);
+    }
     const elements: Element[] = [];
     for (const { el, start, end } of this.spanEntries()) {
       // Check if this span overlaps with the range

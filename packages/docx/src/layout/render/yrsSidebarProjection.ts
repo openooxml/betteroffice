@@ -192,12 +192,27 @@ function indexStory(
   }
 }
 
+const projections = new WeakMap<
+  YrsSession,
+  { version: string; projection: YrsSidebarProjection }
+>();
+
 /**
  * Build a lazy projection from live yrs stories to display positions.
  * The canonical yrs segment stream supplies paragraph/atom units; table-cell
  * and block-SDT stories are recursively sized so container tokens are included.
+ * A session gets the same projection back until its document changes.
  */
 export function createYrsSidebarProjection(session: YrsSession): YrsSidebarProjection {
+  const version = session.version();
+  const cached = projections.get(session);
+  if (cached?.version === version) return cached.projection;
+  const projection = projectSession(session);
+  projections.set(session, { version, projection });
+  return projection;
+}
+
+function projectSession(session: YrsSession): YrsSidebarProjection {
   const paragraphMaps = new Map<string, Map<string, ParagraphDisplaySpan> | null>();
   const roots = geometryRoots(session);
 

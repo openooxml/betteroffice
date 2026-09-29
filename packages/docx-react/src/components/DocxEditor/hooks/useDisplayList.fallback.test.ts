@@ -6,11 +6,11 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { YrsSelection, YrsSession } from '@betteroffice/docx/yrs';
 import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
+import { useCanvasRenderer, useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
+const { act, cleanup, configure, renderHook, waitFor } = await import('@testing-library/react');
 const originalWorker = globalThis.Worker;
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
@@ -545,4 +545,90 @@ test('falls back to the main thread and keeps the keystroke when the worker retu
     errors.mockRestore();
     native.free();
   }
+});
+
+test('a StrictMode remount keeps the worker its second mount started', async () => {
+  const native = createEditSession(9102);
+  native.create_story('body', 'Remounted text', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  const frame = native.build_display_list_frame(JSON.stringify(inputs), 0);
+  const workers: FakeWorker[] = [];
+  class FakeWorker {
+    onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+    onerror: ((event: ErrorEvent) => void) | null = null;
+    onmessageerror = null;
+    bootstrapId = 0;
+    terminated = false;
+    constructor() {
+      workers.push(this);
+    }
+    postMessage(request: ResidentEngineWorkerRequest): void {
+      if (request.type === 'bootstrap') this.bootstrapId = request.id;
+    }
+    reply(): void {
+      this.onmessage?.({ data: {
+        id: this.bootstrapId, ok: true, frame: frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1,
+      } } as MessageEvent<ResidentEngineWorkerResponse>);
+    }
+    terminate(): void {
+      this.terminated = true;
+    }
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const engine = {
+    buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
+    buildDisplayListFrame: (input: string, epoch: number) =>
+      native.build_display_list_frame(input, epoch),
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const overrides = { getInputs: () => inputs };
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  configure({ reactStrictMode: true });
+  try {
+    const { result, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    configure({ reactStrictMode: false });
+    expect(workers).toHaveLength(2);
+    expect(workers[0].terminated).toBe(true);
+    await act(async () => {
+      workers[1].reply();
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(1);
+    });
+    expect(workers[1].terminated).toBe(false);
+    expect(result.current.workerSurfacesActive).toBe(true);
+    unmount();
+    expect(workers[1].terminated).toBe(true);
+  } finally {
+    configure({ reactStrictMode: false });
+    errors.mockRestore();
+    native.free();
+  }
+});
+
+test('each session decodes its images into a cache of its own', () => {
+  const { result } = renderHook(() => useCanvasRenderer());
+  const first = { name: 'first' } as unknown as YrsSession;
+  act(() => result.current.onLayoutComputed(null, first));
+  const firstImages = result.current.resolveImage;
+  act(() => result.current.onLayoutComputed(null, first));
+  expect(result.current.resolveImage).toBe(firstImages);
+  act(() => result.current.onLayoutComputed(null, { name: 'next' } as unknown as YrsSession));
+  expect(result.current.resolveImage).not.toBe(firstImages);
 });
