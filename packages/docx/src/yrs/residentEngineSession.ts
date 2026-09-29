@@ -26,6 +26,7 @@ export type ResidentEngineSession = Pick<
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadState'
+  | 'markPartialDocument'
   | 'measureParagraphJson'
   | 'onUpdate'
   | 'outlineGlyphJson'
@@ -80,6 +81,7 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
     layoutDocumentWithRegionsRetainedJson: (input) =>
       session.layout_document_with_regions_retained_json(input),
+    markPartialDocument: () => session.mark_partial_document(),
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(input, pages),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>

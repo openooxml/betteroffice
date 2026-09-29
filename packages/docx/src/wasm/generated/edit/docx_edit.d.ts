@@ -576,6 +576,11 @@ export class EditSession {
      */
     locate_paragraph(story: string, para_id: string): string;
     /**
+     * Marks the session's document as part of a package, as a replica of a
+     * preview is: its layouts render NUMPAGES empty.
+     */
+    mark_partial_document(): void;
+    /**
      * Re-parses the DOCX bytes retained by the last
      * [`EditSession::open_docx`] and returns the COMPLETE package envelope as
      * JSON, or `None` when no DOCX has been opened. Unlike `open_docx` this
@@ -1437,6 +1442,7 @@ export interface InitOutput {
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_mark_partial_document: (a: number) => void;
     readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];

@@ -80,6 +80,7 @@ export const editsession_list_revisions: (a: number) => [number, number, number,
 export const editsession_load: (a: number, b: number, c: number) => [number, number];
 export const editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_mark_partial_document: (a: number) => void;
 export const editsession_materialize_docx: (a: number) => [number, number, number, number];
 export const editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];

@@ -332,6 +332,7 @@ function hydrate(
   incompleteLayout = null;
   completedLayout = null;
   session.loadState(snapshot.state);
+  if (snapshot.partialDocument) session.markPartialDocument();
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
     // omits fonts when it knows this session's applied revision matches).

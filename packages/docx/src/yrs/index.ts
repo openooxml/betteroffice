@@ -594,6 +594,8 @@ export interface YrsResidentWorkerSnapshot {
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;
+  /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
+  partialDocument?: boolean;
 }
 
 /**
@@ -904,6 +906,8 @@ export interface YrsSession extends CollaborationReplica {
   openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost;
   /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
   isDisplayOnly(): boolean;
+  /** Marks a replica of a preview's document, so its layouts render NUMPAGES empty. @internal */
+  markPartialDocument(): void;
   /**
    * The region layout of only as much of the body as fills `pages` pages;
    * a reply marked `provisional` covers a prefix. @internal
@@ -1433,6 +1437,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
   // A preview session refuses every change to its document.
   let displayOnly = false;
+  // A preview's cut of a package, whose layouts count only its own pages.
+  let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
     if (displayOnly) throw new Error('A document preview is display-only');
     invalidateReadCaches();
@@ -1523,9 +1529,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty('all');
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
       displayOnly = true;
+      partialDocument = true;
       return decodeDocxHost(json, bytes);
     },
     isDisplayOnly: () => displayOnly,
+    markPartialDocument: () => {
+      partialDocument = true;
+      session.mark_partial_document();
+    },
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(input, pages),
 
@@ -1675,6 +1686,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutInput: residentLayoutInput,
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
+        ...(partialDocument ? { partialDocument: true } : {}),
       };
     },
     residentWorkerProbe: () => {
