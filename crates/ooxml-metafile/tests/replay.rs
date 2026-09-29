@@ -17,10 +17,28 @@ fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-3
 }
 
+/// Sizes come from frames rounded to 0.01 mm, a few thousandths of a pixel off.
+fn about(a: f64, b: f64) -> bool {
+    (a - b).abs() < 0.05
+}
+
+fn point(command: &PathCommand) -> (f64, f64) {
+    match *command {
+        PathCommand::Move { x, y } | PathCommand::Line { x, y } => (x, y),
+        PathCommand::Quad { x, y, .. } | PathCommand::Cubic { x, y, .. } => (x, y),
+        PathCommand::Close => panic!("a close has no point"),
+    }
+}
+
+fn at(command: &PathCommand, x: f64, y: f64) -> bool {
+    let (px, py) = point(command);
+    close(px, x) && close(py, y)
+}
+
 #[test]
 fn a_frame_sizes_the_drawing_in_css_pixels() {
     let drawing = replay(&Emf::new(480, 320).rec(43, &i32s(&[0, 0, 10, 10])).bytes()).unwrap();
-    assert!(close(drawing.width, 480.0) && close(drawing.height, 320.0));
+    assert!(about(drawing.width, 480.0) && about(drawing.height, 320.0));
 }
 
 #[test]
@@ -139,16 +157,11 @@ fn opaque_text_fills_its_rectangle_and_clipped_text_clips_to_it() {
         .clip
         .as_deref()
         .expect("clipped text carries its rectangle");
-    assert_eq!(
-        clip.region.path,
-        vec![
-            PathCommand::Move { x: 5.0, y: 5.0 },
-            PathCommand::Line { x: 50.0, y: 5.0 },
-            PathCommand::Line { x: 50.0, y: 20.0 },
-            PathCommand::Line { x: 5.0, y: 20.0 },
-            PathCommand::Close,
-        ]
-    );
+    let path = &clip.region.path;
+    assert_eq!(path.len(), 5);
+    assert!(at(&path[0], 5.0, 5.0) && at(&path[1], 50.0, 5.0));
+    assert!(at(&path[2], 50.0, 20.0) && at(&path[3], 5.0, 20.0));
+    assert_eq!(path[4], PathCommand::Close);
 }
 
 #[test]
@@ -175,8 +188,8 @@ fn clip_rectangles_intersect_exclude_and_come_back_with_their_context() {
         rect.parent.is_none(),
         "nested intersections merge into one rectangle"
     );
-    assert_eq!(rect.region.path[0], PathCommand::Move { x: 10.0, y: 20.0 });
-    assert_eq!(rect.region.path[2], PathCommand::Line { x: 80.0, y: 90.0 });
+    assert!(at(&rect.region.path[0], 10.0, 20.0));
+    assert!(at(&rect.region.path[2], 80.0, 90.0));
     assert!(outside.clip.is_none());
 }
 
@@ -225,7 +238,8 @@ fn dashed_cosmetic_and_hatched_objects_keep_their_styles() {
     };
     let stroke = boxed.stroke.as_ref().unwrap();
     assert!(close(stroke.width, 4.0));
-    assert_eq!(stroke.dash.as_deref(), Some(&[12.0, 4.0][..]));
+    let dash = stroke.dash.as_deref().unwrap();
+    assert!(dash.len() == 2 && close(dash[0], 12.0) && close(dash[1], 4.0));
     assert!(matches!(
         boxed.fill,
         Some(Paint::Hatch {
@@ -238,7 +252,8 @@ fn dashed_cosmetic_and_hatched_objects_keep_their_styles() {
         close(hairline.width, 1.0),
         "a cosmetic pen is one pixel wide"
     );
-    assert_eq!(hairline.dash.as_deref(), Some(&[3.0, 3.0][..]));
+    let dash = hairline.dash.as_deref().unwrap();
+    assert!(dash.len() == 2 && close(dash[0], 3.0) && close(dash[1], 3.0));
 }
 
 #[test]
@@ -375,7 +390,7 @@ fn emf_plus_only_files_play_gdi_records_only_inside_get_dc_spans() {
     let [Op::Shape(shape)] = &drawing.ops[..] else {
         panic!("only the rectangle inside the GetDC span");
     };
-    assert_eq!(shape.path[0], PathCommand::Move { x: 20.0, y: 20.0 });
+    assert!(at(&shape.path[0], 20.0, 20.0));
 }
 
 #[test]
@@ -421,7 +436,7 @@ fn a_wmf_carrying_an_emf_draws_the_emf() {
         .bytes();
     let drawing = replay(&bytes).unwrap();
     assert!(
-        close(drawing.width, 10.0),
+        about(drawing.width, 10.0),
         "the embedded EMF's frame sizes the drawing"
     );
 }
@@ -484,6 +499,7 @@ fn a_nested_emf_plus_metafile_is_placed_in_its_destination() {
     let Op::Shape(shape) = &drawing.ops[0] else {
         panic!("the nested fill");
     };
-    assert_eq!(shape.path[0], PathCommand::Move { x: 50.0, y: 50.0 });
-    assert_eq!(shape.path[2], PathCommand::Line { x: 70.0, y: 70.0 });
+    assert!(at(&shape.path[0], 50.0, 50.0));
+    let (x, y) = point(&shape.path[2]);
+    assert!(about(x, 70.0) && about(y, 70.0));
 }

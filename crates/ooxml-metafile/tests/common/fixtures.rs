@@ -84,8 +84,8 @@ pub fn shapes() -> Vec<u8> {
 }
 
 /// Text runs: advances, alignment, rotation, styles, backgrounds and Symbol.
+/// The advances are the Liberation substitutes' own, rounded as GDI rounds.
 pub fn text() -> Vec<u8> {
-    let advances = |text: &str, advance: i32| vec![advance; text.encode_utf16().count()];
     Emf::new(480, 320)
         .recs(vec![
             value(18, 1),
@@ -96,7 +96,7 @@ pub fn text() -> Vec<u8> {
                 20,
                 20,
                 "Left top",
-                Some(&advances("Left top", 15)),
+                Some(&[16, 16, 8, 8, 8, 8, 16, 16]),
                 0,
                 [0, 0, -1, -1],
             ),
@@ -108,7 +108,7 @@ pub fn text() -> Vec<u8> {
                 240,
                 110,
                 "Centred baseline",
-                Some(&advances("Centred baseline", 13)),
+                Some(&[16, 11, 13, 7, 9, 11, 12, 6, 12, 12, 9, 11, 7, 7, 13, 11]),
                 0,
                 [0, 0, -1, -1],
             ),
@@ -125,7 +125,7 @@ pub fn text() -> Vec<u8> {
                 40,
                 300,
                 "Rotated",
-                Some(&advances("Rotated", 13)),
+                Some(&[16, 12, 6, 12, 6, 12, 12]),
                 0,
                 [0, 0, -1, -1],
             ),
@@ -135,7 +135,7 @@ pub fn text() -> Vec<u8> {
                 100,
                 190,
                 "abgWp",
-                Some(&advances("abgWp", 18)),
+                Some(&[14, 13, 11, 19, 13]),
                 0,
                 [0, 0, -1, -1],
             ),
@@ -145,7 +145,7 @@ pub fn text() -> Vec<u8> {
                 100,
                 240,
                 "Opaque",
-                Some(&advances("Opaque", 16)),
+                Some(&[22, 16, 16, 16, 16, 16]),
                 0x2,
                 [96, 236, 210, 272],
             ),
@@ -153,7 +153,7 @@ pub fn text() -> Vec<u8> {
                 260,
                 240,
                 "Clipped away",
-                Some(&advances("Clipped away", 16)),
+                Some(&[20, 6, 6, 16, 16, 16, 16, 8, 16, 20, 16, 14]),
                 0x4,
                 [256, 236, 330, 272],
             ),
@@ -279,7 +279,13 @@ pub fn emfplus() -> Vec<u8> {
                 plus_draw_image(5, [0.0, 0.0, 8.0, 8.0], [400.0, 170.0, 64.0, 64.0]),
                 plus_font(6, 24.0, 1, "Arial"),
                 plus_world([1.0, 0.0, 0.0, 1.0, 0.0, 10.0]),
-                plus_driver_string(6, 0xff20_2124, "EMF+ text", (260.0, 280.0), 16.0),
+                plus_driver_string(
+                    6,
+                    0xff20_2124,
+                    "EMF+ text",
+                    (260.0, 280.0),
+                    &[16.0, 20.0, 15.0, 14.0, 7.0, 8.0, 13.0, 13.0, 8.0],
+                ),
                 plus_eof(),
             ])
             .1,
@@ -307,10 +313,10 @@ pub fn wmf() -> Vec<u8> {
     font.extend(b"Arial\0");
     font.resize(50, 0);
     let text = b"WMF text";
-    let mut ext_text = i16s(&[1500, 200, text.len() as i16]);
+    let mut ext_text = i16s(&[1130, 140, text.len() as i16]);
     ext_text.extend(u16s(&[0]));
     ext_text.extend(text);
-    ext_text.extend(i16s(&[140; 8]));
+    ext_text.extend(i16s(&[227, 200, 147, 67, 80, 133, 133, 80]));
     let mut polygon = i16s(&[5]);
     polygon.extend(points_xy(&[
         (200, 640),
@@ -326,7 +332,7 @@ pub fn wmf() -> Vec<u8> {
         (1120, 640),
         (1300, 1000),
     ]));
-    Wmf::new(2160, 1440, 1440)
+    Wmf::new(2160, 1440, 720)
         .recs(vec![
             (0x0103, i16s(&[8])),
             (0x020B, i16s(&[0, 0])),
@@ -361,7 +367,7 @@ pub fn wmf() -> Vec<u8> {
             (0x0209, u32s(&[BLACK])),
             (
                 0x0521,
-                [i16s(&[4]), b"Plan".to_vec(), i16s(&[1300, 1500])].concat(),
+                [i16s(&[4]), b"Plan".to_vec(), i16s(&[640, 1560])].concat(),
             ),
             (0x0B41, stretch),
         ])

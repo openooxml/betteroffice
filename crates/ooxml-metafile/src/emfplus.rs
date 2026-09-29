@@ -277,7 +277,7 @@ fn play<const FULL: bool>(
             let clip = state.graphics.clip.clone();
             push_shape(player, path, paint, stroke, kind == 0x400C, clip);
         }
-        0x400E | 0x400F | 0x4010 | 0x4011 | 0x4012 => {
+        0x400E..=0x4012 => {
             let (paint, mut at) = match kind {
                 0x400E | 0x4010 => (Some(brush(state, solid, u32_at(data, 0)?)?), 4),
                 _ => (None, 0),
@@ -335,7 +335,7 @@ fn play<const FULL: bool>(
                 }
             }
         }
-        0x4016 | 0x4017 | 0x4018 => {
+        0x4016..=0x4018 => {
             let (paint, at) = if kind == 0x4016 {
                 (Some(brush(state, solid, u32_at(data, 0)?)?), 4)
             } else {
@@ -485,7 +485,7 @@ fn play<const FULL: bool>(
         }
         0x402A => state.graphics.world = matrix(data, 0)?,
         0x402B => state.graphics.world = IDENTITY,
-        0x402C | 0x402D | 0x402E | 0x402F => {
+        0x402C..=0x402F => {
             let m = match kind {
                 0x402C => matrix(data, 0)?,
                 0x402D => [1.0, 0.0, 0.0, 1.0, finite_at(data, 0)?, finite_at(data, 4)?],
@@ -507,7 +507,7 @@ fn play<const FULL: bool>(
             state.graphics.page_scale = if scale > 0.0 { scale } else { 1.0 };
         }
         0x4031 => state.graphics.clip = None,
-        0x4032 | 0x4033 | 0x4034 => {
+        0x4032..=0x4034 => {
             let mode = u32::from((flags >> 8) & 0x0f);
             let region = match kind {
                 0x4032 => {

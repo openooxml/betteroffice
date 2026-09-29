@@ -28,7 +28,7 @@ pub fn utf16(text: &str) -> Vec<u16> {
 }
 
 fn pad4(bytes: &mut Vec<u8>) {
-    while bytes.len() % 4 != 0 {
+    while !bytes.len().is_multiple_of(4) {
         bytes.push(0);
     }
 }
@@ -266,8 +266,8 @@ pub fn text_out(
     (84, body)
 }
 
-/// A bottom-up `BITMAPINFOHEADER` DIB: `rows` from the top, one colour per
-/// pixel, stored as 24-bit BGR.
+/// A bottom-up `BITMAPINFOHEADER` DIB: `rows` from the top, one `COLORREF`
+/// per pixel, stored as 24-bit BGR.
 pub fn dib24(rows: &[&[u32]]) -> (Vec<u8>, Vec<u8>) {
     let (width, height) = (rows[0].len(), rows.len());
     let mut bmi = u32s(&[40, width as u32, height as u32]);
@@ -278,7 +278,7 @@ pub fn dib24(rows: &[&[u32]]) -> (Vec<u8>, Vec<u8>) {
     for row in rows.iter().rev() {
         let start = bits.len();
         for color in *row {
-            bits.extend([*color as u8, (*color >> 8) as u8, (*color >> 16) as u8]);
+            bits.extend([(*color >> 16) as u8, (*color >> 8) as u8, *color as u8]);
         }
         bits.resize(start + stride, 0);
     }
@@ -292,7 +292,7 @@ pub fn dib1(rows: &[&[u8]], palette: [u32; 2]) -> (Vec<u8>, Vec<u8>) {
     bmi.extend(u16s(&[1, 1]));
     bmi.extend(u32s(&[0, 0, 0, 0, 2, 0]));
     for color in palette {
-        bmi.extend([color as u8, (color >> 8) as u8, (color >> 16) as u8, 0]);
+        bmi.extend([(color >> 16) as u8, (color >> 8) as u8, color as u8, 0]);
     }
     let stride = width.div_ceil(32) * 4;
     let mut bits = Vec::new();
@@ -488,13 +488,15 @@ pub fn plus_driver_string(
     argb: u32,
     text: &str,
     origin: (f32, f32),
-    advance: f32,
+    advances: &[f32],
 ) -> (u16, u16, Vec<u8>) {
     let units = utf16(text);
     let mut body = u32s(&[argb, 1, 0, units.len() as u32]);
     body.extend(u16s(&units));
+    let mut x = origin.0;
     for index in 0..units.len() {
-        body.extend(f32s(&[origin.0 + advance * index as f32, origin.1]));
+        body.extend(f32s(&[x, origin.1]));
+        x += advances.get(index).copied().unwrap_or(0.0);
     }
     (0x4036, 0x8000 | u16::from(font), body)
 }
@@ -544,7 +546,7 @@ impl Wmf {
 
     pub fn rec(mut self, function: u16, params: &[u8]) -> Self {
         let mut params = params.to_vec();
-        if params.len() % 2 != 0 {
+        if !params.len().is_multiple_of(2) {
             params.push(0);
         }
         let words = (params.len() / 2 + 3) as u32;
@@ -567,7 +569,7 @@ impl Wmf {
         placeable.extend(i16s(&[0, 0, self.width, self.height]));
         placeable.extend(u16s(&[self.inch]));
         placeable.extend(u32s(&[0]));
-        let checksum = placeable.chunks_exact(2).fold(0u16, |sum, pair| {
+        let checksum = placeable.as_chunks::<2>().0.iter().fold(0u16, |sum, pair| {
             sum ^ u16::from_le_bytes([pair[0], pair[1]])
         });
         placeable.extend(u16s(&[checksum]));

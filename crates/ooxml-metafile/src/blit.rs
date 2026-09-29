@@ -422,8 +422,8 @@ fn crop(
                 let start = row * stride + x0 as usize * 4;
                 out.extend_from_slice(&rgba[start..start + cw * 4]);
             }
-            for pixel in out.chunks_exact_mut(4) {
-                let [r, g, b, a] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+            for pixel in out.as_chunks_mut::<4>().0 {
+                let [r, g, b, a] = *pixel;
                 if !alpha {
                     pixel[3] = 255;
                 } else if a > 0 && a < 255 {

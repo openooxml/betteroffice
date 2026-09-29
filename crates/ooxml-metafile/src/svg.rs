@@ -459,10 +459,11 @@ fn data_url(bitmap: &Bitmap) -> Option<String> {
     let (mime, bytes) = match &bitmap.pixels {
         Pixels::Encoded { mime, bytes } => (*mime, bytes.clone()),
         Pixels::Rgba(rgba) => {
-            let opaque = rgba.chunks_exact(4).all(|pixel| pixel[3] == 255);
+            let pixels = rgba.as_chunks::<4>().0;
+            let opaque = pixels.iter().all(|pixel| pixel[3] == 255);
             let encoded = if opaque {
-                let rgb: Vec<u8> = rgba
-                    .chunks_exact(4)
+                let rgb: Vec<u8> = pixels
+                    .iter()
                     .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
                     .collect();
                 ooxml_drawingml::png_encode::encode_rgb8(&rgb, bitmap.width, bitmap.height)
