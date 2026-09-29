@@ -628,3 +628,15 @@ check; passing a number to it retains body mapping.
 Text runs and their editable content boxes are accepted. Page margins, images,
 page gaps, points outside pages, and queries without ready canvas geometry return
 `null`.
+
+### Font loads per editor
+
+Several editors can share one page. `createFontLoadScope()` gives each its own
+font loads: `onFontsLoaded` and `onFontError` on a scope hear the loads made
+through it and module-level ones, never another scope's. `registerDocumentFaces(faces, scope)`
+registers a document's embedded faces under their own family names, or under
+an alias when another open document embeds different faces under the same name,
+and resolves to the family each was registered under. Draw with that map as
+`DrawPageOptions.fontFamilies`. The scope holds the faces until its next
+document or `dispose()`. `loadEmbeddedFontFamilies` does the same from a
+package's font table.

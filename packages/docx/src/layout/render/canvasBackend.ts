@@ -35,6 +35,8 @@ export interface DrawPageOptions {
   resolveImage?: ImageResolver;
   /** Glyph cache; unresolved outlines fall back to `fillText`. */
   glyphCache?: GlyphCache;
+  /** The CSS family each document font family paints browser text with, where they differ. */
+  fontFamilies?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -252,12 +254,19 @@ async function drawPrimitiveCore(
   primitive: DisplayPrimitive,
   options: DrawPageOptions
 ): Promise<void> {
+  const families = options.fontFamilies;
   switch (primitive.kind) {
     case 'text':
-      drawTextRun(ctx, primitive);
+      drawTextRun(ctx, families?.size ? textRunWithFamilies(primitive, families) : primitive);
       break;
     case 'glyphRun':
-      drawGlyphRun(ctx, primitive, options.glyphCache);
+      drawGlyphRun(
+        ctx,
+        families?.size && primitive.fallbackFont
+          ? { ...primitive, fallbackFont: withFontFamilies(primitive.fallbackFont, families) }
+          : primitive,
+        options.glyphCache
+      );
       break;
     case 'rect':
       drawRect(ctx, primitive);
@@ -1556,6 +1565,45 @@ function drawLeaderText(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): v
 
 function hasHorizontalScale(horizontalScale: number | undefined): horizontalScale is number {
   return horizontalScale !== undefined && horizontalScale !== 100;
+}
+
+const CSS_FONT_FAMILY_LIST = /^(.*?\d*\.?\d+px(?:\/\S+)?\s+)(.+)$/;
+// One entry of a family list; a quoted name may hold commas.
+const CSS_FAMILY_ENTRY = /(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^,"'])+/g;
+
+/**
+ * `font`, a CSS font shorthand or a bare family list, with each family that
+ * `families` maps replaced by the mapped one.
+ */
+export function withFontFamilies(font: string, families: ReadonlyMap<string, string>): string {
+  const match = CSS_FONT_FAMILY_LIST.exec(font) ?? ['', '', font];
+  let changed = false;
+  const list = (match[2].match(CSS_FAMILY_ENTRY) ?? []).map((entry) => {
+    const trimmed = entry.trim();
+    const name = /^["']/.test(trimmed) ? trimmed.slice(1, -1).replace(/\\(.)/g, '$1') : trimmed;
+    const folded = name.toLowerCase();
+    const mapped =
+      families.get(name) ??
+      [...families].find(([family]) => family.toLowerCase() === folded)?.[1];
+    if (mapped === undefined || mapped === name) return entry;
+    changed = true;
+    return ` "${mapped.replace(/["\\]/g, '\\$&')}"`;
+  });
+  return changed ? `${match[1]}${list.join(',').trimStart()}` : font;
+}
+
+function textRunWithFamilies(
+  run: TextRunPrimitive,
+  families: ReadonlyMap<string, string>
+): TextRunPrimitive {
+  const font = withFontFamilies(run.font, families);
+  const leaderFont = run.leaderGlyphs?.font && withFontFamilies(run.leaderGlyphs.font, families);
+  if (font === run.font && leaderFont === run.leaderGlyphs?.font) return run;
+  return {
+    ...run,
+    font,
+    ...(run.leaderGlyphs ? { leaderGlyphs: { ...run.leaderGlyphs, font: leaderFont } } : {}),
+  };
 }
 
 function fontWithVariant(font: string, smallCaps: boolean | undefined): string {

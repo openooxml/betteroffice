@@ -128,7 +128,7 @@ import { useHyperlinkDialog } from './dialogs/HyperlinkDialog';
 import { DefaultLoadingIndicator, DefaultPlaceholder, ParseError } from './DocxEditorHelpers';
 import { type DocxInput } from '@betteroffice/docx/utils';
 import type { FontDefinition, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
-import { useFontLifecycle } from '../hooks/useFontLifecycle';
+import { useFontLifecycle, useFontLoadScope } from '../hooks/useFontLifecycle';
 import { useTableSelection } from '../hooks/useTableSelection';
 import { useDocumentHistory } from '../hooks/useHistory';
 
@@ -834,6 +834,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // PagedEditor ref declared early so comment management can read the live
   // Yrs session before the tracked-changes effect drives `setComments`.
   const pagedEditorRef = useRef<PagedEditorRef>(null);
+  const fontScope = useFontLoadScope();
 
   const {
     comments,
@@ -1020,6 +1021,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     acceptHostDocument,
     failHostDocument,
     reportLayoutError: reportDocumentLayoutError,
+    fontAliases,
   } = useDocumentLoader({
     documentBuffer,
     initialDocument,
@@ -1036,6 +1038,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentsLoadedRef,
     commentIdAllocator: commentIdAllocatorRef.current,
     setDocumentFonts,
+    fontScope,
   });
 
   // A layout error of the session a newer load replaced is not the loaded
@@ -1089,6 +1092,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useFileIO({
     pagedEditorRef,
     resolveImage: canvasRenderer.resolveImage,
+    fontFamilies: fontAliases,
     comments,
     documentName,
     onSave,
@@ -1171,7 +1175,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     trackedChangesLoadedRef,
   });
 
-  useFontLifecycle(fonts, onFontsLoadedCallback, onError);
+  useFontLifecycle(fonts, onFontsLoadedCallback, onError, fontScope);
 
   const pushDocument = useCallback(
     (document: Document) => {
@@ -2131,6 +2135,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             sidebarOpen={sidebarOpen}
             zoom={state.zoom}
             interactive={!readOnly}
+            fontFamilies={fontAliases}
           >
             <DocxEditorPagedArea
               commandBridgeRef={commandBridgeRef}

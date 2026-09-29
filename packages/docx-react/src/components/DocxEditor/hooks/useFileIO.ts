@@ -59,12 +59,13 @@ function settled(w: Window, images: HTMLImageElement[]): Promise<void> {
 async function renderDisplayListPages(
   w: Window,
   displayList: DisplayList,
-  resolveImage: ImageResolver
+  resolveImage: ImageResolver,
+  fontFamilies: ReadonlyMap<string, string> | undefined
 ): Promise<void> {
   const style = w.document.createElement('style');
   style.textContent = PRINT_CANVAS_CSS;
   w.document.head.appendChild(style);
-  const canvases = await rasterizeDisplayListPages(displayList, { resolveImage });
+  const canvases = await rasterizeDisplayListPages(displayList, { resolveImage, fontFamilies });
   const images: HTMLImageElement[] = [];
   for (const canvas of canvases) {
     try {
@@ -136,6 +137,7 @@ function withSavedComments(document: Document, session: YrsSession, comments: Co
 export function useFileIO({
   pagedEditorRef,
   resolveImage,
+  fontFamilies,
   comments,
   documentName,
   onSave,
@@ -150,6 +152,8 @@ export function useFileIO({
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   resolveImage: ImageResolver;
+  /** The CSS family each document font family paints browser text with, where they differ. */
+  fontFamilies?: ReadonlyMap<string, string>;
   comments: Comment[];
   documentName: string | undefined;
   onSave: ((buffer: ArrayBuffer) => void) | undefined;
@@ -203,7 +207,9 @@ export function useFileIO({
     const w = openPrintWindow('Print', '');
     return {
       async prepare(displayList) {
-        if (w && !w.closed) await renderDisplayListPages(w, displayList, resolveImage);
+        if (w && !w.closed) {
+          await renderDisplayListPages(w, displayList, resolveImage, fontFamilies);
+        }
       },
       print() {
         if (!w) {
@@ -221,7 +227,7 @@ export function useFileIO({
         if (w && !w.closed) w.close();
       },
     };
-  }, [resolveImage, onPrint]);
+  }, [resolveImage, fontFamilies, onPrint]);
 
   const handleDownloadDocument = useCallback((): Promise<DocxSaveOutcome> => {
     if (saveRequestRef.current) return saveRequestRef.current;
