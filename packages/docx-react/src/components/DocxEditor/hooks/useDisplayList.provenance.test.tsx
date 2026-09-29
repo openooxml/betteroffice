@@ -4,12 +4,18 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
+import { createYrsSession, type YrsRenderEnv, type YrsSession } from '@betteroffice/docx/yrs';
 import {
   residentWorkerFactory,
   type InProcessResidentWorker,
 } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
-import { sourceVersionOf, stampSourceVersion } from '../internals/layoutProvenance';
+import {
+  revisionPreviewKey,
+  revisionPreviewKeyOf,
+  sourceVersionOf,
+  stampRevisionPreviewKey,
+  stampSourceVersion,
+} from '../internals/layoutProvenance';
 import {
   useRustDisplayList,
   type RustDisplayListHookOverrides,
@@ -28,12 +34,13 @@ const FONT = resolve(
   import.meta.dir,
   '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 );
-const LAYOUT = JSON.stringify({
-  bodyStory: 'body',
-  regions: { sections: [{ sectionId: 'main', properties: {} }] },
-  measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } },
-  renderEnv: {},
-});
+const layoutRequest = (renderEnv: YrsRenderEnv) =>
+  JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } },
+    renderEnv,
+  });
 const originalWorker = globalThis.Worker;
 const sessions: YrsSession[] = [];
 let startWorker: () => InProcessResidentWorker;
@@ -57,12 +64,14 @@ function Harness({
   overrides,
   display,
   requestLayout,
+  previewKeys,
 }: {
   session: YrsSession;
   layout: Layout;
   overrides: RustDisplayListHookOverrides;
   display: { current: UseRustDisplayListResult | null };
   requestLayout: () => void;
+  previewKeys: (string | null)[];
 }) {
   display.current = useRustDisplayList(
     layout,
@@ -72,6 +81,7 @@ function Harness({
     session,
     requestLayout
   );
+  previewKeys.push(revisionPreviewKeyOf(display.current.queries));
   return null;
 }
 
@@ -85,14 +95,15 @@ async function until(done: () => boolean): Promise<void> {
   expect(done()).toBe(true);
 }
 
-async function setup() {
+async function setup(renderEnv: { current: YrsRenderEnv } = { current: {} }) {
   const session = await createYrsSession();
   sessions.push(session);
   const { paraId } = session.createStory('body', 'Seed');
   session.registerFont(new Uint8Array(readFileSync(FONT)));
   const layOut = () => {
-    const inputs = JSON.parse(session.layoutDocumentWithRegionsJson(LAYOUT));
+    const inputs = JSON.parse(session.layoutDocumentWithRegionsJson(layoutRequest(renderEnv.current)));
     stampSourceVersion(inputs.layout, session.version());
+    stampRevisionPreviewKey(inputs.layout, revisionPreviewKey(renderEnv.current.revisionPreview));
     return inputs as { layout: Layout };
   };
   let inputs = layOut();
@@ -106,6 +117,7 @@ async function setup() {
   } as unknown as typeof Worker;
   const display: { current: UseRustDisplayListResult | null } = { current: null };
   const layoutRequests: number[] = [];
+  const previewKeys: (string | null)[] = [];
   const overrides: RustDisplayListHookOverrides = { getInputs: () => inputs as never };
   const harness = () => (
     <Harness
@@ -114,6 +126,7 @@ async function setup() {
       overrides={overrides}
       display={display}
       requestLayout={() => layoutRequests.push(Date.now())}
+      previewKeys={previewKeys}
     />
   );
   const view = render(harness());
@@ -122,7 +135,15 @@ async function setup() {
     inputs = layOut();
     view.rerender(harness());
   };
-  return { session, paraId, display, worker: () => worker, layoutRequests, relayout };
+  return {
+    session,
+    paraId,
+    display,
+    worker: () => worker,
+    layoutRequests,
+    previewKeys,
+    relayout,
+  };
 }
 
 test('a frame is stamped with the version its layout and typed input produced', async () => {
@@ -169,4 +190,71 @@ test('a worker frame overtaken by a remote change stays unpublished and unsettle
 
   await act(async () => relayout());
   await until(() => settled && sourceVersionOf(display.current!.queries) === session.version());
+});
+
+/** Painted text, each tracked stretch followed by its revision kind. */
+function paintedText(display: { current: UseRustDisplayListResult | null }): string {
+  const segments: [string, string][] = [];
+  for (const primitive of (display.current?.displayList?.pages ?? []).flatMap(
+    (page) => page.primitives
+  )) {
+    if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') continue;
+    const kind = primitive.revision?.kind ?? '';
+    const last = segments.at(-1);
+    if (last && last[1] === kind) last[0] += primitive.text;
+    else segments.push([primitive.text, kind]);
+  }
+  return segments.map(([text, kind]) => (kind ? `${text}[${kind}]` : text)).join('');
+}
+
+test('a frame carries the revision preview of its layout, and a superseded preview never lands', async () => {
+  const renderEnv: { current: YrsRenderEnv } = { current: {} };
+  const { session, paraId, display, worker, previewKeys, relayout } = await setup(renderEnv);
+  const applied = session.applyEdits({
+    expectVersion: session.version(),
+    history: 'none',
+    steps: [
+      {
+        op: 'insertText',
+        target: { kind: 'paragraph', story: 'body', paraId },
+        at: 'end',
+        text: ' more',
+        suggest: { author: 'Ann', date: '2026-09-29T12:00:00Z' },
+      },
+    ],
+  });
+  if (!applied.ok) throw new Error(applied.failure.message);
+  const [revision] = applied.receipts[0].revisionIds;
+  const show = async (revisionPreview?: YrsRenderEnv['revisionPreview']) => {
+    renderEnv.current = revisionPreview ? { revisionPreview } : {};
+    await act(async () => relayout());
+  };
+
+  await show({ [revision]: 'accepted' });
+  const acceptedKey = revisionPreviewKey({ [revision]: 'accepted' });
+  await until(() => revisionPreviewKeyOf(display.current!.queries) === acceptedKey);
+  expect(paintedText(display)).toBe('Seed more');
+  const acceptedQueries = display.current!.queries;
+  await act(async () => {
+    await display.current!.applyInput('!');
+  });
+  expect(revisionPreviewKeyOf(display.current!.queries)).toBe(acceptedKey);
+
+  worker().hold();
+  await show({ [revision]: 'rejected' });
+  await show();
+  const released = previewKeys.length;
+  await act(async () => worker().release());
+  await until(
+    () =>
+      revisionPreviewKeyOf(display.current!.queries) === '' &&
+      sourceVersionOf(display.current!.queries) === session.version()
+  );
+  expect(paintedText(display)).toBe('Seed more[ins]!');
+  expect(previewKeys.slice(released)).not.toContain(revisionPreviewKey({ [revision]: 'rejected' }));
+  expect(revisionPreviewKeyOf(acceptedQueries)).toBe(acceptedKey);
+  expect(revisionPreviewKey({ b: 'rejected', a: 'accepted' })).toBe(
+    revisionPreviewKey({ a: 'accepted', b: 'rejected' })
+  );
+  expect(revisionPreviewKey({})).toBe('');
 });

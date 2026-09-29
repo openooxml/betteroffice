@@ -455,6 +455,8 @@ export interface YrsRenderEnv {
   numericIds?: Record<string, number>;
   /** Include hidden text in visible layout without changing the document. */
   showHiddenText?: boolean;
+  /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
+  revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
 }
 
 /** Receipt of {@link YrsSession.addComment}. */

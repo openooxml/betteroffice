@@ -37,7 +37,9 @@ import { displayListNeedsHostImages } from '../canvasPresentation';
 import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
   readSessionVersion,
+  revisionPreviewKeyOf,
   sourceVersionOf,
+  stampRevisionPreviewKey,
   stampSourceVersion,
 } from '../internals/layoutProvenance';
 import {
@@ -167,6 +169,7 @@ export function useRustDisplayList(
   if (!queryEpochGateRef.current) queryEpochGateRef.current = new DisplayListQueryEpochGate();
   const queryEpochGate = queryEpochGateRef.current;
   const contentEpochRef = useRef(0);
+  const layoutPreviewKeyRef = useRef<string | null>(null);
   const settledEpochRef = useRef<number | null>(null);
   const settleErrorRef = useRef<Error | null>(null);
   const settleWaitersRef = useRef(new Set<() => void>());
@@ -470,7 +473,8 @@ export function useRustDisplayList(
           caret,
           null,
           { ...previous, queries: null },
-          readSessionVersion(hostEngine)
+          readSessionVersion(hostEngine),
+          layoutPreviewKeyRef.current
         );
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
@@ -585,7 +589,8 @@ export function useRustDisplayList(
           caret,
           null,
           previous,
-          readSessionVersion(worker.engine)
+          readSessionVersion(worker.engine),
+          layoutPreviewKeyRef.current
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -676,6 +681,7 @@ export function useRustDisplayList(
       // layout reset (document change) — drop the stale pages
       generationRef.current++;
       contentEpochRef.current += 1;
+      layoutPreviewKeyRef.current = null;
       queryEpochGate.clear();
       snapshotRef.current = EMPTY_DISPLAY_LIST_SNAPSHOT;
       recoveryFrameEpochRef.current = 0;
@@ -692,6 +698,8 @@ export function useRustDisplayList(
     queryEpochGate.invalidate();
     const contentEpoch = contentEpochRef.current;
     const sourceVersion = sourceVersionOf(layout);
+    const previewKey = revisionPreviewKeyOf(layout);
+    layoutPreviewKeyRef.current = previewKey;
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
     if (!inputs) {
@@ -854,7 +862,8 @@ export function useRustDisplayList(
           result.caret,
           result.queryEngine,
           snapshotRef.current,
-          sourceVersion
+          sourceVersion,
+          previewKey
         );
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
@@ -957,18 +966,23 @@ export function useRustDisplayList(
   };
 }
 
-/** `sourceVersion`: the document version the frame's pixels and queries show. */
+/**
+ * `sourceVersion` and `previewKey`: the document version and revision preview the frame's pixels
+ * and queries show.
+ */
 function createRustDisplayListSnapshot(
   displayList: DisplayList,
   frame: RetainedFrame | null,
   caret: YrsResidentCaretSnapshot | null,
   engine: RustDisplayListEngine | null | undefined,
   previous: RustDisplayListSnapshot,
-  sourceVersion: string | null
+  sourceVersion: string | null,
+  previewKey: string | null
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
   const queries = createDisplayListQueries(displayList, residentQueries, previous.queries);
   stampSourceVersion(queries, sourceVersion);
+  if (previewKey !== null) stampRevisionPreviewKey(queries, previewKey);
   return { displayList, frame, queries, caret };
 }
 
