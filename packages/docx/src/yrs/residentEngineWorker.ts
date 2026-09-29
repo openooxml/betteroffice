@@ -16,6 +16,7 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
+import { wasmModuleMemories } from '../wasm/loadWasmAsset';
 import {
   encodeDisplayListFrameExtras,
   type DisplayListBuildInputs,
@@ -77,11 +78,16 @@ scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
     .catch((error) => {
       if (error instanceof WebAssembly.RuntimeError) {
         trap = error;
+        const failed = editFailedAllocationBytes();
         reply({
           id: event.data.id,
           ok: false,
-          error: `Resident engine worker trapped: ${error.message}`,
+          error:
+            failed > 0
+              ? `Resident engine worker ran out of memory allocating ${failed} bytes: ${error.message}`
+              : `Resident engine worker trapped: ${error.message}`,
           terminal: true,
+          ...(failed > 0 ? { outOfMemory: true } : {}),
         });
         return;
       }
@@ -104,7 +110,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // makes a fast structural input race overlap one client's clock range and
     // corrupt the update; a fresh id lets yrs merge queued/local operations
     // safely while the main replica applies worker updates with local origin.
-    session = await createResidentEngineSession();
+    session = await createResidentEngineSession(request.heapLimitBytes);
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
     const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
     if (provisional) {
@@ -618,6 +624,10 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer;
 }
 
+function editFailedAllocationBytes(): number {
+  return wasmModuleMemories().find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+}
+
 function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
-  scope.postMessage(response, transfer);
+  scope.postMessage({ ...response, memory: wasmModuleMemories() }, transfer);
 }

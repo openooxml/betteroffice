@@ -15,8 +15,9 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const modules: Record<string, string> = {
     './residentEngineSession':
-      'export const createResidentEngineSession = async () => testHarness.session;',
+      'export const createResidentEngineSession = async (heapLimitBytes) => ((testHarness.heapLimits ??= []).push(heapLimitBytes), testHarness.session);',
     '../layout/render/glyphCache': 'export class GlyphCache {}',
+    '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
       export const decodeFrameDelta = () => testHarness.delta;
@@ -81,6 +82,7 @@ function worker() {
     presented: [] as number[],
     failRaster: null as number | null,
     failPresent: null as number | null,
+    memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       loadState() {},
       setPartialDocument() {},
@@ -181,12 +183,13 @@ function worker() {
       harness.rasterized = [];
       harness.presented = [];
     },
-    async bootstrap(pageCount = 3) {
+    async bootstrap(pageCount = 3, heapLimitBytes?: number) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
         type: 'bootstrap',
         expectedFrameEpoch: 0,
         extras: '',
+        ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
         snapshot: {
           clientId: 1,
           state: new Uint8Array(),
@@ -572,5 +575,51 @@ describe('resident worker layout ownership', () => {
     const late = await w.send({ type: 'completeLayout', expectedFrameEpoch: 4, paintCaret: false });
     expect(late.ok && late.layoutJson).toBe(full);
     expect(calls).toHaveLength(4);
+  });
+});
+
+describe('resident worker memory', () => {
+  test('a bootstrap starts the session under its heap limit', async () => {
+    const w = worker();
+    await w.bootstrap(3, 1024);
+    await w.bootstrap();
+    expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toEqual([1024, undefined]);
+  });
+
+  test('every reply carries the worker memory', async () => {
+    const w = worker();
+    const reply = await w.bootstrap();
+    expect(reply.memory).toEqual(w.harness.memories);
+  });
+
+  test('a trap after a failed allocation replies out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.memories = [
+      { label: 'docx-edit', bufferBytes: 4294901760, liveBytes: 4172000000, peakBytes: 4172000000, failedAllocationBytes: 65536 },
+    ];
+    w.harness.session.buildDisplayListFrame = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const trapped = await w.build([1]);
+    expect(trapped.ok).toBe(false);
+    expect(!trapped.ok && trapped.terminal).toBe(true);
+    expect(!trapped.ok && trapped.outOfMemory).toBe(true);
+    expect(!trapped.ok && trapped.error).toBe(
+      'Resident engine worker ran out of memory allocating 65536 bytes: unreachable'
+    );
+    expect(trapped.memory).toEqual(w.harness.memories);
+  });
+
+  test('a trap without a failed allocation is not reported as out of memory', async () => {
+    const w = worker();
+    await w.bootstrap();
+    w.harness.session.buildDisplayListFrame = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const trapped = await w.build([1]);
+    expect(!trapped.ok && trapped.terminal).toBe(true);
+    expect(!trapped.ok && trapped.outOfMemory).toBeUndefined();
+    expect(!trapped.ok && trapped.error).toBe('Resident engine worker trapped: unreachable');
   });
 });

@@ -13,6 +13,7 @@ import type {
   YrsParagraph,
   YrsSession,
   YrsStoryRange,
+  WasmModuleMemory,
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
@@ -24,6 +25,9 @@ import { createComment } from '../commentFactories';
 import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '../editorBatches';
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
+import { readMemoryStats } from '../memoryStats';
+
+const noWorkerMemory = (): null => null;
 
 type LocatedParagraph = {
   story: string;
@@ -179,6 +183,7 @@ export function useDocxEditorRefApi({
   commands,
   modeRef,
   allowHostProposalsRef,
+  workerMemory = noWorkerMemory,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -206,6 +211,8 @@ export function useDocxEditorRefApi({
   modeRef: React.RefObject<EditorMode>;
   /** Whether proposal methods run while the editor is read-only. */
   allowHostProposalsRef: React.RefObject<boolean>;
+  /** The resident worker's wasm memories as of its latest reply. */
+  workerMemory?: () => WasmModuleMemory[] | null;
 }) {
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
@@ -224,6 +231,7 @@ export function useDocxEditorRefApi({
       focus: () => pagedEditorRef.current?.focus(),
       getCurrentPage: () => scrollPageInfo.currentPage,
       getTotalPages: () => scrollPageInfo.totalPages,
+      getMemoryStats: () => readMemoryStats(workerMemory),
       scrollToPage: (pageNumber) => pagedEditorRef.current?.scrollToPage(pageNumber),
       scrollToPosition: (displayPosition) =>
         pagedEditorRef.current?.scrollToPosition(displayPosition),
@@ -489,6 +497,7 @@ export function useDocxEditorRefApi({
       loadBuffer,
       comments,
       commands,
+      workerMemory,
     ]
   );
 }

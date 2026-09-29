@@ -66,6 +66,12 @@ import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayT
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
+import {
+  useMemoryPressure,
+  type DocxMemoryBudget,
+  type DocxMemoryPressure,
+  type DocxMemoryStats,
+} from './DocxEditor/memoryStats';
 import { commandOutcome, useDocxCommandBinding } from './DocxEditor/hooks/useDocxCommands';
 import type {
   PagedEditorCommandBridge,
@@ -177,6 +183,17 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   onSelectionChange?: (state: SelectionState | null) => void;
   /** Callback on error */
   onError?: (error: Error) => void;
+  /**
+   * Called when the fullest wasm memory, on the main thread or in the resident
+   * worker, crosses a `memoryBudget` level or drops back below it. Silent while
+   * memory stays under the warning level.
+   */
+  onMemoryPressure?: (pressure: DocxMemoryPressure) => void;
+  /**
+   * Levels for `onMemoryPressure`, 75% and 90% of 4 GiB by default, and an
+   * optional limit on the resident worker's allocations.
+   */
+  memoryBudget?: DocxMemoryBudget;
   /** Callback when fonts are loaded */
   onFontsLoaded?: () => void;
   /** Color theme mode for UI styling. `'system'` follows the OS preference. */
@@ -452,6 +469,8 @@ export interface DocxEditorRef {
   getCurrentPage: () => number;
   /** Get total page count */
   getTotalPages: () => number;
+  /** The editor's wasm memories on the main thread and in its resident worker. */
+  getMemoryStats: () => DocxMemoryStats;
   /**
    * Scroll the paginated view so the given page is in view.
    * Page numbers are 1-indexed (matches `getCurrentPage` / `getTotalPages`).
@@ -725,6 +744,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onChange,
     onSelectionChange,
     onError,
+    onMemoryPressure,
+    memoryBudget,
     onFontsLoaded: onFontsLoadedCallback,
     colorMode = 'light',
     theme,
@@ -867,12 +888,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // Canvas renderer plumbing. `resolvedIdsForRender` reaches the Rust
   // display-list build so the canvas drops the comment wash of resolved
   // threads (and re-tints the one whose sidebar card is expanded).
-  const canvasRenderer = useCanvasRenderer(rustFontChainsProviderRef, resolvedIdsForRender, () =>
-    pagedEditorRef.current?.relayout()
+  const canvasRenderer = useCanvasRenderer(
+    rustFontChainsProviderRef,
+    resolvedIdsForRender,
+    () => pagedEditorRef.current?.relayout(),
+    memoryBudget?.workerLimitBytes
   );
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
   }, [canvasRenderer.error, onError]);
+  useMemoryPressure(onMemoryPressure, memoryBudget, canvasRenderer.workerMemory, canvasRenderer.frame);
 
   const [yrsTrackedChangesResult, setYrsTrackedChangesResult] = useState<TrackedChangesResult>(
     () => ({
@@ -1590,6 +1615,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commands: commandController.store,
     modeRef: writeModeRef,
     allowHostProposalsRef,
+    workerMemory: canvasRenderer.workerMemory,
   });
 
   const initialSectionProperties = useMemo(

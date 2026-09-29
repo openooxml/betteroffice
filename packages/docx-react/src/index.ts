@@ -126,6 +126,12 @@ export type {
 } from './commands/types';
 export type { DocxPointPosition, SelectionState } from './components/DocxEditor/types';
 export type {
+  DocxMemoryBudget,
+  DocxMemoryPressure,
+  DocxMemoryPressureLevel,
+  DocxMemoryStats,
+} from './components/DocxEditor/memoryStats';
+export type {
   RenderedDomContext,
   PositionCoordinates,
   PointPosition,
