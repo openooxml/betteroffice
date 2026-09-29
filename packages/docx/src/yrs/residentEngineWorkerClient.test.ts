@@ -263,7 +263,9 @@ describe('queued snapshots', () => {
     expect(client.remoteStateVector()).toEqual(new Uint8Array([8]));
     expect(worker.posted[1]).not.toHaveProperty('layoutExtras');
 
-    worker.reply({ ...frameReply(worker.posted[0].id), layoutJson: '{"layout":{}}' });
+    const layoutReply = frameReply(worker.posted[0].id);
+    if (layoutReply.ok) layoutReply.layoutJson = '{"layout":{}}';
+    worker.reply(layoutReply);
     expect((await bootstrap).layoutJson).toBe('{"layout":{}}');
     worker.reply(frameReply(worker.posted[1].id));
     expect((await sync).layoutJson).toBeUndefined();
