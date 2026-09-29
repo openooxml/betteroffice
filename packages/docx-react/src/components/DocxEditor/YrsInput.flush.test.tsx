@@ -448,3 +448,42 @@ test('a stored superscript applies to the next typed text and clears subscript',
   expect(typed.superscript).toBe(true);
   expect(typed.subscript).toBe(false);
 });
+
+test('typing in a table cell is offered to the resident engine', async () => {
+  const session = await seededSession();
+  const paraId = session.paragraphs('body')[0]!.paraId;
+  session.insertTable({ story: 'body', paraId, offset: 0 }, 1, 1);
+  const cell = session.storyIds().find((story) => story.startsWith('body:'))!;
+  const cellParagraph = session.paragraphs(cell)[0]!.paraId;
+  session.setSelection({ story: cell, paraId: cellParagraph, offset: 0 });
+  const map = (story = 'body') =>
+    createYrsInputPositionMap(
+      story,
+      session.paragraphs(story).map((p) => ({ paraId: p.paraId, length: p.text.length }))
+    );
+  const offered: string[] = [];
+  const input = createRef<YrsInputRef>();
+  render(
+    <YrsInput
+      ref={input}
+      enabled
+      readOnly={false}
+      session={session}
+      inputPositionMap={map}
+      displayPositionToLoc={(position, story) => displayPositionToYrsLoc(map(story), position)}
+      locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(loc.story), loc)}
+      onStateChange={() => {}}
+      onDirectInput={() => {}}
+      applyResidentInput={async (text) => {
+        offered.push(text);
+        return null;
+      }}
+    />
+  );
+  act(() => input.current!.insertText('x'));
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  expect(offered).toEqual(['x']);
+  expect(session.paragraphs(cell)[0]!.text).toBe('x');
+});

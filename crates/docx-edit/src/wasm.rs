@@ -270,6 +270,13 @@ fn adjacent_story_unit(
     }))
 }
 
+fn embed_at(doc: &EditingDoc, story: &str, index: u32) -> Result<bool, JsValue> {
+    let segments = doc.segment_index(story).map_err(js_err)?;
+    Ok(segments
+        .segment_at(index)
+        .is_some_and(|segment| matches!(segment.kind, SegKind::Embed)))
+}
+
 /// Per-peer selection state. These sticky positions are deliberately held
 /// outside the yrs document: an awareness transport may publish them, but they
 /// are never serialized as document content or included in save updates.
@@ -1397,6 +1404,15 @@ impl EditSession {
                     .map_err(js_err)?;
             }
             (direction, Some(AdjacentStoryUnit::Pilcrow)) => {
+                // Merging forward over a table or other embed would pull it
+                // into the paragraph; the host path owns that case.
+                if matches!(direction, DeleteDirection::Forward)
+                    && embed_at(self.engine.doc(), &story, head + 1)?
+                {
+                    return Err(js_err(
+                        "resident input state is not ready for this paragraph",
+                    ));
+                }
                 let paragraphs = self.engine.doc().paragraphs(&story).map_err(js_err)?;
                 let paragraph_index = paragraphs
                     .iter()

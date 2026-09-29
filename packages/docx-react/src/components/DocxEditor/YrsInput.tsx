@@ -201,6 +201,11 @@ function toRange(selection: YrsSelection, map: YrsInputPositionMap): YrsStoryRan
   };
 }
 
+/** The body or a table cell or control story laid out with it: resident input can apply there. */
+function isBodyFlowStory(story: string): boolean {
+  return story === 'body' || story.startsWith('body:');
+}
+
 const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInput(
   {
     enabled,
@@ -531,7 +536,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         };
         if (
           !hasSelection &&
-          current.head.story === 'body' &&
+          isBodyFlowStory(current.head.story) &&
           !isSuggesting &&
           !stored &&
           /^[\x20-\x7e]+$/u.test(inputText) &&
@@ -609,7 +614,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           direction === 'backward'
             ? caret.offset > 0 || index > 0
             : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
-        if (hasTarget && activeStory === 'body' && !isSuggesting && applyResidentDelete) {
+        if (hasTarget && isBodyFlowStory(activeStory) && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction, remaining);
           if (applied) {
             finishResidentMutation(applied);
