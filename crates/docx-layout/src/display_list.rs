@@ -10682,9 +10682,12 @@ fn page_position_span(
             }));
         }
     };
+    // The integral numbers the transcoder reads back as integers.
     fn position(value: Option<f64>) -> Option<i64> {
         value
-            .filter(|value| value.is_finite() && value.fract() == 0.0)
+            .filter(|value| {
+                value.fract() == 0.0 && *value >= i64::MIN as f64 && *value <= i64::MAX as f64
+            })
             .map(|value| value as i64)
     }
     fn block(block: &LayoutBlock, include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
