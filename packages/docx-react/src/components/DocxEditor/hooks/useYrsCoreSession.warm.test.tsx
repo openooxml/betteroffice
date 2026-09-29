@@ -1,0 +1,91 @@
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
+import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import type { YrsDocxHost } from '@betteroffice/docx/yrs';
+import { useYrsCoreSession } from './useYrsCoreSession';
+
+const ownsDom = !GlobalRegistrator.isRegistered;
+if (ownsDom) GlobalRegistrator.register();
+const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
+const FIXTURE = resolve(
+  import.meta.dir,
+  '../../../../../../crates/docx-edit/tests/fixtures/paragraph-identities'
+);
+
+function fixture(): Uint8Array {
+  const parts = new Map<string, Uint8Array>();
+  const add = (dir: string, prefix: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) add(path, `${prefix}${entry.name}/`);
+      else parts.set(`${prefix}${entry.name}`, toBytes(readFileSync(path, 'utf8')));
+    }
+  };
+  add(FIXTURE, '');
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+beforeAll(() =>
+  preloadEditWasm(
+    new Uint8Array(
+      readFileSync(
+        resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
+      )
+    )
+  )
+);
+afterEach(() => cleanup());
+afterAll(async () => {
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+async function openedSession() {
+  const bytes = fixture();
+  let host: YrsDocxHost | null = null;
+  const hook = renderHook(() =>
+    useYrsCoreSession(true, null, null, bytes, 1, undefined, {
+      onHostDocument: (opened) => {
+        host = opened;
+      },
+    })
+  );
+  await waitFor(() => expect(hook.result.current.session).not.toBeNull());
+  const session = hook.result.current.session!;
+  let materializations = 0;
+  const materializeDocx = session.materializeDocx.bind(session);
+  session.materializeDocx = () => {
+    materializations += 1;
+    return materializeDocx();
+  };
+  const project = () => hook.result.current.documentFromYrs(host!.document);
+  return { hook, project, materializations: () => materializations };
+}
+
+const idle = () => new Promise((resolve) => setTimeout(resolve, 300));
+
+test('opening never materializes the compatibility document by itself', async () => {
+  const { project, materializations } = await openedSession();
+  await act(idle);
+  expect(materializations()).toBe(0);
+
+  expect(project()).not.toBeNull();
+  expect(materializations()).toBe(1);
+  expect(project()).not.toBeNull();
+  expect(materializations()).toBe(1);
+});
+
+test('a requested warm materializes once when the main thread is idle', async () => {
+  const { hook, project, materializations } = await openedSession();
+  hook.result.current.scheduleCompatibilityWarm();
+  hook.result.current.scheduleCompatibilityWarm();
+  expect(materializations()).toBe(0);
+  await act(idle);
+  expect(materializations()).toBe(1);
+  hook.result.current.scheduleCompatibilityWarm();
+  await act(idle);
+  expect(project()).not.toBeNull();
+  expect(materializations()).toBe(1);
+});
