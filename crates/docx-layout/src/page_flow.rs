@@ -157,10 +157,10 @@ impl Paginator {
         })
     }
 
-    /// Restore a paginator at a clean page start. The first lazily-created
-    /// page uses `start_page_number`; no prefix pages are copied into this
-    /// instance, so callers can splice the resulting suffix onto retained
-    /// pages without walking them again.
+    /// Restore a paginator at a clean page start, on a fresh page numbered
+    /// `start_page_number`; no prefix pages are copied into this instance, so
+    /// callers can splice the resulting suffix onto retained pages without
+    /// walking them again.
     pub fn resume(
         geometry: &PageFlowGeometry,
         start_page_number: u32,
@@ -172,12 +172,15 @@ impl Paginator {
             geometry.columns.clone(),
             footnote_reserved_heights,
         )?;
-        paginator.pending_page_size = geometry.pending_page_size.clone();
-        paginator.pending_margins = geometry.pending_margins.clone();
-        paginator.pending_columns = geometry.pending_columns.clone();
         paginator.start_page_number = start_page_number;
         paginator.leading_spacing_spent = geometry.leading_spacing_spent;
         paginator.numbering_parity_offset = geometry.numbering_parity_offset;
+        // the checkpoint's page keeps the geometry it was captured under;
+        // deferred geometry waits for the page after it
+        paginator.create_new_page();
+        paginator.pending_page_size = geometry.pending_page_size.clone();
+        paginator.pending_margins = geometry.pending_margins.clone();
+        paginator.pending_columns = geometry.pending_columns.clone();
         paginator.balanced_page = geometry.balanced_region.then_some(0);
         Ok(paginator)
     }

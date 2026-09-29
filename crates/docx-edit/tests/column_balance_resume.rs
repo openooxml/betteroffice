@@ -20,15 +20,16 @@ impl Rng {
     }
 }
 
-/// A section of `columns` columns, starting as `start` says (`nextPage` when empty).
-fn section(columns: u64, start: &str, last: bool) -> String {
+/// A section of `columns` columns with a `top` twip top margin, starting as `start` says
+/// (`nextPage` when empty).
+fn section(columns: u64, top: u64, start: &str, last: bool) -> String {
     let start = if start.is_empty() {
         String::new()
     } else {
         format!(r#"<w:type w:val="{start}"/>"#)
     };
     let properties = format!(
-        r#"{start}<w:cols w:num="{columns}" w:space="360"/><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/>"#
+        r#"{start}<w:cols w:num="{columns}" w:space="360"/><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="{top}" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/>"#
     );
     if last {
         format!("<w:sectPr>{properties}</w:sectPr>")
@@ -52,7 +53,8 @@ fn generated(seed: u64) -> Vec<u8> {
             0 => body.push_str(&p(&id, r#"<w:r><w:br w:type="page"/></w:r>"#)),
             1 => {
                 let start = ["", "continuous", "nextColumn"][rng.next(3) as usize];
-                body.push_str(&section(1 + rng.next(3), start, false));
+                let top = [720, 1080][rng.next(2) as usize];
+                body.push_str(&section(1 + rng.next(3), top, start, false));
             }
             2 => body.push_str(&p(&id, "")),
             kind => {
@@ -70,12 +72,12 @@ fn generated(seed: u64) -> Vec<u8> {
             }
         }
     }
-    body.push_str(&section(1, "continuous", true));
+    body.push_str(&section(1, 720, "continuous", true));
     with_body_and_note(&body, &p("", &r("A note.")))
 }
 
-/// Types into the middle of the body's last run of text.
-fn type_into(engine: &EngineSession) {
+/// Types `text` into the middle of the body's last run of text.
+fn type_into(engine: &EngineSession, text: &str) {
     let mut offset = 0;
     let mut at = None;
     for segment in engine.doc().story_segments("body").unwrap() {
@@ -95,22 +97,22 @@ fn type_into(engine: &EngineSession) {
         .insert_text(
             &EditCtx::local("", ""),
             Position::new("body", at.expect("the body has text")),
-            "typed ",
+            text,
             FormatPolicy::Inherit,
         )
         .unwrap();
 }
 
-/// Lays `bytes` out, types into its last run of text and lays it out again, which must
-/// repaginate incrementally and match a full layout of the edited document.
-fn assert_edit_relays_out_like_a_full_layout(bytes: &[u8], font: u32, label: &str) {
+/// Lays `bytes` out, types `text` into its last run of text and lays it out again, which
+/// must repaginate incrementally and match a full layout of the edited document.
+fn assert_edit_relays_out_like_a_full_layout(bytes: &[u8], text: &str, font: u32, label: &str) {
     let engine = EngineSession::new(72);
     seed_from_docx(engine.doc(), bytes).unwrap();
     let request = region_request(&engine, bytes, font).to_string();
     engine
         .layout_document_with_regions_retained_json(&request)
         .unwrap();
-    type_into(&engine);
+    type_into(&engine, text);
     let before = engine.stats().incremental_pagination_calls;
     let incremental = engine
         .layout_document_with_regions_retained_json(&request)
@@ -142,6 +144,7 @@ fn an_edit_in_a_later_section_relays_out_like_a_full_layout() {
     for seed in 1..=24 {
         assert_edit_relays_out_like_a_full_layout(
             &generated(seed),
+            "typed ",
             font,
             &format!("generated document {seed}"),
         );
@@ -154,20 +157,51 @@ fn a_section_balanced_on_the_page_before_is_not_rebalanced_after_its_page_break(
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let body = [
         p("00000001", &r("Before the columns.")),
-        section(1, "", false),
+        section(1, 720, "", false),
         p(
             "00000002",
             &format!("<w:pPr><w:pageBreakBefore/></w:pPr>{}", r("First.")),
         ),
         p("00000003", &r("Second.")),
-        section(2, "continuous", false),
+        section(2, 720, "continuous", false),
         p("00000004", &r("After the columns.")),
-        section(1, "continuous", true),
+        section(1, 720, "continuous", true),
     ]
     .concat();
     assert_edit_relays_out_like_a_full_layout(
         &with_body_and_note(&body, &p("", &r("A note."))),
+        "typed ",
         font,
         "a page break opening a balanced section",
+    );
+}
+
+#[test]
+fn an_edit_past_a_page_break_rebalances_its_section() {
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let mut body = vec![
+        p("00000001", &r("Before the columns.")),
+        section(1, 720, "", false),
+    ];
+    for index in 2..6 {
+        body.push(p(&format!("{index:08X}"), &r("A short paragraph.")));
+    }
+    body.push(p(
+        "00000006",
+        &format!(
+            "<w:pPr><w:pageBreakBefore/></w:pPr>{}",
+            r("After the break.")
+        ),
+    ));
+    body.push(p("00000007", &r("The last paragraph of the columns.")));
+    body.push(section(2, 720, "continuous", false));
+    body.push(p("00000008", ""));
+    body.push(section(1, 720, "continuous", true));
+    assert_edit_relays_out_like_a_full_layout(
+        &with_body_and_note(&body.concat(), &p("", &r("A note."))),
+        &"grown ".repeat(40),
+        font,
+        "an edit after a page break in a balanced section",
     );
 }
