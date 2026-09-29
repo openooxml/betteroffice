@@ -1,9 +1,11 @@
 //! Word widens a page's body margins by the header and footer that page
 //! shows: the first-page band only on a `w:titlePg` section's first page, the
-//! even band only on even pages under `w:evenAndOddHeaders`. Each fixture has
-//! 280 one-line paragraphs at an exact 12pt pitch on A4, 58 to a page with a
-//! one-line band and 53 with an eight-line one. The page breaks were exported
-//! from Word 16.113.
+//! even band only on pages whose displayed number is even under
+//! `w:evenAndOddHeaders`, and nothing for a missing first or even band. Each
+//! fixture has 280 one-line paragraphs at an exact 12pt pitch on A4, 58 to a
+//! page with a one-line band and 53 with an eight-line one. The page breaks
+//! were exported from Word 16.113; `continuous-title-page-at-page-break` only
+//! checks that an edit repaginates as a fresh layout does.
 
 use docx_edit::{EngineSession, seed_from_docx};
 use serde_json::{Value, json};
@@ -19,23 +21,35 @@ fn fixture(name: &str) -> Vec<u8> {
     .unwrap()
 }
 
-/// The first and last body line on each page.
-fn page_lines(bytes: &[u8]) -> Vec<(u32, u32)> {
+fn request(bytes: &[u8]) -> String {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
         .unwrap()
         .document
         .package;
+    let mut sections: Vec<_> = package
+        .document
+        .sections
+        .unwrap_or_default()
+        .into_iter()
+        .map(|section| json!({"properties": section.properties}))
+        .collect();
+    sections.push(json!({"properties": package.document.final_section_properties}));
+    json!({
+        "bodyStory": "body", "renderEnv": {},
+        "regions": {"sections": sections, "settings": package.settings},
+        "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 12}}
+    })
+    .to_string()
+}
+
+/// The first and last body line on each page.
+fn page_lines(bytes: &[u8]) -> Vec<(u32, u32)> {
     let engine = EngineSession::new(76500);
     seed_from_docx(engine.doc(), bytes).unwrap();
-    let request = json!({
-        "bodyStory": "body", "renderEnv": {},
-        "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
-        "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 12}}
-    });
     let output: Value = serde_json::from_str(
         &engine
-            .layout_document_with_regions_json(&request.to_string())
+            .layout_document_with_regions_json(&request(bytes))
             .unwrap(),
     )
     .unwrap();
@@ -124,20 +138,45 @@ fn a_first_page_footer_reserves_nothing_without_a_title_page() {
 }
 
 #[test]
+fn a_missing_even_band_is_blank_under_even_and_odd_headers() {
+    assert_eq!(
+        page_lines(&fixture("even-and-odd-missing-even")),
+        [
+            (1, 53),
+            (54, 111),
+            (112, 164),
+            (165, 222),
+            (223, 275),
+            (276, 280)
+        ]
+    );
+}
+
+#[test]
+fn the_displayed_page_number_selects_the_even_band() {
+    assert_eq!(
+        page_lines(&fixture("even-and-odd-restart-at-two")),
+        [
+            (1, 53),
+            (54, 111),
+            (112, 164),
+            (165, 222),
+            (223, 275),
+            (276, 280)
+        ]
+    );
+}
+
+#[test]
 fn an_edit_repaginates_with_the_bands_its_pages_show() {
-    for name in ["title-page-footer", "even-and-odd-headers"] {
+    for (name, position) in [
+        ("title-page-footer", 149 * 9),
+        ("even-and-odd-headers", 149 * 9),
+        ("even-and-odd-restart-at-two", 149 * 9),
+        ("continuous-title-page-at-page-break", 39 * 9),
+    ] {
         let bytes = fixture(name);
-        let font = docx_layout::register_measure_font(FONT).unwrap();
-        let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
-            .unwrap()
-            .document
-            .package;
-        let request = json!({
-            "bodyStory": "body", "renderEnv": {},
-            "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
-            "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 12}}
-        })
-        .to_string();
+        let request = request(&bytes);
         let engine = EngineSession::new(76501);
         seed_from_docx(engine.doc(), &bytes).unwrap();
         engine
@@ -148,7 +187,7 @@ fn an_edit_repaginates_with_the_bands_its_pages_show() {
             .doc()
             .insert_text(
                 &docx_edit::EditCtx::local("", ""),
-                docx_edit::Position::new("body", 149 * 9),
+                docx_edit::Position::new("body", position),
                 "x",
                 docx_edit::FormatPolicy::Inherit,
             )

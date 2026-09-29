@@ -616,16 +616,8 @@ fn extend_input_for_header_footer(
                     .map(|variant| variant.flow_height)
             };
             let extend = |hf_type: HeaderFooterType| {
-                let fallback = |kind| match hf_type {
-                    HeaderFooterType::First => Some(0.0),
-                    _ => height(kind, HeaderFooterType::Default),
-                };
-                let header = height(HeaderFooterKind::Header, hf_type)
-                    .or_else(|| fallback(HeaderFooterKind::Header))
-                    .unwrap_or(0.0);
-                let footer = height(HeaderFooterKind::Footer, hf_type)
-                    .or_else(|| fallback(HeaderFooterKind::Footer))
-                    .unwrap_or(0.0);
+                let header = height(HeaderFooterKind::Header, hf_type).unwrap_or(0.0);
+                let footer = height(HeaderFooterKind::Footer, hf_type).unwrap_or(0.0);
                 extend_body_margins(&page_size, &margins, header, footer)
             };
             let even_and_odd = section

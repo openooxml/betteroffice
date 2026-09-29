@@ -417,6 +417,11 @@ fn band_for_page<'a>(
     &'a crate::header_footer::HeaderFooterVariant,
     HeaderFooterType,
 )> {
+    let page_number = if page.number > 0 {
+        u64::from(page.number)
+    } else {
+        page_index as u64 + 1
+    };
     select_band_variant(
         &payload.variants,
         |variant| {
@@ -436,11 +441,8 @@ fn band_for_page<'a>(
         &BandPage {
             section_index: page.section_index.map(|value| value as usize),
             section_page_index: page.section_page_index,
-            page_number: if page.number > 0 {
-                u64::from(page.number)
-            } else {
-                page_index as u64 + 1
-            },
+            page_number,
+            displayed_number: page.section_page_number.unwrap_or(page_number),
             has_refs: page.header_footer_refs.is_some(),
         },
         |kind, hf_type| {

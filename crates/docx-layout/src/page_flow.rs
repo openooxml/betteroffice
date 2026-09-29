@@ -204,6 +204,7 @@ impl Paginator {
         let idx = self.get_current();
         let number = self.pages[self.states[idx].page_index].number;
         self.numbering_parity_offset = start % 2 != u64::from(number % 2);
+        self.restamp_pristine_band();
     }
 
     pub fn physical_parity_is_odd(&self, number: u64) -> bool {
@@ -224,9 +225,7 @@ impl Paginator {
             if entering {
                 self.opens_section[idx] = true;
                 self.section_started = true;
-                if self.pending_margins.is_none() {
-                    self.restamp_pristine_page();
-                }
+                self.restamp_pristine_band();
             }
         }
     }
@@ -290,7 +289,7 @@ impl Paginator {
             .and_then(|variants| {
                 if opens_section && variants.first.is_some() {
                     variants.first.as_ref()
-                } else if page_number.is_multiple_of(2) {
+                } else if !self.physical_parity_is_odd(u64::from(page_number)) {
                     variants.even.as_ref()
                 } else {
                     None
@@ -353,6 +352,17 @@ impl Paginator {
         state.content_limit = content_limit;
         self.column_region_top = content_top;
         self.column_region_bottom = content_top;
+    }
+
+    /// Re-forms a pristine page whose band changed after it opened.
+    fn restamp_pristine_band(&mut self) {
+        let Some(idx) = self.pristine_page() else {
+            return;
+        };
+        let page = &self.pages[self.states[idx].page_index];
+        if self.page_margins(self.opens_section[idx], page.number) != page.margins {
+            self.restamp_pristine_page();
+        }
     }
 
     /// Opens the next page, promoting any deferred geometry first, and returns
@@ -844,6 +854,37 @@ mod tests {
             separator: None,
             columns: None,
         }
+    }
+
+    #[test]
+    fn a_pristine_page_entering_a_section_takes_its_first_band_as_a_resume_does() {
+        let bands = vec![
+            SectionPageMargins::default(),
+            SectionPageMargins {
+                first: Some(margins(180.0, 96.0)),
+                even: None,
+            },
+        ];
+        let size = Size {
+            w: 816.0,
+            h: 1056.0,
+        };
+        let mut paginator = Paginator::new(size, margins(96.0, 96.0), columns(), None).unwrap();
+        paginator.set_section_page_margins(bands.clone());
+        paginator.get_current();
+        paginator.force_authored_page_break(false);
+        paginator
+            .update_page_layout(None, Some(margins(96.0, 96.0)), false)
+            .unwrap();
+        paginator.set_section_index(1);
+        let (page_index, number, flow) = paginator.clean_page_start().unwrap();
+        assert_eq!(paginator.pages[page_index].margins.top, 180.0);
+
+        let mut resumed = Paginator::resume_in_section(&flow, number, 1, None).unwrap();
+        resumed.set_section_page_margins(bands);
+        let idx = resumed.get_current();
+        assert_eq!(resumed.pages[idx].margins.top, 180.0);
+        assert_eq!(resumed.state(idx).content_top, 180.0);
     }
 
     #[test]

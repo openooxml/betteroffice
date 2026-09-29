@@ -2772,7 +2772,7 @@ pub(crate) struct PageIn {
     #[serde(default)]
     pub(crate) section_page_index: Option<u64>,
     #[serde(default)]
-    section_page_number: Option<u64>,
+    pub(crate) section_page_number: Option<u64>,
     #[serde(default)]
     pub(crate) header_footer_refs: Option<PageHeaderFooterRefsIn>,
     #[serde(default)]

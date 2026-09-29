@@ -161,6 +161,9 @@ pub(crate) struct BandPage {
     pub section_page_index: Option<u64>,
     /// The layout's own 1-based page number.
     pub page_number: u64,
+    /// The number the page displays, after section restarts; its parity
+    /// selects the even band.
+    pub displayed_number: u64,
     /// Whether the page carries its section's header/footer relationships.
     pub has_refs: bool,
 }
@@ -196,9 +199,10 @@ pub(crate) fn select_band_variant<'a, V>(
         .section_page_index
         .unwrap_or(page.page_number.saturating_sub(1))
         == 0;
+    let even_page = even_and_odd && page.displayed_number.is_multiple_of(2);
     let selected_type = if first_page && title_page {
         HeaderFooterType::First
-    } else if even_and_odd && page.page_number.is_multiple_of(2) {
+    } else if even_page {
         HeaderFooterType::Even
     } else {
         HeaderFooterType::Default
@@ -212,21 +216,15 @@ pub(crate) fn select_band_variant<'a, V>(
         {
             return Some((variant, selected_type));
         }
-        if selected_type == HeaderFooterType::First {
+        if selected_type != HeaderFooterType::Default {
             return None;
         }
     }
-    if first_page && title_page {
-        // `titlePg` selects a distinct story. Word treats an absent first-page
-        // relationship as an intentionally blank band; falling through here
-        // would incorrectly repeat the default header/footer on page one.
-        return get(HeaderFooterType::First).map(|variant| (variant, HeaderFooterType::First));
-    }
-    if even_and_odd
-        && page.page_number.is_multiple_of(2)
-        && let Some(variant) = get(HeaderFooterType::Even)
-    {
-        return Some((variant, HeaderFooterType::Even));
+    // `titlePg` and `evenAndOddHeaders` select distinct stories. Word treats
+    // an absent first-page or even-page story as an intentionally blank band
+    // rather than repeating the default one.
+    if selected_type != HeaderFooterType::Default {
+        return get(selected_type).map(|variant| (variant, selected_type));
     }
     get(HeaderFooterType::Default).map(|variant| (variant, HeaderFooterType::Default))
 }
@@ -289,6 +287,7 @@ fn resolve_variant<'a>(
             section_index: page.section_index.map(|value| value as usize),
             section_page_index: page.section_page_index,
             page_number,
+            displayed_number: page.section_page_number.unwrap_or(page_number),
             has_refs: page.header_footer_refs.is_some(),
         },
         |kind, hf_type| {
@@ -384,6 +383,55 @@ mod tests {
     }
 
     #[test]
+    fn the_displayed_number_selects_the_even_band_and_a_missing_one_is_blank() {
+        let settings = BandSettings {
+            title_pg: false,
+            even_and_odd_headers: true,
+            title_page_sections: &[],
+            even_and_odd_sections: &[],
+        };
+        let role = |variants: &[(HeaderFooterType, &'static str)],
+                    page_number: u64,
+                    displayed_number: u64,
+                    has_refs: bool| {
+            select_band_variant(
+                variants,
+                |(hf_type, r_id)| (HeaderFooterKind::Header, *hf_type, *r_id, None),
+                &settings,
+                &BandPage {
+                    section_index: Some(0),
+                    section_page_index: Some(page_number - 1),
+                    page_number,
+                    displayed_number,
+                    has_refs,
+                },
+                |_, hf_type| {
+                    variants
+                        .iter()
+                        .find(|(variant_type, _)| *variant_type == hf_type)
+                        .map(|(_, r_id)| *r_id)
+                },
+                HeaderFooterKind::Header,
+            )
+            .map(|(_, role)| role)
+        };
+        let both = [
+            (HeaderFooterType::Default, "default"),
+            (HeaderFooterType::Even, "even"),
+        ];
+        let default_only = [(HeaderFooterType::Default, "default")];
+
+        assert_eq!(role(&both, 1, 2, true), Some(HeaderFooterType::Even));
+        assert_eq!(role(&both, 2, 3, true), Some(HeaderFooterType::Default));
+        assert_eq!(role(&default_only, 2, 2, true), None);
+        assert_eq!(role(&default_only, 2, 2, false), None);
+        assert_eq!(
+            role(&default_only, 1, 1, true),
+            Some(HeaderFooterType::Default)
+        );
+    }
+
+    #[test]
     fn a_shared_relationship_is_shown_in_the_role_the_page_selects() {
         let variants = [
             (HeaderFooterType::Default, "shared"),
@@ -404,6 +452,7 @@ mod tests {
                     section_index: Some(0),
                     section_page_index: Some(page_number - 1),
                     page_number,
+                    displayed_number: page_number,
                     has_refs: true,
                 },
                 |_, _| Some("shared"),
