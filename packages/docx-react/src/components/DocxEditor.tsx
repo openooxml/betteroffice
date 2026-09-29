@@ -886,7 +886,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // The full session failing to lay out or render as it opens fails the
   // load, which reports it. Each render error is handled once: one the
   // preview left set is not the full session's.
-  const failOpeningRef = useRef<(error: Error) => boolean>(() => false);
+  const failOpeningRef = useRef<(error: Error, session?: unknown) => boolean>(() => false);
   const handledRenderErrorRef = useRef<Error | null>(null);
   useEffect(() => {
     const error = canvasRenderer.error;
@@ -1066,8 +1066,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const opening = yrsCore.opening;
   failOpeningRef.current = yrsCore.failOpening;
   const reportPagedError = useCallback(
-    (error: Error) => {
-      if (!failOpeningRef.current(error)) reportLayoutError(error);
+    (error: Error, session?: unknown) => {
+      if (!failOpeningRef.current(error, session)) reportLayoutError(error);
     },
     [reportLayoutError]
   );

@@ -120,10 +120,14 @@ test('a full session keeps the preview until its first frame shows, past the wai
 test('a full session that fails to render before its first frame fails the load', async () => {
   const { result, errors, preview, unmount } = await previewThen('open');
   await waitFor(() => expect(result.current.previewing).toBe(false));
-  expect(result.current.session).not.toBe(preview);
+  const full = result.current.session;
+  expect(full).not.toBe(preview);
+  // A late error of the preview's own is not the full session's.
+  expect(result.current.failOpening(new Error('preview fonts failed'), preview)).toBe(false);
+  expect(result.current.opening).toBe(true);
   let failed = false;
   await act(async () => {
-    failed = result.current.failOpening(new Error('render failed'));
+    failed = result.current.failOpening(new Error('render failed'), full);
   });
   expect(failed).toBe(true);
   expect(errors.map((error) => error.message)).toEqual(['render failed']);

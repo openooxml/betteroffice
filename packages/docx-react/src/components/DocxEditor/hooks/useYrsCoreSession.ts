@@ -44,9 +44,10 @@ export interface YrsCoreSession {
   notifyFramePresented(engine: unknown): void;
   /**
    * Fails the load with `error` if its full session has yet to show a frame,
-   * dropping that session and the preview. Returns whether it did.
+   * dropping that session and the preview. Returns whether it did. An error
+   * of another session than `session`, when given, fails nothing.
    */
-  failOpening(error: Error): boolean;
+  failOpening(error: Error, session?: unknown): boolean;
   /**
    * Materializes the save projection base when the main thread is next idle,
    * for a host that projects the document on every change.
@@ -259,7 +260,7 @@ export function useYrsCoreSession(
   const previewingRef = useRef(false);
   previewingRef.current = previewing;
   const retiringRef = useRef<YrsSession | null>(null);
-  const failOpeningRef = useRef<((error: Error) => boolean) | null>(null);
+  const failOpeningRef = useRef<((error: Error, session?: unknown) => boolean) | null>(null);
   // Collaboration shares one replica from the start, so it never previews.
   // Read once per load: a later change of the option does not reopen it.
   const previewFirstPageRef = useRef(false);
@@ -316,9 +317,10 @@ export function useYrsCoreSession(
       }
     };
 
-    failOpeningRef.current = (error: Error): boolean => {
+    failOpeningRef.current = (error: Error, session?: unknown): boolean => {
       const full = sessionRef.current;
       if (!shown || stale() || !full || full === shown.session) return false;
+      if (session !== undefined && session !== full) return false;
       abandoned = true;
       sessionRef.current = null;
       setSession(null);
@@ -459,8 +461,8 @@ export function useYrsCoreSession(
   }, [retire]);
 
   const failOpening = useCallback(
-    (error: Error): boolean =>
-      retiringRef.current !== null && (failOpeningRef.current?.(error) ?? false),
+    (error: Error, session?: unknown): boolean =>
+      retiringRef.current !== null && (failOpeningRef.current?.(error, session) ?? false),
     []
   );
 
