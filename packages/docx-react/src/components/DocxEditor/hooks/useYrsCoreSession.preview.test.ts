@@ -53,6 +53,7 @@ test('a first-page preview opens first, cannot save, and hands over once it has 
   );
   await waitFor(() => expect(result.current.previewing).toBe(true));
   const preview = result.current.session!;
+  expect(result.current.opening).toBe(true);
   expect(hosts).toEqual([true]);
   expect(preview.materializeDocx()).toBeNull();
   await expect(saveYrsDocx(preview)).rejects.toThrow();
@@ -71,6 +72,8 @@ test('a first-page preview opens first, cannot save, and hands over once it has 
   expect(full).not.toBe(preview);
   expect(hosts).toEqual([true, false]);
   expect(result.current.handoffFrom).toBe(preview);
+  // Still showing the preview's pages: nothing edits until the full session's are shown.
+  expect(result.current.opening).toBe(true);
   expect(full.materializeDocx()).not.toBeNull();
   expect(full.isDisplayOnly()).toBe(false);
 
@@ -78,7 +81,37 @@ test('a first-page preview opens first, cannot save, and hands over once it has 
     result.current.notifyFramePresented(full);
   });
   expect(result.current.handoffFrom).toBeNull();
+  expect(result.current.opening).toBe(false);
   unmount();
+});
+
+test('a tab that draws no frames still opens the full document', async () => {
+  const requestFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => 0;
+  try {
+    const { result, unmount } = renderHook(() =>
+      useYrsCoreSession(
+        true,
+        null,
+        null,
+        PAGES,
+        1,
+        undefined,
+        { isCurrentLoad: () => true },
+        { previewFirstPage: true }
+      )
+    );
+    await waitFor(() => expect(result.current.previewing).toBe(true));
+    const preview = result.current.session!;
+    await act(async () => {
+      result.current.notifyFramePresented(preview);
+    });
+    await waitFor(() => expect(result.current.previewing).toBe(false));
+    expect(result.current.session).not.toBe(preview);
+    unmount();
+  } finally {
+    globalThis.requestAnimationFrame = requestFrame;
+  }
 });
 
 test('without the option the document opens in full at once', async () => {

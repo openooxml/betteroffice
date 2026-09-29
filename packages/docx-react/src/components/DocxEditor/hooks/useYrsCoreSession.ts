@@ -44,6 +44,8 @@ export interface YrsCoreSession {
   previewing: boolean;
   /** The preview session whose pages the renderer keeps until the full session's replace them. */
   handoffFrom: YrsSession | null;
+  /** From the preview until a frame of the full session is presented: nothing reads or edits. */
+  opening: boolean;
   /** A frame of `engine`'s layout was published for display. */
   notifyFramePresented(engine: unknown): void;
 }
@@ -67,6 +69,8 @@ export interface YrsCoreSessionOptions {
 const PREVIEW_BODY_BLOCKS = 200;
 /** How long the full open waits for the preview's pages to paint. */
 const PREVIEW_PAINT_TIMEOUT_MS = 2000;
+/** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
+const PREVIEW_FRAME_WAIT_MS = 100;
 
 function mergeHeaderFooterMaps(
   full: Map<string, HeaderFooter> | undefined,
@@ -280,9 +284,16 @@ export function useYrsCoreSession(
           setSessionGeneration(seedGeneration);
           callbacksRef.current?.onHostDocument?.(shown.host, seedGeneration, { preview: true });
           await painted;
-          await new Promise<void>((resolve) =>
-            requestAnimationFrame(() => setTimeout(resolve, 0))
-          );
+          if (paintWaitRef.current?.session === shown.session) paintWaitRef.current = null;
+          await new Promise<void>((resolve) => {
+            const bound = setTimeout(resolve, PREVIEW_FRAME_WAIT_MS);
+            requestAnimationFrame(() =>
+              setTimeout(() => {
+                clearTimeout(bound);
+                resolve();
+              }, 0)
+            );
+          });
           if (stale()) return;
         }
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
@@ -290,11 +301,17 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
-        const host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
-          bytes: seedBytes,
-          document: seedDocument,
-          initialUpdate: collaborationInitialUpdate,
-        });
+        let host: ReturnType<typeof seedYrsSession>;
+        try {
+          host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
+            bytes: seedBytes,
+            document: seedDocument,
+            initialUpdate: collaborationInitialUpdate,
+          });
+        } catch (error) {
+          next.destroy();
+          throw error;
+        }
         sessionRef.current = next;
         facadeRef.current = yrs;
         if (shown) {
@@ -492,6 +509,7 @@ export function useYrsCoreSession(
     sessionGeneration,
     previewing,
     handoffFrom,
+    opening: previewing || handoffFrom !== null,
     notifyFramePresented,
     storyBlocks,
     bodyBlocks,

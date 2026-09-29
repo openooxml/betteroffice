@@ -62,6 +62,7 @@ function yrsCore(): YrsCoreSession {
     cancelCompatibilityWarm: () => {},
     previewing: false,
     handoffFrom: null,
+    opening: false,
     notifyFramePresented: () => {},
   };
 }
