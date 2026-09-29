@@ -1663,6 +1663,7 @@ impl EditSession {
         input: &str,
         pages: u32,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_prefix_retained_json(input, pages as usize)
             .map_err(|error| JsValue::from_str(&error))
@@ -4975,6 +4976,11 @@ mod tests {
             record(parse(
                 session.layout_document_with_regions_json(&request).unwrap(),
             ));
+            record(parse(
+                session
+                    .layout_document_with_regions_prefix_retained_json(&request, 1)
+                    .unwrap(),
+            ));
             let layout = parse(
                 session
                     .layout_document_with_regions_retained_json(&request)
@@ -5190,11 +5196,9 @@ mod tests {
             ("word/document.xml".to_owned(), document.into_bytes()),
         ])
         .unwrap();
-        docx_layout::clear_measure_fonts();
-        let font_id = docx_layout::register_measure_font(include_bytes!(
-            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
-        ))
-        .unwrap();
+        const LIBERATION: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let font_id = 0;
         let request = json!({
             "bodyStory": "body",
             "regions": { "sections": [{ "sectionId": "main", "properties": {
@@ -5210,6 +5214,7 @@ mod tests {
         })
         .to_string();
         let numpages = |session: &EditSession| {
+            let _fonts = session.fonts.enter();
             let layout: Value = serde_json::from_str(
                 &session
                     .engine
@@ -5234,18 +5239,21 @@ mod tests {
             (text, layout["layout"]["pages"].as_array().unwrap().len())
         };
         let full = EditSession::new(80.0).unwrap();
+        full.register_measure_font(LIBERATION).unwrap();
         full.open_docx(&bytes, true, None, None).unwrap();
         let (text, pages) = numpages(&full);
         assert!(pages > 1);
         assert_eq!(text, pages.to_string());
         // The preview's blocks fit its pages whole; its page count is still not the document's.
         let preview = EditSession::new(81.0).unwrap();
+        preview.register_measure_font(LIBERATION).unwrap();
         preview.open_preview(&bytes, 20).unwrap().unwrap();
         let (text, preview_pages) = numpages(&preview);
         assert!(preview_pages < pages);
         assert_eq!(text, "");
 
         // An edit's resident pass lays out part of the package too.
+        let fonts = preview.fonts.enter();
         preview
             .engine
             .doc()
@@ -5276,6 +5284,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(text, "");
+        drop(fonts);
 
         // A complete open over the preview counts the whole document again.
         preview.delete_story("body").unwrap();
