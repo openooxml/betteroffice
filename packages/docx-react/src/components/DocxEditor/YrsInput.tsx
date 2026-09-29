@@ -23,7 +23,6 @@ import {
   type YrsStoryRange,
 } from '@betteroffice/docx/yrs';
 import {
-  renderedScale,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -38,6 +37,7 @@ import {
   yrsTableSelectionRange,
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
+import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
@@ -1323,15 +1323,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged)
     ) {
       const scroller = findVerticalScrollParentOrRoot(host);
-      const viewport = scroller.getBoundingClientRect();
-      const margin = 24;
-      const scale = renderedScale(scroller, viewport);
-      const caretBottom = nextTop + nextHeight;
-      if (nextTop < viewport.top + margin) {
-        scroller.scrollTop += (nextTop - viewport.top) / scale - margin;
-      } else if (caretBottom > viewport.bottom - margin) {
-        scroller.scrollTop += (caretBottom - viewport.bottom) / scale + margin;
-      }
+      const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
+      if (delta !== 0) scroller.scrollTop += delta;
     }
   }, [
     canvasHostRef,

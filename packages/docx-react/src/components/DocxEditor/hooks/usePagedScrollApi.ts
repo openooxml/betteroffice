@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 import {
-  renderedScale,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
   type DisplayListRect,
@@ -13,6 +12,7 @@ import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import { runAfterFrames } from '../internals/scrollUtils';
+import { scrollViewport } from '../internals/viewportBand';
 
 export interface UsePagedScrollApiOptions {
   pagesContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -75,18 +75,14 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const pageSize = queries.pageSize(rect.pageIndex);
       if (!pageRect || !pageSize) return false;
       const scroller = getScrollContainer() ?? findVerticalScrollParentOrRoot(host);
-      const scrollerRect = scroller.getBoundingClientRect();
+      const viewport = scrollViewport(scroller);
       const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
       const clientY = pageRect.top + (rect.y + rect.height / 2) * scaleY;
-      const distance =
-        (clientY - scrollerRect.top) / renderedScale(scroller, scrollerRect) -
-        scroller.clientHeight / 2;
+      const distance = (clientY - (viewport.top + viewport.bottom) / 2) / viewport.zoom;
+      const height = (viewport.bottom - viewport.top) / viewport.zoom;
       scroller.scrollTo({
         top: scroller.scrollTop + distance,
-        behavior:
-          smooth && Math.abs(distance) <= scroller.clientHeight * SMOOTH_SCROLL_VIEWPORTS
-            ? 'smooth'
-            : 'auto',
+        behavior: smooth && Math.abs(distance) <= height * SMOOTH_SCROLL_VIEWPORTS ? 'smooth' : 'auto',
       });
       return true;
     },

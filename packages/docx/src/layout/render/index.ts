@@ -128,7 +128,7 @@ export {
   displayPageCanvas,
   displayPageCanvases,
   DisplayPageRegistry,
-  renderedScale,
+  effectiveZoom,
   resolveCanvasPoint,
   resolveDisplayPageClientRect,
   type CanvasPointHit,

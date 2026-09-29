@@ -38,21 +38,19 @@ export interface DisplayPageClientRect {
 }
 
 /**
- * Client pixels per layout pixel of `element`. Client rects include the CSS
- * `zoom` and scale transforms of its ancestors; offsets, client sizes and
- * scroll positions do not.
+ * The CSS `zoom` `element` renders at, its ancestors' included. Client rects
+ * carry it; layout sizes and an element's scroll offsets do not.
  */
-export function renderedScale(
-  element: HTMLElement,
-  rect: { width: number; height: number } = element.getBoundingClientRect()
-): number {
-  const scale =
-    element.offsetHeight > 0
-      ? rect.height / element.offsetHeight
-      : element.offsetWidth > 0
-        ? rect.width / element.offsetWidth
-        : 1;
-  return Number.isFinite(scale) && scale > 0 ? scale : 1;
+export function effectiveZoom(element: Element): number {
+  const current = (element as Element & { currentCSSZoom?: unknown }).currentCSSZoom;
+  if (typeof current === 'number') return current > 0 && Number.isFinite(current) ? current : 1;
+  if (typeof getComputedStyle !== 'function') return 1;
+  let zoom = 1;
+  for (let node: Element | null = element; node; node = node.parentElement) {
+    const value = Number.parseFloat(getComputedStyle(node).zoom);
+    if (value > 0 && Number.isFinite(value)) zoom *= value;
+  }
+  return zoom;
 }
 
 /**
