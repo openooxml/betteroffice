@@ -16,6 +16,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
+import type { DisplayList } from '@betteroffice/docx/layout/render';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
@@ -179,6 +180,7 @@ export function useDocxEditorRefApi({
   commands,
   modeRef,
   allowHostProposalsRef,
+  settledDisplayList,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -206,6 +208,8 @@ export function useDocxEditorRefApi({
   modeRef: React.RefObject<EditorMode>;
   /** Whether proposal methods run while the editor is read-only. */
   allowHostProposalsRef: React.RefObject<boolean>;
+  /** The renderer's display list once it shows the whole current document. */
+  settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
 }) {
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
@@ -224,6 +228,10 @@ export function useDocxEditorRefApi({
       focus: () => pagedEditorRef.current?.focus(),
       getCurrentPage: () => scrollPageInfo.currentPage,
       getTotalPages: () => scrollPageInfo.totalPages,
+      whenLayoutComplete: async (options) => {
+        if (!settledDisplayList) throw new Error('This editor paints no display list');
+        return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
+      },
       scrollToPage: (pageNumber) => pagedEditorRef.current?.scrollToPage(pageNumber),
       scrollToPosition: (displayPosition) =>
         pagedEditorRef.current?.scrollToPosition(displayPosition),
@@ -489,6 +497,7 @@ export function useDocxEditorRefApi({
       loadBuffer,
       comments,
       commands,
+      settledDisplayList,
     ]
   );
 }

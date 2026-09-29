@@ -450,8 +450,18 @@ export interface DocxEditorRef {
   focus: () => void;
   /** Get current page number */
   getCurrentPage: () => number;
-  /** Get total page count */
+  /**
+   * The document's page count, or 0 until it is laid out in full: a large document paints its
+   * first pages before the rest is laid out. See {@link whenLayoutComplete}.
+   */
   getTotalPages: () => number;
+  /**
+   * Resolves with the page count once the whole document, as it is now, is laid out and its
+   * pages are ready to paint. Waits for the layout the editor runs on its own and never asks for
+   * one. Rejects when rendering fails, or after `options.timeoutMs` when given.
+   * @example const pages = await ref.current?.whenLayoutComplete({ timeoutMs: 60_000 })
+   */
+  whenLayoutComplete: (options?: { timeoutMs?: number }) => Promise<number>;
   /**
    * Scroll the paginated view so the given page is in view.
    * Page numbers are 1-indexed (matches `getCurrentPage` / `getTotalPages`).
@@ -1590,6 +1600,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commands: commandController.store,
     modeRef: writeModeRef,
     allowHostProposalsRef,
+    settledDisplayList: canvasRenderer.settledDisplayList,
   });
 
   const initialSectionProperties = useMemo(

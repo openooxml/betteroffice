@@ -292,3 +292,28 @@ test('a provisional layout paints first and settles only once the full layout fo
     native.free();
   }
 });
+
+test('a layout of part of the document never settles', async () => {
+  const displayList = { pages: [] };
+  const overrides = {
+    build: async () => displayList,
+    getInputs: () => ({ measured: [], options: {} }) as never,
+  };
+  const layout = (partial: boolean) =>
+    ({ pageSize: { w: 816, h: 1056 }, pages: [], ...(partial ? { partial } : {}) }) as Layout;
+  const { result, rerender } = renderHook(
+    ({ layout }) => useRustDisplayList(layout, overrides),
+    { initialProps: { layout: layout(true) } }
+  );
+  await waitFor(() => expect(result.current.displayList).toBe(displayList));
+  let settled = false;
+  void result.current.settledDisplayList(null, null).then(() => {
+    settled = true;
+  });
+  await act(async () => {});
+  expect(settled).toBe(false);
+  await act(async () => {
+    rerender({ layout: layout(false) });
+  });
+  await waitFor(() => expect(settled).toBe(true));
+});

@@ -71,10 +71,14 @@ export interface UseRustDisplayListResult {
   /** Resolve the newest query facade after pending document/frame changes. */
   resolveQueries: ResolveDisplayListQueries;
   /**
-   * The display list once it shows every document change so far. `relayout`
-   * runs a layout pass when none is on its way; rejects when rendering fails.
+   * The display list once it shows every document change so far, laid out in
+   * full. `relayout` runs a layout pass when none is on its way; rejects when
+   * rendering fails, or after `timeoutMs` (15 s by default, none when null).
    */
-  settledDisplayList(relayout: () => void, timeoutMs?: number): Promise<DisplayList>;
+  settledDisplayList(
+    relayout: (() => void) | null,
+    timeoutMs?: number | null
+  ): Promise<DisplayList>;
   /** Worker-computed caret tagged to `frame`. */
   caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
@@ -1088,7 +1092,7 @@ export function useRustDisplayList(
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
-        if (!result.provisional) markSettled(contentEpoch);
+        if (!result.provisional && layout.partial !== true) markSettled(contentEpoch);
         const workerProduced = Boolean(
           result.workerProduced && probe && workerRef.current?.client.isReady()
         );
@@ -1138,7 +1142,7 @@ export function useRustDisplayList(
   ]);
 
   const settledDisplayList = useCallback(
-    (relayout: () => void, timeoutMs = 15_000): Promise<DisplayList> =>
+    (relayout: (() => void) | null, timeoutMs: number | null = 15_000): Promise<DisplayList> =>
       new Promise<DisplayList>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const settle = (): boolean => {
@@ -1157,13 +1161,15 @@ export function useRustDisplayList(
           settle();
         };
         if (settle()) return;
-        settleRelayoutRef.current = relayout;
+        if (relayout) settleRelayoutRef.current = relayout;
         settleWaitersRef.current.add(waiter);
-        timer = setTimeout(() => {
-          settleWaitersRef.current.delete(waiter);
-          reject(new Error('The document did not finish rendering'));
-        }, timeoutMs);
-        relayout();
+        if (timeoutMs !== null) {
+          timer = setTimeout(() => {
+            settleWaitersRef.current.delete(waiter);
+            reject(new Error('The document did not finish rendering'));
+          }, timeoutMs);
+        }
+        relayout?.();
       }),
     []
   );
@@ -1288,8 +1294,8 @@ export interface UseCanvasRendererResult {
   queries: DisplayListQueries | null;
   /** Resolve the newest facade after pending edits and relayouts. */
   resolveQueries: ResolveDisplayListQueries;
-  /** The display list once it shows every document change so far. */
-  settledDisplayList(relayout: () => void, timeoutMs?: number): Promise<DisplayList>;
+  /** See {@link UseRustDisplayListResult.settledDisplayList}. */
+  settledDisplayList: UseRustDisplayListResult['settledDisplayList'];
   /** Worker caret from the same atomic renderer snapshot. */
   caret: YrsResidentCaretSnapshot | null;
   /** Whether worker-presented pixels make `caret` authoritative. */
