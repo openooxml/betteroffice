@@ -96,8 +96,6 @@ mod undo;
 pub mod canonical;
 pub mod engine;
 pub mod frame_delta;
-#[cfg(test)]
-mod frame_golden;
 
 pub use batch::{
     DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditFailureReason, EditGuard,
