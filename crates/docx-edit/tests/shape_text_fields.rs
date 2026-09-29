@@ -115,7 +115,6 @@ fn fields_in_text_boxes_paint() {
     docx_layout::clear_measure_fonts();
     let display = display_list(&document());
     let footer = |page: usize| fields(&display["pages"][page]["footer"]);
-    // Word shows "Page 1" to "Page 12".
     assert_eq!(footer(0), ["1"]);
     assert_eq!(footer(1), ["2"]);
     assert_eq!(footer(PAGES - 1), ["12"]);
