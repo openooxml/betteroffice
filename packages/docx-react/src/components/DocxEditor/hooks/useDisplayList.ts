@@ -79,8 +79,11 @@ export interface UseRustDisplayListResult {
   caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
   applyInput(text: string): Promise<ResidentFrameApplyResult | null>;
-  /** Apply one collapsed deletion/paragraph merge through the resident engine. */
-  applyDelete(direction: 'backward' | 'forward'): Promise<ResidentFrameApplyResult | null>;
+  /** Apply up to `count` collapsed deletions/paragraph merges through the resident engine. */
+  applyDelete(
+    direction: 'backward' | 'forward',
+    count?: number
+  ): Promise<ResidentFrameApplyResult | null>;
   /** See {@link LayoutInWorker}. */
   layoutInWorker: LayoutInWorker;
   /**
@@ -154,6 +157,8 @@ class MainThreadLayoutPendingError extends Error {}
 export interface ResidentFrameApplyResult {
   frameEpoch: number | null;
   caretSynchronized: boolean;
+  /** Characters a resident deletion removed; absent when unknown. */
+  deletedUnits?: number;
 }
 
 /** Pages a worker's first frame builds before the viewport is known. */
@@ -182,7 +187,7 @@ export interface RustDisplayListHookOverrides {
 
 type ResidentInputOperation =
   | { kind: 'insert'; text: string }
-  | { kind: 'delete'; direction: 'backward' | 'forward' };
+  | { kind: 'delete'; direction: 'backward' | 'forward'; count: number };
 
 interface RustDisplayListSnapshot {
   displayList: DisplayList | null;
@@ -261,6 +266,7 @@ export function useRustDisplayList(
   const pageBuildInFlightRef = useRef(false);
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
+  const recoveryFrameEpochRef = useRef(0);
   const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const suppressWorkerInvalidationRef = useRef(0);
   const [workerSurfacesActive, setWorkerSurfacesActive] = useState(false);
@@ -379,6 +385,22 @@ export function useRustDisplayList(
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
 
+  // Rendering moves to the host engine for good: its frames start from a fresh
+  // base, numbered after the worker's last frame.
+  const adoptHostEngine = useCallback(
+    (hostEngine: YrsSession): void => {
+      if (workerFallbackEngineRef.current === hostEngine) return;
+      hostEngine.resetFrameBase();
+      queryEpochGate.clear();
+      recoveryFrameEpochRef.current = snapshotRef.current.frame?.frameEpoch ?? 0;
+      const fallbackSnapshot = { ...snapshotRef.current, frame: null, queries: null, caret: null };
+      snapshotRef.current = fallbackSnapshot;
+      setSnapshot(fallbackSnapshot);
+      workerFallbackEngineRef.current = hostEngine;
+    },
+    [queryEpochGate]
+  );
+
   useEffect(() => {
     if (!residentEngine) return;
     return residentEngine.onUpdate((update) => {
@@ -478,10 +500,7 @@ export function useRustDisplayList(
         frameEpoch: number,
         paintToken: number
       ): Promise<ResidentFrameApplyResult | null> => {
-        if (workerFallbackEngineRef.current !== hostEngine) {
-          queryEpochGate.clear();
-          workerFallbackEngineRef.current = hostEngine;
-        }
+        adoptHostEngine(hostEngine);
         if (workerRef.current?.engine === hostEngine) {
           workerRef.current.client.destroy();
           workerRef.current = null;
@@ -489,12 +508,15 @@ export function useRustDisplayList(
         setWorkerSurfacesActive(false);
         setWorkerPresentationActive(false);
         let encoded: Uint8Array;
+        let deletedUnits: number | undefined;
         suppressWorkerInvalidationRef.current += 1;
         try {
-          encoded =
-            pending.kind === 'insert'
-              ? hostEngine.applyInput(pending.text, frameEpoch)
-              : hostEngine.applyDelete(pending.direction, frameEpoch);
+          if (pending.kind === 'insert') {
+            encoded = hostEngine.applyInput(pending.text, frameEpoch);
+          } else {
+            encoded = hostEngine.applyDelete(pending.direction, frameEpoch, pending.count);
+            deletedUnits = hostEngine.residentDeletedUnits();
+          }
         } catch (error) {
           suppressWorkerInvalidationRef.current -= 1;
           if (
@@ -534,7 +556,7 @@ export function useRustDisplayList(
         setLoading(false);
         markSettled(contentEpochRef.current);
         applyPaintedCaretReply(false, paintToken);
-        return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false };
+        return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false, deletedUnits };
       };
       const run = async (): Promise<ResidentFrameApplyResult | null> => {
         const worker = workerRef.current;
@@ -564,7 +586,8 @@ export function useRustDisplayList(
                   selection,
                   currentFrame.frameEpoch,
                   false,
-                  paintCaret
+                  paintCaret,
+                  operation.count
                 );
           if (result.applied) {
             try {
@@ -601,7 +624,7 @@ export function useRustDisplayList(
         const previous = snapshotRef.current;
         if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) {
           // Superseded: a newer frame's reply owns the painted-caret verdict.
-          return { frameEpoch: null, caretSynchronized: false };
+          return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
         }
         const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
         const caret = residentCaretForSelection(
@@ -626,7 +649,11 @@ export function useRustDisplayList(
           requestSettleRelayout();
           setTimeout(() => requestLayoutRef.current?.(), 0);
           applyPaintedCaretReply(false, paintToken);
-          return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false };
+          return {
+            frameEpoch: nextFrame.frameEpoch,
+            caretSynchronized: false,
+            deletedUnits: result.deletedUnits,
+          };
         }
         const nextSnapshot = createRustDisplayListSnapshot(
           nextFrame.displayList,
@@ -653,6 +680,7 @@ export function useRustDisplayList(
               workerPresentationActiveRef.current &&
               !displayListNeedsHostImages(nextFrame.displayList)
           ),
+          deletedUnits: result.deletedUnits,
         };
       };
       const pending = workerInputQueueRef.current.then(run, run);
@@ -678,6 +706,7 @@ export function useRustDisplayList(
       });
     },
     [
+      adoptHostEngine,
       applyPaintedCaretReply,
       markSettled,
       paintedCaretMachine,
@@ -693,8 +722,8 @@ export function useRustDisplayList(
   );
 
   const applyDelete = useCallback(
-    (direction: 'backward' | 'forward') =>
-      applyResidentInput({ kind: 'delete', direction }),
+    (direction: 'backward' | 'forward', count = 1) =>
+      applyResidentInput({ kind: 'delete', direction, count }),
     [applyResidentInput]
   );
 
@@ -718,18 +747,7 @@ export function useRustDisplayList(
   // every later layout and frame runs on the main thread.
   const dropWorker = useCallback(
     (hostEngine: YrsSession): void => {
-      if (workerFallbackEngineRef.current !== hostEngine) {
-        queryEpochGate.clear();
-        const fallbackSnapshot = {
-          ...snapshotRef.current,
-          frame: null,
-          queries: null,
-          caret: null,
-        };
-        snapshotRef.current = fallbackSnapshot;
-        setSnapshot(fallbackSnapshot);
-        workerFallbackEngineRef.current = hostEngine;
-      }
+      adoptHostEngine(hostEngine);
       if (workerRef.current?.engine === hostEngine) {
         workerRef.current.client.destroy();
         workerRef.current = null;
@@ -737,7 +755,7 @@ export function useRustDisplayList(
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
     },
-    [queryEpochGate, setWorkerPresentationActive]
+    [adoptHostEngine, setWorkerPresentationActive]
   );
 
   const layoutInWorker = useCallback<LayoutInWorker>(
@@ -998,6 +1016,7 @@ export function useRustDisplayList(
       contentEpochRef.current += 1;
       queryEpochGate.clear();
       snapshotRef.current = EMPTY_DISPLAY_LIST_SNAPSHOT;
+      recoveryFrameEpochRef.current = 0;
       setSnapshot(EMPTY_DISPLAY_LIST_SNAPSHOT);
       setError(null);
       setLoading(true);
@@ -1057,7 +1076,12 @@ export function useRustDisplayList(
             workerProduced: false,
             caretPainted: false,
           }))
-        : buildRustDisplayFrame(buildInputs, engine ?? undefined, snapshotRef.current.frame).then(
+        : buildRustDisplayFrame(
+            buildInputs,
+            engine ?? undefined,
+            snapshotRef.current.frame,
+            snapshotRef.current.frame?.frameEpoch ?? recoveryFrameEpochRef.current
+          ).then(
             (result) => ({
               ...result,
               caret: null as YrsResidentCaretSnapshot | null,
@@ -1243,6 +1267,7 @@ export function useRustDisplayList(
         markSettled(null, nextError);
       });
   }, [
+    adoptHostEngine,
     layout,
     overrides,
     fontChainsProviderRef,
@@ -1430,9 +1455,10 @@ export interface UseCanvasRendererResult {
   glyphOutlineProvider: GlyphOutlineProvider | null;
   /** One-call ordinary text insertion; false until resident state is ready. */
   applyInput(text: string): Promise<ResidentFrameApplyResult | null>;
-  /** One-call ordinary deletion/merge; false until resident state is ready. */
+  /** One-call ordinary deletions/merges; false until resident state is ready. */
   applyDelete(
-    direction: 'backward' | 'forward'
+    direction: 'backward' | 'forward',
+    count?: number
   ): Promise<ResidentFrameApplyResult | null>;
   /** Hands a layout pass to the resident worker; see {@link LayoutInWorker}. */
   layoutInWorker: LayoutInWorker;

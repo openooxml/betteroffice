@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { YrsResidentWorkerSnapshot, YrsSelection } from './index';
 import {
+  RESIDENT_WORKER_SILENCE_MS,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
   type ResidentEngineWorkerPort,
@@ -107,12 +108,33 @@ function setup() {
 }
 
 describe('watchdog', () => {
-  test('gives bootstrap a larger budget than buildFrame', () => {
-    const { client } = setup();
-    void client.bootstrap(snapshot, '').catch(() => {});
-    void client.buildFrame('', 0).catch(() => {});
-    const [bootstrapMs, buildFrameMs] = armedBudgets();
-    expect(bootstrapMs).toBeGreaterThan(buildFrameMs);
+  test('queued requests share one silence budget that each reply restarts', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap(snapshot, '');
+    const frame = client.buildFrame('', 0);
+    expect(armedBudgets()).toEqual([RESIDENT_WORKER_SILENCE_MS]);
+    const armed = [...timers.keys()];
+    worker.reply(frameReply(worker.posted[0].id));
+    await bootstrap;
+    expect(armedBudgets()).toEqual([RESIDENT_WORKER_SILENCE_MS]);
+    expect([...timers.keys()]).not.toEqual(armed);
+    worker.reply(frameReply(worker.posted[1].id));
+    await frame;
+    expect(timers.size).toBe(0);
+    expect(worker.terminated).toBe(false);
+  });
+
+  test('a reply slower than a keystroke budget keeps the worker', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    const input = client.applyInput('a', selection, 0);
+    expect(armedBudgets().every((ms) => ms >= 60_000)).toBe(true);
+    worker.reply(frameReply(worker.lastId()));
+    expect(await input).toMatchObject({ applied: true });
+    expect(worker.terminated).toBe(false);
+    expect(client.isReady()).toBe(true);
   });
 
   test('rejects an unanswered request, terminates the worker, refuses later ones', async () => {

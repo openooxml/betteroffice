@@ -556,6 +556,8 @@ struct DisplayState {
     next_page_id: u64,
     extras_fingerprint: u64,
     extras_json: Option<String>,
+    /// The next frame is full whatever epoch the caller holds.
+    fresh_base: bool,
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
     /// Pages a full build compiles besides those already built; the rest stay
@@ -2681,7 +2683,8 @@ impl EngineSession {
 
     /// Build the retained display list and return a binary FrameDelta v1.
     /// `expected_frame_epoch` is the last frame the host actually applied. A
-    /// mismatch automatically widens to a full recovery frame.
+    /// mismatch automatically widens to a full recovery frame, and the new
+    /// frame's epoch always exceeds it, so a host switching engines can apply it.
     pub fn build_display_list_frame(
         &self,
         extras_json: &str,
@@ -2767,7 +2770,10 @@ impl EngineSession {
         };
         observe_display_phase();
         let mut display = self.display.borrow_mut();
-        display.frame_epoch = display.frame_epoch.wrapping_add(1);
+        display.frame_epoch = display
+            .frame_epoch
+            .max(expected_frame_epoch)
+            .wrapping_add(1);
         display.display_builds = display.display_builds.wrapping_add(1);
         display.incremental_display_builds = display
             .incremental_display_builds
@@ -2779,7 +2785,9 @@ impl EngineSession {
         display.extras_json = Some(extras_json.to_owned());
         let frame_epoch = display.frame_epoch;
         let binary_frame_epoch = display.binary_frame_epoch;
-        let full = expected_frame_epoch != binary_frame_epoch || binary_frame_epoch == 0;
+        let full = display.fresh_base
+            || expected_frame_epoch != binary_frame_epoch
+            || binary_frame_epoch == 0;
         let layout_epoch = self.pagination.borrow().layout_epoch;
         let mut next_page_id = display.next_page_id;
         // Split borrows: the encoder reads the retained list and the previous
@@ -2811,6 +2819,7 @@ impl EngineSession {
         display.pages = pages;
         display.next_page_id = next_page_id;
         display.binary_frame_epoch = frame_epoch;
+        display.fresh_base = false;
         Ok(bytes)
     }
 
@@ -2851,10 +2860,15 @@ impl EngineSession {
         };
         let rebuilt: HashSet<usize> = built.into_iter().collect();
         let mut display = self.display.borrow_mut();
-        display.frame_epoch = display.frame_epoch.wrapping_add(1);
+        display.frame_epoch = display
+            .frame_epoch
+            .max(expected_frame_epoch)
+            .wrapping_add(1);
         let frame_epoch = display.frame_epoch;
         let binary_frame_epoch = display.binary_frame_epoch;
-        let full = expected_frame_epoch != binary_frame_epoch || binary_frame_epoch == 0;
+        let full = display.fresh_base
+            || expected_frame_epoch != binary_frame_epoch
+            || binary_frame_epoch == 0;
         let epochs = FrameEpochs {
             doc_epoch: self.doc_epoch(),
             layout_epoch: self.pagination.borrow().layout_epoch,
@@ -2877,7 +2891,13 @@ impl EngineSession {
         display.pages = snapshots;
         display.next_page_id = next_page_id;
         display.binary_frame_epoch = frame_epoch;
+        display.fresh_base = false;
         Ok(bytes)
+    }
+
+    /// Make the next frame a full one: its caller holds another engine's frames.
+    pub fn reset_frame_base(&self) {
+        self.display.borrow_mut().fresh_base = true;
     }
 
     /// Read the resident display list without cloning or serializing it.
@@ -5080,6 +5100,28 @@ mod tests {
             Vec::<(usize, String)>::new(),
             "absolute positions inside a table cell are ignored too"
         );
+    }
+
+    #[test]
+    fn recovery_frames_are_newer_than_the_frame_the_caller_holds() {
+        let engine = EngineSession::new(18);
+        engine
+            .layout_document_json(
+                r#"{"measured": [], "options": {"pageSize": {"w": 816, "h": 1056},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}}}"#,
+            )
+            .unwrap();
+        engine.build_display_list_frame("{}", 7).unwrap();
+        assert_eq!(engine.display.borrow().binary_frame_epoch, 8);
+        engine.build_display_list_frame("{}", 8).unwrap();
+        assert_eq!(engine.display.borrow().binary_frame_epoch, 9);
+        engine.build_display_list_frame("{}", 3).unwrap();
+        assert_eq!(engine.display.borrow().binary_frame_epoch, 10);
+        engine.reset_frame_base();
+        let full = engine.build_display_list_frame("{}", 10).unwrap();
+        assert_eq!(u32::from_le_bytes(full[12..16].try_into().unwrap()), 1);
+        let delta = engine.build_display_list_frame("{}", 11).unwrap();
+        assert_eq!(u32::from_le_bytes(delta[12..16].try_into().unwrap()), 0);
     }
 
     #[test]
