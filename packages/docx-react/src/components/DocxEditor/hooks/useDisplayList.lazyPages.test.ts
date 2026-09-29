@@ -9,6 +9,10 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import {
+  revisionPreviewKeyOf,
+  stampRevisionPreviewKey,
+} from '../internals/layoutProvenance';
 import { useRustDisplayList } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -171,6 +175,7 @@ function lazyFixture() {
 test('a worker frame builds only the pages near the viewport', async () => {
   const { engine, inputs, host } = lazyFixture();
   try {
+    stampRevisionPreviewKey(inputs.layout, 'preview');
     const overrides = { getInputs: () => inputs };
     const { result, unmount } = renderHook(() =>
       useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
@@ -188,6 +193,7 @@ test('a worker frame builds only the pages near the viewport', async () => {
     });
     await waitFor(() => expect(pages()[last]?.unbuilt).toBeFalsy());
     expect(pages().slice(5, last).every((page) => page.unbuilt)).toBe(true);
+    expect(revisionPreviewKeyOf(result.current.queries)).toBe('preview');
     const span = pages()[5]!.positionSpan!;
     expect(span[0]).toBeLessThanOrEqual(span[1]);
     expect(

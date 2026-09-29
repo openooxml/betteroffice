@@ -830,7 +830,8 @@ export function useRustDisplayList(
                     caret,
                     null,
                     previous,
-                    readSessionVersion(worker.engine)
+                    readSessionVersion(worker.engine),
+                    layoutPreviewKeyRef.current
                   )
                 : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
             snapshotRef.current = nextSnapshot;
