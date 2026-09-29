@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": minor
 ---
 
-Add semantic plugin geometry for proposals, revisions, paragraphs, searches, and text ranges, with page-aware overlay anchors. Publish proposal preview changes and invalidate geometry when the document or preview changes.
+Add `getAnchorGeometry()`, page-aware plugin geometry for proposals, revisions, paragraphs, searches and text ranges. Proposal preview changes are now published and invalidate geometry, keeping overlays positioned as the document or preview changes.

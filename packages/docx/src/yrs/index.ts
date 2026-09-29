@@ -1450,7 +1450,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   // The current resident layout ran only in a resident worker replica.
   let layoutRanInWorker = false;
   let residentFontsRevision = 0;
-  let ownsResidentFontStore = false;
   let docxSource: Uint8Array | null = null;
 
   const invalidateReadCaches = (): void => {
@@ -1602,14 +1601,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
 
     registerFont: (bytes) => {
-      // The Rust font store is module-global, while document sessions are
-      // replaceable. Claim a fresh id space on the first registration for a
-      // new session so a worker replay sees the same dense ids (0..N) after a
-      // document load; otherwise ids would retain gaps from the old session.
-      if (!ownsResidentFontStore) {
-        session.clear_measure_fonts();
-        ownsResidentFontStore = true;
-      }
       const id = session.register_measure_font(bytes);
       residentFonts.push(bytes.slice());
       residentFontsRevision += 1;
@@ -1627,7 +1618,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentFonts.length = 0;
       residentMeasureInputs.clear();
       residentFontsRevision += 1;
-      ownsResidentFontStore = true;
     },
     measureParagraphJson: (input) => {
       const output = session.measure_paragraph_json(input);
