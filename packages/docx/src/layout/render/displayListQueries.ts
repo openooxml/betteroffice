@@ -863,15 +863,20 @@ export function createDisplayListQueries(
 
   // A position on a page whose content is not built yet resolves to the top of
   // that page's content box, which is enough to scroll it into view (and so
-  // have it built). Spans meet where a paragraph or table row continues on the
-  // next page, and the position there belongs to the later page.
+  // have it built). Unbuilt pages whose spans overlap, as a table row split
+  // across them does, are picked in proportion to where the position falls in
+  // their shared range; spans that only touch give it to the later page.
   const unbuiltPageRect = (pos: number): DisplayListRect | null => {
-    let found: DisplayPage | null = null;
-    for (const page of list.pages) {
+    const candidates = list.pages.filter((page) => {
       const span = page.unbuilt ? page.positionSpan : undefined;
-      if (span && pos >= span[0] && pos <= span[1]) found = page;
-    }
-    if (!found) return null;
+      return span !== undefined && pos >= span[0] && pos <= span[1];
+    });
+    if (candidates.length === 0) return null;
+    const low = Math.max(...candidates.map((page) => page.positionSpan![0]));
+    const high = Math.min(...candidates.map((page) => page.positionSpan![1]));
+    const share = high > low ? (pos - low) / (high - low + 1) : 1;
+    const pick = Math.min(candidates.length - 1, Math.floor(share * candidates.length));
+    const found = candidates[pick]!;
     return {
       pageIndex: found.pageIndex,
       x: found.contentBounds?.x ?? 0,

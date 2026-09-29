@@ -252,6 +252,27 @@ describe('createDisplayListQueries unbuilt pages', () => {
     expect(queries.caretRect(40)).toEqual({ pageIndex: 1, x: 10, y: 13, width: 0, height: 0 });
     expect(queries.caretRect(80)).toEqual({ pageIndex: 2, x: 10, y: 14, width: 0, height: 0 });
   });
+
+  test('a position in a row split across unbuilt pages picks the page by its share of the row', () => {
+    const { engine } = fakeEngine();
+    const unbuilt = (pageIndex: number, positionSpan: [number, number]): DisplayPage => ({
+      pageIndex,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      positionSpan,
+    });
+    const queries = createDisplayListQueries(
+      { pages: [page(0), unbuilt(1, [50, 400]), unbuilt(2, [100, 400]), unbuilt(3, [100, 450])] },
+      engine
+    );
+    expect(queries.caretRect(120)?.pageIndex).toBe(1);
+    expect(queries.caretRect(250)?.pageIndex).toBe(2);
+    expect(queries.caretRect(390)?.pageIndex).toBe(3);
+    expect(queries.caretRect(60)?.pageIndex).toBe(1);
+    expect(queries.caretRect(420)?.pageIndex).toBe(3);
+  });
 });
 
 describe('visual lines', () => {

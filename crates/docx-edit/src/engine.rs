@@ -5983,7 +5983,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unbuilt_page_of_a_row_split_across_pages_spans_only_the_blocks_it_shows() {
+    fn an_unbuilt_page_spans_every_position_a_split_row_places_on_it() {
         docx_layout::clear_measure_fonts();
         let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
         let engine = EngineSession::new(206);
@@ -6044,22 +6044,11 @@ mod tests {
                 let Some(position) = primitive["docStart"].as_i64() else {
                     continue;
                 };
-                let holders: Vec<usize> = unbuilt
-                    .iter()
-                    .copied()
-                    .filter(|&candidate| {
-                        lazy.pages[candidate]
-                            .position_span
-                            .is_some_and(|[low, high]| low <= position && position <= high)
-                    })
-                    .collect();
                 assert!(
-                    holders.contains(&index),
+                    lazy.pages[index]
+                        .position_span
+                        .is_some_and(|[low, high]| low <= position && position <= high),
                     "position {position} on page {index}"
-                );
-                assert!(
-                    holders.iter().all(|holder| holder.abs_diff(index) <= 1),
-                    "position {position} on page {index} is also spanned by {holders:?}"
                 );
             }
         }

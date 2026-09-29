@@ -19,25 +19,27 @@ afterAll(async () => {
 function pagedDom() {
   const scroller = document.createElement('div');
   const host = document.createElement('div');
-  const page = document.createElement('div');
-  page.className = 'canvas-page';
-  page.dataset.pageIndex = '6';
   host.className = 'canvas-pages';
-  host.append(page);
+  for (const index of [6, 8]) {
+    const page = document.createElement('div');
+    page.className = 'canvas-page';
+    page.dataset.pageIndex = String(index);
+    page.getBoundingClientRect = () =>
+      ({
+        top: index * 1000 - scroller.scrollTop,
+        bottom: (index + 1) * 1000 - scroller.scrollTop,
+        height: 1000,
+        left: 0,
+        right: 800,
+        width: 800,
+      } as DOMRect);
+    host.append(page);
+  }
   scroller.append(host);
   document.body.append(scroller);
   Object.defineProperty(scroller, 'clientHeight', { value: 400 });
   scroller.getBoundingClientRect = () =>
-    ({ top: 0, bottom: 400, height: 400, left: 0, right: 800, width: 800 }) as DOMRect;
-  page.getBoundingClientRect = () =>
-    ({
-      top: 6000 - scroller.scrollTop,
-      bottom: 7000 - scroller.scrollTop,
-      height: 1000,
-      left: 0,
-      right: 800,
-      width: 800,
-    }) as DOMRect;
+    ({ top: 0, bottom: 400, height: 400, left: 0, right: 800, width: 800 } as DOMRect);
   const scrolls: number[] = [];
   scroller.scrollTo = ((options: ScrollToOptions) => {
     scrolls.push(options.top ?? 0);
@@ -46,12 +48,13 @@ function pagedDom() {
   return { scroller, host, scrolls };
 }
 
-function queries(built: boolean, anchor: DisplayListRect): DisplayListQueries {
-  const page: DisplayPage = { pageIndex: 6, width: 800, height: 1000, primitives: [] };
-  if (!built) Object.assign(page, { unbuilt: true, positionSpan: [400, 600] });
-  const pages = Array.from({ length: 7 }, (_, pageIndex) =>
-    pageIndex === 6 ? page : { pageIndex, width: 800, height: 1000, primitives: [] }
-  );
+function queries(built: boolean | number[], anchor: DisplayListRect): DisplayListQueries {
+  const pages: DisplayPage[] = Array.from({ length: 10 }, (_, pageIndex) => {
+    const page: DisplayPage = { pageIndex, width: 800, height: 1000, primitives: [] };
+    const isBuilt = Array.isArray(built) ? built.includes(pageIndex) : built || pageIndex < 6;
+    if (!isBuilt) Object.assign(page, { unbuilt: true, positionSpan: [400, 900] });
+    return page;
+  });
   return {
     displayList: { pages },
     anchorRect: () => anchor,
@@ -89,4 +92,31 @@ test('a position on an unbuilt page is scrolled to again once the page is built'
 
   await act(async () => rerender({ displayListQueries: queries(true, match) }));
   expect(scrolls).toHaveLength(2);
+});
+
+test('a scroll to an unbuilt page follows its position to the page that holds it', async () => {
+  const { scroller, host, scrolls } = pagedDom();
+  const guess = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
+  const next = { pageIndex: 8, x: 20, y: 20, width: 0, height: 0 };
+  const match = { pageIndex: 8, x: 20, y: 500, width: 0, height: 16 };
+  const { result, rerender } = renderHook(
+    ({ displayListQueries }) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: null },
+        yrsSession: null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => scroller,
+        displayListQueries,
+      }),
+    { initialProps: { displayListQueries: queries([0, 1, 2, 3, 4, 5], guess) } }
+  );
+  await act(async () => result.current.scrollToPositionImpl(700));
+  await act(async () => rerender({ displayListQueries: queries([0, 1, 2, 3, 4, 5, 6, 7], next) }));
+  expect(scrolls).toHaveLength(2);
+  await act(async () => rerender({ displayListQueries: queries(true, match) }));
+  expect(scrolls).toHaveLength(3);
+  const matchTop = 8000 - scroller.scrollTop + 500;
+  expect(matchTop).toBeGreaterThanOrEqual(0);
+  expect(matchTop).toBeLessThanOrEqual(400);
 });

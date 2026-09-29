@@ -40,6 +40,8 @@ export interface UsePagedScrollApiReturn {
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
 }
 
+const REFINE_WINDOW_MS = 3000;
+
 function isUnbuiltPage(queries: DisplayListQueries, pageIndex: number): boolean {
   return queries.displayList?.pages[pageIndex]?.unbuilt === true;
 }
@@ -57,9 +59,12 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     requestCanvasParagraphFlash,
   } = opts;
   const scrollAbortRef = useRef<AbortController | null>(null);
-  // A position on a page that is not built yet scrolls to that page's content
-  // top; once the page is built, the scroll moves to the position itself.
-  const pendingRefineRef = useRef<{ position: number; pageIndex: number } | null>(null);
+  // A position on a page that is not built yet scrolls to a best guess. As
+  // pages get built, the scroll follows the position until it lands on a built
+  // page or the attempt runs out.
+  const pendingRefineRef = useRef<{ position: number; pageIndex: number; until: number } | null>(
+    null
+  );
 
   useEffect(
     () => () => {
@@ -93,7 +98,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   const scrollAnchorIntoView = useCallback(
     (queries: DisplayListQueries, rect: DisplayListRect, position: number, smooth: boolean) => {
       pendingRefineRef.current = isUnbuiltPage(queries, rect.pageIndex)
-        ? { position, pageIndex: rect.pageIndex }
+        ? { position, pageIndex: rect.pageIndex, until: performance.now() + REFINE_WINDOW_MS }
         : null;
       return scrollRectIntoView(rect, smooth);
     },
@@ -102,21 +107,21 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
 
   useEffect(() => {
     const pending = pendingRefineRef.current;
-    if (!pending || !displayListQueries || isUnbuiltPage(displayListQueries, pending.pageIndex)) {
+    if (!pending || !displayListQueries) return;
+    const rect =
+      performance.now() <= pending.until ? displayListQueries.anchorRect(pending.position) : null;
+    if (!rect) {
+      pendingRefineRef.current = null;
       return;
     }
-    pendingRefineRef.current = null;
-    const host = canvasHostRef?.current ?? pagesContainerRef.current;
-    const pageRect = host
-      ? resolveDisplayPageClientRect(host, displayListQueries, pending.pageIndex)
-      : null;
-    if (!host || !pageRect) return;
-    const scroller = getScrollContainer() ?? findVerticalScrollParentOrRoot(host);
-    const viewport = scroller.getBoundingClientRect();
-    if (pageRect.bottom < viewport.top || pageRect.top > viewport.bottom) return;
-    const rect = displayListQueries.anchorRect(pending.position);
-    if (rect) scrollRectIntoView(rect, false);
-  }, [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef, scrollRectIntoView]);
+    if (isUnbuiltPage(displayListQueries, rect.pageIndex)) {
+      if (rect.pageIndex === pending.pageIndex) return;
+      pending.pageIndex = rect.pageIndex;
+    } else {
+      pendingRefineRef.current = null;
+    }
+    scrollRectIntoView(rect, false);
+  }, [displayListQueries, scrollRectIntoView]);
 
   const scrollToPositionImpl = useCallback(
     (pmPos: number, forParaIdScroll = false) => {

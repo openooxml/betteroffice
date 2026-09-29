@@ -10707,121 +10707,13 @@ fn page_position_span(
                 {
                     let end = fragment.row_end.min(table.rows.len());
                     let start = fragment.row_start.min(end);
-                    match &measured.measure {
-                        MeasureIn::Table(extent)
-                            if fragment.clip_top.is_some() || fragment.clip_bottom.is_some() =>
-                        {
-                            split_table_rows(table, extent, fragment, start..end, &mut include);
-                        }
-                        _ => rows(&table.rows[start..end], &mut include),
-                    }
+                    rows(&table.rows[start..end], &mut include);
                 }
             }
             FragmentIn::Unsupported => {}
         }
     }
     span
-}
-
-/// Positions of a table fragment that starts or ends inside a row: a cut row
-/// adds only the cell blocks whose share of the cell's height reaches this
-/// page, with a line of slack so neighbouring pages overlap instead of gapping.
-fn split_table_rows(
-    table: &TableBlockIn,
-    extent: &TableExtentIn,
-    fragment: &TableFragmentIn,
-    rows: std::ops::Range<usize>,
-    include: &mut dyn FnMut(Option<i64>, Option<i64>),
-) {
-    const SLACK: f64 = 24.0;
-    fn whole(block: &BlockIn, include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
-        match block {
-            BlockIn::Paragraph(paragraph) => include(paragraph.pm_start, paragraph.pm_end),
-            BlockIn::Image(image) => include(image.pm_start, image.pm_end),
-            BlockIn::Table(table) => {
-                for row in &table.rows {
-                    for cell in &row.cells {
-                        for nested in &cell.blocks {
-                            whole(nested, include);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    fn measured_height(measure: &MeasureIn) -> f64 {
-        match measure {
-            MeasureIn::Paragraph(paragraph) => paragraph.total_height,
-            MeasureIn::Table(table) => table.total_height,
-            MeasureIn::Image(image) => image.height,
-            MeasureIn::TextBox(text_box) => text_box.height,
-            MeasureIn::Shape(shape) | MeasureIn::Chart(shape) => shape.height,
-            _ => 0.0,
-        }
-    }
-    let mut row_tops = vec![0.0];
-    for row in &extent.rows {
-        row_tops.push(row_tops.last().copied().unwrap_or(0.0) + row.height);
-    }
-    let top_of = |row: usize| row_tops.get(row).copied().unwrap_or(0.0);
-    let header_height = if fragment.carried_from_prev == Some(true) {
-        (0..fragment
-            .header_row_count
-            .unwrap_or(0)
-            .min(extent.rows.len()))
-            .map(|row| extent.rows[row].height)
-            .sum()
-    } else {
-        0.0
-    };
-    let window_top = top_of(rows.start) + fragment.clip_top.unwrap_or(0.0);
-    let window_bottom = if fragment.clip_bottom.is_some() {
-        window_top + (fragment.height - header_height).max(0.0)
-    } else {
-        top_of(rows.end)
-    };
-    for index in rows {
-        let (row_top, row_bottom) = (top_of(index), top_of(index + 1));
-        let row = &table.rows[index];
-        let measured_row = extent.rows.get(index);
-        let cut = row_top < window_top - SLACK || row_bottom > window_bottom + SLACK;
-        let Some(measured_row) =
-            measured_row.filter(|measured| cut && measured.cells.len() == row.cells.len())
-        else {
-            for cell in &row.cells {
-                for block in &cell.blocks {
-                    whole(block, include);
-                }
-            }
-            continue;
-        };
-        let (visible_top, visible_bottom) = (
-            window_top - row_top - SLACK,
-            window_bottom - row_top + SLACK,
-        );
-        for (cell, measured_cell) in row.cells.iter().zip(&measured_row.cells) {
-            let heights: Vec<f64> = if measured_cell.blocks.len() == cell.blocks.len() {
-                measured_cell.blocks.iter().map(measured_height).collect()
-            } else {
-                vec![1.0; cell.blocks.len()]
-            };
-            let total: f64 = heights.iter().sum();
-            let scale = if total > 0.0 {
-                measured_cell.height.max(total) / total
-            } else {
-                0.0
-            };
-            let mut y = 0.0;
-            for (block, height) in cell.blocks.iter().zip(heights) {
-                let bottom = y + height * scale;
-                if bottom >= visible_top && y <= visible_bottom {
-                    whole(block, include);
-                }
-                y = bottom;
-            }
-        }
-    }
 }
 
 fn unbuilt_page(
