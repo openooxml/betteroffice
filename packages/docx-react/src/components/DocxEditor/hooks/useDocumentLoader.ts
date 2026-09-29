@@ -166,12 +166,17 @@ export function useDocumentLoader({
   const failHostDocument = useCallback(
     (error: Error, generation: number) => {
       if (!loadGeneration.complete(generation)) return;
+      // A preview's first pages are not the document the load failed to open.
+      if (previewDocumentRef.current) {
+        previewDocumentRef.current = null;
+        history.reset(null);
+      }
       setYrsSeedDocument(null);
       setYrsSeedBytes(null);
       setLoadingState({ isLoading: false, parseError: error.message });
       onError?.(error);
     },
-    [loadGeneration, onError, setLoadingState]
+    [loadGeneration, history, onError, setLoadingState]
   );
 
   const isCurrentLoad = useCallback(

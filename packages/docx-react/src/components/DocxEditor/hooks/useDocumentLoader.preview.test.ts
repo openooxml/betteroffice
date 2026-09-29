@@ -83,3 +83,44 @@ test('comments load from the full document, not from its preview', async () => {
   previewSession.destroy();
   fullSession.destroy();
 });
+
+test('a load whose full open fails keeps nothing of its preview', async () => {
+  const previewSession = await createYrsSession();
+  const preview = previewSession.openDocxPreview(COMMENTED, 1)!;
+  const errors: Error[] = [];
+  const { result, unmount } = renderHook(() => {
+    const history = useHistory<Document | null>(null);
+    const loader = useDocumentLoader({
+      documentBuffer: null,
+      initialDocument: null,
+      externalContent: false,
+      history,
+      pagedEditorRef: { current: null },
+      setLoadingState: () => {},
+      setComments: () => {},
+      setShowCommentsSidebar: () => {},
+      onError: (error) => errors.push(error),
+      resetForNewDocument: () => {},
+      commentsLoadedRef: { current: false },
+      commentIdAllocator: createCommentIdAllocator(),
+      setDocumentFonts: () => {},
+    });
+    return { history, loader };
+  });
+  await act(async () => {
+    void result.current.loader.loadBuffer(COMMENTED.slice().buffer);
+  });
+  const generation = result.current.loader.yrsSeedGeneration;
+  await act(async () => {
+    result.current.loader.acceptHostDocument(preview, generation, { preview: true });
+  });
+  expect(result.current.history.state).toBe(preview.document);
+
+  await act(async () => {
+    result.current.loader.failHostDocument(new Error('full open failed'), generation);
+  });
+  expect(result.current.history.state).toBeNull();
+  expect(errors.map((error) => error.message)).toEqual(['full open failed']);
+  unmount();
+  previewSession.destroy();
+});
