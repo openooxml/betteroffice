@@ -381,6 +381,28 @@ pub fn has_floating_zones(
     .is_empty())
 }
 
+/// `(anchors a floating zone, anchors a margin-relative one)` for `blocks`.
+/// Margin-relative zones are shared across the flow; paragraph-relative ones
+/// apply from their anchor on.
+pub fn floating_zone_kinds(
+    blocks: &[LayoutBlock],
+    content_width: f64,
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+) -> Result<(bool, bool), String> {
+    let zones = extract_floating_zones(
+        blocks,
+        content_width,
+        config,
+        page_geometry,
+        &BTreeMap::new(),
+    )?;
+    Ok((
+        !zones.is_empty(),
+        zones.iter().any(|zone| zone.margin_relative),
+    ))
+}
+
 pub fn measure_blocks_with_floats(
     blocks: &mut [LayoutBlock],
     widths: &[f64],
