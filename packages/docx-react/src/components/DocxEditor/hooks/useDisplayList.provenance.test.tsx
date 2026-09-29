@@ -16,6 +16,7 @@ import {
   sourceVersionOf,
   stampRevisionPreviewKey,
   stampSourceVersion,
+  UNKNOWN_REVISION_PREVIEW_KEY,
 } from '../internals/layoutProvenance';
 import {
   useRustDisplayList,
@@ -35,10 +36,16 @@ const FONT = resolve(
   import.meta.dir,
   '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 );
-const layoutRequest = (renderEnv: YrsRenderEnv) =>
+const layoutRequest = (renderEnv: YrsRenderEnv, header = false) =>
   JSON.stringify({
     bodyStory: 'body',
-    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    regions: {
+      sections: [
+        header
+          ? { sectionId: 'main', headerFooterRefs: { headerDefault: 'rId1' } }
+          : { sectionId: 'main', properties: {} },
+      ],
+    },
     measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } },
     renderEnv,
   });
@@ -72,7 +79,7 @@ function Harness({
   overrides: RustDisplayListHookOverrides;
   display: { current: UseRustDisplayListResult | null };
   requestLayout: () => void;
-  previewKeys: [string | null, string][];
+  previewKeys: [string | null, string, string][];
 }) {
   display.current = useRustDisplayList(
     layout,
@@ -85,6 +92,7 @@ function Harness({
   previewKeys.push([
     revisionPreviewKeyOf(display.current.queries),
     paintedText(display.current.displayList),
+    headerText(display.current.displayList),
   ]);
   return null;
 }
@@ -99,13 +107,17 @@ async function until(done: () => boolean): Promise<void> {
   expect(done()).toBe(true);
 }
 
-async function setup(renderEnv: { current: YrsRenderEnv } = { current: {} }) {
+async function setup(renderEnv: { current: YrsRenderEnv } = { current: {} }, header = false) {
   const session = await createYrsSession();
   sessions.push(session);
   const { paraId } = session.createStory('body', 'Seed');
+  if (header) session.createStory('hf:rId1', 'Header');
   session.registerFont(new Uint8Array(readFileSync(FONT)));
   const layOut = () => {
-    const inputs = JSON.parse(session.layoutDocumentWithRegionsJson(layoutRequest(renderEnv.current)));
+    const inputs = JSON.parse(
+      session.layoutDocumentWithRegionsJson(layoutRequest(renderEnv.current, header))
+    );
+    inputs.layoutRevision = session.residentWorkerProbe()!.layoutRevision;
     stampSourceVersion(inputs.layout, session.version());
     stampRevisionPreviewKey(inputs.layout, revisionPreviewKey(renderEnv.current.revisionPreview));
     return inputs as { layout: Layout };
@@ -121,7 +133,7 @@ async function setup(renderEnv: { current: YrsRenderEnv } = { current: {} }) {
   } as unknown as typeof Worker;
   const display: { current: UseRustDisplayListResult | null } = { current: null };
   const layoutRequests: number[] = [];
-  const previewKeys: [string | null, string][] = [];
+  const previewKeys: [string | null, string, string][] = [];
   const overrides: RustDisplayListHookOverrides = { getInputs: () => inputs as never };
   const harness = () => (
     <Harness
@@ -212,18 +224,32 @@ function paintedText(displayList: DisplayList | null): string {
   return segments.map(([text, kind]) => (kind ? `${text}[${kind}]` : text)).join('');
 }
 
-/** "Seed" with a suggested " more", shown through a preview the test switches by relayout. */
-async function previewSetup() {
+/** Header text, each tracked stretch followed by its revision kind. */
+function headerText(displayList: DisplayList | null): string {
+  const header = displayList?.pages[0]?.header;
+  return header ? paintedText({ pages: [header] } as unknown as DisplayList) : '';
+}
+
+/**
+ * "Seed" with a suggested " more", shown through a preview the test switches by relayout. With
+ * `header`, the suggestion is in a "Header" instead.
+ */
+async function previewSetup(header = false) {
   const renderEnv: { current: YrsRenderEnv } = { current: {} };
-  const harness = await setup(renderEnv);
+  const harness = await setup(renderEnv, header);
   const { session, paraId, display, relayout } = harness;
+  const story = header ? 'hf:rId1' : 'body';
   const applied = session.applyEdits({
     expectVersion: session.version(),
     history: 'none',
     steps: [
       {
         op: 'insertText',
-        target: { kind: 'paragraph', story: 'body', paraId },
+        target: {
+          kind: 'paragraph',
+          story,
+          paraId: header ? session.paragraphs(story)[0].paraId : paraId,
+        },
         at: 'end',
         text: ' more',
         suggest: { author: 'Ann', date: '2026-09-29T12:00:00Z' },
@@ -242,10 +268,13 @@ async function previewSetup() {
     revisionPreviewKeyOf(display.current!.queries),
     paintedText(display.current!.displayList),
   ];
+  const shownHeader = () => headerText(display.current!.displayList);
   await show('accepted');
   await until(() => shown()[0] === key('accepted'));
-  expect(shown()).toEqual([key('accepted'), 'Seed more']);
-  return { ...harness, revision, key, decide: show, shown };
+  expect([...shown(), shownHeader()]).toEqual(
+    header ? [key('accepted'), 'Seed', 'Header more'] : [key('accepted'), 'Seed more', '']
+  );
+  return { ...harness, revision, key, decide: show, shown, shownHeader };
 }
 
 test('a frame carries the revision preview of its layout, typed frames included', async () => {
@@ -364,4 +393,96 @@ test('a layout that lands after a newer worker layout does not relabel what the 
     if (shownKey === key('accepted')) expect(text).toContain('more');
     if (shownKey === key('rejected')) expect(text).not.toContain('more');
   }
+});
+
+test('a layout superseded by a worker layout of another preview sends the worker none of its headers', async () => {
+  const { session, display, worker, previewKeys, revision, key, shown, shownHeader, layOut, show } =
+    await previewSetup(true);
+  const older = layOut();
+  worker().hold();
+  let laidOut!: ReturnType<UseRustDisplayListResult['layoutInWorker']>;
+  act(() => {
+    laidOut = display.current!.layoutInWorker(
+      session,
+      layoutRequest({ revisionPreview: { [revision]: 'rejected' } }, true)
+    );
+  });
+  await act(async () => show(older));
+  const released = previewKeys.length;
+  await act(async () => {
+    worker().release();
+    await laidOut;
+  });
+  await act(async () => {
+    await display.current!.applyInput('!');
+  });
+  await until(() => shown()[1] === 'Seed!');
+  expect([...shown(), shownHeader()]).toEqual([key('rejected'), 'Seed!', 'Header']);
+  for (const [shownKey, , header] of previewKeys.slice(released)) {
+    if (shownKey === key('rejected')) expect(header).toBe('Header');
+  }
+});
+
+test('a host frame of pagination a newer layout replaced claims no preview', async () => {
+  const { session, display, worker, revision, key, shown, layOut, show } = await previewSetup();
+  worker().onerror?.({ message: 'worker crashed' } as ErrorEvent);
+  await act(async () => show(layOut()));
+  await until(() => !display.current!.workerSurfacesActive && shown()[0] === key('accepted'));
+  expect(shown()).toEqual([key('accepted'), 'Seed more']);
+  const older = layOut();
+  session.layoutDocumentWithRegionsJson(
+    layoutRequest({ revisionPreview: { [revision]: 'rejected' } })
+  );
+  await act(async () => show(older));
+  await until(() => shown()[1] === 'Seed');
+  expect(shown()).toEqual([UNKNOWN_REVISION_PREVIEW_KEY, 'Seed']);
+});
+
+test('input replayed on the host after a worker failure claims no preview', async () => {
+  const { session, display, worker, revision, shown } = await previewSetup();
+  session.buildDisplayListFrame('{}', 0);
+  await act(async () => {
+    await display.current!.layoutInWorker(
+      session,
+      layoutRequest({ revisionPreview: { [revision]: 'rejected' } })
+    );
+  });
+  worker().hold();
+  let typed!: Promise<unknown>;
+  act(() => {
+    typed = display.current!.applyInput('!');
+  });
+  await until(() => worker().requests.includes('applyInput'));
+  await act(async () => {
+    worker().onerror?.({ message: 'worker crashed' } as ErrorEvent);
+    await typed;
+  });
+  expect(shown()).toEqual([UNKNOWN_REVISION_PREVIEW_KEY, 'Seed more!']);
+});
+
+test('a worker frame of a forgotten layout revision claims no preview', async () => {
+  const { session, display, worker, revision, shown } = await previewSetup();
+  worker().hold();
+  let typed!: Promise<unknown>;
+  act(() => {
+    typed = display.current!.applyInput('!');
+  });
+  await until(() => worker().requests.includes('applyInput'));
+  const laidOut: ReturnType<UseRustDisplayListResult['layoutInWorker']>[] = [];
+  act(() => {
+    for (let pass = 0; pass < 9; pass += 1) {
+      laidOut.push(
+        display.current!.layoutInWorker(
+          session,
+          layoutRequest({ revisionPreview: { [revision]: 'accepted' } })
+        )
+      );
+    }
+  });
+  await act(async () => {
+    worker().release();
+    await typed;
+    await Promise.all(laidOut);
+  });
+  expect(shown()).toEqual([UNKNOWN_REVISION_PREVIEW_KEY, 'Seed more!']);
 });

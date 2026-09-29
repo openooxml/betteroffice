@@ -20,6 +20,7 @@ import {
   revisionPreviewKey,
   stampRevisionPreviewKey,
   stampSourceVersion,
+  UNKNOWN_REVISION_PREVIEW_KEY,
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { createPluginGeometry, pluginLayout, toOverlayRect } from './geometry';
 import * as proposalPreview from './proposalPreview';
@@ -642,6 +643,10 @@ describe('semantic anchor geometry', () => {
     expect(proposalPreview.renderedPreviewKey(source)).toBe(key);
     anchored(geometry.getAnchorGeometry(target));
     expect(pluginLayout(source, 'v1', 1, { key, previewVersion: 0 })).not.toBeNull();
+
+    stampRevisionPreviewKey(source, UNKNOWN_REVISION_PREVIEW_KEY);
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+    stampRevisionPreviewKey(source, key);
 
     setSnapshot({ proposals: [{ ...accepted, state: 'proposed' }] }, false);
     refused(geometry.getAnchorGeometry(target), 'layout-unavailable');

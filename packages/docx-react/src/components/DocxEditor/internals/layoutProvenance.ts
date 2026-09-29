@@ -22,12 +22,15 @@ export function revisionPreviewKey(preview?: YrsRenderEnv['revisionPreview']): s
   return entries.length === 0 ? '' : JSON.stringify(entries);
 }
 
+/** Stamped on a frame whose revision preview is not known; it matches no preview. */
+export const UNKNOWN_REVISION_PREVIEW_KEY = '?';
+
 /** Records the {@link revisionPreviewKey} a layout or query facade was rendered with. */
 export function stampRevisionPreviewKey(target: object, key: string): void {
   revisionPreviewKeys.set(target, key);
 }
 
-/** The {@link revisionPreviewKey} `target` was rendered with, or null when unknown. */
+/** The {@link revisionPreviewKey} `target` was rendered with, or null when unstamped. */
 export function revisionPreviewKeyOf(target: object | null | undefined): string | null {
   return target ? (revisionPreviewKeys.get(target) ?? null) : null;
 }
