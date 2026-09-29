@@ -14,7 +14,9 @@ use docx_layout::display_list::{DisplayList, DisplayPage, DocAttrs, Primitive};
 use serde_json::Value;
 
 mod typed_page;
-use typed_page::{encode_page, hash_page};
+#[cfg(not(target_arch = "wasm32"))]
+use typed_page::collect_page_strings;
+use typed_page::{Interner, encode_page, encode_page_hashed, hash_page};
 
 pub const FRAME_DELTA_VERSION: u16 = 1;
 pub const FRAME_HEADER_LEN: usize = 80;
@@ -94,19 +96,39 @@ struct PreparedPage<'a> {
     page: &'a DisplayPage,
     is_new: bool,
     moved: bool,
+    /// The page is emitted speculatively and hashed in the same pass; the
+    /// fused fingerprints are backpatched into the snapshot.
+    fused: bool,
 }
 
+/// What a prepared page contributes to the delta once its fingerprints are
+/// known.
 #[derive(Debug)]
-enum PageOp<'a, 'b> {
-    Upsert(&'a PreparedPage<'b>),
-    Remove(&'a FramePageSnapshot),
-    Move(&'a PreparedPage<'b>),
-    PatchPositions(&'a PreparedPage<'b>, Vec<PositionPatch>),
-    ShiftPositions(
-        &'a PreparedPage<'b>,
-        Vec<PositionShiftRun>,
-        Vec<NoteAnchorSnapshot>,
-    ),
+enum PendingOp {
+    Upsert,
+    Skip,
+    Move,
+    PatchPositions(Vec<PositionPatch>),
+    ShiftPositions(Vec<PositionShiftRun>, Vec<NoteAnchorSnapshot>),
+}
+
+/// A fused page's speculative `[primitive ids][payload]` block, either still
+/// in the data buffer or held separately by the parallel emit.
+enum Speculated {
+    Inline {
+        mark: usize,
+        primitive_id_offset: usize,
+        payload_offset: usize,
+    },
+    Buffered(Vec<u8>),
+}
+
+/// A fused page emitted off-thread: its fingerprints plus the
+/// `[primitive ids][payload]` block as it will appear in the data section.
+struct FusedEmit {
+    fingerprint: u64,
+    visual_fingerprint: u64,
+    payload: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -193,79 +215,132 @@ fn encode_prepared(
     previous: &[FramePageSnapshot],
     epochs: FrameEpochs,
     full: bool,
-    prepared: Vec<PreparedPage<'_>>,
+    mut prepared: Vec<PreparedPage<'_>>,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     let next_ids: HashSet<u64> = prepared.iter().map(|page| page.snapshot.page_id).collect();
     let previous_by_id: HashMap<u64, &FramePageSnapshot> =
         previous.iter().map(|old| (old.page_id, old)).collect();
 
-    let mut ops = Vec::new();
-    if full {
-        ops.extend(prepared.iter().map(PageOp::Upsert));
-    } else {
-        for old in previous {
-            if !next_ids.contains(&old.page_id) {
-                ops.push(PageOp::Remove(old));
-            }
-        }
-        for page in &prepared {
-            let old = previous_by_id.get(&page.snapshot.page_id).copied();
-            if page.is_new || old.is_none() {
-                ops.push(PageOp::Upsert(page));
-            } else if let Some(old) = old
-                && old.fingerprint != page.snapshot.fingerprint
-            {
-                if old.visual_fingerprint == page.snapshot.visual_fingerprint
-                    && old.primitive_ids == page.snapshot.primitive_ids
-                {
-                    let patches = position_patches(old, &page.snapshot);
-                    let anchors =
-                        changed_note_anchors(&old.note_anchors, &page.snapshot.note_anchors);
-                    let runs = if patches.is_empty() {
-                        Some(Vec::new())
-                    } else {
-                        position_shift_runs(&old.positions, &page.snapshot.positions)
-                    };
-                    match (anchors, runs) {
-                        (Some(anchors), Some(runs)) if !anchors.is_empty() || !runs.is_empty() => {
-                            ops.push(PageOp::ShiftPositions(page, runs, anchors));
-                        }
-                        (Some(anchors), None) if anchors.is_empty() => {
-                            ops.push(PageOp::PatchPositions(page, patches));
-                        }
-                        _ => ops.push(PageOp::Upsert(page)),
-                    }
-                } else {
-                    ops.push(PageOp::Upsert(page));
-                }
-            } else if page.moved {
-                ops.push(PageOp::Move(page));
-            }
-        }
-    }
-
-    let op_count = checked_u32(ops.len(), "page operation count")?;
-    let page_count = checked_u32(list.pages.len(), "page count")?;
-    let ops_bytes = ops
-        .len()
-        .checked_mul(PAGE_OP_LEN)
-        .ok_or_else(|| "FrameDelta operation table overflow".to_owned())?;
-    let strings_offset = FRAME_HEADER_LEN
-        .checked_add(ops_bytes)
-        .ok_or_else(|| "FrameDelta header overflow".to_owned())?;
-
     // Page payloads intern their strings while they are written, so the data
     // section is built first and placed after the finished string table.
     // Offsets recorded here are relative to the data section, whose start is
     // 8-byte aligned, so relative alignment is absolute alignment.
-    let mut records = vec![0_u8; ops_bytes];
+    let mut records = Vec::new();
     let mut data_offsets = Vec::new();
     let mut strings = StringTable::default();
     let mut out = Vec::new();
-    for (op_index, op) in ops.iter().enumerate() {
-        let record = op_index * PAGE_OP_LEN;
-        match op {
-            PageOp::Upsert(page) => {
+
+    // On hosts with threads, rebuilt pages emit in parallel: a collect pass
+    // per chunk builds the string table, then the fused emit+hash runs
+    // against it read-only. Few fused pages stay sequential — the wasm build
+    // always does.
+    let mut parallel_emits: Vec<Option<FusedEmit>> = Vec::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let fused: Vec<usize> = prepared
+            .iter()
+            .enumerate()
+            .filter(|(_, page)| page.fused)
+            .map(|(index, _)| index)
+            .collect();
+        if fused.len() >= 8 {
+            parallel_emits = emit_fused_parallel(&prepared, &fused, &mut strings)?;
+        }
+    }
+
+    let open_record = |records: &mut Vec<u8>| -> usize {
+        let record = records.len();
+        records.resize(record + PAGE_OP_LEN, 0);
+        record
+    };
+
+    if !full {
+        for old in previous {
+            if !next_ids.contains(&old.page_id) {
+                let record = open_record(&mut records);
+                records[record] = PAGE_OP_REMOVE;
+                patch_u32(&mut records, record + 4, old.page_index);
+                patch_u64(&mut records, record + 8, old.page_id);
+            }
+        }
+    }
+
+    for (index, page) in prepared.iter_mut().enumerate() {
+        let old = previous_by_id.get(&page.snapshot.page_id).copied();
+        // Fused pages emit speculatively before the op is chosen: the emit
+        // pass computes the fingerprints the choice depends on, and the
+        // bytes are truncated back out when the page ends up compacted.
+        let mut speculated = None;
+        if page.fused {
+            if let Some(buffered) = parallel_emits
+                .get_mut(index)
+                .and_then(|emitted| emitted.take())
+            {
+                page.snapshot.fingerprint = buffered.fingerprint;
+                page.snapshot.visual_fingerprint = buffered.visual_fingerprint;
+                speculated = Some(Speculated::Buffered(buffered.payload));
+            } else {
+                let mark = out.len();
+                align(&mut out, 8);
+                let primitive_id_offset = out.len();
+                for id in page.snapshot.primitive_ids.iter() {
+                    write_u64(&mut out, *id);
+                }
+                let payload_offset = out.len();
+                let hashes = encode_page_hashed(page.page, Interner::Mut(&mut strings), &mut out)?;
+                page.snapshot.fingerprint = hashes.fingerprint;
+                page.snapshot.visual_fingerprint = hashes.visual_fingerprint;
+                speculated = Some(Speculated::Inline {
+                    mark,
+                    primitive_id_offset,
+                    payload_offset,
+                });
+            }
+        }
+
+        let pending = if full || page.is_new || old.is_none() {
+            PendingOp::Upsert
+        } else if let Some(old) = old
+            && old.fingerprint != page.snapshot.fingerprint
+        {
+            if old.visual_fingerprint == page.snapshot.visual_fingerprint
+                && old.primitive_ids == page.snapshot.primitive_ids
+            {
+                let patches = position_patches(old, &page.snapshot);
+                let anchors = changed_note_anchors(&old.note_anchors, &page.snapshot.note_anchors);
+                let runs = if patches.is_empty() {
+                    Some(Vec::new())
+                } else {
+                    position_shift_runs(&old.positions, &page.snapshot.positions)
+                };
+                match (anchors, runs) {
+                    (Some(anchors), Some(runs)) if !anchors.is_empty() || !runs.is_empty() => {
+                        PendingOp::ShiftPositions(runs, anchors)
+                    }
+                    (Some(anchors), None) if anchors.is_empty() => {
+                        PendingOp::PatchPositions(patches)
+                    }
+                    _ => PendingOp::Upsert,
+                }
+            } else {
+                PendingOp::Upsert
+            }
+        } else if page.moved {
+            PendingOp::Move
+        } else {
+            PendingOp::Skip
+        };
+
+        if !matches!(pending, PendingOp::Upsert) {
+            if let Some(Speculated::Inline { mark, .. }) = speculated {
+                out.truncate(mark);
+            }
+            speculated = None;
+        }
+
+        match pending {
+            PendingOp::Upsert => {
+                let record = open_record(&mut records);
                 records[record] = PAGE_OP_UPSERT;
                 patch_u32(&mut records, record + 4, page.snapshot.page_index);
                 patch_u64(&mut records, record + 8, page.snapshot.page_id);
@@ -276,16 +351,37 @@ fn encode_prepared(
                     checked_u32(page.snapshot.primitive_ids.len(), "primitive id count")?,
                 );
 
-                align(&mut out, 8);
-                let primitive_id_offset = checked_u32(out.len(), "primitive id offset")?;
+                let (primitive_id_offset, payload_offset) = match speculated.take() {
+                    Some(Speculated::Inline {
+                        primitive_id_offset,
+                        payload_offset,
+                        ..
+                    }) => (primitive_id_offset, payload_offset),
+                    Some(Speculated::Buffered(buffered)) => {
+                        align(&mut out, 8);
+                        let primitive_id_offset = out.len();
+                        let payload_offset =
+                            primitive_id_offset + page.snapshot.primitive_ids.len() * 8;
+                        out.extend_from_slice(&buffered);
+                        (primitive_id_offset, payload_offset)
+                    }
+                    None => {
+                        align(&mut out, 8);
+                        let primitive_id_offset = out.len();
+                        for id in page.snapshot.primitive_ids.iter() {
+                            write_u64(&mut out, *id);
+                        }
+                        let payload_offset = out.len();
+                        encode_page(page.page, Interner::Mut(&mut strings), &mut out)?;
+                        (primitive_id_offset, payload_offset)
+                    }
+                };
                 data_offsets.push(record + 28);
-                patch_u32(&mut records, record + 28, primitive_id_offset);
-                for id in page.snapshot.primitive_ids.iter() {
-                    write_u64(&mut out, *id);
-                }
-
-                let payload_offset = out.len();
-                encode_page(page.page, &mut strings, &mut out)?;
+                patch_u32(
+                    &mut records,
+                    record + 28,
+                    checked_u32(primitive_id_offset, "primitive id offset")?,
+                );
                 let payload_len = out.len() - payload_offset;
                 data_offsets.push(record + 32);
                 patch_u32(
@@ -299,18 +395,16 @@ fn encode_prepared(
                     checked_u32(payload_len, "page payload length")?,
                 );
             }
-            PageOp::Remove(page) => {
-                records[record] = PAGE_OP_REMOVE;
-                patch_u32(&mut records, record + 4, page.page_index);
-                patch_u64(&mut records, record + 8, page.page_id);
-            }
-            PageOp::Move(page) => {
+            PendingOp::Skip => {}
+            PendingOp::Move => {
+                let record = open_record(&mut records);
                 records[record] = PAGE_OP_MOVE;
                 patch_u32(&mut records, record + 4, page.snapshot.page_index);
                 patch_u64(&mut records, record + 8, page.snapshot.page_id);
                 patch_u64(&mut records, record + 16, page.snapshot.fingerprint);
             }
-            PageOp::PatchPositions(page, patches) => {
+            PendingOp::PatchPositions(patches) => {
+                let record = open_record(&mut records);
                 records[record] = PAGE_OP_PATCH_POSITIONS;
                 patch_u32(&mut records, record + 4, page.snapshot.page_index);
                 patch_u64(&mut records, record + 8, page.snapshot.page_id);
@@ -327,7 +421,7 @@ fn encode_prepared(
                     checked_u32(patches.len(), "position patch count")?,
                 );
                 write_u32(&mut out, 0);
-                for patch in patches {
+                for patch in &patches {
                     write_u64(&mut out, patch.primitive_id);
                     out.push(patch.changed_mask);
                     out.push(patch.present_mask);
@@ -355,7 +449,8 @@ fn encode_prepared(
                     checked_u32(payload_length, "position patch payload length")?,
                 );
             }
-            PageOp::ShiftPositions(page, runs, anchors) => {
+            PendingOp::ShiftPositions(runs, anchors) => {
+                let record = open_record(&mut records);
                 records[record] = PAGE_OP_SHIFT_POSITIONS;
                 patch_u32(&mut records, record + 4, page.snapshot.page_index);
                 patch_u64(&mut records, record + 8, page.snapshot.page_id);
@@ -377,7 +472,7 @@ fn encode_prepared(
                     checked_u32(runs.len(), "position shift run count")?,
                 );
                 write_u32(&mut out, 0);
-                for run in runs {
+                for run in &runs {
                     write_u32(&mut out, run.start);
                     write_u32(&mut out, run.count);
                     out.push(run.changed_mask);
@@ -387,7 +482,7 @@ fn encode_prepared(
                 if !anchors.is_empty() {
                     write_u32(&mut out, checked_u32(anchors.len(), "note anchor count")?);
                     write_u32(&mut out, 0);
-                    for anchor in anchors {
+                    for anchor in &anchors {
                         write_u32(&mut out, anchor.area);
                         write_u32(&mut out, anchor.note);
                         write_i64(&mut out, anchor.start.unwrap_or(i64::MIN));
@@ -409,6 +504,12 @@ fn encode_prepared(
             }
         }
     }
+
+    let op_count = checked_u32(records.len() / PAGE_OP_LEN, "page operation count")?;
+    let page_count = checked_u32(list.pages.len(), "page count")?;
+    let strings_offset = FRAME_HEADER_LEN
+        .checked_add(records.len())
+        .ok_or_else(|| "FrameDelta header overflow".to_owned())?;
 
     let mut prefix = vec![0; FRAME_HEADER_LEN];
     prefix.extend_from_slice(&records);
@@ -466,9 +567,88 @@ fn encode_prepared(
     );
     patch_u32(&mut out, 72, list.contract_version.unwrap_or_default());
 
-    drop(ops);
     let next_snapshots = prepared.into_iter().map(|page| page.snapshot).collect();
     Ok((out, next_snapshots))
+}
+
+/// Emit fused pages on worker threads. A collect pass per chunk fills local
+/// string tables whose merge reproduces the sequential first-use order, so
+/// the shared read-only table makes the parallel emit byte-identical to the
+/// sequential one.
+#[cfg(not(target_arch = "wasm32"))]
+fn emit_fused_parallel(
+    prepared: &[PreparedPage<'_>],
+    fused: &[usize],
+    strings: &mut StringTable,
+) -> Result<Vec<Option<FusedEmit>>, String> {
+    let jobs: Vec<(&DisplayPage, &[u64])> = fused
+        .iter()
+        .map(|&index| {
+            let page = &prepared[index];
+            (page.page, &page.snapshot.primitive_ids[..])
+        })
+        .collect();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(jobs.len());
+    let chunk_len = jobs.len().div_ceil(workers);
+
+    let mut emitted = Vec::new();
+    emitted.resize_with(prepared.len(), || None);
+    std::thread::scope(|scope| -> Result<(), String> {
+        let handles: Vec<_> = jobs
+            .chunks(chunk_len)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut table = StringTable::default();
+                    for (page, _) in chunk {
+                        collect_page_strings(page, &mut table)?;
+                    }
+                    Ok::<_, String>(table)
+                })
+            })
+            .collect();
+        for handle in handles {
+            let table = handle.join().expect("string collection panicked")?;
+            for value in table.into_strings() {
+                strings.id(&value)?;
+            }
+        }
+
+        let table = &*strings;
+        let handles: Vec<_> = jobs
+            .chunks(chunk_len)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|(page, ids)| -> Result<FusedEmit, String> {
+                            let mut payload = Vec::with_capacity(64 * 1024 + ids.len() * 8);
+                            for &id in *ids {
+                                write_u64(&mut payload, id);
+                            }
+                            let hashes =
+                                encode_page_hashed(page, Interner::Shared(table), &mut payload)?;
+                            Ok(FusedEmit {
+                                fingerprint: hashes.fingerprint,
+                                visual_fingerprint: hashes.visual_fingerprint,
+                                payload,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            })
+            .collect();
+        let mut at = 0;
+        for handle in handles {
+            for emit in handle.join().expect("page emission panicked")? {
+                emitted[fused[at]] = Some(emit);
+                at += 1;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(emitted)
 }
 
 fn prepare_pages<'a>(
@@ -544,16 +724,21 @@ fn prepare_pages<'a>(
         };
         let positions = primitive_positions(page);
         let note_anchors = note_anchors(page)?;
-        // An unbuilt page has no primitive positions to shift, so its
-        // position span only reaches the host through a fresh fingerprint.
-        let full_prepare = is_new
+        // Rebuilt, new and unbuilt pages emit speculatively and compute their
+        // fingerprints during emission; only clean pages whose retained index
+        // moved still need an eager hash.
+        let fused = is_new
             || page.unbuilt
-            || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index))
-            || matched.is_none_or(|old| i64::from(old.page_index) != retained_index(index));
-        let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
+            || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index));
+        let (fingerprint, visual_fingerprint, primitive_ids) = if fused {
+            (0, 0, primitive_ids(page, page_id).into())
+        } else if matched.is_none_or(|old| i64::from(old.page_index) != retained_index(index)) {
             let hashes = hash_page(page)?;
-            let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
-            (hashes.fingerprint, hashes.visual_fingerprint, primitive_ids)
+            (
+                hashes.fingerprint,
+                hashes.visual_fingerprint,
+                primitive_ids(page, page_id).into(),
+            )
         } else {
             let old = matched.expect("clean incremental pages retain a previous snapshot");
             let fingerprint = if positions == old.positions && note_anchors == old.note_anchors {
@@ -581,6 +766,7 @@ fn prepare_pages<'a>(
             page,
             is_new,
             moved,
+            fused,
         });
     }
     Ok(prepared)
@@ -632,21 +818,38 @@ fn page_anchors(list: &DisplayList) -> Vec<String> {
 }
 
 fn primitive_ids(page: &DisplayPage, page_id: u64) -> Vec<u64> {
-    let mut occurrences: HashMap<String, usize> = HashMap::new();
+    use std::fmt::Write as _;
+    let mut occurrences: HashMap<u64, usize> = HashMap::new();
     let mut used = HashSet::new();
+    let mut raw = String::new();
     visit_primitives(page)
         .map(|(region, primitive)| {
             let kind = primitive_kind(primitive);
-            let owner = primitive_owner(primitive).unwrap_or_else(|| format!("page:{page_id}"));
-            let raw = format!("{region}|{kind}|{owner}");
-            let occurrence = occurrences.entry(raw.clone()).or_default();
-            let key = format!("{raw}|{}", *occurrence);
+            let attrs = primitive_attrs(primitive);
+            raw.clear();
+            let _ = write!(raw, "{region}|{kind}|");
+            if let Some(value) = attrs.para_id.as_ref() {
+                let _ = write!(raw, "para:{value}");
+            } else if let Some(value) = attrs.block_key.as_ref() {
+                let _ = write!(raw, "block:{value}");
+            } else if let Some(value) = attrs.block_id.as_ref() {
+                let _ = write!(raw, "block:{value}");
+            } else if let Some(value) = attrs.cell.as_ref().and_then(|cell| cell.cell_id.as_ref()) {
+                let _ = write!(raw, "cell:{value}");
+            } else {
+                let _ = write!(raw, "page:{page_id}");
+            }
+            let occurrence = occurrences.entry(hash_bytes(raw.as_bytes())).or_default();
+            let _ = write!(raw, "|{}", *occurrence);
             *occurrence += 1;
-            let mut id = hash_bytes(key.as_bytes());
+            let key_len = raw.len();
+            let mut id = hash_bytes(raw.as_bytes());
             let mut salt = 0_u64;
             while id == 0 || !used.insert(id) {
                 salt = salt.wrapping_add(1);
-                id = hash_bytes(format!("{key}|collision:{salt}").as_bytes());
+                raw.truncate(key_len);
+                let _ = write!(raw, "|collision:{salt}");
+                id = hash_bytes(raw.as_bytes());
             }
             id
         })
@@ -1134,6 +1337,11 @@ impl StringTable {
         Ok(id)
     }
 
+    /// The id `value` was interned under, when it was.
+    pub(crate) fn get(&self, value: &str) -> Option<u32> {
+        self.ids.get(value).copied()
+    }
+
     /// The strings indexed by their ids.
     pub(crate) fn into_strings(self) -> Vec<String> {
         let mut strings = vec![String::new(); self.ids.len()];
@@ -1259,9 +1467,13 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 }
 
 fn hash_write(hash: &mut u64, bytes: &[u8]) {
-    for byte in bytes {
-        *hash ^= u64::from(*byte);
-        *hash = hash.wrapping_mul(FNV_PRIME);
+    let mut words = bytes.chunks_exact(8);
+    for word in &mut words {
+        let word = u64::from_le_bytes(word.try_into().expect("8-byte word"));
+        *hash = (*hash ^ word).wrapping_mul(FNV_PRIME);
+    }
+    for byte in words.remainder() {
+        *hash = (*hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
     }
 }
 
@@ -1554,7 +1766,7 @@ mod tests {
 
                 let mut table = StringTable::default();
                 let mut out = Vec::new();
-                encode_page(page, &mut table, &mut out).unwrap();
+                encode_page(page, Interner::Mut(&mut table), &mut out).unwrap();
                 let strings = table.into_strings();
                 let mut reference_strings = BTreeSet::new();
                 collect_strings(&value, &mut reference_strings);
@@ -1603,7 +1815,7 @@ mod tests {
         let page = &list.pages[0];
         let mut table = StringTable::default();
         let mut out = Vec::new();
-        encode_page(page, &mut table, &mut out).unwrap();
+        encode_page(page, Interner::Mut(&mut table), &mut out).unwrap();
         let strings = table.into_strings();
         let mut cursor = 0;
         let decoded = decode_typed(&out, &mut cursor, &strings);
