@@ -26,7 +26,12 @@ import { documentPageCount } from './documentPageCount';
 import type { LayoutInWorker } from './useDisplayList';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
-import { readSessionVersion, stampSourceVersion } from '../internals/layoutProvenance';
+import {
+  readSessionVersion,
+  revisionPreviewKey,
+  stampRevisionPreviewKey,
+  stampSourceVersion,
+} from '../internals/layoutProvenance';
 import {
   captureDisplayListScrollAnchor,
   captureDisplayListViewportAnchor,
@@ -302,6 +307,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
       const computeInputs = { document, pageGap, session, renderEnv, measurement };
       const sourceVersion = readSessionVersion(session);
+      const previewKey = revisionPreviewKey(renderEnv.revisionPreview);
 
       // Step 4+: paint + scroll/events with the computed values.
       const applyComputation = (
@@ -311,6 +317,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       ) => {
         const { layout: newLayout } = computation;
         stampSourceVersion(newLayout, version);
+        stampRevisionPreviewKey(newLayout, previewKey);
 
         const pagesEl = pagesContainerRef.current;
         const scrollParent =
