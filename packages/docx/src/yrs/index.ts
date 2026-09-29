@@ -1479,10 +1479,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    const json = mutate(() => session.open_docx(source, seedStories, options.generation));
+    const json = mutate(() => {
+      const opened = session.open_docx(source, seedStories, options.generation);
+      proposals.reset();
+      return opened;
+    });
     const host = decodeDocxHost(json, source);
     docxSource = source;
-    proposals.reset();
     return host;
   };
 
@@ -1643,14 +1646,18 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
     loadState: (update) => {
       markDirty('all');
-      mutate(() => session.load(update));
-      proposals.reset();
+      mutate(() => {
+        session.load(update);
+        proposals.reset();
+      });
     },
     seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
     openDocx,
     beginOpening: (generation) => {
-      mutate(() => session.begin_opening(generation));
-      proposals.reset();
+      mutate(() => {
+        session.begin_opening(generation);
+        proposals.reset();
+      });
     },
     materializeDocx: () => {
       const source = docxSource;
@@ -2366,9 +2373,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   registerSessionInternals(facade, {
     compareDocx: (original, revised, options) => {
       markDirty('all');
-      const json = mutate(() => session.compare_docx_json(original, revised, options));
+      const json = mutate(() => {
+        const compared = session.compare_docx_json(original, revised, options);
+        proposals.reset();
+        return compared;
+      });
       docxSource = original.slice();
-      proposals.reset();
       return json;
     },
     finishComparedDocx: (bytes) => session.finish_compared_docx_json(bytes),

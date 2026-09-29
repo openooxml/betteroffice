@@ -420,6 +420,41 @@ describe('YrsSession host proposals', () => {
     expect(reopening.getProposals().proposals).toEqual([]);
   });
 
+  it('keeps proposals that update listeners make after a reopen', async () => {
+    const source = await open();
+    const fresh = await createYrsSession({ clientId: nextClientId++ });
+    sessions.push(fresh);
+    const reopen: Array<[YrsSession, () => void]> = [
+      [source, () => source.beginOpening('next')],
+      [fresh, () => fresh.loadState(source.encodeState())],
+    ];
+    for (const [index, [session, action]] of reopen.entries()) {
+      const id = `listener-${index}`;
+      const paraId = index === 0 ? '00000006' : '00000003';
+      let proposed: DocxProposalResult | null = null;
+      const detach = session.onUpdate(() => {
+        if (proposed) return;
+        const paragraph = {
+          kind: 'session',
+          sessionId: session.paragraphIdentities().sessionId,
+          story: 'body',
+          paraId,
+        } as const;
+        proposed = propose(session, {
+          ...insert(id, paraId, 'end', '!'),
+          paragraph,
+        });
+      });
+      action();
+      detach();
+      expect(proposed).toMatchObject({ ok: true });
+      expect(session.getProposals().proposals.map((record) => record.id)).toEqual([id]);
+      expect(snapshotOf(decide(session, [{ id, state: 'rejected' }])).proposals).toEqual([
+        expect.objectContaining({ id, state: 'rejected' }),
+      ]);
+    }
+  });
+
   it('delivers the newest snapshot last when a listener decides again', async () => {
     const session = await open();
     snapshotOf(
