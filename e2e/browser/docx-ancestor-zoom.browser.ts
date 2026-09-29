@@ -4,27 +4,22 @@ import { resolve } from 'node:path';
 import JSZip from 'jszip';
 
 const root = resolve(import.meta.dirname, '../..');
-const PAGES = 30;
+const PARAGRAPHS = 800;
 
-/** The demo package with a body of `PAGES` page-broken sections of dense text. */
+/** The demo package with a body of dense text that fills every page to the bottom margin. */
 async function longDocument(): Promise<Buffer> {
   const zip = await JSZip.loadAsync(
     await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.docx'))
   );
   const xml = await zip.file('word/document.xml')!.async('string');
   const line = 'The quick brown fox jumps over the lazy dog, again and again. '.repeat(6);
-  const pages = Array.from({ length: PAGES }, (_, index) =>
-    [
-      ...Array.from(
-        { length: 14 },
-        () => `<w:p><w:r><w:t xml:space="preserve">${line}</w:t></w:r></w:p>`
-      ),
-      index < PAGES - 1 ? '<w:p><w:r><w:br w:type="page"/></w:r></w:p>' : '',
-    ].join('')
+  const paragraphs = Array.from(
+    { length: PARAGRAPHS },
+    () => `<w:p><w:r><w:t xml:space="preserve">${line}</w:t></w:r></w:p>`
   ).join('');
   const body = xml.replace(
     /<w:body>[\s\S]*?(<w:sectPr[\s\S]*<\/w:sectPr>)?\s*<\/w:body>/,
-    (_, section) => `<w:body>${pages}${section ?? ''}</w:body>`
+    (_, section) => `<w:body>${paragraphs}${section ?? ''}</w:body>`
   );
   zip.file('word/document.xml', body);
   return zip.generateAsync({ type: 'nodebuffer' });
@@ -46,7 +41,10 @@ async function open(page: Page) {
     .toBeGreaterThan(12);
 }
 
-/** Dark pixels in a screenshot of the middle of the page scroller. */
+/**
+ * Dark pixels in a screenshot of the middle of the page scroller: a band taller
+ * than the margins and gap between one page's text and the next.
+ */
 async function inkAtViewportCentre(page: Page): Promise<number> {
   const box = await page.evaluate(() => {
     let scroller = document.querySelector('.canvas-pages')?.parentElement ?? null;
@@ -54,9 +52,9 @@ async function inkAtViewportCentre(page: Page): Promise<number> {
       scroller = scroller.parentElement;
     }
     const rect = (scroller ?? document.documentElement).getBoundingClientRect();
-    return { x: rect.left + rect.width / 2 - 150, y: rect.top + rect.height / 2 - 60 };
+    return { x: rect.left + rect.width / 2 - 150, y: rect.top + rect.height / 2 - 200 };
   });
-  const png = await page.screenshot({ clip: { ...box, width: 300, height: 120 } });
+  const png = await page.screenshot({ clip: { ...box, width: 300, height: 400 } });
   return page.evaluate(
     async (data) => {
       const image = await createImageBitmap(

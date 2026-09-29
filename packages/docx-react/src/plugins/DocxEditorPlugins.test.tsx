@@ -902,6 +902,77 @@ describe('DocxEditor plugins', () => {
     ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
   });
 
+  test('host proposals anchor through the editor ref in a read-only viewer', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const events: DocxPluginEvent[] = [];
+    const plugin = defineDocxPlugin({
+      id: 'acme.proposals',
+      createState: () => null,
+      onEvent(_context, event) {
+        if (event.type === 'proposal-change') events.push(event);
+      },
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin], readOnly: true, allowHostProposals: true });
+    await until(() => geometry !== null);
+    const session = ref.current!.getEditorRef()!.getYrsSession()!;
+    const { paragraph } = await firstParagraph(ref);
+    const word = paragraph.text.slice(0, 3);
+    const proposed = await act(() =>
+      ref.current!.proposeChanges({
+        expectVersion: session.version(),
+        proposals: [
+          {
+            id: 'p1',
+            paragraph: {
+              kind: 'session',
+              sessionId: session.paragraphIdentities().sessionId,
+              story: paragraph.story,
+              paraId: paragraph.paraId,
+            },
+            suggest: { author: 'Atira', date: '2026-09-29T00:00:00Z' },
+            op: 'replaceText',
+            search: word,
+            replaceWith: 'XYZ',
+          },
+        ],
+      })
+    );
+    if (!proposed.ok) throw new Error(proposed.failure.message);
+    const { version } = proposed.snapshot;
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === version);
+    const anchorAt = (previewVersion: number) => {
+      const current = geometry! as DocxPluginGeometry;
+      current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+      for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+      }
+      const result = current.getAnchorGeometry({ kind: 'proposal', id: 'p1' });
+      expect(result).toMatchObject({ ok: true, version, previewVersion, layoutId: current.layout.id });
+      if (result.ok) expect(result.rects.length).toBeGreaterThan(0);
+      expect(current.getAnchorGeometry({ kind: 'proposal', id: 'missing' })).toMatchObject({
+        ok: false,
+        failure: { code: 'unknown-proposal' },
+      });
+    };
+    anchorAt(0);
+
+    const decided = await act(() =>
+      ref.current!.setProposalStates({
+        expectVersion: version,
+        expectPreviewVersion: 0,
+        changes: [{ id: 'p1', state: 'rejected' }],
+      })
+    );
+    expect(decided).toMatchObject({ ok: true, snapshot: { version, previewVersion: 1 } });
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.previewVersion === 1);
+    anchorAt(1);
+    expect(events.at(-1)).toMatchObject({ type: 'proposal-change', version, previewVersion: 1 });
+  });
+
   test('overlays and layout events re-anchor once the pages show a new zoom', async () => {
     const results: DocxAnchorGeometryResult[] = [];
     const events: (DocxAnchorGeometryResult | null)[] = [];

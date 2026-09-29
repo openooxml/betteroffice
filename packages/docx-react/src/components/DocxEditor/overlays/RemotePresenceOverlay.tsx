@@ -135,7 +135,12 @@ export function RemotePresenceOverlay({
         return;
       }
       const band = viewportColumnBand(usesWindow ? null : scrollParent, column);
-      const pageWindow = remotePresencePageWindow(pageMetrics, 0, band.top, band.bottom);
+      const pageWindow = remotePresencePageWindow(
+        pageMetrics,
+        band.columnTop,
+        band.top,
+        band.top + band.height
+      );
       if (!pageWindow) {
         setGeometry([]);
         return;

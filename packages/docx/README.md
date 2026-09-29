@@ -215,6 +215,47 @@ and redo entries. `source: 'agent'` records provenance only. Add
 Paragraph ids are session keys; inserted paragraphs get Word paragraph IDs as
 typed ones do, so `saveYrsDocx` returns persisted anchors for them.
 
+### Host proposals
+
+`session.proposeChanges()` records a round of reviewable tracked changes under
+the host's own proposal ids. Each proposal names its paragraph by any paragraph
+anchor, such as a persisted Word paragraph ID, and replaces, deletes
+(`replaceWith: ''`) or inserts text:
+
+```ts
+const result = session.proposeChanges({
+  expectVersion: session.version(),
+  proposals: [
+    {
+      id: 'p-17',
+      paragraph: { kind: 'persisted', story: { partUri: '/word/document.xml', kind: 'body' }, paraId: '1A2B3C4D' },
+      suggest: { author: 'Reviewer', date: new Date().toISOString() },
+      op: 'replaceText',
+      search: '30 days',
+      replaceWith: '45 days',
+      occurrence: 'all',
+    },
+  ],
+});
+```
+
+`occurrence` is `'first'` (the default), `'all'` or a one-based number, counting
+non-overlapping matches of the accepted text. The round applies as one batch
+outside undo history, or nothing changes and a typed refusal names the
+`proposalId`: an ambiguous paragraph ID refuses with `ambiguous-target`, and
+adjoining or overlapping proposals with `overlapping-steps`. Retrying an id with
+the same edit is a no-op; the same id with another edit refuses with
+`proposal-id-conflict`. Each record lists the revision ids its proposal created.
+
+`session.setProposalStates()` marks proposals `accepted`, `rejected` or back to
+`proposed`. Decisions keep the tracked revisions and change only how they render:
+`proposalRevisionPreview(snapshot)` is the `revisionPreview` render environment
+entry that shows accepted proposals as plain text and hides rejected ones. They
+leave the document, its version and undo history untouched, and each change
+increments `previewVersion`, which `expectPreviewVersion` checks
+(`stale-preview`). `getProposals()` and `onProposalChange()` read and observe
+the registry; opening another document forgets it.
+
 ### Structured export
 
 Export read-only structured JSON or Markdown with block and inline anchors and

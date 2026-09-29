@@ -360,7 +360,7 @@ export function restoreDisplayListScrollAnchor(
       : null;
   const viewport = scrollViewport(scrollParent);
   const nextTargetTop = pinned
-    ? scrollParent.scrollTop + (pinned.clientY - viewport.top) / viewport.zoom
+    ? scrollParent.scrollTop + pinned.clientY / viewport.zoom - viewport.top / viewport.zoom
     : null;
   const maxScroll = Math.max(0, scrollParent.scrollHeight - scrollParent.clientHeight);
   scrollParent.scrollTop = computeViewportAnchoredScrollTop(
@@ -380,7 +380,9 @@ export function restoreDisplayListViewportAnchor(
   const clientY = viewportTargetClientY(anchor, queries, host, resolvePosition);
   const viewport = scrollViewport(scrollParent);
   const nextTargetTop =
-    clientY == null ? null : scrollParent.scrollTop + (clientY - viewport.top) / viewport.zoom;
+    clientY == null
+      ? null
+      : scrollParent.scrollTop + clientY / viewport.zoom - viewport.top / viewport.zoom;
   const maxScroll = Math.max(0, scrollParent.scrollHeight - scrollParent.clientHeight);
   scrollParent.scrollTop = computeViewportAnchoredScrollTop(anchor, nextTargetTop, maxScroll);
 }

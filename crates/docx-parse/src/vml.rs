@@ -668,6 +668,25 @@ fn vml_fraction(raw: Option<&str>) -> Option<f64> {
     Some((if fixed { parsed / 65_536.0 } else { parsed }).clamp(0.0, 1.0))
 }
 
+/// Whether `shape`'s style positions it from the page or margin.
+pub(crate) fn placed_off_the_text(shape: &XmlElement) -> bool {
+    let Some(style) = shape.attribute(None, "style") else {
+        return false;
+    };
+    let style = parse_style_attr(Some(style));
+    matches!(
+        style.get("position").map(String::as_str),
+        Some("absolute" | "relative")
+    ) && matches!(
+        vml_vertical_relative_to(
+            style
+                .get("mso-position-vertical-relative")
+                .map(String::as_str)
+        ),
+        "page" | "margin"
+    )
+}
+
 fn vml_horizontal_relative_to(raw: Option<&str>) -> &'static str {
     match raw {
         Some("page") => "page",

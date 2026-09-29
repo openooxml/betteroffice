@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
-import type {
-  DisplayListQueries,
-  DisplayListRect,
-  DisplayListVisualLine,
+import {
+  resolveDisplayPageClientRect,
+  type DisplayListQueries,
+  type DisplayListRect,
+  type DisplayListVisualLine,
 } from '@betteroffice/docx/layout/render';
 import type { YrsStickyPosition } from '@betteroffice/docx/yrs';
 import {
@@ -14,7 +15,7 @@ import {
 
 const PAGE_HEIGHT = 800;
 const PAGE_GAP = 24;
-const SCROLLER_TOP = 60;
+const SCROLLER_TOP = 60.3;
 const SCROLLER_HEIGHT = 200;
 const STICKY: YrsStickyPosition = { story: 'body', encoded: Uint8Array.of(1) };
 
@@ -127,4 +128,41 @@ test('the caret line stays pinned under an ancestor CSS zoom', () => {
     restoreDisplayListScrollAnchor(anchor, queries([], 2, caret(740)), host, scroller);
     expect(scroller.scrollTop).toBeCloseTo(740);
   }
+});
+
+test('unzoomed anchors restore exactly as before', () => {
+  const scrollTop = 2_800;
+  const caret = (y: number): DisplayListRect => ({ pageIndex: 3, x: 0, y, width: 2, height: 16 });
+  const pinned = zoomedScene(1, scrollTop, 4);
+  const pageTop = resolveDisplayPageClientRect(pinned.host, queries([], 4), 3)!.top;
+  const expected = scrollTop + (pageTop + 540.7) - SCROLLER_TOP - (pageTop + 500.3 - SCROLLER_TOP);
+  const scrollAnchor = captureDisplayListScrollAnchor(
+    queries([], 4, caret(500.3)),
+    pinned.host,
+    pinned.scroller,
+    42
+  );
+  restoreDisplayListScrollAnchor(
+    scrollAnchor,
+    queries([], 4, caret(540.7)),
+    pinned.host,
+    pinned.scroller
+  );
+  expect(pinned.scroller.scrollTop).toBe(expected);
+
+  const anchored = zoomedScene(1, scrollTop, 4);
+  const viewportAnchor = captureDisplayListViewportAnchor(
+    queries([line(3, 500.3)], 4),
+    anchored.host,
+    anchored.scroller,
+    () => STICKY
+  );
+  restoreDisplayListViewportAnchor(
+    viewportAnchor,
+    queries([line(3, 540.7)], 4),
+    anchored.host,
+    anchored.scroller,
+    () => 1
+  );
+  expect(anchored.scroller.scrollTop).toBe(expected);
 });

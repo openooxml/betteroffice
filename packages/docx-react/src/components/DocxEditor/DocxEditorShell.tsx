@@ -127,6 +127,7 @@ export function DocxEditorShell({
   toolbar,
   renderDock,
   pagedArea,
+  loadingIndicator,
   overlays,
   dialogs,
   fileInputs,
@@ -165,6 +166,8 @@ export function DocxEditorShell({
     available: { width: number; height: number }
   ) => ReactNode;
   pagedArea: ReactNode;
+  /** Covers the whole editor until the first page paints, matching the parse-time indicator. */
+  loadingIndicator?: ReactNode;
   overlays: ReactNode;
   dialogs: ReactNode;
   fileInputs: ReactNode;
@@ -339,6 +342,21 @@ export function DocxEditorShell({
                   </div>
                   {renderDock?.('bottom', dockArea)}
                 </div>
+                {loadingIndicator ? (
+                  <div
+                    data-testid="canvas-renderer-loading"
+                    role="status"
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      pointerEvents: 'none',
+                    }}
+                  >
+                    {loadingIndicator}
+                  </div>
+                ) : null}
               </div>
 
             </div>
