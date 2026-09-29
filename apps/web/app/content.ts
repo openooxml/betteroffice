@@ -82,11 +82,11 @@ export const PACKAGES_SECTION = {
 export const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with page references, document comparison into tracked changes, host proposals with reversible accept and reject previews, and undoable reanchoring of existing comments.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with version-checked atomic text, paragraph and content-control batches, content-control discovery, structured JSON and Markdown export with page references, document comparison into tracked changes, host proposals with reversible accept and reject previews, undoable reanchoring of existing comments, and font loading kept apart between editors on one page.",
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, composable toolbar controls, version-checked edit batches, host proposals a read-only viewer can preview, host-owned plugins with explicitly granted access, content-control discovery, and page-referenced structured export.",
+    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, composable toolbar controls, version-checked edit batches, host proposals a read-only viewer can preview, host-owned plugins with explicitly granted access, content-control discovery, page-referenced structured export, and several editors per page.",
   },
   {
     name: "@betteroffice/xlsx",

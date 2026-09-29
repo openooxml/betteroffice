@@ -12,6 +12,7 @@ import type { RenderedDomContext, PositionCoordinates, PointPosition } from './t
 import type { DisplayListQueries, DisplayListRect } from '../layout/render/displayListQueries';
 import {
   effectiveZoom,
+  materializeDisplayPages,
   resolveCanvasPoint,
   resolveDisplayPageClientRect,
 } from '../layout/render/canvasPointer';
@@ -244,6 +245,10 @@ export class RenderedDomContextImpl implements RenderedDomContext {
    * Find DOM elements that overlap with a display-position range.
    */
   findElementsForRange(from: number, to: number): Element[] {
+    if (this.queries) {
+      const pages = new Set(this.queries.rangeRects(from, to).map((rect) => rect.pageIndex));
+      materializeDisplayPages(this.pagesContainer, [...pages]);
+    }
     const elements: Element[] = [];
     for (const { el, start, end } of this.spanEntries()) {
       // Check if this span overlaps with the range

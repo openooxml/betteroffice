@@ -6,12 +6,22 @@ if (ownsDom) GlobalRegistrator.register();
 
 import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
 import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
-import type { DocxSessionParagraphAnchor, DocxTextRange, YrsSession } from '@betteroffice/docx/yrs';
+import {
+  proposalRevisionPreview,
+  type DocxSessionParagraphAnchor,
+  type DocxTextRange,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import {
   createCanvasHostProjector,
   createRenderedDomContext,
 } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import { stampSourceVersion } from '../components/DocxEditor/internals/layoutProvenance';
+import {
+  revisionPreviewKey,
+  stampRevisionPreviewKey,
+  stampSourceVersion,
+  UNKNOWN_REVISION_PREVIEW_KEY,
+} from '../components/DocxEditor/internals/layoutProvenance';
 import { createPluginGeometry, pluginLayout, toOverlayRect } from './geometry';
 import * as proposalPreview from './proposalPreview';
 import type { DocxProposalSnapshot } from './proposalPreview';
@@ -205,7 +215,7 @@ const PARAGRAPH_TARGET: DocxGeometryTarget = { kind: 'paragraph', paragraph: PAR
  * Pages under a layer at client (20, 10). An `ancestor` CSS zoom scales every client distance
  * from the layer; the elements' own pixels, borders and scroll offsets stay as they are.
  */
-function semanticGeometry(zoom = 1, ancestor = 1) {
+function semanticGeometry(zoom = 1, ancestor = 1, { stableSession = false } = {}) {
   const pages = document.createElement('div');
   const layer = document.createElement('div');
   const canvases = [0, 1].map((index) => {
@@ -330,7 +340,10 @@ function semanticGeometry(zoom = 1, ancestor = 1) {
     () => current,
     () => null,
     source,
-    () => (available ? { session, editor, presented } : null)
+    // Tests swap the session's reads without a version change, which a real document cannot do;
+    // a copy per access keeps per-version reads from carrying across those swaps.
+    () =>
+      available ? { session: stableSession ? session : { ...session }, editor, presented } : null
   );
   return {
     geometry,
@@ -351,8 +364,12 @@ function semanticGeometry(zoom = 1, ancestor = 1) {
     setPresented: (value: boolean) => {
       presented = value;
     },
-    setSnapshot: (value: Partial<DocxProposalSnapshot>) => {
+    /** Updates the registry; `rendered` also stamps the queries as showing its preview. */
+    setSnapshot: (value: Partial<DocxProposalSnapshot>, rendered = true) => {
       snapshot = { ...snapshot, ...value };
+      if (rendered) {
+        stampRevisionPreviewKey(source, revisionPreviewKey(proposalRevisionPreview(snapshot)));
+      }
     },
   };
 }
@@ -714,6 +731,42 @@ describe('semantic anchor geometry', () => {
     }
   });
 
+  test('follows a preview change only once the queries show the new preview', () => {
+    const { geometry, setSnapshot, source, session } = semanticGeometry();
+    const accepted = {
+      id: 'proposal',
+      paragraph: PARAGRAPH,
+      state: 'accepted' as const,
+      changed: true,
+      revisionIds: ['r1', 'r2'],
+    };
+    const target: DocxGeometryTarget = { kind: 'proposal', id: 'proposal' };
+    stampSourceVersion(source, 'v1');
+    expect(proposalPreview.currentPreviewKey(session)).toBe('');
+    expect(proposalPreview.renderedPreviewKey(source)).toBe('');
+    anchored(geometry.getAnchorGeometry(target));
+    expect(pluginLayout(source, 'v1', 1, { key: '', previewVersion: 0 })).not.toBeNull();
+
+    setSnapshot({ proposals: [accepted] }, false);
+    const key = revisionPreviewKey({ r1: 'accepted', r2: 'accepted' });
+    expect(proposalPreview.currentPreviewKey(session)).toBe(key);
+    expect(proposalPreview.renderedPreviewKey(source)).toBe('');
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+    expect(pluginLayout(source, 'v1', 1, { key, previewVersion: 0 })).toBeNull();
+
+    stampRevisionPreviewKey(source, key);
+    expect(proposalPreview.renderedPreviewKey(source)).toBe(key);
+    anchored(geometry.getAnchorGeometry(target));
+    expect(pluginLayout(source, 'v1', 1, { key, previewVersion: 0 })).not.toBeNull();
+
+    stampRevisionPreviewKey(source, UNKNOWN_REVISION_PREVIEW_KEY);
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+    stampRevisionPreviewKey(source, key);
+
+    setSnapshot({ proposals: [{ ...accepted, state: 'proposed' }] }, false);
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+  });
+
   test('refuses missing page bounds or unmappable display positions', () => {
     const { geometry, source, editor } = semanticGeometry();
     source.pageBounds = () => null;
@@ -763,6 +816,44 @@ describe('semantic anchor geometry', () => {
       rects: [],
       anchor: { x: 154, width: 0 },
     });
+  });
+
+  test('one session reads the document once across preview decisions at a version', () => {
+    const { geometry, setSnapshot, source, session } = semanticGeometry(1, 1, { stableSession: true });
+    const reads = { listRevisions: 0, paragraphSpans: 0 };
+    for (const name of ['listRevisions', 'paragraphSpans'] as const) {
+      const read = session[name].bind(session) as () => unknown;
+      (session as unknown as Record<string, () => unknown>)[name] = () => {
+        reads[name] += 1;
+        return read();
+      };
+    }
+    const decide = (state: 'proposed' | 'accepted' | 'rejected') =>
+      setSnapshot({
+        proposals: [
+          { id: 'proposal', paragraph: PARAGRAPH, state, changed: true, revisionIds: ['r1', 'r2'] },
+        ],
+      });
+    const target: DocxGeometryTarget = { kind: 'proposal', id: 'proposal' };
+    decide('accepted');
+    textLine(source, [0]);
+    expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+      rects: [{ x: 155 }, { x: 156 }],
+      anchor: { x: 157, width: 0 },
+    });
+    decide('rejected');
+    textLine(source, [2, 3]);
+    expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+      rects: [{ x: 153 }],
+      anchor: { x: 154, width: 0 },
+    });
+    decide('proposed');
+    textLine(source);
+    expect(anchored(geometry.getAnchorGeometry(target)).rects).toHaveLength(3);
+    expect(reads).toEqual({ listRevisions: 1, paragraphSpans: 1 });
+
+    session.version = () => 'v2';
+    refused(geometry.getAnchorGeometry(target), 'stale-version');
   });
 
   test('hides the same text from range and search targets as from its revision', () => {

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { createYrsSession, type DocxTextRange, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import { textRangeToRaw } from './anchorGeometry';
+import { resolveAnchorTarget, textRangeToRaw } from './anchorGeometry';
 
 function range(
   start: number,
@@ -192,6 +192,53 @@ describe('view-to-raw boundaries in a real session', () => {
         ok: false,
         failure: { code: 'missing-target' },
       });
+    } finally {
+      session.destroy();
+    }
+  });
+
+  test('reads each whole story once per document version', async () => {
+    const session = await createYrsSession({ clientId: 814 });
+    try {
+      session.openDocx(await trackedDocument(), true);
+      const reads = new Map<string, number>();
+      const counted = new Proxy(session, {
+        get(target, key, receiver) {
+          const value = Reflect.get(target, key, receiver);
+          if (typeof value !== 'function') return value;
+          return (...args: unknown[]) => {
+            reads.set(String(key), (reads.get(String(key)) ?? 0) + 1);
+            return value.apply(target, args);
+          };
+        },
+      });
+      const paragraph = {
+        kind: 'persisted' as const,
+        story: { partUri: '/word/document.xml', kind: 'body' as const },
+        paraId: '00000003',
+      };
+      const revisionId = session.listRevisions()[0]!.revisionId;
+      const resolveAll = () =>
+        [
+          { kind: 'revision' as const, revisionId },
+          { kind: 'paragraph' as const, paragraph },
+          { kind: 'search' as const, paragraph, text: 'xy' },
+        ].map((target) => resolveAnchorTarget(counted, target, session.version()));
+      const first = resolveAll();
+      expect(first.every((resolved) => resolved.ok)).toBe(true);
+      expect(resolveAll()).toEqual(first);
+      expect(reads.get('listRevisions')).toBe(1);
+      expect(reads.get('paragraphSpans')).toBe(1);
+      expect(reads.get('storySegments')).toBe(1);
+      expect(reads.get('resolveParagraphAnchor')).toBe(1);
+
+      session.insertText({ story: 'body', paraId: '00000003', offset: 0 }, 'z');
+      const changed = resolveAll();
+      expect(reads.get('listRevisions')).toBe(2);
+      expect(reads.get('storySegments')).toBe(2);
+      const offset = (resolved: (typeof first)[number]) =>
+        resolved.ok ? resolved.ranges[0]!.start.offset : null;
+      expect(offset(changed[2]!)).toBe(offset(first[2]!)! + 1);
     } finally {
       session.destroy();
     }

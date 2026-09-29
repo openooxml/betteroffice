@@ -953,7 +953,8 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 /// Parses the render bridge's host context from JSON:
 /// `{ "themeColors": {name: hex}, "defaultTabStopTwips": number|null,
 /// "pageContentHeight": number|null, "numericIds": {yrsId: number},
-/// "showHiddenText": bool, "defaultParagraphStyleId": string }`.
+/// "showHiddenText": bool, "defaultParagraphStyleId": string,
+/// "revisionPreview": {revisionId: "accepted"|"rejected"} }`.
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
     let mut env = crate::bridge::RenderEnv::default();
@@ -985,6 +986,9 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
                 env.numeric_ids.insert(key.clone(), id);
             }
         }
+    }
+    if let Some(preview) = value.get("revisionPreview") {
+        env.revision_preview = crate::bridge::RenderEnv::parse_revision_preview(preview);
     }
     Ok(env)
 }
@@ -4176,7 +4180,8 @@ impl EditSession {
     /// `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
     /// "pageContentHeight":number|null,"numericIds":{yrsId: number},
     /// "tocStyleIds":[styleId],"showHiddenText":bool,
-    /// "defaultParagraphStyleId":string}`, all
+    /// "defaultParagraphStyleId":string,
+    /// "revisionPreview":{revisionId: "accepted"|"rejected"}}`, all
     /// optional. Errors when the story does not end in a pilcrow, holds a
     /// malformed table, references itself through a cell story, or contains an
     /// embed lowering does not support.
