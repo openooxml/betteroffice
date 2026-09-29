@@ -8,6 +8,7 @@ import { createRef } from 'react';
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
+import { parseDocx } from '@betteroffice/docx/docx';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 
 const { act, cleanup, render } = await import('@testing-library/react');
@@ -71,14 +72,43 @@ async function tick(ms = 10) {
   });
 }
 
-test('a reload waits for the new document and reports no pages while it loads', async () => {
+/** The page count `whenLayoutComplete()` resolves with, or its failure. */
+async function layoutComplete(ref: React.RefObject<DocxEditorRef | null>) {
+  let outcome = null as number | Error | null;
+  ref.current!.whenLayoutComplete().then(
+    (pages) => (outcome = pages),
+    (error: Error) => (outcome = error)
+  );
+  for (let attempt = 0; attempt < 300 && outcome === null; attempt += 1) await tick();
+  return outcome;
+}
+
+async function mountTwoPages() {
   const ref = createRef<DocxEditorRef>();
   render(<DocxEditor ref={ref} documentBuffer={await pagedDocx(2)} />);
   for (let attempt = 0; attempt < 300 && !ref.current; attempt += 1) await tick();
-  let first = null as number | null;
-  void ref.current!.whenLayoutComplete().then((pages) => (first = pages));
-  for (let attempt = 0; attempt < 300 && first === null; attempt += 1) await tick();
-  expect(first).toBe(2);
+  expect(await layoutComplete(ref)).toBe(2);
+  return ref;
+}
+
+test('a parsed reload settles with the new document', async () => {
+  const ref = await mountTwoPages();
+  const document = await parseDocx(await pagedDocx(3));
+  act(() => ref.current!.loadDocument(document));
+  expect(await layoutComplete(ref)).toBe(3);
+  expect(ref.current!.getTotalPages()).toBe(3);
+}, 30_000);
+
+test('a parsed reload with the same page count reports it again', async () => {
+  const ref = await mountTwoPages();
+  const document = ref.current!.getDocument()!;
+  act(() => ref.current!.loadDocument(document));
+  expect(await layoutComplete(ref)).toBe(2);
+  expect(ref.current!.getTotalPages()).toBe(2);
+}, 30_000);
+
+test('a reload waits for the new document and reports no pages while it loads', async () => {
+  const ref = await mountTwoPages();
 
   let release = () => {};
   const gate = new Promise<void>((done) => (release = done));

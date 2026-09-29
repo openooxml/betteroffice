@@ -181,6 +181,7 @@ export function useDocxEditorRefApi({
   modeRef,
   allowHostProposalsRef,
   settledDisplayList,
+  awaitingDocument,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -210,6 +211,8 @@ export function useDocxEditorRefApi({
   allowHostProposalsRef: React.RefObject<boolean>;
   /** The renderer's display list once it shows the whole current document. */
   settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
+  /** Whether a document load has not yet produced its first layout. */
+  awaitingDocument?: () => boolean;
 }) {
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
@@ -227,7 +230,7 @@ export function useDocxEditorRefApi({
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),
       getCurrentPage: () => scrollPageInfo.currentPage,
-      getTotalPages: () => scrollPageInfo.totalPages,
+      getTotalPages: () => (awaitingDocument?.() ? 0 : scrollPageInfo.totalPages),
       whenLayoutComplete: async (options) => {
         if (!settledDisplayList) throw new Error('This editor paints no display list');
         return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
@@ -498,6 +501,7 @@ export function useDocxEditorRefApi({
       comments,
       commands,
       settledDisplayList,
+      awaitingDocument,
     ]
   );
 }

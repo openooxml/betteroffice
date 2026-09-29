@@ -1003,13 +1003,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     clearFindReplaceMatches: useCallback(() => findReplace.setMatches([], 0), [findReplace]),
     cleanOrphanedCommentsTimerRef,
   });
-  const { resetSettled } = canvasRenderer;
-  const resetTotalPagesRef = useRef<() => void>(() => {});
+  const { resetSettled, awaitingDocument } = canvasRenderer;
   const resetForNewDocument = useCallback(() => {
     beginPluginLoadRef.current();
     resetEditorState();
     resetSettled();
-    resetTotalPagesRef.current();
   }, [resetEditorState, resetSettled]);
 
   const {
@@ -1040,9 +1038,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     setDocumentFonts,
   });
 
+  // Until a load's document is laid out, a layout error may come from the
+  // document it replaces, so it fails no wait.
   const reportLayoutError = useCallback(
-    (error: Error) => reportDocumentLayoutError(error, resetSettled),
-    [reportDocumentLayoutError, resetSettled]
+    (error: Error) =>
+      reportDocumentLayoutError(error, (current) => {
+        if (!awaitingDocument()) resetSettled(current);
+      }),
+    [reportDocumentLayoutError, resetSettled, awaitingDocument]
   );
   useEffect(() => {
     if (state.parseError) resetSettled(new Error(state.parseError));
@@ -1471,8 +1474,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     scrollContainerRef,
     pagedEditorRef,
   });
-  resetTotalPagesRef.current = () =>
-    setScrollPageInfo((prev) => (prev.totalPages === 0 ? prev : { ...prev, totalPages: 0 }));
 
   const pluginOverlayTarget = useCanvasOverlayTarget((plugins?.length ?? 0) > 0, editorContentRef);
   const pluginHost = useDocxPluginHost({
@@ -1615,6 +1616,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     modeRef: writeModeRef,
     allowHostProposalsRef,
     settledDisplayList: canvasRenderer.settledDisplayList,
+    awaitingDocument,
   });
 
   const initialSectionProperties = useMemo(

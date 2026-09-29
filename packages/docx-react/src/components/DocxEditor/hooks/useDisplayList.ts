@@ -84,6 +84,8 @@ export interface UseRustDisplayListResult {
    * wait for its display list; with one they reject.
    */
   resetSettled(failure?: Error | null): void;
+  /** True from a document load until the loaded document's first layout arrives. */
+  awaitingDocument(): boolean;
   /** Worker-computed caret tagged to `frame`. */
   caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
@@ -1319,6 +1321,7 @@ export function useRustDisplayList(
     },
     [markSettled]
   );
+  const awaitingDocument = useCallback((): boolean => replacedLayoutRef.current !== null, []);
 
   const settledDisplayList = useCallback(
     (relayout: (() => void) | null, timeoutMs: number | null = 15_000): Promise<DisplayList> =>
@@ -1367,6 +1370,7 @@ export function useRustDisplayList(
     resolveQueries,
     settledDisplayList,
     resetSettled,
+    awaitingDocument,
     caret: snapshot.caret,
     applyInput,
     applyDelete,
@@ -1484,6 +1488,8 @@ export interface UseCanvasRendererResult {
   settledDisplayList: UseRustDisplayListResult['settledDisplayList'];
   /** See {@link UseRustDisplayListResult.resetSettled}. */
   resetSettled: UseRustDisplayListResult['resetSettled'];
+  /** See {@link UseRustDisplayListResult.awaitingDocument}. */
+  awaitingDocument: UseRustDisplayListResult['awaitingDocument'];
   /** Worker caret from the same atomic renderer snapshot. */
   caret: YrsResidentCaretSnapshot | null;
   /** Whether worker-presented pixels make `caret` authoritative. */
@@ -1561,6 +1567,7 @@ export function useCanvasRenderer(
     resolveQueries,
     settledDisplayList,
     resetSettled,
+    awaitingDocument,
     caret,
     applyInput,
     applyDelete,
@@ -1657,6 +1664,7 @@ export function useCanvasRenderer(
     resolveQueries,
     settledDisplayList,
     resetSettled,
+    awaitingDocument,
     caret,
     authoritativeCaretActive,
     canvasHostRef,
