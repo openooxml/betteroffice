@@ -468,11 +468,25 @@ fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
             .flatten()
             .flat_map(|child| shape_content_runs(child, depth + 1))
             .collect(),
-        Some("complexField") => match projected_result(content) {
-            Some(result) => result
-                .iter()
-                .flat_map(|child| shape_content_runs(child, depth + 1))
-                .collect(),
+        Some("complexField") => match projected_result(content, depth) {
+            Some(result) => {
+                let formatting = field(content, "formatting");
+                result
+                    .iter()
+                    .flat_map(|child| match formatting {
+                        // Result runs without their own formatting take the field's.
+                        Some(formatting)
+                            if string(child, "type").as_deref() == Some("run")
+                                && field(child, "formatting").is_none() =>
+                        {
+                            let mut child = child.clone();
+                            child["formatting"] = formatting.clone();
+                            shape_content_runs(&child, depth + 1)
+                        }
+                        _ => shape_content_runs(child, depth + 1),
+                    })
+                    .collect()
+            }
             None => vec![shape_field_run(content)],
         },
         Some("simpleField") => vec![shape_field_run(content)],
@@ -482,7 +496,11 @@ fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
 
 /// The result of a complex field that holds a hyperlink or a simple field,
 /// which shows its parts, as body text does, so a nested PAGE still resolves.
-fn projected_result(field_value: &Value) -> Option<&Vec<Value>> {
+/// Too deep to lower a hyperlink's runs, the field shows its cached text.
+fn projected_result(field_value: &Value, depth: usize) -> Option<&Vec<Value>> {
+    if depth + 2 >= MAX_SHAPE_BODY_DEPTH {
+        return None;
+    }
     let instruction = string(field_value, "instruction").unwrap_or_default();
     let result = object(field_value, "structuredResult")?
         .get("inline")?
@@ -1182,6 +1200,37 @@ mod tests {
         ] {
             assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
         }
+    }
+
+    #[test]
+    fn a_field_result_with_a_nested_field_shows_its_parts_unless_too_deep() {
+        let page = json!({"type": "simpleField", "fieldType": "PAGE", "instruction": " PAGE ",
+            "content": [{"type": "run", "content": [{"type": "text", "text": "9"}]}]});
+        let text = json!({"type": "run", "content": [{"type": "text", "text": "p"}]});
+        let reference = json!({"type": "complexField", "fieldType": "REF", "instruction": "REF top",
+            "formatting": {"bold": true}, "fieldResult": [text],
+            "structuredResult": {"inline": [text, page]}});
+        let runs = |content: &Value| {
+            let shape = json!({"shapeType": "rect",
+                "textBody": {"content": [{"type": "paragraph", "content": [content]}]}});
+            let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+            block.inner_text.unwrap().remove(0).runs
+        };
+        let projected = runs(&reference);
+        assert!(
+            matches!(&projected[..], [Run::Text(text), Run::Field(page)]
+                if text.text == "p" && text.fmt.bold == Some(true) && page.field_type == "PAGE"),
+            "{projected:?}"
+        );
+        let nested = (0..6).fold(
+            reference,
+            |inner, _| json!({"type": "inlineSdt", "content": [inner]}),
+        );
+        let deep = runs(&nested);
+        assert!(
+            matches!(&deep[..], [Run::Field(field)] if field.fallback.as_deref() == Some("p")),
+            "{deep:?}"
+        );
     }
 
     #[test]
