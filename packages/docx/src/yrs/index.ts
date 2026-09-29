@@ -2313,7 +2313,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         if (result.ok && result.applied) markDirty(result.changedStories);
         return result;
       }),
-    proposeChanges: (request) => proposals.propose(request),
+    proposeChanges: (request) => mutate(() => proposals.propose(request)),
     setProposalStates: (request) => proposals.setStates(request),
     getProposals: () => proposals.snapshot(),
     onProposalChange: (listener) => {

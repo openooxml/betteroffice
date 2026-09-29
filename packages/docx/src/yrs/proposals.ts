@@ -216,11 +216,11 @@ type Located = { anchor: DocxSessionParagraphAnchor } | { failure: DocxProposalF
 
 type Planned = { steps: DocxEditStep[] } | { failure: DocxProposalFailure };
 
+/** The session holds update notifications until `propose` returns, so they see the round. */
 export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
   const records = new Map<string, { record: DocxProposalRecord; key: string }>();
   const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
   let previewVersion = 0;
-  let generation = 0;
   let notifying = false;
   let renotify = false;
 
@@ -459,18 +459,11 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         proposalId: later,
       });
     }
-    const opened = generation;
     const result = session.applyEdits({
       expectVersion: request.expectVersion,
       history: 'none',
       steps,
     });
-    if (opened !== generation) {
-      return refuse({
-        code: 'stale-version',
-        message: 'another document was opened while the proposals applied',
-      });
-    }
     if (!result.ok) {
       const { stepIndex, conflictingStepIndex, ...failure } = result.failure;
       const owner = stepIndex === undefined ? undefined : fresh[owners[stepIndex]!]?.input.id;
@@ -589,7 +582,6 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       };
     },
     reset() {
-      generation += 1;
       if (records.size === 0) return;
       if ([...records.values()].some(({ record }) => record.state !== 'proposed'))
         previewVersion += 1;

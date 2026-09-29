@@ -390,19 +390,34 @@ describe('YrsSession host proposals', () => {
     expect(events).toHaveLength(2);
   });
 
-  it('refuses a round whose document is reopened while it applies', async () => {
-    const session = await open();
-    let reopened = false;
+  it('registers a round before update listeners run', async () => {
+    const session = await open(fixture(paragraph('00000001', run('one two three'))));
+    const nested: DocxProposalResult[] = [];
+    const seen: string[][] = [];
     session.onUpdate(() => {
+      seen.push(session.getProposals().proposals.map((record) => record.id));
+      if (nested.length > 0) return;
+      nested.push(propose(session, replace('p1', '00000001', 'three', 'third')));
+    });
+    const outer = snapshotOf(propose(session, replace('p1', '00000001', 'one', 'first')));
+    expect(seen[0]).toEqual(['p1']);
+    expect(nested[0]).toMatchObject({
+      ok: false,
+      failure: { code: 'proposal-id-conflict', proposalId: 'p1' },
+    });
+    expect(session.getProposals().proposals).toEqual(outer.proposals);
+    expect(texts(session, 'accepted')).toEqual(['first two three']);
+
+    const reopening = await open();
+    let reopened = false;
+    reopening.onUpdate(() => {
       if (reopened) return;
       reopened = true;
-      session.beginOpening('next');
+      reopening.beginOpening('next');
     });
-    expect(propose(session, replace('p1', '00000003', 'Keep', 'Hold'))).toMatchObject({
-      ok: false,
-      failure: { code: 'stale-version' },
-    });
-    expect(session.getProposals().proposals).toEqual([]);
+    const round = snapshotOf(propose(reopening, replace('p1', '00000003', 'Keep', 'Hold')));
+    expect(round.proposals.map((record) => record.id)).toEqual(['p1']);
+    expect(reopening.getProposals().proposals).toEqual([]);
   });
 
   it('delivers the newest snapshot last when a listener decides again', async () => {
