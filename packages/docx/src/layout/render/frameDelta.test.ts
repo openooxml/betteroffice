@@ -709,6 +709,9 @@ describe('FrameDelta note anchor shifts', () => {
     };
     const firstQueries = createDisplayListQueries(owned.displayList, engine);
     firstQueries.prime();
+    // parse every page into the store, so adoption has retained pages to shift
+    firstQueries.rangeRects(0, Number.MAX_SAFE_INTEGER);
+    const parsedUpdates = updates.length;
 
     const { paraId } = (JSON.parse(session.paragraphs('body')) as Array<{ paraId: string }>)[0]!;
     for (const text of ['xyz', 'ab']) {
@@ -738,8 +741,8 @@ describe('FrameDelta note anchor shifts', () => {
     ).toEqual([3, 3]);
     const secondQueries = createDisplayListQueries(owned.displayList, engine, firstQueries);
     secondQueries.prime();
-    expect(updates).toHaveLength(1);
-    const update = JSON.parse(updates[0]!) as {
+    expect(updates).toHaveLength(parsedUpdates + 1);
+    const update = JSON.parse(updates.at(-1)!) as {
       replace: Array<[number, unknown]>;
       shift: Array<[number, number, unknown[][], unknown[][]?]>;
     };
