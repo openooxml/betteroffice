@@ -10835,6 +10835,11 @@ pub fn build_display_list_value_from_resident_incremental_with_fonts(
         page.page_index = page_index as u64;
         if page_index >= rebuilt_page_end {
             shift_page_body_positions(&mut page, position_deltas);
+            shift_unbuilt_span(
+                &mut page,
+                parsed.layout.pages.get(page_index),
+                position_deltas,
+            );
         }
         pages.push(page);
     }
@@ -10906,6 +10911,7 @@ pub fn update_display_list_value_from_resident_incremental_with_fonts_observed(
     for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
         page.page_index = page_index as u64;
         shift_page_body_positions(page, position_deltas);
+        shift_unbuilt_span(page, parsed.layout.pages.get(page_index), position_deltas);
     }
     Ok(true)
 }
@@ -10952,6 +10958,13 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
     for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
         page.page_index = page_index as u64;
         shift_page_body_positions(page, position_deltas);
+        // The retained layout page may predate this edit, but a converged
+        // page holds the same blocks, which is all the shift reads.
+        shift_unbuilt_span(
+            page,
+            resident.input.layout.pages.get(page_index),
+            position_deltas,
+        );
     }
     Ok(true)
 }
@@ -11051,6 +11064,24 @@ fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
         FragmentIn::Shape(value) => Some(block_key(&value.block_id)),
         FragmentIn::Chart(value) => Some(block_key(&value.block_id)),
         FragmentIn::Unsupported => None,
+    }
+}
+
+/// Moves an unbuilt page's position span with the blocks `layout_page` places.
+fn shift_unbuilt_span(
+    page: &mut DisplayPage,
+    layout_page: Option<&PageIn>,
+    deltas: &HashMap<String, i64>,
+) {
+    let Some(span) = &mut page.position_span else {
+        return;
+    };
+    let delta = layout_page
+        .and_then(|layout_page| layout_page.fragments.iter().find_map(fragment_block_key))
+        .and_then(|key| deltas.get(&key));
+    if let Some(delta) = delta {
+        span[0] += delta;
+        span[1] += delta;
     }
 }
 
