@@ -1077,6 +1077,18 @@ export interface YrsSession extends CollaborationReplica {
   paragraphSpans(story: string): YrsParagraphLength[];
   /** The raw formatted-segment view (the render bridge's input). */
   storySegments(story: string): YrsStorySegment[];
+  /**
+   * The current story revision and the sorted ids of the stories created,
+   * edited, or deleted after revision `since` (0 lists every story).
+   */
+  storiesChangedSince(since: number): { revision: number; stories: string[] };
+  /**
+   * One digest per unit of {@link YrsSession.storySegments}, split after each
+   * pilcrow. Equal digests mean equal segments.
+   */
+  storySegmentUnitDigests(story: string): string[];
+  /** The segments of the listed units, each as {@link YrsSession.storySegments} gives them. */
+  storySegmentUnits(story: string, units: readonly number[]): YrsStorySegment[][];
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
 
@@ -2147,6 +2159,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+    storiesChangedSince: (since) =>
+      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
+    storySegmentUnitDigests: (story) =>
+      JSON.parse(session.story_segment_unit_digests(story)) as string[],
+    storySegmentUnits: (story, units) =>
+      JSON.parse(session.story_segment_units(story, Uint32Array.from(units))) as YrsStorySegment[][],
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
 
