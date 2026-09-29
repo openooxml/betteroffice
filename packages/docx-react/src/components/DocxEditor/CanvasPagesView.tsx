@@ -14,6 +14,8 @@ import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVer
 import {
   bindDisplayPageRegistry,
   DisplayPageRegistry,
+  displayPageHoldsMirrorId,
+  displayPageMayHoldTabStops,
   presentDisplayPageBackBuffer,
   rasterizeDisplayPageToBackBuffer,
   GlyphCache,
@@ -100,6 +102,19 @@ const PAGE_WINDOW_MIN_PAGES = 12;
 // A page already mounted stays mounted until it drifts one page beyond the
 // mount band, so slow scrolling at a boundary cannot thrash mount/unmount.
 const PAGE_WINDOW_HYSTERESIS = 1;
+// Pages outside the window whose chrome something asked for (keyboard
+// navigation, a link, a plugin DOM query) keep it, the most recent first.
+const ON_DEMAND_PAGES = 4;
+const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';
+
+/** The elements under `root` that Tab stops at, in document order. */
+function tabStops(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(TAB_STOPS)).filter(
+    (element) => element.tabIndex >= 0 && !(element as HTMLButtonElement).disabled
+  );
+}
+
+type ChromeKind = 'mirror' | 'overlay';
 
 interface PageWindowRange {
   start: number;
@@ -128,7 +143,8 @@ function nextPageWindow(
  * Memoized so a keystroke's snapshot commit re-renders only the pages whose
  * `DisplayPage` identity actually changed — the owned frame-delta path keeps
  * untouched pages' identity stable across keystrokes. A page without
- * `chrome` keeps only its sized canvas.
+ * `chrome` keeps its sized canvas and empty chrome hosts, which
+ * `registerChrome` can fill on demand.
  */
 const CanvasPageSurface = memo(function CanvasPageSurface({
   page,
@@ -136,17 +152,29 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   zoom,
   interactive,
   chrome,
+  inWindow,
   deferChrome,
   registerCanvas,
+  registerChrome,
 }: {
   page: DisplayPage;
   pageKey: string;
   zoom: number;
   interactive: boolean;
   chrome: boolean;
+  inWindow: boolean;
   deferChrome: boolean;
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
+  registerChrome: (pageKey: string, kind: ChromeKind, build: (() => void) | null) => void;
 }) {
+  const registerMirror = useCallback(
+    (build: (() => void) | null) => registerChrome(pageKey, 'mirror', build),
+    [pageKey, registerChrome]
+  );
+  const registerOverlay = useCallback(
+    (build: (() => void) | null) => registerChrome(pageKey, 'overlay', build),
+    [pageKey, registerChrome]
+  );
   return (
     <div
       className="canvas-page"
@@ -165,9 +193,22 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           boxShadow: '0 1px 3px var(--doc-shadow)',
         }}
       />
-      {chrome ? <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} /> : null}
-      {chrome && interactive ? (
-        <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
+      <CanvasPageMirror
+        page={page}
+        zoom={zoom}
+        active={chrome}
+        defer={deferChrome}
+        visible={inWindow}
+        registerBuild={registerMirror}
+      />
+      {interactive ? (
+        <CanvasInteractiveOverlay
+          page={page}
+          zoom={zoom}
+          active={chrome}
+          defer={deferChrome}
+          registerBuild={registerOverlay}
+        />
       ) : null}
     </div>
   );
@@ -416,6 +457,129 @@ export function CanvasPagesView({
     }
   });
 
+  // Chrome built on demand for pages outside the window: each page's mirror
+  // and overlay register a function that builds them at once.
+  const pageKeys = useMemo(
+    () =>
+      displayList.pages.map((page, index) => {
+        const retainedPage = frame?.pages[index];
+        return retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
+      }),
+    [displayList, frame]
+  );
+  const pageKeysRef = useRef(pageKeys);
+  pageKeysRef.current = pageKeys;
+  const displayListRef = useRef(displayList);
+  displayListRef.current = displayList;
+  const chromeBuildersRef = useRef(new Map<string, Partial<Record<ChromeKind, () => void>>>());
+  const registerChrome = useCallback(
+    (pageKey: string, kind: ChromeKind, build: (() => void) | null) => {
+      const builders = chromeBuildersRef.current;
+      const entry = builders.get(pageKey) ?? {};
+      if (build) entry[kind] = build;
+      else delete entry[kind];
+      if (entry.mirror || entry.overlay) builders.set(pageKey, entry);
+      else builders.delete(pageKey);
+    },
+    []
+  );
+  const [onDemandPageKeys, setOnDemandPageKeys] = useState<readonly string[]>([]);
+  const materializePages = useCallback((pageIndices: readonly number[]) => {
+    const keys = [
+      ...new Set(
+        pageIndices
+          .map((index) => pageKeysRef.current[index])
+          .filter((key): key is string => key !== undefined)
+      ),
+    ];
+    if (keys.length === 0) return;
+    for (const key of keys) {
+      const builders = chromeBuildersRef.current.get(key);
+      builders?.mirror?.();
+      builders?.overlay?.();
+    }
+    setOnDemandPageKeys((previous) => {
+      const next = [...keys, ...previous.filter((key) => !keys.includes(key))].slice(
+        0,
+        Math.max(keys.length, ON_DEMAND_PAGES)
+      );
+      return next.length === previous.length && next.every((key, i) => key === previous[i])
+        ? previous
+        : next;
+    });
+  }, []);
+  useEffect(() => {
+    pageRegistry.setMaterializer(materializePages);
+    return () => pageRegistry.setMaterializer(null);
+  }, [materializePages, pageRegistry]);
+
+  // Tab and fragment links reach content on pages whose chrome is not built:
+  // build it first, then let focus or the link land on it.
+  useEffect(() => {
+    const host = innerHostRef.current;
+    if (!host) return;
+    const pageElement = (index: number): HTMLElement | null =>
+      host.querySelector<HTMLElement>(`.canvas-page[data-page-index="${index}"]`);
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.defaultPrevented || !(event.target instanceof HTMLElement)) return;
+      const target = event.target;
+      const from = Number(target.closest<HTMLElement>('.canvas-page')?.dataset.pageIndex);
+      if (!Number.isInteger(from)) return;
+      const step = event.shiftKey ? -1 : 1;
+      const following = (element: HTMLElement): boolean =>
+        Boolean(
+          target.compareDocumentPosition(element) &
+            (step > 0 ? Node.DOCUMENT_POSITION_FOLLOWING : Node.DOCUMENT_POSITION_PRECEDING)
+        ) && !target.contains(element);
+      const stops = tabStops(host).filter(following);
+      const next = step > 0 ? stops[0] : stops[stops.length - 1];
+      const pages = displayListRef.current.pages;
+      // A stop outside every page lies beyond the page column.
+      const nextPage = Number(next?.closest<HTMLElement>('.canvas-page')?.dataset.pageIndex);
+      const nextIndex = Number.isInteger(nextPage) ? nextPage : step > 0 ? pages.length : -1;
+      const before = (index: number) => (step > 0 ? index < nextIndex : index > nextIndex);
+      for (let index = from + step; before(index); index += step) {
+        const page = pages[index];
+        if (!page) break;
+        if (!displayPageMayHoldTabStops(page)) continue;
+        materializePages([index]);
+        const element = pageElement(index);
+        const candidates = element ? tabStops(element) : [];
+        const stop = step > 0 ? candidates[0] : candidates[candidates.length - 1];
+        if (stop) {
+          event.preventDefault();
+          stop.focus();
+          return;
+        }
+      }
+    };
+    const onClick = (event: MouseEvent): void => {
+      const link =
+        event.target instanceof Element
+          ? event.target.closest<HTMLAnchorElement>('a[href^="#"]')
+          : null;
+      if (!link || !host.contains(link)) return;
+      let id: string;
+      try {
+        id = decodeURIComponent(link.getAttribute('href')!.slice(1));
+      } catch {
+        return;
+      }
+      if (!id || link.ownerDocument.getElementById(id)) return;
+      const index = displayListRef.current.pages.findIndex((page) =>
+        displayPageHoldsMirrorId(page, id)
+      );
+      if (index >= 0) materializePages([index]);
+    };
+    host.addEventListener('keydown', onKeyDown);
+    host.addEventListener('click', onClick, true);
+    return () => {
+      host.removeEventListener('keydown', onKeyDown);
+      host.removeEventListener('click', onClick, true);
+    };
+  }, [materializePages]);
+
   // One glyph-outline cache for the canvas lifetime (task contract: not
   // per-render). The wasm-backed outline provider loads lazily through the
   // SAME module the display-list builder already resolved — no extra fetch.
@@ -636,13 +800,14 @@ export function CanvasPagesView({
         }}
       >
         {displayList.pages.map((page, i) => {
-          const retainedPage = frame?.pages[i];
-          const pageKey = retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
+          const pageKey = pageKeys[i]!;
           const surfaceKey = `${pageKey}:${offscreenEligible && !offscreenFailed ? 'offscreen' : 'dom'}`;
           // per-page wrapper so the mirror positions 1:1 over its canvas.
           // Every page keeps its sized canvas, so page geometry never
-          // changes; the a11y mirror and SDT overlay exist only for pages in
-          // the window and the page holding focus, built while idle.
+          // changes; the a11y mirror and SDT overlay hold content only for
+          // pages in the window, the page holding focus, and pages built on
+          // demand. A page's first build waits for idle time; a page in the
+          // window rebuilds at once.
           return (
             <CanvasPageSurface
               key={surfaceKey}
@@ -650,9 +815,15 @@ export function CanvasPagesView({
               pageKey={pageKey}
               zoom={zoom}
               interactive={interactive}
-              chrome={chromeInWindow(i) || pageKey === focusedPageKey}
+              chrome={
+                chromeInWindow(i) ||
+                pageKey === focusedPageKey ||
+                onDemandPageKeys.includes(pageKey)
+              }
+              inWindow={chromeInWindow(i)}
               deferChrome={windowingEnabled}
               registerCanvas={registerCanvas}
+              registerChrome={registerChrome}
             />
           );
         })}

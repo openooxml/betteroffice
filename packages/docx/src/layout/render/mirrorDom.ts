@@ -90,6 +90,55 @@ export interface BuildMirrorPageOptions {
   labels?: MirrorLabels;
 }
 
+function pageRegionPrimitives(page: DisplayPage): DisplayPrimitive[] {
+  return [
+    ...page.primitives,
+    ...(page.header?.primitives ?? []),
+    ...(page.footer?.primitives ?? []),
+    ...(page.noteAreas ?? []).flatMap((area) => area.primitives ?? []),
+  ];
+}
+
+/**
+ * Whether `page`'s mirror or interactive overlay may hold a tab stop: a link,
+ * a note reference, a note (with its backlink) or a content control. False
+ * means neither holds one, so keyboard navigation can pass the page by
+ * without building it.
+ */
+export function displayPageMayHoldTabStops(page: DisplayPage): boolean {
+  return (
+    (page.noteAreas?.length ?? 0) > 0 ||
+    pageRegionPrimitives(page).some(
+      (p) => p.href || p.noteRef || p.sdt || p.sdtPath?.length || p.inlineSdtWidget
+    )
+  );
+}
+
+/** Whether `page`'s mirror holds the note or note reference with element id `id`. */
+export function displayPageHoldsMirrorId(page: DisplayPage, id: string): boolean {
+  const note = /^oox-(footnote|endnote)-(.+)$/.exec(id);
+  if (note) {
+    const [, kind, noteId] = note;
+    return (page.noteAreas ?? []).some(
+      (area) =>
+        (area.kind ?? 'footnote') === kind &&
+        (area.noteIds ?? []).some((candidate) => String(candidate) === noteId) &&
+        (area.primitives ?? []).some((p) => p.groupId === `${kind}-${noteId}`)
+    );
+  }
+  const reference = /^oox-noteref-(footnote|endnote)-(.+)$/.exec(id);
+  if (!reference) return false;
+  const [, kind, noteId] = reference;
+  return pageRegionPrimitives(page).some(
+    (p) =>
+      (p.kind === 'text' || p.kind === 'glyphRun') &&
+      !p.href &&
+      p.noteRef?.id !== undefined &&
+      String(p.noteRef.id) === noteId &&
+      (p.noteRef.kind ?? 'footnote') === kind
+  );
+}
+
 /**
  * build the mirror DOM for one display page: an invisible (opacity 0,
  * pointer-events none) absolutely-positioned tree whose elements sit at the

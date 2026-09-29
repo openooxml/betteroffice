@@ -10,66 +10,51 @@
  * Focus never lands here: the hidden input remains the editing surface.
  */
 
-import { useEffect, useRef } from 'react';
-import {
-  buildMirrorPage,
-  displayPageRevision,
-  type DisplayPage,
-} from '@betteroffice/docx/layout/render';
+import { useRef } from 'react';
+import { buildMirrorPage, type DisplayPage } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
+import { usePageChrome } from './usePageChrome';
+
+const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
+  buildMirrorPage(page, {
+    labels: {
+      page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
+      header: t('a11y.headerLabel'),
+      footer: t('a11y.footerLabel'),
+    },
+  });
 
 export function CanvasPageMirror({
   page,
   zoom = 1,
+  active = true,
   defer = false,
+  visible = true,
+  registerBuild,
 }: {
   page: DisplayPage;
   zoom?: number;
-  /** Off-window pages build at idle time instead of inside the mount flush. */
+  /** Holds the mirror; an inactive page keeps only its empty host. */
+  active?: boolean;
+  /** The first build may wait for idle time. */
   defer?: boolean;
+  /** The page is in the page window, so a rebuild never waits. */
+  visible?: boolean;
+  /** Receives a function that builds the mirror at once. */
+  registerBuild?: (build: (() => void) | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  // Read when a build is scheduled: a change of scheduling alone keeps the
-  // built DOM (and any focus inside it) in place.
-  const deferRef = useRef(defer);
-  deferRef.current = defer;
-  // Position-shift deltas mutate primitives in place — identity alone is stale.
-  const builtForRef = useRef<{ page: DisplayPage; revision: number; t: TFunction } | null>(null);
   const { t } = useTranslation();
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const built = builtForRef.current;
-    if (built?.page === page && built.revision === displayPageRevision(page) && built.t === t) {
-      return;
-    }
-    const build = (): void => {
-      const mirror = buildMirrorPage(page, {
-        labels: {
-          page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
-          header: t('a11y.headerLabel'),
-          footer: t('a11y.footerLabel'),
-        },
-      });
-      // Keep the previous mirror connected until this replacement is ready.
-      // Clearing in effect cleanup creates a detached-DOM window on every page
-      // update; unmounting already removes the host and its complete subtree.
-      host.replaceChildren(mirror);
-      builtForRef.current = { page, revision: displayPageRevision(page), t };
-    };
-    if (!deferRef.current) {
-      build();
-      return;
-    }
-    if (typeof requestIdleCallback === 'function') {
-      const id = requestIdleCallback(build, { timeout: 1500 });
-      return () => cancelIdleCallback(id);
-    }
-    const id = setTimeout(build, 150);
-    return () => clearTimeout(id);
-  }, [page, t]);
+  usePageChrome(hostRef, {
+    page,
+    t,
+    active,
+    defer,
+    rebuildAtOnce: visible,
+    registerBuild,
+    make: makeMirror,
+  });
 
   return (
     <div

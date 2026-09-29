@@ -12,69 +12,52 @@
  * listener on the overlay root): a synthetic React handler here would fire at
  * the React root, after the canvas host's native pointer routing already moved
  * the caret. Rebuilt whenever the page's display list changes — the same
- * trigger that re-rasters the canvas.
+ * trigger that re-rasters the canvas — and at once, since its buttons carry
+ * the positions and values they dispatch.
  */
 
-import { useEffect, useRef } from 'react';
-import {
-  buildInteractiveOverlayPage,
-  displayPageRevision,
-  type DisplayPage,
-} from '@betteroffice/docx/layout/render';
+import { useRef } from 'react';
+import { buildInteractiveOverlayPage, type DisplayPage } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
+import { usePageChrome } from './usePageChrome';
+
+const makeOverlay = (page: DisplayPage, t: TFunction): HTMLElement =>
+  buildInteractiveOverlayPage(page, {
+    labels: {
+      control: t('a11y.contentControl'),
+      addRepeatingItem: t('a11y.addRepeatingItem'),
+      removeRepeatingItem: t('a11y.removeRepeatingItem'),
+    },
+  });
 
 export function CanvasInteractiveOverlay({
   page,
   zoom = 1,
+  active = true,
   defer = false,
+  registerBuild,
 }: {
   page: DisplayPage;
   zoom?: number;
-  /** See {@link CanvasPageMirror} — off-window pages build at idle time. */
+  /** See {@link CanvasPageMirror}. */
+  active?: boolean;
+  /** The first build may wait for idle time. */
   defer?: boolean;
+  /** Receives a function that builds the overlay at once. */
+  registerBuild?: (build: (() => void) | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  // Read when a build is scheduled: a change of scheduling alone keeps the
-  // built DOM (and any focus inside it) in place.
-  const deferRef = useRef(defer);
-  deferRef.current = defer;
-  // Position-shift deltas mutate primitives in place — identity alone is stale.
-  const builtForRef = useRef<{ page: DisplayPage; revision: number; t: TFunction } | null>(null);
   const { t } = useTranslation();
-
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const built = builtForRef.current;
-    if (built?.page === page && built.revision === displayPageRevision(page) && built.t === t) {
-      return;
-    }
-    const build = (): void => {
-      const overlay = buildInteractiveOverlayPage(page, {
-        labels: {
-          control: t('a11y.contentControl'),
-          addRepeatingItem: t('a11y.addRepeatingItem'),
-          removeRepeatingItem: t('a11y.removeRepeatingItem'),
-        },
-      });
-      host.replaceChildren(overlay);
-      builtForRef.current = { page, revision: displayPageRevision(page), t };
-    };
-    if (!deferRef.current) {
-      build();
-      return () => {
-        host.replaceChildren();
-        builtForRef.current = null;
-      };
-    }
-    if (typeof requestIdleCallback === 'function') {
-      const id = requestIdleCallback(build, { timeout: 1500 });
-      return () => cancelIdleCallback(id);
-    }
-    const id = setTimeout(build, 150);
-    return () => clearTimeout(id);
-  }, [page, t]);
+  usePageChrome(hostRef, {
+    page,
+    t,
+    active,
+    defer,
+    rebuildAtOnce: true,
+    registerBuild,
+    make: makeOverlay,
+  });
 
   return (
     <div
