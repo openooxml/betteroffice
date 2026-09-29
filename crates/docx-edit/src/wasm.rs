@@ -1555,6 +1555,12 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Makes the next display frame a full one whatever epoch its caller
+    /// passes, for a host that switches to this engine from another.
+    pub fn reset_frame_base(&self) {
+        self.engine.reset_frame_base();
+    }
+
     /// `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
     /// against the same resident font store this session measures with.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {

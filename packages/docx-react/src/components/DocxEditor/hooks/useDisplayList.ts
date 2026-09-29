@@ -314,6 +314,7 @@ export function useRustDisplayList(
   const adoptHostEngine = useCallback(
     (hostEngine: YrsSession): void => {
       if (workerFallbackEngineRef.current === hostEngine) return;
+      hostEngine.resetFrameBase();
       queryEpochGate.clear();
       recoveryFrameEpochRef.current = snapshotRef.current.frame?.frameEpoch ?? 0;
       const fallbackSnapshot = { ...snapshotRef.current, frame: null, queries: null, caret: null };

@@ -708,6 +708,11 @@ export class EditSession {
      */
     replace_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text: string, author_name?: string | null, author_date?: string | null): string;
     /**
+     * Makes the next display frame a full one whatever epoch its caller
+     * passes, for a host that switches to this engine from another.
+     */
+    reset_frame_base(): void;
+    /**
      * `{"frameEpoch", "caretRect": {…}|null}` for the session's own collapsed
      * body selection. `caretRect` is null whenever there is no selection, the
      * selection is not a collapsed body caret, or the retained layout has no
@@ -1397,6 +1402,7 @@ export interface InitOutput {
     readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
+    readonly editsession_reset_frame_base: (a: number) => void;
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resident_deleted_units: (a: number) => number;
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];

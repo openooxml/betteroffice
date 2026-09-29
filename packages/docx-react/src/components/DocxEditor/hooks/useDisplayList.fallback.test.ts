@@ -61,6 +61,7 @@ test('continues the frame epochs after a worker with a higher epoch fails', asyn
   const expectedEpochs: number[] = [];
   const engine = {
     buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
     buildDisplayListFrame: (input: string, epoch: number) => {
       expectedEpochs.push(epoch);
       return native.build_display_list_frame(input, epoch);
@@ -93,6 +94,93 @@ test('continues the frame epochs after a worker with a higher epoch fails', asyn
     await waitFor(() => expect(result.current.error).toBeNull());
     expect(expectedEpochs[0]).toBe(100);
     expect(result.current.frame?.frameEpoch).toBe(101);
+    expect(result.current.loading).toBe(false);
+    expect(result.current.workerSurfacesActive).toBe(false);
+    expect(
+      errors.mock.calls.some(([message]) => String(message).includes('Rust display-list build failed'))
+    ).toBe(false);
+    const fallbackEpoch = result.current.frame!.frameEpoch;
+    await act(async () => {
+      rerender({ layout: { ...inputs.layout } });
+    });
+    await waitFor(() => expect(result.current.frame!.frameEpoch).toBeGreaterThan(fallbackEpoch));
+    expect(expectedEpochs[1]).toBe(fallbackEpoch);
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
+
+test('recovers from a worker whose frame number the host engine already used', async () => {
+  const native = createEditSession(9101);
+  native.create_story('body', 'Fallback text', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  const frame = native.build_display_list_frame(JSON.stringify(inputs), 0);
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setBigUint64(32, 1n, true);
+  let worker: FakeWorker;
+  class FakeWorker {
+    onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+    onerror: ((event: ErrorEvent) => void) | null = null;
+    onmessageerror = null;
+    constructor() {
+      worker = this;
+    }
+    bootstrapId = 0;
+    postMessage(request: ResidentEngineWorkerRequest): void {
+      if (request.type === 'bootstrap') this.bootstrapId = request.id;
+    }
+    reply(): void {
+      this.onmessage?.({ data: {
+        id: this.bootstrapId, ok: true, frame: frame.slice().buffer,
+        caret: { frameEpoch: 100, caretRect: null }, selection: null, layoutRevision: 1,
+      } } as MessageEvent<ResidentEngineWorkerResponse>);
+    }
+    terminate(): void {}
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const expectedEpochs: number[] = [];
+  const engine = {
+    buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
+    buildDisplayListFrame: (input: string, epoch: number) => {
+      expectedEpochs.push(epoch);
+      return native.build_display_list_frame(input, epoch);
+    },
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const overrides = { getInputs: () => inputs };
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    await act(async () => {
+      worker!.reply();
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(1);
+    });
+    await act(async () => {
+      worker!.onerror?.({ message: 'worker crashed' } as ErrorEvent);
+      rerender({ layout: { ...inputs.layout } });
+    });
+    await waitFor(() => expect(expectedEpochs.length).toBeGreaterThan(0));
+    await waitFor(() => expect(result.current.error).toBeNull());
+    expect(expectedEpochs[0]).toBe(1);
+    expect(result.current.frame?.frameEpoch).toBe(2);
     expect(result.current.loading).toBe(false);
     expect(result.current.workerSurfacesActive).toBe(false);
     expect(
@@ -190,6 +278,7 @@ test('falls back to the main thread and keeps the keystroke when the worker cras
   globalThis.Worker = FakeWorker as unknown as typeof Worker;
   const engine = {
     buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
     buildDisplayListFrame: (input: string, epoch: number) =>
       native.build_display_list_frame(input, epoch),
     applyInput: (text: string, epoch: number) => native.apply_input(text, epoch),
@@ -265,6 +354,7 @@ test('a layout after a worker crash the host cannot absorb as input still render
   };
   const engine = {
     buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
     buildDisplayListFrame: (input: string, epoch: number) =>
       native.build_display_list_frame(input, epoch),
     applyInput: () => {
@@ -334,6 +424,7 @@ test('surfaces an engine-level input rejection instead of falling back', async (
   globalThis.Worker = FakeWorker as unknown as typeof Worker;
   const engine = {
     buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
     buildDisplayListFrame: (input: string, epoch: number) =>
       native.build_display_list_frame(input, epoch),
     applyInput: (text: string, epoch: number) => native.apply_input(text, epoch),
@@ -401,6 +492,7 @@ test('falls back to the main thread and keeps the keystroke when the worker retu
   globalThis.Worker = FakeWorker as unknown as typeof Worker;
   const engine = {
     buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => native.reset_frame_base(),
     buildDisplayListFrame: (input: string, epoch: number) =>
       native.build_display_list_frame(input, epoch),
     applyInput: (text: string, epoch: number) => native.apply_input(text, epoch),

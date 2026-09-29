@@ -454,6 +454,8 @@ struct DisplayState {
     next_page_id: u64,
     extras_fingerprint: u64,
     extras_json: Option<String>,
+    /// The next frame is full whatever epoch the caller holds.
+    fresh_base: bool,
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
 }
@@ -2610,7 +2612,9 @@ impl EngineSession {
         display.extras_json = Some(extras_json.to_owned());
         let frame_epoch = display.frame_epoch;
         let binary_frame_epoch = display.binary_frame_epoch;
-        let full = expected_frame_epoch != binary_frame_epoch || binary_frame_epoch == 0;
+        let full = display.fresh_base
+            || expected_frame_epoch != binary_frame_epoch
+            || binary_frame_epoch == 0;
         let layout_epoch = self.pagination.borrow().layout_epoch;
         let mut next_page_id = display.next_page_id;
         // Split borrows: the encoder reads the retained list and the previous
@@ -2642,7 +2646,13 @@ impl EngineSession {
         display.pages = pages;
         display.next_page_id = next_page_id;
         display.binary_frame_epoch = frame_epoch;
+        display.fresh_base = false;
         Ok(bytes)
+    }
+
+    /// Make the next frame a full one: its caller holds another engine's frames.
+    pub fn reset_frame_base(&self) {
+        self.display.borrow_mut().fresh_base = true;
     }
 
     /// Read the resident display list without cloning or serializing it.
@@ -4641,6 +4651,11 @@ mod tests {
         assert_eq!(engine.display.borrow().binary_frame_epoch, 9);
         engine.build_display_list_frame("{}", 3).unwrap();
         assert_eq!(engine.display.borrow().binary_frame_epoch, 10);
+        engine.reset_frame_base();
+        let full = engine.build_display_list_frame("{}", 10).unwrap();
+        assert_eq!(u32::from_le_bytes(full[12..16].try_into().unwrap()), 1);
+        let delta = engine.build_display_list_frame("{}", 11).unwrap();
+        assert_eq!(u32::from_le_bytes(delta[12..16].try_into().unwrap()), 0);
     }
 
     #[test]

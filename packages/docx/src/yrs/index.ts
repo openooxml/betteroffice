@@ -794,6 +794,8 @@ export interface YrsSession extends CollaborationReplica {
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
   buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
+  resetFrameBase(): void;
   /** Caret geometry from the current resident display frame. */
   residentCaretSnapshot(): YrsResidentCaretSnapshot;
   /** Apply a collapsed plain-text insertion and return its resident FrameDelta. */
@@ -1499,6 +1501,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return session.retained_kernel_inputs_json();
     },
     buildDisplayListJson: (input) => session.build_display_list_json(input),
+    resetFrameBase: () => {
+      if (!destroyed) session.reset_frame_base();
+    },
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     residentCaretSnapshot: () =>
