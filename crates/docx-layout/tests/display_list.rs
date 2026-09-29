@@ -3107,3 +3107,58 @@ fn auto_spacing_keeps_the_first_baseline_at_the_top_of_a_taller_box() {
         );
     }
 }
+
+#[test]
+fn unbuilt_page_spans_read_positions_as_a_fresh_build_does() {
+    use docx_layout::types::{Input, LayoutBlock};
+    let raw = std::fs::read_to_string(fixture_path("table-splits-with-repeated-header", "input"))
+        .unwrap();
+    let input: Input = serde_json::from_str(&raw).unwrap();
+    let layout = docx_layout::compute_layout_input(&mut input.clone()).unwrap();
+    let unbuilt = |_: usize| false;
+    for value in [f64::NAN, f64::INFINITY, 12.5, 1e30, 18.0] {
+        let mut changed = input.clone();
+        let LayoutBlock::Table(table) = &mut changed.measured[0].block else {
+            panic!("the fixture opens with a table");
+        };
+        let LayoutBlock::Paragraph(paragraph) = &mut table.rows[4].cells[0].blocks[0] else {
+            panic!("the row opens with a paragraph");
+        };
+        paragraph.pm_start = Some(value);
+        paragraph.pm_end = Some(20.0);
+        let fresh = docx_layout::build_resident_display_list_partial_observed(
+            &changed,
+            &layout,
+            "{}",
+            &unbuilt,
+            &mut || {},
+        );
+        let (mut resident, mut list) = docx_layout::build_resident_display_list_partial_observed(
+            &input,
+            &layout,
+            "{}",
+            &unbuilt,
+            &mut || {},
+        )
+        .unwrap();
+        let updated = docx_layout::update_resident_display_list_incremental_partial_observed(
+            &changed,
+            &layout,
+            &mut resident,
+            &mut list,
+            0,
+            layout.pages.len(),
+            &[],
+            &std::collections::HashMap::new(),
+            &unbuilt,
+            &mut || {},
+        );
+        match fresh {
+            Ok((_, fresh)) => {
+                assert!(updated.unwrap(), "{value}");
+                assert_eq!(list.pages, fresh.pages, "{value}");
+            }
+            Err(_) => assert!(updated.is_err(), "{value}"),
+        }
+    }
+}

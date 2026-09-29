@@ -10761,57 +10761,68 @@ fn unbuilt_page_with_span(
     }
 }
 
-/// [`page_position_span`] read from a pagination page and its measured blocks.
+/// [`page_position_span`] read from a pagination page and its measured blocks,
+/// converting positions as the resident transcoder does: a non-finite one is
+/// absent and a fractional or out-of-range one is an error.
 fn layout_page_position_span(
     page: &crate::types::Page,
     blocks: &HashMap<String, &crate::types::MeasuredBlock>,
-) -> Option<[i64; 2]> {
+) -> Result<Option<[i64; 2]>, String> {
     use crate::types::{Fragment, LayoutBlock, TableRow};
-    fn block(block: &LayoutBlock, include: &mut dyn FnMut(Option<f64>, Option<f64>)) {
+    fn block(block: &LayoutBlock, positions: &mut Vec<Option<f64>>) {
         match block {
-            LayoutBlock::Paragraph(paragraph) => include(paragraph.pm_start, paragraph.pm_end),
-            LayoutBlock::Image(image) => include(image.pm_start, image.pm_end),
-            LayoutBlock::Table(table) => rows(&table.rows, include),
+            LayoutBlock::Paragraph(paragraph) => {
+                positions.extend([paragraph.pm_start, paragraph.pm_end]);
+            }
+            LayoutBlock::Image(image) => positions.extend([image.pm_start, image.pm_end]),
+            LayoutBlock::Table(table) => rows(&table.rows, positions),
             _ => {}
         }
     }
-    fn rows(rows: &[TableRow], include: &mut dyn FnMut(Option<f64>, Option<f64>)) {
+    fn rows(rows: &[TableRow], positions: &mut Vec<Option<f64>>) {
         for row in rows {
             for cell in &row.cells {
                 for nested in &cell.blocks {
-                    block(nested, include);
+                    block(nested, positions);
                 }
             }
         }
     }
-    let mut span: Option<[i64; 2]> = None;
-    let mut include = |start: Option<f64>, end: Option<f64>| {
-        for value in [start, end].into_iter().flatten() {
-            let value = value as i64;
-            span = Some(span.map_or([value, value], |[low, high]| {
-                [low.min(value), high.max(value)]
-            }));
-        }
-    };
+    let mut positions = Vec::new();
     for fragment in &page.fragments {
         match fragment {
-            Fragment::Paragraph(fragment) => include(fragment.pm_start, fragment.pm_end),
-            Fragment::Image(fragment) => include(fragment.pm_start, fragment.pm_end),
-            Fragment::TextBox(fragment) => include(fragment.pm_start, fragment.pm_end),
-            Fragment::Shape(fragment) => include(fragment.pm_start, fragment.pm_end),
-            Fragment::Chart(fragment) => include(fragment.pm_start, fragment.pm_end),
+            Fragment::Paragraph(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::Image(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::TextBox(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::Shape(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::Chart(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Table(fragment) => {
                 if let Some(measured) = blocks.get(&crate_block_id_key(&fragment.block_id))
                     && let LayoutBlock::Table(table) = &measured.block
                 {
                     let end = fragment.row_end.min(table.rows.len());
                     let start = fragment.row_start.min(end);
-                    rows(&table.rows[start..end], &mut include);
+                    rows(&table.rows[start..end], &mut positions);
                 }
             }
         }
     }
-    span
+    let mut span: Option<[i64; 2]> = None;
+    for value in positions.into_iter().flatten() {
+        if !value.is_finite() {
+            continue;
+        }
+        if value.fract() != 0.0 || value < i64::MIN as f64 || value > i64::MAX as f64 {
+            return Err(format!(
+                "resident display body position {value} is not an integer"
+            ));
+        }
+        let value = value as i64;
+        span = Some(span.map_or([value, value], |[low, high]| {
+            [low.min(value), high.max(value)]
+        }));
+    }
+    Ok(span)
 }
 
 fn resident_build_input(
@@ -11084,7 +11095,7 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_observed(
             previous.pages[page_index] = unbuilt_page_with_span(
                 &resident.input.layout.pages[page_index],
                 page_index,
-                layout_page_position_span(&layout.pages[page_index], &blocks),
+                layout_page_position_span(&layout.pages[page_index], &blocks)?,
             );
         }
     }
