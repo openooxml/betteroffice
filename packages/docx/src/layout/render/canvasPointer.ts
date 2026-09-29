@@ -37,8 +37,85 @@ export interface DisplayPageClientRect {
   height: number;
 }
 
-/** the canvas page elements inside a `.canvas-pages` host, in page order */
-function pageCanvases(host: HTMLElement): HTMLCanvasElement[] {
+/**
+ * The page canvases a renderer mounts under its pages host, so page lookups
+ * read them instead of searching a subtree that also holds every page's
+ * accessibility mirror. A renderer adds each `<canvas data-page-index>` it
+ * mounts, deletes it on unmount, invalidates the registry whenever it may have
+ * moved or renumbered them, and binds the registry to the host with
+ * {@link bindDisplayPageRegistry}.
+ */
+export class DisplayPageRegistry {
+  private readonly canvases = new Set<HTMLCanvasElement>();
+  private ordered: HTMLCanvasElement[] | null = null;
+  private byIndex: Map<number, HTMLCanvasElement> | null = null;
+
+  add(canvas: HTMLCanvasElement): void {
+    this.canvases.add(canvas);
+    this.invalidate();
+  }
+
+  delete(canvas: HTMLCanvasElement): void {
+    this.canvases.delete(canvas);
+    this.invalidate();
+  }
+
+  /** Forgets the order and indices read so far, after the renderer moved or renumbered canvases. */
+  invalidate(): void {
+    this.ordered = null;
+    this.byIndex = null;
+  }
+
+  /** The registered canvases in document order. */
+  all(): HTMLCanvasElement[] {
+    this.ordered ??= [...this.canvases].sort((a, b) =>
+      a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_PRECEDING ? 1 : -1
+    );
+    return this.ordered;
+  }
+
+  /** The first canvas in document order that shows `pageIndex`. */
+  canvas(pageIndex: number): HTMLCanvasElement | null {
+    const cached = this.byIndex?.get(pageIndex);
+    if (cached?.dataset.pageIndex === String(pageIndex)) return cached;
+    this.byIndex = this.indexPages();
+    return this.byIndex.get(pageIndex) ?? null;
+  }
+
+  private indexPages(): Map<number, HTMLCanvasElement> {
+    const byIndex = new Map<number, HTMLCanvasElement>();
+    for (const canvas of this.all()) {
+      const pageIndex = canvas.dataset.pageIndex;
+      if (pageIndex === undefined) continue;
+      const key = Number(pageIndex);
+      if (String(key) === pageIndex && !byIndex.has(key)) byIndex.set(key, canvas);
+    }
+    return byIndex;
+  }
+}
+
+const displayPageRegistries = new WeakMap<HTMLElement, DisplayPageRegistry>();
+
+/** Binds `registry` to the pages `host` it renders into, or unbinds it with null. */
+export function bindDisplayPageRegistry(
+  host: HTMLElement,
+  registry: DisplayPageRegistry | null
+): void {
+  if (registry) displayPageRegistries.set(host, registry);
+  else displayPageRegistries.delete(host);
+}
+
+/** The first `<canvas data-page-index>` under `host` for `pageIndex`. */
+export function displayPageCanvas(host: HTMLElement, pageIndex: number): HTMLCanvasElement | null {
+  const registry = displayPageRegistries.get(host);
+  if (registry) return registry.canvas(pageIndex);
+  return host.querySelector<HTMLCanvasElement>(`canvas[data-page-index="${pageIndex}"]`);
+}
+
+/** The canvas page elements inside a pages host, in document order. */
+export function displayPageCanvases(host: HTMLElement): HTMLCanvasElement[] {
+  const registry = displayPageRegistries.get(host);
+  if (registry) return registry.all();
   return Array.from(host.querySelectorAll<HTMLCanvasElement>('canvas[data-page-index]'));
 }
 
@@ -49,7 +126,7 @@ export function resolveDisplayPageClientRect(
   pageIndex: number,
   options?: DisplayPageHostOptions
 ): DisplayPageClientRect | null {
-  const canvas = host.querySelector<HTMLCanvasElement>(`canvas[data-page-index="${pageIndex}"]`);
+  const canvas = displayPageCanvas(host, pageIndex);
   if (canvas) {
     const rect = canvas.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) return rect;
@@ -106,7 +183,7 @@ export function resolveCanvasPoint(
   clientY: number,
   options?: { clampToNearestPage?: boolean; pageGap?: number; paddingTop?: number }
 ): CanvasPointHit | null {
-  const canvases = pageCanvases(host);
+  const canvases = displayPageCanvases(host);
   const canvasByPage = new Map<number, HTMLCanvasElement>();
   for (const canvas of canvases) {
     const pageIndex = Number(canvas.dataset.pageIndex);
