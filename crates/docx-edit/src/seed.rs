@@ -3770,6 +3770,57 @@ fn bind_field_result_blocks(
     }
 }
 
+/// Binds each field whose code runs past its paragraph's mark to the paragraphs whose marks
+/// that code hides. Word joins such a paragraph with the next one whose mark is visible: the
+/// paragraph holding the field's separator, or the code's last paragraph when the field ends
+/// there. Tables among those blocks leave the field unbound.
+fn bind_field_code_blocks(
+    units: &mut [InlineUnit],
+    story_id: &str,
+    blocks: &[Value],
+    owner: usize,
+    after_owner: BlockCursor,
+) {
+    for unit in units {
+        let UnitContent::Embed { kind, payload } = &mut unit.content else {
+            continue;
+        };
+        if kind.as_str() != "field" {
+            continue;
+        }
+        let Some(data) = payload
+            .get("fieldData")
+            .and_then(Value::as_str)
+            .filter(|data| data.contains("\"structuredCode\"") && data.contains("\"blocks\""))
+            .and_then(|data| serde_json::from_str::<Value>(data).ok())
+        else {
+            continue;
+        };
+        let code = array(field(field(Some(&data), "structuredCode"), "blocks")).len();
+        if code == 0 {
+            continue;
+        }
+        let has_result = !array(field(field(Some(&data), "structuredResult"), "blocks")).is_empty();
+        let hidden = if has_result { code } else { code - 1 };
+        let Some(joined) = blocks.get(owner + 1..owner + 1 + hidden + 1) else {
+            continue;
+        };
+        if joined
+            .iter()
+            .any(|block| string(field(Some(block), "type")) != Some("paragraph"))
+        {
+            continue;
+        }
+        let mut cursor = after_owner;
+        let ids = joined[..hidden]
+            .iter()
+            .filter_map(|block| cursor.take(story_id, block))
+            .map(Value::String)
+            .collect();
+        payload.insert("fieldCodeMarks".to_owned(), Value::Array(ids));
+    }
+}
+
 fn add_comment_coverage(plan: &mut StoryPlan) {
     let mut offset = 0u32;
     for unit in &plan.units {
@@ -4126,6 +4177,7 @@ fn visit_story(
                     cursor,
                     &mut result_table_ids,
                 );
+                bind_field_code_blocks(&mut units, &story_id, blocks, block_index, cursor);
                 context.plans[plan_index].units.extend(units);
                 context.plans[plan_index]
                     .units
