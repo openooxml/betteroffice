@@ -130,6 +130,14 @@ describe('useCompatibilityWarm', () => {
     expect(calls).toEqual(['cancel', 'schedule']);
   });
 
+  test('losing the last content listener cancels a pending warm', () => {
+    const { calls, rerender } = warmer({ session: sessions[0]!, frame: null, projects: true });
+    rerender({ session: sessions[0]!, frame: frames[0]!, projects: true });
+    calls.length = 0;
+    rerender({ session: sessions[0]!, frame: frames[0]!, projects: false });
+    expect(calls).toEqual(['cancel']);
+  });
+
   test('never warms for a host that does not project changes', () => {
     const { calls, rerender } = warmer({ session: sessions[0]!, frame: null, projects: false });
     rerender({ session: sessions[0]!, frame: frames[0]!, projects: false });

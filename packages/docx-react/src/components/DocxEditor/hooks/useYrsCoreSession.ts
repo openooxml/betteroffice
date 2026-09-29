@@ -396,8 +396,9 @@ export function useYrsCoreSession(
  * Warms the compatibility base for a host that projects every change, once
  * the session's own first display list is on screen. A replacement session
  * can inherit the previous session's frame until its own layout lands, so the
- * frame shown when the session changed never qualifies it; a renderer leaving
- * readiness cancels a pending warm.
+ * frame shown when the session changed never qualifies it. A renderer leaving
+ * readiness, or the host losing its last content listener, cancels a pending
+ * warm.
  */
 export function useCompatibilityWarm(
   session: YrsSession | null,
@@ -415,10 +416,10 @@ export function useCompatibilityWarm(
   }
   const ownFrame = renderedFrame !== null && renderedFrame !== inheritedRef.current.frame;
   useEffect(() => {
-    if (!ownFrame) {
+    if (!ownFrame || !projectsEveryChange) {
       cancel();
       return;
     }
-    if (session && projectsEveryChange) schedule();
+    if (session) schedule();
   }, [cancel, ownFrame, projectsEveryChange, schedule, session]);
 }
