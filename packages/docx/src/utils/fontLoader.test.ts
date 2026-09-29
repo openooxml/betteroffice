@@ -493,6 +493,15 @@ test('a family Google does not serve is asked for once, and its link removed', a
   expect(googleLinks()).toHaveLength(0);
   expect(await loadFont('Unserved Office Face')).toBe(false);
   expect(googleLinks()).toHaveLength(0);
+  const now = Date.now;
+  Date.now = () => now() + 5 * 60_000;
+  try {
+    void loadFont('Unserved Office Face');
+    expect(googleLinks()).toHaveLength(1);
+    googleLinks()[0].onerror?.(new Event('error'));
+  } finally {
+    Date.now = now;
+  }
 });
 
 test('documents embedding different faces under one name each keep their own', async () => {

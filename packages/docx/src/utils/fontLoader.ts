@@ -145,9 +145,19 @@ const registeredFamilies = new Set<string>();
 // measureText calls on a shared canvas.
 const probeSatisfied = new Set<string>();
 
-// Google Fonts stylesheet URLs that failed: families Google does not serve
-// (Calibri, Cambria, Aptos, …). Kept for the page's lifetime.
-const failedGoogleStylesheets = new Set<string>();
+// Google Fonts stylesheet URLs that failed, by when. A family Google does not
+// serve (Calibri, Cambria, Aptos, …) fails the same way every time; a network
+// error may not, so a failure is retried once it is this old.
+const failedGoogleStylesheets = new Map<string, number>();
+const GOOGLE_STYLESHEET_RETRY_MS = 5 * 60_000;
+
+function googleStylesheetFailed(url: string): boolean {
+  const failedAt = failedGoogleStylesheets.get(url);
+  if (failedAt === undefined) return false;
+  if (Date.now() - failedAt < GOOGLE_STYLESHEET_RETRY_MS) return true;
+  failedGoogleStylesheets.delete(url);
+  return false;
+}
 
 function reportFontError(
   error: unknown,
@@ -563,7 +573,7 @@ async function loadFontFrom(
     return false;
   }
   const googleUrl = getGoogleFontsUrl(normalizedFamily, options?.weights, options?.styles);
-  if (!bundled && pendingFaces.promises.length === 0 && failedGoogleStylesheets.has(googleUrl)) {
+  if (!bundled && pendingFaces.promises.length === 0 && googleStylesheetFailed(googleUrl)) {
     return false;
   }
 
@@ -615,7 +625,7 @@ async function loadFontFrom(
       // Remote fetch disabled (no-egress embedder). The font is not locally
       // available, so don't inject a Google Fonts <link> — report failure and
       // let the caller's CSS fallback stack render with what is available.
-      if (!googleFontsEnabled || failedGoogleStylesheets.has(googleUrl)) {
+      if (!googleFontsEnabled || googleStylesheetFailed(googleUrl)) {
         return false;
       }
 
@@ -656,13 +666,13 @@ async function loadFontFrom(
         return true;
       }
 
-      // A family Google does not serve fails the same way on every call;
-      // remember it so later mounts neither re-request it nor add a link. A
-      // timeout only drops the link, so a later call can try again.
+      // Remember a failure so the next mounts neither re-request it nor add a
+      // link until it may be retried. A timeout only drops the link, so a
+      // later call can try again.
       link.onload = null;
       link.onerror = null;
       link.remove();
-      if (failed) failedGoogleStylesheets.add(googleUrl);
+      if (failed) failedGoogleStylesheets.set(googleUrl, Date.now());
       return false;
     } catch (error) {
       reportFontError(error, `failed to load "${normalizedFamily}"`, requesters);
