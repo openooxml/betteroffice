@@ -11,7 +11,8 @@
 //! The two fingerprints answer different questions, so each excludes what it
 //! must not notice. The structural one ignores the root `pageIndex`, since a
 //! page that only moved is still the same page. The visual one additionally
-//! ignores `docStart`, `docEnd`, `fragmentDocStart`, `fragmentDocEnd` and an
+//! ignores `docStart`, `docEnd`, `fragmentDocStart`, `fragmentDocEnd`, a note
+//! region note's `anchorDocStart` and `anchorDocEnd`, and an
 //! `inlineSdtWidget`'s `pos`: those shift as text is edited elsewhere without
 //! changing a pixel, and a page whose visual fingerprint holds can ship a
 //! position patch rather than a full re-encode. Fingerprints are only ever
@@ -141,7 +142,12 @@ fn classify(key: &str) -> Slot {
 fn is_position_key(key: &str) -> bool {
     matches!(
         key,
-        "docStart" | "docEnd" | "fragmentDocStart" | "fragmentDocEnd"
+        "docStart"
+            | "docEnd"
+            | "fragmentDocStart"
+            | "fragmentDocEnd"
+            | "anchorDocStart"
+            | "anchorDocEnd"
     )
 }
 

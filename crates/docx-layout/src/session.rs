@@ -120,14 +120,27 @@ struct DisplayListUpdate {
     #[serde(default)]
     replace: Vec<(usize, DisplayPage)>,
     /// Retained pages whose doc positions moved: `[next_index, previous_index,
-    /// run_lists]`, where each run list is applied in order and a run is
+    /// run_lists, anchor_lists?]`, where each run list is applied in order and a run is
     /// `[start, count, mask, delta]` over the canonical primitive order (body,
     /// note separators+primitives per area, header, footer). Mask bits: 1
     /// docStart, 2 docEnd, 4 fragmentDocStart, 8 fragmentDocEnd, 16 inline
-    /// widget pos — the owned frame-delta shift contract.
+    /// widget pos — the owned frame-delta shift contract. `anchor_lists`, when
+    /// present, holds one list per run list of `[area, note, start, end]` note
+    /// anchors, each set after its run list.
     #[serde(default)]
-    shift: Vec<(usize, usize, Vec<Vec<(usize, usize, u8, i64)>>)>,
+    shift: Vec<ShiftEntry>,
 }
+
+type ShiftRun = (usize, usize, u8, i64);
+type NoteAnchor = (usize, usize, Option<i64>, Option<i64>);
+
+#[derive(serde::Deserialize)]
+struct ShiftEntry(
+    usize,
+    usize,
+    Vec<Vec<ShiftRun>>,
+    #[serde(default)] Vec<Vec<NoteAnchor>>,
+);
 
 /// Apply a page-delta update to a stored display list, so an incremental
 /// rebuild re-parses only its changed pages instead of the whole list. On any
@@ -243,10 +256,7 @@ fn shift_primitive_positions(
 /// Replays one owned-frame position-shift run list onto a retained page, in
 /// the same canonical primitive order the encoder used: body primitives, each
 /// note area's separators then primitives, header, footer.
-fn shift_page_positions(
-    page: &mut DisplayPage,
-    runs: &[(usize, usize, u8, i64)],
-) -> Result<(), String> {
+fn shift_page_positions(page: &mut DisplayPage, runs: &[ShiftRun]) -> Result<(), String> {
     const FIELDS: u8 = SHIFT_DOC_START
         | SHIFT_DOC_END
         | SHIFT_FRAGMENT_START
@@ -337,13 +347,25 @@ fn apply_display_list_update(
         }
         *slot = Some(page);
     }
-    for (next_index, previous_index, run_lists) in update.shift {
+    for ShiftEntry(next_index, previous_index, run_lists, anchor_lists) in update.shift {
+        if !anchor_lists.is_empty() && anchor_lists.len() != run_lists.len() {
+            return Err("note anchor lists do not match the run lists".to_owned());
+        }
         let mut page = previous
             .get_mut(previous_index)
             .and_then(Option::take)
             .ok_or_else(|| format!("shifted page {previous_index} is missing"))?;
-        for runs in &run_lists {
+        for (step, runs) in run_lists.iter().enumerate() {
             shift_page_positions(&mut page, runs)?;
+            for &(area, note, start, end) in anchor_lists.get(step).into_iter().flatten() {
+                let note = page
+                    .note_areas
+                    .get_mut(area)
+                    .and_then(|area| area.notes.get_mut(note))
+                    .ok_or_else(|| "note anchor shift references an unknown note".to_owned())?;
+                note.anchor_doc_start = start;
+                note.anchor_doc_end = end;
+            }
         }
         let slot = next
             .get_mut(next_index)
@@ -697,6 +719,81 @@ mod tests {
             update_display_list(handle, &absent.to_string()).is_err(),
             "an exact run still needs its fields"
         );
+    }
+
+    #[test]
+    fn note_anchor_shifts_match_a_fresh_open() {
+        drain();
+        let text = |start: i64| {
+            serde_json::json!({"kind": "text", "text": "x", "x": 10, "baselineY": 20,
+                "width": 5, "font": "400 16px Arial", "color": "#000000",
+                "docStart": start, "docEnd": start + 1})
+        };
+        let area = |kind: &str, anchors: &[Option<i64>]| {
+            let notes: Vec<_> = anchors
+                .iter()
+                .enumerate()
+                .map(|(index, anchor)| {
+                    let mut note = serde_json::json!({"id": index + 1, "label": "1"});
+                    if let Some(anchor) = anchor {
+                        note["anchorDocStart"] = serde_json::json!(anchor);
+                        note["anchorDocEnd"] = serde_json::json!(anchor + 1);
+                    }
+                    note
+                })
+                .collect();
+            serde_json::json!({"kind": kind, "primitives": [text(2)],
+                "noteIds": (1..=anchors.len()).collect::<Vec<_>>(), "notes": notes})
+        };
+        // A footnote page, an endnote page whose anchors span the document,
+        // and a page with both.
+        let list = |body: i64, foot: i64, ends: [Option<i64>; 2]| {
+            let page = |index: usize, primitives, areas| {
+                serde_json::json!({"pageIndex": index, "width": 816, "height": 1056,
+                    "primitives": primitives, "noteAreas": areas})
+            };
+            serde_json::json!({"pages": [
+                page(0, serde_json::json!([text(body)]), serde_json::json!([area("footnote", &[Some(foot)])])),
+                page(1, serde_json::json!([]), serde_json::json!([area("endnote", &ends)])),
+                page(2, serde_json::json!([text(body + 50)]), serde_json::json!([
+                    area("footnote", &[Some(foot + 50)]),
+                    area("endnote", &ends),
+                ])),
+            ]})
+            .to_string()
+        };
+        let stored = |handle: u32| SESSIONS.with(|s| s.borrow().get(handle).cloned().unwrap());
+
+        let handle = open_display_list(&list(10, 11, [Some(3), Some(40)])).expect("opens");
+        let update = serde_json::json!({"total": 3, "shift": [
+            [0, 0, [[[0, 1, 3, 5]], []], [[[0, 0, 16, 17]], [[0, 0, 18, 19]]]],
+            [1, 1, [[], []], [[[0, 1, 45, 46]], [[0, 0, null, null]]]],
+            [2, 2, [[[0, 1, 3, 5]], []], [[[0, 0, 66, 67], [1, 1, 45, 46]], [[1, 0, null, null]]]],
+        ]});
+        update_display_list(handle, &update.to_string()).expect("updates");
+        let mut expected: serde_json::Value =
+            serde_json::from_str(&list(15, 18, [None, Some(45)])).unwrap();
+        expected["pages"][2]["noteAreas"][0]["notes"][0]["anchorDocStart"] = 66.into();
+        expected["pages"][2]["noteAreas"][0]["notes"][0]["anchorDocEnd"] = 67.into();
+        let fresh = open_display_list(&expected.to_string()).unwrap();
+        assert_eq!(stored(handle), stored(fresh));
+        close_display_list(fresh);
+        close_display_list(handle);
+
+        for shift in [
+            serde_json::json!([0, 0, [[], []], [[[0, 0, 1, 2]]]]),
+            serde_json::json!([0, 0, [[]], [[[1, 0, 1, 2]]]]),
+            serde_json::json!([0, 0, [[]], [[[0, 1, 1, 2]]]]),
+        ] {
+            let handle = open_display_list(&list(10, 11, [Some(3), Some(40)])).expect("opens");
+            let update =
+                serde_json::json!({"total": 3, "reuse": [[1, 1], [2, 2]], "shift": [shift]});
+            assert!(
+                update_display_list(handle, &update.to_string()).is_err(),
+                "{shift}"
+            );
+            assert!(hit_test_regions_by_handle(handle, 0, 1.0, 1.0).is_err());
+        }
     }
 
     #[test]
