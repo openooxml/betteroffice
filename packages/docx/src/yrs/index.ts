@@ -1317,6 +1317,9 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   };
 }
 
+/** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 function wrapSession(session: EditSession, clientId: number): YrsSession {
   const listeners = new Map<
     number,
@@ -2172,7 +2175,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
     storyIds: () => session.story_ids(),
-    hasStory: (story) => session.has_story(story),
+    hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
     storyLength: (story) => session.story_len(story),
     storyChecksum: (story) => BigInt(session.story_checksum(story)),
     yrsBlocksForStory: (story, env = {}) => {
