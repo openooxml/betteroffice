@@ -159,6 +159,7 @@ function lazyFixture() {
   const host = {
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    resetFrameBase: () => {},
     encodeStateVector: () => new Uint8Array(),
     onUpdate: () => () => {},
     selection: () => null,

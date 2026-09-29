@@ -119,7 +119,8 @@ export interface YrsInputProps {
   applyResidentInput?(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-owner collapsed delete/merge path; false until the resident frame is initialized. */
   applyResidentDelete?(
-    direction: 'backward' | 'forward'
+    direction: 'backward' | 'forward',
+    count?: number
   ): Promise<ResidentFrameApplyResult | null>;
   onFocusChange?(focused: boolean): void;
   /** Accepted input started or finished waiting to be applied. */
@@ -255,6 +256,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     );
   }
   const pendingResidentTextRef = useRef<{ text: string } | null>(null);
+  const pendingResidentDeleteRef = useRef<{
+    direction: 'backward' | 'forward';
+    count: number;
+  } | null>(null);
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
   const verticalCaretGoalRef = useRef(new VerticalCaretGoal());
   const displayListQueriesRef = useRef(displayListQueries);
@@ -271,9 +276,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const [positionStyle, setPositionStyle] = useState<CSSProperties>({ left: 0, top: 0, height: 1 });
   const [selectionEpoch, setSelectionEpoch] = useState(0);
 
-  const enqueueInputOperation = useCallback((operation: () => void | Promise<void>): void => {
-    inputOperationQueueRef.current?.enqueue(operation);
+  // Every queued operation seals the pending text and delete batches: input
+  // after it must not join a batch that runs before it.
+  const sealInputBatches = useCallback((): void => {
+    pendingResidentTextRef.current = null;
+    pendingResidentDeleteRef.current = null;
   }, []);
+
+  const enqueueInputOperation = useCallback(
+    (operation: () => void | Promise<void>): void => {
+      sealInputBatches();
+      inputOperationQueueRef.current?.enqueue(operation);
+    },
+    [sealInputBatches]
+  );
 
   const advanceInteractionEpoch = useCallback((): void => {
     inputOperationQueueRef.current?.advanceInteractionEpoch();
@@ -538,9 +554,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         !text.includes('\r') &&
         !text.includes('\n');
       if (!canBatchResidentText) {
-        // Seal any earlier text batch so a synchronous structural operation
-        // remains an ordering barrier for later input.
-        pendingResidentTextRef.current = null;
         enqueueInputOperation(() => applyText(text));
         return;
       }
@@ -552,11 +565,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
 
       const batch = { text };
-      pendingResidentTextRef.current = batch;
       enqueueInputOperation(async () => {
         if (pendingResidentTextRef.current === batch) pendingResidentTextRef.current = null;
         await applyText(batch.text);
       });
+      pendingResidentTextRef.current = batch;
     },
     [
       applyResidentInput,
@@ -573,15 +586,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ]
   );
 
-  const deleteDirection = useCallback(
-    (direction: 'backward' | 'forward'): void => {
-      verticalCaretGoalRef.current.reset();
-      dispatchCaretInput();
-      enqueueInputOperation(async () => {
-        if (!session || readOnly) return;
+  const deleteUnits = useCallback(
+    async (direction: 'backward' | 'forward', count: number): Promise<void> => {
+      if (!session || readOnly) return;
+      let remaining = count;
+      while (remaining > 0) {
         if (deleteSelected()) {
           finishMutation();
-          return;
+          remaining -= 1;
+          continue;
         }
         const current = ensureSelection();
         const activeStory = current?.head.story;
@@ -597,10 +610,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             ? caret.offset > 0 || index > 0
             : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
         if (hasTarget && activeStory === 'body' && !isSuggesting && applyResidentDelete) {
-          const applied = await applyResidentDelete(direction);
+          const applied = await applyResidentDelete(direction, remaining);
           if (applied) {
             finishResidentMutation(applied);
-            return;
+            remaining -= Math.max(1, applied.deletedUnits ?? remaining);
+            continue;
           }
         }
         if (direction === 'backward') {
@@ -650,13 +664,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           }
         }
         finishMutation();
-      });
+        remaining -= 1;
+      }
     },
     [
       applyResidentDelete,
       deleteSelected,
-      dispatchCaretInput,
-      enqueueInputOperation,
       ensureSelection,
       finishMutation,
       finishResidentMutation,
@@ -666,6 +679,26 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       session,
       suggestingAuthor,
     ]
+  );
+
+  // Deletes queued behind busy input join one batch, applied with one layout.
+  const deleteDirection = useCallback(
+    (direction: 'backward' | 'forward'): void => {
+      verticalCaretGoalRef.current.reset();
+      dispatchCaretInput();
+      const pending = pendingResidentDeleteRef.current;
+      if (pending?.direction === direction) {
+        pending.count += 1;
+        return;
+      }
+      const batch = { direction, count: 1 };
+      enqueueInputOperation(async () => {
+        if (pendingResidentDeleteRef.current === batch) pendingResidentDeleteRef.current = null;
+        await deleteUnits(batch.direction, batch.count);
+      });
+      pendingResidentDeleteRef.current = batch;
+    },
+    [deleteUnits, dispatchCaretInput, enqueueInputOperation]
   );
 
   const splitParagraph = useCallback((): void => {
@@ -1062,10 +1095,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       await new Promise<void>((resolve) => compositionWaitersRef.current.add(resolve));
       assertCurrent();
     }
-    pendingResidentTextRef.current = null;
+    sealInputBatches();
     await queue?.flush(since);
     assertCurrent();
-  }, [session]);
+  }, [sealInputBatches, session]);
 
   const runAfterPendingInput = useCallback(
     <T,>(operation: () => T | Promise<T>): Promise<T> => {
@@ -1075,7 +1108,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const admitted = session;
       const admit = (): Promise<T> => {
         if (!queue) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));
-        pendingResidentTextRef.current = null;
+        sealInputBatches();
         return queue.run((inputLost) => {
           if (!lifetime.mounted || !lifetime.enabled || !admitted) {
             throw new DocxCommandAdmissionError('editor-unavailable');
@@ -1092,7 +1125,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         });
       });
     },
-    [session]
+    [sealInputBatches, session]
   );
 
   const hasPendingInput = useCallback(
@@ -1117,10 +1150,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     composingRef.current = false;
     compositionPendingRef.current = false;
     compositionCommitRef.current = '';
-    pendingResidentTextRef.current = null;
+    sealInputBatches();
     for (const resolve of compositionWaitersRef.current) resolve();
     compositionWaitersRef.current.clear();
-  }, [session, enabled]);
+  }, [sealInputBatches, session, enabled]);
 
   useImperativeHandle(
     ref,

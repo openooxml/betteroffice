@@ -2,7 +2,11 @@
 
 import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
+import {
+  displayPageCanvas,
+  type DisplayListQueries,
+  type DisplayListRect,
+} from '@betteroffice/docx/layout/render';
 
 /** Tint variant — mirrors the painter `<style>` colors. */
 export type CanvasBrightenVariant = 'comment' | 'insertion' | 'deletion';
@@ -65,9 +69,7 @@ export function CanvasSidebarBrightenOverlay({
     const recompute = () => {
       const targetRect = overlayTarget.getBoundingClientRect();
       const project = (r: DisplayListRect): ProjectedRect | null => {
-        const canvasEl = host.querySelector<HTMLCanvasElement>(
-          `canvas[data-page-index="${r.pageIndex}"]`
-        );
+        const canvasEl = displayPageCanvas(host, r.pageIndex);
         const size = displayListQueries.pageSize(r.pageIndex);
         if (!canvasEl || !size) return null;
         const canvasRect = canvasEl.getBoundingClientRect();

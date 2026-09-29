@@ -1605,6 +1605,49 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
 /// matching it contribute. A header/footer part paints on every page using it,
 /// so a match yields one rect set per such page, each stamped with its own
 /// `page_index`.
+/// The document span `[start, end)` holding every body item of `page` that a
+/// range query can return a rect for, or `None` when it has none: a body
+/// range query that misses the span gets nothing from the page.
+pub fn body_range_span(page: &DisplayPage) -> Option<(i64, i64)> {
+    let mut span: Option<(i64, i64)> = None;
+    let mut cover = |first: i64, second: i64| {
+        let (start, end) = (first.min(second), first.max(second));
+        let end = if start == end {
+            start.saturating_add(1)
+        } else {
+            end
+        };
+        span = Some(span.map_or((start, end), |(low, high)| (low.min(start), high.max(end))));
+    };
+    for hit in text_hits(&page.primitives) {
+        cover(hit.doc_start, hit.doc_end);
+    }
+    for (start, end, _) in page.primitives.iter().filter_map(atom_rect) {
+        cover(start, end);
+    }
+    span
+}
+
+/// [`range_rects`] reading only the listed pages, in the order given.
+pub fn range_rects_on_pages(
+    dl: &DisplayList,
+    pages: impl IntoIterator<Item = usize>,
+    from: i64,
+    to: i64,
+) -> Vec<RangeRect> {
+    let (from, to) = (from.min(to), from.max(to));
+    let mut rects = Vec::new();
+    if from == to {
+        return rects;
+    }
+    for page_index in pages {
+        if let Some(page) = dl.pages.get(page_index) {
+            collect_range_rects(&page.primitives, page_index, from, to, &mut rects);
+        }
+    }
+    rects
+}
+
 pub fn range_rects_in_region(
     dl: &DisplayList,
     scope: RegionScope<'_>,
