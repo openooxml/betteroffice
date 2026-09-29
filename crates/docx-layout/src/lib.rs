@@ -327,6 +327,7 @@ pub fn update_display_list_value_from_resident_incremental_observed(
 }
 
 /// Page-scoped update using the engine's retained parsed display input.
+#[allow(clippy::too_many_arguments)]
 pub fn update_resident_display_list_incremental_observed(
     pagination: &types::Input,
     layout: &types::Layout,
@@ -334,6 +335,7 @@ pub fn update_resident_display_list_incremental_observed(
     previous: &mut display_list::DisplayList,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
+    extra_pages: &[usize],
     position_deltas: &std::collections::HashMap<String, i64>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
@@ -346,6 +348,7 @@ pub fn update_resident_display_list_incremental_observed(
             previous,
             rebuilt_page_start,
             rebuilt_page_end,
+            extra_pages,
             position_deltas,
             observe_phase,
         )

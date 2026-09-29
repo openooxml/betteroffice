@@ -79,6 +79,8 @@ struct MeasurementState {
 #[derive(Debug)]
 struct ResidentRegionState {
     request_json: String,
+    /// [`layout_options_fingerprint`] of `request_json`.
+    request_fingerprint: String,
     headers_footers: Option<serde_json::Value>,
     /// Inputs retained from the last full region pass so a plain body-text
     /// edit can relayout residently. `None` when the pass was not
@@ -291,6 +293,16 @@ fn has_wrap_stabilized_shapes(blocks: &[LayoutBlock]) -> bool {
         .any(|block| matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape)))
 }
 
+fn float_geometry_key(geometry: &docx_layout::measure_blocks::FloatPageGeometry) -> [f64; 5] {
+    [
+        geometry.page_width,
+        geometry.margin_left,
+        geometry.page_height,
+        geometry.margin_top,
+        geometry.content_height,
+    ]
+}
+
 fn stabilize_shape_wrapping(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
@@ -447,6 +459,9 @@ struct PaginationState {
     measured_with: Option<u64>,
     /// The body lowering a float document's `input` arena was measured from.
     lowered_from: Option<Rc<Vec<LayoutBlock>>>,
+    /// The widths and float page geometry the `input` arena was measured at.
+    measured_widths: Vec<f64>,
+    measured_float_geometry: Option<[f64; 5]>,
     layout: Option<Layout>,
     checkpoints: Vec<LayoutCheckpoint>,
     block_fingerprints: Vec<u64>,
@@ -1327,6 +1342,19 @@ impl EngineSession {
     /// state. `apply_input`'s fallback consumes this directly so a keystroke
     /// never serializes a layout nobody reads. Returns `notes_converged`.
     fn layout_document_with_regions_value(&self, input_json: &str) -> Result<bool, String> {
+        let request_fingerprint = layout_options_fingerprint(
+            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?,
+        );
+        // Reused pages keep the section stamps and page labels of the regions
+        // they were laid out under, so a regions change paginates afresh.
+        if self
+            .regions
+            .borrow()
+            .as_ref()
+            .is_none_or(|state| state.request_fingerprint != request_fingerprint)
+        {
+            self.pagination.borrow_mut().checkpoints.clear();
+        }
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (mut input, regions, mut notes, measurement, render_env, body_story) = request.split();
@@ -1352,6 +1380,8 @@ impl EngineSession {
         let resident_body = body_story.is_some();
         let mut block_fingerprints: Option<Vec<u64>> = None;
         let mut lowered_from = None;
+        let mut measured_widths = Vec::new();
+        let mut measured_float_geometry = None;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
                 .as_ref()
@@ -1366,6 +1396,8 @@ impl EngineSession {
                     apply_section_geometry(&mut input, &regions);
                     let widths = region_measurement_widths(blocks.iter(), &input, &regions);
                     let geometry = initial_float_page_geometry(&input, &regions);
+                    measured_widths.clone_from(&widths);
+                    measured_float_geometry = Some(float_geometry_key(&geometry));
                     let default_width = widths.first().copied().unwrap_or(0.0);
                     let (floats, margin_floats) = docx_layout::measure_blocks::floating_zone_kinds(
                         blocks,
@@ -1562,6 +1594,7 @@ impl EngineSession {
         };
         self.regions.replace(Some(ResidentRegionState {
             request_json: input_json.to_owned(),
+            request_fingerprint,
             headers_footers,
             fast_path: regional.map(|regional| RegionFastPathState {
                 regions: Rc::new(regions),
@@ -1576,6 +1609,8 @@ impl EngineSession {
         let mut pagination = self.pagination.borrow_mut();
         pagination.measured_with = resident_body.then_some(measurement_fingerprint);
         pagination.lowered_from = lowered_from;
+        pagination.measured_widths = measured_widths;
+        pagination.measured_float_geometry = measured_float_geometry;
         drop(pagination);
         if let (true, Some(render_env)) = (resident_body, parsed_render_env) {
             self.capture.replace(Some(LayoutCapture {
@@ -2149,11 +2184,10 @@ impl EngineSession {
         {
             return Ok(None);
         }
-        let previous_widths = region_measurement_widths(
-            previous.measured.iter().map(|measured| &measured.block),
-            previous,
-            regions,
-        );
+        let previous_widths = &pagination.measured_widths;
+        if previous_widths.len() != blocks.len() {
+            return Ok(None);
+        }
         let lowered_from = match floats {
             Some(_) => match pagination.lowered_from.as_deref() {
                 Some(lowered) if lowered.len() == blocks.len() => Some(lowered),
@@ -2161,7 +2195,10 @@ impl EngineSession {
             },
             None => None,
         };
-        if floats.is_some() && widths.first() != previous_widths.first() {
+        if floats.is_some_and(|geometry| {
+            widths.first() != previous_widths.first()
+                || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
+        }) {
             return Ok(None);
         }
         let previous_fingerprints = &pagination.block_fingerprints;
@@ -2456,7 +2493,7 @@ impl EngineSession {
                 story,
                 &env,
                 &mut || phase(RegionResidentPhase::Lowered),
-                |blocks| -> Result<Option<(ResidentLayoutInput, usize)>, String> {
+                |blocks| -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
                     let (widths, geometry, previous_pages) = {
                         let pagination = self.pagination.borrow();
                         let (Some(input), Some(layout)) =
@@ -2497,13 +2534,13 @@ impl EngineSession {
                             )
                         },
                     ) {
-                        Ok(resident) => Ok(Some((resident, previous_pages))),
+                        Ok(resident) => Ok(Some((resident, previous_pages, widths))),
                         Err(_) => Ok(None),
                     }
                 },
             )
             .map_err(|error| error.to_string())??;
-        let (resident, previous_pages) = match outcome {
+        let (resident, previous_pages, widths) = match outcome {
             Some(resident) => resident,
             None => return Ok(false),
         };
@@ -2514,6 +2551,7 @@ impl EngineSession {
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
         pagination.measured_with = Some(measurement_fingerprint);
+        pagination.measured_widths = widths;
         let serial = pagination.layout_epoch;
         let layout = pagination
             .layout
@@ -2670,7 +2708,7 @@ impl EngineSession {
         observe_display_phase: &mut impl FnMut(),
     ) -> Result<Vec<u8>, String> {
         let extras_fingerprint = hash_bytes(extras_json.as_bytes());
-        let (incremental_build, rebuilt_display_pages, rebuilt_page_start, rebuilt_page_end) = {
+        let (incremental_build, rebuilt_display_pages, rebuilt_pages) = {
             let pagination = self.pagination.borrow();
             let input = pagination
                 .input
@@ -2682,9 +2720,23 @@ impl EngineSession {
                 .ok_or_else(|| "resident layout is not built".to_owned())?;
             let mut display = self.display.borrow_mut();
             if pagination.last_incremental && display.extras_fingerprint == extras_fingerprint {
-                let rebuilt_pages = pagination
-                    .rebuilt_page_end
-                    .saturating_sub(pagination.rebuilt_page_start);
+                // A later page's note areas anchor to references the edit moved.
+                let note_pages: Vec<usize> = if pagination.position_deltas.is_empty() {
+                    Vec::new()
+                } else {
+                    (pagination.rebuilt_page_end..layout.pages.len())
+                        .filter(|&index| {
+                            layout.pages[index]
+                                .note_areas
+                                .as_ref()
+                                .is_some_and(|areas| !areas.is_empty())
+                        })
+                        .collect()
+                };
+                let rebuilt_pages: HashSet<usize> = (pagination.rebuilt_page_start
+                    ..pagination.rebuilt_page_end)
+                    .chain(note_pages.iter().copied())
+                    .collect();
                 let incremental = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
@@ -2698,6 +2750,7 @@ impl EngineSession {
                         previous,
                         pagination.rebuilt_page_start,
                         pagination.rebuilt_page_end,
+                        &note_pages,
                         &pagination.position_deltas,
                         observe_display_phase,
                     )?
@@ -2714,12 +2767,7 @@ impl EngineSession {
                     display.resident_input = Some(resident_input);
                     display.list = Some(list);
                 }
-                (
-                    incremental,
-                    rebuilt_pages,
-                    pagination.rebuilt_page_start,
-                    pagination.rebuilt_page_end,
-                )
+                (incremental, rebuilt_pages.len(), rebuilt_pages)
             } else {
                 let (resident_input, list) = docx_layout::build_resident_display_list_observed(
                     input,
@@ -2729,7 +2777,7 @@ impl EngineSession {
                 )?;
                 display.resident_input = Some(resident_input);
                 display.list = Some(list);
-                (false, layout.pages.len(), 0, layout.pages.len())
+                (false, layout.pages.len(), HashSet::new())
             }
         };
         observe_display_phase();
@@ -2770,7 +2818,7 @@ impl EngineSession {
                     previous_pages,
                     epochs,
                     &mut next_page_id,
-                    rebuilt_page_start..rebuilt_page_end,
+                    &rebuilt_pages,
                 )?
             } else {
                 encode_frame_delta(list, previous_pages, epochs, full, &mut next_page_id)?

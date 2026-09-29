@@ -343,10 +343,13 @@ pub fn layout_document_incremental(
     )?;
     plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
+    // A dirty block that opened a page may now start on the one before it (a
+    // removed page break, a paragraph that now fits), so resume strictly before
+    // it; only the document's first page cannot move back.
     let resume = previous_checkpoints
         .iter()
         .rev()
-        .find(|checkpoint| checkpoint.block_index <= dirty_index)
+        .find(|checkpoint| checkpoint.block_index < dirty_index || checkpoint.block_index == 0)
         .ok_or_else(|| LayoutError::Unsupported("no clean pagination checkpoint".into()))?;
     let prefix_checkpoints: Vec<_> = previous_checkpoints
         .iter()
