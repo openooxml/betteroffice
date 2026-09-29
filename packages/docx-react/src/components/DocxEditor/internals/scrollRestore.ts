@@ -133,8 +133,9 @@ function nearestLineAnchor(
   queries: DisplayListQueries,
   host: HTMLElement,
   viewport: DOMRect,
-  lines: readonly DisplayListVisualLine[],
-  capturePosition: CaptureViewportPosition
+  lines: Iterable<DisplayListVisualLine>,
+  capturePosition: CaptureViewportPosition,
+  visibleOnly = false
 ): { target: PositionViewportTarget; clientY: number } | null {
   const visible: Array<{ line: DisplayListVisualLine; clientY: number }> = [];
   let nearest: { line: DisplayListVisualLine; clientY: number; distance: number } | null = null;
@@ -158,7 +159,7 @@ function nearestLineAnchor(
     }
   }
   const candidates = visible.sort((left, right) => left.clientY - right.clientY);
-  if (candidates.length === 0 && nearest) candidates.push(nearest);
+  if (candidates.length === 0 && nearest && !visibleOnly) candidates.push(nearest);
   for (const candidate of candidates.slice(0, ANCHOR_CANDIDATE_LIMIT)) {
     const position = capturePosition(candidate.line.from);
     if (position) {
@@ -166,6 +167,82 @@ function nearestLineAnchor(
     }
   }
   return null;
+}
+
+/** The first page, in their top-to-bottom stacking, whose client rect reaches `top`. */
+function firstPageReaching(
+  queries: DisplayListQueries,
+  host: HTMLElement,
+  top: number
+): number | null {
+  let low = 0;
+  let high = queries.pageCount() - 1;
+  let found: number | null = null;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const rect = resolveDisplayPageClientRect(host, queries, middle);
+    if (!rect) return null;
+    if (rect.bottom >= top) {
+      found = middle;
+      high = middle - 1;
+    } else {
+      low = middle + 1;
+    }
+  }
+  return found;
+}
+
+/**
+ * A page-level filter only has to keep every page the exact per-line test can
+ * accept, so its comparisons allow this much slack against rounding.
+ */
+const PAGE_FILTER_SLACK = 1;
+
+/**
+ * Every page with a line that can reach the viewport, in page order: the pages
+ * the viewport spans, and any other page whose lines come near or beyond its
+ * own bounds and near the viewport. Null when a page rect cannot be resolved.
+ */
+function pagesReachingViewport(
+  queries: DisplayListQueries,
+  host: HTMLElement,
+  viewport: DOMRect,
+  projectionCache: Map<number, PageProjection | null>
+): number[] | null {
+  const pageCount = queries.pageCount();
+  const first = firstPageReaching(queries, host, viewport.top);
+  if (first === null) return null;
+  const last = firstPageReaching(queries, host, viewport.bottom) ?? pageCount - 1;
+  const pages: number[] = [];
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    if (pageIndex >= first && pageIndex <= last) {
+      pages.push(pageIndex);
+      continue;
+    }
+    const extent = queries.visualLineExtent(pageIndex);
+    const size = queries.pageSize(pageIndex);
+    if (
+      !extent ||
+      (size && extent.top >= PAGE_FILTER_SLACK && extent.bottom <= size.height - PAGE_FILTER_SLACK)
+    ) {
+      continue;
+    }
+    const projection = pageProjection(queries, host, pageIndex, projectionCache);
+    if (!projection) return null;
+    const top = projection.top + extent.top * projection.scaleY;
+    const bottom = projection.top + extent.bottom * projection.scaleY;
+    if (bottom + PAGE_FILTER_SLACK >= viewport.top && top - PAGE_FILTER_SLACK <= viewport.bottom) {
+      pages.push(pageIndex);
+    }
+  }
+  return pages;
+}
+
+function* linesOnPages(
+  queries: DisplayListQueries,
+  pages: readonly number[]
+): Generator<DisplayListVisualLine> {
+  for (const pageIndex of pages) yield* queries.visualLinesOnPage(pageIndex);
 }
 
 /**
@@ -232,9 +309,21 @@ export function captureDisplayListViewportAnchor(
     scrollParent.style.setProperty('overflow-anchor', 'none');
   }
   const viewport = scrollParent.getBoundingClientRect();
-  const lines = queries.visualLines();
+  // Scanning the pages whose lines can reach the viewport finds the visible
+  // lines a scan of every line would. The full scan remains for a viewport
+  // showing no line, where the nearest line anywhere wins.
+  const pages = pagesReachingViewport(queries, host, viewport, new Map());
   const resolved =
-    nearestLineAnchor(queries, host, viewport, lines, capturePosition) ??
+    (pages &&
+      nearestLineAnchor(
+        queries,
+        host,
+        viewport,
+        linesOnPages(queries, pages),
+        capturePosition,
+        true
+      )) ??
+    nearestLineAnchor(queries, host, viewport, queries.visualLines(), capturePosition) ??
     visiblePageAnchor(queries, host, viewport);
   return {
     target: resolved?.target ?? null,
