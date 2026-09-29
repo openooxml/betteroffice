@@ -272,6 +272,34 @@ describe('paged structured export', () => {
     }
   });
 
+  it('types into a live session with its own fonts while another lays out', async () => {
+    const typeInto = async (between = () => {}) => {
+      const { session } = await laidOut();
+      try {
+        session.buildDisplayListFrame('{}', 0);
+        const { paraId } = session.paragraphs('body').find((paragraph) => paragraph.text.length > 2)!;
+        session.setSelection({ story: 'body', paraId, offset: 1 });
+        between();
+        const typed = session.applyInputProfiled('x', 1).frame;
+        between();
+        return [typed, session.applyDeleteProfiled('backward', 2).frame];
+      } finally {
+        session.destroy();
+      }
+    };
+    const alone = await typeInto();
+    const other = await laidOut(OTHER_FONT);
+    try {
+      const interleaved = await typeInto(() => {
+        other.session.layoutDocumentWithRegionsRetainedJson(other.request);
+        other.session.buildDisplayListFrame('{}', 0);
+      });
+      expect(interleaved).toEqual(alone);
+    } finally {
+      other.session.destroy();
+    }
+  });
+
   it('exports a live session against its retained layout and refuses stale ones', async () => {
     const empty = await createYrsSession({ clientId: nextClientId++ });
     try {

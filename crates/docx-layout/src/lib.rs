@@ -56,6 +56,14 @@
 //! measurement surface is re-exported here as well and the wasm-visible font
 //! registry lives in this file. Everything below the wrappers is pure and
 //! native-testable.
+//!
+//! Font ids index one measurement font store. A host running several
+//! documents in one module gives each a [`MeasureFonts`] and holds
+//! [`MeasureFonts::enter`] around every call that registers fonts, measures,
+//! lays out, builds a display list or reads glyph outlines. Callers that never
+//! create one use the module's own store. Once any [`MeasureFonts`] is alive,
+//! using fonts with none entered panics, so a missed `enter` fails loudly
+//! instead of reading another document's fonts.
 
 mod anchor;
 pub mod canonical;
@@ -521,30 +529,60 @@ pub fn range_rects_region_by_handle(
 type SharedFontStore = std::rc::Rc<std::cell::RefCell<ooxml_text::FontStore>>;
 
 thread_local! {
-    /// The measurement font store in use: the entered [`MeasureFonts`], else
-    /// this module's own. WASM is single-threaded, so a thread_local doubles
-    /// as the module-global slot; native tests get one per test thread.
-    static MEASURE_FONTS: std::cell::RefCell<SharedFontStore> = std::cell::RefCell::default();
+    /// The module's own measurement font store, used when no [`MeasureFonts`]
+    /// exists. WASM is single-threaded, so a thread_local doubles as the
+    /// module-global store; native tests get one per test thread.
+    static MODULE_FONTS: SharedFontStore = SharedFontStore::default();
+    /// The entered [`MeasureFonts`], if any.
+    static ENTERED_FONTS: std::cell::RefCell<Option<SharedFontStore>> =
+        const { std::cell::RefCell::new(None) };
+    /// How many [`MeasureFonts`] are alive.
+    static SESSION_FONTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Runs `read` against the measurement font store in use.
+/// Runs `read` against the entered measurement font store, else the module's
+/// own. Panics when a [`MeasureFonts`] is alive but none is entered: a caller
+/// forgot [`MeasureFonts::enter`] and would otherwise read the wrong store.
 fn with_measure_fonts<T>(read: impl FnOnce(&std::cell::RefCell<ooxml_text::FontStore>) -> T) -> T {
-    let store = MEASURE_FONTS.with(|current| std::rc::Rc::clone(&current.borrow()));
+    let store = ENTERED_FONTS
+        .with(|entered| entered.borrow().clone())
+        .unwrap_or_else(|| {
+            assert_eq!(
+                SESSION_FONTS.with(std::cell::Cell::get),
+                0,
+                "measurement fonts used outside MeasureFonts::enter while a session owns a store"
+            );
+            MODULE_FONTS.with(std::rc::Rc::clone)
+        });
     read(&store)
 }
 
 /// A measurement font store of one session's own. Its ids start at zero and
-/// stay valid whatever other stores register or clear.
-#[derive(Default)]
+/// stay valid whatever other stores register or clear. While any is alive,
+/// fonts may only be used inside [`MeasureFonts::enter`].
 pub struct MeasureFonts(SharedFontStore);
+
+impl Default for MeasureFonts {
+    fn default() -> Self {
+        SESSION_FONTS.with(|count| count.set(count.get() + 1));
+        Self(SharedFontStore::default())
+    }
+}
+
+impl Drop for MeasureFonts {
+    fn drop(&mut self) {
+        let _ = SESSION_FONTS.try_with(|count| count.set(count.get() - 1));
+    }
+}
 
 impl MeasureFonts {
     /// Makes this the store that registration, measurement, display building
     /// and glyph outlines use until the returned scope drops, which puts the
     /// replaced store back.
     pub fn enter(&self) -> MeasureFontsScope {
-        let previous = MEASURE_FONTS.with(|current| current.replace(std::rc::Rc::clone(&self.0)));
-        MeasureFontsScope(Some(previous))
+        let previous =
+            ENTERED_FONTS.with(|entered| entered.replace(Some(std::rc::Rc::clone(&self.0))));
+        MeasureFontsScope(previous)
     }
 }
 
@@ -554,9 +592,8 @@ pub struct MeasureFontsScope(Option<SharedFontStore>);
 
 impl Drop for MeasureFontsScope {
     fn drop(&mut self) {
-        if let Some(previous) = self.0.take() {
-            MEASURE_FONTS.with(|current| current.replace(previous));
-        }
+        let previous = self.0.take();
+        let _ = ENTERED_FONTS.try_with(|entered| entered.replace(previous));
     }
 }
 
@@ -724,8 +761,8 @@ mod tests {
         clear_measure_fonts();
         register_measure_font_bytes(LIBERATION_SANS).unwrap();
         register_measure_font_bytes(LIBERATION_SANS).unwrap();
-        let (a, b) = (MeasureFonts::default(), MeasureFonts::default());
         {
+            let (a, b) = (MeasureFonts::default(), MeasureFonts::default());
             let _a = a.enter();
             assert!(!holds(0));
             assert_eq!(register_measure_font_bytes(LIBERATION_SANS), Ok(0));
@@ -739,11 +776,12 @@ mod tests {
                 assert!(!holds(0));
             }
             assert!(holds(0));
-            clear_measure_fonts();
         }
         assert!(holds(1));
-        let _a = a.enter();
-        assert!(!holds(0));
+        let unentered = MeasureFonts::default();
+        assert!(std::panic::catch_unwind(|| holds(1)).is_err());
+        drop(unentered);
+        assert!(holds(1));
     }
 
     fn options_json() -> serde_json::Value {
