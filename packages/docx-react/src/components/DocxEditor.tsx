@@ -432,7 +432,8 @@ export interface DocxEditorRef {
   /**
    * Scroll the paginated view so the given page is in view.
    * Page numbers are 1-indexed (matches `getCurrentPage` / `getTotalPages`).
-   * No-op for out-of-range or non-integer values.
+   * No-op for out-of-range or non-integer values. While only the first pages
+   * are laid out, a later page waits for the rest.
    * @example ref.current?.scrollToPage(2)
    */
   scrollToPage: (pageNumber: number) => void;
@@ -554,8 +555,10 @@ export interface DocxEditorRef {
   }) => boolean;
   /**
    * Read the contents of a single page. 1-indexed; returns null if the page
-   * does not exist. Each paragraph is returned with its stable paraId so the
-   * agent can comment on or modify it without an extra round-trip.
+   * does not exist or the document is not laid out in full yet (its first
+   * pages paint before the rest). Each paragraph is returned with its stable
+   * paraId so the agent can comment on or modify it without an extra
+   * round-trip.
    */
   getPageContent: (pageNumber: number) => {
     pageNumber: number;

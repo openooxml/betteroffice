@@ -6,6 +6,7 @@ import {
   type DisplayListQueries,
   type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { ParagraphHighlightOptions, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
@@ -20,6 +21,8 @@ export interface UsePagedScrollApiOptions {
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
   getScrollContainer: () => HTMLDivElement | null;
   displayListQueries?: DisplayListQueries | null;
+  /** The current layout: a page past a partial one's last waits for the full layout. */
+  layout?: Layout | null;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   onNavigationIntent?: () => void;
   requestCanvasParagraphFlash?: (req: {
@@ -48,6 +51,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     yrsLocToDisplayPosition,
     getScrollContainer,
     displayListQueries = null,
+    layout = null,
     canvasHostRef,
     onNavigationIntent,
     requestCanvasParagraphFlash,
@@ -109,22 +113,29 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     [displayListQueries, onNavigationIntent, scrollRectIntoView]
   );
 
+  const pendingPageRef = useRef<number | null>(null);
   const scrollToPageImpl = useCallback(
     (pageNumber: number): void => {
-      if (
-        !Number.isInteger(pageNumber) ||
-        pageNumber < 1 ||
-        !displayListQueries ||
-        pageNumber > displayListQueries.pageCount()
-      ) {
+      pendingPageRef.current = null;
+      if (!Number.isInteger(pageNumber) || pageNumber < 1 || !displayListQueries) return;
+      if (pageNumber > displayListQueries.pageCount()) {
+        if (layout?.partial) pendingPageRef.current = pageNumber;
         return;
       }
       onNavigationIntent?.();
       const bounds = displayListQueries.pageBounds(pageNumber - 1);
       if (bounds) scrollRectIntoView(bounds, true);
     },
-    [displayListQueries, onNavigationIntent, scrollRectIntoView]
+    [displayListQueries, layout, onNavigationIntent, scrollRectIntoView]
   );
+
+  useEffect(() => {
+    const page = pendingPageRef.current;
+    if (page === null || !displayListQueries) return;
+    const pages = displayListQueries.pageCount();
+    const complete = layout !== null && !layout.partial && pages === layout.pages.length;
+    if (page <= pages || complete) scrollToPageImpl(page);
+  }, [displayListQueries, layout, scrollToPageImpl]);
 
   const scrollToParaIdImpl = useCallback(
     (paraId: string, options?: ScrollToParaIdOptions): boolean => {
