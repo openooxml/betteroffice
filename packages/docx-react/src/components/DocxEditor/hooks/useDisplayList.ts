@@ -190,6 +190,7 @@ export function useRustDisplayList(
     client: ResidentEngineWorkerClient;
   } | null>(null);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
+  const recoveryFrameEpochRef = useRef(0);
   const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const suppressWorkerInvalidationRef = useRef(0);
   const [workerSurfacesActive, setWorkerSurfacesActive] = useState(false);
@@ -308,6 +309,21 @@ export function useRustDisplayList(
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
 
+  // Rendering moves to the host engine for good: its frames start from a fresh
+  // base, numbered after the worker's last frame.
+  const adoptHostEngine = useCallback(
+    (hostEngine: YrsSession): void => {
+      if (workerFallbackEngineRef.current === hostEngine) return;
+      queryEpochGate.clear();
+      recoveryFrameEpochRef.current = snapshotRef.current.frame?.frameEpoch ?? 0;
+      const fallbackSnapshot = { ...snapshotRef.current, frame: null, queries: null, caret: null };
+      snapshotRef.current = fallbackSnapshot;
+      setSnapshot(fallbackSnapshot);
+      workerFallbackEngineRef.current = hostEngine;
+    },
+    [queryEpochGate]
+  );
+
   useEffect(() => {
     if (!residentEngine) return;
     return residentEngine.onUpdate((update) => {
@@ -407,10 +423,7 @@ export function useRustDisplayList(
         frameEpoch: number,
         paintToken: number
       ): Promise<ResidentFrameApplyResult | null> => {
-        if (workerFallbackEngineRef.current !== hostEngine) {
-          queryEpochGate.clear();
-          workerFallbackEngineRef.current = hostEngine;
-        }
+        adoptHostEngine(hostEngine);
         if (workerRef.current?.engine === hostEngine) {
           workerRef.current.client.destroy();
           workerRef.current = null;
@@ -616,6 +629,7 @@ export function useRustDisplayList(
       });
     },
     [
+      adoptHostEngine,
       applyPaintedCaretReply,
       markSettled,
       paintedCaretMachine,
@@ -663,6 +677,7 @@ export function useRustDisplayList(
       contentEpochRef.current += 1;
       queryEpochGate.clear();
       snapshotRef.current = EMPTY_DISPLAY_LIST_SNAPSHOT;
+      recoveryFrameEpochRef.current = 0;
       setSnapshot(EMPTY_DISPLAY_LIST_SNAPSHOT);
       setError(null);
       setLoading(true);
@@ -720,7 +735,12 @@ export function useRustDisplayList(
             workerProduced: false,
             caretPainted: false,
           }))
-        : buildRustDisplayFrame(buildInputs, engine ?? undefined, snapshotRef.current.frame).then(
+        : buildRustDisplayFrame(
+            buildInputs,
+            engine ?? undefined,
+            snapshotRef.current.frame,
+            snapshotRef.current.frame?.frameEpoch ?? recoveryFrameEpochRef.current
+          ).then(
             (result) => ({
               ...result,
               caret: null as YrsResidentCaretSnapshot | null,
@@ -750,19 +770,7 @@ export function useRustDisplayList(
           '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
           nextError
         );
-        if (workerFallbackEngineRef.current !== hostEngine) {
-          queryEpochGate.clear();
-          // The retained worker frame stays as the base: the host engine answers
-          // its epoch with a full frame numbered after it.
-          const fallbackSnapshot = {
-            ...snapshotRef.current,
-            queries: null,
-            caret: null,
-          };
-          snapshotRef.current = fallbackSnapshot;
-          setSnapshot(fallbackSnapshot);
-          workerFallbackEngineRef.current = hostEngine;
-        }
+        adoptHostEngine(hostEngine);
         if (workerRef.current?.engine === hostEngine) {
           workerRef.current.client.destroy();
           workerRef.current = null;
@@ -878,6 +886,7 @@ export function useRustDisplayList(
         markSettled(null, nextError);
       });
   }, [
+    adoptHostEngine,
     layout,
     overrides,
     fontChainsProviderRef,

@@ -1322,19 +1322,51 @@ impl EditSession {
         if count == 0 {
             return Err(js_err("resident delete count must be positive"));
         }
-        let story =
-            self.delete_resident_input(direction, self.collapsed_resident_input_selection()?)?;
-        let mut deleted = 1;
-        while deleted < count
-            && self
+        // Resident layout absorbs one paragraph merge per pass.
+        let mut story = None;
+        let mut merged = false;
+        let mut deleted = 0;
+        while deleted < count {
+            let step = self
                 .collapsed_resident_input_selection()
-                .and_then(|selection| self.delete_resident_input(direction, selection))
-                .is_ok()
-        {
-            deleted += 1;
+                .and_then(|selection| {
+                    let merges = self.resident_unit_is_pilcrow(direction, &selection)?;
+                    if merges && merged {
+                        return Ok(None);
+                    }
+                    Ok(Some((
+                        self.delete_resident_input(direction, selection)?,
+                        merges,
+                    )))
+                });
+            match step {
+                Ok(Some((from, merges))) => {
+                    story = Some(from);
+                    merged |= merges;
+                    deleted += 1;
+                }
+                Err(error) if deleted == 0 => return Err(error),
+                Ok(None) | Err(_) => break,
+            }
         }
         self.resident_deleted_units.set(deleted);
-        Ok(story)
+        Ok(story.expect("the first resident deletion succeeded"))
+    }
+
+    fn resident_unit_is_pilcrow(
+        &self,
+        direction: &str,
+        selection: &(String, String, u32),
+    ) -> Result<bool, JsValue> {
+        let direction = match direction {
+            "backward" => DeleteDirection::Backward,
+            "forward" => DeleteDirection::Forward,
+            _ => return Err(js_err("delete direction must be backward or forward")),
+        };
+        Ok(matches!(
+            adjacent_story_unit(self.engine.doc(), &selection.0, selection.2, direction)?,
+            Some(AdjacentStoryUnit::Pilcrow)
+        ))
     }
 
     fn delete_resident_input(
@@ -1760,9 +1792,10 @@ impl EditSession {
     /// lays out once, and returns the resulting binary `FrameDelta`.
     /// `direction` is `"backward"` or `"forward"`; a surrogate pair is removed
     /// whole. At a paragraph boundary a deletion merges with the neighbouring
-    /// paragraph instead. Deleting stops early at the document start or end, or
-    /// at a paragraph the resident state cannot absorb;
-    /// [`EditSession::resident_deleted_units`] reports how many were removed.
+    /// paragraph instead. Deleting stops early at the document start or end,
+    /// before a second paragraph merge, or at a paragraph the resident state
+    /// cannot absorb; [`EditSession::resident_deleted_units`] reports how many
+    /// were removed.
     ///
     /// Errors on an unknown `direction`, a zero `count`, when
     /// `expected_frame_epoch` is not a non-negative safe integer, under the

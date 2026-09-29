@@ -247,7 +247,10 @@ test('a layout after a worker crash the host cannot absorb as input still render
     renderEnv: {},
   })));
   const frame = native.build_display_list_frame(JSON.stringify(inputs), 0);
-  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setBigUint64(32, 100n, true);
+  const header = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  header.setBigUint64(16, 50n, true);
+  header.setBigUint64(24, 50n, true);
+  header.setBigUint64(32, 100n, true);
   let worker: InputFakeWorker | null = null;
   class FakeWorker extends InputFakeWorker {
     constructor() {

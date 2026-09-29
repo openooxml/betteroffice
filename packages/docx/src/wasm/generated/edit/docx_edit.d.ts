@@ -46,9 +46,10 @@ export class EditSession {
      * lays out once, and returns the resulting binary `FrameDelta`.
      * `direction` is `"backward"` or `"forward"`; a surrogate pair is removed
      * whole. At a paragraph boundary a deletion merges with the neighbouring
-     * paragraph instead. Deleting stops early at the document start or end, or
-     * at a paragraph the resident state cannot absorb;
-     * [`EditSession::resident_deleted_units`] reports how many were removed.
+     * paragraph instead. Deleting stops early at the document start or end,
+     * before a second paragraph merge, or at a paragraph the resident state
+     * cannot absorb; [`EditSession::resident_deleted_units`] reports how many
+     * were removed.
      *
      * Errors on an unknown `direction`, a zero `count`, when
      * `expected_frame_epoch` is not a non-negative safe integer, under the
