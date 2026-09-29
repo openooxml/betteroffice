@@ -308,6 +308,7 @@ export function useRustDisplayList(
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
   const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
+  const workerLayoutRequestRef = useRef(0);
   const completionGateRef = useRef<(() => void) | null>(null);
   const resolvedCommentIdsRef = useRef(resolvedCommentIds);
   resolvedCommentIdsRef.current = resolvedCommentIds;
@@ -1047,6 +1048,7 @@ export function useRustDisplayList(
         !bootstrapping &&
         workerPresentationActiveRef.current &&
         paintedCaretMachine.shouldPaint(performance.now());
+      const requestId = ++workerLayoutRequestRef.current;
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
@@ -1056,6 +1058,8 @@ export function useRustDisplayList(
         cause: unknown
       ): Promise<WorkerLayoutComputation | null> | null => {
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
+          // A newer pass recovers the worker it asks; the host drops this one.
+          if (requestId !== workerLayoutRequestRef.current) return null;
           const outcome = replaceOutOfMemoryWorker(hostEngine, worker, cause);
           if (outcome === 'failed') return Promise.reject(cause);
           if (outcome === 'stale') return null;
@@ -1138,13 +1142,13 @@ export function useRustDisplayList(
       zoom: number,
       caretStyle: ResidentCaretPaintStyle
     ): Promise<boolean> => {
-      const worker = workerRef.current?.client;
+      const current = workerRef.current;
       // Queue even while the worker is mid-invalidation: requests are handled
       // FIFO, so an attach lands after the sync that follows and the worker
       // rasters the newly attached surfaces itself. Refusing here would strand
       // already-transferred canvases (they cannot be re-transferred).
-      if (!worker) return false;
-      const attached = worker.attachCanvases(
+      if (!current) return false;
+      const attached = current.client.attachCanvases(
         pages,
         activePageIds,
         devicePixelRatio,
@@ -1153,10 +1157,21 @@ export function useRustDisplayList(
       );
       completionGateRef.current?.();
       completionGateRef.current = null;
-      await attached;
+      try {
+        await attached;
+      } catch (error) {
+        if (!(error instanceof ResidentWorkerOutOfMemoryError)) throw error;
+        if (
+          workerRef.current === current &&
+          replaceOutOfMemoryWorker(current.engine, current.client, error) === 'retry'
+        ) {
+          requestLayoutRef.current?.();
+        }
+        return false;
+      }
       return true;
     },
-    []
+    [replaceOutOfMemoryWorker]
   );
 
   useEffect(() => {
@@ -1274,20 +1289,24 @@ export function useRustDisplayList(
         cause: unknown,
         client: ResidentEngineWorkerClient | null = null
       ): Promise<BuiltDisplay> => {
+        const latest = generation === generationRef.current;
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
-          if (replaceOutOfMemoryWorker(hostEngine, client, cause) !== 'retry') {
-            return Promise.reject(cause);
+          // A newer build recovers the worker it asks.
+          if (!latest) return Promise.reject(cause);
+          const outcome = replaceOutOfMemoryWorker(hostEngine, client, cause);
+          if (outcome === 'retry') {
+            try {
+              return requestWorkerFrame();
+            } catch (error) {
+              return fallback(error);
+            }
           }
-          try {
-            return requestWorkerFrame();
-          } catch (error) {
-            return fallback(error);
-          }
-        }
-        if (requested !== workerRef.current) {
-          return generation === generationRef.current
+          return outcome === 'stale' && requested !== workerRef.current
             ? buildOnMainThread()
             : Promise.reject(cause);
+        }
+        if (requested !== workerRef.current) {
+          return latest ? buildOnMainThread() : Promise.reject(cause);
         }
         const nextError =
           cause instanceof Error

@@ -248,6 +248,96 @@ test('a provisional layout whose completion runs out of memory completes in a fr
   }
 });
 
+test('a superseded provisional layout does not run again in the replacement worker', async () => {
+  const { native, frame, engine, layoutJson } = setup();
+  const adopted: string[] = [];
+  const host = {
+    ...engine,
+    adoptResidentWorkerLayout: (request: string) => {
+      adopted.push(request);
+      return 1;
+    },
+  } as YrsSession;
+  const newer = JSON.stringify({ ...JSON.parse(REQUEST), renderEnv: { preview: 'b' } });
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, null)
+    );
+    const pending = result.current.layoutInWorker(host, REQUEST)!;
+    const [first] = FakeWorker.spawned;
+    await act(async () =>
+      first!.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true })
+    );
+    const provisional = (await pending) as { complete?: Promise<unknown> };
+    await act(async () => {
+      const recovered = result.current.layoutInWorker(host, newer)!;
+      first!.outOfMemory();
+      await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+      FakeWorker.spawned[1]!.replyFrame(frame(2), 2, { layoutJson });
+      await recovered;
+    });
+    const second = FakeWorker.spawned[1]!;
+    const sent = second.posted.length;
+    await act(async () => expect(await provisional.complete).toBeNull());
+    expect(second.posted).toHaveLength(sent);
+    expect(second.terminated).toBe(false);
+    expect(adopted).toEqual([REQUEST, newer, newer]);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    warnings.mockRestore();
+    native.free();
+  }
+});
+
+test('a worker that runs out of memory attaching canvases is replaced and lays out again', async () => {
+  const { native, inputs, frame, engine } = setup();
+  let relayouts = 0;
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) =>
+        useRustDisplayList(layout, overrides, undefined, undefined, engine, () => {
+          relayouts += 1;
+        }),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    const [first] = FakeWorker.spawned;
+    await act(async () => first!.replyFrame(frame(100), 100));
+    await waitFor(() => expect(result.current.workerSurfacesActive).toBe(true));
+
+    let attached: unknown;
+    await act(async () => {
+      const pending = result.current.attachOffscreenCanvases([], [], 1, 1, {
+        color: '#000',
+        width: 2,
+      });
+      expect(first!.last()).toMatchObject({ type: 'attachCanvases' });
+      first!.outOfMemory();
+      attached = await pending;
+    });
+    expect(attached).toBe(false);
+    expect(first!.terminated).toBe(true);
+    expect(relayouts).toBe(1);
+    expect(result.current.workerSurfacesActive).toBe(false);
+    expect(result.current.error).toBeNull();
+
+    await act(async () => rerender({ layout: { ...inputs.layout } }));
+    expect(FakeWorker.spawned).toHaveLength(2);
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last()).toMatchObject({ type: 'bootstrap' });
+    await act(async () => second.replyFrame(frame(101), 101));
+    await waitFor(() => expect(result.current.workerSurfacesActive).toBe(true));
+    unmount();
+  } finally {
+    warnings.mockRestore();
+    native.free();
+  }
+});
+
 test("an out-of-memory failure from a replaced document's worker leaves the new worker alone", async () => {
   const { native, inputs, frame, engine } = setup();
   const other = { ...engine } as YrsSession;
