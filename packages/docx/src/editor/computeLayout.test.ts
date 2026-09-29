@@ -114,6 +114,7 @@ describe('computeLayout retained kernel inputs', () => {
         'retained layout revision mismatch: expected 1, current 2'
       );
       expect(secondKernel!.measured).toHaveLength(1);
+      expect([firstKernel!.layoutRevision, secondKernel!.layoutRevision]).toEqual([1, 2]);
     } finally {
       session.destroy();
     }
