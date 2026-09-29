@@ -211,3 +211,69 @@ describe('createDisplayListQueries wasm trap containment', () => {
     expect(isDisplayListQuerySourceDead(resident)).toBe(true);
   });
 });
+
+describe('visual lines', () => {
+  const text = (
+    x: number,
+    baselineY: number,
+    docStart: number,
+    identity: { paraId?: string; blockKey?: string } = {}
+  ) => ({
+    kind: 'text' as const,
+    text: 'x',
+    x,
+    baselineY,
+    width: 10,
+    font: '400 10px Calibri',
+    color: '#000000',
+    docStart,
+    docEnd: docStart + 1,
+    ...identity,
+  });
+
+  test('group each page on its own, the way the whole list does', () => {
+    const lines: DisplayPage = {
+      pageIndex: 0,
+      width: 600,
+      height: 800,
+      primitives: [
+        text(0, 20, 1, { paraId: 'a' }),
+        text(300, 20, 50, { paraId: 'b' }),
+        text(20, 21, 2, { paraId: 'a' }),
+        text(0, 40, 3, { paraId: 'a' }),
+        text(310, 20.5, 51, { paraId: 'b' }),
+        text(0, 60, 70),
+        text(0, 60, 71),
+        text(0, 80, 80, { blockKey: 'k' }),
+      ],
+    };
+    const second: DisplayPage = {
+      ...lines,
+      pageIndex: 1,
+      primitives: [text(0, 20, 90, { paraId: 'c' })],
+    };
+    const queries = createDisplayListQueries({ pages: [lines, second] }, fakeEngine().engine);
+
+    const first = queries.visualLinesOnPage(0);
+    expect(
+      first.map(({ paraId, blockId, from, to, x, width }) => [paraId, blockId, from, to, x, width])
+    ).toEqual([
+      ['a', undefined, 1, 3, 0, 30],
+      ['b', undefined, 50, 52, 300, 20],
+      ['a', undefined, 3, 4, 0, 10],
+      [undefined, undefined, 70, 71, 0, 10],
+      [undefined, undefined, 71, 72, 0, 10],
+      [undefined, 'k', 80, 81, 0, 10],
+    ]);
+    expect(queries.visualLines()).toEqual([...first, ...queries.visualLinesOnPage(1)]);
+    expect(queries.visualLinesOnPage(2)).toEqual([]);
+    expect(queries.visualLineExtent(0)).toEqual({
+      top: Math.min(...first.map((line) => line.y)),
+      bottom: Math.max(...first.map((line) => line.y + line.height)),
+    });
+    const blank: DisplayPage = { ...lines, pageIndex: 2, primitives: [] };
+    expect(
+      createDisplayListQueries({ pages: [blank] }, fakeEngine().engine).visualLineExtent(0)
+    ).toBeNull();
+  });
+});
