@@ -30,10 +30,16 @@
 import React, { useLayoutEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  deriveDisplayListTableFragments,
+  deriveDisplayListTableFragmentsOnPages,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
+import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { projectPageLocalRect } from '../internals/canvasProjection';
+import {
+  buildRemotePresencePageMetrics,
+  remotePresencePageWindow,
+  type RemotePresencePageWindow,
+} from './remotePresenceGeometry';
 import type { YrsEditorCommand } from '../yrsCommands';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 
@@ -94,11 +100,102 @@ export function CanvasTableResizeOverlay({
   sidebarOpen,
   zoom,
 }: CanvasTableResizeOverlayProps): React.ReactPortal | null {
+  // Handles exist only on the visible pages and one page either side; the
+  // window follows scrolling and resizing a frame at a time.
+  const [pageWindow, setPageWindow] = useState<RemotePresencePageWindow | null>(null);
+  useLayoutEffect(() => {
+    const host = canvasHostRef.current;
+    if (!host) {
+      setPageWindow(null);
+      return;
+    }
+    const metrics = buildRemotePresencePageMetrics(displayListQueries.displayList, zoom);
+    const scrollsWindow = (element: HTMLElement) =>
+      element === document.scrollingElement || element === document.documentElement;
+    let frame: number | null = null;
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        update();
+      });
+    };
+    // The scroller is looked up again on every update: an editor shown after
+    // mounting, or an ancestor that starts scrolling, changes it without any
+    // event on the old one.
+    let scrollParent: HTMLElement | null = null;
+    let scrollerResized: ResizeObserver | null = null;
+    const update = () => {
+      const next = findVerticalScrollParentOrRoot(host);
+      if (next !== scrollParent) {
+        scrollerResized?.disconnect();
+        scrollParent = next;
+        scrollerResized = scrollsWindow(next) ? null : new ResizeObserver(schedule);
+        scrollerResized?.observe(next);
+      }
+      const usesWindow = scrollsWindow(next);
+      const column = host.firstElementChild as HTMLElement | null;
+      const viewportTop = usesWindow ? 0 : next.getBoundingClientRect().top;
+      const viewportBottom = viewportTop + (usesWindow ? window.innerHeight : next.clientHeight);
+      const nextWindow = column
+        ? remotePresencePageWindow(
+            metrics,
+            column.getBoundingClientRect().top,
+            viewportTop,
+            viewportBottom,
+            Infinity
+          )
+        : null;
+      setPageWindow((previous) =>
+        previous?.start === nextWindow?.start && previous?.end === nextWindow?.end
+          ? previous
+          : nextWindow
+      );
+    };
+    // Scroll events do not bubble; capturing them on the document sees every
+    // scroller, the window's included.
+    document.addEventListener('scroll', schedule, { capture: true, passive: true });
+    const hostResized = new ResizeObserver(schedule);
+    hostResized.observe(host);
+    // Layout elsewhere can move pages into view without scrolling or resizing.
+    const pagesShown =
+      typeof IntersectionObserver === 'function' ? new IntersectionObserver(schedule) : null;
+    const observePages = () => {
+      pagesShown?.disconnect();
+      host.querySelectorAll('.canvas-page').forEach((page) => pagesShown?.observe(page));
+    };
+    observePages();
+    // The page surfaces are replaced without a display-list change when the
+    // canvas falls back from worker rendering.
+    const pagesReplaced =
+      typeof MutationObserver === 'function'
+        ? new MutationObserver(() => {
+            const column = host.firstElementChild;
+            if (column) pagesReplaced?.observe(column, { childList: true });
+            observePages();
+            schedule();
+          })
+        : null;
+    pagesReplaced?.observe(host, { childList: true });
+    if (host.firstElementChild) pagesReplaced?.observe(host.firstElementChild, { childList: true });
+    window.addEventListener('resize', schedule);
+    update();
+    return () => {
+      document.removeEventListener('scroll', schedule, { capture: true });
+      scrollerResized?.disconnect();
+      hostResized.disconnect();
+      pagesShown?.disconnect();
+      pagesReplaced?.disconnect();
+      window.removeEventListener('resize', schedule);
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  }, [canvasHostRef, displayListQueries, sidebarOpen, zoom]);
+
   // Page-local handle specs + commit params, rebuilt whenever the display list
   // rebuilds (its identity changes per build, including after a resize commit).
   const specs = useMemo<HandleSpec[]>(() => {
     if (readOnly) return [];
-    if (!positionProjection) return [];
+    if (!positionProjection || !pageWindow) return [];
 
     // Cell content primitives carry each cell-paragraph's block id, so the core
     // grouper needs a table identity: resolve an in-cell doc position to the
@@ -124,9 +221,11 @@ export function CanvasTableResizeOverlay({
     };
 
     const out: HandleSpec[] = [];
-    for (const frag of deriveDisplayListTableFragments(
+    for (const frag of deriveDisplayListTableFragmentsOnPages(
       displayListQueries.displayList,
-      tableKeyOf
+      tableKeyOf,
+      pageWindow.start,
+      pageWindow.end
     )) {
       const table = tableAt.get(frag.tableKey);
       if (!table || table.widthsTwips.length === 0) continue;
@@ -176,7 +275,7 @@ export function CanvasTableResizeOverlay({
       }
     }
     return out;
-  }, [displayListQueries, positionProjection, readOnly]);
+  }, [displayListQueries, pageWindow, positionProjection, readOnly]);
 
   // Project page-local specs onto the visible canvas via the live canvas rects.
   const [projected, setProjected] = useState<ProjectedHandle[]>([]);

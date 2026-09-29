@@ -41,12 +41,8 @@
  * exists, because building the display list went through the same module.
  */
 
-import type { DisplayList, DisplayPrimitive } from './displayList';
-import {
-  displayPageRevision,
-  displayPageShiftsSince,
-  type FramePositionShiftRun,
-} from './frameDelta';
+import type { DisplayList, DisplayPage, DisplayPrimitive } from './displayList';
+import { displayPageRevision, displayPageShiftsSince, type DisplayPageShift } from './frameDelta';
 import { displayPrimitiveRect, type GeoRect } from './displayListGeometry';
 import {
   findImagePrimitiveAtPoint,
@@ -138,6 +134,11 @@ export interface DisplayListParagraphGeometry extends DisplayListRect {
 }
 
 /** One ordered visual line reconstructed from authoritative primitives. */
+export interface VisualLineExtent {
+  top: number;
+  bottom: number;
+}
+
 export interface DisplayListVisualLine extends DisplayListRect {
   baseline: number;
   from: number;
@@ -174,6 +175,10 @@ export interface DisplayListQueries {
   paragraphRects(pos: number): DisplayListParagraphGeometry[];
   /** Ordered body visual lines across all pages. */
   visualLines(): readonly DisplayListVisualLine[];
+  /** The part of {@link visualLines} on one page, computed for that page alone. */
+  visualLinesOnPage(pageIndex: number): readonly DisplayListVisualLine[];
+  /** Vertical span of the page's visual lines in page coordinates, or null when it has none. */
+  visualLineExtent(pageIndex: number): VisualLineExtent | null;
   /** Visual line containing `pos`, or null. */
   visualLineAtPosition(pos: number): DisplayListVisualLine | null;
   /** Topmost image under a page-local point. Body by default. */
@@ -351,6 +356,39 @@ function isWasmTrap(error: unknown): boolean {
 }
 
 type StoreShiftRun = [start: number, count: number, mask: number, delta: number];
+type StoreNoteAnchor = [area: number, note: number, start: number | null, end: number | null];
+
+/** The baseline of a primitive that forms part of a visual line, or null. */
+function visualLineBaseline(primitive: DisplayPrimitive): number | null {
+  if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') return null;
+  if (primitive.docStart === undefined || primitive.docEnd === undefined) return null;
+  if (primitive.kind === 'glyphRun' && primitive.glyphs.length === 0) return null;
+  const baseline =
+    primitive.kind === 'text'
+      ? primitive.baselineY
+      : primitive.glyphs.reduce((max, glyph) => Math.max(max, glyph.y), -Infinity);
+  return Number.isFinite(baseline) ? baseline : null;
+}
+
+// Geometry only: an owned position shift keeps the page object and moves no
+// geometry, so an extent stays valid for as long as its page object lives.
+const visualLineExtents = new WeakMap<DisplayPage, VisualLineExtent | null>();
+
+/** Vertical span of a page's visual lines in page coordinates, or null when it has none. */
+function visualLineExtent(page: DisplayPage): VisualLineExtent | null {
+  if (visualLineExtents.has(page)) return visualLineExtents.get(page) ?? null;
+  let top = Infinity;
+  let bottom = -Infinity;
+  for (const primitive of page.primitives) {
+    if (visualLineBaseline(primitive) === null) continue;
+    const rect = displayPrimitiveRect(primitive);
+    top = Math.min(top, rect.y);
+    bottom = Math.max(bottom, rect.y + rect.h);
+  }
+  const extent = top <= bottom ? { top, bottom } : null;
+  visualLineExtents.set(page, extent);
+  return extent;
+}
 
 /**
  * Page-delta between two display lists, exploiting the retained-frame
@@ -368,7 +406,9 @@ function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): s
   seed.list.pages.forEach((page, index) => previousIndex.set(page, index));
   const reuse: Array<[number, number]> = [];
   const replace: Array<[number, unknown]> = [];
-  const shift: Array<[number, number, StoreShiftRun[][]]> = [];
+  const shift: Array<
+    [number, number, StoreShiftRun[][]] | [number, number, StoreShiftRun[][], StoreNoteAnchor[][]]
+  > = [];
   next.pages.forEach((page, index) => {
     const from = previousIndex.get(page);
     if (from === undefined) {
@@ -381,22 +421,28 @@ function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): s
       replace.push([index, page]);
       return;
     }
-    const runLists =
+    const shifts =
       displayPageRevision(page) === storeRevision
         ? []
         : displayPageShiftsSince(page, storeRevision);
-    if (runLists === null) {
+    if (shifts === null) {
       replace.push([index, page]);
-    } else if (runLists.length === 0) {
+    } else if (shifts.length === 0) {
       reuse.push([index, from]);
     } else {
-      shift.push([
-        index,
-        from,
-        runLists.map((runs: readonly FramePositionShiftRun[]) =>
-          runs.map((run): StoreShiftRun => [run.start, run.count, run.changedMask, run.delta])
-        ),
-      ]);
+      const runLists = shifts.map((step: DisplayPageShift) =>
+        step.runs.map((run): StoreShiftRun => [run.start, run.count, run.changedMask, run.delta])
+      );
+      if (shifts.some((step: DisplayPageShift) => step.anchors.length > 0)) {
+        const anchorLists = shifts.map((step: DisplayPageShift) =>
+          step.anchors.map(
+            (anchor): StoreNoteAnchor => [anchor.area, anchor.note, anchor.start, anchor.end]
+          )
+        );
+        shift.push([index, from, runLists, anchorLists]);
+      } else {
+        shift.push([index, from, runLists]);
+      }
     }
   });
   if (reuse.length === 0 && shift.length === 0) return null;
@@ -973,55 +1019,59 @@ export function createDisplayListQueries(
   };
 
   const VISUAL_BASELINE_EPSILON = 1.5;
+  const pageVisualLines: Array<readonly DisplayListVisualLine[] | undefined> = [];
+  const visualLinesOnPage = (pageIndex: number): readonly DisplayListVisualLine[] => {
+    const cached = pageVisualLines[pageIndex];
+    if (cached) return cached;
+    const page = list.pages[pageIndex];
+    if (!page) return [];
+    const pageLines: DisplayListVisualLine[] = [];
+    // A line is found among the lines of its own identity, in the order they began.
+    const linesByIdentity = new Map<string, DisplayListVisualLine[]>();
+    let anonymous = 0;
+    for (const primitive of page.primitives) {
+      const baseline = visualLineBaseline(primitive);
+      if (baseline === null || primitive.docStart === undefined || primitive.docEnd === undefined) {
+        continue;
+      }
+      const identity = primitiveIdentity(primitive) ?? `anonymous:${anonymous++}`;
+      const rect = displayPrimitiveRect(primitive);
+      const sameIdentity = linesByIdentity.get(identity);
+      const current = sameIdentity?.find(
+        (line) => Math.abs(line.baseline - baseline) <= VISUAL_BASELINE_EPSILON
+      );
+      if (!current) {
+        const line: DisplayListVisualLine = {
+          ...pageRect(page.pageIndex, rect),
+          baseline,
+          from: primitive.docStart,
+          to: primitive.docEnd,
+          blockId: publicBlockId(primitive),
+          paraId: primitive.paraId,
+        };
+        pageLines.push(line);
+        if (sameIdentity) sameIdentity.push(line);
+        else linesByIdentity.set(identity, [line]);
+        continue;
+      }
+      const left = Math.min(current.x, rect.x);
+      const top = Math.min(current.y, rect.y);
+      const right = Math.max(current.x + current.width, rect.x + rect.w);
+      const bottom = Math.max(current.y + current.height, rect.y + rect.h);
+      current.x = left;
+      current.y = top;
+      current.width = right - left;
+      current.height = bottom - top;
+      current.from = Math.min(current.from, primitive.docStart);
+      current.to = Math.max(current.to, primitive.docEnd);
+    }
+    pageVisualLines[pageIndex] = pageLines;
+    return pageLines;
+  };
+
   let visualLineCache: DisplayListVisualLine[] | null = null;
   const visualLines = (): readonly DisplayListVisualLine[] => {
-    if (visualLineCache) return visualLineCache;
-    const lines: DisplayListVisualLine[] = [];
-    for (const page of list.pages) {
-      const pageLines: Array<DisplayListVisualLine & { identity: string }> = [];
-      let anonymous = 0;
-      for (const primitive of page.primitives) {
-        if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') continue;
-        if (primitive.docStart === undefined || primitive.docEnd === undefined) continue;
-        if (primitive.kind === 'glyphRun' && primitive.glyphs.length === 0) continue;
-        const baseline =
-          primitive.kind === 'text'
-            ? primitive.baselineY
-            : primitive.glyphs.reduce((max, glyph) => Math.max(max, glyph.y), -Infinity);
-        if (!Number.isFinite(baseline)) continue;
-        const identity = primitiveIdentity(primitive) ?? `anonymous:${anonymous++}`;
-        const rect = displayPrimitiveRect(primitive);
-        const current = pageLines.find(
-          (line) =>
-            line.identity === identity &&
-            Math.abs(line.baseline - baseline) <= VISUAL_BASELINE_EPSILON
-        );
-        if (!current) {
-          pageLines.push({
-            identity,
-            ...pageRect(page.pageIndex, rect),
-            baseline,
-            from: primitive.docStart,
-            to: primitive.docEnd,
-            blockId: publicBlockId(primitive),
-            paraId: primitive.paraId,
-          });
-          continue;
-        }
-        const left = Math.min(current.x, rect.x);
-        const top = Math.min(current.y, rect.y);
-        const right = Math.max(current.x + current.width, rect.x + rect.w);
-        const bottom = Math.max(current.y + current.height, rect.y + rect.h);
-        current.x = left;
-        current.y = top;
-        current.width = right - left;
-        current.height = bottom - top;
-        current.from = Math.min(current.from, primitive.docStart);
-        current.to = Math.max(current.to, primitive.docEnd);
-      }
-      lines.push(...pageLines.map(({ identity: _identity, ...line }) => line));
-    }
-    visualLineCache = lines;
+    visualLineCache ??= list.pages.flatMap((_, pageIndex) => visualLinesOnPage(pageIndex));
     return visualLineCache;
   };
 
@@ -1097,6 +1147,11 @@ export function createDisplayListQueries(
     columnBounds,
     paragraphRects,
     visualLines,
+    visualLinesOnPage,
+    visualLineExtent: (pageIndex: number) => {
+      const page = list.pages[pageIndex];
+      return page ? visualLineExtent(page) : null;
+    },
     visualLineAtPosition,
     imageAtPoint,
     imageByPos,

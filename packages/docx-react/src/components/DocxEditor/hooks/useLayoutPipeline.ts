@@ -305,10 +305,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       // Step 4+: paint + scroll/events with the computed values.
       const applyComputation = (
         computation: LayoutComputation,
-        origin: LayoutUpdateOrigin = layoutUpdateOrigin
+        origin: LayoutUpdateOrigin = layoutUpdateOrigin,
+        version = sourceVersion
       ) => {
         const { layout: newLayout } = computation;
-        stampSourceVersion(newLayout, sourceVersion);
+        stampSourceVersion(newLayout, version);
 
         const pagesEl = pagesContainerRef.current;
         const scrollParent =
@@ -355,8 +356,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
       const layOutHere = (): void => {
         try {
+          // An edit may have landed since the pass began.
+          const version = readSessionVersion(session);
           const computation = computeLayout(computeInputs);
-          applyComputation(computation);
+          applyComputation(computation, layoutUpdateOrigin, version);
           const totalTime = performance.now() - pipelineStart;
           if (totalTime > 2000) {
             console.warn(
