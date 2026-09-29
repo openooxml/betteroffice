@@ -46,6 +46,7 @@ import type {
   SelectionState,
   TableContextInfo,
 } from './DocxEditor/types';
+import { onPresented } from './DocxEditor/internals/layoutProvenance';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -1017,10 +1018,22 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   if (yrsCore.previewing) writeModeRef.current = 'viewing';
   handoffFromRef.current = yrsCore.handoffFrom;
   const { notifyFramePresented } = yrsCore;
-  const presentedEngine = canvasRenderer.presentedEngine;
-  useEffect(() => {
-    if (presentedEngine) notifyFramePresented(presentedEngine);
-  }, [presentedEngine, canvasRenderer.displayList, notifyFramePresented]);
+  const shownRef = useRef({
+    displayList: canvasRenderer.displayList,
+    engine: canvasRenderer.presentedEngine,
+  });
+  shownRef.current = {
+    displayList: canvasRenderer.displayList,
+    engine: canvasRenderer.presentedEngine,
+  };
+  useEffect(
+    () =>
+      onPresented((displayList) => {
+        const shown = shownRef.current;
+        if (shown.engine && displayList === shown.displayList) notifyFramePresented(shown.engine);
+      }),
+    [notifyFramePresented]
+  );
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.
   useCompatibilityWarm(
