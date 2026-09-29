@@ -40,6 +40,7 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import {
   computeAnchorPositionsFromYrs,
   createYrsSidebarProjection,
+  displayPageCanvases,
   extractTrackedChangesFromYrs,
   resolveDisplayPageClientRect,
   type TrackedChangesResult,
@@ -1595,9 +1596,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         if (!target) return;
         const targetRect = target.getBoundingClientRect();
         const canvasByPage = new Map<number, HTMLCanvasElement>();
-        for (const canvas of host.querySelectorAll<HTMLCanvasElement>(
-          'canvas[data-page-index]'
-        )) {
+        for (const canvas of displayPageCanvases(host)) {
           const pageIndex = Number(canvas.dataset.pageIndex);
           if (Number.isFinite(pageIndex)) canvasByPage.set(pageIndex, canvas);
         }
