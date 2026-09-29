@@ -1705,6 +1705,120 @@ impl PartialEq for TextBoxBlock {
     }
 }
 
+impl Run {
+    /// The `pm_start`/`pm_end` positions [`PartialEq`] masks, copied from
+    /// `other`, which must be the same variant.
+    fn sync_positions(&mut self, other: &Self) {
+        match (self, other) {
+            (Self::Text(a), Self::Text(b)) => {
+                a.pm_start = b.pm_start;
+                a.pm_end = b.pm_end;
+            }
+            (Self::Tab(a), Self::Tab(b)) => {
+                a.pm_start = b.pm_start;
+                a.pm_end = b.pm_end;
+            }
+            (Self::Image(a), Self::Image(b)) => {
+                a.pm_start = b.pm_start;
+                a.pm_end = b.pm_end;
+            }
+            (Self::LineBreak(a), Self::LineBreak(b)) => {
+                a.pm_start = b.pm_start;
+                a.pm_end = b.pm_end;
+            }
+            (Self::Field(a), Self::Field(b)) => {
+                a.pm_start = b.pm_start;
+                a.pm_end = b.pm_end;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl ParagraphBlock {
+    fn sync_positions(&mut self, other: &Self) {
+        self.pm_start = other.pm_start;
+        self.pm_end = other.pm_end;
+        for (run, other) in self.runs.iter_mut().zip(&other.runs) {
+            run.sync_positions(other);
+        }
+    }
+}
+
+impl TableBlock {
+    fn sync_positions(&mut self, other: &Self) {
+        self.pm_start = other.pm_start;
+        self.pm_end = other.pm_end;
+        for (row, other) in self.rows.iter_mut().zip(&other.rows) {
+            for (cell, other) in row.cells.iter_mut().zip(&other.cells) {
+                for (block, other) in cell.blocks.iter_mut().zip(&other.blocks) {
+                    block.sync_positions(other);
+                }
+            }
+        }
+    }
+}
+
+impl ShapeBlock {
+    fn sync_positions(&mut self, other: &Self) {
+        self.doc_start = other.doc_start;
+        self.doc_end = other.doc_end;
+        self.pm_start = other.pm_start;
+        self.pm_end = other.pm_end;
+        if let (Some(inner), Some(other)) = (&mut self.inner_text, &other.inner_text) {
+            for (paragraph, other) in inner.iter_mut().zip(other) {
+                paragraph.sync_positions(other);
+            }
+        }
+        for (child, other) in self.children.iter_mut().zip(&other.children) {
+            child.sync_positions(other);
+        }
+    }
+}
+
+impl TextBoxBlock {
+    fn sync_positions(&mut self, other: &Self) {
+        self.pm_start = other.pm_start;
+        self.pm_end = other.pm_end;
+        for (paragraph, other) in self.content.iter_mut().zip(&other.content) {
+            paragraph.sync_positions(other);
+        }
+    }
+}
+
+impl LayoutBlock {
+    /// The positions [`PartialEq`] masks — `pm_start`, `pm_end`, `doc_start`
+    /// and `doc_end` at every level — copied from `other`, which must be the
+    /// same variant (its masked fields are then identical too).
+    pub fn sync_positions(&mut self, other: &Self) {
+        match (self, other) {
+            (Self::Paragraph(a), Self::Paragraph(b)) => a.sync_positions(b),
+            (Self::Table(a), Self::Table(b)) => a.sync_positions(b),
+            (Self::Image(a), Self::Image(b)) => {
+                a.pm_start = b.pm_start;
+                a.pm_end = b.pm_end;
+            }
+            (Self::Shape(a), Self::Shape(b)) => a.sync_positions(b),
+            (Self::Chart(a), Self::Chart(b)) => {
+                a.doc_start = b.doc_start;
+                a.doc_end = b.doc_end;
+                a.pm_start = b.pm_start;
+                a.pm_end = b.pm_end;
+            }
+            (Self::TextBox(a), Self::TextBox(b)) => a.sync_positions(b),
+            (Self::PageBreak(a), Self::PageBreak(b)) => {
+                a.pm_start = b.pm_start;
+                a.pm_end = b.pm_end;
+            }
+            (Self::ColumnBreak(a), Self::ColumnBreak(b)) => {
+                a.pm_start = b.pm_start;
+                a.pm_end = b.pm_end;
+            }
+            _ => {}
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // extents (measurement results)
 // ---------------------------------------------------------------------------

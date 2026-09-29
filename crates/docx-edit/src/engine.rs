@@ -32,7 +32,9 @@ use serde::Serialize;
 use yrs::Subscription;
 
 use crate::EditingDoc;
-use crate::bridge::{BridgeError, LoweringMap, RenderEnv, yrs_doc_to_mapped_layout_blocks};
+use crate::bridge::{
+    BridgeError, LoweringMap, RenderEnv, StoryReuse, yrs_doc_to_mapped_layout_blocks_reused,
+};
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
     encode_frame_delta_pages,
@@ -52,6 +54,11 @@ struct LoweredStory {
     blocks: Rc<Vec<LayoutBlock>>,
     /// Where the blocks' positions came from, recorded by the same lowering.
     map: Rc<LoweringMap>,
+    /// Reuse trace of the lowering that produced `blocks`.
+    reuse: Rc<StoryReuse>,
+    /// `blocks[..len]` are verbatim clones of this vec's head — the story the
+    /// lowering's prefix came from.
+    reused_from: Option<(Rc<Vec<LayoutBlock>>, usize)>,
     /// Lazily serialized layout blocks.
     serialized_blocks: Option<String>,
 }
@@ -661,11 +668,26 @@ struct PaginationState {
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
     position_deltas: HashMap<String, i64>,
+    /// What the recycled measured arena consumed out of `previous.input` —
+    /// eligibility and position deltas read this instead of the moved arena.
+    pending_prev: Option<PrevMeasuredInfo>,
     last_incremental: bool,
     layout_epoch: u64,
     pagination_calls: u64,
     incremental_pagination_calls: u64,
     pagination_blocks_placed: u64,
+}
+
+/// Info the recycled measured arena captured while consuming `previous.input`.
+#[derive(Debug, Default)]
+struct PrevMeasuredInfo {
+    measured_len: usize,
+    /// Every compared `previous`/`next` block pair satisfied
+    /// `resident_fragment_keys_match` (the spliced prefix matches trivially).
+    keys_match: bool,
+    /// `(index, block key, pm_start)` of each retained entry the pass
+    /// overwrote — the only pairs that can report a position delta.
+    starts: Vec<(usize, String, Option<f64>)>,
 }
 
 #[derive(Debug, Default)]
@@ -1085,13 +1107,6 @@ fn first_cell_paragraph(
         })
 }
 
-/// Put extents moved out of the retained arena back; consumed in index order.
-fn restore_moved_measures(measured: &mut [MeasuredBlock], entries: Vec<MeasuredBlock>) {
-    for (consumed, entry) in entries.into_iter().enumerate() {
-        measured[consumed].measure = entry.measure;
-    }
-}
-
 /// Mirror `contextual_spacing_pair`'s writes for a freshly lowered `owned`
 /// block before it can compare equal to a retained one: `before` vs the
 /// previous sibling and `after` vs the next (the table arm uses the first
@@ -1217,24 +1232,57 @@ fn incremental_eligible(
     previous: &PaginationState,
     next: &LayoutInput,
     next_options_fingerprint: u64,
+    prev_info: Option<&PrevMeasuredInfo>,
 ) -> bool {
-    let Some(previous_input) = previous.input.as_ref() else {
-        return false;
+    let measured_match = match prev_info {
+        Some(info) => info.measured_len == next.measured.len() && info.keys_match,
+        None => previous.input.as_ref().is_some_and(|input| {
+            input.measured.len() == next.measured.len()
+                && input
+                    .measured
+                    .iter()
+                    .zip(&next.measured)
+                    .all(|(previous, next)| {
+                        resident_fragment_keys_match(&previous.block, &next.block)
+                    })
+        }),
     };
-    previous.layout.is_some()
+    measured_match
+        && previous.layout.is_some()
         && !previous.checkpoints.is_empty()
         && previous.options_fingerprint == next_options_fingerprint
-        && previous_input.measured.len() == next.measured.len()
         && next
             .options
             .columns
             .as_ref()
             .is_none_or(|columns| columns.count <= 1.0)
-        && previous_input
-            .measured
-            .iter()
-            .zip(&next.measured)
-            .all(|(previous, next)| resident_fragment_keys_match(&previous.block, &next.block))
+}
+
+/// [`position_deltas`] for a pass whose previous arena was consumed in place:
+/// only overwritten entries can have moved, so the captured starts suffice.
+fn deltas_from_starts(
+    starts: &[(usize, String, Option<f64>)],
+    next: &LayoutInput,
+) -> HashMap<String, i64> {
+    starts
+        .iter()
+        .filter_map(|(index, key, previous_start)| {
+            let next_block = &next.measured.get(*index)?.block;
+            if *key != block_key(next_block.block_id()?) {
+                return None;
+            }
+            let delta = next_block.pm_start()? as i64 - (*previous_start)? as i64;
+            if delta == 0 {
+                return None;
+            }
+            let mut entries = vec![(key.clone(), delta)];
+            let mut nested = Vec::new();
+            nested_block_keys(next_block, &mut nested);
+            entries.extend(nested.into_iter().map(|key| (key, delta)));
+            Some(entries)
+        })
+        .flatten()
+        .collect()
 }
 
 impl EngineSession {
@@ -1305,7 +1353,24 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
-        let (blocks, map) = yrs_doc_to_mapped_layout_blocks(&self.doc, story, env)?;
+        let previous = {
+            let mut render = self.render.borrow_mut();
+            render
+                .stories
+                .remove(story)
+                .filter(|cached| cached.env == *env)
+                .map(|mut cached| {
+                    drop(cached.reused_from.take());
+                    drop(cached.blocks);
+                    drop(cached.map);
+                    Rc::try_unwrap(cached.reuse).unwrap_or_else(|rc| (*rc).clone())
+                })
+        };
+        let reused_from = previous
+            .as_ref()
+            .map(|previous| Rc::clone(&previous.blocks));
+        let (blocks, map, reuse, reused) =
+            yrs_doc_to_mapped_layout_blocks_reused(&self.doc, story, env, previous)?;
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(
@@ -1313,8 +1378,12 @@ impl EngineSession {
             LoweredStory {
                 doc_epoch: epoch,
                 env: env.clone(),
-                blocks: Rc::new(blocks),
-                map: Rc::new(map),
+                reused_from: reused_from
+                    .filter(|_| reused > 0)
+                    .map(|from| (from, reused)),
+                blocks,
+                map,
+                reuse: Rc::new(reuse),
                 serialized_blocks: None,
             },
         );
@@ -1733,20 +1802,23 @@ impl EngineSession {
                         &measurement,
                         measurement_fingerprint,
                         floats.then_some(&geometry),
+                        self.render
+                            .borrow()
+                            .stories
+                            .get(story)
+                            .and_then(|lowered| lowered.reused_from.clone()),
                     )? {
                         Some((measured, fingerprints)) => Ok(Arena::Reused(measured, fingerprints)),
                         None => Ok(Arena::Full(blocks.to_vec(), false)),
                     }
                 })
                 .map_err(|error| error.to_string())??;
-            if has_floats {
-                lowered_from = self
-                    .render
-                    .borrow()
-                    .stories
-                    .get(story)
-                    .map(|lowered| Rc::clone(&lowered.blocks));
-            }
+            lowered_from = self
+                .render
+                .borrow()
+                .stories
+                .get(story)
+                .map(|lowered| Rc::clone(&lowered.blocks));
             match arena {
                 Arena::Reused(measured, fingerprints) => {
                     input.measured = measured;
@@ -2273,6 +2345,7 @@ impl EngineSession {
         let mut deltas = HashMap::new();
         let run = {
             let mut previous = self.pagination.borrow_mut();
+            let prev_info = previous.pending_prev.take();
             let first_dirty = previous
                 .block_fingerprints
                 .iter()
@@ -2287,13 +2360,21 @@ impl EngineSession {
                     )
                 });
             if let Some(dirty_index) = first_dirty
-                && incremental_eligible(&previous, &input, input_options_fingerprint)
+                && incremental_eligible(
+                    &previous,
+                    &input,
+                    input_options_fingerprint,
+                    prev_info.as_ref(),
+                )
             {
                 let previous = &mut *previous;
-                deltas = position_deltas(
-                    previous.input.as_ref().expect("eligibility checked input"),
-                    &input,
-                );
+                deltas = match &prev_info {
+                    Some(info) => deltas_from_starts(&info.starts, &input),
+                    None => position_deltas(
+                        previous.input.as_ref().expect("eligibility checked input"),
+                        &input,
+                    ),
+                };
                 let attempted = docx_layout::place::layout_document_incremental(
                     &mut input,
                     previous
@@ -2605,6 +2686,7 @@ impl EngineSession {
     /// `Ok(None)` means the caller must measure the whole story.
     /// With `floats`, a changed block re-measures every block of its float
     /// flow segment instead of itself alone.
+    #[allow(clippy::too_many_arguments)]
     fn resident_region_measured(
         &self,
         blocks: &[LayoutBlock],
@@ -2613,6 +2695,7 @@ impl EngineSession {
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
         floats: Option<&docx_layout::measure_blocks::FloatPageGeometry>,
+        unchanged_from: Option<(Rc<Vec<LayoutBlock>>, usize)>,
     ) -> Result<Option<(Vec<MeasuredBlock>, Vec<u64>)>, String> {
         let pagination = &mut *self.pagination.borrow_mut();
         let Some(previous) = pagination.input.as_mut() else {
@@ -2643,17 +2726,52 @@ impl EngineSession {
         }) {
             return Ok(None);
         }
-        let previous_fingerprints = &pagination.block_fingerprints;
+        // Gates passed: recycle the retained arena in place. Spliced and
+        // clean blocks keep their retained entries verbatim, so only dirty
+        // ones are written and nothing is cloned for the clean prefix.
+        // `pagination.block_fingerprints` stays put — `first_dirty` compares
+        // against it — while eligibility/position deltas read `prev_info`.
+        let mut previous = pagination.input.take().expect("input checked above");
+        let mut prev_info = PrevMeasuredInfo {
+            measured_len: previous.measured.len(),
+            keys_match: true,
+            starts: Vec::new(),
+        };
+        let mut block_fingerprints = Vec::with_capacity(blocks.len());
         let float_blocks = if floats.is_some() { blocks.len() } else { 0 };
         let mut float_dirty = vec![false; float_blocks];
         let mut float_sections = vec![0; float_blocks];
 
-        let mut measured: Vec<MeasuredBlock> = Vec::with_capacity(blocks.len());
-        let mut block_fingerprints = Vec::with_capacity(blocks.len());
         let mut measure_calls = 0_u64;
         let mut reused_blocks = 0_u64;
         let mut section_index = 0_usize;
-        for (index, next_block) in blocks.iter().enumerate() {
+        // A leading run of blocks cloned verbatim from `pagination.lowered_from`
+        // is definitionally equal to the retained entries at the same indices,
+        // so their measures transfer without the per-block gates. The boundary
+        // block itself re-verifies, since the next block may have changed.
+        // Float flows need no extra clamp: a segment containing any dirty
+        // block is re-measured wholesale, and a clean one is valid verbatim.
+        let mut splice = match (unchanged_from.as_ref(), pagination.lowered_from.as_ref()) {
+            (Some((from, prefix)), Some(lowered)) if Rc::ptr_eq(from, lowered) => {
+                prefix.saturating_sub(1)
+            }
+            _ => 0,
+        }
+        .min(previous.measured.len());
+        if splice > 0 && widths[..splice] != previous_widths[..splice] {
+            splice = 0;
+        }
+        for (index, entry) in previous.measured[..splice].iter().enumerate() {
+            if let Some(section) = float_sections.get_mut(index) {
+                *section = section_index;
+            }
+            block_fingerprints.push(pagination.block_fingerprints[index]);
+            if matches!(entry.block, LayoutBlock::SectionBreak(_)) {
+                section_index += 1;
+            }
+        }
+        for index in splice..blocks.len() {
+            let next_block = &blocks[index];
             // An empty paragraph ahead of a section break measures to a bare
             // mark extent; only its own emptiness plus the next block's kind
             // matter, so a dirty next block has to force a re-measure.
@@ -2669,8 +2787,9 @@ impl EngineSession {
                 *section = section_index;
             }
             let previous_entry = &mut previous.measured[index];
+            prev_info.keys_match &= resident_fragment_keys_match(&previous_entry.block, next_block);
             if !resident_block_slots_match(&previous_entry.block, next_block) {
-                restore_moved_measures(&mut previous.measured, measured);
+                pagination.input = Some(previous);
                 return Ok(None);
             }
             // In a float flow the extent depends on the block as lowered, before
@@ -2681,14 +2800,17 @@ impl EngineSession {
                     == matches!(next_block, LayoutBlock::Unsupported)
                 && lowered_from.is_none_or(|lowered| lowered[index] == *next_block);
             if width_clean && *next_block == previous_entry.block {
-                measured.push(MeasuredBlock {
-                    block: next_block.clone(),
-                    measure: std::mem::replace(
-                        &mut previous_entry.measure,
-                        BlockExtent::Unsupported,
-                    ),
-                });
-                block_fingerprints.push(previous_fingerprints[index]);
+                if next_block.pm_start() != previous_entry.block.pm_start()
+                    && let Some(id) = previous_entry.block.block_id()
+                {
+                    prev_info.starts.push((
+                        index,
+                        block_key(id).into_owned(),
+                        previous_entry.block.pm_start(),
+                    ));
+                }
+                previous_entry.block.sync_positions(next_block);
+                block_fingerprints.push(pagination.block_fingerprints[index]);
                 reused_blocks = reused_blocks.wrapping_add(1);
             } else {
                 let mut owned = next_block.clone();
@@ -2718,22 +2840,27 @@ impl EngineSession {
                     && (owned == previous_entry.block
                         || section_breaks_match_but_margins(&owned, &previous_entry.block))
                 {
-                    measured.push(MeasuredBlock {
-                        block: owned,
-                        measure: std::mem::replace(
-                            &mut previous_entry.measure,
-                            BlockExtent::Unsupported,
-                        ),
-                    });
-                    block_fingerprints.push(previous_fingerprints[index]);
+                    if let Some(id) = previous_entry.block.block_id() {
+                        prev_info.starts.push((
+                            index,
+                            block_key(id).into_owned(),
+                            previous_entry.block.pm_start(),
+                        ));
+                    }
+                    previous_entry.block = owned;
+                    block_fingerprints.push(pagination.block_fingerprints[index]);
                     reused_blocks = reused_blocks.wrapping_add(1);
                 } else if floats.is_some() {
                     float_dirty[index] = true;
-                    measured.push(MeasuredBlock {
-                        block: owned,
-                        measure: previous_entry.measure.clone(),
-                    });
-                    block_fingerprints.push(previous_fingerprints[index]);
+                    if let Some(id) = previous_entry.block.block_id() {
+                        prev_info.starts.push((
+                            index,
+                            block_key(id).into_owned(),
+                            previous_entry.block.pm_start(),
+                        ));
+                    }
+                    previous_entry.block = owned;
+                    block_fingerprints.push(pagination.block_fingerprints[index]);
                 } else {
                     let measure = if next_is_break
                         && matches!(&owned, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
@@ -2750,7 +2877,7 @@ impl EngineSession {
                         ) {
                             Ok(measure) => measure,
                             Err(error) => {
-                                restore_moved_measures(&mut previous.measured, measured);
+                                pagination.input = Some(previous);
                                 return Err(error);
                             }
                         }
@@ -2762,12 +2889,19 @@ impl EngineSession {
                     let fingerprint = match measured_fingerprint(&entry) {
                         Ok(fingerprint) => fingerprint,
                         Err(error) => {
-                            restore_moved_measures(&mut previous.measured, measured);
+                            pagination.input = Some(previous);
                             return Err(error);
                         }
                     };
+                    if let Some(id) = previous_entry.block.block_id() {
+                        prev_info.starts.push((
+                            index,
+                            block_key(id).into_owned(),
+                            previous_entry.block.pm_start(),
+                        ));
+                    }
+                    *previous_entry = entry;
                     block_fingerprints.push(fingerprint);
-                    measured.push(entry);
                     measure_calls = measure_calls.wrapping_add(1);
                 }
             }
@@ -2816,7 +2950,7 @@ impl EngineSession {
                     ) {
                         Ok(Some(extents)) => extents,
                         outcome => {
-                            restore_moved_measures(&mut previous.measured, measured);
+                            pagination.input = Some(previous);
                             return outcome.map(|_| None);
                         }
                     };
@@ -2828,20 +2962,31 @@ impl EngineSession {
                             std::slice::from_mut(&mut block),
                         );
                         let entry = MeasuredBlock { block, measure };
+                        let previous_entry = &mut previous.measured[start + offset];
+                        if let Some(id) = previous_entry.block.block_id() {
+                            prev_info.starts.push((
+                                start + offset,
+                                block_key(id).into_owned(),
+                                previous_entry.block.pm_start(),
+                            ));
+                        }
                         block_fingerprints[start + offset] = match measured_fingerprint(&entry) {
                             Ok(fingerprint) => fingerprint,
                             Err(error) => {
-                                restore_moved_measures(&mut previous.measured, measured);
+                                pagination.input = Some(previous);
                                 return Err(error);
                             }
                         };
-                        measured[start + offset] = entry;
+                        previous.measured[start + offset] = entry;
                         measure_calls = measure_calls.wrapping_add(1);
                     }
                 }
                 start = end;
             }
         }
+        let measured = std::mem::take(&mut previous.measured);
+        drop(previous);
+        pagination.pending_prev = Some(prev_info);
         let mut measurement_state = self.measurement.borrow_mut();
         measurement_state.resident_measure_calls = measurement_state
             .resident_measure_calls
@@ -2956,7 +3101,8 @@ impl EngineSession {
                         )
                     };
                     let default_width = widths.first().copied().unwrap_or(0.0);
-                    if !collect_note_refs(blocks).is_empty()
+                    let note_refs = collect_note_refs(blocks);
+                    if !note_refs.is_empty()
                         || docx_layout::measure_blocks::has_floating_zones(
                             blocks,
                             default_width,

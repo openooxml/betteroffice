@@ -33,8 +33,10 @@
 //! page content height, and the mapping from yrs ids to the numeric ids the
 //! layout contract uses — arrive in [`RenderEnv`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use docx_layout::types::{
@@ -47,11 +49,15 @@ use docx_layout::types::{
     UnderlineSpec,
 };
 use serde_json::{Map as JsonMap, Value};
+use yrs::branch::{Branch, BranchPtr};
 use yrs::types::Attrs;
-use yrs::types::text::YChange;
+use yrs::types::text::{Diff, YChange};
 use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 
-use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
+use super::{
+    COMMENTS, DEL, EditError, EditingDoc, INS, KIND_KEY, PILCROW_KIND, decode_anchor, is_pilcrow,
+    story_ref,
+};
 use crate::list_marker::{ListState, compute_list_marker};
 
 mod shapes;
@@ -247,6 +253,94 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    yrs_doc_to_mapped_layout_blocks_reused(doc, story_id, env, None)
+        .map(|(blocks, map, _, _)| ((*blocks).clone(), (*map).clone()))
+}
+
+/// The state [`lower_story`] threads across top-level items. It only ever
+/// flows forward, so the state reaching an item is a pure function of the
+/// items before it.
+#[derive(Clone, Debug)]
+struct LowerState {
+    story_index: u32,
+    paragraph_start: u32,
+    paragraph_pm_start: u64,
+    paragraph_pm_units: u32,
+    pm_cursor: u64,
+    at_block_boundary: bool,
+    section_margins: SectionMarginsTwips,
+    list_state: ListState,
+    hidden_field_blocks: BTreeSet<String>,
+    pending_hidden_field_blocks: BTreeSet<String>,
+    table_ordinal: u32,
+    break_ordinal: u32,
+}
+
+/// One top-level reuse item — a paragraph or a standalone embed — and where
+/// it landed in every output. The `hash` covers the item's complete diff
+/// stream, so equal items lower identically given equal inputs.
+#[derive(Clone, Debug)]
+struct ReuseItem {
+    hash: u64,
+    /// False when the item's inputs contained a value the fingerprint cannot
+    /// cover; such items never match and always re-lower.
+    sound: bool,
+    /// Text units this item ends at — items fully before the story's dirty
+    /// fence match by units alone, without fingerprinting.
+    units_end: u64,
+    blocks_end: u32,
+    stories_end: u32,
+    paragraphs_end: u32,
+    paragraph_blocks_end: u32,
+    spans_end: u32,
+    tables_end: u32,
+    state: LowerState,
+}
+
+/// Reuse trace of one [`yrs_doc_to_mapped_layout_blocks_reused`] pass. A
+/// later pass with the same `previous` clones the longest matching item
+/// prefix — outputs, map and lowering state — instead of re-lowering it.
+#[derive(Clone, Debug)]
+pub struct StoryReuse {
+    /// The doc's story-revision counter when the producing pass ran — the
+    /// dirty check resolves everything after it through
+    /// [`EditingDoc::stories_changed_since`].
+    revision: u64,
+    comments: Vec<CommentInterval>,
+    items: Vec<ReuseItem>,
+    /// The blocks the producing pass emitted — shared so the measured pass
+    /// can tell verbatim-spliced output by pointer identity.
+    pub(crate) blocks: Rc<Vec<LayoutBlock>>,
+    map: Rc<LoweringMap>,
+}
+
+impl StoryReuse {
+    fn new(
+        revision: u64,
+        comments: Vec<CommentInterval>,
+        items: Vec<ReuseItem>,
+        blocks: Rc<Vec<LayoutBlock>>,
+        map: Rc<LoweringMap>,
+    ) -> Self {
+        Self {
+            revision,
+            comments,
+            items,
+            blocks,
+            map,
+        }
+    }
+}
+
+/// [`yrs_doc_to_mapped_layout_blocks`] with prefix reuse against `previous`:
+/// the trace the same story's last lowering produced, and how much of it
+/// this pass re-emitted unchanged.
+pub fn yrs_doc_to_mapped_layout_blocks_reused(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+    previous: Option<StoryReuse>,
+) -> Result<(Rc<Vec<LayoutBlock>>, Rc<LoweringMap>, StoryReuse, usize), BridgeError> {
     if doc.yrs_doc().offset_kind() != OffsetKind::Utf16 {
         return Err(BridgeError::WrongOffsetKind);
     }
@@ -255,6 +349,15 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
+    let since = previous.as_ref().map_or(0, |previous| previous.revision);
+    let (revision, dirty) = doc.stories_changed_since(since);
+    let dirty_from = doc.story_dirty_from(since);
+    let mut walk = ReuseWalk::new(
+        previous,
+        dirty,
+        doc.take_dirty_branches(),
+        dirty_from.get(story_id).copied().unwrap_or(0),
+    );
     let (blocks, _) = lower_story(
         &txn,
         story_id,
@@ -264,9 +367,419 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         &mut list_state,
         CellEdges::default(),
         &mut map,
+        Some(&mut walk),
     )?;
     map.finish();
-    Ok((blocks, map))
+    let (items, comments, reused_blocks) = walk.finish();
+    let blocks = Rc::new(blocks);
+    let map = Rc::new(map);
+    let reuse = StoryReuse::new(revision, comments, items, blocks.clone(), map.clone());
+    Ok((blocks, map, reuse, reused_blocks))
+}
+
+/// Order-insensitive rolling fingerprint over a diff stream. Text bytes,
+/// attribute maps and embedded yrs values fold in a canonical order so the
+/// same item always lands on the same hash.
+struct Fingerprint(u64);
+
+impl Fingerprint {
+    const SEED: u64 = 0xcbf2_9ce4_8422_2325;
+    const MUL: u64 = 0x0000_0100_0000_01b3;
+    const FIRST: u64 = 0x517c_c1b7_2722_0a95;
+    const LAST: u64 = 0x2545_f491_4f6c_dd1d;
+
+    fn new() -> Self {
+        Self(Self::SEED)
+    }
+
+    fn mix(&mut self, value: u64) {
+        self.0 = (self.0 ^ value).wrapping_mul(Self::MUL);
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) {
+        self.mix(bytes.len() as u64);
+        for chunk in bytes.chunks(8) {
+            let mut word = [0_u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.mix(u64::from_le_bytes(word));
+        }
+    }
+
+    fn string(&mut self, text: &str) {
+        self.bytes(text.as_bytes());
+    }
+}
+
+fn fingerprint_any(fp: &mut Fingerprint, value: &Any) {
+    match value {
+        Any::Null => fp.mix(0x00),
+        Any::Undefined => fp.mix(0x01),
+        Any::Bool(flag) => fp.mix(0x02 | u64::from(*flag)),
+        Any::Number(number) => fp.mix(number.to_bits()),
+        Any::BigInt(number) => fp.mix(number.cast_unsigned()),
+        Any::String(text) => {
+            fp.mix(0x03);
+            fp.string(text);
+        }
+        Any::Buffer(data) => {
+            fp.mix(0x04);
+            fp.bytes(data);
+        }
+        Any::Array(items) => {
+            fp.mix(0x05);
+            for item in items.iter() {
+                fingerprint_any(fp, item);
+            }
+        }
+        Any::Map(entries) => {
+            fp.mix(0x06);
+            let mut fold = 0_u64;
+            for (key, value) in entries.iter() {
+                let mut entry = Fingerprint::new();
+                entry.string(key);
+                fingerprint_any(&mut entry, value);
+                fold ^= entry.0;
+            }
+            fp.mix(fold);
+        }
+    }
+}
+
+fn fingerprint_attrs(fp: &mut Fingerprint, attrs: Option<&Attrs>) {
+    if let Some(attrs) = attrs {
+        let mut fold = 0_u64;
+        for (key, value) in attrs.iter() {
+            let mut entry = Fingerprint::new();
+            entry.string(key);
+            fingerprint_any(&mut entry, value);
+            fold ^= entry.0;
+        }
+        fp.mix(fold);
+    }
+}
+
+/// The shared type a chunk embeds, if any — its branch pointer identifies the
+/// value, and commits flag the pointer when the value's content changes.
+/// Text units `insert` occupies — UTF-16 for strings, one for embeds.
+fn out_units(insert: &Out) -> u64 {
+    match insert {
+        Out::Any(Any::String(text)) if text.is_ascii() => text.len() as u64,
+        Out::Any(Any::String(text)) => text.encode_utf16().count() as u64,
+        _ => 1,
+    }
+}
+
+fn out_branch(out: &Out) -> Option<BranchPtr> {
+    match out {
+        Out::YMap(branch) => Some(BranchPtr::from(AsRef::<Branch>::as_ref(branch))),
+        Out::YArray(branch) => Some(BranchPtr::from(AsRef::<Branch>::as_ref(branch))),
+        Out::YText(branch) => Some(BranchPtr::from(AsRef::<Branch>::as_ref(branch))),
+        Out::YXmlElement(branch) => Some(BranchPtr::from(AsRef::<Branch>::as_ref(branch))),
+        Out::YXmlFragment(branch) => Some(BranchPtr::from(AsRef::<Branch>::as_ref(branch))),
+        Out::YXmlText(branch) => Some(BranchPtr::from(AsRef::<Branch>::as_ref(branch))),
+        Out::UndefinedRef(branch) => Some(*branch),
+        _ => None,
+    }
+}
+
+/// The chunks `lower_story` treats as whole-item boundaries: pilcrows close
+/// paragraphs, and tables, breaks and block SDTs lower standalone.
+fn reuse_boundary<T: ReadTxn>(insert: &Out, txn: &T) -> bool {
+    let Out::YMap(map) = insert else {
+        return false;
+    };
+    matches!(
+        map.get(txn, KIND_KEY),
+        Some(Out::Any(Any::String(kind)))
+            if matches!(
+                kind.as_ref(),
+                PILCROW_KIND | "table" | "pageBreak" | "columnBreak" | "blockSdt"
+            )
+    )
+}
+
+/// One pass over the diff stream, serving both phases of a reused lowering:
+/// matching items against `previous` until the first divergence, then
+/// recording the trace of everything lowered after it.
+struct ReuseWalk {
+    previous: Option<StoryReuse>,
+    items: Vec<ReuseItem>,
+    comments: Vec<CommentInterval>,
+    /// Stories changed since `previous` was produced — an item that lowered
+    /// one of them by reference (cell, SDT) cannot be trusted by hash alone.
+    dirty: BTreeSet<String>,
+    /// Shared types any commit has touched since the last drain; an item
+    /// embedding one re-lowers because its chunk identity is ptr-based.
+    dirty_branches: HashSet<BranchPtr>,
+    fp: Fingerprint,
+    sound: bool,
+    /// Diff index the item accumulating now started at.
+    item_start: u32,
+    /// Diffs consumed so far.
+    cursor: u32,
+    /// The story's clean-prefix fence — items ending below it match by
+    /// units and dirty checks alone.
+    skip_bound: u64,
+    /// Text units consumed so far.
+    units: u64,
+    /// `units` when the in-flight item began — the rewind point.
+    item_units_start: u64,
+    /// Diff index `lower_story` resumes at — where the matched prefix ends.
+    diff_start: usize,
+    /// Blocks spliced out of `previous` — the matched prefix's output span.
+    reused_blocks: usize,
+}
+
+impl ReuseWalk {
+    fn new(
+        previous: Option<StoryReuse>,
+        dirty: Vec<String>,
+        dirty_branches: HashSet<BranchPtr>,
+        skip_bound: u64,
+    ) -> Self {
+        Self {
+            previous,
+            items: Vec::new(),
+            comments: Vec::new(),
+            dirty: dirty.into_iter().collect(),
+            dirty_branches,
+            skip_bound,
+            units: 0,
+            item_units_start: 0,
+            fp: Fingerprint::new(),
+            sound: true,
+            item_start: 0,
+            cursor: 0,
+            diff_start: 0,
+            reused_blocks: 0,
+        }
+    }
+
+    /// Folds one diff chunk; returns the item hash and its soundness when
+    /// the chunk closed an item.
+    fn update<T: ReadTxn>(
+        &mut self,
+        diff: &Diff<YChange>,
+        last_diff: bool,
+        txn: &T,
+    ) -> Option<(u64, bool)> {
+        self.units += out_units(&diff.insert);
+        match &diff.insert {
+            Out::Any(value) => fingerprint_any(&mut self.fp, value),
+            insert => match out_branch(insert) {
+                Some(branch) => {
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    branch.hash(&mut hasher);
+                    self.fp.mix(hasher.finish() ^ 0x30);
+                    if self.dirty_branches.contains(&branch) {
+                        self.sound = false;
+                    }
+                }
+                None => self.sound = false,
+            },
+        }
+        fingerprint_attrs(&mut self.fp, diff.attributes.as_deref());
+        self.cursor += 1;
+        if !reuse_boundary(&diff.insert, txn) {
+            return None;
+        }
+        if last_diff {
+            self.fp.mix(Fingerprint::LAST);
+        }
+        let mut marker = self.fp.0;
+        if self.item_start == 0 {
+            marker ^= Fingerprint::FIRST;
+        }
+        self.fp = Fingerprint::new();
+        let sound = self.sound;
+        self.sound = true;
+        self.item_start = self.cursor;
+        self.item_units_start = self.units;
+        Some((marker, sound))
+    }
+
+    /// Skip-mode fold: counts units only. `self.units` can only reach the
+    /// item's recorded `units_end` at its real boundary chunk, so `>=` is the
+    /// boundary signal — overruns report a marker that fails the comparison.
+    fn update_skip(&mut self, diff: &Diff<YChange>, units_end: u64) -> Option<(u64, bool)> {
+        self.units += out_units(&diff.insert);
+        if let Some(branch) = out_branch(&diff.insert)
+            && self.dirty_branches.contains(&branch)
+        {
+            self.sound = false;
+        }
+        self.cursor += 1;
+        if self.units < units_end {
+            return None;
+        }
+        let marker = self.units;
+        let sound = self.sound;
+        self.sound = true;
+        self.item_start = self.cursor;
+        self.item_units_start = self.units;
+        Some((marker, sound))
+    }
+
+    /// Matches items against `previous` until the stream diverges, seeding
+    /// `blocks`/`map`/records with the prefix's outputs. Returns the index
+    /// of the last matched item — the [`LowerState`] to resume with — and
+    /// sets `diff_start` to the first diff needing a fresh lower.
+    fn scan<T: ReadTxn>(
+        &mut self,
+        diffs: &[Diff<YChange>],
+        comments: &[CommentInterval],
+        blocks: &mut Vec<LayoutBlock>,
+        map: &mut LoweringMap,
+        txn: &T,
+    ) -> Option<LowerState> {
+        self.comments = comments.to_vec();
+        let previous = self.previous.take()?;
+        if previous.comments != comments {
+            return None;
+        }
+        let StoryReuse {
+            items: prev_items,
+            blocks: prev_blocks,
+            map: prev_map,
+            ..
+        } = previous;
+        let mut matched = 0_usize;
+        let mut stories_start = 0_usize;
+        let mut diverged = false;
+        for (index, diff) in diffs.iter().enumerate() {
+            if matched == prev_items.len() {
+                self.diff_start = index;
+                diverged = true;
+                break;
+            }
+            let item_start = self.item_start;
+            let item_units_start = self.item_units_start;
+            let item = &prev_items[matched];
+            let skipping = item.units_end <= self.skip_bound;
+            let finished = if skipping {
+                self.update_skip(diff, item.units_end)
+            } else {
+                self.update(diff, index + 1 == diffs.len(), txn)
+            };
+            if let Some((marker, sound)) = finished {
+                // `map.stories[start..end]` holds every story this item
+                // visited; the head slot is the story being lowered, whose
+                // own chunks the hash already covers.
+                let stories_dirty = prev_map.stories
+                    [stories_start.max(1)..item.stories_end as usize]
+                    .iter()
+                    .any(|name| self.dirty.contains(name));
+                let marker_match = if skipping {
+                    item.units_end == marker
+                } else {
+                    item.hash == marker
+                };
+                if marker_match && item.sound && sound && !stories_dirty {
+                    matched += 1;
+                    stories_start = item.stories_end as usize;
+                } else {
+                    // The mismatched item is re-fingerprinted during the
+                    // lower, so rewind the accumulators to its first chunk.
+                    self.cursor = item_start;
+                    self.item_start = item_start;
+                    self.units = item_units_start;
+                    self.diff_start = item_start as usize;
+                    diverged = true;
+                    break;
+                }
+            }
+        }
+        if !diverged {
+            self.diff_start = diffs.len();
+        }
+        if matched == 0 {
+            return None;
+        }
+        let last = &prev_items[matched - 1];
+        let ends = (
+            last.blocks_end as usize,
+            last.stories_end as usize,
+            last.paragraphs_end as usize,
+            last.paragraph_blocks_end as usize,
+            last.spans_end as usize,
+            last.tables_end as usize,
+        );
+        let state = last.state.clone();
+        let (blocks_end, stories_end, paragraphs_end, paragraph_blocks_end, spans_end, tables_end) =
+            ends;
+        // `previous`'s vectors move rather than clone when nothing else shares
+        // their Rcs — the prefix splice is then a truncate, not a deep copy.
+        match Rc::try_unwrap(prev_blocks) {
+            Ok(mut shared) => {
+                shared.truncate(blocks_end);
+                *blocks = shared;
+            }
+            Err(shared) => blocks.extend(shared[..blocks_end].iter().cloned()),
+        }
+        match Rc::try_unwrap(prev_map) {
+            Ok(mut shared) => {
+                // `map.stories` already holds this story's own entry, pushed
+                // before the scan — the seed's head is the same entry.
+                map.stories
+                    .extend(shared.stories.drain(..stories_end).skip(map.stories.len()));
+                map.paragraphs
+                    .extend(shared.paragraphs.drain(..paragraphs_end));
+                map.paragraph_blocks
+                    .extend(shared.paragraph_blocks.drain(..paragraph_blocks_end));
+                map.spans.extend(shared.spans.drain(..spans_end));
+                map.tables.extend(shared.tables.drain(..tables_end));
+            }
+            Err(shared) => {
+                map.stories.extend(
+                    shared.stories[..stories_end]
+                        .iter()
+                        .skip(map.stories.len())
+                        .cloned(),
+                );
+                map.paragraphs
+                    .extend(shared.paragraphs[..paragraphs_end].iter().cloned());
+                map.paragraph_blocks.extend(
+                    shared.paragraph_blocks[..paragraph_blocks_end]
+                        .iter()
+                        .cloned(),
+                );
+                map.spans.extend(shared.spans[..spans_end].iter().cloned());
+                map.tables
+                    .extend(shared.tables[..tables_end].iter().cloned());
+            }
+        }
+        self.reused_blocks = blocks_end;
+        self.items.extend(prev_items.into_iter().take(matched));
+        Some(state)
+    }
+
+    /// Records the item a boundary chunk just closed.
+    #[allow(clippy::too_many_arguments)]
+    fn push_item(
+        &mut self,
+        hash: u64,
+        sound: bool,
+        blocks_end: u32,
+        map: &LoweringMap,
+        state: LowerState,
+    ) {
+        self.items.push(ReuseItem {
+            hash,
+            sound,
+            units_end: self.units,
+            blocks_end,
+            stories_end: map.stories.len() as u32,
+            paragraphs_end: map.paragraphs.len() as u32,
+            paragraph_blocks_end: map.paragraph_blocks.len() as u32,
+            spans_end: map.spans.len() as u32,
+            tables_end: map.tables.len() as u32,
+            state,
+        });
+    }
+
+    fn finish(self) -> (Vec<ReuseItem>, Vec<CommentInterval>, usize) {
+        (self.items, self.comments, self.reused_blocks)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -285,6 +798,7 @@ fn lower_story<T: ReadTxn>(
     list_state: &mut ListState,
     cell_edges: CellEdges,
     map: &mut LoweringMap,
+    reuse: Option<&mut ReuseWalk>,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
@@ -312,9 +826,38 @@ fn lower_story<T: ReadTxn>(
         // header/footer stories simply never carry section properties.
         let mut section_margins = SectionMarginsTwips::default();
 
-        for diff in story.diff(txn, YChange::identity) {
+        let mut reuse = reuse;
+        let diffs = story.diff(txn, YChange::identity);
+        let mut diff_start = 0_usize;
+        if let Some(walk) = reuse.as_deref_mut()
+            && walk.previous.is_some()
+            && let Some(state) = walk.scan(&diffs, &comments, &mut blocks, map, txn)
+        {
+            diff_start = walk.diff_start;
+            story_index = state.story_index;
+            paragraph_start = state.paragraph_start;
+            paragraph_pm_start = state.paragraph_pm_start;
+            paragraph_pm_units = state.paragraph_pm_units;
+            pm_cursor = state.pm_cursor;
+            at_block_boundary = state.at_block_boundary;
+            section_margins = state.section_margins;
+            *list_state = state.list_state.clone();
+            hidden_field_blocks = state.hidden_field_blocks.clone();
+            pending_hidden_field_blocks = state.pending_hidden_field_blocks.clone();
+            table_ordinal = state.table_ordinal;
+            break_ordinal = state.break_ordinal;
+        } else if let Some(walk) = reuse.as_deref_mut() {
+            diff_start = walk.diff_start;
+        }
+
+        for (index, diff) in diffs.iter().enumerate().skip(diff_start) {
             let attributes = diff.attributes.as_deref();
-            match diff.insert {
+            let finished = if let Some(walk) = reuse.as_deref_mut() {
+                walk.update(diff, index + 1 == diffs.len(), txn)
+            } else {
+                None
+            };
+            match &diff.insert {
                 Out::Any(Any::String(text)) => {
                     let text = text.as_ref();
                     push_text_chunks(
@@ -331,11 +874,11 @@ fn lower_story<T: ReadTxn>(
                     paragraph_pm_units += width;
                     at_block_boundary = false;
                 }
-                Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
+                Out::YMap(pilcrow) if is_pilcrow(pilcrow, txn) => {
                     let mut paragraph_blocks = flush_paragraph_parts(
                         paragraph_runs,
                         paragraph_drawings,
-                        &pilcrow,
+                        pilcrow,
                         attributes,
                         txn,
                         story_id,
@@ -345,7 +888,7 @@ fn lower_story<T: ReadTxn>(
                         list_state,
                         (map, story_slot),
                     );
-                    let values = pilcrow_values(&pilcrow, txn);
+                    let values = pilcrow_values(pilcrow, txn);
                     suppress_cell_edge_spacing(
                         &mut paragraph_blocks,
                         &values,
@@ -355,7 +898,7 @@ fn lower_story<T: ReadTxn>(
                         },
                     );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
-                    if !shared_map_string(&pilcrow, txn, "paraId")
+                    if !shared_map_string(pilcrow, txn, "paraId")
                         .is_some_and(|id| hidden_field_blocks.contains(&id))
                     {
                         blocks.extend(paragraph_blocks);
@@ -378,7 +921,7 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = true;
                 }
                 Out::YMap(table)
-                    if shared_map_string(&table, txn, "_kind").as_deref() == Some("table") =>
+                    if shared_map_string(table, txn, "_kind").as_deref() == Some("table") =>
                 {
                     if !paragraph_runs.is_empty()
                         || !paragraph_drawings.is_empty()
@@ -390,12 +933,12 @@ fn lower_story<T: ReadTxn>(
                             detail: "table embed interrupts paragraph content".to_owned(),
                         });
                     }
-                    let hidden = shared_map_string(&table, txn, "blockId")
+                    let hidden = shared_map_string(table, txn, "blockId")
                         .is_some_and(|id| hidden_field_blocks.contains(&id));
                     map.tables.push((pm_cursor, story_slot, table_ordinal));
                     table_ordinal += 1;
                     let (lowered, node_size) = lower_table(
-                        &table,
+                        table,
                         txn,
                         story_id,
                         story_index,
@@ -417,7 +960,7 @@ fn lower_story<T: ReadTxn>(
                 }
                 Out::YMap(page_break)
                     if matches!(
-                        shared_map_string(&page_break, txn, "_kind").as_deref(),
+                        shared_map_string(page_break, txn, "_kind").as_deref(),
                         Some("pageBreak" | "columnBreak")
                     ) =>
                 {
@@ -430,7 +973,7 @@ fn lower_story<T: ReadTxn>(
                             index: story_index,
                         });
                     }
-                    let kind = shared_map_string(&page_break, txn, "_kind").unwrap_or_default();
+                    let kind = shared_map_string(page_break, txn, "_kind").unwrap_or_default();
                     if kind == "pageBreak"
                         && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last_mut()
                         && paragraph.runs.is_empty()
@@ -468,7 +1011,7 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = true;
                 }
                 Out::YMap(block_sdt)
-                    if shared_map_string(&block_sdt, txn, "_kind").as_deref()
+                    if shared_map_string(block_sdt, txn, "_kind").as_deref()
                         == Some("blockSdt") =>
                 {
                     if !at_block_boundary
@@ -480,13 +1023,13 @@ fn lower_story<T: ReadTxn>(
                             index: story_index,
                         });
                     }
-                    let Some(child_story) = shared_map_string(&block_sdt, txn, "story") else {
+                    let Some(child_story) = shared_map_string(block_sdt, txn, "story") else {
                         return Err(BridgeError::UnsupportedEmbed {
                             story: story_id.to_owned(),
                             index: story_index,
                         });
                     };
-                    let group = lower_sdt_group(&block_sdt, txn, pm_cursor as i64);
+                    let group = lower_sdt_group(block_sdt, txn, pm_cursor as i64);
                     let (mut child_blocks, content_size) = lower_story(
                         txn,
                         &child_story,
@@ -499,6 +1042,7 @@ fn lower_story<T: ReadTxn>(
                             after: cell_edges.after && story_index + 1 == story.len(txn),
                         },
                         map,
+                        None,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     if !hidden_field_blocks.contains(&child_story) {
@@ -512,12 +1056,12 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = true;
                 }
                 Out::YMap(note_ref)
-                    if shared_map_string(&note_ref, txn, "_kind").as_deref() == Some("noteRef") =>
+                    if shared_map_string(note_ref, txn, "_kind").as_deref() == Some("noteRef") =>
                 {
-                    let footnote_id = shared_any(&note_ref, txn, "footnoteRefId")
+                    let footnote_id = shared_any(note_ref, txn, "footnoteRefId")
                         .as_ref()
                         .and_then(|value| note_ref_id(value, env));
-                    let endnote_id = shared_any(&note_ref, txn, "endnoteRefId")
+                    let endnote_id = shared_any(note_ref, txn, "endnoteRefId")
                         .as_ref()
                         .and_then(|value| note_ref_id(value, env));
                     let Some(id) = footnote_id.or(endnote_id) else {
@@ -561,18 +1105,18 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(field)
-                    if shared_map_string(&field, txn, "_kind").as_deref() == Some("field") =>
+                    if shared_map_string(field, txn, "_kind").as_deref() == Some("field") =>
                 {
-                    let instruction = shared_map_string(&field, txn, "instruction")
+                    let instruction = shared_map_string(field, txn, "instruction")
                         .filter(|value| !value.is_empty());
                     let hidden = instruction
                         .as_deref()
                         .is_some_and(super::seed::numeric_field_instruction);
                     if hidden {
                         pending_hidden_field_blocks
-                            .append(&mut hidden_field_result_blocks(&field, txn));
+                            .append(&mut hidden_field_result_blocks(field, txn));
                     }
-                    let field_type = shared_map_string(&field, txn, "fieldType")
+                    let field_type = shared_map_string(field, txn, "fieldType")
                         .unwrap_or_else(|| "OTHER".to_owned());
                     let mapped_type = match field_type.as_str() {
                         "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
@@ -586,7 +1130,7 @@ fn lower_story<T: ReadTxn>(
                             fallback: Some(if hidden {
                                 String::new()
                             } else {
-                                shared_map_string(&field, txn, "displayText").unwrap_or_default()
+                                shared_map_string(field, txn, "displayText").unwrap_or_default()
                             }),
                         },
                         formatting: lower_run_formatting(attributes, env),
@@ -603,7 +1147,7 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(line_break)
-                    if shared_map_string(&line_break, txn, "_kind").as_deref() == Some("break") =>
+                    if shared_map_string(line_break, txn, "_kind").as_deref() == Some("break") =>
                 {
                     paragraph_runs.push(RawRun {
                         kind: RawRunKind::LineBreak,
@@ -621,11 +1165,11 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(image)
-                    if shared_map_string(&image, txn, "_kind").as_deref() == Some("image") =>
+                    if shared_map_string(image, txn, "_kind").as_deref() == Some("image") =>
                 {
                     let formatting = lower_run_formatting(attributes, env);
                     paragraph_runs.push(RawRun {
-                        kind: RawRunKind::Image(lower_image_run(&image, txn, &formatting, env)),
+                        kind: RawRunKind::Image(lower_image_run(image, txn, &formatting, env)),
                         formatting,
                         story_start: story_index,
                         story_end: story_index + 1,
@@ -640,10 +1184,10 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(rule)
-                    if shared_map_string(&rule, txn, "_kind").as_deref()
+                    if shared_map_string(rule, txn, "_kind").as_deref()
                         == Some("horizontalRule") =>
                 {
-                    let Some(rule) = shared_any(&rule, txn, "rule")
+                    let Some(rule) = shared_any(rule, txn, "rule")
                         .filter(|value| {
                             any_map(value).is_some_and(|map| {
                                 ["width", "widthPercent", "height"].iter().all(|key| {
@@ -686,9 +1230,9 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(math)
-                    if shared_map_string(&math, txn, "_kind").as_deref() == Some("math") =>
+                    if shared_map_string(math, txn, "_kind").as_deref() == Some("math") =>
                 {
-                    let text = shared_map_string(&math, txn, "plainText")
+                    let text = shared_map_string(math, txn, "plainText")
                         .filter(|value| !value.is_empty())
                         .unwrap_or_else(|| "[equation]".to_owned());
                     paragraph_runs.push(RawRun {
@@ -715,10 +1259,10 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(sdt)
-                    if shared_map_string(&sdt, txn, "_kind").as_deref() == Some("sdt") =>
+                    if shared_map_string(sdt, txn, "_kind").as_deref() == Some("sdt") =>
                 {
                     let node_size = lower_inline_sdt(
-                        &sdt,
+                        sdt,
                         txn,
                         env,
                         story_index,
@@ -732,11 +1276,11 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(shape)
-                    if shared_map_string(&shape, txn, "_kind").as_deref() == Some("shape") =>
+                    if shared_map_string(shape, txn, "_kind").as_deref() == Some("shape") =>
                 {
                     let pm_offset = paragraph_pm_units;
                     let Some(block) = lower_shape_block(
-                        &shape,
+                        shape,
                         txn,
                         paragraph_pm_start + 1 + u64::from(pm_offset),
                         env,
@@ -815,11 +1359,11 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(chart)
-                    if shared_map_string(&chart, txn, "_kind").as_deref() == Some("chart") =>
+                    if shared_map_string(chart, txn, "_kind").as_deref() == Some("chart") =>
                 {
                     let pm_offset = paragraph_pm_units;
                     let Some(block) = lower_chart_block(
-                        &chart,
+                        chart,
                         txn,
                         paragraph_pm_start + 1 + u64::from(pm_offset),
                         env,
@@ -847,6 +1391,30 @@ fn lower_story<T: ReadTxn>(
                     });
                 }
             }
+            if let Some(walk) = reuse.as_deref_mut()
+                && let Some((hash, sound)) = finished
+            {
+                walk.push_item(
+                    hash,
+                    sound,
+                    blocks.len() as u32,
+                    map,
+                    LowerState {
+                        story_index,
+                        paragraph_start,
+                        paragraph_pm_start,
+                        paragraph_pm_units,
+                        pm_cursor,
+                        at_block_boundary,
+                        section_margins,
+                        list_state: list_state.clone(),
+                        hidden_field_blocks: hidden_field_blocks.clone(),
+                        pending_hidden_field_blocks: pending_hidden_field_blocks.clone(),
+                        table_ordinal,
+                        break_ordinal,
+                    },
+                );
+            }
         }
 
         if !at_block_boundary
@@ -856,7 +1424,6 @@ fn lower_story<T: ReadTxn>(
         {
             return Err(BridgeError::UnterminatedStory(story_id.to_owned()));
         }
-
         Ok((blocks, pm_cursor - pm_base))
     })();
     active_stories.remove(story_id);
@@ -1042,6 +1609,7 @@ fn lower_table<T: ReadTxn>(
                     after: true,
                 },
                 map,
+                None,
             )?;
 
             let width_value = map_number(tc_pr, "width");
@@ -1983,7 +2551,7 @@ fn lower_cell_border(
     })
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct CommentInterval {
     start: u32,
     end: u32,
