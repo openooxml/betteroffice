@@ -1,5 +1,5 @@
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -110,6 +110,93 @@ pub fn collect_font_requirements_into<'a>(
             collect_paragraph_font_requirements(paragraph, &scripts, default_family, requirements);
         });
     }
+}
+
+/// [`collect_font_requirements_into`] over a borrowed list, chunked over
+/// `std::thread::scope` workers on native so callers holding `Rc` lists can
+/// fan out. Chunk maps merge in block order into `requirements`, so keys and
+/// their script lists land identical to the sequential walk.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn collect_font_requirements_into_slice<T: std::borrow::Borrow<LayoutBlock> + Sync>(
+    blocks: &[T],
+    default_family: &str,
+    requirements: &mut BTreeMap<String, FontRequirement>,
+) {
+    const PARALLEL_COLLECT_MIN: usize = 512;
+    fn collect<T: std::borrow::Borrow<LayoutBlock>>(
+        blocks: &[T],
+        default_family: &str,
+        requirements: &mut BTreeMap<String, FontRequirement>,
+    ) {
+        for block in blocks {
+            walk_paragraphs(std::slice::from_ref(block.borrow()), &mut |paragraph| {
+                let scripts = paragraph_scripts(paragraph);
+                collect_paragraph_font_requirements(
+                    paragraph,
+                    &scripts,
+                    default_family,
+                    requirements,
+                );
+            });
+        }
+    }
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(blocks.len() / PARALLEL_COLLECT_MIN + 1);
+    if workers <= 1 {
+        collect(blocks, default_family, requirements);
+        return;
+    }
+    let chunk_len = blocks.len().div_ceil(workers);
+    let mut partials: Vec<(usize, BTreeMap<String, FontRequirement>)> =
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = blocks
+                .chunks(chunk_len)
+                .enumerate()
+                .map(|(index, chunk)| {
+                    scope.spawn(move || {
+                        let mut local = BTreeMap::new();
+                        collect(chunk, default_family, &mut local);
+                        (index, local)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("font requirement worker panicked"))
+                .collect()
+        });
+    partials.sort_by_key(|(index, _)| *index);
+    for (_, partial) in partials {
+        for (key, requirement) in partial {
+            match requirements.get_mut(&key) {
+                Some(existing) => {
+                    for script in requirement.scripts {
+                        if !existing.scripts.contains(&script) {
+                            existing.scripts.push(script);
+                        }
+                    }
+                }
+                None => {
+                    requirements.insert(key, requirement);
+                }
+            }
+        }
+    }
+}
+
+/// [`collect_font_requirements_into_slice`] on targets without scoped threads.
+#[cfg(target_arch = "wasm32")]
+pub fn collect_font_requirements_into_slice<T: std::borrow::Borrow<LayoutBlock>>(
+    blocks: &[T],
+    default_family: &str,
+    requirements: &mut BTreeMap<String, FontRequirement>,
+) {
+    collect_font_requirements_into(
+        blocks.iter().map(|block| block.borrow()),
+        default_family,
+        requirements,
+    );
 }
 
 /// The family measurement gives text naming none: `defaults.fontFamily`, else Calibri.
@@ -407,7 +494,7 @@ pub fn measure_blocks_with_shape_offsets(
         extract_floating_zones(blocks, default_width, config, page_geometry, shape_offsets)?;
     let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
     let marks = section_break_marks(blocks);
-    measure_float_flow(
+    measure_flow(
         blocks,
         widths,
         default_width,
@@ -415,6 +502,38 @@ pub fn measure_blocks_with_shape_offsets(
         &paragraph_zones,
         &zones_by_anchor,
         &marks,
+    )
+}
+
+fn measure_flow(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    config: &MeasurementConfig,
+    paragraph_zones: &ParagraphZones,
+    zones_by_anchor: &AnchorZones,
+    section_break_marks: &[bool],
+) -> Result<Vec<BlockExtent>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(measured) = measure_flow_parallel(
+        blocks,
+        widths,
+        default_width,
+        config,
+        paragraph_zones,
+        zones_by_anchor,
+        section_break_marks,
+    )? {
+        return Ok(measured);
+    }
+    measure_float_flow(
+        blocks,
+        widths,
+        default_width,
+        config,
+        paragraph_zones,
+        zones_by_anchor,
+        section_break_marks,
     )
 }
 
@@ -610,6 +729,160 @@ fn measure_float_flow(
     Ok(measured)
 }
 
+/// Below this many blocks the flow is cheaper sequential than spawning workers.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_MEASURE_MIN_BLOCKS: usize = 256;
+
+/// [`measure_float_flow`] chunked over `std::thread::scope` workers; `None`
+/// when the input is too small to split. Pieces never share flow state: with
+/// no zones at all every block is independent, so index chunks split evenly;
+/// otherwise splits land only at [`resets_float_flow`] boundaries, where
+/// `active_zones` and `cumulative_y` clear — the same independence
+/// [`measure_float_segment`] documents. Each worker measures its pieces
+/// against a [`crate::MeasureFonts`] replica of the caller's store, so
+/// outputs are identical to the sequential walk, and piece results report in
+/// document order, which keeps the first-error contract too.
+#[cfg(not(target_arch = "wasm32"))]
+fn measure_flow_parallel(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    config: &MeasurementConfig,
+    paragraph_zones: &ParagraphZones,
+    zones_by_anchor: &AnchorZones,
+    section_break_marks: &[bool],
+) -> Result<Option<Vec<BlockExtent>>, String> {
+    if blocks.len() < PARALLEL_MEASURE_MIN_BLOCKS {
+        return Ok(None);
+    }
+    let zone_free = paragraph_zones.is_empty() && zones_by_anchor.is_empty();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(blocks.len() / PARALLEL_MEASURE_MIN_BLOCKS + 1);
+    if workers <= 1 {
+        return Ok(None);
+    }
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    if zone_free {
+        let chunk_len = blocks.len().div_ceil(workers);
+        for start in (0..blocks.len()).step_by(chunk_len) {
+            ranges.push(start..(start + chunk_len).min(blocks.len()));
+        }
+    } else {
+        let mut start = 0;
+        for (index, block) in blocks.iter().enumerate() {
+            if index != start && resets_float_flow(block) {
+                ranges.push(start..index);
+                start = index;
+            }
+        }
+        ranges.push(start..blocks.len());
+    }
+    if ranges.len() < 2 {
+        return Ok(None);
+    }
+    let workers = workers.min(ranges.len());
+    let block_count = blocks.len();
+    let mut pieces = split_ranges_mut(blocks, &ranges);
+    let snapshot = crate::measure_fonts_snapshot();
+    let mut piece_results: Vec<(usize, Result<Vec<BlockExtent>, String>)> =
+        std::thread::scope(|scope| {
+            // largest pieces to the lightest worker first
+            let mut order: Vec<usize> = (0..ranges.len()).collect();
+            order.sort_by_key(|&piece| std::cmp::Reverse(ranges[piece].len()));
+            let mut loads = vec![0usize; workers];
+            let mut assignments: Vec<Vec<usize>> = (0..workers).map(|_| Vec::new()).collect();
+            for piece in order {
+                let worker = (0..workers).min_by_key(|&w| loads[w]).unwrap_or(0);
+                loads[worker] += ranges[piece].len();
+                assignments[worker].push(piece);
+            }
+            let handles: Vec<_> = assignments
+                .into_iter()
+                .map(|piece_ids| {
+                    let owned: Vec<(usize, &mut [LayoutBlock], std::ops::Range<usize>)> = piece_ids
+                        .into_iter()
+                        .map(|piece| {
+                            (
+                                piece,
+                                pieces[piece].take().unwrap_or(&mut []),
+                                ranges[piece].clone(),
+                            )
+                        })
+                        .collect();
+                    let snapshot = &snapshot;
+                    scope.spawn(move || {
+                        let store = ooxml_text::FontStore::from_snapshot(snapshot);
+                        let fonts = crate::MeasureFonts::from_store(store);
+                        let _scope = fonts.enter();
+                        let mut out = Vec::with_capacity(owned.len());
+                        for (piece, segment, range) in owned {
+                            let zones = paragraph_zones
+                                .range(range.clone())
+                                .map(|(&index, zones)| (index - range.start, zones.clone()))
+                                .collect();
+                            let anchored = zones_by_anchor
+                                .iter()
+                                .filter(|(index, _)| range.contains(index))
+                                .map(|(&index, zones)| (index - range.start, zones.clone()))
+                                .collect();
+                            out.push((
+                                piece,
+                                measure_float_flow(
+                                    segment,
+                                    widths_slice(widths, &range),
+                                    default_width,
+                                    config,
+                                    &zones,
+                                    &anchored,
+                                    &section_break_marks[range.clone()],
+                                ),
+                            ));
+                        }
+                        out
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("measure worker panicked"))
+                .collect()
+        });
+    piece_results.sort_by_key(|(piece, _)| *piece);
+    let mut measured = Vec::with_capacity(block_count);
+    for (_, extents) in piece_results {
+        measured.extend(extents?);
+    }
+    Ok(Some(measured))
+}
+
+/// `widths[range]`, or the shorter tail when `widths` runs out early —
+/// lookups past its end already fall back to `default_width`.
+#[cfg(not(target_arch = "wasm32"))]
+fn widths_slice<'a>(widths: &'a [f64], range: &std::ops::Range<usize>) -> &'a [f64] {
+    let end = range.end.min(widths.len());
+    &widths[range.start.min(end)..end]
+}
+
+/// `blocks[start..end]` as disjoint mutable subslices for sorted `ranges`.
+#[cfg(not(target_arch = "wasm32"))]
+fn split_ranges_mut<'a>(
+    blocks: &'a mut [LayoutBlock],
+    ranges: &[std::ops::Range<usize>],
+) -> Vec<Option<&'a mut [LayoutBlock]>> {
+    let mut pieces = Vec::with_capacity(ranges.len());
+    let mut rest = blocks;
+    let mut cursor = 0;
+    for range in ranges {
+        let (_, tail) = rest.split_at_mut(range.start - cursor);
+        let (piece, tail) = tail.split_at_mut(range.len());
+        pieces.push(Some(piece));
+        rest = tail;
+        cursor = range.end;
+    }
+    pieces
+}
+
 pub fn measure_block(
     block: &mut LayoutBlock,
     content_width: f64,
@@ -724,7 +997,7 @@ fn measure_paragraph_with_context(
     measure_horizontal_rules(paragraph, &mut extent);
     if let ExtentLookup::Miss(Some(key)) = lookup {
         let weight = extent_weight(&extent);
-        EXTENT_CACHE.with(|cache| cache.borrow_mut().insert_hot(key, extent.clone(), weight));
+        extent_cache().insert_hot(key, extent.clone(), weight);
     }
     Ok(extent)
 }
@@ -818,14 +1091,25 @@ impl ExtentCache {
     }
 }
 
+/// Process-wide cache: entries key every input a measure reads, so scoped
+/// measure workers and the sessions that spawned them share hits.
+static EXTENT_CACHE: LazyLock<Mutex<ExtentCache>> =
+    LazyLock::new(|| Mutex::new(ExtentCache::default()));
+
 thread_local! {
-    static EXTENT_CACHE: RefCell<ExtentCache> = RefCell::new(ExtentCache::default());
     /// Key scratch reused per lookup so a hit allocates nothing.
-    static EXTENT_KEY_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static EXTENT_KEY_BUF: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn extent_cache() -> std::sync::MutexGuard<'static, ExtentCache> {
+    EXTENT_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(crate) fn clear_extent_cache() {
-    EXTENT_CACHE.with(|cache| *cache.borrow_mut() = ExtentCache::default());
+    *extent_cache() = ExtentCache::default();
 }
 
 enum ExtentLookup {
@@ -852,7 +1136,14 @@ fn extent_cache_lookup(
             return ExtentLookup::Miss(None);
         }
         key.extend_from_slice(&content_width.to_bits().to_le_bytes());
-        key.extend_from_slice(&cumulative_y.to_bits().to_le_bytes());
+        // `cumulative_y` only reaches the request when zones ride along, so
+        // zone-free paragraphs at different heights collapse to one entry.
+        key.extend_from_slice(
+            &floating_zones
+                .map_or(0.0, |_| cumulative_y)
+                .to_bits()
+                .to_le_bytes(),
+        );
         match floating_zones {
             None => key.push(0),
             Some(zones) => {
@@ -880,7 +1171,7 @@ fn extent_cache_lookup(
         let (store, fonts) = crate::measure_fonts_generation();
         key.extend_from_slice(&store.to_le_bytes());
         key.extend_from_slice(&(fonts as u64).to_le_bytes());
-        match EXTENT_CACHE.with(|cache| cache.borrow_mut().get(key)) {
+        match extent_cache().get(key) {
             Some(extent) => ExtentLookup::Hit(extent),
             None => ExtentLookup::Miss(Some(key.clone())),
         }
@@ -1184,8 +1475,37 @@ fn extract_floating_zones(
     page_geometry: Option<&FloatPageGeometry>,
     shape_offsets: &BTreeMap<usize, f64>,
 ) -> Result<Vec<AnchoredFloatingZone>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(zones) = extract_floating_zones_parallel(
+        blocks,
+        content_width,
+        config,
+        page_geometry,
+        shape_offsets,
+    )? {
+        return Ok(zones);
+    }
+    extract_floating_zones_from(
+        blocks,
+        0,
+        content_width,
+        config,
+        page_geometry,
+        shape_offsets,
+    )
+}
+
+fn extract_floating_zones_from(
+    blocks: &[LayoutBlock],
+    base_index: usize,
+    content_width: f64,
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
+) -> Result<Vec<AnchoredFloatingZone>, String> {
     let mut zones = Vec::new();
-    for (block_index, block) in blocks.iter().enumerate() {
+    for (offset, block) in blocks.iter().enumerate() {
+        let block_index = base_index + offset;
         match block {
             LayoutBlock::Paragraph(paragraph) => {
                 extract_image_zones(paragraph, block_index, content_width, &mut zones);
@@ -1212,6 +1532,66 @@ fn extract_floating_zones(
         }
     }
     Ok(zones)
+}
+
+/// [`extract_floating_zones`] chunked over `std::thread::scope` workers;
+/// `None` when the scan is too small to split. Every block's zones depend
+/// only on that block and its index, so chunk outputs simply concatenate in
+/// order. Workers measure floating tables against a [`crate::MeasureFonts`]
+/// replica of the caller's store.
+#[cfg(not(target_arch = "wasm32"))]
+fn extract_floating_zones_parallel(
+    blocks: &[LayoutBlock],
+    content_width: f64,
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
+) -> Result<Option<Vec<AnchoredFloatingZone>>, String> {
+    const PARALLEL_EXTRACT_MIN: usize = 512;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |count| count.get())
+        .min(blocks.len() / PARALLEL_EXTRACT_MIN + 1);
+    if workers <= 1 {
+        return Ok(None);
+    }
+    let snapshot = crate::measure_fonts_snapshot();
+    let chunk_len = blocks.len().div_ceil(workers);
+    let mut chunk_results: Vec<(usize, Result<Vec<AnchoredFloatingZone>, String>)> =
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = blocks
+                .chunks(chunk_len)
+                .enumerate()
+                .map(|(index, chunk)| {
+                    let snapshot = &snapshot;
+                    scope.spawn(move || {
+                        let store = ooxml_text::FontStore::from_snapshot(snapshot);
+                        let fonts = crate::MeasureFonts::from_store(store);
+                        let _scope = fonts.enter();
+                        (
+                            index,
+                            extract_floating_zones_from(
+                                chunk,
+                                index * chunk_len,
+                                content_width,
+                                config,
+                                page_geometry,
+                                shape_offsets,
+                            ),
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("zone extract worker panicked"))
+                .collect()
+        });
+    chunk_results.sort_by_key(|(index, _)| *index);
+    let mut zones = Vec::new();
+    for (_, chunk_zones) in chunk_results {
+        zones.extend(chunk_zones?);
+    }
+    Ok(Some(zones))
 }
 
 /// Whether a line runs past a float rather than stopping at its wider side.

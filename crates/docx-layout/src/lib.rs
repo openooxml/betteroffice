@@ -623,6 +623,15 @@ impl Drop for MeasureFonts {
 }
 
 impl MeasureFonts {
+    /// A session store adopting `store` instead of an empty one, for a
+    /// replica [`ooxml_text::FontStore::from_snapshot`] rebuilt on a scoped
+    /// worker thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn from_store(store: ooxml_text::FontStore) -> Self {
+        SESSION_FONTS.with(|count| count.set(count.get() + 1));
+        Self(SharedFontStore::new(std::cell::RefCell::new(store)))
+    }
+
     /// Makes this the store that registration, measurement, display building
     /// and glyph outlines use until the returned scope drops, which puts the
     /// replaced store back.
@@ -631,6 +640,13 @@ impl MeasureFonts {
             ENTERED_FONTS.with(|entered| entered.replace(Some(std::rc::Rc::clone(&self.0))));
         MeasureFontsScope(previous)
     }
+}
+
+/// The measurement store's [`ooxml_text::FontStore::snapshot`], for replicas
+/// scoped worker threads hydrate with [`MeasureFonts::from_store`].
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn measure_fonts_snapshot() -> ooxml_text::FontStoreSnapshot {
+    with_measure_fonts(|store| store.borrow().snapshot())
 }
 
 /// The span a [`MeasureFonts`] is in use; see [`MeasureFonts::enter`].

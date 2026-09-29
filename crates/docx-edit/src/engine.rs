@@ -958,7 +958,38 @@ fn section_start_of_first_changed_break(
     dirty.min(section_start)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_FINGERPRINT_MIN: usize = 512;
+
 fn measured_fingerprints(input: &LayoutInput) -> Result<Vec<u64>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, |count| count.get())
+            .min(input.measured.len() / PARALLEL_FINGERPRINT_MIN + 1);
+        if workers > 1 {
+            let chunk_len = input.measured.len().div_ceil(workers);
+            return std::thread::scope(|scope| {
+                let handles: Vec<_> = input
+                    .measured
+                    .chunks(chunk_len)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            chunk
+                                .iter()
+                                .map(measured_fingerprint)
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                    })
+                    .collect();
+                let mut fingerprints = Vec::with_capacity(input.measured.len());
+                for handle in handles {
+                    fingerprints.extend(handle.join().expect("fingerprint worker panicked")?);
+                }
+                Ok(fingerprints)
+            });
+        }
+    }
     input.measured.iter().map(measured_fingerprint).collect()
 }
 
@@ -1489,8 +1520,13 @@ impl EngineSession {
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
         let mut requirements = BTreeMap::new();
-        docx_layout::measure_blocks::collect_font_requirements_into(
-            input.measured.iter().map(|measured| &measured.block),
+        let measured_blocks: Vec<&LayoutBlock> = input
+            .measured
+            .iter()
+            .map(|measured| &measured.block)
+            .collect();
+        docx_layout::measure_blocks::collect_font_requirements_into_slice(
+            &measured_blocks,
             default_family,
             &mut requirements,
         );
@@ -1525,7 +1561,7 @@ impl EngineSession {
             }));
             for story in stories {
                 self.with_lowered_story(&story, &render_env, |blocks| {
-                    docx_layout::measure_blocks::collect_font_requirements_into(
+                    docx_layout::measure_blocks::collect_font_requirements_into_slice(
                         blocks,
                         default_family,
                         &mut requirements,
