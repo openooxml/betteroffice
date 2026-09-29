@@ -39,7 +39,9 @@ export interface DisplayPageClientRect {
 
 /**
  * The CSS `zoom` `element` renders at, its ancestors' included. Client rects
- * carry it; layout sizes and an element's scroll offsets do not.
+ * carry it; layout sizes and an element's scroll offsets do not. Where
+ * `currentCSSZoom` is unavailable, zoom set inside a closed shadow tree the
+ * element is slotted through cannot be read and is left out.
  */
 export function effectiveZoom(element: Element): number {
   const current = (element as Element & { currentCSSZoom?: unknown }).currentCSSZoom;

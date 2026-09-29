@@ -138,7 +138,13 @@ export function CanvasTableResizeOverlay({
       const column = host.firstElementChild as HTMLElement | null;
       const band = column ? viewportColumnBand(usesWindow ? null : next, column) : null;
       const nextWindow = band
-        ? remotePresencePageWindow(metrics, 0, band.top, band.bottom, Infinity)
+        ? remotePresencePageWindow(
+            metrics,
+            band.columnTop,
+            band.top,
+            band.top + band.height,
+            Infinity
+          )
         : null;
       setPageWindow((previous) =>
         previous?.start === nextWindow?.start && previous?.end === nextWindow?.end

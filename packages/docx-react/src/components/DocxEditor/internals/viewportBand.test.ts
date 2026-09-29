@@ -90,25 +90,27 @@ describe('viewportColumnBand', () => {
       const scroller = zoomed(zoom, 40.25, 1_000.4, 1_000);
       const column = zoomed(zoom, 40.25 + (8 - scrollTop) * zoom, 13_696.3);
       const band = viewportColumnBand(scroller, column);
-      expect(band.top).toBeCloseTo(scrollTop - 8, 9);
-      expect(band.bottom).toBeCloseTo(scrollTop - 8 + 1_000, 9);
+      expect(band.top - band.columnTop).toBeCloseTo(scrollTop - 8, 9);
+      expect(band.height).toBeCloseTo(1_000, 9);
     }
   });
 
-  test('computes the unzoomed band exactly as client rects and clientHeight give it', () => {
-    const scroller = zoomed(1, 40.25, 300.484375, 300);
-    const column = zoomed(1, -2_391.7, 13_696.3);
-    const band = viewportColumnBand(scroller, column);
-    expect(band.top).toBe(40.25 - -2_391.7);
-    expect(band.bottom).toBe(40.25 - -2_391.7 + 300);
+  test('passes unzoomed client rects and clientHeight through unchanged', () => {
+    const scroller = zoomed(1, 40.3, 300.484375, 300);
+    const column = zoomed(1, -2_000.1, 13_696.3);
+    expect(viewportColumnBand(scroller, column)).toEqual({
+      columnTop: -2_000.1,
+      top: 40.3,
+      height: 300,
+    });
   });
 
   test('uses the window for the root scroller, whose rect moves with the page', () => {
     const column = zoomed(0.8, -480, 10_000);
     for (const scroller of [null, document.documentElement]) {
       const band = viewportColumnBand(scroller, column);
-      expect(band.top).toBeCloseTo(600);
-      expect(band.bottom).toBeCloseTo(600 + window.innerHeight / 0.8);
+      expect(band.top - band.columnTop).toBeCloseTo(600);
+      expect(band.height).toBeCloseTo(window.innerHeight / 0.8);
     }
   });
 });

@@ -338,10 +338,9 @@ export function CanvasPagesView({
         );
         return;
       }
-      const { top: viewTop, bottom: viewBottom } = viewportColumnBand(
-        scrollTarget === window ? null : scrollParent,
-        column
-      );
+      const band = viewportColumnBand(scrollTarget === window ? null : scrollParent, column);
+      const viewTop = band.top - band.columnTop;
+      const viewBottom = viewTop + band.height;
       const { tops, bottoms } = pageOffsets;
       let first = tops.length - 1;
       for (let index = 0; index < tops.length; index += 1) {

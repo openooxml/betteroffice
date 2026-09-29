@@ -17,7 +17,7 @@ afterAll(async () => {
 const PAGE = { width: 100, height: 200 };
 const PAGES = 12;
 const GAP = 24;
-const SCROLLER_TOP = 40.25;
+const SCROLLER_TOP = 40.3;
 const SCROLLER_BOX = 300.4;
 const SCROLLER_HEIGHT = 300;
 
@@ -114,8 +114,9 @@ test('scrollToPage centres the page in the window when the root scrolls', () => 
 });
 
 test('scrollToPage computes an unzoomed target exactly as before', () => {
-  const { host, scroller, moves } = scene(1, 100.5);
+  const scrollTop = 100.1;
+  const { host, scroller, moves } = scene(1, scrollTop);
   scrollApi(host, scroller).scrollToPageImpl(3);
-  const clientY = SCROLLER_TOP + (pageCentre(3) - 100.5);
-  expect(moves[0]).toBe(100.5 + clientY - SCROLLER_TOP - SCROLLER_HEIGHT / 2);
+  const clientY = host.children[2]!.getBoundingClientRect().top + PAGE.height / 2;
+  expect(moves[0]).toBe(scrollTop + clientY - SCROLLER_TOP - SCROLLER_HEIGHT / 2);
 });

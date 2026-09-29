@@ -33,19 +33,23 @@ export function scrollViewport(scroller: HTMLElement): ScrollViewport {
 }
 
 /**
- * The band of `column` the viewport shows, in the column's layout pixels, the
- * space its page offsets are in. `scroller` is null for the root scroller.
+ * The viewport band over `column`, in the column's layout pixels measured from
+ * the client origin: the band starts `top - columnTop` down the column.
+ * `scroller` is null for the root scroller.
  */
 export function viewportColumnBand(
   scroller: HTMLElement | null,
   column: HTMLElement
-): { top: number; bottom: number } {
+): { columnTop: number; top: number; height: number } {
   const viewport = scroller
     ? scrollViewport(scroller)
     : { top: 0, height: window.innerHeight, zoom: 1 };
   const zoom = effectiveZoom(column);
-  const top = (viewport.top - column.getBoundingClientRect().top) / zoom;
-  return { top, bottom: top + (viewport.height * viewport.zoom) / zoom };
+  return {
+    columnTop: column.getBoundingClientRect().top / zoom,
+    top: viewport.top / zoom,
+    height: (viewport.height * viewport.zoom) / zoom,
+  };
 }
 
 /**
