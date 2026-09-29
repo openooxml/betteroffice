@@ -237,7 +237,9 @@ export function useYrsCoreSession(
   previewingRef.current = previewing;
   const retiringRef = useRef<YrsSession | null>(null);
   // Collaboration shares one replica from the start, so it never previews.
-  const previewFirstPage =
+  // Read once per load: a later change of the option does not reopen it.
+  const previewFirstPageRef = useRef(false);
+  previewFirstPageRef.current =
     options?.previewFirstPage === true && !collaboration && !collaborationInitialUpdate;
 
   useEffect(() => {
@@ -252,6 +254,7 @@ export function useYrsCoreSession(
 
     const stale = () =>
       cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false;
+    const previewFirstPage = previewFirstPageRef.current;
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
@@ -354,7 +357,6 @@ export function useYrsCoreSession(
     seedGeneration,
     collaborationClientId,
     collaborationInitialUpdate,
-    previewFirstPage,
   ]);
 
   const notifyFramePresented = useCallback((engine: unknown): void => {

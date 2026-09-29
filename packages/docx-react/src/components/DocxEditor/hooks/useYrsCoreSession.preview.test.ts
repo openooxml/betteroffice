@@ -161,3 +161,26 @@ test('a document the preview refuses opens in full at once', async () => {
   expect(hosts).toEqual([false]);
   unmount();
 });
+
+test('changing the preview option keeps the open session', async () => {
+  const { result, rerender, unmount } = renderHook(
+    ({ preview }: { preview: boolean }) =>
+      useYrsCoreSession(
+        true,
+        null,
+        null,
+        PAGES,
+        1,
+        undefined,
+        { isCurrentLoad: () => true },
+        { previewFirstPage: preview }
+      ),
+    { initialProps: { preview: false } }
+  );
+  await waitFor(() => expect(result.current.session).not.toBeNull());
+  const session = result.current.session;
+  rerender({ preview: true });
+  await act(async () => {});
+  expect(result.current.session).toBe(session);
+  unmount();
+});
