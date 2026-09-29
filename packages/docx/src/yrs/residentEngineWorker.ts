@@ -194,9 +194,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const applied =
       request.type === 'applyDelete'
         ? request.profile
-          ? session.applyDeleteProfiled(request.direction, request.expectedFrameEpoch)
+          ? session.applyDeleteProfiled(
+              request.direction,
+              request.expectedFrameEpoch,
+              request.count
+            )
           : {
-              frame: session.applyDelete(request.direction, request.expectedFrameEpoch),
+              frame: session.applyDelete(
+                request.direction,
+                request.expectedFrameEpoch,
+                request.count
+              ),
               profile: undefined,
             }
         : request.profile
@@ -213,7 +221,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       applied.profile,
       started,
       true,
-      request.paintCaret
+      request.paintCaret,
+      request.type === 'applyDelete' ? session.residentDeletedUnits() : undefined
     );
   } catch (error) {
     if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -298,7 +307,8 @@ async function replyFrame(
   engineProfile?: import('./index').YrsEngineApplyProfile,
   requestStarted = performance.now(),
   requireCaret = false,
-  paintCaret = false
+  paintCaret = false,
+  deletedUnits?: number
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
@@ -356,6 +366,7 @@ async function replyFrame(
       replayMs,
       replayedPages,
       layoutRevision,
+      ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
     },
     [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]

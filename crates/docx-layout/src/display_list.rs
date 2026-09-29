@@ -10678,6 +10678,9 @@ pub fn update_display_list_value_from_resident_incremental_with_fonts_observed(
 /// Incremental engine path backed by a retained parsed display input. Only
 /// rebuilt layout pages and the measured blocks referenced by those pages
 /// cross the typed-layout compatibility adapter on each edit.
+/// `extra_pages` outside the range are rebuilt too: pages whose note areas
+/// changed although their body did not.
+#[allow(clippy::too_many_arguments)]
 pub fn update_resident_display_list_incremental_with_fonts_observed(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
@@ -10686,6 +10689,7 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
     previous: &mut DisplayList,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
+    extra_pages: &[usize],
     position_deltas: &HashMap<String, i64>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
@@ -10694,19 +10698,19 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
     {
         return Ok(false);
     }
-    if rebuilt_page_start > rebuilt_page_end || rebuilt_page_end > layout.pages.len() {
+    if rebuilt_page_start > rebuilt_page_end
+        || rebuilt_page_end > layout.pages.len()
+        || extra_pages.iter().any(|&page| page >= layout.pages.len())
+    {
         return Err("resident display incremental page range is invalid".to_owned());
     }
+    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end)
+        .chain(extra_pages.iter().copied())
+        .collect();
 
-    refresh_resident_display_pages(
-        &mut resident.input,
-        pagination,
-        layout,
-        rebuilt_page_start..rebuilt_page_end,
-    )?;
+    refresh_resident_display_pages(&mut resident.input, pagination, layout, &selected)?;
     observe_phase();
 
-    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end).collect();
     let rebuilt = build_display_list_selected(&resident.input, fonts, Some(&selected));
     observe_phase();
     previous.contract_version = rebuilt.contract_version;
@@ -10715,6 +10719,9 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
         previous.pages[page_index] = page;
     }
     for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
+        if selected.contains(&page_index) {
+            continue;
+        }
         page.page_index = page_index as u64;
         shift_page_body_positions(page, position_deltas);
     }
@@ -10725,10 +10732,10 @@ fn refresh_resident_display_pages(
     input: &mut BuildInput,
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
-    rebuilt_pages: std::ops::Range<usize>,
+    rebuilt_pages: &HashSet<usize>,
 ) -> Result<(), String> {
     let mut selected_blocks = HashSet::new();
-    for page_index in rebuilt_pages {
+    for &page_index in rebuilt_pages {
         let page: PageIn =
             convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
         for fragment in &page.fragments {
@@ -10823,6 +10830,12 @@ fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
 }
 
 fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i64>) {
+    if deltas.is_empty() {
+        return;
+    }
+    // Looked up by reference: a clone per primitive is an allocation per
+    // primitive on every page after the edit.
+    let mut id_key = String::new();
     for primitive in &mut page.primitives {
         let attrs = match primitive {
             Primitive::Text(value) => &mut value.attrs,
@@ -10833,11 +10846,17 @@ fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i6
             Primitive::Shape(value) => &mut value.attrs,
             Primitive::Decoration(value) => &mut value.attrs,
         };
-        let key = attrs
-            .block_key
-            .clone()
-            .or_else(|| attrs.block_id.as_ref().map(ToString::to_string));
-        let Some(delta) = key.as_ref().and_then(|key| deltas.get(key)).copied() else {
+        let key = match (&attrs.block_key, &attrs.block_id) {
+            (Some(key), _) => key.as_str(),
+            (None, Some(id)) => {
+                id_key.clear();
+                std::fmt::Write::write_fmt(&mut id_key, format_args!("{id}"))
+                    .expect("writing to a String cannot fail");
+                id_key.as_str()
+            }
+            (None, None) => continue,
+        };
+        let Some(&delta) = deltas.get(key) else {
             continue;
         };
         attrs.doc_start = attrs.doc_start.map(|value| value + delta);
@@ -10887,6 +10906,57 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_positions_shift_by_block_key_or_else_block_id() {
+        let mut page: DisplayPage = serde_json::from_value(serde_json::json!({
+            "pageIndex": 3, "width": 816, "height": 1056,
+            "primitives": [
+                {"kind": "text", "text": "a", "x": 0, "baselineY": 10, "width": 5,
+                 "font": "10px serif", "color": "#000", "docStart": 10, "docEnd": 11,
+                 "blockKey": "b1", "blockId": 7},
+                {"kind": "text", "text": "b", "x": 0, "baselineY": 20, "width": 5,
+                 "font": "10px serif", "color": "#000", "docStart": 20, "docEnd": 21,
+                 "blockId": 7},
+                {"kind": "rect", "x": 0, "y": 0, "w": 5, "h": 5, "fill": "#000",
+                 "fragmentDocStart": 30, "fragmentDocEnd": 40, "blockId": 7.5},
+                {"kind": "text", "text": "c", "x": 0, "baselineY": 30, "width": 5,
+                 "font": "10px serif", "color": "#000", "docStart": 50, "docEnd": 51}
+            ]
+        }))
+        .unwrap();
+        let deltas = HashMap::from([
+            ("b1".to_owned(), 3),
+            ("7".to_owned(), -2),
+            ("7.5".to_owned(), 4),
+        ]);
+        shift_page_body_positions(&mut page, &deltas);
+        let positions: Vec<_> = page
+            .primitives
+            .iter()
+            .map(|primitive| {
+                let attrs = match primitive {
+                    Primitive::Text(value) => &value.attrs,
+                    Primitive::Rect(value) => &value.attrs,
+                    _ => unreachable!(),
+                };
+                (
+                    attrs.doc_start,
+                    attrs.fragment_doc_start,
+                    attrs.fragment_doc_end,
+                )
+            })
+            .collect();
+        assert_eq!(
+            positions,
+            [
+                (Some(13), None, None),
+                (Some(18), None, None),
+                (None, Some(34), Some(44)),
+                (Some(50), None, None),
+            ]
+        );
+    }
 
     #[test]
     fn a_centred_chart_label_is_centred_in_its_box() {

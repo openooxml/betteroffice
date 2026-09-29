@@ -21,7 +21,11 @@
 
 import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
+import {
+  displayPageCanvas,
+  type DisplayListQueries,
+  type DisplayListRect,
+} from '@betteroffice/docx/layout/render';
 
 /** One find match, addressed by its live display range. */
 export interface CanvasFindMatch {
@@ -79,9 +83,7 @@ export function CanvasFindHighlightOverlay({
       // CanvasSelectionOverlay. The rect already folds in centering, the
       // sidebar shift, and zoom (canvas CSS width = page * zoom ⇒ scale = zoom).
       const project = (r: DisplayListRect): ProjectedRect | null => {
-        const canvasEl = host.querySelector<HTMLCanvasElement>(
-          `canvas[data-page-index="${r.pageIndex}"]`
-        );
+        const canvasEl = displayPageCanvas(host, r.pageIndex);
         const size = displayListQueries.pageSize(r.pageIndex);
         if (!canvasEl || !size) return null;
         const canvasRect = canvasEl.getBoundingClientRect();
