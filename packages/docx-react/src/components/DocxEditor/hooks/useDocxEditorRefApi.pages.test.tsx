@@ -126,6 +126,8 @@ async function setup(options: {
       commentIdAllocator: createCommentIdAllocator(),
       commands: UNAVAILABLE_DOCX_COMMANDS,
       modeRef: { current: 'editing' as EditorMode },
+      allowHostProposalsRef: { current: false },
+      sidebarAutoOpenedRef: { current: false },
     });
     return ref;
   });

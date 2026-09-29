@@ -3,6 +3,7 @@ import type {
   DocxEditRefusal,
   DocxEditRequest,
   DocxEditResult,
+  DocxProposalResult,
   YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
@@ -132,4 +133,46 @@ export async function applyEditBatch<Refusal = never>(
     }
   }
   return { result };
+}
+
+/**
+ * The ref's proposal path: the host-proposal gate, an input flush, the gate again, the session
+ * call, then one refresh of the stories new proposals changed. Throws when the document is
+ * unavailable or replaced while flushing.
+ */
+export async function applyProposalCall(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  allowed: () => boolean,
+  call: (session: YrsSession) => DocxProposalResult
+): Promise<DocxProposalResult> {
+  const denied = (session: YrsSession): DocxProposalResult => ({
+    ok: false,
+    version: session.version(),
+    failure: { code: 'read-only', message: 'The editor is read-only' },
+  });
+  const session = pagedEditorRef.current?.getYrsSession();
+  if (!session) throw new Error('The editor input is unavailable');
+  if (!allowed()) return denied(session);
+  const flushed = await flushEditorInput(pagedEditorRef);
+  if (!flushed.ok) throw flushed.error;
+  if (flushed.session !== session || pagedEditorRef.current?.getYrsSession() !== session) {
+    throw new Error('The document changed while flushing input');
+  }
+  if (!allowed()) return denied(session);
+  const known = new Set(session.getProposals().proposals.map((proposal) => proposal.id));
+  const result = call(session);
+  if (!result.ok) return result;
+  const stories = new Set(
+    result.snapshot.proposals
+      .filter((proposal) => proposal.changed && !known.has(proposal.id))
+      .map((proposal) => proposal.paragraph.story)
+  );
+  if (stories.size > 0) {
+    try {
+      flushed.editor.syncYrsInputState(true, [...stories]);
+    } catch (error) {
+      console.error('[DocxEditor] refreshing after applied proposals failed', error);
+    }
+  }
+  return result;
 }

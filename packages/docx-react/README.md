@@ -291,6 +291,40 @@ list the document's content controls with the version they were read at; fill
 plain- and rich-text controls with `setContentControlText` steps through
 `applyEdits`, which refreshes the control's story and the story holding it.
 
+## Host proposals
+
+`DocxEditorRef.proposeChanges()`, `setProposalStates()` and `getProposals()` flush
+pending input, then run the session's host proposals: a round of tracked changes
+grouped by the host's proposal ids, shown with the editor's tracked-change
+highlighting, and decisions that show accepted proposals as plain text and hide
+rejected ones without changing the document or undo history. Set
+`allowHostProposals` to use them in a read-only or viewing editor; typing,
+`applyEdits`, commands and plugin writes stay blocked there. Proposals never save
+or open the comments sidebar.
+
+```tsx
+const round = await editorRef.current!.proposeChanges({
+  expectVersion: (await editorRef.current!.getProposals()).version,
+  proposals: [
+    {
+      id: 'p-17',
+      paragraph: { kind: 'persisted', story: { partUri: '/word/document.xml', kind: 'body' }, paraId: '1A2B3C4D' },
+      suggest: { author: 'Reviewer', date: new Date().toISOString() },
+      op: 'replaceText',
+      search: '30 days',
+      replaceWith: '45 days',
+    },
+  ],
+});
+if (round.ok) {
+  await editorRef.current!.setProposalStates({
+    expectVersion: round.snapshot.version,
+    expectPreviewVersion: round.snapshot.previewVersion,
+    changes: [{ id: 'p-17', state: 'accepted' }],
+  });
+}
+```
+
 ## Host plugins
 
 Host-owned tools (review aids, templates, checks) install through the `plugins`

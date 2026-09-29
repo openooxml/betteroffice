@@ -24,6 +24,10 @@ import type {
   DocxLayoutMap,
   DocxPageExportOptions,
   DocxPagedStructuredContent,
+  DocxProposalRequest,
+  DocxProposalResult,
+  DocxProposalSnapshot,
+  DocxProposalStateRequest,
   DocxReadParagraphsRequest,
   DocxReadParagraphsResult,
   DocxValidationResult,
@@ -205,6 +209,11 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
+   * Lets the ref's proposal methods run while the editor is read-only or viewing. Typing,
+   * `applyEdits`, commands and plugin writes stay blocked. Default: false.
+   */
+  allowHostProposals?: boolean;
+  /**
    * When true, the editor does not intercept Cmd/Ctrl+F or Cmd/Ctrl+H.
    * This lets the browser or host app handle native find/history shortcuts.
    */
@@ -385,6 +394,20 @@ export interface DocxEditorRef {
    * is replaced while input is flushing.
    */
   applyEdits: (request: DocxEditRequest) => Promise<DocxEditResult>;
+  /**
+   * Flushes pending input, then proposes a round of tracked changes grouped by proposal id; see
+   * `YrsSession.proposeChanges`. Read-only editors refuse with `read-only` unless
+   * `allowHostProposals` is set. Never saves or opens the comments sidebar. Throws when the
+   * document is replaced while input is flushing.
+   */
+  proposeChanges: (request: DocxProposalRequest) => Promise<DocxProposalResult>;
+  /**
+   * Flushes pending input, then sets how proposals render; see `YrsSession.setProposalStates`.
+   * Gated like {@link proposeChanges}.
+   */
+  setProposalStates: (request: DocxProposalStateRequest) => Promise<DocxProposalResult>;
+  /** Flushes pending input, then reads the proposals of the loaded document. */
+  getProposals: () => Promise<DocxProposalSnapshot>;
   /**
    * Flushes pending input, then lists the document's content controls with the version they were
    * read at. Fill text controls with `setContentControlText` steps through {@link applyEdits}.
@@ -702,6 +725,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     initialZoom = 1.0,
     showHiddenText = false,
     readOnly: readOnlyProp = false,
+    allowHostProposals = false,
     disableFindReplaceShortcuts = false,
     toolbarExtra,
     toolbar,
@@ -860,6 +884,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const commandBridgeRef = useRef<PagedEditorCommandBridge | null>(null);
   const writeModeRef = useRef<EditorMode>(editingMode);
   writeModeRef.current = readOnly ? 'viewing' : editingMode;
+  const allowHostProposalsRef = useRef(allowHostProposals);
+  allowHostProposalsRef.current = allowHostProposals;
 
   // Bridge / agent event subscribers — fan-out from the existing onChange and
   // onSelectionChange paths so multiple listeners (host app, MCP server, etc.)
@@ -1549,6 +1575,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentIdAllocator: commentIdAllocatorRef.current,
     commands: commandController.store,
     modeRef: writeModeRef,
+    allowHostProposalsRef,
+    sidebarAutoOpenedRef,
   });
 
   const initialSectionProperties = useMemo(
