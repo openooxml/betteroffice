@@ -2501,6 +2501,7 @@ impl EngineSession {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
         }
+        self.resumable.replace(None);
         self.capture.borrow_mut().take();
         let input_options_fingerprint = options_fingerprint(&input)?;
         let mut incremental = false;

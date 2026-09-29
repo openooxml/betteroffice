@@ -88,9 +88,15 @@ scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   enqueue(() => handle(event.data), event.data.id);
 };
 
-function enqueue(operation: () => Promise<void> | void, id: number): void {
+/** `current` drops an operation whose request was answered while it waited. */
+function enqueue(
+  operation: () => Promise<void> | void,
+  id: number,
+  current: () => boolean = () => true
+): void {
   operations = operations
     .then(() => {
+      if (!current()) return;
       if (trap) throw trap;
       return operation();
     })
@@ -462,14 +468,18 @@ function nextTurn(callback: () => void): void {
 function scheduleCompletionSlice(completion: SlicedCompletion): void {
   nextTurn(() => {
     if (slicedCompletion !== completion) return;
-    enqueue(async () => {
-      try {
-        await completionSlice(completion);
-      } catch (error) {
-        if (slicedCompletion === completion) slicedCompletion = null;
-        throw error;
-      }
-    }, completion.id);
+    enqueue(
+      async () => {
+        try {
+          await completionSlice(completion);
+        } catch (error) {
+          if (slicedCompletion === completion) slicedCompletion = null;
+          throw error;
+        }
+      },
+      completion.id,
+      () => slicedCompletion === completion
+    );
   });
 }
 

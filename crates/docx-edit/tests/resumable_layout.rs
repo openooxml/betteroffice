@@ -269,6 +269,25 @@ fn a_change_between_steps_abandons_the_pass() {
             .layout_json
             .is_none()
     );
+    engine
+        .layout_document_json(
+            r#"{"measured": [], "options": {"pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}}}"#,
+        )
+        .unwrap();
+    assert!(
+        engine.resume_region_layout(1).is_err(),
+        "a layout without regions replaces it"
+    );
+
+    let (engine, request) = seeded(&bytes, font);
+    assert!(
+        engine
+            .begin_region_layout(&request)
+            .unwrap()
+            .layout_json
+            .is_none()
+    );
     docx_layout::register_measure_font(fixture::OTHER_FONT).unwrap();
     assert!(
         engine.resume_region_layout(1).is_err(),

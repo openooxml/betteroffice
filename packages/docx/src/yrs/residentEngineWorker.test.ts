@@ -757,6 +757,57 @@ describe('sliced layout completion', () => {
     expect(new Set(w.answered).size).toBe(w.answered.length);
   });
 
+  test('a step queued behind a request that traps finishing the pass leaves the completion answered once', async () => {
+    const { w, onResume, bootstrap } = steppedWorker(100);
+    const build = w.harness.session.buildDisplayListFrame;
+    w.harness.session.buildDisplayListFrame = () => {
+      const bytes = build();
+      w.harness.delta = {
+        ...w.harness.delta!,
+        pageCount: 1,
+        operations: [
+          {
+            kind: 'upsert',
+            pageId: 1n,
+            pageIndex: 0,
+            fingerprint: BigInt(w.harness.delta!.frameEpoch),
+            primitiveIds: new BigUint64Array(),
+            page: { pageIndex: 0, width: 100, height: 100, primitives: [] },
+          },
+        ],
+      };
+      return bytes;
+    };
+    await bootstrap();
+    const raster = deferred();
+    const rasterize = w.harness.rasterize;
+    let frame: Promise<ResidentEngineWorkerResponse> | undefined;
+    onResume.push(() => {
+      w.harness.rasterize = async (...args) => {
+        await raster.promise;
+        return rasterize(...args);
+      };
+      (w.harness.session as { resumeRegionLayout?: unknown }).resumeRegionLayout = () => {
+        throw new WebAssembly.RuntimeError('unreachable');
+      };
+      // The attach holds the queue while the next step is queued behind the frame request.
+      void w.attach([1]);
+      frame = w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 2, paintCaret: false });
+      setTimeout(() => raster.resolve(), 20);
+    });
+    const completion = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    const framed = await frame!;
+    expect(completion.ok).toBe(false);
+    expect(framed.ok).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(new Set(w.answered).size).toBe(w.answered.length);
+  });
+
   test("a superseded completion's queued step never runs the next completion", async () => {
     const { w, calls, onResume, bootstrap } = steppedWorker(12);
     await bootstrap();
