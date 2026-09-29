@@ -41,7 +41,7 @@
  * exists, because building the display list went through the same module.
  */
 
-import type { DisplayList, DisplayPrimitive } from './displayList';
+import type { DisplayList, DisplayPage, DisplayPrimitive } from './displayList';
 import {
   displayPageRevision,
   displayPageShiftsSince,
@@ -138,6 +138,11 @@ export interface DisplayListParagraphGeometry extends DisplayListRect {
 }
 
 /** One ordered visual line reconstructed from authoritative primitives. */
+export interface VisualLineExtent {
+  top: number;
+  bottom: number;
+}
+
 export interface DisplayListVisualLine extends DisplayListRect {
   baseline: number;
   from: number;
@@ -176,6 +181,8 @@ export interface DisplayListQueries {
   visualLines(): readonly DisplayListVisualLine[];
   /** The part of {@link visualLines} on one page, computed for that page alone. */
   visualLinesOnPage(pageIndex: number): readonly DisplayListVisualLine[];
+  /** Vertical span of the page's visual lines in page coordinates, or null when it has none. */
+  visualLineExtent(pageIndex: number): VisualLineExtent | null;
   /** Visual line containing `pos`, or null. */
   visualLineAtPosition(pos: number): DisplayListVisualLine | null;
   /** Topmost image under a page-local point. Body by default. */
@@ -353,6 +360,38 @@ function isWasmTrap(error: unknown): boolean {
 }
 
 type StoreShiftRun = [start: number, count: number, mask: number, delta: number];
+
+/** The baseline of a primitive that forms part of a visual line, or null. */
+function visualLineBaseline(primitive: DisplayPrimitive): number | null {
+  if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') return null;
+  if (primitive.docStart === undefined || primitive.docEnd === undefined) return null;
+  if (primitive.kind === 'glyphRun' && primitive.glyphs.length === 0) return null;
+  const baseline =
+    primitive.kind === 'text'
+      ? primitive.baselineY
+      : primitive.glyphs.reduce((max, glyph) => Math.max(max, glyph.y), -Infinity);
+  return Number.isFinite(baseline) ? baseline : null;
+}
+
+// Geometry only: an owned position shift keeps the page object and moves no
+// geometry, so an extent stays valid for as long as its page object lives.
+const visualLineExtents = new WeakMap<DisplayPage, VisualLineExtent | null>();
+
+/** Vertical span of a page's visual lines in page coordinates, or null when it has none. */
+function visualLineExtent(page: DisplayPage): VisualLineExtent | null {
+  if (visualLineExtents.has(page)) return visualLineExtents.get(page) ?? null;
+  let top = Infinity;
+  let bottom = -Infinity;
+  for (const primitive of page.primitives) {
+    if (visualLineBaseline(primitive) === null) continue;
+    const rect = displayPrimitiveRect(primitive);
+    top = Math.min(top, rect.y);
+    bottom = Math.max(bottom, rect.y + rect.h);
+  }
+  const extent = top <= bottom ? { top, bottom } : null;
+  visualLineExtents.set(page, extent);
+  return extent;
+}
 
 /**
  * Page-delta between two display lists, exploiting the retained-frame
@@ -986,14 +1025,10 @@ export function createDisplayListQueries(
     const linesByIdentity = new Map<string, DisplayListVisualLine[]>();
     let anonymous = 0;
     for (const primitive of page.primitives) {
-      if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') continue;
-      if (primitive.docStart === undefined || primitive.docEnd === undefined) continue;
-      if (primitive.kind === 'glyphRun' && primitive.glyphs.length === 0) continue;
-      const baseline =
-        primitive.kind === 'text'
-          ? primitive.baselineY
-          : primitive.glyphs.reduce((max, glyph) => Math.max(max, glyph.y), -Infinity);
-      if (!Number.isFinite(baseline)) continue;
+      const baseline = visualLineBaseline(primitive);
+      if (baseline === null || primitive.docStart === undefined || primitive.docEnd === undefined) {
+        continue;
+      }
       const identity = primitiveIdentity(primitive) ?? `anonymous:${anonymous++}`;
       const rect = displayPrimitiveRect(primitive);
       const sameIdentity = linesByIdentity.get(identity);
@@ -1108,6 +1143,10 @@ export function createDisplayListQueries(
     paragraphRects,
     visualLines,
     visualLinesOnPage,
+    visualLineExtent: (pageIndex: number) => {
+      const page = list.pages[pageIndex];
+      return page ? visualLineExtent(page) : null;
+    },
     visualLineAtPosition,
     imageAtPoint,
     imageByPos,

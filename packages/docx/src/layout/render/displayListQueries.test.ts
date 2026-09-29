@@ -267,5 +267,13 @@ describe('visual lines', () => {
     ]);
     expect(queries.visualLines()).toEqual([...first, ...queries.visualLinesOnPage(1)]);
     expect(queries.visualLinesOnPage(2)).toEqual([]);
+    expect(queries.visualLineExtent(0)).toEqual({
+      top: Math.min(...first.map((line) => line.y)),
+      bottom: Math.max(...first.map((line) => line.y + line.height)),
+    });
+    const blank: DisplayPage = { ...lines, pageIndex: 2, primitives: [] };
+    expect(
+      createDisplayListQueries({ pages: [blank] }, fakeEngine().engine).visualLineExtent(0)
+    ).toBeNull();
   });
 });

@@ -192,14 +192,44 @@ function firstPageReaching(
   return found;
 }
 
+/**
+ * Every page with a line that can reach the viewport, in page order: the pages
+ * the viewport spans, and any other page whose lines overflow its own bounds
+ * as far as the viewport. Null when a page rect cannot be resolved.
+ */
+function pagesReachingViewport(
+  queries: DisplayListQueries,
+  host: HTMLElement,
+  viewport: DOMRect,
+  projectionCache: Map<number, PageProjection | null>
+): number[] | null {
+  const pageCount = queries.pageCount();
+  const first = firstPageReaching(queries, host, viewport.top);
+  if (first === null) return null;
+  const last = firstPageReaching(queries, host, viewport.bottom) ?? pageCount - 1;
+  const pages: number[] = [];
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    if (pageIndex >= first && pageIndex <= last) {
+      pages.push(pageIndex);
+      continue;
+    }
+    const extent = queries.visualLineExtent(pageIndex);
+    const size = queries.pageSize(pageIndex);
+    if (!extent || (size && extent.top >= 0 && extent.bottom <= size.height)) continue;
+    const projection = pageProjection(queries, host, pageIndex, projectionCache);
+    if (!projection) return null;
+    const top = projection.top + extent.top * projection.scaleY;
+    const bottom = projection.top + extent.bottom * projection.scaleY;
+    if (bottom >= viewport.top && top <= viewport.bottom) pages.push(pageIndex);
+  }
+  return pages;
+}
+
 function* linesOnPages(
   queries: DisplayListQueries,
-  first: number,
-  last: number
+  pages: readonly number[]
 ): Generator<DisplayListVisualLine> {
-  for (let pageIndex = first; pageIndex <= last; pageIndex += 1) {
-    yield* queries.visualLinesOnPage(pageIndex);
-  }
+  for (const pageIndex of pages) yield* queries.visualLinesOnPage(pageIndex);
 }
 
 /**
@@ -266,19 +296,20 @@ export function captureDisplayListViewportAnchor(
     scrollParent.style.setProperty('overflow-anchor', 'none');
   }
   const viewport = scrollParent.getBoundingClientRect();
-  // Only lines of the pages the viewport shows, and of one page either side,
-  // can be visible, so scanning those finds the visible lines a scan of every
-  // line would. The full scan remains for a viewport showing no line, where
-  // the nearest line anywhere wins.
-  const lastPage = queries.pageCount() - 1;
-  const first = firstPageReaching(queries, host, viewport.top);
-  const last = firstPageReaching(queries, host, viewport.bottom) ?? lastPage;
-  const shown =
-    first === null
-      ? null
-      : linesOnPages(queries, Math.max(0, first - 1), Math.min(last + 1, lastPage));
+  // Scanning the pages whose lines can reach the viewport finds the visible
+  // lines a scan of every line would. The full scan remains for a viewport
+  // showing no line, where the nearest line anywhere wins.
+  const pages = pagesReachingViewport(queries, host, viewport, new Map());
   const resolved =
-    (shown && nearestLineAnchor(queries, host, viewport, shown, capturePosition, true)) ??
+    (pages &&
+      nearestLineAnchor(
+        queries,
+        host,
+        viewport,
+        linesOnPages(queries, pages),
+        capturePosition,
+        true
+      )) ??
     nearestLineAnchor(queries, host, viewport, queries.visualLines(), capturePosition) ??
     visiblePageAnchor(queries, host, viewport);
   return {

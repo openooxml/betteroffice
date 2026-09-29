@@ -116,6 +116,7 @@ export {
   type DisplayListRegionHit,
   type DisplayListVerticalMove,
   type DisplayListVisualLine,
+  type VisualLineExtent,
   type ResidentDisplayListQueryEngine,
 } from './displayListQueries';
 
