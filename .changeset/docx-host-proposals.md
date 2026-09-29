@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": minor
 ---
 
-Add host proposals. `YrsSession.proposeChanges()` records a round of tracked changes under host proposal ids, resolved by paragraph anchor and search with a one-based or `'all'` non-overlapping occurrence, as one batch outside undo history or a typed refusal with nothing changed. `setProposalStates()` previews accepted, rejected and restored proposals through the new `revisionPreview` render environment entry without changing the document, its version or undo history, and `getProposals()`/`onProposalChange()` read and observe the registry. `DocxEditorRef` gains the matching async methods, and the `allowHostProposals` prop admits them in a read-only viewer.
+Add host proposals: `YrsSession.proposeChanges()` records a tracked-change batch outside undo history, and `setProposalStates()` previews accept/reject/restore via the new `revisionPreview` entry without changing the document. `getProposals()` and `YrsSession.onProposalChange()` read them; `DocxEditorRef`'s matching methods reach read-only viewers via the new `allowHostProposals` prop, off by default.
