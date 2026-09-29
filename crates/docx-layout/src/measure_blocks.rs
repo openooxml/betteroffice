@@ -1979,6 +1979,7 @@ fn measure_table(
         };
     }
 
+    let mut spanning_cells = Vec::new();
     for row_index in 0..rows.len() {
         for cell_index in 0..table.rows[row_index].cells.len() {
             let source_cell = &table.rows[row_index].cells[cell_index];
@@ -1988,21 +1989,25 @@ fn measure_table(
             }
             let last = (row_index + row_span - 1).min(rows.len() - 1);
             let needed = rows[row_index].cells[cell_index].height + cell_border_height(source_cell);
-            let spanned = rows[row_index..=last]
-                .iter()
-                .map(|row| row.height)
-                .sum::<f64>();
-            let deficit = needed - spanned;
-            if deficit <= 0.0 {
-                continue;
-            }
-            let mut target = last;
-            while target > row_index && exact[target] {
-                target -= 1;
-            }
-            if !exact[target] {
-                rows[target].height += deficit;
-            }
+            spanning_cells.push((row_index, last, needed));
+        }
+    }
+    spanning_cells.sort_unstable_by_key(|&(row_index, last, _)| (last, row_index));
+    for (row_index, last, needed) in spanning_cells {
+        let spanned = rows[row_index..=last]
+            .iter()
+            .map(|row| row.height)
+            .sum::<f64>();
+        let deficit = needed - spanned;
+        if deficit <= 0.0 {
+            continue;
+        }
+        let mut target = last;
+        while target > row_index && exact[target] {
+            target -= 1;
+        }
+        if !exact[target] {
+            rows[target].height += deficit;
         }
     }
 
@@ -2861,6 +2866,46 @@ mod tests {
         let actual: Vec<_> = measured.rows.iter().map(|row| row.height).collect();
         assert_eq!(actual, [16.0, 16.0, 48.0, 32.0]);
         assert_eq!(measured.total_height, 112.0);
+    }
+
+    #[test]
+    fn unequal_merged_spans_share_growth_in_either_column_order() {
+        let cell = |id: &str, height: f64, row_span: usize, column: usize| {
+            json!({
+                "id":id, "rowSpan":row_span, "gridStart":column,
+                "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                "blocks":[{"kind":"image","id":id,"src":"","width":10,"height":height}]
+            })
+        };
+        for spans in [[(96.0, 3), (80.0, 2)], [(80.0, 2), (96.0, 3)]] {
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id":"table", "columnWidths":[100,100,100], "rows":[
+                    {"id":"row0", "cantSplit":true, "cells":[
+                        cell("left", spans[0].0, spans[0].1, 0),
+                        cell("right", spans[1].0, spans[1].1, 1),
+                        cell("marker0", 16.0, 1, 2)
+                    ]},
+                    {"id":"row1", "cantSplit":true, "cells":[cell("marker1", 16.0, 1, 2)]},
+                    {"id":"row2", "cantSplit":true, "cells":[cell("marker2", 16.0, 1, 2)]}
+                ]
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 300.0, &MeasurementConfig::default()).unwrap();
+            let actual: Vec<_> = measured.rows.iter().map(|row| row.height).collect();
+            assert_eq!(actual, [16.0, 64.0, 16.0], "spans {spans:?}");
+            assert_eq!(measured.total_height, 96.0);
+            let mut input = crate::types::Input {
+                measured: vec![crate::types::MeasuredBlock {
+                    block: LayoutBlock::Table(table),
+                    measure: BlockExtent::Table(measured),
+                }],
+                options: serde_json::from_value(json!({"pageSize":{"w":300,"h":120},
+                    "margins":{"top":0,"bottom":0,"left":0,"right":0}}))
+                .unwrap(),
+            };
+            let layout = crate::compute_layout_input(&mut input).unwrap();
+            assert_eq!(layout.pages.len(), 1, "spans {spans:?}");
+        }
     }
 
     #[test]
