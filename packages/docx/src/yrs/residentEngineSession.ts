@@ -18,6 +18,7 @@ export type ResidentEngineSession = Pick<
   | 'applyInputProfiled'
   | 'applyUpdate'
   | 'buildDisplayListFrame'
+  | 'buildDisplayPagesFrame'
   | 'clearFonts'
   | 'destroy'
   | 'encodeStateVector'
@@ -25,6 +26,7 @@ export type ResidentEngineSession = Pick<
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadState'
+  | 'setPartialDocument'
   | 'measureParagraphJson'
   | 'onUpdate'
   | 'outlineGlyphJson'
@@ -33,9 +35,13 @@ export type ResidentEngineSession = Pick<
   | 'residentCaretSnapshot'
   | 'residentDeletedUnits'
   | 'selection'
+  | 'setDisplayWindow'
   | 'setSelection'
   | 'yrsBlocksForStory'
->;
+> & {
+  /** The region layout of only as much of the body as fills `pages` pages. */
+  layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+};
 
 export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
   await preloadEditWasm();
@@ -75,8 +81,14 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
     layoutDocumentWithRegionsRetainedJson: (input) =>
       session.layout_document_with_regions_retained_json(input),
+    setPartialDocument: (partial) => session.set_partial_document(partial),
+    layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
+      session.layout_document_with_regions_prefix_retained_json(input, pages),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
+      session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,
