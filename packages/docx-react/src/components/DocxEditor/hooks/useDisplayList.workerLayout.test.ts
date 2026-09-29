@@ -303,9 +303,14 @@ function settleHarness() {
     ({ pageSize: { w: 816, h: 1056 }, pages: [], ...(partial ? { partial } : {}) }) as Layout;
   const initial = layout(false);
   const hook = renderHook(
-    ({ layout, resolved }: { layout: Layout; resolved?: ReadonlySet<number> }) =>
+    ({ layout, resolved }: { layout: Layout | null; resolved?: ReadonlySet<number> }) =>
       useRustDisplayList(layout, overrides, undefined, resolved),
-    { initialProps: { layout: initial } as { layout: Layout; resolved?: ReadonlySet<number> } }
+    {
+      initialProps: { layout: initial } as {
+        layout: Layout | null;
+        resolved?: ReadonlySet<number>;
+      },
+    }
   );
   const settle = () => {
     const state = { settled: false, failure: null as Error | null };
@@ -358,6 +363,11 @@ test('a reset waits for the next layout and a failure rejects', async () => {
   overrides.getInputs = getInputs;
   expect(next.settled).toBe(false);
   expect(next.failure).toBeNull();
+  // The editor shows no layout while the new document's bytes load.
+  await act(async () => {
+    rerender({ layout: null });
+  });
+  expect(result.current.awaitingDocument()).toBe(true);
   await act(async () => {
     rerender({ layout: layout(false) });
   });

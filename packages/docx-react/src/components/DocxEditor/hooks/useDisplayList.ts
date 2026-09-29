@@ -266,6 +266,7 @@ export function useRustDisplayList(
   // The layout shown when another document started loading. What becomes of
   // it settles no wait: waits are for the document being loaded.
   const replacedLayoutRef = useRef<{ layout: Layout | null } | null>(null);
+  const documentLoadsRef = useRef(0);
   const markSettled = useCallback(
     (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
       if (replacedLayoutRef.current && !authoritative) return;
@@ -526,6 +527,7 @@ export function useRustDisplayList(
 
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
+      const documentLoad = documentLoadsRef.current;
       const replayInputOnMainThread = async (
         pending: ResidentInputOperation,
         hostEngine: YrsSession,
@@ -733,9 +735,12 @@ export function useRustDisplayList(
         // stories, or a frame that has not established resident state).
         if (nextError.message.includes('resident input state is not ready')) return null;
         console.error('[CanvasRenderer] Resident input failed', nextError);
-        queryEpochGate.clear();
-        setError(nextError);
-        markSettled(null, nextError);
+        // An input to a document another load replaced fails nothing of the new one.
+        if (documentLoadsRef.current === documentLoad) {
+          queryEpochGate.clear();
+          setError(nextError);
+          markSettled(null, nextError);
+        }
         // Once invoked, never fall through to the legacy op: a worker failure
         // may have happened after committing the transaction.
         return { frameEpoch: null, caretSynchronized: false };
@@ -1054,7 +1059,7 @@ export function useRustDisplayList(
   );
 
   useEffect(() => {
-    if (replacedLayoutRef.current && layout !== replacedLayoutRef.current.layout) {
+    if (replacedLayoutRef.current && layout && layout !== replacedLayoutRef.current.layout) {
       replacedLayoutRef.current = null;
     }
     if (!layout) {
@@ -1379,6 +1384,7 @@ export function useRustDisplayList(
     (failure: Error | null = null): void => {
       if (!failure) {
         contentEpochRef.current += 1;
+        documentLoadsRef.current += 1;
         replacedLayoutRef.current = { layout: layoutRef.current };
       }
       markSettled(null, failure, true);
