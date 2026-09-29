@@ -36,6 +36,7 @@ import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
 import { clearPresented, markPresented } from './internals/layoutProvenance';
+import { viewportColumnBand } from './internals/viewportBand';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
@@ -337,14 +338,10 @@ export function CanvasPagesView({
         );
         return;
       }
-      // client rects are viewport-relative: the visible band starts at the
-      // scroller's client top for an element scroller, at 0 for the root
-      const viewportTop = scrollTarget === window ? 0 : scrollParent.getBoundingClientRect().top;
-      const viewportHeight =
-        scrollTarget === window ? window.innerHeight : scrollParent.clientHeight;
-      const columnRect = column.getBoundingClientRect();
-      const viewTop = viewportTop - columnRect.top;
-      const viewBottom = viewTop + viewportHeight;
+      const { top: viewTop, bottom: viewBottom } = viewportColumnBand(
+        scrollTarget === window ? null : scrollParent,
+        column
+      );
       const { tops, bottoms } = pageOffsets;
       let first = tops.length - 1;
       for (let index = 0; index < tops.length; index += 1) {

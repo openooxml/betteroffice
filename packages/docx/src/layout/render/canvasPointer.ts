@@ -38,6 +38,24 @@ export interface DisplayPageClientRect {
 }
 
 /**
+ * Client pixels per layout pixel of `element`. Client rects include the CSS
+ * `zoom` and scale transforms of its ancestors; offsets, client sizes and
+ * scroll positions do not.
+ */
+export function renderedScale(
+  element: HTMLElement,
+  rect: { width: number; height: number } = element.getBoundingClientRect()
+): number {
+  const scale =
+    element.offsetHeight > 0
+      ? rect.height / element.offsetHeight
+      : element.offsetWidth > 0
+        ? rect.width / element.offsetWidth
+        : 1;
+  return Number.isFinite(scale) && scale > 0 ? scale : 1;
+}
+
+/**
  * The page canvases a renderer mounts under its pages host, so page lookups
  * read them instead of searching a subtree that also holds every page's
  * accessibility mirror. A renderer adds each `<canvas data-page-index>` it

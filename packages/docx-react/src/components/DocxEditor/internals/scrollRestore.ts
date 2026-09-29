@@ -1,4 +1,5 @@
 import {
+  renderedScale,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
   type DisplayListRect,
@@ -290,10 +291,12 @@ export function captureDisplayListScrollAnchor(
     scrollParent.style.setProperty('overflow-anchor', 'none');
   }
   const projected = projectedAnchorRect(queries, host, pmPos);
-  const scrollerTop = scrollParent.getBoundingClientRect().top;
+  const scrollerRect = scrollParent.getBoundingClientRect();
   return {
     pmPos,
-    clientOffset: projected ? projected.clientY - scrollerTop : null,
+    clientOffset: projected
+      ? (projected.clientY - scrollerRect.top) / renderedScale(scrollParent, scrollerRect)
+      : null,
     pageIndex: projected?.pageIndex ?? null,
     scrollTopSnapshot: scrollParent.scrollTop,
   };
@@ -327,7 +330,9 @@ export function captureDisplayListViewportAnchor(
     visiblePageAnchor(queries, host, viewport);
   return {
     target: resolved?.target ?? null,
-    viewportOffset: resolved ? resolved.clientY - viewport.top : 0,
+    viewportOffset: resolved
+      ? (resolved.clientY - viewport.top) / renderedScale(scrollParent, viewport)
+      : 0,
     scrollTopSnapshot: scrollParent.scrollTop,
   };
 }
@@ -354,8 +359,11 @@ export function restoreDisplayListScrollAnchor(
     (anchor.pageIndex == null || anchor.pageIndex === projected.pageIndex)
       ? projected
       : null;
-  const scrollerTop = scrollParent.getBoundingClientRect().top;
-  const nextTargetTop = pinned ? scrollParent.scrollTop + pinned.clientY - scrollerTop : null;
+  const scrollerRect = scrollParent.getBoundingClientRect();
+  const nextTargetTop = pinned
+    ? scrollParent.scrollTop +
+      (pinned.clientY - scrollerRect.top) / renderedScale(scrollParent, scrollerRect)
+    : null;
   const maxScroll = Math.max(0, scrollParent.scrollHeight - scrollParent.clientHeight);
   scrollParent.scrollTop = computeViewportAnchoredScrollTop(
     { viewportOffset: anchor.clientOffset ?? 0, scrollTopSnapshot: anchor.scrollTopSnapshot },
@@ -372,8 +380,12 @@ export function restoreDisplayListViewportAnchor(
   resolvePosition: ResolveViewportPosition
 ): void {
   const clientY = viewportTargetClientY(anchor, queries, host, resolvePosition);
-  const scrollerTop = scrollParent.getBoundingClientRect().top;
-  const nextTargetTop = clientY == null ? null : scrollParent.scrollTop + clientY - scrollerTop;
+  const scrollerRect = scrollParent.getBoundingClientRect();
+  const nextTargetTop =
+    clientY == null
+      ? null
+      : scrollParent.scrollTop +
+        (clientY - scrollerRect.top) / renderedScale(scrollParent, scrollerRect);
   const maxScroll = Math.max(0, scrollParent.scrollHeight - scrollParent.clientHeight);
   scrollParent.scrollTop = computeViewportAnchoredScrollTop(anchor, nextTargetTop, maxScroll);
 }

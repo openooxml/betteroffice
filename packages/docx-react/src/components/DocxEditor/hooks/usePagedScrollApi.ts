@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 import {
+  renderedScale,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
   type DisplayListRect,
@@ -75,7 +76,10 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
       const clientY = pageRect.top + (rect.y + rect.height / 2) * scaleY;
       scroller.scrollTo({
-        top: scroller.scrollTop + clientY - scrollerRect.top - scroller.clientHeight / 2,
+        top:
+          scroller.scrollTop +
+          (clientY - scrollerRect.top) / renderedScale(scroller, scrollerRect) -
+          scroller.clientHeight / 2,
         behavior: smooth ? 'smooth' : 'auto',
       });
       return true;
