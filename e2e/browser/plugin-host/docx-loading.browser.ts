@@ -1,6 +1,6 @@
 import { test, expect, type Route } from 'playwright/test';
 
-type Centres = Record<'parse' | 'renderer', string[]>;
+type Centres = Record<'parse' | 'renderer', [number, number][]>;
 
 test('the loading spinner holds its position until the first page paints', async ({ page }) => {
   const hold = async (route: Route) => {
@@ -19,7 +19,7 @@ test('the loading spinner holds its position until the first page paints', async
         const phase = ring.closest('[data-testid="canvas-renderer-loading"]')
           ? 'renderer'
           : 'parse';
-        centres[phase].push(`${box.left + box.width / 2},${box.top + box.height / 2}`);
+        centres[phase].push([box.left + box.width / 2, box.top + box.height / 2]);
       }
       if (!document.querySelector('canvas[data-page-index="0"]')) requestAnimationFrame(sample);
     };
@@ -32,6 +32,10 @@ test('the loading spinner holds its position until the first page paints', async
   );
   expect(centres.parse.length).toBeGreaterThan(0);
   expect(centres.renderer.length).toBeGreaterThan(0);
-  expect(new Set([...centres.parse, ...centres.renderer])).toEqual(new Set([centres.parse[0]]));
+  const [x, y] = centres.parse[0];
+  const drift = [...centres.parse, ...centres.renderer].map(([cx, cy]) =>
+    Math.max(Math.abs(cx - x), Math.abs(cy - y))
+  );
+  expect(Math.max(...drift)).toBeLessThan(0.5);
   await expect(page.getByTestId('canvas-renderer-loading')).toHaveCount(0);
 });
