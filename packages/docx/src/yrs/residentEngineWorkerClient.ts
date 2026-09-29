@@ -24,6 +24,8 @@ export interface ResidentEngineWorkerFrame {
   replayMs: number;
   replayedPages: number;
   layoutRevision: number;
+  /** Characters an applyDelete removed. */
+  deletedUnits: number;
   /** The region layout the worker ran, when the request handed it the layout. */
   layoutJson?: string;
 }
@@ -46,9 +48,9 @@ export interface ResidentEngineWorkerApplyResult extends ResidentEngineWorkerFra
 }
 
 type PendingRequest = {
+  type: AwaitedRequest['type'];
   resolve(response: ResidentEngineWorkerResponse & { ok: true }): void;
   reject(error: Error): void;
-  timeout: ReturnType<typeof setTimeout>;
 };
 
 type AwaitedRequest = Exclude<
@@ -56,15 +58,12 @@ type AwaitedRequest = Exclude<
   { type: 'applyUpdate' | 'eraseCaret' | 'destroy' }
 >;
 
-/** attachCanvases queues behind a sync, so it shares that budget. */
-const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
-  bootstrap: 15_000,
-  sync: 15_000,
-  attachCanvases: 15_000,
-  buildFrame: 5_000,
-  applyInput: 5_000,
-  applyDelete: 5_000,
-};
+/**
+ * How long the worker may stay silent while requests wait. A large document
+ * legitimately takes seconds per request, and the main thread would take just
+ * as long, so this only catches a worker that stopped answering altogether.
+ */
+export const RESIDENT_WORKER_SILENCE_MS = 60_000;
 
 export interface ResidentEngineWorkerPort {
   onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null;
@@ -84,6 +83,7 @@ function spawnResidentEngineWorker(): ResidentEngineWorkerPort {
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
 export class ResidentEngineWorkerClient {
   private readonly pending = new Map<number, PendingRequest>();
+  private watchdog: ReturnType<typeof setTimeout> | null = null;
   private nextId = 1;
   private terminalError: Error | null = null;
   private ready = false;
@@ -105,10 +105,11 @@ export class ResidentEngineWorkerClient {
         this.fail(new ResidentWorkerUnavailableError(response.error));
         return;
       }
+      if (this.pending.size > 0) this.armWatchdog();
       const pending = this.pending.get(response.id);
       if (!pending) return;
       this.pending.delete(response.id);
-      clearTimeout(pending.timeout);
+      if (this.pending.size === 0) this.disarmWatchdog();
       if (response.ok) pending.resolve(response);
       else pending.reject(residentWorkerError(response.error, response.residentUnavailable));
     };
@@ -239,7 +240,8 @@ export class ResidentEngineWorkerClient {
     selection: YrsSelection,
     expectedFrameEpoch: number,
     profile = false,
-    paintCaret = false
+    paintCaret = false,
+    count = 1
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
@@ -247,6 +249,7 @@ export class ResidentEngineWorkerClient {
         await this.request({
           type: 'applyDelete',
           direction,
+          count,
           selection,
           expectedFrameEpoch,
           profile,
@@ -311,16 +314,9 @@ export class ResidentEngineWorkerClient {
   ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.nextId++;
-    const timeoutMs = REQUEST_TIMEOUT_MS[request.type];
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.fail(
-          new ResidentWorkerFailureError(
-            `Resident engine worker did not answer ${request.type} within ${timeoutMs}ms`
-          )
-        );
-      }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timeout });
+      if (this.pending.size === 0) this.armWatchdog();
+      this.pending.set(id, { type: request.type, resolve, reject });
       this.worker.postMessage({ ...request, id } as ResidentEngineWorkerRequest, transfer);
     });
   }
@@ -337,6 +333,26 @@ export class ResidentEngineWorkerClient {
     this.appliedFontsRevision = fontsRevision;
   }
 
+  /** Restarted by every message, so a queue of slow but answered requests never trips it. */
+  private armWatchdog(): void {
+    this.disarmWatchdog();
+    this.watchdog = setTimeout(() => {
+      this.watchdog = null;
+      const waiting = this.pending.values().next().value?.type ?? 'a request';
+      this.fail(
+        new ResidentWorkerFailureError(
+          `Resident engine worker did not answer ${waiting} within ${RESIDENT_WORKER_SILENCE_MS}ms`
+        )
+      );
+    }, RESIDENT_WORKER_SILENCE_MS);
+  }
+
+  private disarmWatchdog(): void {
+    if (this.watchdog === null) return;
+    clearTimeout(this.watchdog);
+    this.watchdog = null;
+  }
+
   /** Record a successfully applied bootstrap/sync payload's fonts revision.
    * The state vector is tracked centrally in `onmessage`. */
   private recordSync(
@@ -349,11 +365,9 @@ export class ResidentEngineWorkerClient {
   private fail(error: Error): void {
     this.terminalError = error;
     this.ready = false;
+    this.disarmWatchdog();
     this.worker.terminate();
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(error);
-    }
+    for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
 }
@@ -396,6 +410,7 @@ function frameResult(
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,
     layoutRevision: response.layoutRevision ?? 0,
+    deletedUnits: response.deletedUnits ?? 0,
     ...(response.layoutJson !== undefined ? { layoutJson: response.layoutJson } : {}),
   };
 }

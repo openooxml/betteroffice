@@ -31,6 +31,7 @@ export type ResidentEngineSession = Pick<
   | 'registerFont'
   | 'registerSubstituteFont'
   | 'residentCaretSnapshot'
+  | 'residentDeletedUnits'
   | 'selection'
   | 'setSelection'
   | 'yrsBlocksForStory'
@@ -83,19 +84,20 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
       ensureUndo();
       return session.apply_input(text, expectedFrameEpoch);
     },
-    applyDelete: (direction, expectedFrameEpoch) => {
+    applyDelete: (direction, expectedFrameEpoch, count = 1) => {
       ensureUndo();
-      return session.apply_delete(direction, expectedFrameEpoch);
+      return session.apply_delete(direction, expectedFrameEpoch, count);
     },
+    residentDeletedUnits: () => session.resident_deleted_units(),
     applyInputProfiled: (text, expectedFrameEpoch) => {
       ensureUndo();
       const frame = session.apply_input_profiled(text, expectedFrameEpoch);
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
-    applyDeleteProfiled: (direction, expectedFrameEpoch) => {
+    applyDeleteProfiled: (direction, expectedFrameEpoch, count = 1) => {
       ensureUndo();
-      const frame = session.apply_delete_profiled(direction, expectedFrameEpoch);
+      const frame = session.apply_delete_profiled(direction, expectedFrameEpoch, count);
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },

@@ -72,6 +72,7 @@ function setup() {
       return adopted.length;
     },
     residentLayoutInWorker: () => true,
+    resetFrameBase: () => {},
     residentWorkerProbe: () => ({ layoutRevision: adopted.length }),
     residentWorkerSnapshot: () => ({
       state: new Uint8Array(),

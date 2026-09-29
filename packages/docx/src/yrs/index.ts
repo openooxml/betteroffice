@@ -802,12 +802,19 @@ export interface YrsSession extends CollaborationReplica {
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
   buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
+  resetFrameBase(): void;
   /** Caret geometry from the current resident display frame. */
   residentCaretSnapshot(): YrsResidentCaretSnapshot;
   /** Apply a collapsed plain-text insertion and return its resident FrameDelta. */
   applyInput(text: string, expectedFrameEpoch: number): Uint8Array;
-  /** Apply a collapsed character deletion/paragraph merge and return its resident FrameDelta. */
-  applyDelete(direction: 'backward' | 'forward', expectedFrameEpoch: number): Uint8Array;
+  /**
+   * Apply up to `count` (default 1) collapsed character deletions/paragraph
+   * merges, lay out once, and return the resident FrameDelta.
+   */
+  applyDelete(direction: 'backward' | 'forward', expectedFrameEpoch: number, count?: number): Uint8Array;
+  /** Characters the last resident deletion removed; fewer than asked at a document boundary. */
+  residentDeletedUnits(): number;
   /** Instrumented apply used only by opt-in browser performance traces. */
   applyInputProfiled(
     text: string,
@@ -816,7 +823,8 @@ export interface YrsSession extends CollaborationReplica {
   /** Instrumented deletion used only by opt-in browser performance traces. */
   applyDeleteProfiled(
     direction: 'backward' | 'forward',
-    expectedFrameEpoch: number
+    expectedFrameEpoch: number,
+    count?: number
   ): { frame: Uint8Array; profile: YrsEngineApplyProfile };
   /** Snapshot the inputs needed to move resident layout ownership to a worker. */
   residentWorkerSnapshot(options?: YrsResidentWorkerSyncOptions): YrsResidentWorkerSnapshot | null;
@@ -1071,6 +1079,8 @@ export interface YrsSession extends CollaborationReplica {
   listComments(): YrsCommentInfo[];
   /** Story ids in the document, sorted. */
   storyIds(): string[];
+  /** Whether the document has a story with this id, without listing them all. */
+  hasStory(story: string): boolean;
   /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
   storyLength(story: string): number;
   /** Returns the story's canonical-stream checksum. */
@@ -1085,6 +1095,12 @@ export interface YrsSession extends CollaborationReplica {
   paragraphSpans(story: string): YrsParagraphLength[];
   /** The raw formatted-segment view (the render bridge's input). */
   storySegments(story: string): YrsStorySegment[];
+  /**
+   * The payload of the story's `tableIndex`-th table embed, as
+   * {@link YrsSession.storySegments} gives it, or null when there is no such
+   * table. Reads the one table rather than the whole story.
+   */
+  tablePayload(story: string, tableIndex: number): Record<string, unknown> | null;
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
 
@@ -1299,6 +1315,9 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
       : { fontTableRelationshipsXml: result.fontTableRelationshipsXml }),
   };
 }
+
+/** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 function wrapSession(session: EditSession, clientId: number): YrsSession {
   const listeners = new Map<
@@ -1517,6 +1536,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return session.retained_kernel_inputs_json();
     },
     buildDisplayListJson: (input) => session.build_display_list_json(input),
+    resetFrameBase: () => {
+      if (!destroyed) session.reset_frame_base();
+    },
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     residentCaretSnapshot: () =>
@@ -1526,11 +1548,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty(selectionStory());
       return mutate(() => session.apply_input(text, expectedFrameEpoch));
     },
-    applyDelete: (direction, expectedFrameEpoch) => {
+    applyDelete: (direction, expectedFrameEpoch, count = 1) => {
       ensureUndo();
       markDirty(selectionStory());
-      return mutate(() => session.apply_delete(direction, expectedFrameEpoch));
+      return mutate(() => session.apply_delete(direction, expectedFrameEpoch, count));
     },
+    residentDeletedUnits: () => session.resident_deleted_units(),
     applyInputProfiled: (text, expectedFrameEpoch) => {
       ensureUndo();
       markDirty(selectionStory());
@@ -1538,10 +1561,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
-    applyDeleteProfiled: (direction, expectedFrameEpoch) => {
+    applyDeleteProfiled: (direction, expectedFrameEpoch, count = 1) => {
       ensureUndo();
       markDirty(selectionStory());
-      const frame = mutate(() => session.apply_delete_profiled(direction, expectedFrameEpoch));
+      const frame = mutate(() =>
+        session.apply_delete_profiled(direction, expectedFrameEpoch, count)
+      );
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
@@ -2146,6 +2171,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
     storyIds: () => session.story_ids(),
+    hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
     storyLength: (story) => session.story_len(story),
     storyChecksum: (story) => BigInt(session.story_checksum(story)),
     yrsBlocksForStory: (story, env = {}) => {
@@ -2171,6 +2197,15 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+    tablePayload: (story, tableIndex) => {
+      // No table has an index the u32 boundary would wrap; the story must still exist.
+      if (!Number.isInteger(tableIndex) || tableIndex < 0 || tableIndex > 0xffffffff) {
+        session.story_len(story);
+        return null;
+      }
+      const payload = session.table_payload(story, tableIndex);
+      return payload === undefined ? null : (JSON.parse(payload) as Record<string, unknown>);
+    },
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
 

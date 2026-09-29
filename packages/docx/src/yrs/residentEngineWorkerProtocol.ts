@@ -49,6 +49,7 @@ export type ResidentEngineWorkerRequest =
       id: number;
       type: 'applyDelete';
       direction: 'backward' | 'forward';
+      count: number;
       selection: YrsSelection;
       expectedFrameEpoch: number;
       profile: boolean;
@@ -94,6 +95,8 @@ export type ResidentEngineWorkerResponse =
       replayMs?: number;
       replayedPages?: number;
       layoutRevision?: number;
+      /** Characters an applyDelete removed. */
+      deletedUnits?: number;
       /** The worker replica's yrs state vector after this operation, so the
        * next sync can ship a diff instead of the whole document state. */
       stateVector?: ArrayBuffer;
