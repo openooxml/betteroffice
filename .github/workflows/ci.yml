@@ -52,6 +52,9 @@ jobs:
           bun install --lockfile-only
           git diff --exit-code -- bun.lock
 
+      - name: Check changeset length
+        run: bun scripts/check-changeset-length.ts
+
       - name: Type check
         run: bun run typecheck:packages
 
