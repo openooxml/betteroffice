@@ -407,7 +407,14 @@ export function resolveMetricCompatFace(
   italic: boolean,
 ): BundledFontFace | undefined {
   const family = resolveMetricCompatFamily(wordFamily);
-  if (!family) return undefined;
+  return family ? familyFace(family, bold, italic) : undefined;
+}
+
+function familyFace(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
   const faces = BUNDLED_FONTS.filter((f) => f.family === family);
   const weight = bold ? 700 : 400;
   const style = italic ? 'italic' : 'normal';
@@ -415,6 +422,33 @@ export function resolveMetricCompatFace(
     faces.find((f) => f.weight === weight && f.style === style) ??
     faces.find((f) => f.weight === 400 && f.style === 'normal')
   );
+}
+
+const bundledFamilyByName = new Map(
+  BUNDLED_FONTS.map((face) => [face.family.toLowerCase(), face.family]),
+);
+
+/** Serif Noto families this package does not vendor; the same region's sans face covers them. */
+const UNVENDORED_NOTO_SERIF: Record<string, string> = {
+  'noto serif tc': 'Noto Sans TC',
+  'noto serif jp': 'Noto Sans JP',
+  'noto serif kr': 'Noto Sans KR',
+};
+
+/**
+ * Resolve a family by its bundled name (`"Gelasio"`, `"Noto Sans SC"`) or, when
+ * it is not one, as a Word family through {@link resolveMetricCompatFace}.
+ */
+export function resolveBundledFamilyFace(
+  family: string,
+  bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
+  const key = family.trim().toLowerCase();
+  const bundled = bundledFamilyByName.get(key) ?? UNVENDORED_NOTO_SERIF[key];
+  return bundled
+    ? familyFace(bundled, bold, italic)
+    : resolveMetricCompatFace(family, bold, italic);
 }
 
 /**

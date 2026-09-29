@@ -12,6 +12,7 @@ import {
   hasDefaultFontSource,
   resolveDefaultFontProvider,
 } from '../layout/measure/defaultFontProvider';
+import type { BundledFontProvider } from '../layout/measure/fontRegistry';
 import { resolveFontFamily } from './fontResolver';
 
 // Track loaded fonts to avoid duplicate requests
@@ -100,13 +101,6 @@ function faceKey(
   return `${family.trim()}|${weight}|${style}`;
 }
 
-// "A genuine system font satisfies this family" — the decision behind every
-// fetch skip. Self-excludes families registered through our face loaders
-// (subsetted/partial faces — see registeredFamilies); system fonts that
-// render are assumed weight-complete, since OS-bundled families ship full
-// sets. The first positive probe also fires onFontsLoaded (microtask,
-// matching the fetch path's async timing) — consumers gate ready-state UI
-// on that callback, and before the skip existed the fetch guaranteed it.
 const DEFAULT_FACE_STYLES: Array<[boolean, boolean]> = [
   [false, false],
   [true, false],
@@ -114,19 +108,99 @@ const DEFAULT_FACE_STYLES: Array<[boolean, boolean]> = [
   [true, true],
 ];
 
+/** How long `loadFont` waits for a bundled family; the load continues and a later call reuses it. */
+const BUNDLED_FONT_DEADLINE_MS = 5000;
+
+// Bundled faces by family|weight|style; a failed face is evicted so a later call retries it.
+const bundledFaces = new Map<string, Promise<boolean>>();
+let bundledFacesInFlight = 0;
+let bundledFacesToAnnounce: FontFace[] = [];
+
+function withDeadline(promise: Promise<boolean>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(false);
+      }
+    );
+  });
+}
+
+// A face built from bytes can already be loaded when it joins the set
+// (Chromium parses it synchronously), so the set never fires `loadingdone`
+// for it. Announce such faces once no bundled load is in flight, so the
+// editor repaints text that was drawn before they arrived.
+function announceBundledFaces(): void {
+  const fontfaces = bundledFacesToAnnounce;
+  bundledFacesToAnnounce = [];
+  document.fonts.dispatchEvent(
+    typeof FontFaceSetLoadEvent === 'function'
+      ? new FontFaceSetLoadEvent('loadingdone', { fontfaces })
+      : new Event('loadingdone')
+  );
+}
+
+function registerBundledFace(
+  provider: BundledFontProvider,
+  family: string,
+  bold: boolean,
+  italic: boolean
+): Promise<boolean> {
+  const key = faceKey(family, bold ? 700 : 400, italic ? 'italic' : 'normal');
+  const existing = bundledFaces.get(key);
+  if (existing) return existing;
+  const load = provider.resolveFamily
+    ? provider.resolveFamily(family, bold, italic)
+    : provider.resolve(family, bold, italic);
+  if (!load) return Promise.resolve(false);
+  bundledFacesInFlight += 1;
+  const promise = (async () => {
+    let face: FontFace | undefined;
+    try {
+      face = new FontFace(family, await load(), {
+        weight: bold ? '700' : '400',
+        style: italic ? 'italic' : 'normal',
+      });
+      const loadedBeforeAdd = face.status === 'loaded';
+      document.fonts.add(face);
+      await face.load();
+      if (loadedBeforeAdd) bundledFacesToAnnounce.push(face);
+      return true;
+    } catch (error) {
+      if (face) document.fonts.delete(face);
+      reportFontError(error, `failed to register bundled "${family}"`);
+      return false;
+    } finally {
+      bundledFacesInFlight -= 1;
+      if (bundledFacesInFlight === 0 && bundledFacesToAnnounce.length > 0) announceBundledFaces();
+    }
+  })();
+  bundledFaces.set(key, promise);
+  void promise.then((registered) => {
+    if (!registered && bundledFaces.get(key) === promise) bundledFaces.delete(key);
+  });
+  return promise;
+}
+
 /**
- * Registers the configured bundled faces for `family` under its own name.
- * Only families the bundle carries (directly or as a metric-compatible clone)
- * are registered; others stay with their CSS fallback stack.
+ * Registers the configured bundled faces for `family` under its own name,
+ * settling false after {@link BUNDLED_FONT_DEADLINE_MS}. Families the bundle
+ * lacks stay on their CSS fallback stack.
  */
-async function registerBundledFamily(
+function registerBundledFamily(
   family: string,
   weights?: number[],
   styles?: ('normal' | 'italic')[]
 ): Promise<boolean> {
-  if (typeof FontFace === 'undefined' || document.fonts === undefined) return false;
-  const provider = await resolveDefaultFontProvider();
-  if (!provider) return false;
+  if (typeof FontFace === 'undefined' || document.fonts === undefined) {
+    return Promise.resolve(false);
+  }
   const faces =
     weights || styles
       ? (weights ?? [400, 700]).flatMap((weight) =>
@@ -135,27 +209,24 @@ async function registerBundledFamily(
           )
         )
       : DEFAULT_FACE_STYLES;
-  const registered = await Promise.all(
-    faces.map(async ([bold, italic]) => {
-      const load = provider.resolve(family, bold, italic);
-      if (!load) return false;
-      try {
-        const face = new FontFace(family, await load(), {
-          weight: bold ? '700' : '400',
-          style: italic ? 'italic' : 'normal',
-        });
-        await face.load();
-        document.fonts.add(face);
-        return true;
-      } catch (error) {
-        reportFontError(error, `failed to register bundled "${family}"`);
-        return false;
-      }
-    })
-  );
-  return registered.some(Boolean);
+  const registration = (async () => {
+    const provider = await resolveDefaultFontProvider();
+    if (!provider) return false;
+    const registered = await Promise.all(
+      faces.map(([bold, italic]) => registerBundledFace(provider, family, bold, italic))
+    );
+    return registered.some(Boolean);
+  })();
+  return withDeadline(registration, BUNDLED_FONT_DEADLINE_MS);
 }
 
+// "A genuine system font satisfies this family" — the decision behind every
+// fetch skip. Self-excludes families registered through our face loaders
+// (subsetted/partial faces — see registeredFamilies); system fonts that
+// render are assumed weight-complete, since OS-bundled families ship full
+// sets. The first positive probe also fires onFontsLoaded (microtask,
+// matching the fetch path's async timing) — consumers gate ready-state UI
+// on that callback, and before the skip existed the fetch guaranteed it.
 function satisfiedBySystemFont(family: string): boolean {
   if (registeredFamilies.has(family)) {
     return false;

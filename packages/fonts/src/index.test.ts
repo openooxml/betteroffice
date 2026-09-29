@@ -6,6 +6,7 @@ import {
   BUNDLED_FONTS,
   createFontProvider,
   loadBundledFontBytes,
+  resolveBundledFamilyFace,
   resolveLastResortFace,
   resolveMetricCompatFace,
   resolveMetricCompatFamily,
@@ -105,6 +106,38 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Archivo Black', false, false).file).toBe('Carlito-Regular.ttf');
     expect(resolveLastResortFace('Archivo Black', false, true).file).toBe('Carlito-Italic.ttf');
     expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('Carlito-Bold.ttf');
+  });
+});
+
+describe('bundled family names', () => {
+  test('resolve to their own faces, not only as Word families', () => {
+    expect(resolveMetricCompatFace('Gelasio', false, false)).toBeUndefined();
+    expect(resolveBundledFamilyFace('Gelasio', true, true)?.file).toBe('Gelasio-BoldItalic.ttf');
+    expect(resolveBundledFamilyFace(' source sans 3 ', false, true)?.file).toBe(
+      'SourceSans3-Italic.ttf'
+    );
+    expect(resolveBundledFamilyFace('Comic Relief', true, false)?.file).toBe('ComicRelief-Bold.ttf');
+    expect(resolveBundledFamilyFace('Noto Serif SC', true, false)?.file).toBe(
+      'NotoSerifSC-Regular.otf'
+    );
+  });
+
+  test('cover the serif Noto families the package does not vendor with the sans face', () => {
+    expect(resolveBundledFamilyFace('Noto Serif TC', false, false)?.family).toBe('Noto Sans TC');
+    expect(resolveBundledFamilyFace('Noto Serif JP', false, false)?.family).toBe('Noto Sans JP');
+    expect(resolveBundledFamilyFace('Noto Serif KR', false, false)?.family).toBe('Noto Sans KR');
+  });
+
+  test('fall back to Word-family resolution and miss unknown names', () => {
+    expect(resolveBundledFamilyFace('Calibri', false, false)?.family).toBe('Carlito');
+    expect(resolveBundledFamilyFace('Tinos', false, false)?.family).toBe('Liberation Serif');
+    expect(resolveBundledFamilyFace('Nonesuch', false, false)).toBeUndefined();
+  });
+
+  test('are served by the provider', async () => {
+    const bytes = await createFontProvider().resolveFamily('Gelasio', false, false)!();
+    expect(bytes.byteLength).toBe(107588);
+    expect(createFontProvider().resolve('Gelasio', false, false)).toBeUndefined();
   });
 });
 
