@@ -9,6 +9,7 @@ import {
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  displayPageNoteAnchorRevision,
   displayPageRevision,
   displayPageShiftsSince,
   FRAME_DELTA_VERSION,
@@ -588,6 +589,18 @@ describe('FrameDelta note anchor shifts', () => {
     expect(() => decodeFrameDelta(shiftFrame([], [[0, 0, 2n ** 60n, 6n]]))).toThrow(
       'safe-integer range'
     );
+    const farArea = 2 ** 21;
+    expect(
+      decodeFrameDelta(
+        shiftFrame(
+          [],
+          [
+            [farArea, 0, 5n, 6n],
+            [farArea, 1, 7n, 8n],
+          ]
+        )
+      ).operations
+    ).toHaveLength(1);
   });
 
   it('sets anchors after runs and rejects a missing note before touching the page', () => {
@@ -598,6 +611,7 @@ describe('FrameDelta note anchor shifts', () => {
       ).displayList.pages[0]!;
       expect(moved.primitives[0]).toMatchObject({ docStart: 3, docEnd: 4 });
       expect(moved.noteAreas![0]!.notes).toEqual([{ id: 1, anchorDocStart: 7 }]);
+      if (apply === applyFrameDeltaOwned) expect(displayPageNoteAnchorRevision(moved)).toBe(1);
 
       for (const missing of [
         [1, 0, 7n, 8n],

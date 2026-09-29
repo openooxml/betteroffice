@@ -580,6 +580,19 @@ function bumpDisplayPageRevision(page: DisplayPage): void {
   });
 }
 
+const DISPLAY_PAGE_NOTE_ANCHOR_REVISION = '__betterofficeNoteAnchorRevision';
+
+/**
+ * Counts the owned shifts that moved this page's note anchors in place, for
+ * consumers that render the anchors (the accessibility mirror) and otherwise
+ * key on page identity.
+ */
+export function displayPageNoteAnchorRevision(page: DisplayPage): number {
+  return ((page as unknown as Record<string, unknown>)[DISPLAY_PAGE_NOTE_ANCHOR_REVISION] as
+    | number
+    | undefined) ?? 0;
+}
+
 const DISPLAY_PAGE_SHIFT_LOG = '__betterofficePageShiftLog';
 // Deep enough that a long typing burst between two query-store primes (one
 // recorded shift per applied frame) still replays as compact ops.
@@ -678,6 +691,14 @@ function shiftDisplayPagePositionsOwned(
     invalid('position shift range exceeds retained primitive count');
   }
   shift.anchors.forEach((anchor, index) => setNoteAnchor(notes[index]!, anchor));
+  if (shift.anchors.length > 0) {
+    Object.defineProperty(page, DISPLAY_PAGE_NOTE_ANCHOR_REVISION, {
+      value: displayPageNoteAnchorRevision(page) + 1,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
   bumpDisplayPageRevision(page);
   recordDisplayPageShift(page, shift);
   return page.pageIndex === pageIndex ? page : { ...page, pageIndex };
@@ -843,15 +864,15 @@ function decodePositionShift(reader: BinaryReader, operation: RawPageOp): Displa
       const at = require(8, label);
       return reader.i64(at) === ABSENT_ANCHOR ? null : reader.safeI64(at, label);
     };
-    let previous = -1;
     for (let index = 0; index < anchorCount; index++) {
       const area = reader.u32(require(4, 'note anchor area'));
       const note = reader.u32(require(4, 'note anchor note'));
       const start = anchorValue('note anchor start');
       const end = anchorValue('note anchor end');
-      const key = area * 2 ** 32 + note;
-      if (key <= previous) invalid('note anchors are not in strictly increasing order');
-      previous = key;
+      const previous = anchors.at(-1);
+      if (previous && (area < previous.area || (area === previous.area && note <= previous.note))) {
+        invalid('note anchors are not in strictly increasing order');
+      }
       anchors.push({ area, note, start, end });
     }
   }
