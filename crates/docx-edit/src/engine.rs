@@ -384,6 +384,54 @@ fn measure_page_prefix(
     }
 }
 
+fn wraps_by_page_side(shape: &docx_layout::types::ShapeBlock) -> bool {
+    let Some(horizontal) = shape
+        .position
+        .as_ref()
+        .and_then(|position| position.horizontal.as_ref())
+    else {
+        return false;
+    };
+    matches!(
+        shape.wrap_type.as_deref(),
+        Some("square" | "tight" | "through" | "topAndBottom")
+    ) && (horizontal.align.as_deref() == Some("inside")
+        || matches!(
+            horizontal.relative_to.as_deref(),
+            Some("insideMargin" | "outsideMargin")
+        ))
+}
+
+/// Whether every float in `blocks` hangs from the text before it, so a float
+/// past a prefix cannot reach back into its pages, and no float waits on the
+/// page-side wrapping that settles only after the whole body is placed.
+fn floats_follow_the_text(blocks: &[LayoutBlock]) -> bool {
+    fn text_relative(position: Option<&docx_layout::types::ImageRunPosition>) -> bool {
+        position.is_none_or(|position| {
+            position
+                .vertical
+                .as_ref()
+                .and_then(|vertical| vertical.relative_to.as_deref())
+                .is_some_and(|relative_to| matches!(relative_to, "paragraph" | "line"))
+        })
+    }
+    blocks.iter().all(|block| match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().all(|run| match run {
+            docx_layout::types::Run::Image(image) => text_relative(image.position.as_ref()),
+            _ => true,
+        }),
+        LayoutBlock::Table(table) => table
+            .floating
+            .as_ref()
+            .is_none_or(|floating| floating.vert_anchor.as_deref() == Some("text")),
+        LayoutBlock::TextBox(text_box) => text_relative(text_box.position.as_ref()),
+        LayoutBlock::Shape(shape) => {
+            text_relative(shape.position.as_ref()) && !wraps_by_page_side(shape)
+        }
+        _ => true,
+    })
+}
+
 fn stabilize_shape_wrapping(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
@@ -393,20 +441,11 @@ fn stabilize_shape_wrapping(
         .measured
         .iter()
         .enumerate()
-        .filter_map(|(index, measured)| {
-            let LayoutBlock::Shape(shape) = &measured.block else {
-                return None;
-            };
-            let horizontal = shape.position.as_ref()?.horizontal.as_ref()?;
-            (matches!(
-                shape.wrap_type.as_deref(),
-                Some("square" | "tight" | "through" | "topAndBottom")
-            ) && (horizontal.align.as_deref() == Some("inside")
-                || matches!(
-                    horizontal.relative_to.as_deref(),
-                    Some("insideMargin" | "outsideMargin")
-                )))
-            .then(|| (index, shape.id.clone()))
+        .filter_map(|(index, measured)| match &measured.block {
+            LayoutBlock::Shape(shape) if wraps_by_page_side(shape) => {
+                Some((index, shape.id.clone()))
+            }
+            _ => None,
         })
         .collect::<Vec<_>>();
     if shapes.is_empty() {
@@ -1386,8 +1425,8 @@ impl EngineSession {
 
     /// [`Self::layout_document_with_regions_retained_json`] over only as much
     /// of the body as fills the first `pages` pages. A reply marked
-    /// `provisional` holds a layout of that prefix: its page count and
-    /// NUMPAGES fields are the prefix's, and retained state serves only
+    /// `provisional` holds a layout of that prefix: its page count is the
+    /// prefix's, NUMPAGES fields render empty, and retained state serves only
     /// display and caret reads until a full pass replaces it. Edits made
     /// meanwhile take the full region pass.
     pub fn layout_document_with_regions_prefix_retained_json(
@@ -1519,7 +1558,10 @@ impl EngineSession {
                         )?;
                     floats = anchors_floats;
                     if anchors_floats {
-                        return Ok(Arena::Full(blocks.to_vec(), couples_flow));
+                        return Ok(Arena::Full(
+                            blocks.to_vec(),
+                            couples_flow || !floats_follow_the_text(blocks),
+                        ));
                     }
                     match self.resident_region_measured(
                         blocks,
@@ -1676,6 +1718,7 @@ impl EngineSession {
             .layout
             .as_mut()
             .expect("layout retained after successful pagination");
+        layout.partial = provisional;
         apply_document_regions(layout, &regions);
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
@@ -4111,6 +4154,195 @@ mod tests {
             prefix["layout"]["pages"].as_array().unwrap()[..3],
             first_pages
         );
+    }
+
+    const INSIDE_SHAPE: &str = r#"<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="66675" distR="123825" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>inside</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1828800" cy="914400"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="1" name="Inside shape"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="CCCCCC"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+
+    fn floating_table(anchor: &str, index: usize) -> String {
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblpPr w:leftFromText="120" w:rightFromText="120" {anchor} w:horzAnchor="text" w:tblpY="60"/><w:tblW w:w="1800" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1800"/></w:tblGrid>{rows}</w:tbl>"#,
+            rows =
+                format!("<w:tr><w:tc><w:p><w:r><w:t>Float {index}</w:t></w:r></w:p></w:tc></w:tr>")
+                    .repeat(4)
+        )
+    }
+
+    /// 200 paragraphs, with `float(index)` before those it returns one for.
+    fn floated_body(float: impl Fn(usize) -> Option<String>) -> Vec<u8> {
+        let mut body = String::new();
+        for index in 0..200 {
+            if let Some(float) = float(index) {
+                body.push_str(&float);
+            }
+            body.push_str(&format!(
+                "<w:p><w:r><w:t>Paragraph {index} wraps around the floats beside it on this page.</w:t></w:r></w:p>"
+            ));
+        }
+        docx_bytes("", &body)
+    }
+
+    fn float_page_request(notes: serde_json::Value) -> String {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [{ "sectionId": "main", "properties": {
+                "pageWidth": 5760, "pageHeight": 4320,
+                "marginTop": 360, "marginRight": 360, "marginBottom": 360, "marginLeft": 360
+            } }] },
+            "notes": notes,
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string()
+    }
+
+    /// The full pass and a three-page prefix pass of `bytes`, each on a fresh session
+    /// that `prepare` sets up after seeding.
+    fn full_and_prefix(
+        bytes: &[u8],
+        request: &str,
+        prepare: &dyn Fn(&EngineSession),
+    ) -> (serde_json::Value, serde_json::Value) {
+        let seeded = || {
+            let engine = EngineSession::new(149);
+            crate::seed::seed_from_docx(engine.doc(), bytes).unwrap();
+            prepare(&engine);
+            engine
+        };
+        let full = seeded()
+            .layout_document_with_regions_retained_json(request)
+            .unwrap();
+        let prefix = seeded()
+            .layout_document_with_regions_prefix_retained_json(request, 3)
+            .unwrap();
+        (
+            serde_json::from_str(&full).unwrap(),
+            serde_json::from_str(&prefix).unwrap(),
+        )
+    }
+
+    fn first_pages(output: &serde_json::Value) -> Vec<serde_json::Value> {
+        output["layout"]["pages"].as_array().unwrap()[..3].to_vec()
+    }
+
+    #[test]
+    fn floats_placed_from_outside_the_text_keep_the_whole_body() {
+        let request = float_page_request(serde_json::json!({}));
+        for (name, float) in [
+            (
+                "margin table",
+                floating_table(r#"w:vertAnchor="margin""#, 3),
+            ),
+            ("page table", floating_table(r#"w:vertAnchor="page""#, 3)),
+            ("table without an anchor", floating_table("", 3)),
+            ("inside shape", format!("<w:p>{INSIDE_SHAPE}</w:p>")),
+        ] {
+            let bytes = floated_body(|index| (index % 7 == 3).then(|| float.clone()));
+            let (full, prefix) = full_and_prefix(&bytes, &request, &|_| {});
+            assert_ne!(prefix["provisional"], true, "{name}");
+            assert_eq!(prefix["layout"], full["layout"], "{name}");
+        }
+    }
+
+    #[test]
+    fn a_float_next_to_the_cut_leaves_the_first_pages_as_the_full_pass_lays_them_out() {
+        let request = float_page_request(serde_json::json!({}));
+        let bytes = floated_body(|index| {
+            (index % 2 == 1).then(|| floating_table(r#"w:vertAnchor="text""#, index))
+        });
+        let (full, prefix) = full_and_prefix(&bytes, &request, &|_| {});
+        assert_eq!(prefix["provisional"], true);
+        assert_eq!(first_pages(&prefix), first_pages(&full));
+    }
+
+    #[test]
+    fn a_float_beside_a_footnote_leaves_the_first_pages_as_the_full_pass_lays_them_out() {
+        let request = float_page_request(serde_json::json!({"contents": [{"id": 5, "height": 0}]}));
+        let bytes = floated_body(|index| {
+            (index % 3 == 0).then(|| floating_table(r#"w:vertAnchor="text""#, index))
+        });
+        let with_note = |engine: &EngineSession| {
+            engine
+                .doc()
+                .insert_embed(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", 20),
+                    "noteRef",
+                    vec![("footnoteRefId".to_owned(), Any::Number(5.0))],
+                )
+                .unwrap();
+            engine
+                .doc()
+                .create_story("fn:5", "A footnote beside the floats", "Normal", "left")
+                .unwrap();
+        };
+        let (full, prefix) = full_and_prefix(&bytes, &request, &with_note);
+        assert_eq!(prefix["provisional"], true);
+        assert!(
+            serde_json::to_string(&first_pages(&full))
+                .unwrap()
+                .contains("footnoteIds"),
+            "the note sits on the first pages"
+        );
+        assert_eq!(first_pages(&prefix), first_pages(&full));
+    }
+
+    #[test]
+    fn a_provisional_layout_renders_numpages_empty_until_the_full_pass() {
+        let request = float_page_request(serde_json::json!({}));
+        let mut body = String::from(
+            r#"<w:p><w:r><w:t>Page count </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>"#,
+        );
+        for index in 0..200 {
+            body.push_str(&format!(
+                "<w:p><w:r><w:t>Paragraph {index} fills the pages the field counts.</w:t></w:r></w:p>"
+            ));
+        }
+        let bytes = docx_bytes("", &body);
+        let engine = EngineSession::new(150);
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let numpages_text = |engine: &EngineSession| {
+            engine.build_display_list_frame("{}", 0).unwrap();
+            engine
+                .with_display_list(|list| {
+                    let page = serde_json::to_value(&list.pages[0]).unwrap();
+                    page["primitives"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|primitive| primitive["field"]["category"] == "NUMPAGES")
+                        .map(|primitive| primitive["text"].as_str().unwrap_or("").to_owned())
+                        .collect::<String>()
+                })
+                .unwrap()
+        };
+        let prefix: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_prefix_retained_json(&request, 3)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(prefix["provisional"], true);
+        assert_eq!(
+            numpages_text(&engine),
+            "",
+            "no count while the layout is partial"
+        );
+
+        let full: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap(),
+        )
+        .unwrap();
+        let pages = full["layout"]["pages"].as_array().unwrap().len();
+        assert!(pages > prefix["layout"]["pages"].as_array().unwrap().len());
+        assert_eq!(numpages_text(&engine), pages.to_string());
     }
 
     #[test]
