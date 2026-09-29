@@ -4902,11 +4902,11 @@ mod tests {
             session.clear_measure_fonts();
             record(json!(session.register_measure_font(fonts[0]).unwrap()));
             record(json!(session.register_measure_font(fonts[1]).unwrap()));
-            record(json!(
-                session
-                    .register_substitute_measure_font(0, "Calibri")
-                    .unwrap()
-            ));
+            let substitute = session
+                .register_substitute_measure_font(0, "MS Mincho")
+                .unwrap();
+            assert_eq!(substitute, 2);
+            record(json!(substitute));
             let (request, chains) = request(session);
             let blocks = parse(session.yrs_blocks_for_story("body", "{}").unwrap());
             record(blocks.clone());

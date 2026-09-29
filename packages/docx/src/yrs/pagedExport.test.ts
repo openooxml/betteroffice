@@ -291,6 +291,8 @@ describe('paged structured export', () => {
     const other = await laidOut(OTHER_FONT);
     try {
       const interleaved = await typeInto(() => {
+        other.session.clearFonts();
+        other.session.registerFont(OTHER_FONT);
         other.session.layoutDocumentWithRegionsRetainedJson(other.request);
         other.session.buildDisplayListFrame('{}', 0);
       });
