@@ -236,9 +236,9 @@ export function useRustDisplayList(
 ): UseRustDisplayListResult {
   const requestLayoutRef = useRef(requestLayout);
   requestLayoutRef.current = requestLayout;
-  // The frame shown when the worker was handed to another session: not a
-  // base the new session's frames apply to.
-  const handedOffFrameRef = useRef<RetainedFrame | null>(null);
+  // The engine whose layout the shown frame is of: another engine's frames
+  // never apply to it as a base.
+  const frameEngineRef = useRef<unknown>(null);
   const [presentedEngine, setPresentedEngine] = useState<unknown>(null);
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
@@ -776,7 +776,6 @@ export function useRustDisplayList(
     if (current?.engine === hostEngine) return current.client;
     if (current && handoffFromRef?.current === current.engine) {
       current.client.rebootstrap();
-      handedOffFrameRef.current = snapshotRef.current.frame;
       workerRef.current = { engine: hostEngine, client: current.client };
       return current.client;
     }
@@ -785,10 +784,10 @@ export function useRustDisplayList(
     return workerRef.current.client;
   }, [handoffFromRef]);
 
-  /** The frame `hostEngine`'s next frame applies to. */
+  /** The frame `engine`'s next frame applies to. */
   const frameBase = useCallback(
-    (): RetainedFrame | null =>
-      snapshotRef.current.frame === handedOffFrameRef.current ? null : snapshotRef.current.frame,
+    (engine: unknown): RetainedFrame | null =>
+      frameEngineRef.current === engine ? snapshotRef.current.frame : null,
     []
   );
 
@@ -805,7 +804,7 @@ export function useRustDisplayList(
       }
       const worker = workerFor(hostEngine);
       const bootstrapping = !worker.bootstrapSent();
-      const previousFrame = bootstrapping ? null : frameBase();
+      const previousFrame = bootstrapping ? null : frameBase(hostEngine);
       hostEngine.adoptResidentWorkerLayout(request);
       const snapshot = hostEngine.residentWorkerSnapshot(
         bootstrapping
@@ -872,10 +871,15 @@ export function useRustDisplayList(
             setTimeout(resolve, PROVISIONAL_SURFACE_WAIT_MS);
           });
           const complete = surfaced
-            .then(() => worker.completeLayout(provisionalEpoch))
+            // A worker handed to another session lays out that session now.
+            .then(() =>
+              workerRef.current?.engine === hostEngine
+                ? worker.completeLayout(provisionalEpoch)
+                : null
+            )
             .then((completed) => {
               if (!completed) return null;
-              const base = snapshotRef.current.frame;
+              const base = frameBase(hostEngine);
               return adopt(completed, base?.frameEpoch === provisionalEpoch ? base : undefined);
             })
             .catch(unavailable);
@@ -896,7 +900,7 @@ export function useRustDisplayList(
       const worker = workerRef.current;
       const frame = snapshotRef.current.frame;
       // A frame handed over from another session is replaced, not built on.
-      if (!worker || !worker.client.isReady() || !frame || frame === handedOffFrameRef.current) {
+      if (!worker || !worker.client.isReady() || !frame || frameEngineRef.current !== worker.engine) {
         return;
       }
       const pages = frame.displayList.pages;
@@ -1047,6 +1051,7 @@ export function useRustDisplayList(
       queryEpochGate.clear();
       snapshotRef.current = EMPTY_DISPLAY_LIST_SNAPSHOT;
       recoveryFrameEpochRef.current = 0;
+      frameEngineRef.current = null;
       setSnapshot(EMPTY_DISPLAY_LIST_SNAPSHOT);
       setError(null);
       setLoading(true);
@@ -1109,7 +1114,7 @@ export function useRustDisplayList(
         : buildRustDisplayFrame(
             buildInputs,
             engine ?? undefined,
-            snapshotRef.current.frame,
+            frameBase(residentEngine ?? engine ?? null),
             snapshotRef.current.frame?.frameEpoch ?? recoveryFrameEpochRef.current
           ).then(
             (result) => ({
@@ -1156,7 +1161,8 @@ export function useRustDisplayList(
           prebuilt.engine === hostEngine &&
           workerRef.current?.engine === hostEngine &&
           prebuilt.contentEpoch === contentEpoch &&
-          (frameBase()?.frameEpoch ?? null) === (prebuilt.previousFrame?.frameEpoch ?? null) &&
+          (frameBase(hostEngine)?.frameEpoch ?? null) ===
+            (prebuilt.previousFrame?.frameEpoch ?? null) &&
           prebuilt.layoutExtras === JSON.stringify(frameExtrasInputs())
         ) {
           // The worker ran this layout and built its frame in the same pass.
@@ -1181,7 +1187,7 @@ export function useRustDisplayList(
           const worker = workerFor(hostEngine);
           const extras = encodeDisplayListFrameExtras(buildInputs);
           const bootstrapping = !worker.bootstrapSent();
-          const previousFrame = bootstrapping ? null : frameBase();
+          const previousFrame = bootstrapping ? null : frameBase(hostEngine);
           // On a fresh client both hints are null, so a bootstrap snapshot is
           // always complete; a sync snapshot ships a state diff and skips font
           // bytes the worker already holds.
@@ -1257,6 +1263,7 @@ export function useRustDisplayList(
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
+        frameEngineRef.current = residentEngine ?? engine ?? null;
         setPresentedEngine(residentEngine ?? engine ?? null);
         setError(null);
         setLoading(false);

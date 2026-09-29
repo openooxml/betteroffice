@@ -877,6 +877,8 @@ export interface YrsSession extends CollaborationReplica {
    * document is opened. The session cannot save. @internal
    */
   openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost;
+  /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
+  isDisplayOnly(): boolean;
   /**
    * The region layout of only as much of the body as fills `pages` pages;
    * a reply marked `provisional` covers a prefix. @internal
@@ -1386,7 +1388,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     }
   };
 
+  // A preview session refuses every change to its document.
+  let displayOnly = false;
   const mutate = <T>(operation: () => T): T => {
+    if (displayOnly) throw new Error('A document preview is display-only');
     invalidateReadCaches();
     wasmCallDepth += 1;
     try {
@@ -1472,8 +1477,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
+      displayOnly = true;
       return decodeDocxHost(json, bytes);
     },
+    isDisplayOnly: () => displayOnly,
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(input, pages),
 

@@ -235,6 +235,8 @@ export function useYrsCoreSession(
   const [previewing, setPreviewing] = useState(false);
   const [handoffFrom, setHandoffFrom] = useState<YrsSession | null>(null);
   const paintWaitRef = useRef<{ session: YrsSession; resolve: () => void } | null>(null);
+  const previewingRef = useRef(false);
+  previewingRef.current = previewing;
   const retiringRef = useRef<YrsSession | null>(null);
   // Collaboration shares one replica from the start, so it never previews.
   const previewFirstPage =
@@ -272,6 +274,7 @@ export function useYrsCoreSession(
           });
           sessionRef.current = shown.session;
           facadeRef.current = yrs;
+          previewingRef.current = true;
           setSession(shown.session);
           setPreviewing(true);
           setSessionGeneration(seedGeneration);
@@ -295,6 +298,11 @@ export function useYrsCoreSession(
         sessionRef.current = next;
         facadeRef.current = yrs;
         if (shown) {
+          // Maps and projections of the preview do not describe this session.
+          inputPositionMapsRef.current.clear();
+          projectionStoriesRef.current.clear();
+          compatibilityBaseRef.current = null;
+          previewingRef.current = false;
           retiringRef.current = shown.session;
           setHandoffFrom(shown.session);
         }
@@ -444,7 +452,8 @@ export function useYrsCoreSession(
     const facade = facadeRef.current;
     const host = baseDocument === undefined ? documentRef.current : baseDocument;
     let base = host;
-    if (!enabledRef.current || !live || !facade || !base) return null;
+    // A preview holds only the first pages: nothing saves or exports it.
+    if (!enabledRef.current || previewingRef.current || !live || !facade || !base) return null;
     try {
       const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
       if (compatibilityBase) {
