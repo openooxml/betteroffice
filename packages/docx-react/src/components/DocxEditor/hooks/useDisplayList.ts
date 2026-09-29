@@ -794,8 +794,8 @@ export function useRustDisplayList(
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
       const unavailable = (cause: unknown): null => {
-        // A session no longer shown has no worker or frame of this display's to give up.
-        if (residentEngineRef.current !== hostEngine) return null;
+        // A worker handed to another session, or already given up, is not this session's to drop.
+        if (workerRef.current?.engine !== hostEngine) return null;
         console.error(
           '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
           cause

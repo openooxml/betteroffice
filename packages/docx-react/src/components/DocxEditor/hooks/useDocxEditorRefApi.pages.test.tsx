@@ -90,6 +90,7 @@ async function setup(options: {
   opening?: { current: boolean };
   comments?: Comment[];
   setComments?: () => void;
+  save?: () => Promise<ArrayBuffer | null>;
 }) {
   const events: string[] = [];
   const editor = {
@@ -113,7 +114,7 @@ async function setup(options: {
       documentFromYrs: () => null,
       historyStateRef: { current: null },
       pagedEditorRef,
-      handleSave: async () => null,
+      handleSave: options.save ?? (async () => null),
       zoom: 1,
       setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
@@ -174,6 +175,10 @@ test('while the document opens, the API reads, exports and changes nothing', asy
     opening,
     comments: [{ id: 1, content: [], author: 'A' } as unknown as Comment],
     setComments: () => commentChanges.push('changed'),
+    save: async () => {
+      commentChanges.push('saved');
+      return new ArrayBuffer(0);
+    },
   });
   expect(api().getDocument()).toBeNull();
   expect(api().getComments()).toEqual([]);
@@ -182,6 +187,7 @@ test('while the document opens, the API reads, exports and changes nothing', asy
   expect(api().findInDocument('a')).toEqual([]);
   expect(api().replyToComment(1, 'reply', 'B')).toBeNull();
   api().resolveComment(1);
+  expect(await api().save()).toBeNull();
   expect(commentChanges).toEqual([]);
   expect(events).toEqual([]);
 
