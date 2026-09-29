@@ -1,7 +1,7 @@
 //! Font registry over raw font bytes.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use skrifa::raw::TableProvider;
@@ -239,7 +239,7 @@ struct FontEntry {
     /// Horizontal multiplier every advance, offset and outline this entry
     /// reports is scaled by. See [`FontStore::advance_scale`].
     advance_scale: f32,
-    char_cache: RefCell<HashMap<char, CharEntry>>,
+    char_cache: Mutex<HashMap<char, CharEntry>>,
 }
 
 /// Registry of fonts, keyed by [`FontId`], parsed from raw bytes.
@@ -248,7 +248,7 @@ struct FontEntry {
 pub struct FontStore {
     id: u64,
     fonts: Vec<FontEntry>,
-    shape_cache: RefCell<ShapeCache>,
+    shape_cache: Mutex<ShapeCache>,
 }
 
 static NEXT_FONT_STORE_ID: AtomicU64 = AtomicU64::new(0);
@@ -264,7 +264,7 @@ impl FontStore {
         Self {
             id: NEXT_FONT_STORE_ID.fetch_add(1, Ordering::Relaxed),
             fonts: Vec::new(),
-            shape_cache: RefCell::default(),
+            shape_cache: Mutex::default(),
         }
     }
 
@@ -324,7 +324,7 @@ impl FontStore {
             data,
             metrics,
             advance_scale: 1.0,
-            char_cache: RefCell::new(HashMap::new()),
+            char_cache: Mutex::new(HashMap::new()),
         });
         Ok(id)
     }
@@ -378,7 +378,7 @@ impl FontStore {
             data: Box::default(),
             metrics,
             advance_scale,
-            char_cache: RefCell::new(HashMap::new()),
+            char_cache: Mutex::new(HashMap::new()),
         });
         Ok(id)
     }
@@ -438,7 +438,7 @@ impl FontStore {
     }
 
     pub(crate) fn cached_shape(&self, key: &ShapeCacheKey) -> Option<Vec<ShapedGlyph>> {
-        let mut cache = self.shape_cache.borrow_mut();
+        let mut cache = self.shape_cache.lock().unwrap();
         if let Some(glyphs) = cache.hot.entries.get(key) {
             return Some(glyphs.clone());
         }
@@ -455,21 +455,21 @@ impl FontStore {
         {
             return;
         }
-        let mut cache = self.shape_cache.borrow_mut();
+        let mut cache = self.shape_cache.lock().unwrap();
         cache.cold.remove(&key);
         cache.insert_hot(key, glyphs.to_vec());
     }
 
     #[cfg(test)]
     pub(crate) fn shape_cache_len(&self) -> usize {
-        let cache = self.shape_cache.borrow();
+        let cache = self.shape_cache.lock().unwrap();
         cache.hot.entries.len() + cache.cold.entries.len()
     }
 
     /// Memoized cmap (+advance) lookup for one character of one font.
     fn char_entry(&self, id: FontId, ch: char) -> Result<CharEntry, FontError> {
         let entry = self.byte_entry(id)?;
-        if let Some(cached) = entry.char_cache.borrow().get(&ch) {
+        if let Some(cached) = entry.char_cache.lock().unwrap().get(&ch) {
             return Ok(*cached);
         }
         let font = Self::font_ref(entry);
@@ -485,7 +485,7 @@ impl FontStore {
             mapped: mapped.map(|g| g.to_u32() as u16),
             advance,
         };
-        let mut cache = entry.char_cache.borrow_mut();
+        let mut cache = entry.char_cache.lock().unwrap();
         if cache.len() >= MAX_CHAR_CACHE_ENTRIES {
             cache.clear();
         }
@@ -604,7 +604,11 @@ mod tests {
         assert_eq!(store.glyph_id(font, 'A').unwrap(), gid);
         assert_eq!(store.advance_width(font, 'A').unwrap(), advance);
         assert_eq!(
-            store.fonts[font.0 as usize].char_cache.borrow().len(),
+            store.fonts[font.0 as usize]
+                .char_cache
+                .lock()
+                .unwrap()
+                .len(),
             1,
             "repeat lookups reuse the memo"
         );

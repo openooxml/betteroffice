@@ -7,7 +7,7 @@
 //! page reaches canvas replay.
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use docx_layout::display_list::{DisplayList, DisplayPage, DocAttrs, Primitive};
 #[cfg(test)]
@@ -56,7 +56,7 @@ pub struct FramePageSnapshot {
     pub page_index: u32,
     /// Shared with the next frame's snapshot when the page's primitive
     /// identity is unchanged — cloning a snapshot never copies the id array.
-    pub primitive_ids: Rc<[u64]>,
+    pub primitive_ids: Arc<[u64]>,
     pub positions: Vec<PrimitivePositionSnapshot>,
     /// Every note region note's anchor, in area then note order.
     pub note_anchors: Vec<NoteAnchorSnapshot>,
@@ -530,8 +530,17 @@ fn prepare_pages<'a>(
             index as i64
         }
     };
-    let mut prepared = Vec::with_capacity(list.pages.len());
-    for ((index, page), anchor) in list.pages.iter().enumerate().zip(anchors) {
+
+    struct PagePlan {
+        page_index: u32,
+        page_id: u64,
+        is_new: bool,
+        moved: bool,
+        full_prepare: bool,
+        matched: Option<usize>,
+    }
+    let mut plan = Vec::with_capacity(list.pages.len());
+    for (index, page) in list.pages.iter().enumerate() {
         let page_index = checked_u32(index, "page index")?;
         let matched = matched_previous[index].map(|previous_index| &previous[previous_index]);
         let (page_id, is_new, moved) = if let Some(old) = matched {
@@ -542,48 +551,142 @@ fn prepare_pages<'a>(
                 .ok_or_else(|| "FrameDelta page id space exhausted".to_owned())?;
             (*next_page_id, true, false)
         };
-        let positions = primitive_positions(page);
-        let note_anchors = note_anchors(page)?;
         // An unbuilt page has no primitive positions to shift, so its
         // position span only reaches the host through a fresh fingerprint.
-        let full_prepare = is_new
-            || page.unbuilt
-            || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index))
-            || matched.is_none_or(|old| i64::from(old.page_index) != retained_index(index));
-        let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
-            let hashes = hash_page(page)?;
-            let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
-            (hashes.fingerprint, hashes.visual_fingerprint, primitive_ids)
-        } else {
-            let old = matched.expect("clean incremental pages retain a previous snapshot");
-            let fingerprint = if positions == old.positions && note_anchors == old.note_anchors {
-                old.fingerprint
+        plan.push(PagePlan {
+            page_index,
+            page_id,
+            is_new,
+            moved,
+            full_prepare: is_new
+                || page.unbuilt
+                || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages(index))
+                || matched.is_none_or(|old| i64::from(old.page_index) != retained_index(index)),
+            matched: matched_previous[index],
+        });
+    }
+
+    struct PageWork {
+        positions: Vec<PrimitivePositionSnapshot>,
+        note_anchors: Vec<NoteAnchorSnapshot>,
+        fingerprint: u64,
+        visual_fingerprint: u64,
+        /// `None` shares the matched snapshot's id array, resolved on assembly.
+        primitive_ids: Option<Vec<u64>>,
+    }
+    let works: Vec<Result<PageWork, String>> =
+        par_map_indexed(list.pages.len(), &|index| -> Result<PageWork, String> {
+            let page = &list.pages[index];
+            let entry = &plan[index];
+            let positions = primitive_positions(page);
+            let note_anchors = note_anchors(page)?;
+            let (fingerprint, visual_fingerprint, primitive_ids) = if entry.full_prepare {
+                let hashes = hash_page(page)?;
+                (
+                    hashes.fingerprint,
+                    hashes.visual_fingerprint,
+                    Some(primitive_ids(page, entry.page_id)),
+                )
             } else {
-                hash_positions(old.visual_fingerprint, &positions, &note_anchors)
+                let old = &previous[entry
+                    .matched
+                    .expect("clean incremental pages retain a previous snapshot")];
+                let fingerprint = if positions == old.positions && note_anchors == old.note_anchors
+                {
+                    old.fingerprint
+                } else {
+                    hash_positions(old.visual_fingerprint, &positions, &note_anchors)
+                };
+                (fingerprint, old.visual_fingerprint, None)
             };
-            (
+            Ok(PageWork {
+                positions,
+                note_anchors,
                 fingerprint,
-                old.visual_fingerprint,
-                Rc::clone(&old.primitive_ids),
-            )
+                visual_fingerprint,
+                primitive_ids,
+            })
+        });
+
+    let mut prepared = Vec::with_capacity(list.pages.len());
+    for ((entry, work), (page, anchor)) in
+        plan.iter().zip(works).zip(list.pages.iter().zip(anchors))
+    {
+        let work = work?;
+        let primitive_ids = match work.primitive_ids {
+            Some(ids) => ids.into(),
+            None => Arc::clone(
+                &previous[entry
+                    .matched
+                    .expect("clean incremental pages retain a previous snapshot")]
+                .primitive_ids,
+            ),
         };
         prepared.push(PreparedPage {
             snapshot: FramePageSnapshot {
-                page_id,
+                page_id: entry.page_id,
                 anchor,
-                fingerprint,
-                visual_fingerprint,
-                page_index,
+                fingerprint: work.fingerprint,
+                visual_fingerprint: work.visual_fingerprint,
+                page_index: entry.page_index,
                 primitive_ids,
-                positions,
-                note_anchors,
+                positions: work.positions,
+                note_anchors: work.note_anchors,
             },
             page,
-            is_new,
-            moved,
+            is_new: entry.is_new,
+            moved: entry.moved,
         });
     }
     Ok(prepared)
+}
+
+/// Apply `work` to every index of `len` and return the results in index
+/// order. Work reads only shared inputs, so native splits it across scoped
+/// threads; wasm stays sequential.
+fn par_map_indexed<T: Send>(len: usize, work: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+    let sequential = || (0..len).map(work).collect::<Vec<T>>();
+    #[cfg(target_arch = "wasm32")]
+    {
+        sequential()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::num::NonZeroUsize;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let workers = std::thread::available_parallelism()
+            .map_or(1, NonZeroUsize::get)
+            .min(len);
+        if workers <= 1 {
+            return sequential();
+        }
+        let next = AtomicUsize::new(0);
+        let out = Mutex::new((0..len).map(|_| None::<T>).collect::<Vec<_>>());
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            if index >= len {
+                                break;
+                            }
+                            out.lock().unwrap()[index] = Some(work(index));
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("page preparation panicked");
+            }
+        });
+        out.into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|item| item.expect("every index prepared"))
+            .collect()
+    }
 }
 
 fn hash_positions(
