@@ -11,6 +11,7 @@ import {
   drawPrimitive,
   rasterizeDisplayPageToBackBuffer,
   sizeCanvasForPage,
+  withFontFamilies,
 } from './canvasBackend';
 import type {
   DisplayList,
@@ -435,5 +436,49 @@ describe('Canvas text-run slot clipping', () => {
     expect(paints).toHaveLength(1);
     expect(paints[0].right).toBe(paints[0].naturalRight);
     expect(paints[0].right).toBeGreaterThan(run.width);
+  });
+});
+
+describe('Canvas font families', () => {
+  it('swaps only the mapped families of a CSS font shorthand', () => {
+    const families = new Map([['Calibri', 'Calibri#1f2e']]);
+    expect(withFontFamilies('italic 700 13.333px Calibri, sans-serif', families)).toBe(
+      'italic 700 13.333px "Calibri#1f2e", sans-serif'
+    );
+    expect(withFontFamilies('400 11px "Calibri", serif', families)).toBe(
+      '400 11px "Calibri#1f2e", serif'
+    );
+    expect(withFontFamilies('400 11px Cambria, sans-serif', families)).toBe(
+      '400 11px Cambria, sans-serif'
+    );
+    expect(withFontFamilies('400 11px calibri, sans-serif', families)).toBe(
+      '400 11px "Calibri#1f2e", sans-serif'
+    );
+    expect(withFontFamilies('Calibri', families)).toBe('"Calibri#1f2e"');
+    expect(
+      withFontFamilies('400 11px "Review, Sans", Calibri', new Map([['Review, Sans', 'Review#2']]))
+    ).toBe('400 11px "Review#2", Calibri');
+  });
+
+  it('paints browser text with the family the document registered', async () => {
+    const fonts: string[] = [];
+    const { ctx } = recordingContext(new Map([['Hi', { width: 10, ascent: 8, descent: 2 }]]));
+    const recorded = new Proxy(ctx, {
+      set(target, key, value) {
+        if (key === 'font') fonts.push(value as string);
+        return Reflect.set(target, key, value);
+      },
+    });
+    const run = {
+      kind: 'text',
+      text: 'Hi',
+      x: 0,
+      baselineY: 10,
+      width: 10,
+      font: '400 13px Calibri, sans-serif',
+      color: '#000000',
+    } as TextRunPrimitive;
+    await drawPrimitive(recorded, run, { fontFamilies: new Map([['Calibri', 'Calibri#1f2e']]) });
+    expect(fonts).toEqual(['400 13px "Calibri#1f2e", sans-serif']);
   });
 });

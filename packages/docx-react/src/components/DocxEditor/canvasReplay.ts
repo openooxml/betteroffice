@@ -5,6 +5,7 @@ export interface CanvasRasterEnvironment {
   zoom: number;
   glyphCache?: GlyphCache;
   resolveImage?: ImageResolver;
+  fontFamilies?: ReadonlyMap<string, string>;
 }
 
 interface CanvasPresentation {
@@ -58,7 +59,8 @@ export class CanvasReplayState {
       previous.environment.dpr === environment.dpr &&
       previous.environment.zoom === environment.zoom &&
       previous.environment.glyphCache === environment.glyphCache &&
-      previous.environment.resolveImage === environment.resolveImage
+      previous.environment.resolveImage === environment.resolveImage &&
+      previous.environment.fontFamilies === environment.fontFamilies
     ) {
       return null;
     }

@@ -94,6 +94,11 @@ configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
 For offline assets, import `* as fonts` from `@betteroffice/fonts` and call
 `configureDefaultFonts({ fonts })`; see [font configuration](../fonts/README.md).
 
+Several editors can share one page: each hears only its own font loads through
+`onFontsLoaded` and `onError`, paints a document's embedded faces even when
+another open document embeds different faces under the same family name, and
+releases those faces when it unmounts or loads its next document.
+
 ## Collaboration
 
 The document is a CRDT — pass a `collaboration` prop and wire a transport to
