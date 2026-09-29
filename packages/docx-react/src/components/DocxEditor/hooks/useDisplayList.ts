@@ -86,6 +86,8 @@ export interface UseRustDisplayListResult {
   ): Promise<ResidentFrameApplyResult | null>;
   /** See {@link LayoutInWorker}. */
   layoutInWorker: LayoutInWorker;
+  /** The engine whose layout the latest published frame shows. */
+  presentedEngine: unknown;
   /**
    * The pages `[start, end)` near the viewport. Only these are built; every
    * other page arrives as geometry until it comes near.
@@ -225,10 +227,19 @@ export function useRustDisplayList(
   resolvedCommentIds?: ReadonlySet<number>,
   engine?: RustDisplayListEngine | null,
   /** Asks the host for a layout of the document as it is now. */
-  requestLayout?: () => void
+  requestLayout?: () => void,
+  /**
+   * The session whose pages are shown while another session replaces it
+   * page for page: its worker and page surfaces carry over to the next.
+   */
+  handoffFromRef?: React.RefObject<YrsSession | null>
 ): UseRustDisplayListResult {
   const requestLayoutRef = useRef(requestLayout);
   requestLayoutRef.current = requestLayout;
+  // The frame shown when the worker was handed to another session: not a
+  // base the new session's frames apply to.
+  const handedOffFrameRef = useRef<RetainedFrame | null>(null);
+  const [presentedEngine, setPresentedEngine] = useState<unknown>(null);
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const queryEpochGateRef = useRef<DisplayListQueryEpochGate | null>(null);
@@ -758,6 +769,29 @@ export function useRustDisplayList(
     [adoptHostEngine, setWorkerPresentationActive]
   );
 
+  // The worker client for `hostEngine`: its own, the one of the session it
+  // takes over from, or a new one.
+  const workerFor = useCallback((hostEngine: YrsSession): ResidentEngineWorkerClient => {
+    const current = workerRef.current;
+    if (current?.engine === hostEngine) return current.client;
+    if (current && handoffFromRef?.current === current.engine) {
+      current.client.rebootstrap();
+      handedOffFrameRef.current = snapshotRef.current.frame;
+      workerRef.current = { engine: hostEngine, client: current.client };
+      return current.client;
+    }
+    current?.client.destroy();
+    workerRef.current = { engine: hostEngine, client: new ResidentEngineWorkerClient() };
+    return workerRef.current.client;
+  }, [handoffFromRef]);
+
+  /** The frame `hostEngine`'s next frame applies to. */
+  const frameBase = useCallback(
+    (): RetainedFrame | null =>
+      snapshotRef.current.frame === handedOffFrameRef.current ? null : snapshotRef.current.frame,
+    []
+  );
+
   const layoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
       if (
@@ -769,16 +803,9 @@ export function useRustDisplayList(
       ) {
         return null;
       }
-      if (workerRef.current?.engine !== hostEngine) {
-        workerRef.current?.client.destroy();
-        workerRef.current = {
-          engine: hostEngine,
-          client: new ResidentEngineWorkerClient(),
-        };
-      }
-      const worker = workerRef.current.client;
+      const worker = workerFor(hostEngine);
       const bootstrapping = !worker.bootstrapSent();
-      const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
+      const previousFrame = bootstrapping ? null : frameBase();
       hostEngine.adoptResidentWorkerLayout(request);
       const snapshot = hostEngine.residentWorkerSnapshot(
         bootstrapping
@@ -856,7 +883,7 @@ export function useRustDisplayList(
         })
         .catch(unavailable);
     },
-    [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine]
+    [dropWorker, frameBase, frameExtrasInputs, overrides?.build, paintedCaretMachine, workerFor]
   );
 
   // Build the unbuilt pages of the worker frame: those the viewport shows
@@ -868,7 +895,10 @@ export function useRustDisplayList(
       if (pageBuildInFlightRef.current) return;
       const worker = workerRef.current;
       const frame = snapshotRef.current.frame;
-      if (!worker || !worker.client.isReady() || !frame) return;
+      // A frame handed over from another session is replaced, not built on.
+      if (!worker || !worker.client.isReady() || !frame || frame === handedOffFrameRef.current) {
+        return;
+      }
       const pages = frame.displayList.pages;
       const [start, end] = displayWindowRef.current;
       const unbuilt: number[] = [];
@@ -1126,8 +1156,7 @@ export function useRustDisplayList(
           prebuilt.engine === hostEngine &&
           workerRef.current?.engine === hostEngine &&
           prebuilt.contentEpoch === contentEpoch &&
-          (snapshotRef.current.frame?.frameEpoch ?? null) ===
-            (prebuilt.previousFrame?.frameEpoch ?? null) &&
+          (frameBase()?.frameEpoch ?? null) === (prebuilt.previousFrame?.frameEpoch ?? null) &&
           prebuilt.layoutExtras === JSON.stringify(frameExtrasInputs())
         ) {
           // The worker ran this layout and built its frame in the same pass.
@@ -1149,17 +1178,10 @@ export function useRustDisplayList(
             provisional: prebuilt.provisional,
           });
         } else {
-          if (workerRef.current?.engine !== hostEngine) {
-            workerRef.current?.client.destroy();
-            workerRef.current = {
-              engine: hostEngine,
-              client: new ResidentEngineWorkerClient(),
-            };
-          }
-          const worker = workerRef.current.client;
+          const worker = workerFor(hostEngine);
           const extras = encodeDisplayListFrameExtras(buildInputs);
           const bootstrapping = !worker.bootstrapSent();
-          const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
+          const previousFrame = bootstrapping ? null : frameBase();
           // On a fresh client both hints are null, so a bootstrap snapshot is
           // always complete; a sync snapshot ships a state diff and skips font
           // bytes the worker already holds.
@@ -1235,6 +1257,7 @@ export function useRustDisplayList(
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
+        setPresentedEngine(residentEngine ?? engine ?? null);
         setError(null);
         setLoading(false);
         if (!result.provisional) markSettled(contentEpoch);
@@ -1335,6 +1358,7 @@ export function useRustDisplayList(
     applyDelete,
     layoutInWorker,
     setDisplayWindow,
+    presentedEngine,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1453,6 +1477,8 @@ export interface UseCanvasRendererResult {
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   /** Glyph outlines sourced from the same resident font store as measurement. */
   glyphOutlineProvider: GlyphOutlineProvider | null;
+  /** The engine whose layout the shown frame is of. */
+  presentedEngine: unknown;
   /** One-call ordinary text insertion; false until resident state is ready. */
   applyInput(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-call ordinary deletions/merges; false until resident state is ready. */
@@ -1497,7 +1523,9 @@ export function useCanvasRenderer(
   // rebuild the display list (resolve / reopen / expand-a-resolved-card).
   resolvedCommentIds?: ReadonlySet<number>,
   /** Asks the host for a layout of the document as it is now. */
-  requestLayout?: () => void
+  requestLayout?: () => void,
+  /** See `useRustDisplayList`'s `handoffFromRef`. */
+  handoffFromRef?: React.RefObject<YrsSession | null>
 ): UseCanvasRendererResult {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [engine, setEngine] = useState<
@@ -1526,6 +1554,7 @@ export function useCanvasRenderer(
     applyDelete,
     layoutInWorker,
     setDisplayWindow,
+    presentedEngine,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1540,7 +1569,8 @@ export function useCanvasRenderer(
     fontChainsProviderRef,
     resolvedCommentIds,
     engine,
-    requestLayout
+    requestLayout,
+    handoffFromRef
   );
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const status: UseCanvasRendererResult['status'] = error
@@ -1620,6 +1650,7 @@ export function useCanvasRenderer(
     authoritativeCaretActive,
     canvasHostRef,
     glyphOutlineProvider: engine?.outlineGlyphJson ?? null,
+    presentedEngine,
     applyInput,
     applyDelete,
     layoutInWorker,

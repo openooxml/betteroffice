@@ -123,8 +123,15 @@ export function useDocumentLoader({
   );
 
   const acceptHostDocument = useCallback(
-    (host: YrsDocxHost, generation: number) => {
-      if (!loadGeneration.complete(generation)) return;
+    (host: YrsDocxHost, generation: number, options?: { preview: boolean }) => {
+      // A preview shows the load's first pages; the full document completes it.
+      if (
+        options?.preview
+          ? !loadGeneration.isCurrent(generation)
+          : !loadGeneration.complete(generation)
+      ) {
+        return;
+      }
       const doc = host.document;
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });

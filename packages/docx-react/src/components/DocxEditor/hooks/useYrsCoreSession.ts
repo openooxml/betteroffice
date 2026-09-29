@@ -37,13 +37,36 @@ export interface YrsCoreSession {
    */
   scheduleCompatibilityWarm(): void;
   cancelCompatibilityWarm(): void;
+  /**
+   * `session` is a display-only preview of the document's first pages; the
+   * full session replaces it once they have painted.
+   */
+  previewing: boolean;
+  /** The preview session whose pages the renderer keeps until the full session's replace them. */
+  handoffFrom: YrsSession | null;
+  /** A frame of `engine`'s layout was published for display. */
+  notifyFramePresented(engine: unknown): void;
 }
 
 interface YrsCoreSessionCallbacks {
   isCurrentLoad?: (generation: number) => boolean;
-  onHostDocument?: (host: YrsDocxHost, generation: number) => void;
+  onHostDocument?: (
+    host: YrsDocxHost,
+    generation: number,
+    options?: { preview: boolean }
+  ) => void;
   onError?: (error: Error, generation: number) => void;
 }
+
+export interface YrsCoreSessionOptions {
+  /** Open a display-only preview of the first pages before the full document. */
+  previewFirstPage?: boolean;
+}
+
+/** Body blocks a first-page preview parses. */
+const PREVIEW_BODY_BLOCKS = 200;
+/** How long the full open waits for the preview's pages to paint. */
+const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 
 function mergeHeaderFooterMaps(
   full: Map<string, HeaderFooter> | undefined,
@@ -112,6 +135,22 @@ export function mergeDocxHostMetadata(full: Document, host: Document): Document 
   };
 }
 
+/** A display-only session of the first pages of `bytes`, or null when it cannot open. */
+async function openPreview(
+  yrs: YrsFacadeModule,
+  bytes: Uint8Array,
+  clientId: number | undefined
+): Promise<{ session: YrsSession; host: YrsDocxHost } | null> {
+  const session = await yrs.createYrsSession({ clientId });
+  try {
+    return { session, host: session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS) };
+  } catch (error) {
+    console.warn('[yrs] the first-page preview could not open; opening in full', error);
+    session.destroy();
+    return null;
+  }
+}
+
 export interface YrsSeedSources {
   bytes: Uint8Array | null;
   document: Document | null;
@@ -172,7 +211,8 @@ export function useYrsCoreSession(
   seedBytes: Uint8Array | null,
   seedGeneration: number,
   collaboration?: DocxEditorCollaborationOptions,
-  callbacks?: YrsCoreSessionCallbacks
+  callbacks?: YrsCoreSessionCallbacks,
+  options?: YrsCoreSessionOptions
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -192,22 +232,58 @@ export function useYrsCoreSession(
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [handoffFrom, setHandoffFrom] = useState<YrsSession | null>(null);
+  const paintWaitRef = useRef<{ session: YrsSession; resolve: () => void } | null>(null);
+  const retiringRef = useRef<YrsSession | null>(null);
+  // Collaboration shares one replica from the start, so it never previews.
+  const previewFirstPage =
+    options?.previewFirstPage === true && !collaboration && !collaborationInitialUpdate;
 
   useEffect(() => {
     setSession(null);
+    setPreviewing(false);
+    setHandoffFrom(null);
     if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
 
+    const stale = () =>
+      cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false;
+
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
+        // A preview paints the first pages first; the full open, which
+        // blocks this thread for the whole package, waits until they have.
+        const shown =
+          previewFirstPage && seedBytes
+            ? await openPreview(yrs, seedBytes, collaborationClientId)
+            : null;
+        if (shown && stale()) {
+          shown.session.destroy();
+          return;
+        }
+        if (shown) {
+          const painted = new Promise<void>((resolve) => {
+            paintWaitRef.current = { session: shown.session, resolve };
+            setTimeout(resolve, PREVIEW_PAINT_TIMEOUT_MS);
+          });
+          sessionRef.current = shown.session;
+          facadeRef.current = yrs;
+          setSession(shown.session);
+          setPreviewing(true);
+          setSessionGeneration(seedGeneration);
+          callbacksRef.current?.onHostDocument?.(shown.host, seedGeneration, { preview: true });
+          await painted;
+          await new Promise<void>((resolve) =>
+            requestAnimationFrame(() => setTimeout(resolve, 0))
+          );
+          if (stale()) return;
+        }
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
-        if (
-          cancelled ||
-          callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false
-        ) {
+        if (stale()) {
           next.destroy();
           return;
         }
@@ -218,7 +294,12 @@ export function useYrsCoreSession(
         });
         sessionRef.current = next;
         facadeRef.current = yrs;
+        if (shown) {
+          retiringRef.current = shown.session;
+          setHandoffFrom(shown.session);
+        }
         setSession(next);
+        setPreviewing(false);
         setSessionGeneration(seedGeneration);
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration);
       })
@@ -239,6 +320,10 @@ export function useYrsCoreSession(
       cancelled = true;
       cancelCompatibilityWarmRef.current?.();
       cancelCompatibilityWarmRef.current = null;
+      paintWaitRef.current?.resolve();
+      paintWaitRef.current = null;
+      if (retiringRef.current !== sessionRef.current) retiringRef.current?.destroy();
+      retiringRef.current = null;
       sessionRef.current?.destroy();
       sessionRef.current = null;
       facadeRef.current = null;
@@ -252,7 +337,23 @@ export function useYrsCoreSession(
     seedGeneration,
     collaborationClientId,
     collaborationInitialUpdate,
+    previewFirstPage,
   ]);
+
+  const notifyFramePresented = useCallback((engine: unknown): void => {
+    const waiting = paintWaitRef.current;
+    if (waiting && waiting.session === engine) {
+      paintWaitRef.current = null;
+      waiting.resolve();
+    }
+    const retiring = retiringRef.current;
+    if (retiring && engine === sessionRef.current && engine !== retiring) {
+      retiringRef.current = null;
+      setHandoffFrom(null);
+      // Components let go of the preview on this commit.
+      setTimeout(() => retiring.destroy(), 0);
+    }
+  }, []);
 
   // Save, export and getDocument materialize the base on first use; only a
   // host projecting every change asks for it ahead of the first edit.
@@ -380,6 +481,9 @@ export function useYrsCoreSession(
   return {
     session,
     sessionGeneration,
+    previewing,
+    handoffFrom,
+    notifyFramePresented,
     storyBlocks,
     bodyBlocks,
     inputPositionMap,

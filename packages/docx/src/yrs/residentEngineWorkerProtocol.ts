@@ -21,6 +21,11 @@ export type ResidentEngineWorkerRequest =
        * marked `layoutProvisional` is finished by `completeLayout`.
        */
       provisionalPages?: number;
+      /**
+       * The document replaces the one this worker showed, which the host
+       * hands over from: keep the attached page surfaces for its pages.
+       */
+      keepSurfaces?: boolean;
     }
   | {
       id: number;

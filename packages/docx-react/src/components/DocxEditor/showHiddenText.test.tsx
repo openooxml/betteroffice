@@ -60,6 +60,9 @@ function yrsCore(): YrsCoreSession {
     publishDirectInput: () => {},
     scheduleCompatibilityWarm: () => {},
     cancelCompatibilityWarm: () => {},
+    previewing: false,
+    handoffFrom: null,
+    notifyFramePresented: () => {},
   };
 }
 
