@@ -2226,6 +2226,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             />
           </CanvasPagedArea>
         }
+        loadingIndicator={
+          canvasRenderer.status === 'loading' && (loadingIndicator || <DefaultLoadingIndicator />)
+        }
         overlays={
           <DocxEditorOverlays
             contextMenu={contextMenu}

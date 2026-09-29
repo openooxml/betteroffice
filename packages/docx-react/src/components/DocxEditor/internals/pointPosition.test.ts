@@ -174,13 +174,15 @@ function pluginGeometry(
     displayListQueries: queries,
     projector: createCanvasHostProjector(host, queries, 1),
   });
-  const layout = pluginLayout(queries, session.version(), 1)!;
+  const layout = pluginLayout(queries, session.version(), 1, { key: '', previewVersion: 0 })!;
   const geometry = createPluginGeometry(
     layout,
     dom,
     document.createElement('div'),
     current,
-    (hit) => resolvePointPosition(editor, hit, host, queries)
+    (hit) => resolvePointPosition(editor, hit, host, queries),
+    queries,
+    () => null
   );
   return { layout, geometry };
 }

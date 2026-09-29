@@ -212,6 +212,132 @@ describe('createDisplayListQueries wasm trap containment', () => {
   });
 });
 
+describe('createDisplayListQueries lazy store pages', () => {
+  function textPage(pageIndex: number, from: number, to: number): DisplayPage {
+    return {
+      pageIndex,
+      width: 100,
+      height: 100,
+      primitives: [
+        {
+          kind: 'text',
+          text: 'x',
+          x: 0,
+          baselineY: 10,
+          width: 10,
+          font: '10px serif',
+          color: '#000',
+          docStart: from,
+          docEnd: to,
+        } as DisplayPage['primitives'][number],
+      ],
+    };
+  }
+
+  function recordingEngine() {
+    const opened: string[] = [];
+    const updates: Array<{ reuse: number[][]; replace: Array<[number, DisplayPage]> }> = [];
+    const { engine, calls } = fakeEngine();
+    engine.openDisplayList = (json: string) => {
+      calls.open += 1;
+      opened.push(json);
+      return 1;
+    };
+    engine.updateDisplayList = (_handle: number, json: string) => {
+      calls.update += 1;
+      updates.push(JSON.parse(json));
+    };
+    engine.hitTestRegionsByHandle = () => 'null';
+    engine.rangeRectsRegionByHandle = () => '[]';
+    engine.rangeRectsRegionJson = () => '[]';
+    engine.hasRangeRectsRegion = () => true;
+    return { engine, calls, opened, updates };
+  }
+
+  const list = () => ({ pages: [textPage(0, 1, 10), textPage(1, 11, 20), textPage(2, 21, 30)] });
+
+  test('opens the store with page sizes only and parses the pages a range touches', () => {
+    const { engine, opened, updates } = recordingEngine();
+    const queries = createDisplayListQueries(list(), engine);
+    queries.rangeRects(14, 15);
+    expect(JSON.parse(opened[0]).pages.map((p: DisplayPage) => p.primitives.length)).toEqual([
+      0, 0, 0,
+    ]);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].replace.map(([index]) => index)).toEqual([1]);
+    expect(updates[0].reuse).toEqual([
+      [0, 0],
+      [2, 2],
+    ]);
+    expect(updates[0].replace[0][1].primitives).toHaveLength(1);
+
+    queries.rangeRects(15, 16);
+    expect(updates).toHaveLength(1);
+  });
+
+  test('loads the hit page, a move’s neighbours, and every page for region queries', () => {
+    const { engine, updates } = recordingEngine();
+    const queries = createDisplayListQueries(list(), engine);
+    queries.hitTestRegions(2, 5, 5);
+    expect(updates.at(-1)!.replace.map(([index]) => index)).toEqual([2]);
+    queries.verticalMove(5, 'down');
+    expect(updates.at(-1)!.replace.map(([index]) => index)).toEqual([0, 1]);
+    queries.hfRangeRects('header', 'rId1', 0, 1);
+    expect(updates).toHaveLength(2);
+  });
+
+  test('a range spanning pages loads each of them', () => {
+    const { engine, updates } = recordingEngine();
+    const queries = createDisplayListQueries(list(), engine);
+    queries.rangeRects(5, 25);
+    expect(updates[0].replace.map(([index]) => index)).toEqual([0, 1, 2]);
+  });
+});
+
+describe('createDisplayListQueries page load failures', () => {
+  test('a trap while loading pages stops querying the instance', () => {
+    const { engine, calls } = fakeEngine();
+    engine.updateDisplayList = () => {
+      throw wasmTrap();
+    };
+    const textPage: DisplayPage = {
+      ...page(0),
+      primitives: [
+        { kind: 'rect', x: 0, y: 0, w: 1, h: 1, docStart: 1, docEnd: 2 } as DisplayPage['primitives'][number],
+      ],
+    };
+    const queries = createDisplayListQueries({ pages: [textPage] }, engine);
+    expect(queries.rangeRects(1, 2)).toEqual([]);
+    expect(calls.rangeJson).toBe(0);
+    expect(calls.rangeByHandle).toBe(0);
+    expect(queries.sourceState().status).toBe('error');
+  });
+
+  test('an ordinary page load failure closes the handle and falls back to JSON', () => {
+    const { engine, calls } = fakeEngine();
+    engine.updateDisplayList = () => {
+      throw new Error('update rejected');
+    };
+    const textPage: DisplayPage = {
+      ...page(0),
+      primitives: [
+        { kind: 'rect', x: 0, y: 0, w: 1, h: 1, docStart: 1, docEnd: 2 } as DisplayPage['primitives'][number],
+      ],
+    };
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const queries = createDisplayListQueries({ pages: [textPage] }, engine);
+      queries.rangeRects(1, 2);
+      expect(calls.close).toBe(1);
+      expect(calls.rangeJson).toBe(1);
+      expect(calls.rangeByHandle).toBe(0);
+    } finally {
+      console.warn = warn;
+    }
+  });
+});
+
 describe('visual lines', () => {
   const text = (
     x: number,

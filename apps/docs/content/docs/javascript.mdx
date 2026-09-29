@@ -144,7 +144,9 @@ aborts it and delivers `load` again, and after ten such runs the plugin is
 stopped and reported. `document-change` carries only the committed version, for
 typing, remote edits, undo, commands and batches (a plugin's own included), and
 never for a refusal or no-op; `selection-change`, `mode-change` (with the
-effective `readOnly`), `layout-change` and `grants-change` follow. Notifications
+effective `readOnly`), `layout-change`, `proposal-change` (host proposals or
+their preview decisions changed, with `previewVersion`) and `grants-change`
+follow. Notifications
 describe current state, so several changes can arrive as one, and a newer one
 aborts the hook still handling the last (`context.signal`), unless that hook's
 own edit batch made it. Replacing the document,
@@ -191,6 +193,14 @@ converts such a rectangle into pixels of the unscaled overlay layer, or returns
 hit-tests client coordinates like the caret and returns the layout's `version` and
 `layoutId` with a collapsed accepted-view `target` for edit batch steps, or `null`
 likewise, while input is pending, and until the pages show that layout.
+`geometry.getAnchorGeometry(target)` resolves a proposal, revision, paragraph,
+search match or text range to overlay-layer pixels: every visible fragment with
+its zero-based `pageIndex`, an `anchor` collapsed at the end of the last one (at
+the boundary of a target the preview hides, else at its paragraph) and the
+anchor's `pageRect`. It refuses with a typed failure rather than answer from a
+stale or unpainted layout, and `layout-change` repeats once the pages have painted
+a layout that arrived before its pixels; `layout.previewVersion` is the proposal
+preview the pixels show.
 `geometry.dom` is experimental
 and may be replaced by a data-only facade. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
