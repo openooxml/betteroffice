@@ -54,14 +54,19 @@ function tabStops(root: ParentNode): HTMLElement[] {
 }
 
 /** What identifies a tab stop across a rebuild, whatever changed around it. */
-const stopKey = (stop: HTMLElement): string =>
-  [
+const stopKey = (stop: HTMLElement): string => {
+  const { sdtGroupId, sdtWidget, sdtRepeat } = stop.dataset;
+  return [
     stop.tagName,
     stop.getAttribute('href'),
     stop.id,
-    stop.getAttribute('aria-label'),
-    stop.textContent,
+    sdtGroupId,
+    sdtWidget,
+    sdtRepeat,
+    // A control's text shows its state; its group names it.
+    sdtGroupId === undefined ? stop.textContent : '',
   ].join('\u0000');
+};
 
 /**
  * Replaces `host`'s content with `next`. Focus inside it moves to the same

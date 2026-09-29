@@ -300,6 +300,30 @@ test('a rebuild keeps focus on the same link when links before it change', async
   expect(container.contains(document.activeElement)).toBe(true);
 });
 
+test('a rebuild keeps focus on a control whose state changed', async () => {
+  const checkbox = (groupId: string, x: number, checked: boolean): DisplayPrimitive =>
+    ({
+      kind: 'rect',
+      x,
+      y: 10,
+      w: 10,
+      h: 10,
+      inlineSdtWidget: { kind: 'checkbox', groupId, pos: x, checked },
+    }) as DisplayPrimitive;
+  const page = (checked: boolean): DisplayPage => ({
+    pageIndex: 0,
+    width: 100,
+    height: 100,
+    primitives: [checkbox('first', 10, checked), checkbox('second', 40, false)],
+  });
+  const { container, rerender } = render(<CanvasInteractiveOverlay page={page(false)} />);
+  await act(async () => {});
+  container.querySelector<HTMLElement>('[data-sdt-group-id="first"]')!.focus();
+  rerender(<CanvasInteractiveOverlay page={page(true)} />);
+  await act(async () => {});
+  expect((document.activeElement as HTMLElement | null)?.dataset.sdtGroupId).toBe('first');
+});
+
 test('a link to a note on a page whose chrome is not built builds that page first', async () => {
   const hostRef = createRef<HTMLDivElement>();
   const reference = {
