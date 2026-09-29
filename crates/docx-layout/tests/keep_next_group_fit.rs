@@ -25,24 +25,74 @@ fn paragraph(id: u32, lines: &[f64], attrs: Value) -> Value {
     })
 }
 
-/// Lays `measured` out on 100px-tall pages and returns whether blocks 2 and 3
-/// share a page.
-fn head_stays_with_follower(measured: Vec<Value>) -> bool {
-    let input = json!({"measured": measured, "options": {
-        "pageSize": {"w": 200, "h": 120},
-        "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}});
+/// Lays `measured` out on 100px-tall pages and returns each block's first
+/// page and column.
+fn place(measured: Vec<Value>, columns: Option<Value>) -> impl Fn(f64) -> Option<(usize, f64)> {
+    let mut options = json!({"pageSize": {"w": 200, "h": 120},
+        "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}});
+    if let Some(columns) = columns {
+        options["columns"] = columns;
+    }
+    let input = json!({"measured": measured, "options": options});
     let layout: Value =
         serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
-    let page_of = |id: f64| {
-        layout["pages"].as_array().unwrap().iter().position(|page| {
-            page["fragments"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|fragment| fragment["blockId"].as_f64() == Some(id))
+    move |id: f64| {
+        layout["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .find_map(|(index, page)| {
+                page["fragments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|fragment| fragment["blockId"].as_f64() == Some(id))
+                    .map(|fragment| (index, fragment["x"].as_f64().unwrap()))
+            })
+    }
+}
+
+/// Whether blocks 2 and 3 share a page.
+fn head_stays_with_follower(measured: Vec<Value>) -> bool {
+    let at = place(measured, None);
+    at(2.0).map(|(page, _)| page) == at(3.0).map(|(page, _)| page)
+}
+
+/// A table of 20px single-cell rows; `rows` gives each row's header flag,
+/// whether its paragraph keeps with the next row, and whether it may split.
+fn table(id: u32, rows: &[(bool, bool, bool)], floating: Option<Value>) -> Value {
+    let cells: Vec<Value> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (_, keep_next, _))| {
+            paragraph(100 + index as u32, &[20.0], json!({"keepNext": keep_next}))
         })
-    };
-    page_of(2.0) == page_of(3.0)
+        .collect();
+    let block_rows: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (header, _, cant_split))| {
+            json!({"id": 200 + index, "isHeader": header, "cantSplit": cant_split,
+                "cells": [{"id": 300 + index, "blocks": [cells[index]["block"].clone()]}]})
+        })
+        .collect();
+    let measured_rows: Vec<_> = cells
+        .iter()
+        .map(|cell| {
+            json!({"height": 20, "cells": [{"width": 100, "height": 20,
+                "blocks": [cell["measure"].clone()]}]})
+        })
+        .collect();
+    let mut block = json!({"kind": "table", "id": id, "columnWidths": [100], "rows": block_rows});
+    if let Some(floating) = floating {
+        block["floating"] = floating;
+    }
+    json!({
+        "block": block,
+        "measure": {"kind": "table", "totalWidth": 100, "totalHeight": 20.0 * rows.len() as f64,
+            "columnWidths": [100], "rows": measured_rows}
+    })
 }
 
 #[test]
@@ -69,26 +119,6 @@ fn an_empty_follower_still_needs_the_gap_above_it() {
 
 #[test]
 fn a_table_follower_needs_its_kept_leading_rows() {
-    let cells: Vec<Value> = (0..2)
-        .map(|index| paragraph(10 + index, &[20.0], json!({"keepNext": index == 0})))
-        .collect();
-    let rows: Vec<_> = (0..2)
-        .map(|index| {
-            json!({"id": 20 + index, "cantSplit": true,
-                "cells": [{"id": 30 + index, "blocks": [cells[index]["block"].clone()]}]})
-        })
-        .collect();
-    let measured_rows: Vec<_> = (0..2)
-        .map(|index| {
-            json!({"height": 20, "cells": [{"width": 100, "height": 20,
-                "blocks": [cells[index]["measure"].clone()]}]})
-        })
-        .collect();
-    let table = json!({
-        "block": {"kind": "table", "id": 3, "columnWidths": [100], "rows": rows},
-        "measure": {"kind": "table", "totalWidth": 100, "totalHeight": 40,
-            "columnWidths": [100], "rows": measured_rows}
-    });
     assert!(head_stays_with_follower(vec![
         paragraph(1, &[55.0], json!({})),
         paragraph(
@@ -96,6 +126,67 @@ fn a_table_follower_needs_its_kept_leading_rows() {
             &[10.0],
             json!({"keepNext": true, "spacing": {"after": 10}})
         ),
-        table,
+        table(3, &[(false, true, true), (false, false, true)], None),
     ]));
+}
+
+#[test]
+fn a_row_chain_taller_than_a_page_does_not_hold_the_heading_back() {
+    let mut rows = table(3, &[(false, true, true), (false, false, true)], None);
+    rows["measure"]["rows"][1]["height"] = json!(90);
+    rows["measure"]["totalHeight"] = json!(110);
+    assert!(head_stays_with_follower(vec![
+        paragraph(1, &[75.0], json!({})),
+        paragraph(2, &[10.0], json!({"keepNext": true})),
+        rows,
+    ]));
+}
+
+#[test]
+fn a_row_chain_starting_in_the_header_band_comes_along() {
+    assert!(head_stays_with_follower(vec![
+        paragraph(1, &[25.0], json!({})),
+        paragraph(2, &[10.0], json!({"keepNext": true})),
+        table(
+            3,
+            &[
+                (true, false, true),
+                (true, true, true),
+                (false, true, true),
+                (false, false, true)
+            ],
+            None
+        ),
+    ]));
+}
+
+#[test]
+fn a_floating_table_follower_is_not_weighed_as_flow() {
+    assert!(head_stays_with_follower(vec![
+        paragraph(1, &[60.0], json!({})),
+        paragraph(2, &[10.0], json!({"keepNext": true})),
+        table(
+            3,
+            &[(false, true, true), (false, false, true)],
+            Some(json!({"horzAnchor": "page", "tblpX": 90, "vertAnchor": "page", "tblpY": 10}))
+        ),
+    ]));
+}
+
+#[test]
+fn a_run_that_does_not_fit_moves_to_the_next_column() {
+    let at = place(
+        vec![
+            paragraph(1, &[30.0], json!({"spacing": {"after": 80}})),
+            paragraph(2, &[20.0], json!({"keepNext": true})),
+            paragraph(3, &[10.0], json!({})),
+            json!({"block": {"kind": "columnBreak", "id": 4}, "measure": {"kind": "columnBreak"}}),
+            paragraph(5, &[10.0], json!({})),
+        ],
+        Some(json!({"count": 2, "gap": 20})),
+    );
+    let (heading, follower) = (at(2.0).unwrap(), at(3.0).unwrap());
+    assert_eq!(heading, follower);
+    assert_eq!(heading.0, 0);
+    assert!(heading.1 > at(1.0).unwrap().1);
 }

@@ -21,7 +21,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
 use crate::table_row_break::{build_table_row_break_info, first_table_fragment_height};
-use crate::types::{BlockExtent, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent};
+use crate::types::{
+    BlockExtent, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent, TableBlock,
+    TableExtent,
+};
 
 /// Lines below which widow/orphan control forbids every internal break, since
 /// each side of one needs two lines.
@@ -174,20 +177,23 @@ pub fn paragraph_min_leading_slice(block: &ParagraphBlock, measure: &ParagraphEx
 /// single page, measured from a fresh cursor; see
 /// [`measure_keep_with_next_group_at`].
 pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[MeasuredBlock]) -> f64 {
-    measure_keep_with_next_group_at(group, measured, |before| before, 0.0)
+    measure_keep_with_next_group_at(group, measured, |before| before, 0.0, f64::INFINITY)
 }
 
 /// Vertical space (px) the group needs below the cursor for its keepNext
 /// contract to hold on a single page: the members' lines plus the follower's
 /// witness slice, each gap collapsed to the larger of the space-after above
 /// it and the space-before below it, as placement collapses them.
-/// `leading` resolves the head's space-before at the cursor, and `deferred`
-/// is the space-after the cursor still owes the block above it.
+/// `leading` resolves the head's space-before at the cursor, `deferred` is
+/// the space-after the cursor still owes the block above it, and `capacity`
+/// is a blank page's content height, past which placement lets a table's
+/// keep-with-next row chain split.
 pub fn measure_keep_with_next_group_at(
     group: &KeepWithNextGroup,
     measured: &[MeasuredBlock],
     leading: impl Fn(f64) -> f64,
     deferred: f64,
+    capacity: f64,
 ) -> f64 {
     let mut budget = 0.0;
     let mut owed = deferred;
@@ -221,18 +227,7 @@ pub fn measure_keep_with_next_group_at(
             }
         }
         Some(BlockExtent::Table(table)) => match follower.map(|mb| &mb.block) {
-            Some(LayoutBlock::Table(block)) => {
-                let first = first_table_fragment_height(
-                    block,
-                    table,
-                    &build_table_row_break_info(block, table),
-                );
-                let kept = crate::hooks::row_keep_heights(block, table)
-                    .first()
-                    .copied()
-                    .unwrap_or(0.0);
-                first.max(kept)
-            }
+            Some(LayoutBlock::Table(block)) => table_leading_slice(block, table, capacity),
             _ => 0.0,
         },
         Some(BlockExtent::Image(image)) => image.height,
@@ -247,6 +242,37 @@ pub fn measure_keep_with_next_group_at(
         _ => {}
     }
     budget
+}
+
+/// Height (px) of the shortest first fragment placement gives a table: its
+/// header band and first body slice, extended to the end of any
+/// keep-with-next row chain starting in them that fits `capacity`. A floating
+/// table keeps its flow slice, as it is not placed in the flow.
+fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64) -> f64 {
+    let first =
+        first_table_fragment_height(block, measure, &build_table_row_break_info(block, measure));
+    if block.floating.is_some() {
+        return first;
+    }
+    let headers = block
+        .rows
+        .iter()
+        .take_while(|row| row.is_header.unwrap_or(false))
+        .count();
+    let mut top = 0.0;
+    let mut slice = first;
+    for (row, keep) in measure
+        .rows
+        .iter()
+        .zip(crate::hooks::row_keep_heights(block, measure))
+        .take(headers + 1)
+    {
+        if keep > 0.0 && keep <= capacity {
+            slice = slice.max(top + keep);
+        }
+        top += row.height;
+    }
+    slice
 }
 
 /// Whether a paragraph forbids splitting its own lines across a page (keepLines).

@@ -49,9 +49,10 @@ pub fn measure_keep_with_next_group_at(
     measured: &[MeasuredBlock],
     leading: impl Fn(f64) -> f64,
     deferred: f64,
+    capacity: f64,
 ) -> Result<f64, LayoutError> {
     Ok(keep_together::measure_keep_with_next_group_at(
-        group, measured, leading, deferred,
+        group, measured, leading, deferred, capacity,
     ))
 }
 

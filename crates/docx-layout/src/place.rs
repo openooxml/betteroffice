@@ -535,7 +535,7 @@ fn place(
             paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
 
-        // at the head of a keep-with-next group, move to a fresh page when the
+        // at the head of a keep-with-next group, move to a fresh column when the
         // whole group would otherwise straddle the boundary
         if let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
             && !plan.keep_with_next.interior_members.contains(&i)
@@ -549,9 +549,15 @@ fn place(
                 measured,
                 |before| paginator.leading_spacing(before),
                 paginator.state(state_idx).deferred_spacing,
+                page_content_height,
             )?;
-            let fresh_page_height =
-                hooks::measure_keep_with_next_group_at(group, measured, |_| 0.0, 0.0)?;
+            let fresh_page_height = hooks::measure_keep_with_next_group_at(
+                group,
+                measured,
+                |_| 0.0,
+                0.0,
+                page_content_height,
+            )?;
             let must_advance = hooks::keep_with_next_group_must_advance_from(
                 group_height,
                 fresh_page_height,
@@ -560,7 +566,7 @@ fn place(
                 page_has_content,
             )?;
             if must_advance {
-                paginator.force_authored_page_break(false);
+                paginator.advance_for_overflow();
             }
         }
 
