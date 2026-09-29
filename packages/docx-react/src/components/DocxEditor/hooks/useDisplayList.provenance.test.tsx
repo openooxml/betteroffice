@@ -242,7 +242,7 @@ async function previewSetup() {
   await show('accepted');
   await until(() => shown()[0] === key('accepted'));
   expect(shown()).toEqual([key('accepted'), 'Seed more']);
-  return { ...harness, key, show, shown };
+  return { ...harness, revision, key, show, shown };
 }
 
 test('a frame carries the revision preview of its layout, typed frames included', async () => {
@@ -304,4 +304,30 @@ test('settling waits for the frame of the current preview', async () => {
   await until(() => settled !== null);
   expect(paintedText(settled)).toBe('Seed');
   expect(shown()).toEqual([key('rejected'), 'Seed']);
+});
+
+test('frames the worker builds after a preview layout was sent carry that preview', async () => {
+  const { session, display, worker, previewKeys, revision, key, shown } = await previewSetup();
+  worker().hold();
+  let laidOut!: ReturnType<UseRustDisplayListResult['layoutInWorker']>;
+  let typed!: Promise<unknown>;
+  act(() => {
+    laidOut = display.current!.layoutInWorker(
+      session,
+      layoutRequest({ revisionPreview: { [revision]: 'rejected' } })
+    );
+    typed = display.current!.applyInput('!');
+  });
+  expect(laidOut).not.toBeNull();
+  const released = previewKeys.length;
+  await act(async () => {
+    worker().release();
+    await laidOut;
+    await typed;
+  });
+  await until(() => shown()[1] === 'Seed!');
+  expect(shown()[0]).not.toBe(key('accepted'));
+  for (const [shownKey, text] of previewKeys.slice(released)) {
+    if (shownKey === key('accepted')) expect(text).toContain('more');
+  }
 });

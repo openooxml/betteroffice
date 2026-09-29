@@ -33,6 +33,7 @@ import {
   type ResidentEngineOffscreenPage,
   type ResidentEngineWorkerFrame,
   type YrsResidentCaretSnapshot,
+  type YrsRenderEnv,
   type YrsSelection,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -42,6 +43,7 @@ import { displayListNeedsHostImages } from '../canvasPresentation';
 import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
   readSessionVersion,
+  revisionPreviewKey,
   revisionPreviewKeyOf,
   sourceVersionOf,
   stampRevisionPreviewKey,
@@ -916,6 +918,14 @@ export function useRustDisplayList(
             }
       );
       if (!snapshot) return null;
+      const previewKey = revisionPreviewKey(
+        (JSON.parse(request) as { renderEnv?: YrsRenderEnv }).renderEnv?.revisionPreview
+      );
+      if (layoutPreviewKeyRef.current !== null && previewKey !== layoutPreviewKeyRef.current) {
+        contentEpochRef.current += 1;
+        queryEpochGate.invalidate();
+      }
+      layoutPreviewKeyRef.current = previewKey;
       const contentEpoch = contentEpochRef.current;
       const options = {
         layoutExtras: JSON.stringify(frameExtrasInputs()),
@@ -983,7 +993,7 @@ export function useRustDisplayList(
         })
         .catch(unavailable);
     },
-    [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine]
+    [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine, queryEpochGate]
   );
 
   const attachOffscreenCanvases = useCallback(
@@ -1036,10 +1046,14 @@ export function useRustDisplayList(
     }
     queryEpochGate.invalidate();
     const previewKey = revisionPreviewKeyOf(layout);
-    if (layoutPreviewKeyRef.current !== null && previewKey !== layoutPreviewKeyRef.current) {
+    if (
+      previewKey !== null &&
+      layoutPreviewKeyRef.current !== null &&
+      previewKey !== layoutPreviewKeyRef.current
+    ) {
       contentEpochRef.current += 1;
     }
-    layoutPreviewKeyRef.current = previewKey;
+    if (previewKey !== null) layoutPreviewKeyRef.current = previewKey;
     const contentEpoch = contentEpochRef.current;
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
