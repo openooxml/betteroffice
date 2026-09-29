@@ -53,19 +53,34 @@ function tabStops(root: ParentNode): HTMLElement[] {
   );
 }
 
+/** What identifies a tab stop across a rebuild, whatever changed around it. */
+const stopKey = (stop: HTMLElement): string =>
+  [
+    stop.tagName,
+    stop.getAttribute('href'),
+    stop.id,
+    stop.getAttribute('aria-label'),
+    stop.textContent,
+  ].join('\u0000');
+
 /**
- * Replaces `host`'s content with `next`. Focus inside it moves to the stop at
- * the same place in `next`: a rebuild keeps its stops in order.
+ * Replaces `host`'s content with `next`. Focus inside it moves to the same
+ * stop in `next`, or to the stop at the same place when that one is gone.
  */
 function replaceKeepingFocus(host: HTMLElement, next: HTMLElement | null): void {
   if (next && host.childNodes.length === 1 && host.firstChild === next) return;
   const focused = host.ownerDocument.activeElement;
-  const at = focused instanceof HTMLElement && host.contains(focused)
-    ? tabStops(host).indexOf(focused)
-    : -1;
+  const stops = focused instanceof HTMLElement && host.contains(focused) ? tabStops(host) : [];
+  const at = stops.indexOf(focused as HTMLElement);
+  const key = at >= 0 ? stopKey(stops[at]!) : '';
+  const nth = stops.slice(0, at).filter((stop) => stopKey(stop) === key).length;
   if (next) host.replaceChildren(next);
   else host.replaceChildren();
-  if (at >= 0) tabStops(host)[at]?.focus({ preventScroll: true });
+  if (at < 0) return;
+  const rebuilt = tabStops(host);
+  (rebuilt.filter((stop) => stopKey(stop) === key)[nth] ?? rebuilt[at])?.focus({
+    preventScroll: true,
+  });
 }
 
 /** Builds one page's mirror or overlay into `hostRef`, and rebuilds it with the page. */
