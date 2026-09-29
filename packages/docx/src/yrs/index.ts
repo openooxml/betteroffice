@@ -203,6 +203,31 @@ export interface YrsOpeningOptions {
    * as one session. Each opening mints a fresh one by default.
    */
   generation?: string;
+  /**
+   * The SHA-256 of the opened bytes as lowercase hex, when the host already has
+   * it (see {@link docxPackageDigest}); the open hashes the bytes otherwise.
+   * @internal
+   */
+  digest?: string;
+}
+
+/**
+ * The SHA-256 of `bytes` as lowercase hex, taken by the platform off the
+ * calling thread, for {@link YrsOpeningOptions.digest}; undefined where the
+ * platform has no Web Crypto.
+ * @internal
+ */
+export async function docxPackageDigest(bytes: Uint8Array): Promise<string | undefined> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return undefined;
+  try {
+    const data =
+      bytes.buffer instanceof ArrayBuffer ? (bytes as Uint8Array<ArrayBuffer>) : bytes.slice();
+    const hash = new Uint8Array(await subtle.digest('SHA-256', data));
+    return Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return undefined;
+  }
 }
 
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
@@ -1420,7 +1445,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    const json = mutate(() => session.open_docx(source, seedStories, options.generation));
+    const json = mutate(() =>
+      session.open_docx(source, seedStories, options.generation, options.digest)
+    );
     const host = decodeDocxHost(json, source);
     docxSource = source;
     return host;

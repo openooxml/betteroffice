@@ -110,6 +110,8 @@ export interface YrsSeedSources {
   bytes: Uint8Array | null;
   document: Document | null;
   initialUpdate?: Uint8Array;
+  /** The SHA-256 of `bytes`, when already taken; see `docxPackageDigest`. */
+  digest?: string;
 }
 
 /**
@@ -121,9 +123,9 @@ export function seedYrsSession(
   seedDocumentIntoYrs: (document: Document) => void,
   seed: YrsSeedSources
 ): YrsDocxHost | null {
-  const { bytes, document, initialUpdate } = seed;
+  const { bytes, document, initialUpdate, digest } = seed;
   if (bytes) {
-    const host = session.openDocx(bytes, !initialUpdate);
+    const host = session.openDocx(bytes, !initialUpdate, digest ? { digest } : undefined);
     if (initialUpdate) session.loadState(initialUpdate.slice());
     return host;
   }
@@ -194,6 +196,8 @@ export function useYrsCoreSession(
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
+        // Hashing the package with Web Crypto keeps it off this thread.
+        const digest = seedBytes ? await yrs.docxPackageDigest(seedBytes) : undefined;
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
         if (
           cancelled ||
@@ -206,6 +210,7 @@ export function useYrsCoreSession(
           bytes: seedBytes,
           document: seedDocument,
           initialUpdate: collaborationInitialUpdate,
+          ...(digest ? { digest } : {}),
         });
         sessionRef.current = next;
         facadeRef.current = yrs;
