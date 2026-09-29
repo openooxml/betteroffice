@@ -414,18 +414,17 @@ fn apply_display_list_update(
 
 /// `span` after its page's positions moved by the shift runs' deltas.
 fn widened(span: BodySpan, run_lists: &[Vec<(usize, usize, u8, i64)>]) -> BodySpan {
-    let (start, end) = match span {
+    let (mut start, mut end) = match span {
         BodySpan::Unknown | BodySpan::Exact(None) => return span,
         BodySpan::Exact(Some((start, end))) | BodySpan::Widened(start, end) => (start, end),
     };
-    // Each position moves by the sum of the deltas of the lists it is in.
-    let (mut down, mut up) = (0i64, 0i64);
+    // Each run list moves a position by at most its extreme deltas.
     for runs in run_lists {
         let deltas = runs.iter().map(|run| run.3);
-        down = down.saturating_add(deltas.clone().min().unwrap_or(0).min(0));
-        up = up.saturating_add(deltas.max().unwrap_or(0).max(0));
+        start = start.saturating_add(deltas.clone().min().unwrap_or(0).min(0));
+        end = end.saturating_add(deltas.max().unwrap_or(0).max(0));
     }
-    BodySpan::Widened(start.saturating_add(down), end.saturating_add(up))
+    BodySpan::Widened(start, end)
 }
 
 /// Region-aware hit test against a stored display list — the by-handle twin of
@@ -782,6 +781,21 @@ mod tests {
         for handle in [handle, fresh, shifted, replaced] {
             close_display_list(handle);
         }
+    }
+
+    #[test]
+    fn a_span_widened_to_the_position_limits_still_covers_its_page() {
+        drain();
+        let handle = open_display_list(SAMPLE).expect("opens");
+        range_rects_by_handle(handle, 1, 2).unwrap();
+        let update = serde_json::json!({
+            "total": 1,
+            "shift": [[0, 0, [[[0, 1, 3, i64::MIN]], [[0, 1, 3, -1]]]]],
+        });
+        update_display_list(handle, &update.to_string()).expect("updates");
+        let shifted = range_rects_by_handle(handle, i64::MIN, i64::MIN + 1).unwrap();
+        assert_ne!(shifted, "[]");
+        close_display_list(handle);
     }
 
     #[test]
