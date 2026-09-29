@@ -1280,25 +1280,29 @@ impl EditSession {
         };
         let json = serde_json::to_string(&host).map_err(js_err)?;
         self.docx_source.replace(Some(source));
+        self.engine.set_partial_document(false);
         self.engine.doc().rotate_version(js_entropy());
         Ok(json)
     }
 
-    fn open_preview(&self, bytes: &[u8], blocks: usize) -> Result<String, String> {
+    fn open_preview(&self, bytes: &[u8], blocks: usize) -> Result<Option<String>, String> {
         // A preview holds a cut of the document and must never be saved, so
         // it only opens into a session with nothing to save.
         if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
             return Err("a preview opens only into an empty session".to_owned());
         }
-        let envelope = crate::seed::parse_docx_preview(bytes, blocks)?;
+        let Some(envelope) = crate::seed::parse_docx_preview(bytes, blocks)? else {
+            return Ok(None);
+        };
         let host_envelope = thin_docx_envelope(&envelope);
         let referenced_fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope)?;
-        self.engine.mark_partial_document();
+        self.engine.set_partial_document(true);
         self.engine.doc().rotate_version(js_entropy());
         serde_json::to_string(&DocxHostWire {
             envelope: host_envelope,
             referenced_fonts,
         })
+        .map(Some)
         .map_err(|error| error.to_string())
     }
 
@@ -1974,15 +1978,17 @@ impl EditSession {
     /// Opens `bytes` for display only, seeded from the body's first `blocks`
     /// blocks (see `seed::seed_docx_preview`): the reply is the host metadata
     /// of that parse. The session keeps no source package, so it cannot save.
-    pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<String, JsValue> {
+    /// Opens nothing and replies with nothing for a document the preview
+    /// refuses, which opens with [`EditSession::open_docx`] instead.
+    pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<Option<String>, JsValue> {
         self.open_preview(bytes, blocks as usize)
             .map_err(|error| js_err(&error))
     }
 
-    /// Marks the session's document as part of a package, as a replica of a
-    /// preview is: its layouts render NUMPAGES empty.
-    pub fn mark_partial_document(&self) {
-        self.engine.mark_partial_document();
+    /// Marks whether the session's document is part of a package, as a
+    /// replica of a preview is: its layouts render NUMPAGES empty.
+    pub fn set_partial_document(&self, partial: bool) {
+        self.engine.set_partial_document(partial);
     }
 
     /// Re-parses the DOCX bytes retained by the last
@@ -4766,7 +4772,7 @@ mod tests {
         assert_eq!(text, pages.to_string());
         // The preview's blocks fit its pages whole; its page count is still not the document's.
         let preview = EditSession::new(81.0).unwrap();
-        preview.open_preview(&bytes, 20).unwrap();
+        preview.open_preview(&bytes, 20).unwrap().unwrap();
         let (text, preview_pages) = numpages(&preview);
         assert!(preview_pages < pages);
         assert_eq!(text, "");
@@ -4802,6 +4808,35 @@ mod tests {
             })
             .unwrap();
         assert_eq!(text, "");
+
+        // A complete open over the preview counts the whole document again.
+        preview.delete_story("body").unwrap();
+        preview.open_docx(&bytes, true, None).unwrap();
+        assert_eq!(numpages(&preview), (pages.to_string(), pages));
+    }
+
+    #[test]
+    fn a_preview_refuses_a_document_with_a_float_placed_from_the_margin() {
+        let anchor = r#"<w:p><w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapTopAndBottom/><wp:docPr id="1" name="Float"/></wp:anchor></w:drawing></w:r></w:p>"#;
+        let body = (0..200)
+            .map(|index| {
+                let float = if index == 149 { anchor } else { "" };
+                format!("{float}<w:p><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>")
+            })
+            .collect::<String>();
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body>{body}</w:body></w:document>"#
+        );
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .unwrap();
+        let preview = EditSession::new(82.0).unwrap();
+        assert!(preview.open_preview(&bytes, 60).unwrap().is_none());
+        assert!(preview.story_ids().is_empty());
+        preview.open_docx(&bytes, true, None).unwrap();
     }
 
     #[test]
@@ -4814,7 +4849,7 @@ mod tests {
         seeded.open_docx(&bytes, true, None).unwrap();
         assert!(seeded.open_preview(&bytes, 1).is_err());
         let preview = EditSession::new(79.0).unwrap();
-        preview.open_preview(&bytes, 1).unwrap();
+        preview.open_preview(&bytes, 1).unwrap().unwrap();
         assert!(preview.materialize_docx().unwrap().is_none());
     }
 

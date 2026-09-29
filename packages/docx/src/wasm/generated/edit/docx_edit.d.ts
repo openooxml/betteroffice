@@ -561,11 +561,6 @@ export class EditSession {
      */
     locate_paragraph(story: string, para_id: string): string;
     /**
-     * Marks the session's document as part of a package, as a replica of a
-     * preview is: its layouts render NUMPAGES empty.
-     */
-    mark_partial_document(): void;
-    /**
      * Re-parses the DOCX bytes retained by the last
      * [`EditSession::open_docx`] and returns the COMPLETE package envelope as
      * JSON, or `None` when no DOCX has been opened. Unlike `open_docx` this
@@ -621,8 +616,10 @@ export class EditSession {
      * Opens `bytes` for display only, seeded from the body's first `blocks`
      * blocks (see `seed::seed_docx_preview`): the reply is the host metadata
      * of that parse. The session keeps no source package, so it cannot save.
+     * Opens nothing and replies with nothing for a document the preview
+     * refuses, which opens with [`EditSession::open_docx`] instead.
      */
-    open_docx_preview(bytes: Uint8Array, blocks: number): string;
+    open_docx_preview(bytes: Uint8Array, blocks: number): string | undefined;
     /**
      * One glyph outline from this session's resident font store:
      * `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
@@ -910,6 +907,11 @@ export class EditSession {
      * identity such as `paraId`.
      */
     set_paragraph_attrs(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, attrs_json: string, author_name?: string | null, author_date?: string | null): void;
+    /**
+     * Marks whether the session's document is part of a package, as a
+     * replica of a preview is: its layouts render NUMPAGES empty.
+     */
+    set_partial_document(partial: boolean): void;
     /**
      * Stores this peer's anchor and head as sticky positions, replacing any
      * previous selection. Both endpoints must lie in `story`. The positions
@@ -1386,7 +1388,6 @@ export interface InitOutput {
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly editsession_mark_partial_document: (a: number) => void;
     readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1432,6 +1433,7 @@ export interface InitOutput {
     readonly editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
+    readonly editsession_set_partial_document: (a: number, b: number) => void;
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];

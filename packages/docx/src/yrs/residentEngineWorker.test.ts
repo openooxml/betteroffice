@@ -83,6 +83,7 @@ function worker() {
     failPresent: null as number | null,
     session: {
       loadState() {},
+      setPartialDocument() {},
       clearFonts() {},
       layoutDocumentJson() {},
       onUpdate() {
@@ -452,12 +453,12 @@ describe('resident worker layout ownership', () => {
     expect(extras.at(-1)).toBe('given');
   });
 
-  test('marks a preview replica as part of a document before it lays it out', async () => {
+  test('marks a replica as a preview or not before it lays it out', async () => {
     const w = worker();
     const calls: string[] = [];
     Object.assign(w.harness.session, {
       loadState: () => calls.push('load'),
-      markPartialDocument: () => calls.push('partial'),
+      setPartialDocument: (partial: boolean) => calls.push(`partial:${partial}`),
       layoutDocumentWithRegionsRetainedJson: () => {
         calls.push('layout');
         return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
@@ -476,7 +477,7 @@ describe('resident worker layout ownership', () => {
       selection: null,
     };
     await w.send({ type: 'bootstrap', expectedFrameEpoch: 0, extras: '{}', snapshot });
-    expect(calls).toEqual(['load', 'layout']);
+    expect(calls).toEqual(['load', 'partial:false', 'layout']);
     calls.length = 0;
     await w.send({
       type: 'bootstrap',
@@ -484,7 +485,11 @@ describe('resident worker layout ownership', () => {
       extras: '{}',
       snapshot: { ...snapshot, partialDocument: true },
     });
-    expect(calls).toEqual(['load', 'partial', 'layout']);
+    expect(calls).toEqual(['load', 'partial:true', 'layout']);
+    calls.length = 0;
+    // A complete document synced into the same session is no longer a preview's.
+    await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
+    expect(calls).toEqual(['load', 'partial:false', 'layout']);
   });
 
   test('finishes a provisional layout on request and before other work', async () => {

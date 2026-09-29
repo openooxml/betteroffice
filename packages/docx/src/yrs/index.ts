@@ -861,11 +861,16 @@ export interface YrsSession extends CollaborationReplica {
   /**
    * Opens a DOCX for display only, from the body's first `blocks` blocks:
    * enough to lay out its first pages with a prefix pass before the whole
-   * document is opened. The session cannot save. @internal
+   * document is opened. The session cannot save. `null`, opening nothing,
+   * for a document with a float placed from outside the text, which no cut
+   * of the body lays out like the whole: open it with {@link openDocx}. @internal
    */
-  openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost;
-  /** Marks a replica of a preview's document, so its layouts render NUMPAGES empty. @internal */
-  markPartialDocument(): void;
+  openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
+  /**
+   * Marks whether the document is a preview's, as a replica of one is: its
+   * layouts render NUMPAGES empty. @internal
+   */
+  setPartialDocument(partial: boolean): void;
   /**
    * The region layout of only as much of the body as fills `pages` pages;
    * a reply marked `provisional` covers a prefix. @internal
@@ -1450,6 +1455,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     const json = mutate(() => session.open_docx(source, seedStories, options.generation));
     const host = decodeDocxHost(json, source);
     docxSource = source;
+    partialDocument = false;
     return host;
   };
 
@@ -1458,12 +1464,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
+      if (json === undefined) return null;
       partialDocument = true;
       return decodeDocxHost(json, bytes);
     },
-    markPartialDocument: () => {
-      partialDocument = true;
-      session.mark_partial_document();
+    setPartialDocument: (partial) => {
+      partialDocument = partial;
+      session.set_partial_document(partial);
     },
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(input, pages),

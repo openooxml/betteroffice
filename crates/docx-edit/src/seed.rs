@@ -5069,24 +5069,33 @@ pub fn seed_from_docx_with_generation(
 /// only. Its cut is not a real end of the document, so it is laid out with a
 /// prefix pass that stops short of it
 /// (`layout_document_with_regions_prefix_retained_json`); a pass that reaches
-/// it needs more blocks.
-pub fn seed_docx_preview(document: &EditingDoc, bytes: &[u8], blocks: usize) -> Result<(), String> {
-    seed_preview_envelope(document, parse_docx_preview(bytes, blocks)?).map(|_| ())
+/// it needs more blocks. Seeds nothing and returns `false` for a document no
+/// cut of which lays out like the whole (see
+/// [`docx_parse::parse_docx_s9_preview_from_parts`]), which opens in full.
+pub fn seed_docx_preview(
+    document: &EditingDoc,
+    bytes: &[u8],
+    blocks: usize,
+) -> Result<bool, String> {
+    let Some(envelope) = parse_docx_preview(bytes, blocks)? else {
+        return Ok(false);
+    };
+    seed_preview_envelope(document, envelope).map(|_| true)
 }
 
-/// The parse [`seed_docx_preview`] seeds from.
+/// The parse [`seed_docx_preview`] seeds from, or `None` when it refuses one.
 pub(crate) fn parse_docx_preview(
     bytes: &[u8],
     blocks: usize,
-) -> Result<docx_parse::S9WireEnvelope, String> {
+) -> Result<Option<docx_parse::S9WireEnvelope>, String> {
     let is_media = |path: &str| path.to_ascii_lowercase().starts_with("word/media/");
     let mut parts = ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| !is_media(path))?;
     let parse = |parts: &[(String, Vec<u8>)]| {
-        docx_parse::parse_docx_s9_wire_from_parts(
+        docx_parse::parse_docx_s9_preview_from_parts(
             parts,
+            blocks,
             docx_parse::S9ParseOptions {
                 source_ordinals: true,
-                body_blocks: Some(blocks),
                 determinism_seed: Some(PREVIEW_SEED.to_owned()),
                 ..docx_parse::S9ParseOptions::default()
             },
@@ -5094,11 +5103,13 @@ pub(crate) fn parse_docx_preview(
         )
         .map_err(|error| error.to_string())
     };
-    let envelope = parse(&parts)?;
+    let Some(envelope) = parse(&parts)? else {
+        return Ok(None);
+    };
     // Inflate only the images the parsed prefix and the other parts use.
     let media = preview_media(&envelope, &parts)?;
     if media.is_empty() {
-        return Ok(envelope);
+        return Ok(Some(envelope));
     }
     let inflated: u64 = parts.iter().map(|(_, data)| data.len() as u64).sum();
     parts.extend(ooxml_opc::unzip_parts_where(
@@ -5297,15 +5308,16 @@ mod tests {
             ("word/headers/_rels/header1.xml.rels".to_owned(), format!("<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='{IMAGE}' Target = '../media/logo%201.png'/></Relationships>").into_bytes()),
         ];
         let parsed = |blocks| {
-            docx_parse::parse_docx_s9_wire_from_parts(
+            docx_parse::parse_docx_s9_preview_from_parts(
                 &parts,
+                blocks,
                 docx_parse::S9ParseOptions {
-                    body_blocks: Some(blocks),
                     determinism_seed: Some(PREVIEW_SEED.to_owned()),
                     ..docx_parse::S9ParseOptions::default()
                 },
                 &docx_parse::xml::ParseLimits::default(),
             )
+            .unwrap()
             .unwrap()
         };
         let mut envelope = parsed(1);

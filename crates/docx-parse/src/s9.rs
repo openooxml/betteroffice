@@ -38,9 +38,6 @@ pub struct S9ParseOptions {
     pub include_canonical: bool,
     /// Records each paragraph's `w:p` occurrence in its part as `sourceOrdinal`.
     pub source_ordinals: bool,
-    /// Parse only the body's first blocks, for a preview of its first pages:
-    /// at least this many, and on until no field spans past the last one.
-    pub body_blocks: Option<usize>,
 }
 
 impl Default for S9ParseOptions {
@@ -52,7 +49,6 @@ impl Default for S9ParseOptions {
             determinism_seed: None,
             include_canonical: false,
             source_ordinals: false,
-            body_blocks: None,
         }
     }
 }
@@ -205,31 +201,41 @@ pub fn parse_docx_s9_wire_parts_with_limits(
     limits: &ParseLimits,
 ) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>), ParseError> {
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
-    let envelope = parse_s9_package(&parts, data, options, limits)?;
+    let envelope = parse_s9_package(&parts, data, options, limits, None)?
+        .expect("a whole body is never refused");
     Ok((envelope, parts))
 }
 
-/// Parse already inflated package parts. The parts alone cannot be hashed
-/// into generated IDs, so `options.determinism_seed` is required.
-pub fn parse_docx_s9_wire_from_parts(
+/// Parses already inflated package parts with only the body's first
+/// `blocks` blocks, for a preview of its first pages: at least that many, and
+/// on until no field spans past the last one. `None` when the document holds
+/// a float placed from outside the text, which the layout may apply from the
+/// body's first block, so no cut of the body lays out like the whole. The
+/// parts alone cannot be hashed into generated IDs, so
+/// `options.determinism_seed` is required.
+pub fn parse_docx_s9_preview_from_parts(
     parts: &[(String, Vec<u8>)],
+    blocks: usize,
     options: S9ParseOptions,
     limits: &ParseLimits,
-) -> Result<S9WireEnvelope, ParseError> {
+) -> Result<Option<S9WireEnvelope>, ParseError> {
     if options.determinism_seed.is_none() || options.include_canonical {
         return Err(ParseError::Canonical(
             "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
         ));
     }
-    parse_s9_package(parts, &[], options, limits)
+    parse_s9_package(parts, &[], options, limits, Some(blocks))
 }
 
+/// `None` only when `body_blocks` would cut a body the preview refuses; see
+/// [`parse_docx_s9_preview_from_parts`].
 fn parse_s9_package(
     parts: &[(String, Vec<u8>)],
     data: &[u8],
     options: S9ParseOptions,
     limits: &ParseLimits,
-) -> Result<S9WireEnvelope, ParseError> {
+    body_blocks: Option<usize>,
+) -> Result<Option<S9WireEnvelope>, ParseError> {
     let mut budget = ParseBudget::new(limits);
     if options.source_ordinals {
         budget.record_source_ordinals();
@@ -304,6 +310,9 @@ fn parse_s9_package(
             let parsed = parse_xml(xml, path, &mut budget)?;
             match parsed.root() {
                 Some(root) => {
+                    if body_blocks.is_some() && crate::document::places_floats_off_the_text(root) {
+                        return Ok(None);
+                    }
                     let mut parser = StoryParser {
                         relationships: Some(&relationships),
                         theme: Some(&theme),
@@ -317,7 +326,7 @@ fn parse_s9_package(
                         ids: &mut ids,
                         part: path,
                     };
-                    parse_document_body_compact(root, &mut parser, options.body_blocks)?
+                    parse_document_body_compact(root, &mut parser, body_blocks)?
                 }
                 None => DocumentBody::default(),
             }
@@ -503,14 +512,14 @@ fn parse_s9_package(
         .filter(|(_, xml)| is_valid_utf8_xml_text(xml))
         .map(|(_, xml)| String::from_utf8_lossy(xml).into_owned());
 
-    Ok(S9WireEnvelope {
+    Ok(Some(S9WireEnvelope {
         wire_version: 1,
         document,
         embedded_font_parts,
         font_table_relationships_xml,
         canonical_base64,
         canonical_sha256,
-    })
+    }))
 }
 
 /// Flags every paragraph whose ID repeats one earlier in the package,
@@ -756,7 +765,6 @@ mod tests {
                 determinism_seed: None,
                 include_canonical: true,
                 source_ordinals: false,
-                body_blocks: None,
             },
         )
         .unwrap();

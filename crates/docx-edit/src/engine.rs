@@ -1156,11 +1156,11 @@ impl EngineSession {
         }
     }
 
-    /// Marks the document as part of a package, such as a preview's first
-    /// blocks: its layouts count only its own pages, so they render NUMPAGES
-    /// empty.
-    pub fn mark_partial_document(&self) {
-        self.partial_document.set(true);
+    /// Marks whether the document is part of a package, such as a preview's
+    /// first blocks: such a document's layouts count only its own pages, so
+    /// they render NUMPAGES empty.
+    pub fn set_partial_document(&self, partial: bool) {
+        self.partial_document.set(partial);
     }
 
     /// Editing document.
@@ -5844,7 +5844,7 @@ mod tests {
                 .unwrap(),
         );
         let preview = EngineSession::new(311);
-        crate::seed::seed_docx_preview(preview.doc(), &bytes, 60).unwrap();
+        assert!(crate::seed::seed_docx_preview(preview.doc(), &bytes, 60).unwrap());
         assert!(
             preview.doc().paragraphs("body").unwrap().len()
                 < full.doc().paragraphs("body").unwrap().len()
@@ -5936,7 +5936,7 @@ mod tests {
         full.layout_document_with_regions_retained_json(&request)
             .unwrap();
         let preview = EngineSession::new(312);
-        crate::seed::seed_docx_preview(preview.doc(), &bytes, 40).unwrap();
+        assert!(crate::seed::seed_docx_preview(preview.doc(), &bytes, 40).unwrap());
         preview
             .layout_document_with_regions_prefix_retained_json(&request, 3)
             .unwrap();
@@ -6007,7 +6007,7 @@ mod tests {
         });
         println!("preview of the first {blocks} body blocks:");
         let preview = open(&EngineSession::new(320), &|engine| {
-            crate::seed::seed_docx_preview(engine.doc(), &bytes, blocks).unwrap();
+            assert!(crate::seed::seed_docx_preview(engine.doc(), &bytes, blocks).unwrap());
         });
         for (index, (full, preview)) in full.iter().zip(&preview).enumerate() {
             println!("  page {index} identical: {}", full == preview);
