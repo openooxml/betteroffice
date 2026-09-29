@@ -551,34 +551,71 @@ fn measure_float_flow(
     zones_by_anchor: &AnchorZones,
     section_break_marks: &[bool],
 ) -> Result<Vec<BlockExtent>, String> {
-    let mut cumulative_y = 0.0;
-    let mut active_zones = Vec::new();
+    let mut flow = FlowState::default();
     let mut measured = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter_mut().enumerate() {
+        measured.push(flow.measure(
+            index,
+            block,
+            widths,
+            default_width,
+            config,
+            paragraph_zones,
+            zones_by_anchor,
+            section_break_marks,
+        )?);
+    }
+    Ok(measured)
+}
+
+/// Where the float flow stands between two blocks.
+#[derive(Default)]
+struct FlowState {
+    cumulative_y: f64,
+    active_zones: Vec<FloatingZone>,
+}
+
+impl FlowState {
+    #[allow(clippy::too_many_arguments)]
+    fn measure(
+        &mut self,
+        index: usize,
+        block: &mut LayoutBlock,
+        widths: &[f64],
+        default_width: f64,
+        config: &MeasurementConfig,
+        paragraph_zones: &ParagraphZones,
+        zones_by_anchor: &AnchorZones,
+        section_break_marks: &[bool],
+    ) -> Result<BlockExtent, String> {
+        let Self {
+            cumulative_y,
+            active_zones,
+        } = self;
         if resets_float_flow(block) {
             active_zones.clear();
-            cumulative_y = 0.0;
+            *cumulative_y = 0.0;
         }
         if let Some(zones) = paragraph_zones.get(&index) {
             // A paragraph-anchored band hangs off its own anchor, which sits at
             // `cumulative_y` in the frame the earlier bands were measured in.
             if active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
                 active_zones.extend(zones.iter().map(|zone| FloatingZone {
-                    top_y: zone.top_y + cumulative_y,
-                    bottom_y: zone.bottom_y + cumulative_y,
+                    top_y: zone.top_y + *cumulative_y,
+                    bottom_y: zone.bottom_y + *cumulative_y,
                     ..zone.clone()
                 }));
             } else {
-                cumulative_y = 0.0;
+                *cumulative_y = 0.0;
                 active_zones.clone_from(zones);
             }
         }
         if let Some(zones) = zones_by_anchor.get(&index) {
             // Anchors the flow has not advanced past share one origin.
-            if cumulative_y == 0.0 && active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
+            if *cumulative_y == 0.0 && active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
                 active_zones.extend(zones.iter().cloned());
             } else {
-                cumulative_y = 0.0;
+                *cumulative_y = 0.0;
                 active_zones.clone_from(zones);
             }
         }
@@ -597,17 +634,94 @@ fn measure_float_flow(
                 width,
                 config,
                 (!active_zones.is_empty()).then_some(active_zones.as_slice()),
-                cumulative_y,
+                *cumulative_y,
             )?
         };
         if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
             && !matches!(block, LayoutBlock::Shape(shape) if anchored_shape(shape))
         {
-            cumulative_y += extent_height(&extent);
+            *cumulative_y += extent_height(&extent);
         }
-        measured.push(extent);
+        Ok(extent)
     }
-    Ok(measured)
+}
+
+/// [`measure_blocks_with_floats`] a few blocks at a time. The floating zones
+/// are found once up front; [`Self::measure_until`] then measures the blocks in
+/// order and can stop after any of them, and the extents equal one call's.
+pub struct FloatFlow {
+    default_width: f64,
+    paragraph_zones: ParagraphZones,
+    zones_by_anchor: AnchorZones,
+    marks: Vec<bool>,
+    state: FlowState,
+    measured: Vec<BlockExtent>,
+}
+
+impl FloatFlow {
+    pub fn new(
+        blocks: &[LayoutBlock],
+        widths: &[f64],
+        config: &MeasurementConfig,
+        page_geometry: Option<&FloatPageGeometry>,
+    ) -> Result<Self, String> {
+        let default_width = widths.first().copied().unwrap_or(0.0);
+        let extracted = extract_floating_zones(
+            blocks,
+            default_width,
+            config,
+            page_geometry,
+            &BTreeMap::new(),
+        )?;
+        let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
+        Ok(Self {
+            default_width,
+            paragraph_zones,
+            zones_by_anchor,
+            marks: section_break_marks(blocks),
+            state: FlowState::default(),
+            measured: Vec::with_capacity(blocks.len()),
+        })
+    }
+
+    /// Blocks measured so far.
+    pub fn measured(&self) -> usize {
+        self.measured.len()
+    }
+
+    /// The extents of the blocks measured so far.
+    pub fn extents(&self) -> &[BlockExtent] {
+        &self.measured
+    }
+
+    /// Measures the next blocks up to `end`, exclusive. `blocks` and `widths`
+    /// are the ones the flow was created for.
+    pub fn measure_until(
+        &mut self,
+        blocks: &mut [LayoutBlock],
+        widths: &[f64],
+        config: &MeasurementConfig,
+        end: usize,
+    ) -> Result<(), String> {
+        for index in self.measured.len()..end.min(blocks.len()) {
+            let extent = self.state.measure(
+                index,
+                &mut blocks[index],
+                widths,
+                self.default_width,
+                config,
+                &self.paragraph_zones,
+                &self.zones_by_anchor,
+                &self.marks,
+            )?;
+            self.measured.push(extent);
+        }
+        Ok(())
+    }
+
+    pub fn into_extents(self) -> Vec<BlockExtent> {
+        self.measured
+    }
 }
 
 pub fn measure_block(

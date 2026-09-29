@@ -159,6 +159,12 @@ export class EditSession {
      */
     begin_opening(generation?: string | null): void;
     /**
+     * Begins `layout_document_with_regions_retained_json` as a pass measured a
+     * step at a time; see `EngineSession::begin_region_layout`. Returns the
+     * progress JSON, with `layoutJson` once the pass is complete.
+     */
+    begin_region_layout(input: string): string;
+    /**
      * Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
      * a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
      * frame the caller currently holds; pass `0` for the first frame. A
@@ -778,6 +784,11 @@ export class EditSession {
      */
     resolve_sticky_position(story: string, position: Uint8Array): string;
     /**
+     * Measures up to `blocks` more body blocks of the begun pass; see
+     * `EngineSession::resume_region_layout`.
+     */
+    resume_region_layout(blocks: number): string;
+    /**
      * Retained `{ measured, options }` for the main-thread display-list
      * fallback after a retained-only region layout.
      */
@@ -1382,6 +1393,7 @@ export interface InitOutput {
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
+    readonly editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1471,6 +1483,7 @@ export interface InitOutput {
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

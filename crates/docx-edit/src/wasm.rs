@@ -1669,6 +1669,29 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Begins `layout_document_with_regions_retained_json` as a pass measured a
+    /// step at a time; see `EngineSession::begin_region_layout`. Returns the
+    /// progress JSON, with `layoutJson` once the pass is complete.
+    pub fn begin_region_layout(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        let progress = self
+            .engine
+            .begin_region_layout(input)
+            .map_err(|error| JsValue::from_str(&error))?;
+        serde_json::to_string(&progress).map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    /// Measures up to `blocks` more body blocks of the begun pass; see
+    /// `EngineSession::resume_region_layout`.
+    pub fn resume_region_layout(&self, blocks: u32) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        let progress = self
+            .engine
+            .resume_region_layout(blocks as usize)
+            .map_err(|error| JsValue::from_str(&error))?;
+        serde_json::to_string(&progress).map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
     /// Retained `{ measured, options }` for the main-thread display-list
     /// fallback after a retained-only region layout.
     pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {
@@ -5015,6 +5038,12 @@ mod tests {
                     .layout_document_with_regions_prefix_retained_json(&request, 1)
                     .unwrap(),
             ));
+            let mut progress = parse(session.begin_region_layout(&request).unwrap());
+            while progress.get("layoutJson").is_none() {
+                between();
+                progress = parse(session.resume_region_layout(1).unwrap());
+            }
+            record(progress);
             let layout = parse(
                 session
                     .layout_document_with_regions_retained_json(&request)

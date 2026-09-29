@@ -49,6 +49,11 @@ export type ResidentEngineWorkerRequest =
       type: 'completeLayout';
       expectedFrameEpoch: number;
       paintCaret: boolean;
+      /**
+       * Measure the rest this many body blocks a step to start with, letting
+       * requests that arrive meanwhile run between steps; absent, in one step.
+       */
+      sliceBlocks?: number;
     }
   | {
       id: number;
