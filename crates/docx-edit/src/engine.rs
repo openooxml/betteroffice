@@ -4409,9 +4409,10 @@ mod tests {
         let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
         let mut body = String::new();
         for index in 0..200 {
-            if index % 15 == 3 {
+            if index % 7 == 3 {
                 body.push_str(&format!(
-                    r#"<w:tbl><w:tblPr><w:tblpPr w:leftFromText="120" w:rightFromText="120" w:vertAnchor="text" w:horzAnchor="text" w:tblpY="60"/><w:tblW w:w="1800" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1800"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Float {index}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+                    r#"<w:tbl><w:tblPr><w:tblpPr w:leftFromText="120" w:rightFromText="120" w:vertAnchor="text" w:horzAnchor="text" w:tblpY="60"/><w:tblW w:w="1800" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1800"/></w:tblGrid>{rows}</w:tbl>"#,
+                    rows = format!("<w:tr><w:tc><w:p><w:r><w:t>Float {index}</w:t></w:r></w:p></w:tc></w:tr>").repeat(6)
                 ));
             }
             body.push_str(&format!(
@@ -4444,18 +4445,22 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let engine = seeded();
         let prefix: serde_json::Value = serde_json::from_str(
-            &engine
+            &seeded()
                 .layout_document_with_regions_prefix_retained_json(&request, 3)
                 .unwrap(),
         )
         .unwrap();
-        assert!(engine.pagination.borrow().measured_with_floats);
+        let first_pages = full["layout"]["pages"].as_array().unwrap()[..3].to_vec();
+        assert!(
+            serde_json::to_string(&first_pages)
+                .unwrap()
+                .contains("\"isFloating\":true")
+        );
         assert_eq!(prefix["provisional"], true);
         assert_eq!(
             prefix["layout"]["pages"].as_array().unwrap()[..3],
-            full["layout"]["pages"].as_array().unwrap()[..3]
+            first_pages
         );
     }
 
