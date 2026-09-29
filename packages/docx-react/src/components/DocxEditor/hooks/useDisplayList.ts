@@ -1302,13 +1302,10 @@ export function useRustDisplayList(
 
   const resetSettled = useCallback(
     (failure: Error | null = null): void => {
-      if (!failure) {
-        contentEpochRef.current += 1;
-        queryEpochGate.invalidate();
-      }
+      if (!failure) contentEpochRef.current += 1;
       markSettled(null, failure);
     },
-    [markSettled, queryEpochGate]
+    [markSettled]
   );
 
   const settledDisplayList = useCallback(
