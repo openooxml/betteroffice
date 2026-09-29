@@ -300,7 +300,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       const sourceVersion = readSessionVersion(session);
 
       // Step 4+: paint + scroll/events with the computed values.
-      const applyComputation = (computation: LayoutComputation) => {
+      const applyComputation = (
+        computation: LayoutComputation,
+        origin: LayoutUpdateOrigin = layoutUpdateOrigin
+      ) => {
         const { layout: newLayout } = computation;
         stampSourceVersion(newLayout, sourceVersion);
 
@@ -312,7 +315,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         const currentViewportAnchor = currentViewportAnchorRef.current;
         const anchor =
           scrollParent?.isConnected && interactionHost && queries
-            ? layoutUpdateOrigin === 'remote'
+            ? origin === 'remote'
               ? currentViewportAnchor?.navigationEpoch === navigationEpochRef.current
                 ? {
                     kind: 'viewport' as const,
@@ -331,7 +334,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             : null;
 
         viewportAnchorCaptureReadyRef.current = false;
-        layoutUpdateOriginRef.current = layoutUpdateOrigin;
+        layoutUpdateOriginRef.current = origin;
         setLayout(newLayout);
 
         const vp = viewportLayoutRef.current;
@@ -410,7 +413,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             void computation.complete?.then((complete) => {
               if (pass !== passRef.current || sessionRef.current !== session) return;
               if (complete && readSessionVersion(session) === sourceVersion) {
-                applyComputation(complete);
+                // Nothing the user did changed: keep their viewport.
+                applyComputation(complete, 'remote');
               } else {
                 layOutHere();
               }
