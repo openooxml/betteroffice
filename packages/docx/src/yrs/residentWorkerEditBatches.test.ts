@@ -204,3 +204,52 @@ test('one resident delete request merges at most one paragraph', async () => {
   expect(accepted(main)).toEqual(['pha']);
   expect(frameText(frame)).toBe('pha');
 });
+
+test('typing in a table cell goes through the resident worker', async () => {
+  const main = await createYrsSession({ clientId: 5104 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Anchor');
+  main.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2);
+  const cell = main.storyIds().find((story) => story.startsWith('body:'))!;
+  const cellParagraph = main.paragraphs(cell)[0]!.paraId;
+  main.insertText({ story: cell, paraId: cellParagraph, offset: 0 }, 'Cell');
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  main.setSelection({ story: cell, paraId: cellParagraph, offset: 4 });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  let frame = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+  expect(frameText(frame)).toContain('Cell');
+
+  const typed = await client.applyInput(' typed', main.selection()!, frame.frameEpoch);
+  if (!typed.applied) throw new Error('the worker refused resident input in a cell');
+  for (const update of typed.updates) main.applyLocalUpdate(update);
+  frame = applyFrameDeltaOwned(frame, decodeFrameDelta(typed.frame));
+  expect(frameText(frame)).toContain('Cell typed');
+  expect(main.paragraphs(cell)[0]!.text).toBe('Cell typed');
+  expect(typed.selection?.head).toMatchObject({ story: cell, offset: 10 });
+});
+
+test('a resident delete does not merge a paragraph forward over a table', async () => {
+  const main = await createYrsSession({ clientId: 5105 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Alpha');
+  const { secondParaId } = main.splitParagraph({ story: 'body', paraId, offset: 5 });
+  main.insertText({ story: 'body', paraId: secondParaId, offset: 0 }, 'Omega');
+  main.insertTable({ story: 'body', paraId: secondParaId, offset: 0 }, 1, 1);
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  main.setSelection({ story: 'body', paraId, offset: 5 });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  const frame = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+  const before = accepted(main);
+
+  expect(
+    await client.applyDelete('forward', main.selection()!, frame.frameEpoch, false, false)
+  ).toEqual({ applied: false });
+  expect(accepted(main)).toEqual(before);
+  expect(client.isReady()).toBe(true);
+});
