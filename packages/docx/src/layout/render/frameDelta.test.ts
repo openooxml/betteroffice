@@ -348,7 +348,9 @@ describe('FrameDelta wire round-trip', () => {
       verticalMoveByHandle: () => 'null',
     };
     const firstQueries = createDisplayListQueries(retained.displayList, engine);
-    firstQueries.prime();
+    // parse every page into the store, so adoption has retained pages to shift
+    firstQueries.rangeRects(0, Number.MAX_SAFE_INTEGER);
+    expect(updates.length).toBe(1);
 
     session.insert_text('body', paraId, 5, 'x', undefined, undefined);
     const second = envelopeFor();
@@ -372,8 +374,8 @@ describe('FrameDelta wire round-trip', () => {
     // the page's serialized payload
     const secondQueries = createDisplayListQueries(next.displayList, engine, firstQueries);
     secondQueries.prime();
-    expect(updates.length).toBe(1);
-    const update = JSON.parse(updates[0]!) as {
+    expect(updates.length).toBe(2);
+    const update = JSON.parse(updates[1]!) as {
       total: number;
       replace?: Array<[number, unknown]>;
       shift?: Array<[number, number, number[][][]]>;
@@ -707,6 +709,9 @@ describe('FrameDelta note anchor shifts', () => {
     };
     const firstQueries = createDisplayListQueries(owned.displayList, engine);
     firstQueries.prime();
+    // parse every page into the store, so adoption has retained pages to shift
+    firstQueries.rangeRects(0, Number.MAX_SAFE_INTEGER);
+    const parsedUpdates = updates.length;
 
     const { paraId } = (JSON.parse(session.paragraphs('body')) as Array<{ paraId: string }>)[0]!;
     for (const text of ['xyz', 'ab']) {
@@ -736,8 +741,8 @@ describe('FrameDelta note anchor shifts', () => {
     ).toEqual([3, 3]);
     const secondQueries = createDisplayListQueries(owned.displayList, engine, firstQueries);
     secondQueries.prime();
-    expect(updates).toHaveLength(1);
-    const update = JSON.parse(updates[0]!) as {
+    expect(updates).toHaveLength(parsedUpdates + 1);
+    const update = JSON.parse(updates.at(-1)!) as {
       replace: Array<[number, unknown]>;
       shift: Array<[number, number, unknown[][], unknown[][]?]>;
     };
