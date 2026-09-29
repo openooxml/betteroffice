@@ -694,6 +694,11 @@ fn options_fingerprint(input: &LayoutInput) -> Result<u64, String> {
         .map_err(|error| format!("fingerprint layout options: {error}"))
 }
 
+/// A table cell or content control story lowered as part of the body.
+fn is_nested_body_story(story: &str) -> bool {
+    story.starts_with("body:")
+}
+
 fn block_key(id: &BlockId) -> Cow<'_, str> {
     match id {
         BlockId::Num(value) if value.fract() == 0.0 => Cow::Owned(format!("{}", *value as i64)),
@@ -1875,17 +1880,19 @@ impl EngineSession {
     /// Whether the current resident state can complete a plain body-text edit
     /// without consulting the host. This is checked before the document
     /// mutation so `apply_input` cannot discover a missing measurement
-    /// template after committing the text.
+    /// template after committing the text. A table cell or other story nested
+    /// in the body qualifies once the body lays out through regions.
     pub fn can_apply_input(&self, story: &str, para_id: &str) -> bool {
-        if story != "body" {
+        let regions = self.regions.borrow().is_some();
+        if story != "body" && !(regions && is_nested_body_story(story)) {
             return false;
         }
-        let render_ready = self.render.borrow().stories.contains_key(story);
+        let render_ready = self.render.borrow().stories.contains_key("body");
         let pagination = self.pagination.borrow();
         let layout_ready = pagination.input.is_some() && pagination.layout.is_some();
         drop(pagination);
         let display_ready = self.display.borrow().extras_json.is_some();
-        let measure_ready = self.regions.borrow().is_some()
+        let measure_ready = regions
             || self
                 .pagination
                 .borrow()
@@ -1927,6 +1934,7 @@ impl EngineSession {
         self.with_lowered_story_observed(story, &env, after_lower, |blocks| {
             self.resident_layout_input_from_blocks(
                 blocks,
+                false,
                 &mut |_, key, previous_block, next_block| {
                     let mut envelope = self
                         .measurement_envelope_for_block(key, previous_block)
@@ -1957,9 +1965,12 @@ impl EngineSession {
     /// blocks reuse their retained extents (with fresh absolute positions),
     /// changed paragraph blocks are re-measured through `measure_dirty`
     /// (`(block_index, block_key, previous_block, next_block) -> extent`).
+    /// With `any_block`, a changed table or other non-paragraph block with a
+    /// stable id is re-measured too instead of refused.
     fn resident_layout_input_from_blocks(
         &self,
         blocks: &[LayoutBlock],
+        any_block: bool,
         measure_dirty: &mut dyn FnMut(
             usize,
             &str,
@@ -2010,9 +2021,36 @@ impl EngineSession {
                 paragraph_identity(&previous_measured.block),
             ) else {
                 if *next_block != previous_measured.block {
-                    return Err(
-                        "resident plain-text input changed a non-paragraph block".to_owned()
-                    );
+                    let (true, Some(next_id), Some(previous_id)) = (
+                        any_block,
+                        fragment_identity(next_block),
+                        fragment_identity(&previous_measured.block),
+                    ) else {
+                        return Err(
+                            "resident plain-text input changed a non-paragraph block".to_owned()
+                        );
+                    };
+                    let key = block_key(next_id);
+                    if key != block_key(previous_id) {
+                        return Err(
+                            "resident plain-text input changed stable block identity".to_owned()
+                        );
+                    }
+                    let mut next_measured_block = next_block.clone();
+                    let measure = measure_dirty(
+                        block_index,
+                        &key,
+                        &previous_measured.block,
+                        &mut next_measured_block,
+                    )?;
+                    let measured_block = MeasuredBlock {
+                        block: next_measured_block,
+                        measure,
+                    };
+                    block_fingerprints.push(measured_fingerprint(&measured_block)?);
+                    measured.push(measured_block);
+                    resident_measure_calls = resident_measure_calls.wrapping_add(1);
+                    continue;
                 }
                 measured.push(MeasuredBlock {
                     block: next_block.clone(),
@@ -2279,9 +2317,10 @@ impl EngineSession {
         story: &str,
         phase: &mut impl FnMut(RegionResidentPhase),
     ) -> Result<bool, String> {
-        if story != "body" {
+        if story != "body" && !is_nested_body_story(story) {
             return Ok(false);
         }
+        let story = "body";
         let fast_config = {
             let state = self.regions.borrow();
             state.as_ref().and_then(|state| {
@@ -2343,6 +2382,7 @@ impl EngineSession {
                     }
                     match self.resident_layout_input_from_blocks(
                         blocks,
+                        true,
                         &mut |index, _key, _previous_block, next_block| {
                             let width = widths.get(index).copied().unwrap_or(default_width);
                             resolve_line_unit_spacing(
@@ -4530,7 +4570,7 @@ mod tests {
         let walk = |blocks: &[LayoutBlock]| {
             let mut dirty: Vec<(usize, String)> = Vec::new();
             engine
-                .resident_layout_input_from_blocks(blocks, &mut |index, key, _, _| {
+                .resident_layout_input_from_blocks(blocks, false, &mut |index, key, _, _| {
                     dirty.push((index, key.to_owned()));
                     Ok(BlockExtent::Paragraph(ParagraphExtent {
                         lines: Vec::new(),

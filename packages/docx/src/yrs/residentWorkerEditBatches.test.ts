@@ -126,3 +126,29 @@ test('host batches drain worker input, invalidate the worker once and never adop
   expect(stale).toBeInstanceOf(FrameDeltaError);
   expect((stale as FrameDeltaError).code).toBe('stale-frame');
 });
+
+test('typing in a table cell goes through the resident worker', async () => {
+  const main = await createYrsSession({ clientId: 5104 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Anchor');
+  main.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2);
+  const cell = main.storyIds().find((story) => story.startsWith('body:'))!;
+  const cellParagraph = main.paragraphs(cell)[0]!.paraId;
+  main.insertText({ story: cell, paraId: cellParagraph, offset: 0 }, 'Cell');
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  main.setSelection({ story: cell, paraId: cellParagraph, offset: 4 });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  let frame = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+  expect(frameText(frame)).toContain('Cell');
+
+  const typed = await client.applyInput(' typed', main.selection()!, frame.frameEpoch);
+  if (!typed.applied) throw new Error('the worker refused resident input in a cell');
+  for (const update of typed.updates) main.applyLocalUpdate(update);
+  frame = applyFrameDeltaOwned(frame, decodeFrameDelta(typed.frame));
+  expect(frameText(frame)).toContain('Cell typed');
+  expect(main.paragraphs(cell)[0]!.text).toBe('Cell typed');
+  expect(typed.selection?.head).toMatchObject({ story: cell, offset: 10 });
+});

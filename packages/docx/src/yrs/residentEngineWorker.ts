@@ -212,7 +212,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       pendingUpdates,
       applied.profile,
       started,
-      true,
+      request.selection.head.story === 'body',
       request.paintCaret
     );
   } catch (error) {
