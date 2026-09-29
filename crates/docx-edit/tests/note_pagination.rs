@@ -353,8 +353,8 @@ fn shrinking_a_kept_follower_pulls_its_keep_with_next_run_back() {
     assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9315));
 }
 
-#[test]
-fn a_same_length_edit_around_an_endnote_reference_moves_its_backlink() {
+/// Pages of text after a paragraph whose endnote is laid out on the last page.
+fn endnote_after_pages(client_id: u64) -> (EngineSession, String) {
     let filler = (0..40)
         .map(|index| {
             fixture::p(
@@ -374,7 +374,7 @@ fn a_same_length_edit_around_an_endnote_reference_moves_its_backlink() {
             )
         )
     ));
-    let (engine, request) = fixture::laid_out(&fixture::with_body(&body), 9316);
+    let (engine, request) = fixture::laid_out(&fixture::with_body(&body), client_id);
     engine
         .build_display_list_frame(&extras(&request), 0)
         .unwrap();
@@ -382,7 +382,12 @@ fn a_same_length_edit_around_an_endnote_reference_moves_its_backlink() {
     engine
         .build_display_list_frame(&extras(&request), 1)
         .unwrap();
+    (engine, request)
+}
 
+#[test]
+fn a_same_length_edit_around_an_endnote_reference_moves_its_backlink() {
+    let (engine, request) = endnote_after_pages(9316);
     let ctx = EditCtx::local("", "");
     engine
         .doc()
@@ -397,6 +402,29 @@ fn a_same_length_edit_around_an_endnote_reference_moves_its_backlink() {
         .build_display_list_frame(&extras(&request), 2)
         .unwrap();
     assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9317));
+}
+
+#[test]
+fn a_body_edit_batched_with_an_endnote_edit_redraws_the_endnote() {
+    let (engine, request) = endnote_after_pages(9318);
+    let ctx = EditCtx::local("", "");
+    engine
+        .doc()
+        .insert_text(&ctx, Position::new("body", 0), "x", FormatPolicy::Inherit)
+        .unwrap();
+    engine
+        .doc()
+        .delete_range(&ctx, StoryRange::new("body", 1, 2))
+        .unwrap();
+    engine
+        .doc()
+        .insert_text(&ctx, Position::new("en:1", 1), "y", FormatPolicy::Inherit)
+        .unwrap();
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    engine
+        .build_display_list_frame(&extras(&request), 2)
+        .unwrap();
+    assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9319));
 }
 
 #[test]

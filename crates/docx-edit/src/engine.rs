@@ -26,7 +26,7 @@ use docx_layout::regions::{
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
-    ParagraphExtent, Run,
+    NoteAreaContract, ParagraphExtent, Run,
 };
 use serde::Serialize;
 use yrs::Subscription;
@@ -293,29 +293,13 @@ fn has_wrap_stabilized_shapes(blocks: &[LayoutBlock]) -> bool {
         .any(|block| matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape)))
 }
 
-type NotePageKey = Vec<(Option<i64>, Option<String>, Option<i64>, Option<i64>)>;
-
-/// What each page's note areas show that an edit elsewhere can change.
-fn note_page_keys(layout: Option<&Layout>) -> Vec<NotePageKey> {
+/// What each page's note areas show, which an edit elsewhere can change.
+fn note_page_keys(layout: Option<&Layout>) -> Vec<Option<Vec<NoteAreaContract>>> {
     layout.map_or_else(Vec::new, |layout| {
         layout
             .pages
             .iter()
-            .map(|page| {
-                page.note_areas
-                    .iter()
-                    .flatten()
-                    .flat_map(|area| area.notes.iter().flatten())
-                    .map(|note| {
-                        (
-                            note.id,
-                            note.display_label.clone(),
-                            note.anchor_doc_start,
-                            note.anchor_doc_end,
-                        )
-                    })
-                    .collect()
-            })
+            .map(|page| page.note_areas.clone())
             .collect()
     })
 }
