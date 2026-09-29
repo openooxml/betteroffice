@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useInsertionEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -225,6 +226,9 @@ export function CanvasPagesView({
     },
     [pageRegistry]
   );
+  // Runs after this render's page DOM is in place and before any layout effect
+  // reads it: memoized pages can move or renumber without their refs rerunning.
+  useInsertionEffect(() => pageRegistry.invalidate());
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
   const [replayState] = useState(() => new CanvasReplayState());
   const offscreenSignatureRef = useRef('');

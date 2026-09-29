@@ -41,7 +41,8 @@ export interface DisplayPageClientRect {
  * The page canvases a renderer mounts under its pages host, so page lookups
  * read them instead of searching a subtree that also holds every page's
  * accessibility mirror. A renderer adds each `<canvas data-page-index>` it
- * mounts, deletes it on unmount, and binds the registry to the host with
+ * mounts, deletes it on unmount, invalidates the registry whenever it may have
+ * moved or renumbered them, and binds the registry to the host with
  * {@link bindDisplayPageRegistry}.
  */
 export class DisplayPageRegistry {
@@ -51,12 +52,16 @@ export class DisplayPageRegistry {
 
   add(canvas: HTMLCanvasElement): void {
     this.canvases.add(canvas);
-    this.ordered = null;
-    this.byIndex = null;
+    this.invalidate();
   }
 
   delete(canvas: HTMLCanvasElement): void {
     this.canvases.delete(canvas);
+    this.invalidate();
+  }
+
+  /** Forgets the order and indices read so far, after the renderer moved or renumbered canvases. */
+  invalidate(): void {
     this.ordered = null;
     this.byIndex = null;
   }

@@ -92,6 +92,30 @@ test('page lookups read the mounted canvases as a search of the host would', asy
   expectSearchAnswers(hostRef.current!, 1);
 });
 
+test('page lookups follow pages the view reorders without rerendering them', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const pages = [0, 1, 2].map((pageIndex) => ({
+    pageIndex,
+    width: 100,
+    height: 100,
+    primitives: [],
+  }));
+  const view = (order: typeof pages) => (
+    <CanvasPagesView
+      displayList={{ pages: order }}
+      hostRef={hostRef}
+      glyphOutlineProvider={() => ''}
+    />
+  );
+  const { rerender } = render(view(pages));
+  await act(async () => {});
+  expectSearchAnswers(hostRef.current!, 3);
+
+  rerender(view([...pages].reverse()));
+  await act(async () => {});
+  expectSearchAnswers(hostRef.current!, 3);
+});
+
 test('a registry answers for renumbered canvases and prefers the first in document order', () => {
   const host = document.createElement('div');
   const canvases = [0, 1, 1].map((pageIndex) => {
