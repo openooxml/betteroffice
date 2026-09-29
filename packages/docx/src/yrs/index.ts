@@ -1063,6 +1063,8 @@ export interface YrsSession extends CollaborationReplica {
   listComments(): YrsCommentInfo[];
   /** Story ids in the document, sorted. */
   storyIds(): string[];
+  /** Whether the document has a story with this id, without listing them all. */
+  hasStory(story: string): boolean;
   /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
   storyLength(story: string): number;
   /** Returns the story's canonical-stream checksum. */
@@ -2122,6 +2124,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
     storyIds: () => session.story_ids(),
+    hasStory: (story) => session.has_story(story),
     storyLength: (story) => session.story_len(story),
     storyChecksum: (story) => BigInt(session.story_checksum(story)),
     yrsBlocksForStory: (story, env = {}) => {

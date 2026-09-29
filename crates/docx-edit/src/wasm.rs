@@ -3853,6 +3853,13 @@ impl EditSession {
         serde_json::to_string(&matches).map_err(js_err)
     }
 
+    /// Whether the document has a story with this id.
+    pub fn has_story(&self, story: &str) -> bool {
+        let txn = self.engine.doc().yrs_doc().transact();
+        txn.get_map(STORIES)
+            .is_some_and(|stories| stories.contains_key(&txn, story))
+    }
+
     /// Every story id in the document, sorted so the order is stable across
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {

@@ -57,6 +57,7 @@ export const editsession_find_text_json: (a: number, b: number, c: number) => [n
 export const editsession_finish_compared_docx_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_has_story: (a: number, b: number, c: number) => number;
 export const editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_history_stories: (a: number) => [number, number];
 export const editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];

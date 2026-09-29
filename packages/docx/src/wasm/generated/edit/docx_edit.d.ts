@@ -424,6 +424,10 @@ export class EditSession {
      */
     format_text_target_json(target_json: string, delta_json: string): string;
     /**
+     * Whether the document has a story with this id.
+     */
+    has_story(story: string): boolean;
+    /**
      * The headings of `story` in document order, classified as the structured export
      * classifies them: `[{"paraId","heading":{"outlineLevel","source"}}]`.
      */
@@ -1349,6 +1353,7 @@ export interface InitOutput {
     readonly editsession_finish_compared_docx_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_has_story: (a: number, b: number, c: number) => number;
     readonly editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];

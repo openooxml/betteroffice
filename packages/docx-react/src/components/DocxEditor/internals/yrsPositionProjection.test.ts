@@ -64,6 +64,7 @@ describe('YrsPositionProjection', () => {
     }
     const replica = {
       storyIds: () => Object.keys(stories),
+      hasStory: (story: string) => story in stories,
       storySegments: (story: string) => stories[story] ?? [],
     } as unknown as YrsSession;
     const getProjection = (root: string) => createYrsPositionProjection(replica, root);
@@ -96,6 +97,7 @@ describe('YrsPositionProjection', () => {
     let readStory = false;
     const missingStorySession = {
       storyIds: () => ['body'],
+      hasStory: (story: string) => story === 'body',
       storySegments: () => {
         readStory = true;
         throw new Error('missing story');

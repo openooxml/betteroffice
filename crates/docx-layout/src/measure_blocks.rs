@@ -93,18 +93,23 @@ pub fn collect_font_requirements<'a>(
     default_family: &str,
 ) -> Vec<FontRequirement> {
     let mut requirements = BTreeMap::<String, FontRequirement>::new();
+    collect_font_requirements_into(blocks, default_family, &mut requirements);
+    requirements.into_values().collect()
+}
+
+/// [`collect_font_requirements`] into `requirements`, keyed as it keys them,
+/// for callers gathering several block runs without copying them.
+pub fn collect_font_requirements_into<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    default_family: &str,
+    requirements: &mut BTreeMap<String, FontRequirement>,
+) {
     for block in blocks {
         walk_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
             let scripts = paragraph_scripts(paragraph);
-            collect_paragraph_font_requirements(
-                paragraph,
-                &scripts,
-                default_family,
-                &mut requirements,
-            );
+            collect_paragraph_font_requirements(paragraph, &scripts, default_family, requirements);
         });
     }
-    requirements.into_values().collect()
 }
 
 /// The family measurement gives text naming none: `defaults.fontFamily`, else Calibri.

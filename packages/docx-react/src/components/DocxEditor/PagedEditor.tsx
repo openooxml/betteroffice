@@ -1353,7 +1353,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const getYrsPositionProjection = useCallback(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
-        if (!session || !session.storyIds().includes(rootStory)) return null;
+        if (!session || !session.hasStory(rootStory)) return null;
         const cached = yrsPositionProjectionCacheRef.current;
         if (
           cached?.version === yrsProjectionVersionRef.current &&
