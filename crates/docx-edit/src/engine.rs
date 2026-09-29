@@ -5392,7 +5392,21 @@ mod tests {
         );
         let preview = EngineSession::new(311);
         crate::seed::seed_docx_preview(preview.doc(), &bytes, 60).unwrap();
-        assert_eq!(preview.doc().paragraphs("body").unwrap().len(), 60);
+        assert!(
+            preview.doc().paragraphs("body").unwrap().len()
+                < full.doc().paragraphs("body").unwrap().len()
+        );
+        let cell_stories = |engine: &EngineSession| {
+            use yrs::{Map, ReadTxn, Transact};
+            let txn = engine.doc().yrs_doc().transact();
+            let stories = txn.get_map(crate::STORIES).unwrap();
+            stories
+                .iter(&txn)
+                .filter(|(id, _)| id.starts_with("body:"))
+                .count()
+        };
+        // Only the tables the preview reaches keep their cell stories.
+        assert!(cell_stories(&preview) > 0 && cell_stories(&preview) < cell_stories(&full));
         // The preview ends mid-section, so only a prefix pass that stops
         // short of its end lays out pages the rest cannot move.
         let (layout, preview_pages) = first_pages(
@@ -5406,6 +5420,83 @@ mod tests {
         docx_layout::clear_measure_fonts();
     }
 
+    #[test]
+    fn a_preview_draws_the_images_its_first_pages_use() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        // A 1x1 PNG, and a second medium nothing on the first pages uses.
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52,
+            0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0d, 0x49,
+            0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0, 0x05, 0, 0x01,
+            0xff, 0x7d, 0x31, 0x96, 0xd5, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60,
+            0x82,
+        ];
+        let image = |id: &str| {
+            format!(
+                r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="{id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+            )
+        };
+        let mut body = image("rIdFirst");
+        for index in 0..150 {
+            body.push_str(&format!(
+                "<w:p><w:r><w:t>Paragraph {index} of a document whose first page shows a picture.</w:t></w:r></w:p>"
+            ));
+        }
+        body.push_str(&image("rIdLater"));
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>{body}</w:body></w:document>"#
+        );
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), PACKAGE_RELS.as_bytes().to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFirst" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/first.png"/><Relationship Id="rIdLater" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/later.png"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+            ("word/media/first.png".to_owned(), PNG.to_vec()),
+            ("word/media/later.png".to_owned(), PNG.to_vec()),
+        ])
+        .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [{ "sectionId": "main", "properties": {
+                "pageWidth": 5760, "pageHeight": 4320,
+                "marginTop": 360, "marginRight": 360, "marginBottom": 360, "marginLeft": 360
+            } }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        let extras =
+            serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
+        let first_page = |engine: &EngineSession| {
+            engine.build_display_list_frame(&extras, 0).unwrap();
+            engine
+                .with_display_list(|list| list.pages[0].clone())
+                .unwrap()
+        };
+        let full = EngineSession::new(312);
+        crate::seed::seed_from_docx(full.doc(), &bytes).unwrap();
+        full.layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        let preview = EngineSession::new(312);
+        crate::seed::seed_docx_preview(preview.doc(), &bytes, 40).unwrap();
+        preview
+            .layout_document_with_regions_prefix_retained_json(&request, 3)
+            .unwrap();
+        let page = first_page(&preview);
+        assert!(
+            serde_json::to_string(&page)
+                .unwrap()
+                .contains("data:image/png;base64,")
+        );
+        assert_eq!(page, first_page(&full));
+        docx_layout::clear_measure_fonts();
+    }
+
     /// Times opening a document for display in full and from a body prefix.
     /// Run: `DOCX_PREVIEW_PROBE=<file.docx> cargo test -p betteroffice-docx-edit --release --lib -- --ignored preview_probe --nocapture`
     #[test]
@@ -5414,10 +5505,10 @@ mod tests {
         let Ok(path) = std::env::var("DOCX_PREVIEW_PROBE") else {
             return;
         };
-        let paragraphs = std::env::var("DOCX_PREVIEW_PARAGRAPHS")
+        let blocks = std::env::var("DOCX_PREVIEW_BLOCKS")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(150);
+            .unwrap_or(200);
         let bytes = std::fs::read(path).unwrap();
         docx_layout::clear_measure_fonts();
         let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
@@ -5453,15 +5544,21 @@ mod tests {
                 .pages
                 .len();
             println!("  seed {seeded:?}, +layout {laid_out:?}, +frame {painted:?}, {pages} pages");
+            engine
+                .with_display_list(|list| list.pages[..3].to_vec())
+                .unwrap()
         };
         println!("full open:");
-        open(&EngineSession::new(320), &|engine| {
+        let full = open(&EngineSession::new(320), &|engine| {
             crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
         });
-        println!("preview of the first {paragraphs} body paragraphs:");
-        open(&EngineSession::new(321), &|engine| {
-            crate::seed::seed_docx_preview(engine.doc(), &bytes, paragraphs).unwrap();
+        println!("preview of the first {blocks} body blocks:");
+        let preview = open(&EngineSession::new(320), &|engine| {
+            crate::seed::seed_docx_preview(engine.doc(), &bytes, blocks).unwrap();
         });
+        for (index, (full, preview)) in full.iter().zip(&preview).enumerate() {
+            println!("  page {index} identical: {}", full == preview);
+        }
     }
 
     fn layout_pages(bytes: &[u8], client_id: u64, content_height: f64) -> serde_json::Value {

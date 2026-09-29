@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::block::{BlockContent, StoryParser};
+use crate::block::{BlockContent, StoryParser, transparent_children};
 use crate::comments::Comment;
 use crate::inline::{InlineNode, RunContent};
 use crate::paragraph::RawAttribute;
@@ -45,21 +45,23 @@ pub fn parse_document_body(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
 ) -> Result<DocumentBody, ParseError> {
-    parse_document_body_impl(document, parser, true)
+    parse_document_body_impl(document, parser, true, None)
 }
 
 /// Parses a body without cloning blocks into section content.
 pub(crate) fn parse_document_body_compact(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
+    body_blocks: Option<usize>,
 ) -> Result<DocumentBody, ParseError> {
-    parse_document_body_impl(document, parser, false)
+    parse_document_body_impl(document, parser, false, body_blocks)
 }
 
 fn parse_document_body_impl(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
     clone_section_content: bool,
+    body_blocks: Option<usize>,
 ) -> Result<DocumentBody, ParseError> {
     if document.local_name() != "document" {
         return Ok(DocumentBody::default());
@@ -67,9 +69,18 @@ fn parse_document_body_impl(
     let Some(body) = document.child("w", "body") else {
         return Ok(DocumentBody::default());
     };
-    let content = parser.parse_blocks(body, 0, false)?;
-    let final_section_properties = body
-        .child("w", "sectPr")
+    let (content, read) = parser.parse_blocks_until(body, 0, false, body_blocks)?;
+    // A body cut short ends inside the section whose properties the next
+    // section-ending paragraph carries.
+    let cut_section = body_blocks.and_then(|_| {
+        transparent_children(body, false)
+            .into_iter()
+            .skip(read)
+            .filter(|child| child.matches_name("w", "p"))
+            .find_map(|paragraph| paragraph.child("w", "pPr")?.child("w", "sectPr"))
+    });
+    let final_section_properties = cut_section
+        .or_else(|| body.child("w", "sectPr"))
         .map(|element| parse_section_properties(Some(element)));
     let mut sections = build_sections(
         &content,

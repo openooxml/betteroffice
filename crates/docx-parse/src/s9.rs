@@ -38,6 +38,9 @@ pub struct S9ParseOptions {
     pub include_canonical: bool,
     /// Records each paragraph's `w:p` occurrence in its part as `sourceOrdinal`.
     pub source_ordinals: bool,
+    /// Parse only the body's first blocks, for a preview of its first pages:
+    /// at least this many, and on until no field spans past the last one.
+    pub body_blocks: Option<usize>,
 }
 
 impl Default for S9ParseOptions {
@@ -49,6 +52,7 @@ impl Default for S9ParseOptions {
             determinism_seed: None,
             include_canonical: false,
             source_ordinals: false,
+            body_blocks: None,
         }
     }
 }
@@ -205,6 +209,21 @@ pub fn parse_docx_s9_wire_parts_with_limits(
     Ok((envelope, parts))
 }
 
+/// Parse already inflated package parts. The parts alone cannot be hashed
+/// into generated IDs, so `options.determinism_seed` is required.
+pub fn parse_docx_s9_wire_from_parts(
+    parts: &[(String, Vec<u8>)],
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<S9WireEnvelope, ParseError> {
+    if options.determinism_seed.is_none() || options.include_canonical {
+        return Err(ParseError::Canonical(
+            "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
+        ));
+    }
+    parse_s9_package(parts, &[], options, limits)
+}
+
 fn parse_s9_package(
     parts: &[(String, Vec<u8>)],
     data: &[u8],
@@ -298,7 +317,7 @@ fn parse_s9_package(
                         ids: &mut ids,
                         part: path,
                     };
-                    parse_document_body_compact(root, &mut parser)?
+                    parse_document_body_compact(root, &mut parser, options.body_blocks)?
                 }
                 None => DocumentBody::default(),
             }
@@ -737,6 +756,7 @@ mod tests {
                 determinism_seed: None,
                 include_canonical: true,
                 source_ordinals: false,
+                body_blocks: None,
             },
         )
         .unwrap();
