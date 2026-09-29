@@ -124,6 +124,7 @@ test('a worker frame builds only the pages near the viewport', async () => {
   const host = {
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
     onUpdate: () => () => {},
     selection: () => null,
     applyUpdate: () => null,
