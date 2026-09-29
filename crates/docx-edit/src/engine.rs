@@ -829,6 +829,13 @@ fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
         {
             options.remove("pageGap");
         }
+        // A revision preview changes blocks, which their own fingerprints catch.
+        if let Some(env) = fields
+            .get_mut("renderEnv")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            env.remove("revisionPreview");
+        }
     }
     pages::sha256_hex(canonical_json(&request).as_bytes())
 }
