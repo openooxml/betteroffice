@@ -502,7 +502,7 @@ impl VisualLine<'_> {
 
     fn table_cell(&self) -> Option<(&str, &TableCellRef)> {
         let attrs = &self.hits.first()?.attrs;
-        Some((&attrs.table.as_ref()?.table_id, attrs.cell.as_ref()?))
+        Some((&attrs.table.as_ref()?.table_id, attrs.cell.as_deref()?))
     }
 }
 
@@ -1090,12 +1090,16 @@ fn note_stories(area: &NoteRegion) -> Vec<NoteStory<'_>> {
         let Some(attrs) = doc_attrs(primitive) else {
             continue;
         };
-        let id = attrs.group_id.as_deref().and_then(|group| {
-            area.note_ids
-                .iter()
-                .copied()
-                .find(|id| note_group_id(kind, *id) == group)
-        });
+        let id = attrs
+            .group_id
+            .as_deref()
+            .map(String::as_str)
+            .and_then(|group| {
+                area.note_ids
+                    .iter()
+                    .copied()
+                    .find(|id| note_group_id(kind, *id) == group)
+            });
         if id == open.map(|span| span.id) {
             continue;
         }

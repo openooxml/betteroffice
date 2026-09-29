@@ -310,7 +310,12 @@ fn encode_prepared(
                     write_u64(&mut out, *id);
                 }
                 let payload_offset = out.len();
-                let hashes = encode_page_hashed(page.page, Interner::Mut(&mut strings), &mut out, media_srcs)?;
+                let hashes = encode_page_hashed(
+                    page.page,
+                    Interner::Mut(&mut strings),
+                    &mut out,
+                    media_srcs,
+                )?;
                 page.snapshot.fingerprint = hashes.fingerprint;
                 page.snapshot.visual_fingerprint = hashes.visual_fingerprint;
                 speculated = Some(Speculated::Inline {
@@ -651,8 +656,12 @@ fn emit_fused_parallel(
                             for &id in *ids {
                                 write_u64(&mut payload, id);
                             }
-                            let hashes =
-                                encode_page_hashed(page, Interner::Shared(table), &mut payload, srcs)?;
+                            let hashes = encode_page_hashed(
+                                page,
+                                Interner::Shared(table),
+                                &mut payload,
+                                srcs,
+                            )?;
                             Ok(FusedEmit {
                                 fingerprint: hashes.fingerprint,
                                 visual_fingerprint: hashes.visual_fingerprint,

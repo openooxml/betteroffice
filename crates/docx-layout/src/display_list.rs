@@ -286,20 +286,20 @@ pub struct DocAttrs {
     pub line_index: Option<u64>,
     /// table cell the primitive paints inside (0-based grid coordinates)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cell: Option<TableCellRef>,
+    pub cell: Option<Box<TableCellRef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub comment_ids: Option<Vec<String>>,
+    pub comment_ids: Option<Box<Vec<String>>>,
     /// inert field identity when this primitive paints a field result — the
     /// a11y mirror announces it; the instruction is NEVER parsed/executed.
     /// Additive + serde-optional: field-free fixtures stay byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub field: Option<FieldMetadata>,
+    pub field: Option<Box<FieldMetadata>>,
     /// footnote/endnote reference identity when this primitive is the body
     /// reference mark (note backlinks). Additive + serde-optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note_ref: Option<NoteRefMetadata>,
+    pub note_ref: Option<Box<NoteRefMetadata>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision: Option<Revision>,
+    pub revision: Option<Box<Revision>>,
     /// Synthetic numbering glyph emitted before the first line of a list
     /// paragraph. The mirror uses this to expose the stable list-marker class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -312,58 +312,58 @@ pub struct DocAttrs {
     /// display-list snapshots that carry only run-level revisions stay
     /// byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structural_revision: Option<StructuralRevision>,
+    pub structural_revision: Option<Box<StructuralRevision>>,
     /// sanitized hyperlink target for clickable text/image primitives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tooltip: Option<String>,
+    pub tooltip: Option<Box<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_title: Option<String>,
+    pub link_title: Option<Box<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_target: Option<String>,
+    pub link_target: Option<Box<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_history: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_doc_location: Option<String>,
+    pub link_doc_location: Option<Box<String>>,
     /// innermost block-level content-control identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sdt: Option<SdtAttrs>,
+    pub sdt: Option<Box<SdtAttrs>>,
     /// Full outer-to-inner content-control ancestry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sdt_path: Vec<SdtAttrs>,
     /// inline content-control widget metadata when this text primitive is its glyph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_sdt_widget: Option<InlineSdtWidgetAttrs>,
+    pub inline_sdt_widget: Option<Box<InlineSdtWidgetAttrs>>,
     /// accessibility summary for primitives that compose one chart block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chart: Option<ChartA11yAttrs>,
+    pub chart: Option<Box<ChartA11yAttrs>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_order: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bidi_level: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
+    pub lang: Option<Box<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decorative: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aria_label: Option<String>,
+    pub aria_label: Option<Box<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aria_description: Option<String>,
+    pub aria_description: Option<Box<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_object: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group_id: Option<String>,
+    pub group_id: Option<Box<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comment: Option<CommentMetadata>,
+    pub comment: Option<Box<CommentMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clip_group: Option<ClipGroupMetadata>,
+    pub clip_group: Option<Box<ClipGroupMetadata>>,
     /// Leader glyph metadata shared by text and glyph primitives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leader_glyphs: Option<LeaderGlyphMetadata>,
+    pub leader_glyphs: Option<Box<LeaderGlyphMetadata>>,
     /// Optional decoration metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub highlight_slice: Option<HighlightSliceMetadata>,
+    pub highlight_slice: Option<Box<HighlightSliceMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<DisplayBorderStyle>,
     /// Fields belonging to one primitive class are flattened through the shared
@@ -375,38 +375,38 @@ pub struct DocAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "flipV")]
     pub image_flip_v: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "shapeType")]
-    pub image_shape_type: Option<String>,
+    pub image_shape_type: Option<Box<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_frame: Option<ContentFrame>,
+    pub content_frame: Option<Box<ContentFrame>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub border: Option<Value>,
+    pub border: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fill_paint: Option<Value>,
+    pub fill_paint: Option<Box<Value>>,
     /// Lossless DrawingML stroke details beyond the plain colour/width/dash
     /// triple: compound, alignment, caps, joins, arrows and custom dashes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stroke_paint: Option<Value>,
+    pub stroke_paint: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_extent: Option<Value>,
+    pub effect_extent: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drawing_scene: Option<Value>,
+    pub drawing_scene: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_body_properties: Option<Value>,
+    pub text_body_properties: Option<Box<Value>>,
     /// GlyphRun-only member flattened through the shared attrs (same pattern
     /// as the image/shape members above): the resolved CSS font shorthand the
     /// canvas fillText safety net uses when glyph outlines are unavailable,
     /// so the fallback keeps the measured face instead of generic sans-serif.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fallback_font: Option<String>,
+    pub fallback_font: Option<Box<String>>,
     /// Text/GlyphRun-only member: modern w14 text effects payload
     /// (glow/shadow/reflection/textFill/textOutline), passed through losslessly
     /// from `RunFormatting.modernEffects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub modern_effects: Option<Value>,
+    pub modern_effects: Option<Box<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub table: Option<TableMetadata>,
+    pub table: Option<Box<TableMetadata>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_shape_atom: Option<bool>,
 }
@@ -1179,9 +1179,31 @@ pub struct BuildInput {
 
 /// Parsed display input retained by the editing engine across edits. Its fields
 /// stay private so the display-input contract can evolve without becoming a
-/// second public layout model.
+/// second public layout model. `page_eras`/`block_eras` record the layout epoch
+/// each retained entry was transcoded from, so refreshes skip entries already
+/// current; `blocks_by_key` maps each measured block's key to its slot.
 pub struct ResidentDisplayInput {
     input: BuildInput,
+    page_eras: Vec<u64>,
+    block_eras: Vec<u64>,
+    blocks_by_key: HashMap<String, usize>,
+}
+
+impl ResidentDisplayInput {
+    fn new(input: BuildInput, input_epoch: u64) -> Self {
+        let mut blocks_by_key = HashMap::with_capacity(input.measured.len());
+        for (index, measured) in input.measured.iter().enumerate() {
+            if let Some(key) = measured_block_key(measured) {
+                blocks_by_key.entry(key).or_insert(index);
+            }
+        }
+        Self {
+            page_eras: vec![input_epoch; input.layout.pages.len()],
+            block_eras: vec![input_epoch; input.measured.len()],
+            blocks_by_key,
+            input,
+        }
+    }
 }
 
 impl std::fmt::Debug for ResidentDisplayInput {
@@ -3308,7 +3330,7 @@ fn stamp_sdt_range(prims: &mut [Primitive], groups: &[SdtGroupIn], overwrite: bo
         if let Some(attrs) = doc_attrs_mut(p)
             && (overwrite || attrs.sdt.is_none())
         {
-            attrs.sdt = Some(sdt.clone());
+            attrs.sdt = Some(Box::new(sdt.clone()));
             attrs.sdt_path = path.clone();
         }
     }
@@ -3722,11 +3744,11 @@ fn stamp_hyperlink_attrs(
     let href = link.and_then(|value| value.href.as_deref()).or(legacy_href);
     attrs.href = sanitized_href(href);
     if let Some(link) = link {
-        attrs.tooltip = link.tooltip.clone();
-        attrs.link_title = link.tooltip.clone();
-        attrs.link_target = link.target.clone();
+        attrs.tooltip = link.tooltip.clone().map(Box::new);
+        attrs.link_title = link.tooltip.clone().map(Box::new);
+        attrs.link_target = link.target.clone().map(Box::new);
         attrs.link_history = link.history;
-        attrs.link_doc_location = link.doc_location.clone();
+        attrs.link_doc_location = link.doc_location.clone().map(Box::new);
     }
 }
 
@@ -3738,12 +3760,13 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
     attrs.image_flip_v = (run.flip_v == Some(true)
         || transform_has_flip(run.transform.as_deref(), 'y'))
     .then_some(true);
-    attrs.content_frame = content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref());
-    attrs.image_shape_type = run.shape_type.clone();
+    attrs.content_frame =
+        content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref()).map(Box::new);
+    attrs.image_shape_type = run.shape_type.clone().map(Box::new);
     attrs.effects = run.effects.clone();
-    attrs.border = run.outline.clone();
+    attrs.border = run.outline.clone().map(Box::new);
     if run.is_insertion == Some(true) || run.is_deletion == Some(true) {
-        attrs.revision = Some(Revision {
+        attrs.revision = Some(Box::new(Revision {
             author: run.change_author.clone().unwrap_or_default(),
             date: run.change_date.clone().unwrap_or_default(),
             revision_id: run
@@ -3755,14 +3778,14 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
             } else {
                 RevisionKind::Del
             },
-        });
+        }));
     }
 }
 
 fn stamp_image_block_attrs(attrs: &mut DocAttrs, block: &ImageBlockIn, x: f64, y: f64) {
     attrs.href = sanitized_href(block.hlink_href.as_deref());
-    attrs.link_title = block.hlink_title.clone();
-    attrs.tooltip = block.hlink_title.clone();
+    attrs.link_title = block.hlink_title.clone().map(Box::new);
+    attrs.tooltip = block.hlink_title.clone().map(Box::new);
     attrs.image_flip_h = (block.flip_h == Some(true)
         || transform_has_flip(block.transform.as_deref(), 'x'))
     .then_some(true);
@@ -3775,10 +3798,11 @@ fn stamp_image_block_attrs(attrs: &mut DocAttrs, block: &ImageBlockIn, x: f64, y
         block.width,
         block.height,
         block.rotation_bounds.as_ref(),
-    );
-    attrs.image_shape_type = block.shape_type.clone();
+    )
+    .map(Box::new);
+    attrs.image_shape_type = block.shape_type.clone().map(Box::new);
     attrs.effects = block.effects.clone();
-    attrs.border = block.outline.clone();
+    attrs.border = block.outline.clone().map(Box::new);
 }
 
 fn image_layout_width(run: &ImageRunIn) -> f64 {
@@ -4401,7 +4425,7 @@ fn stamp_note_item(prims: &mut [Primitive], start: usize, note: &NoteItemIn, kin
     let group_id = note_group_id(kind, id);
     for primitive in &mut prims[start..] {
         if let Some(attrs) = doc_attrs_mut(primitive) {
-            attrs.group_id = Some(group_id.clone());
+            attrs.group_id = Some(Box::new(group_id.clone()));
         }
     }
 }
@@ -4865,7 +4889,7 @@ fn recompose_hf_region(
                 let mut attrs = BlockRef::of(&block.id).attrs();
                 attrs.doc_start = block.pm_start;
                 attrs.doc_end = block.pm_end;
-                attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+                attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
                 attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
                 stamp_image_block_attrs(&mut attrs, block, x, y);
                 let rotation = block
@@ -5137,7 +5161,9 @@ fn build_display_list_selected(
                     let mut attrs = BlockRef::of(&imf.block_id).attrs();
                     attrs.doc_start = imf.pm_start.or(block.and_then(|b| b.pm_start));
                     attrs.doc_end = imf.pm_end.or(block.and_then(|b| b.pm_end));
-                    attrs.sdt = block.and_then(|b| sdt_attrs_from_groups(&b.sdt_groups));
+                    attrs.sdt = block
+                        .and_then(|b| sdt_attrs_from_groups(&b.sdt_groups))
+                        .map(Box::new);
                     if let Some(block) = block {
                         attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
                         stamp_image_block_attrs(&mut attrs, block, imf.x, imf.y);
@@ -5418,7 +5444,7 @@ fn apply_review_primitive_metadata(
                 if let Some(thread) = thread {
                     apply_comment_thread_metadata(&mut metadata, thread);
                 }
-                attrs.comment = Some(metadata);
+                attrs.comment = Some(Box::new(metadata));
             }
             if is_comment_wash {
                 if all_resolved {
@@ -5555,7 +5581,7 @@ pub(crate) fn emit_paragraph_fragment(
     if emit_block_chrome {
         if let Some(rev) = pmark_revision.clone() {
             let mut bar_attrs = block_ref.attrs();
-            bar_attrs.structural_revision = Some(rev.clone());
+            bar_attrs.structural_revision = Some(Box::new(rev.clone()));
             prims.push(Primitive::Rect(RectPrimitive {
                 x: px(origin_x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
                 y: px(origin_y),
@@ -5655,7 +5681,7 @@ pub(crate) fn emit_paragraph_fragment(
         && frag.carried_to_next != Some(true)
     {
         let mut glyph_attrs = block_ref.attrs();
-        glyph_attrs.structural_revision = Some(rev.clone());
+        glyph_attrs.structural_revision = Some(Box::new(rev.clone()));
         let glyph_x = line.end_x + PARAGRAPH_MARK_GLYPH_GAP;
         prims.push(Primitive::Text(TextRunPrimitive {
             text: "¶".to_string(),
@@ -5725,7 +5751,7 @@ pub(crate) fn emit_paragraph_fragment(
                     a.to_line = Some(to);
                 }
                 if let Some(sdt) = &sdt {
-                    a.sdt = Some(sdt.clone());
+                    a.sdt = Some(Box::new(sdt.clone()));
                     a.sdt_path = sdt_path.clone();
                 }
             }
@@ -6440,7 +6466,7 @@ fn emit_line(
                             attrs.bidi_level =
                                 attrs.bidi_level.or_else(|| logical_order.map(|_| *level));
                             if imr.is_insertion == Some(true) || imr.is_deletion == Some(true) {
-                                attrs.revision = Some(Revision {
+                                attrs.revision = Some(Box::new(Revision {
                                     author: imr.change_author.clone().unwrap_or_default(),
                                     date: imr.change_date.clone().unwrap_or_default(),
                                     revision_id: imr
@@ -6452,7 +6478,7 @@ fn emit_line(
                                     } else {
                                         RevisionKind::Del
                                     },
-                                });
+                                }));
                             }
                         }
                     }
@@ -6602,7 +6628,7 @@ fn emit_tab_leader(
         attrs.doc_end = tab.pm_end;
         attrs.logical_order = logical_order.or(tab.fmt.logical_order);
         attrs.bidi_level = tab.fmt.bidi_level;
-        attrs.leader_glyphs = Some(LeaderGlyphMetadata {
+        attrs.leader_glyphs = Some(Box::new(LeaderGlyphMetadata {
             glyph: Some(glyph.to_string()),
             count: Some(count),
             x: Some(px(x)),
@@ -6614,7 +6640,7 @@ fn emit_tab_leader(
             size: measured.font_size.map(|size| px(size * 96.0 / 72.0)),
             color: Some(run_color(&fmt)),
             rtl: tab.fmt.rtl.filter(|rtl| *rtl),
-        });
+        }));
         prims.push(Primitive::Text(TextRunPrimitive {
             text: glyph.repeat(count as usize),
             x: px(x),
@@ -6770,47 +6796,51 @@ fn emit_text_segment(
     let mut attrs = block_ref.attrs();
     attrs.doc_start = pm_start;
     attrs.doc_end = pm_end;
-    attrs.comment_ids = comment_ids.clone();
-    attrs.revision = revision;
+    attrs.comment_ids = comment_ids.clone().map(Box::new);
+    attrs.revision = revision.map(Box::new);
     attrs.href = hyperlink_href(fmt);
-    attrs.inline_sdt_widget = fmt.inline_sdt_widget.clone();
+    attrs.inline_sdt_widget = fmt.inline_sdt_widget.clone().map(Box::new);
     attrs.logical_order = logical_order.or(fmt.logical_order);
     attrs.bidi_level = exact_advance.then_some(bidi_level).or(fmt.bidi_level);
-    attrs.lang = fmt.language.as_ref().and_then(|language| {
-        if ooxml_text::level_is_rtl(bidi_level) {
-            language.bidi.clone().or_else(|| language.latin.clone())
-        } else {
-            language
-                .east_asia
-                .clone()
-                .or_else(|| language.latin.clone())
-        }
-    });
+    attrs.lang = fmt
+        .language
+        .as_ref()
+        .and_then(|language| {
+            if ooxml_text::level_is_rtl(bidi_level) {
+                language.bidi.clone().or_else(|| language.latin.clone())
+            } else {
+                language
+                    .east_asia
+                    .clone()
+                    .or_else(|| language.latin.clone())
+            }
+        })
+        .map(Box::new);
     if let Some(link) = &fmt.hyperlink {
-        attrs.tooltip = link.tooltip.clone();
-        attrs.link_title = link.tooltip.clone();
-        attrs.link_target = link.target.clone();
+        attrs.tooltip = link.tooltip.clone().map(Box::new);
+        attrs.link_title = link.tooltip.clone().map(Box::new);
+        attrs.link_target = link.target.clone().map(Box::new);
         attrs.link_history = link.history;
-        attrs.link_doc_location = link.doc_location.clone();
+        attrs.link_doc_location = link.doc_location.clone().map(Box::new);
     }
     // inert field identity: type/instruction ride on the result primitives so
     // the a11y mirror can announce what the field is. Announce-only — nothing
     // downstream parses or executes the instruction.
     if let Some(field_run) = field {
-        attrs.field = Some(field_metadata(field_run));
+        attrs.field = Some(Box::new(field_metadata(field_run)));
     }
     // footnote/endnote body reference mark → note_ref, the backlink hook
     // (the mirror renders it as a doc-noteref link to `oox-<kind>-<id>`)
     if let Some(id) = fmt.footnote_ref_id {
-        attrs.note_ref = Some(NoteRefMetadata {
+        attrs.note_ref = Some(Box::new(NoteRefMetadata {
             kind: Some("footnote".to_string()),
             id: Some(id),
-        });
+        }));
     } else if let Some(id) = fmt.endnote_ref_id {
-        attrs.note_ref = Some(NoteRefMetadata {
+        attrs.note_ref = Some(Box::new(NoteRefMetadata {
             kind: Some("endnote".to_string()),
             id: Some(id),
-        });
+        }));
     }
 
     // Highlight is the run font box, never the containing line band. Exact
@@ -6819,7 +6849,7 @@ fn emit_text_segment(
         let ascent = font_px * 0.8;
         let descent = font_px * 0.2;
         let mut highlight_attrs = attrs.clone();
-        highlight_attrs.highlight_slice = Some(HighlightSliceMetadata {
+        highlight_attrs.highlight_slice = Some(Box::new(HighlightSliceMetadata {
             source_start: exact_advance.then_some(source_start as u64),
             source_end: exact_advance.then_some(source_end as u64),
             ascent: Some(px(ascent)),
@@ -6827,7 +6857,7 @@ fn emit_text_segment(
             includes_trailing_whitespace: Some(
                 text.chars().next_back().is_some_and(char::is_whitespace),
             ),
-        });
+        }));
         prims.push(Primitive::Decoration(DecorationPrimitive {
             deco: DecoKind::Highlight,
             x: px(x),
@@ -6915,7 +6945,7 @@ fn emit_text_segment(
     };
     if !emitted_glyphs {
         let mut text_attrs = attrs.clone();
-        text_attrs.modern_effects = fmt.modern_effects.clone();
+        text_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
         prims.push(Primitive::Text(TextRunPrimitive {
             text: text.to_string(),
             x: px(x),
@@ -7243,8 +7273,8 @@ fn try_emit_glyph_runs(
         // the resolved CSS face for the canvas fillText safety net (glyph
         // outlines unavailable) — same shorthand the TextRunPrimitive would
         // carry, so the fallback keeps family/weight/style
-        sub_attrs.fallback_font = Some(css_font(fmt));
-        sub_attrs.modern_effects = fmt.modern_effects.clone();
+        sub_attrs.fallback_font = Some(Box::new(css_font(fmt)));
+        sub_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
 
         local.push(Primitive::GlyphRun(GlyphRunPrimitive {
             font_id: font.to_u32(),
@@ -7899,7 +7929,7 @@ fn emit_floating_image(
     attrs.doc_start = imr.pm_start;
     attrs.doc_end = imr.pm_end;
     stamp_image_run_attrs(&mut attrs, imr, page_x, page_y);
-    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
     prims.push(Primitive::Image(ImagePrimitive {
         rel_id: imr.src.clone(),
@@ -7939,10 +7969,10 @@ fn emit_shape_fragment(
         .or(frag.pm_end)
         .or(block.doc_end)
         .or(block.pm_end);
-    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-    attrs.aria_label = block.title.clone();
-    attrs.aria_description = block.description.clone();
+    attrs.aria_label = block.title.clone().map(Box::new);
+    attrs.aria_description = block.description.clone().map(Box::new);
     // decorative is carried by ShapePrimitive's own field; duplicating it on
     // the flattened attrs produced two identical JSON keys that serde_json's
     // Map used to collapse silently. One authoritative slot keeps the encoded
@@ -7954,18 +7984,22 @@ fn emit_shape_fragment(
         .as_ref()
         .and_then(|scene| scene.pointer("/root/id"))
         .and_then(Value::as_str)
-        .map(str::to_string);
-    attrs.fill_paint = shape_fill_paint(block.fill.as_ref());
-    attrs.media_token = attrs.fill_paint.as_ref().is_some_and(value_has_media_token);
-    attrs.stroke_paint = shape_stroke_paint(block.stroke.as_ref());
+        .map(str::to_string)
+        .map(Box::new);
+    attrs.fill_paint = shape_fill_paint(block.fill.as_ref()).map(Box::new);
+    attrs.media_token = attrs
+        .fill_paint
+        .as_deref()
+        .is_some_and(value_has_media_token);
+    attrs.stroke_paint = shape_stroke_paint(block.stroke.as_ref()).map(Box::new);
     attrs.effects = block.effects.clone();
-    attrs.effect_extent = block.effect_extent.clone();
-    attrs.drawing_scene = block.scene.clone();
+    attrs.effect_extent = block.effect_extent.clone().map(Box::new);
+    attrs.drawing_scene = block.scene.clone().map(Box::new);
     attrs.media_token |= attrs
         .drawing_scene
-        .as_ref()
+        .as_deref()
         .is_some_and(value_has_media_token);
-    attrs.text_body_properties = block.text_body_properties.clone();
+    attrs.text_body_properties = block.text_body_properties.clone().map(Box::new);
 
     let decorative = block.decorative.unwrap_or_else(|| {
         block.inner_text.is_empty() && block.title.is_none() && block.description.is_none()
@@ -8488,13 +8522,13 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
         .or(frag.pm_end)
         .or(block.doc_end)
         .or(block.pm_end);
-    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-    attrs.chart = Some(ChartA11yAttrs {
+    attrs.chart = Some(Box::new(ChartA11yAttrs {
         label: chart_aria_label(&chart),
-    });
-    attrs.aria_label = block.chart.title.clone();
-    attrs.aria_description = block.chart.description.clone();
+    }));
+    attrs.aria_label = block.chart.title.clone().map(Box::new);
+    attrs.aria_description = block.chart.description.clone().map(Box::new);
     attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
 
     let width = if frag.width > 0.0 {
@@ -8887,11 +8921,11 @@ fn apply_clip_group(attrs: &mut DocAttrs, id: String, rect: ClipRect) {
     } else {
         rect
     };
-    attrs.clip_group = Some(ClipGroupMetadata {
+    attrs.clip_group = Some(Box::new(ClipGroupMetadata {
         id: Some(id),
         clip: Some(clip),
         opacity: None,
-    });
+    }));
 }
 
 fn table_metadata(
@@ -9136,7 +9170,7 @@ pub(crate) fn emit_table_fragment(
     let table_revision = whole_table_revision(block);
     if let Some(rev) = table_revision.clone() {
         let mut attrs = block_ref.attrs();
-        attrs.structural_revision = Some(rev.clone());
+        attrs.structural_revision = Some(Box::new(rev.clone()));
         prims.push(Primitive::Rect(RectPrimitive {
             x: px(frag.x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
             y: px(frag.y),
@@ -9164,7 +9198,7 @@ pub(crate) fn emit_table_fragment(
                 continue;
             }
             let mut attrs = block_ref.attrs();
-            attrs.structural_revision = Some(rev.clone());
+            attrs.structural_revision = Some(Box::new(rev.clone()));
             prims.push(Primitive::Rect(RectPrimitive {
                 x: px(frag.x + STRUCTURAL_CHANGE_BAR_OFFSET_X),
                 y: px(t),
@@ -9264,7 +9298,7 @@ pub(crate) fn emit_table_fragment(
             && let Some((t, b)) = clip(cy, cy + p.cell_h)
         {
             let mut bg_attrs = block_ref.attrs();
-            bg_attrs.cell = Some(cell_ref.clone());
+            bg_attrs.cell = Some(Box::new(cell_ref.clone()));
             prims.push(Primitive::Rect(RectPrimitive {
                 x: px(cx),
                 y: px(t),
@@ -9288,8 +9322,8 @@ pub(crate) fn emit_table_fragment(
                     Some(p.g.column_index as u64),
                 );
                 let mut attrs = block_ref.attrs();
-                attrs.cell = Some(cell_ref.clone());
-                attrs.structural_revision = Some(rev.clone());
+                attrs.cell = Some(Box::new(cell_ref.clone()));
+                attrs.structural_revision = Some(Box::new(rev.clone()));
                 prims.push(Primitive::Rect(RectPrimitive {
                     x: px(cx),
                     y: px(t),
@@ -9321,7 +9355,7 @@ pub(crate) fn emit_table_fragment(
                 // explicit ownership: the owning grid cell rides on the line so
                 // consumers associate borders exactly (no geometric fallback)
                 let line_attrs = DocAttrs {
-                    cell: Some(cell_ref.clone()),
+                    cell: Some(Box::new(cell_ref.clone())),
                     ..DocAttrs::default()
                 };
                 prims.push(Primitive::Line(LinePrimitive {
@@ -9425,7 +9459,7 @@ pub(crate) fn emit_table_fragment(
             // ownership metadata: the cut rule closes this grid cell's column
             // band at the fragment edge (borderOwner stays Fragment)
             let line_attrs = DocAttrs {
-                cell: Some(TableCellRef {
+                cell: Some(Box::new(TableCellRef {
                     row: g.row_index as u64,
                     col: g.column_index as u64,
                     row_span: g.row_span as u64,
@@ -9440,7 +9474,7 @@ pub(crate) fn emit_table_fragment(
                     owns_right_border: None,
                     owns_bottom_border: None,
                     owns_left_border: None,
-                }),
+                })),
                 ..DocAttrs::default()
             };
             prims.push(Primitive::Line(LinePrimitive {
@@ -9487,7 +9521,7 @@ pub(crate) fn emit_table_fragment(
                     inner.parent_table_id = Some(table_id.clone());
                 }
             } else {
-                attrs.table = Some(metadata.clone());
+                attrs.table = Some(Box::new(metadata.clone()));
             }
         }
     }
@@ -10174,7 +10208,7 @@ fn emit_cell_floating_images(
             let layout_width = image_layout_width(imr);
             let layout_height = image_layout_height(imr);
             let mut attrs = block_ref.attrs();
-            attrs.cell = Some(cell_ref.clone());
+            attrs.cell = Some(Box::new(cell_ref.clone()));
             // A continuation repaint carries no document positions.
             if selectable {
                 attrs.doc_start = imr.pm_start;
@@ -10506,7 +10540,7 @@ fn strip_doc_positions(p: &mut Primitive) {
 /// carry no DocAttrs and stay untouched)
 fn set_cell_ref(p: &mut Primitive, cell: &TableCellRef) {
     if let Some(attrs) = doc_attrs_mut(p) {
-        attrs.cell = Some(cell.clone());
+        attrs.cell = Some(Box::new(cell.clone()));
     }
 }
 
@@ -10584,6 +10618,7 @@ pub fn build_display_list_value_from_resident_with_fonts_observed(
 pub fn build_resident_display_list_with_fonts_observed(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
+    input_epoch: u64,
     extras: &str,
     fonts: &ooxml_text::FontStore,
     observe_phase: &mut impl FnMut(),
@@ -10592,7 +10627,7 @@ pub fn build_resident_display_list_with_fonts_observed(
     observe_phase();
     let list = build_display_list(&input, fonts);
     observe_phase();
-    Ok((ResidentDisplayInput { input }, list))
+    Ok((ResidentDisplayInput::new(input, input_epoch), list))
 }
 
 /// [`build_resident_display_list_with_fonts_observed`] that builds only the
@@ -10601,6 +10636,7 @@ pub fn build_resident_display_list_with_fonts_observed(
 pub fn build_resident_display_list_partial_with_fonts_observed(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
+    input_epoch: u64,
     extras: &str,
     fonts: &ooxml_text::FontStore,
     build: &dyn Fn(usize) -> bool,
@@ -10631,7 +10667,7 @@ pub fn build_resident_display_list_partial_with_fonts_observed(
         .collect();
     observe_phase();
     Ok((
-        ResidentDisplayInput { input },
+        ResidentDisplayInput::new(input, input_epoch),
         DisplayList {
             contract_version: built.contract_version,
             pages,
@@ -10645,6 +10681,7 @@ pub fn build_resident_display_list_partial_with_fonts_observed(
 pub fn build_resident_display_pages_with_fonts(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
+    input_epoch: u64,
     fonts: &ooxml_text::FontStore,
     resident: &mut ResidentDisplayInput,
     list: &mut DisplayList,
@@ -10666,9 +10703,10 @@ pub fn build_resident_display_pages_with_fonts(
         return Ok(wanted);
     }
     refresh_resident_display_pages(
-        &mut resident.input,
+        resident,
         pagination,
         layout,
+        input_epoch,
         wanted.iter().copied(),
     )?;
     let selected: HashSet<usize> = wanted.iter().copied().collect();
@@ -10957,6 +10995,7 @@ pub fn update_display_list_value_from_resident_incremental_with_fonts_observed(
 pub fn update_resident_display_list_incremental_with_fonts_observed(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
+    input_epoch: u64,
     fonts: &ooxml_text::FontStore,
     resident: &mut ResidentDisplayInput,
     previous: &mut DisplayList,
@@ -10982,9 +11021,10 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
         .collect();
 
     refresh_resident_display_pages(
-        &mut resident.input,
+        resident,
         pagination,
         layout,
+        input_epoch,
         selected.iter().copied(),
     )?;
     observe_phase();
@@ -11014,43 +11054,51 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
 }
 
 fn refresh_resident_display_pages(
-    input: &mut BuildInput,
+    resident: &mut ResidentDisplayInput,
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
+    input_epoch: u64,
     rebuilt_pages: impl IntoIterator<Item = usize>,
 ) -> Result<(), String> {
     let mut selected_blocks = HashSet::new();
     for page_index in rebuilt_pages {
-        let page: PageIn =
-            convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
-        for fragment in &page.fragments {
+        if resident.page_eras.get(page_index).copied() != Some(input_epoch) {
+            let page: PageIn =
+                convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
+            resident.input.layout.pages[page_index] = page;
+            resident.page_eras[page_index] = input_epoch;
+        }
+        for fragment in &resident.input.layout.pages[page_index].fragments {
             if let Some(key) = fragment_block_key(fragment) {
                 selected_blocks.insert(key);
             }
         }
-        input.layout.pages[page_index] = page;
     }
 
-    let current_indices: HashMap<String, usize> = input
-        .measured
-        .iter()
-        .enumerate()
-        .filter_map(|(index, measured)| measured_block_key(measured).map(|key| (key, index)))
-        .collect();
-    let mut pending_blocks = selected_blocks;
-    for measured in &pagination.measured {
-        let key = crate_block_key(&measured.block);
-        if !pending_blocks.remove(&key) {
-            continue;
+    let mut pending_blocks: HashMap<String, usize> = HashMap::new();
+    for key in selected_blocks {
+        let Some(&index) = resident.blocks_by_key.get(&key) else {
+            return Err(format!(
+                "resident display measured block {key:?} is missing"
+            ));
+        };
+        if resident.block_eras[index] != input_epoch {
+            pending_blocks.insert(key, index);
         }
-        let index = current_indices
-            .get(&key)
-            .copied()
-            .ok_or_else(|| format!("resident display measured block {key:?} is missing"))?;
-        input.measured[index] =
-            convert_resident_value(measured, "resident display measured block")?;
     }
-    if let Some(key) = pending_blocks.into_iter().next() {
+    for measured in &pagination.measured {
+        if pending_blocks.is_empty() {
+            break;
+        }
+        let key = crate_block_key(&measured.block);
+        let Some(index) = pending_blocks.remove(&key) else {
+            continue;
+        };
+        resident.input.measured[index] =
+            convert_resident_value(measured, "resident display measured block")?;
+        resident.block_eras[index] = input_epoch;
+    }
+    if let Some(key) = pending_blocks.into_keys().next() {
         return Err(format!(
             "resident pagination measured block {key:?} is missing"
         ));

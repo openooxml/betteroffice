@@ -663,6 +663,9 @@ struct PaginationState {
     position_deltas: HashMap<String, i64>,
     last_incremental: bool,
     layout_epoch: u64,
+    /// Versions the retained (input, layout) pair; bumped at every store so the
+    /// display cache can tell stale transcodes from current ones.
+    input_epoch: u64,
     pagination_calls: u64,
     incremental_pagination_calls: u64,
     pagination_blocks_placed: u64,
@@ -1928,7 +1931,9 @@ impl EngineSession {
             };
             self.layout_document_value_with_fingerprints(final_input, fingerprints)?;
         } else {
-            self.pagination.borrow_mut().layout = Some(stabilized.layout);
+            let mut pagination = self.pagination.borrow_mut();
+            pagination.layout = Some(stabilized.layout);
+            pagination.input_epoch = pagination.input_epoch.wrapping_add(1);
         }
         let mut pagination = self.pagination.borrow_mut();
         let layout = pagination
@@ -2348,6 +2353,7 @@ impl EngineSession {
         pagination.position_deltas = deltas;
         pagination.last_incremental = incremental;
         pagination.layout_epoch = pagination.layout_epoch.wrapping_add(1);
+        pagination.input_epoch = pagination.input_epoch.wrapping_add(1);
         pagination.pagination_calls = pagination.pagination_calls.wrapping_add(1);
         pagination.incremental_pagination_calls = pagination
             .incremental_pagination_calls
@@ -3219,6 +3225,7 @@ impl EngineSession {
                     docx_layout::update_resident_display_list_incremental_observed(
                         input,
                         layout,
+                        pagination.input_epoch,
                         resident_input,
                         previous,
                         pagination.rebuilt_page_start,
@@ -3236,6 +3243,7 @@ impl EngineSession {
                         docx_layout::build_resident_display_list_partial_observed(
                             input,
                             layout,
+                            pagination.input_epoch,
                             extras_json,
                             &|index| build.get(index).copied().unwrap_or(true),
                             observe_display_phase,
@@ -3250,6 +3258,7 @@ impl EngineSession {
                     docx_layout::build_resident_display_list_partial_observed(
                         input,
                         layout,
+                        pagination.input_epoch,
                         extras_json,
                         &|index| build.get(index).copied().unwrap_or(true),
                         observe_display_phase,
@@ -3356,7 +3365,14 @@ impl EngineSession {
             else {
                 return Err("resident display list is not built".to_owned());
             };
-            docx_layout::build_resident_display_pages(input, layout, resident_input, list, pages)?
+            docx_layout::build_resident_display_pages(
+                input,
+                layout,
+                pagination.input_epoch,
+                resident_input,
+                list,
+                pages,
+            )?
         };
         let rebuilt: HashSet<usize> = built.into_iter().collect();
         let mut display = self.display.borrow_mut();

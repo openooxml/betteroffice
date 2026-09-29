@@ -591,7 +591,7 @@ fn glyph_runs_carry_the_resolved_fallback_font() {
     let runs = glyph_runs(&dl);
     assert_eq!(runs.len(), 1);
     assert_eq!(
-        runs[0].attrs.fallback_font.as_deref(),
+        runs[0].attrs.fallback_font.as_deref().map(String::as_str),
         Some("400 16px Liberation Sans, sans-serif"),
         "fallbackFont must carry the resolved css shorthand: {json}"
     );
