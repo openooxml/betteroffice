@@ -35,7 +35,7 @@ export { loadGlyphOutlineProvider } from './glyphOutlineWasm';
 export {
   buildMirrorPage,
   displayPageHoldsMirrorId,
-  displayPageMayHoldTabStops,
+  mirrorPageHasTabStops,
   MIRROR_CLASS_NAMES,
   type BuildMirrorPageOptions,
   type MirrorLabels,
@@ -44,6 +44,7 @@ export {
 export {
   applyInteractiveSdtFocus,
   buildInteractiveOverlayPage,
+  interactiveOverlayHasTabStops,
   type BuildInteractiveOverlayOptions,
   type InteractiveOverlayLabels,
 } from './interactiveOverlay';

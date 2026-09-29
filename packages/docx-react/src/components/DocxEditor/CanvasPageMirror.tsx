@@ -10,8 +10,12 @@
  * Focus never lands here: the hidden input remains the editing surface.
  */
 
-import { useRef } from 'react';
-import { buildMirrorPage, type DisplayPage } from '@betteroffice/docx/layout/render';
+import { useMemo, useRef } from 'react';
+import {
+  buildMirrorPage,
+  mirrorPageHasTabStops,
+  type DisplayPage,
+} from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
 import { usePageChrome, type PageChromeHandle } from './usePageChrome';
@@ -52,6 +56,10 @@ export function CanvasPageMirror({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
+  const standInLabel = useMemo(
+    () => (mirrorPageHasTabStops(page) ? t('a11y.pageLabel', { number: page.pageIndex + 1 }) : null),
+    [page, t]
+  );
   usePageChrome(hostRef, {
     page,
     t,
@@ -59,6 +67,7 @@ export function CanvasPageMirror({
     defer,
     rebuildAtOnce: visible,
     urgentRevision: noteAnchorRevision,
+    standInLabel,
     register,
     make: makeMirror,
   });

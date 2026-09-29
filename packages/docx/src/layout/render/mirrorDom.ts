@@ -95,21 +95,34 @@ function pageRegionPrimitives(page: DisplayPage): DisplayPrimitive[] {
     ...page.primitives,
     ...(page.header?.primitives ?? []),
     ...(page.footer?.primitives ?? []),
-    ...(page.noteAreas ?? []).flatMap((area) => area.primitives ?? []),
+    ...(page.noteAreas ?? []).flatMap((area) => [
+      ...(area.separatorPrimitives ?? []),
+      ...(area.primitives ?? []),
+    ]),
   ];
 }
 
-/**
- * Whether `page`'s mirror or interactive overlay may hold a tab stop: a link,
- * a note reference, a note (with its backlink) or a content control. False
- * means neither holds one, so keyboard navigation can pass the page by
- * without building it.
- */
-export function displayPageMayHoldTabStops(page: DisplayPage): boolean {
+/** Whether the mirror renders `p` as a link: a hyperlink, or a note reference. */
+function mirrorLinks(p: DisplayPrimitive): boolean {
+  if (p.kind === 'image') return Boolean(p.href);
+  return (p.kind === 'text' || p.kind === 'glyphRun') && (Boolean(p.href) || p.noteRef?.id !== undefined);
+}
+
+/** Whether a note of `area` gets a backlink: it has primitives and metadata. */
+function noteHasBacklink(area: NoteRegion, noteId: number): boolean {
+  const groupId = `${area.kind ?? 'footnote'}-${noteId}`;
   return (
-    (page.noteAreas?.length ?? 0) > 0 ||
-    pageRegionPrimitives(page).some(
-      (p) => p.href || p.noteRef || p.sdt || p.sdtPath?.length || p.inlineSdtWidget
+    (area.notes ?? []).some((meta) => meta.id === noteId) &&
+    (area.primitives ?? []).some((p) => p.groupId === groupId)
+  );
+}
+
+/** Whether `buildMirrorPage(page)` holds a link Tab stops at. */
+export function mirrorPageHasTabStops(page: DisplayPage): boolean {
+  return (
+    pageRegionPrimitives(page).some(mirrorLinks) ||
+    (page.noteAreas ?? []).some((area) =>
+      (area.noteIds ?? []).some((noteId) => noteHasBacklink(area, noteId))
     )
   );
 }
@@ -1268,7 +1281,7 @@ function buildMirrorNoteArea(
     // MirrorLabels.noteBacklink, falling back to the note's own label/number
     // (data, not hardcoded English). Pointer-inert like the rest of the
     // mirror; navigation UX belongs to the interactive overlay.
-    if (meta) {
+    if (meta && noteHasBacklink(area, noteId)) {
       const backlink = doc.createElement('a');
       backlink.className = MIRROR_CLASS_NAMES.noteBacklink;
       backlink.setAttribute('role', 'doc-backlink');

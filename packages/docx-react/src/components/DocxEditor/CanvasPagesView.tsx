@@ -15,7 +15,6 @@ import {
   bindDisplayPageRegistry,
   DisplayPageRegistry,
   displayPageHoldsMirrorId,
-  displayPageMayHoldTabStops,
   displayPageRevision,
   presentDisplayPageBackBuffer,
   rasterizeDisplayPageToBackBuffer,
@@ -105,15 +104,6 @@ const PAGE_WINDOW_MIN_PAGES = 12;
 // A page already mounted stays mounted until it drifts one page beyond the
 // mount band, so slow scrolling at a boundary cannot thrash mount/unmount.
 const PAGE_WINDOW_HYSTERESIS = 1;
-const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';
-
-/** The elements under `root` that Tab stops at, in document order. */
-function tabStops(root: ParentNode): HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>(TAB_STOPS)).filter(
-    (element) => element.tabIndex >= 0 && !(element as HTMLButtonElement).disabled
-  );
-}
-
 type ChromeKind = 'mirror' | 'overlay';
 type ChromeHandles = Partial<Record<ChromeKind, PageChromeHandle>>;
 
@@ -492,10 +482,6 @@ export function CanvasPagesView({
     },
     []
   );
-  const chromeCurrent = (pageKey: string): boolean => {
-    const handles = chromeHandlesRef.current.get(pageKey);
-    return Boolean(handles) && Object.values(handles!).every((handle) => handle.current());
-  };
   // Pages built on demand keep their chrome until the page window moves, so
   // what a plugin query returned stays connected while the view stays put.
   const onDemandKeysRef = useRef(new Set<string>());
@@ -520,52 +506,11 @@ export function CanvasPagesView({
     return () => pageRegistry.setMaterializer(null);
   }, [materializePages, pageRegistry]);
 
-  // Tab and fragment links reach content on pages whose chrome is not built:
-  // build it first, then let focus or the link land on it.
+  // A fragment link to content on a page whose chrome is not built builds
+  // that page first, so the browser finds the target it follows.
   useEffect(() => {
     const host = innerHostRef.current;
     if (!host) return;
-    const doc = host.ownerDocument;
-    const follows = (a: Node, b: Node): boolean =>
-      Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey) return;
-      if (event.defaultPrevented || !(event.target instanceof Node)) return;
-      const target = event.target;
-      const step = event.shiftKey ? -1 : 1;
-      // Whether `node` lies past `from` in the direction Tab moves.
-      const past = (from: Node, node: Node): boolean =>
-        !from.contains(node) && (step > 0 ? follows(from, node) : follows(node, from));
-      const stops = tabStops(doc).filter((stop) => past(target, stop));
-      const next = step > 0 ? stops[0] : stops[stops.length - 1];
-      const beforeNext = (node: Node): boolean => !next || past(node, next);
-      const pageElements = Array.from(
-        host.querySelectorAll<HTMLElement>('.canvas-pages__column > .canvas-page')
-      );
-      if (step < 0) pageElements.reverse();
-      const pages = displayListRef.current.pages;
-      for (const element of pageElements) {
-        const onPath =
-          (element.contains(target) || past(target, element)) &&
-          (!next || element.contains(next) || beforeNext(element));
-        if (!onPath) continue;
-        const index = Number(element.dataset.pageIndex);
-        const key = element.dataset.pageKey;
-        const page = pages[index];
-        if (!page || key === undefined || chromeCurrent(key)) continue;
-        if (!displayPageMayHoldTabStops(page)) continue;
-        materializePages([index]);
-        const reached = tabStops(element).filter(
-          (stop) => past(target, stop) && beforeNext(stop)
-        );
-        const stop = step > 0 ? reached[0] : reached[reached.length - 1];
-        if (stop) {
-          event.preventDefault();
-          stop.focus();
-          return;
-        }
-      }
-    };
     const onClick = (event: MouseEvent): void => {
       const link =
         event.target instanceof Element
@@ -578,20 +523,14 @@ export function CanvasPagesView({
       } catch {
         return;
       }
-      if (!id || doc.getElementById(id)) return;
+      if (!id || host.ownerDocument.getElementById(id)) return;
       const index = displayListRef.current.pages.findIndex((page) =>
         displayPageHoldsMirrorId(page, id)
       );
       if (index >= 0) materializePages([index]);
     };
-    // Bubbling to the document, after the editor's own Tab handling.
-    doc.addEventListener('keydown', onKeyDown);
     host.addEventListener('click', onClick, true);
-    return () => {
-      doc.removeEventListener('keydown', onKeyDown);
-      host.removeEventListener('click', onClick, true);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => host.removeEventListener('click', onClick, true);
   }, [materializePages]);
 
   // One glyph-outline cache for the canvas lifetime (task contract: not

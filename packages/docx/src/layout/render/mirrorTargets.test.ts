@@ -1,12 +1,8 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
 import type { DisplayPage, DisplayPrimitive } from './displayList';
-import { buildInteractiveOverlayPage } from './interactiveOverlay';
-import {
-  buildMirrorPage,
-  displayPageHoldsMirrorId,
-  displayPageMayHoldTabStops,
-} from './mirrorDom';
+import { buildInteractiveOverlayPage, interactiveOverlayHasTabStops } from './interactiveOverlay';
+import { buildMirrorPage, displayPageHoldsMirrorId, mirrorPageHasTabStops } from './mirrorDom';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -42,6 +38,23 @@ const pages: DisplayPage[] = [
     height: 100,
     primitives: [text({ inlineSdtWidget: { kind: 'checkbox', groupId: 'g', pos: 1 } })],
   },
+  {
+    pageIndex: 4,
+    width: 100,
+    height: 100,
+    primitives: [
+      text({ inlineSdtWidget: { kind: 'checkbox', groupId: 'l', pos: 1, locked: true } }),
+    ],
+    noteAreas: [
+      {
+        kind: 'endnote',
+        y: 50,
+        height: 20,
+        noteIds: [9],
+        primitives: [text({ groupId: 'endnote-9' })],
+      },
+    ],
+  },
 ];
 
 test('a page reports the note ids and tab stops its chrome builds', () => {
@@ -53,9 +66,11 @@ test('a page reports the note ids and tab stops its chrome builds', () => {
     for (const id of ['oox-footnote-3', 'oox-endnote-7', 'oox-noteref-endnote-7']) {
       if (!ids.includes(id)) expect(displayPageHoldsMirrorId(page, id)).toBe(false);
     }
-    const stops = [mirror, overlay].flatMap((root) =>
-      Array.from(root.querySelectorAll<HTMLElement>('a[href], button'))
-    );
-    expect(displayPageMayHoldTabStops(page)).toBe(stops.length > 0);
+    const stops = (root: HTMLElement) =>
+      Array.from(root.querySelectorAll<HTMLButtonElement>('a[href], button')).filter(
+        (element) => !element.disabled
+      ).length;
+    expect(mirrorPageHasTabStops(page)).toBe(stops(mirror) > 0);
+    expect(interactiveOverlayHasTabStops(page)).toBe(stops(overlay) > 0);
   }
 });

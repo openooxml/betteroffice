@@ -17,6 +17,11 @@ export interface PageChromeOptions {
    * at idle time.
    */
   urgentRevision: number;
+  /**
+   * Names the stand-in Tab reaches while the chrome is not built, when the
+   * built chrome would hold a tab stop; null when it would hold none.
+   */
+  standInLabel: string | null;
   /** Receives the handle that builds the chrome at once, for a page needed before it is active. */
   register?: (handle: PageChromeHandle | null) => void;
   make: (page: DisplayPage, t: TFunction) => HTMLElement;
@@ -26,8 +31,6 @@ export interface PageChromeOptions {
 export interface PageChromeHandle {
   /** Builds the chrome for the current page now, unless it already shows it. */
   build(): void;
-  /** Whether the chrome shows the current page. */
-  current(): boolean;
   /** Clears chrome built while the page is inactive. */
   release(): void;
 }
@@ -39,10 +42,44 @@ interface BuiltFor {
   t: TFunction;
 }
 
+const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';
+
+/** The elements under `root` that Tab stops at, in document order. */
+function tabStops(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(TAB_STOPS)).filter(
+    (element) => element.tabIndex >= 0 && !(element as HTMLButtonElement).disabled
+  );
+}
+
+// The last Tab key, for focus that arrives from outside the document.
+const tabTracked = new WeakSet<Document>();
+let lastTab: { backwards: boolean; at: number } | null = null;
+function trackTab(doc: Document): void {
+  if (tabTracked.has(doc)) return;
+  tabTracked.add(doc);
+  doc.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.key === 'Tab') lastTab = { backwards: event.shiftKey, at: performance.now() };
+    },
+    true
+  );
+}
+
 /** Builds one page's mirror or overlay into `hostRef`, and rebuilds it with the page. */
 export function usePageChrome(
   hostRef: RefObject<HTMLDivElement | null>,
-  { page, t, active, defer, rebuildAtOnce, urgentRevision, register, make }: PageChromeOptions
+  {
+    page,
+    t,
+    active,
+    defer,
+    rebuildAtOnce,
+    urgentRevision,
+    standInLabel,
+    register,
+    make,
+  }: PageChromeOptions
 ): void {
   // Owned deltas shift primitive positions in place: identity alone is stale.
   const revision = displayPageRevision(page);
@@ -81,29 +118,61 @@ export function usePageChrome(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostRef]);
 
+  // Unbuilt chrome that would hold tab stops shows a stand-in in their place.
+  // Tab lands on it in the browser's own order; it builds the chrome and
+  // passes focus to the first stop, or the last when Tab moved backwards.
+  const showStandIn = (host: HTMLElement): void => {
+    if (standInLabel === null) {
+      host.replaceChildren();
+      return;
+    }
+    const doc = host.ownerDocument;
+    trackTab(doc);
+    const standIn = doc.createElement('span');
+    standIn.className = 'canvas-chrome-stand-in';
+    standIn.tabIndex = 0;
+    standIn.setAttribute('aria-label', standInLabel);
+    Object.assign(standIn.style, {
+      position: 'absolute',
+      left: '0',
+      top: '0',
+      width: '1px',
+      height: '1px',
+      overflow: 'hidden',
+    });
+    standIn.addEventListener('focus', (event) => {
+      const from = event.relatedTarget;
+      const backwards =
+        from instanceof Node
+          ? Boolean(standIn.compareDocumentPosition(from) & Node.DOCUMENT_POSITION_FOLLOWING)
+          : lastTab !== null && lastTab.backwards && performance.now() - lastTab.at < 1000;
+      build();
+      const stops = tabStops(host);
+      (backwards ? stops[stops.length - 1] : stops[0])?.focus();
+    });
+    host.replaceChildren(standIn);
+  };
+
   useEffect(() => {
     register?.({
       build,
-      current,
       release: () => {
         const host = hostRef.current;
         if (!host || activeRef.current || !builtForRef.current) return;
-        host.replaceChildren();
         builtForRef.current = null;
+        showStandIn(host);
       },
     });
     return () => register?.(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [build, hostRef, register]);
+  }, [build, hostRef, register, standInLabel]);
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     if (!active) {
-      if (builtForRef.current) {
-        host.replaceChildren();
-        builtForRef.current = null;
-      }
+      builtForRef.current = null;
+      showStandIn(host);
       return;
     }
     if (current()) return;
@@ -116,6 +185,7 @@ export function usePageChrome(
       build();
       return;
     }
+    if (!built) showStandIn(host);
     if (typeof requestIdleCallback === 'function') {
       const id = requestIdleCallback(build, { timeout: 1500 });
       return () => cancelIdleCallback(id);
@@ -123,5 +193,5 @@ export function usePageChrome(
     const id = setTimeout(build, 150);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, t, revision, urgentRevision, active, build]);
+  }, [page, t, revision, urgentRevision, active, build, standInLabel]);
 }

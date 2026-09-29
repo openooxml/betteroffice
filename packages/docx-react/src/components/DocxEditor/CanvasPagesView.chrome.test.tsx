@@ -173,47 +173,83 @@ const widget = (groupId: string): DisplayPrimitive =>
     inlineSdtWidget: { kind: 'checkbox', groupId, pos: 1 },
   }) as DisplayPrimitive;
 
-test('Tab reaches a content control on a page whose chrome is not built', async () => {
+
+test('Tab reaches a control on an unbuilt page through its stand-in, in either direction', async () => {
   const hostRef = createRef<HTMLDivElement>();
-  const displayList: DisplayList = {
-    pages: blankPages(40, (index) =>
-      index === 0
-        ? [widget('first'), { ...widget('second'), x: 50 } as DisplayPrimitive]
-        : index === 30
-          ? [widget('far')]
-          : []
-    ),
-  };
+  const pages = blankPages(40, (index) =>
+    index === 0
+      ? [widget('first')]
+      : index === 30
+        ? [widget('far'), { ...widget('farther'), x: 50 } as DisplayPrimitive]
+        : []
+  );
   render(
-    <CanvasPagesView
-      displayList={displayList}
-      hostRef={hostRef}
-      interactive
-      glyphOutlineProvider={() => ''}
-    />
+    <>
+      <CanvasPagesView
+        displayList={{ pages }}
+        hostRef={hostRef}
+        interactive
+        glyphOutlineProvider={() => ''}
+      />
+      <button type="button" id="after">
+        after
+      </button>
+    </>
   );
   await idle();
   const host = hostRef.current!;
   const control = (groupId: string) =>
     host.querySelector<HTMLButtonElement>(`button[data-sdt-group-id="${groupId}"]`);
+  const standIn = () =>
+    host.querySelector<HTMLElement>(
+      '.canvas-page[data-page-index="30"] .canvas-interactive-overlay .canvas-chrome-stand-in'
+    );
+  // Only chrome that would hold a tab stop gets a stand-in.
+  expect(host.querySelectorAll('.canvas-interactive-overlay .canvas-chrome-stand-in')).toHaveLength(1);
   expect(control('far')).toBeNull();
-  const press = (groupId: string) => {
-    const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
-    control(groupId)!.dispatchEvent(event);
-    return event;
-  };
-  // The next control on the same page is the browser's to reach.
-  expect(press('first').defaultPrevented).toBe(false);
-  expect(control('far')).toBeNull();
-  await act(async () => control('second')!.focus());
-  let tab!: KeyboardEvent;
-  await act(async () => {
-    tab = press('second');
-  });
-  expect(tab.defaultPrevented).toBe(true);
+  const tab = (from: Element, shiftKey: boolean) =>
+    from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true }));
+
+  await act(async () => control('first')!.focus());
+  tab(control('first')!, false);
+  await act(async () => standIn()!.focus());
   expect(document.activeElement).toBe(control('far'));
-  await idle();
-  expect(document.activeElement).toBe(control('far'));
+
+  // Focus leaving the page returns its chrome to a stand-in.
+  const after = document.getElementById('after')!;
+  await act(async () => after.focus());
+  expect(standIn()).not.toBeNull();
+  tab(after, true);
+  await act(async () => standIn()!.focus());
+  expect(document.activeElement).toBe(control('farther'));
+});
+
+test('a page in the window whose chrome is still pending shows stand-ins Tab can reach', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const link = {
+    kind: 'text',
+    x: 10,
+    y: 10,
+    text: 'link',
+    font: '11px sans-serif',
+    color: '#000',
+    href: '#somewhere',
+  } as unknown as DisplayPrimitive;
+  const pages = blankPages(40, (index) => (index === 1 ? [link, widget('own')] : []));
+  render(
+    <CanvasPagesView
+      displayList={{ pages }}
+      hostRef={hostRef}
+      interactive
+      glyphOutlineProvider={() => ''}
+    />
+  );
+  await act(async () => {});
+  const page = hostRef.current!.querySelector<HTMLElement>('.canvas-page[data-page-index="1"]')!;
+  const standIns = page.querySelectorAll<HTMLElement>('.canvas-chrome-stand-in');
+  expect(standIns).toHaveLength(2);
+  await act(async () => standIns[0]!.focus());
+  expect(document.activeElement?.getAttribute('href')).toBe('#somewhere');
 });
 
 test('a link to a note on a page whose chrome is not built builds that page first', async () => {
@@ -359,86 +395,6 @@ test('a position shift in place moves a control at once, and the mirror by idle 
   expect(mirrorStart()).toBe('6');
 });
 
-test('Tab into the pages from outside them reaches the nearest control, built or not', async () => {
-  const hostRef = createRef<HTMLDivElement>();
-  const pages = blankPages(40, (index) =>
-    index === 1 ? [widget('near')] : index === 38 ? [widget('last')] : []
-  );
-  render(
-    <>
-      <button type="button" id="before">
-        before
-      </button>
-      <CanvasPagesView
-        displayList={{ pages }}
-        hostRef={hostRef}
-        interactive
-        glyphOutlineProvider={() => ''}
-      />
-      <button type="button" id="after">
-        after
-      </button>
-    </>
-  );
-  await act(async () => {});
-  const press = (id: string, shiftKey = false) => {
-    const event = new KeyboardEvent('keydown', {
-      key: 'Tab',
-      shiftKey,
-      bubbles: true,
-      cancelable: true,
-    });
-    document.getElementById(id)!.dispatchEvent(event);
-    return event;
-  };
-  const control = (groupId: string) =>
-    hostRef.current!.querySelector(`button[data-sdt-group-id="${groupId}"]`);
-  // Nothing is built yet: the first build waits for idle time.
-  expect(control('near')).toBeNull();
-  await act(async () => {
-    expect(press('before').defaultPrevented).toBe(true);
-  });
-  expect(document.activeElement).toBe(control('near'));
-  await act(async () => {
-    expect(press('after', true).defaultPrevented).toBe(true);
-  });
-  expect(document.activeElement).toBe(control('last'));
-});
-
-test('Tab from a page whose chrome is still pending reaches that page first', async () => {
-  const hostRef = createRef<HTMLDivElement>();
-  const link = {
-    kind: 'text',
-    x: 10,
-    y: 10,
-    text: 'link',
-    font: '11px sans-serif',
-    color: '#000',
-    href: '#somewhere',
-  } as unknown as DisplayPrimitive;
-  const pages = blankPages(40, (index) => (index === 1 ? [link, widget('own')] : []));
-  render(
-    <CanvasPagesView
-      displayList={{ pages }}
-      hostRef={hostRef}
-      interactive
-      glyphOutlineProvider={() => ''}
-    />
-  );
-  await act(async () => {});
-  const canvas = hostRef.current!.querySelector<HTMLElement>(
-    '.canvas-page[data-page-index="1"] canvas'
-  )!;
-  canvas.tabIndex = 0;
-  canvas.focus();
-  const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
-  await act(async () => {
-    canvas.dispatchEvent(event);
-  });
-  expect(event.defaultPrevented).toBe(true);
-  expect(document.activeElement?.getAttribute('href')).toBe('#somewhere');
-});
-
 test('elements a plugin query returned stay connected through other queries', async () => {
   const hostRef = createRef<HTMLDivElement>();
   const run = (docStart: number) =>
@@ -494,7 +450,6 @@ test('chrome built on demand for an inactive page is cleared on release', async 
   expect(content()).toBeNull();
   act(() => handle!.build());
   expect(content()).not.toBeNull();
-  expect(handle!.current()).toBe(true);
   act(() => handle!.release());
   expect(content()).toBeNull();
 

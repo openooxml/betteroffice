@@ -16,10 +16,11 @@
  * the positions and values they dispatch.
  */
 
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import {
   buildInteractiveOverlayPage,
   displayPageRevision,
+  interactiveOverlayHasTabStops,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
@@ -53,6 +54,10 @@ export function CanvasInteractiveOverlay({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
+  const standInLabel = useMemo(
+    () => (interactiveOverlayHasTabStops(page) ? t('a11y.contentControl') : null),
+    [page, t]
+  );
   usePageChrome(hostRef, {
     page,
     t,
@@ -61,6 +66,7 @@ export function CanvasInteractiveOverlay({
     rebuildAtOnce: true,
     // Its buttons carry the positions a shift moves.
     urgentRevision: displayPageRevision(page),
+    standInLabel,
     register,
     make: makeOverlay,
   });
