@@ -10,13 +10,11 @@
 //!
 //! - **fixed** — normalize the declared grid, then raise columns so the first
 //!   row's preferred cell widths fit, sharing a spanning cell's deficit evenly
-//!   across the columns it covers, and finally grow to any explicit table
-//!   width.
+//!   across the columns it covers, then fit any explicit table width.
 //! - **autofit** — accumulate per-column minimum and maximum content widths
-//!   from every cell (`w:noWrap` pins the minimum to the maximum), target
-//!   `max(minTotal, min(contentWidth, explicitOrMaxTotal))`, and hand out the
-//!   room above the minimums in proportion to each column's flex
-//!   (`max - min`); with no flex anywhere the target is spread evenly.
+//!   from every cell, bounded by preferred cell widths and the content budget.
+//!   Distribute room above minimums in proportion to column flex (`max - min`),
+//!   or shrink minimums proportionally when they exceed the budget.
 //! - otherwise — normalize the declared grid and uniformly scale it to an
 //!   explicit table width when the two differ by more than a pixel. A table
 //!   that declares no width of its own then lets [`content_sized_columns`] and
@@ -239,9 +237,15 @@ fn resolve_fixed_column_widths(
             );
         }
     }
-    explicit_width_px.map_or(widths.clone(), |target| {
-        distribute_to_target(widths, target)
-    })
+    if let Some(target) = explicit_width_px {
+        let total: f64 = widths.iter().sum();
+        if total > target {
+            let scale = target / total;
+            return widths.into_iter().map(|width| width * scale).collect();
+        }
+        return distribute_to_target(widths, target);
+    }
+    widths
 }
 
 /// Autofit layout: every cell contributes a minimum and a maximum, and the
@@ -265,6 +269,7 @@ fn resolve_autofit_column_widths(
     );
     let mut minimums = vec![0.0; col_count];
     let mut maximums = vec![0.0; col_count];
+    let mut preferences = vec![0.0; col_count];
     for grid_cell in resolve_cell_grid(table_block) {
         let Some(cell) = table_block
             .rows
@@ -294,7 +299,7 @@ fn resolve_autofit_column_widths(
         if cell.no_wrap.unwrap_or(false) {
             minimum = minimum.max(max_content_width.unwrap_or(0.0));
         }
-        let maximum = minimum.max(max_content_width.or(preferred).unwrap_or(0.0));
+        let maximum = minimum.max(preferred.or(max_content_width).unwrap_or(0.0));
         add_span_constraint(
             &mut minimums,
             grid_cell.column_index,
@@ -309,7 +314,7 @@ fn resolve_autofit_column_widths(
         );
         if let Some(preferred) = preferred {
             add_span_constraint(
-                &mut maximums,
+                &mut preferences,
                 grid_cell.column_index,
                 grid_cell.col_span,
                 preferred,
@@ -317,6 +322,9 @@ fn resolve_autofit_column_widths(
         }
     }
     for column in 0..col_count {
+        if preferences[column] > 0.0 {
+            maximums[column] = preferences[column];
+        }
         if minimums[column] <= 0.0 {
             minimums[column] = base[column].min(if maximums[column] > 0.0 {
                 maximums[column]
@@ -331,13 +339,17 @@ fn resolve_autofit_column_widths(
     }
     let min_total: f64 = minimums.iter().sum();
     let max_total: f64 = maximums.iter().sum();
-    let target = min_total.max(content_width.min(explicit_width_px.unwrap_or(
+    let target = content_width.min(min_total.max(explicit_width_px.unwrap_or(
         if max_total > 0.0 {
             max_total
         } else {
             content_width
         },
     )));
+    if target < min_total {
+        let scale = target / min_total;
+        return minimums.into_iter().map(|width| width * scale).collect();
+    }
     if target >= max_total {
         return distribute_to_target(maximums, target);
     }
@@ -720,6 +732,93 @@ mod tests {
             resolve_table_column_widths(&block, 600.0),
             vec![150.0, 200.0]
         );
+    }
+
+    #[test]
+    fn fixed_layout_scales_oversubscribed_grids_and_preferences_to_table_width() {
+        for (grid, preferred, expected) in [
+            ([300.0, 300.0], [200.0, 200.0], [200.0, 200.0]),
+            ([100.0, 100.0], [450.0, 150.0], [300.0, 100.0]),
+        ] {
+            let block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "fixed", "gridWidths": grid,
+                "preferredWidth": {"value": 6000, "type": "dxa"},
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "width": preferred[0]},
+                    {"id": 1, "blocks": [], "width": preferred[1]}
+                ]}]
+            }))
+            .unwrap();
+            let widths = resolve_table_column_widths(&block, 600.0);
+            for (actual, expected) in widths.iter().zip(expected) {
+                assert_close_to(*actual, expected, 6);
+            }
+        }
+    }
+
+    #[test]
+    fn autofit_shrinks_unbreakable_minimums_to_the_content_budget() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [600],
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "blocks": [], "minContentWidth": 1510.16, "maxContentWidth": 1510.16}
+            ]}]
+        }))
+        .unwrap();
+        assert_close_to(resolve_table_column_widths(&block, 600.0)[0], 600.0, 6);
+        assert_eq!(resolve_table_column_widths(&block, 0.0), vec![0.0]);
+
+        let mut block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+            "preferredWidth": {"value": 15000, "type": "dxa"},
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "blocks": [], "minContentWidth": 900, "maxContentWidth": 1000},
+                {"id": 1, "blocks": [], "minContentWidth": 300, "maxContentWidth": 500}
+            ]}]
+        }))
+        .unwrap();
+        assert_eq!(resolve_table_column_widths(&block, 600.0), vec![450.0, 150.0]);
+        block.indent = Some(60.0);
+        assert_eq!(resolve_table_column_widths(&block, 600.0), vec![405.0, 135.0]);
+    }
+
+    #[test]
+    fn autofit_exceeds_preferred_cell_width_only_for_content_minimums() {
+        for (minimum, maximum, expected) in [
+            (40.0, 238.34, 100.0),
+            (120.0, 238.34, 120.0),
+            (20.0, 50.0, 100.0),
+        ] {
+            let block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "autofit", "gridWidths": [300],
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "preferredWidth": {"value": 1500, "type": "dxa"},
+                     "minContentWidth": minimum, "maxContentWidth": maximum}
+                ]}]
+            }))
+            .unwrap();
+            assert_eq!(resolve_table_column_widths(&block, 600.0), vec![expected]);
+        }
+    }
+
+    #[test]
+    fn autofit_caps_unpriced_cells_in_a_column_with_a_preferred_width() {
+        let mut block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [300],
+            "rows": [
+                {"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "preferredWidth": {"value": 1500, "type": "dxa"},
+                     "minContentWidth": 20, "maxContentWidth": 50}
+                ]},
+                {"id": 1, "cells": [
+                    {"id": 1, "blocks": [], "minContentWidth": 40, "maxContentWidth": 238.34}
+                ]}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(resolve_table_column_widths(&block, 600.0), vec![100.0]);
+        block.rows[1].cells[0].min_content_width = Some(120.0);
+        assert_eq!(resolve_table_column_widths(&block, 600.0), vec![120.0]);
     }
 
     /// `oxi-en-administrative-04`, measured off Word's own `reference.pdf`: an
