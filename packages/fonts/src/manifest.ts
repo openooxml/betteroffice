@@ -407,14 +407,7 @@ export function resolveMetricCompatFace(
   italic: boolean,
 ): BundledFontFace | undefined {
   const family = resolveMetricCompatFamily(wordFamily);
-  return family ? familyFace(family, bold, italic) : undefined;
-}
-
-function familyFace(
-  family: string,
-  bold: boolean,
-  italic: boolean,
-): BundledFontFace | undefined {
+  if (!family) return undefined;
   const faces = BUNDLED_FONTS.filter((f) => f.family === family);
   const weight = bold ? 700 : 400;
   const style = italic ? 'italic' : 'normal';
@@ -436,8 +429,9 @@ const UNVENDORED_NOTO_SERIF: Record<string, string> = {
 };
 
 /**
- * Resolve a family by its bundled name (`"Gelasio"`, `"Noto Sans SC"`) or, when
- * it is not one, as a Word family through {@link resolveMetricCompatFace}.
+ * Resolve a family by its bundled name (`"Gelasio"`, `"Noto Sans SC"`) or as a
+ * Word family, returning only a face whose weight and style match, so a
+ * browser can synthesize the styles a family does not ship.
  */
 export function resolveBundledFamilyFace(
   family: string,
@@ -445,10 +439,15 @@ export function resolveBundledFamilyFace(
   italic: boolean,
 ): BundledFontFace | undefined {
   const key = family.trim().toLowerCase();
-  const bundled = bundledFamilyByName.get(key) ?? UNVENDORED_NOTO_SERIF[key];
-  return bundled
-    ? familyFace(bundled, bold, italic)
-    : resolveMetricCompatFace(family, bold, italic);
+  const bundled =
+    bundledFamilyByName.get(key) ??
+    UNVENDORED_NOTO_SERIF[key] ??
+    resolveMetricCompatFamily(family);
+  const weight = bold ? 700 : 400;
+  const style = italic ? 'italic' : 'normal';
+  return BUNDLED_FONTS.find(
+    (f) => f.family === bundled && f.weight === weight && f.style === style,
+  );
 }
 
 /**

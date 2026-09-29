@@ -152,6 +152,20 @@ test('a mapped CJK family registers its bundled equivalent under the equivalent 
   expect(googleLinks()).toHaveLength(0);
 });
 
+test('a family without italics registers only its upright faces, leaving italics to synthesis', async () => {
+  configureDefaultFonts({
+    fonts: {
+      createFontProvider: () => ({
+        resolve: () => bytes,
+        resolveFamily: (_family: string, _bold: boolean, italic: boolean) =>
+          italic ? undefined : bytes,
+      }),
+    },
+  });
+  expect(await loadFont('Upright Sans')).toBe(true);
+  expect(added.map((face) => face.style)).toEqual(['normal', 'normal']);
+});
+
 test('explicit weights and styles register only those faces', async () => {
   configureDefaultFonts({ fonts: bundle(['Weighted Sans']) });
   expect(await loadFont('Weighted Sans', { weights: [700], styles: ['italic'] })).toBe(true);

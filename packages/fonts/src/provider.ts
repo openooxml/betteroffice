@@ -15,7 +15,7 @@ export interface BundledFontSource {
     bold: boolean,
     italic: boolean,
   ): (() => Promise<ArrayBuffer>) | undefined;
-  /** Like `resolve`, but also accepts bundled family names such as `"Gelasio"`. */
+  /** Like `resolve`, but also accepts bundled family names such as `"Gelasio"`, and never substitutes another style. */
   resolveFamily(
     family: string,
     bold: boolean,

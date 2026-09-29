@@ -117,9 +117,16 @@ describe('bundled family names', () => {
       'SourceSans3-Italic.ttf'
     );
     expect(resolveBundledFamilyFace('Comic Relief', true, false)?.file).toBe('ComicRelief-Bold.ttf');
-    expect(resolveBundledFamilyFace('Noto Serif SC', true, false)?.file).toBe(
+    expect(resolveBundledFamilyFace('Noto Serif SC', false, false)?.file).toBe(
       'NotoSerifSC-Regular.otf'
     );
+  });
+
+  test('never stand in another style, so the browser can synthesize it', () => {
+    expect(resolveBundledFamilyFace('Oswald', false, true)).toBeUndefined();
+    expect(resolveBundledFamilyFace('Noto Serif SC', true, false)).toBeUndefined();
+    expect(resolveBundledFamilyFace('SimSun', true, false)).toBeUndefined();
+    expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf');
   });
 
   test('cover the serif Noto families the package does not vendor with the sans face', () => {
@@ -129,7 +136,7 @@ describe('bundled family names', () => {
   });
 
   test('fall back to Word-family resolution and miss unknown names', () => {
-    expect(resolveBundledFamilyFace('Calibri', false, false)?.family).toBe('Carlito');
+    expect(resolveBundledFamilyFace('Calibri', true, true)?.file).toBe('Carlito-BoldItalic.ttf');
     expect(resolveBundledFamilyFace('Tinos', false, false)?.family).toBe('Liberation Serif');
     expect(resolveBundledFamilyFace('Nonesuch', false, false)).toBeUndefined();
   });
