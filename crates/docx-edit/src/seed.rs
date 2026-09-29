@@ -5063,6 +5063,56 @@ pub fn seed_from_docx_with_generation(
 }
 
 /// Seeds every story of a DOCX without starting an opening.
+/// Seeds `bytes` with the body cut after its first `paragraphs` paragraphs
+/// and every other story whole, to paint the first pages before the document
+/// is seeded in full. The result is for display only. Its cut is not a real
+/// end of the document, so it is laid out with a prefix pass that stops short
+/// of it (`layout_document_with_regions_prefix_retained_json`); a pass that
+/// reaches it needs more paragraphs.
+pub fn seed_docx_preview(
+    document: &EditingDoc,
+    bytes: &[u8],
+    paragraphs: usize,
+) -> Result<(), String> {
+    let (envelope, _) = parse_docx_package(bytes)?;
+    let mut lowered = lower_docx(envelope, None)?;
+    if let Some(body) = lowered
+        .context
+        .plans
+        .iter_mut()
+        .find(|plan| plan.story_id == "body")
+    {
+        truncate_plan(body, paragraphs);
+    }
+    seed_lowered(document, lowered, None).map(|_| ())
+}
+
+/// Cuts `plan` after its `paragraphs`-th paragraph mark, with the comment
+/// coverage clipped to what is left.
+fn truncate_plan(plan: &mut StoryPlan, paragraphs: usize) {
+    let Some(last) = plan
+        .units
+        .iter()
+        .enumerate()
+        .filter(|(_, unit)| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "pilcrow"))
+        .nth(paragraphs.max(1) - 1)
+        .map(|(index, _)| index)
+    else {
+        return;
+    };
+    plan.units.truncate(last + 1);
+    plan.measured = (0, 0);
+    let width = plan.width();
+    for (_, ranges) in &mut plan.comment_coverage {
+        ranges.retain(|(start, _)| *start < width);
+        for range in ranges.iter_mut() {
+            range.1 = range.1.min(width);
+        }
+    }
+    plan.comment_coverage
+        .retain(|(_, ranges)| !ranges.is_empty());
+}
+
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
     let (envelope, parts) = parse_docx_package(bytes)?;
     seed_parsed_docx(document, envelope, parts, Arc::from(bytes)).map(|_| ())
