@@ -122,6 +122,10 @@ export {
 export { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX, canvasPageTops } from './canvasPageMetrics';
 
 export {
+  bindDisplayPageRegistry,
+  displayPageCanvas,
+  displayPageCanvases,
+  DisplayPageRegistry,
   resolveCanvasPoint,
   resolveDisplayPageClientRect,
   type CanvasPointHit,

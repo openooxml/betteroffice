@@ -36,7 +36,7 @@
 //! Story lengths, selection indices and every other unit count in this module
 //! are UTF-16 units in which each embed, pilcrows included, counts as one.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1139,6 +1139,7 @@ pub struct EditSession {
     selection: RefCell<Option<LocalSelection>>,
     cell_selection: RefCell<Option<LocalCellSelection>>,
     last_apply_profile_json: RefCell<String>,
+    resident_deleted_units: Cell<u32>,
     /// The comparison applied here, awaiting its saved bytes.
     compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
 }
@@ -1316,6 +1317,58 @@ impl EditSession {
         Ok((story, loc.para_id, head))
     }
 
+    fn delete_resident_units(&self, direction: &str, count: u32) -> Result<String, JsValue> {
+        self.resident_deleted_units.set(0);
+        if count == 0 {
+            return Err(js_err("resident delete count must be positive"));
+        }
+        // Resident layout absorbs one paragraph merge per pass.
+        let mut story = None;
+        let mut merged = false;
+        let mut deleted = 0;
+        while deleted < count {
+            let step = self
+                .collapsed_resident_input_selection()
+                .and_then(|selection| {
+                    let merges = self.resident_unit_is_pilcrow(direction, &selection)?;
+                    if merges && merged {
+                        return Ok(None);
+                    }
+                    Ok(Some((
+                        self.delete_resident_input(direction, selection)?,
+                        merges,
+                    )))
+                });
+            match step {
+                Ok(Some((from, merges))) => {
+                    story = Some(from);
+                    merged |= merges;
+                    deleted += 1;
+                }
+                Err(error) if deleted == 0 => return Err(error),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        self.resident_deleted_units.set(deleted);
+        Ok(story.expect("the first resident deletion succeeded"))
+    }
+
+    fn resident_unit_is_pilcrow(
+        &self,
+        direction: &str,
+        selection: &(String, String, u32),
+    ) -> Result<bool, JsValue> {
+        let direction = match direction {
+            "backward" => DeleteDirection::Backward,
+            "forward" => DeleteDirection::Forward,
+            _ => return Err(js_err("delete direction must be backward or forward")),
+        };
+        Ok(matches!(
+            adjacent_story_unit(self.engine.doc(), &selection.0, selection.2, direction)?,
+            Some(AdjacentStoryUnit::Pilcrow)
+        ))
+    }
+
     fn delete_resident_input(
         &self,
         direction: &str,
@@ -1408,6 +1461,7 @@ impl EditSession {
             selection: RefCell::new(None),
             cell_selection: RefCell::new(None),
             last_apply_profile_json: RefCell::new("{}".to_owned()),
+            resident_deleted_units: Cell::new(0),
             compared: RefCell::new(None),
         };
         session.engine.doc().rotate_version(js_entropy());
@@ -1501,6 +1555,12 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Makes the next display frame a full one whatever epoch its caller
+    /// passes, for a host that switches to this engine from another.
+    pub fn reset_frame_base(&self) {
+        self.engine.reset_frame_base();
+    }
+
     /// `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
     /// against the same resident font store this session measures with.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {
@@ -1512,7 +1572,8 @@ impl EditSession {
     /// Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
     /// a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
     /// frame the caller currently holds; pass `0` for the first frame. A
-    /// mismatch makes the engine emit a full frame instead of a delta. Errors
+    /// mismatch makes the engine emit a full frame instead of a delta, and the
+    /// returned frame's epoch is always greater than `expected_frame_epoch`. Errors
     /// unless the epoch is a non-negative safe integer, and on build failure.
     pub fn build_display_list_frame(
         &self,
@@ -1733,19 +1794,24 @@ impl EditSession {
         Ok(frame)
     }
 
-    /// Deletes one character at this session's collapsed selection and returns
-    /// the resulting binary `FrameDelta`. `direction` is `"backward"` or
-    /// `"forward"`; a surrogate pair is removed whole. At a paragraph boundary
-    /// this merges with the neighbouring paragraph instead.
+    /// Deletes up to `count` characters at this session's collapsed selection,
+    /// lays out once, and returns the resulting binary `FrameDelta`.
+    /// `direction` is `"backward"` or `"forward"`; a surrogate pair is removed
+    /// whole. At a paragraph boundary a deletion merges with the neighbouring
+    /// paragraph instead. Deleting stops early at the document start or end,
+    /// before a second paragraph merge, or at a paragraph the resident state
+    /// cannot absorb; [`EditSession::resident_deleted_units`] reports how many
+    /// were removed.
     ///
-    /// Errors on an unknown `direction`, when `expected_frame_epoch` is not a
-    /// non-negative safe integer, under the same selection and readiness
-    /// conditions as [`EditSession::apply_input`], and when there is no
-    /// character to delete in that direction (document start or end).
+    /// Errors on an unknown `direction`, a zero `count`, when
+    /// `expected_frame_epoch` is not a non-negative safe integer, under the
+    /// same selection and readiness conditions as [`EditSession::apply_input`],
+    /// and when there is no character to delete in that direction.
     pub fn apply_delete(
         &self,
         direction: &str,
         expected_frame_epoch: f64,
+        count: u32,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         if !(expected_frame_epoch.is_finite()
@@ -1757,11 +1823,15 @@ impl EditSession {
                 "expected_frame_epoch must be a non-negative safe integer",
             ));
         }
-        let selection = self.collapsed_resident_input_selection()?;
-        let story = self.delete_resident_input(direction, selection)?;
+        let story = self.delete_resident_units(direction, count)?;
         self.engine
             .apply_and_layout(&story, expected_frame_epoch as u64)
             .map_err(js_err)
+    }
+
+    /// Characters the last [`EditSession::apply_delete`] removed.
+    pub fn resident_deleted_units(&self) -> u32 {
+        self.resident_deleted_units.get()
     }
 
     /// Instrumented twin of [`EditSession::apply_delete`]: identical arguments,
@@ -1771,6 +1841,7 @@ impl EditSession {
         &self,
         direction: &str,
         expected_frame_epoch: f64,
+        count: u32,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         if !(expected_frame_epoch.is_finite()
@@ -1784,11 +1855,11 @@ impl EditSession {
         }
 
         let started = performance_now();
-        let selection = self.collapsed_resident_input_selection()?;
+        self.collapsed_resident_input_selection()?;
         let selection_ms = performance_now() - started;
 
         let started = performance_now();
-        let story = self.delete_resident_input(direction, selection)?;
+        let story = self.delete_resident_units(direction, count)?;
         let edit_ms = performance_now() - started;
         let (frame, engine_profile) = self
             .engine
@@ -3851,6 +3922,13 @@ impl EditSession {
             .search_text(query, case_sensitive, limit.map(|value| value as usize))
             .map_err(js_err)?;
         serde_json::to_string(&matches).map_err(js_err)
+    }
+
+    /// Whether the document has a story with this id.
+    pub fn has_story(&self, story: &str) -> bool {
+        let txn = self.engine.doc().yrs_doc().transact();
+        txn.get_map(STORIES)
+            .is_some_and(|stories| stories.contains_key(&txn, story))
     }
 
     /// Every story id in the document, sorted so the order is stable across

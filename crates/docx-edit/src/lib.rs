@@ -325,6 +325,42 @@ impl std::error::Error for EditError {}
 
 static DOC_INSTANCES: AtomicU64 = AtomicU64::new(1);
 
+/// Per-story values built at one committed epoch. Older values are never served, so the
+/// first value of a newer epoch drops them all at once.
+struct EpochCache<T> {
+    epoch: u64,
+    entries: HashMap<Box<str>, Arc<T>>,
+}
+
+impl<T> Default for EpochCache<T> {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<T> EpochCache<T> {
+    fn get(&self, story_id: &str, epoch: u64) -> Option<Arc<T>> {
+        if self.epoch != epoch {
+            return None;
+        }
+        self.entries.get(story_id).cloned()
+    }
+
+    fn insert(&mut self, story_id: &str, epoch: u64, value: Arc<T>) {
+        if epoch < self.epoch {
+            return;
+        }
+        if epoch > self.epoch {
+            self.entries.clear();
+            self.epoch = epoch;
+        }
+        self.entries.insert(story_id.into(), value);
+    }
+}
+
 /// A single yrs replica of the DOCX editing model.
 pub struct EditingDoc {
     doc: Doc,
@@ -338,8 +374,8 @@ pub struct EditingDoc {
     /// Rotated whenever the replica's content or retained source is replaced.
     version_nonce: AtomicU64,
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
-    segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
-    chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
+    segment_indexes: Mutex<EpochCache<SegmentIndex>>,
+    chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     source: Mutex<Option<identity::SourcePackage>>,
     seen: identity::SeenCell,
     _update_sub: Subscription,
@@ -379,8 +415,8 @@ impl EditingDoc {
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
             metadata: Mutex::new(None),
-            segment_indexes: Mutex::new(HashMap::new()),
-            chunk_snapshots: Mutex::new(HashMap::new()),
+            segment_indexes: Mutex::default(),
+            chunk_snapshots: Mutex::default(),
             source: Mutex::new(None),
             seen,
             _update_sub: update_sub,
@@ -423,23 +459,17 @@ impl EditingDoc {
         // Sampling before the read txn lets a racing commit tag the fresh index
         // stale rather than serve a pre-commit snapshot as current.
         let epoch = self.epoch.load(Ordering::Relaxed);
-        {
-            let cache = self.segment_indexes.lock().unwrap();
-            if let Some((cached_epoch, index)) = cache.get(story_id) {
-                if *cached_epoch == epoch {
-                    return Ok(Arc::clone(index));
-                }
-            }
+        if let Some(index) = self.segment_indexes.lock().unwrap().get(story_id, epoch) {
+            return Ok(index);
         }
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         let index = Arc::new(SegmentIndex::build(&story, &txn));
-        let mut cache = self.segment_indexes.lock().unwrap();
-        if let Some(stories) = txn.get_map(STORIES) {
-            cache.retain(|key, _| &**key == story_id || stories.get(&txn, key).is_some());
-        }
         drop(txn);
-        cache.insert(story_id.into(), (epoch, Arc::clone(&index)));
+        self.segment_indexes
+            .lock()
+            .unwrap()
+            .insert(story_id, epoch, Arc::clone(&index));
         Ok(index)
     }
 
@@ -451,20 +481,14 @@ impl EditingDoc {
         txn: &T,
     ) -> Arc<Vec<ops::Chunk>> {
         let epoch = self.epoch.load(Ordering::Relaxed);
-        {
-            let cache = self.chunk_snapshots.lock().unwrap();
-            if let Some((cached_epoch, chunks)) = cache.get(story_id)
-                && *cached_epoch == epoch
-            {
-                return Arc::clone(chunks);
-            }
+        if let Some(chunks) = self.chunk_snapshots.lock().unwrap().get(story_id, epoch) {
+            return chunks;
         }
         let chunks = Arc::new(ops::snapshot(story, txn));
-        let mut cache = self.chunk_snapshots.lock().unwrap();
-        if let Some(stories) = txn.get_map(STORIES) {
-            cache.retain(|key, _| &**key == story_id || stories.get(txn, key).is_some());
-        }
-        cache.insert(story_id.into(), (epoch, Arc::clone(&chunks)));
+        self.chunk_snapshots
+            .lock()
+            .unwrap()
+            .insert(story_id, epoch, Arc::clone(&chunks));
         chunks
     }
 
@@ -650,7 +674,11 @@ impl EditingDoc {
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
         if stories.remove(&mut txn, story_id).is_some() {
-            self.chunk_snapshots.lock().unwrap().remove(story_id);
+            self.chunk_snapshots
+                .lock()
+                .unwrap()
+                .entries
+                .remove(story_id);
             Ok(())
         } else {
             Err(EditError::StoryNotFound(story_id.to_owned()))
@@ -1188,6 +1216,28 @@ mod tests {
         doc.create_story("header:rId7", "Header", "Header", "center")
             .unwrap();
         doc
+    }
+
+    #[test]
+    fn epoch_cache_serves_only_the_current_epoch() {
+        let mut cache = EpochCache::default();
+        cache.insert("body", 1, Arc::new(1));
+        cache.insert("hdr", 1, Arc::new(2));
+        assert_eq!(cache.get("body", 1).as_deref(), Some(&1));
+        assert_eq!(cache.get("body", 2), None);
+        cache.insert("body", 2, Arc::new(3));
+        assert_eq!(
+            cache.get("hdr", 2),
+            None,
+            "a newer epoch drops the older values"
+        );
+        cache.insert("hdr", 1, Arc::new(4));
+        assert_eq!(
+            cache.get("hdr", 2),
+            None,
+            "a value built before a commit is not kept"
+        );
+        assert_eq!(cache.entries.len(), 1);
     }
 
     fn peers(text: &str, a_id: u64, b_id: u64) -> (EditingDoc, EditingDoc) {

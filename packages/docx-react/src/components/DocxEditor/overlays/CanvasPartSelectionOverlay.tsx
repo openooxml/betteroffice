@@ -2,7 +2,11 @@
 
 import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
+import {
+  displayPageCanvas,
+  type DisplayListQueries,
+  type DisplayListRect,
+} from '@betteroffice/docx/layout/render';
 import { projectPageLocalRect } from '../internals/canvasProjection';
 import type { PartEdit } from '../partEdit';
 
@@ -99,7 +103,7 @@ export function CanvasPartSelectionOverlay({
           : pageIndices[0];
       let bestDist = Infinity;
       for (const pi of activePageIndex == null ? pageIndices : []) {
-        const canvasEl = host.querySelector<HTMLCanvasElement>(`canvas[data-page-index="${pi}"]`);
+        const canvasEl = displayPageCanvas(host, pi);
         if (!canvasEl) continue;
         const r = canvasEl.getBoundingClientRect();
         const vpCenter = window.innerHeight / 2;
