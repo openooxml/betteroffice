@@ -135,6 +135,7 @@ import {
   projectYrsDisplayPosition,
   type YrsPositionProjection,
 } from './internals/yrsPositionProjection';
+import { YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
 import { positionAtClientPoint } from './internals/pointPosition';
@@ -1351,6 +1352,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       rootStory: string;
       projection: YrsPositionProjection;
     } | null>(null);
+    // Rebuilding a projection re-reads only the paragraphs that changed.
+    const yrsStorySegmentsRef = useRef<YrsStorySegmentCache | null>(null);
+    useEffect(() => () => yrsStorySegmentsRef.current?.dispose(), []);
     const getYrsPositionProjection = useCallback(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
@@ -1363,7 +1367,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         ) {
           return cached.projection;
         }
-        const projection = createYrsPositionProjection(session, rootStory);
+        let segments = yrsStorySegmentsRef.current;
+        if (segments?.session !== session) {
+          segments?.dispose();
+          segments = yrsStorySegmentsRef.current = new YrsStorySegmentCache(session);
+        }
+        segments.refresh();
+        const projection = createYrsPositionProjection(session, rootStory, segments);
+        segments.scheduleDigests();
         if (!projection) return null;
         yrsPositionProjectionCacheRef.current = {
           version: yrsProjectionVersionRef.current,

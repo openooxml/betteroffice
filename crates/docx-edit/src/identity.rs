@@ -498,9 +498,10 @@ impl SourceIndex {
     }
 }
 
-/// The retained source package: its bytes until an identity read needs the index.
+/// The retained source package: its bytes, and their digest when known,
+/// until an identity read needs the index.
 pub(crate) enum SourcePackage {
-    Pending(Arc<[u8]>),
+    Pending(Arc<[u8]>, Option<String>),
     Ready(Arc<SourceIndex>),
 }
 
