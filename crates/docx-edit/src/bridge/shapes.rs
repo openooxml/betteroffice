@@ -496,9 +496,15 @@ fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
 
 /// The result of a complex field that holds a hyperlink or a simple field,
 /// which shows its parts, as body text does, so a nested PAGE still resolves.
-/// Too deep to lower a hyperlink's runs, the field shows its cached text.
+/// A PAGE or NUMPAGES field stays a field, and a field too deep to lower a
+/// hyperlink's runs shows its cached text.
 fn projected_result(field_value: &Value, depth: usize) -> Option<&Vec<Value>> {
-    if depth + 2 >= MAX_SHAPE_BODY_DEPTH {
+    if depth + 2 >= MAX_SHAPE_BODY_DEPTH
+        || matches!(
+            string(field_value, "fieldType").as_deref(),
+            Some("PAGE" | "NUMPAGES")
+        )
+    {
         return None;
     }
     let instruction = string(field_value, "instruction").unwrap_or_default();
@@ -1221,6 +1227,14 @@ mod tests {
             matches!(&projected[..], [Run::Text(text), Run::Field(page)]
                 if text.text == "p" && text.fmt.bold == Some(true) && page.field_type == "PAGE"),
             "{projected:?}"
+        );
+        let link = json!({"type": "hyperlink", "children": [text]});
+        let page_field = json!({"type": "complexField", "fieldType": "PAGE", "instruction": "PAGE",
+            "fieldResult": [text], "structuredResult": {"inline": [link]}});
+        let page_runs = runs(&page_field);
+        assert!(
+            matches!(&page_runs[..], [Run::Field(field)] if field.field_type == "PAGE"),
+            "{page_runs:?}"
         );
         let nested = (0..6).fold(
             reference,
