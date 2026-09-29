@@ -121,6 +121,8 @@ const bundledFamilies = new Set<string>();
 // Families whose bundled faces did not all register; a mapped original name
 // is not marked loaded from them, so its next pass retries.
 const partialBundledFamilies = new Set<string>();
+// Families the bundle had no face for on their last attempt.
+const bundledAbsentFamilies = new Set<string>();
 let bundledFacesInFlight = 0;
 let bundledFacesToAnnounce: FontFace[] = [];
 let announceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -204,7 +206,8 @@ function registerBundledFace(
   return promise;
 }
 
-type BundledRegistration = 'complete' | 'partial' | 'none';
+/** `absent`: the bundle has no face for the family at all, as opposed to faces that failed or are still loading. */
+type BundledRegistration = 'complete' | 'partial' | 'none' | 'absent';
 
 /**
  * Registers the configured bundled faces for `family` under its own name,
@@ -235,6 +238,7 @@ function registerBundledFamily(
   );
   let resolvedProvider = false;
   const summarize = (): BundledRegistration => {
+    if (resolvedProvider && states.every((state) => state === 'unsupported')) return 'absent';
     if (!states.includes('registered')) return 'none';
     return resolvedProvider && states.every((state) => state === 'registered' || state === 'unsupported')
       ? 'complete'
@@ -397,9 +401,14 @@ async function loadFontFrom(
   // Currently loading? Return existing promise
   const existingLoad = loadingFonts.get(normalizedFamily);
   if (existingLoad) {
-    // An in-flight load may lack this call's bundled fallback; retry with it.
+    // An in-flight load may lack this call's bundled fallback; retry with it
+    // only when the bundle had nothing under this name, not after a timeout.
     return bundledFallback
-      ? existingLoad.then((loaded) => loaded || loadFontFrom(fontFamily, options, bundledFallback))
+      ? existingLoad.then((loaded) =>
+          loaded || !bundledAbsentFamilies.has(normalizedFamily)
+            ? loaded
+            : loadFontFrom(fontFamily, options, bundledFallback)
+        )
       : existingLoad;
   }
 
@@ -456,7 +465,9 @@ async function loadFontFrom(
           options?.weights,
           options?.styles
         );
-        if (registration === 'none') return false;
+        if (registration === 'absent') bundledAbsentFamilies.add(normalizedFamily);
+        else bundledAbsentFamilies.delete(normalizedFamily);
+        if (registration === 'none' || registration === 'absent') return false;
         if (registration === 'complete') {
           partialBundledFamilies.delete(normalizedFamily);
           loadedFonts.add(normalizedFamily);

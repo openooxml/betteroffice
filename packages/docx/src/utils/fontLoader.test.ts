@@ -354,6 +354,38 @@ test('a mapped family keeps its bundled fallback when its equivalent is already 
   ]);
 });
 
+test('aliases waiting on one stalled equivalent settle at a single deadline', async () => {
+  jest.useFakeTimers();
+  let release!: () => void;
+  const stalled = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const stalledBytes = async () => {
+    await stalled;
+    return new ArrayBuffer(8);
+  };
+  configureDefaultFonts({
+    fonts: {
+      createFontProvider: () => ({
+        resolve: () => undefined,
+        resolveFamily: (family: string) => (family === 'Noto Serif TC' ? stalledBytes : undefined),
+      }),
+    },
+  });
+  let settled = 0;
+  const loads = ['PMingLiU', 'MingLiU', 'DFKai-SB'].map((family) =>
+    loadFontWithMapping(family).finally(() => {
+      settled += 1;
+    })
+  );
+  await Promise.resolve();
+  jest.advanceTimersByTime(5000);
+  for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+  expect(settled).toBe(3);
+  expect(await Promise.all(loads)).toEqual([false, false, false]);
+  release();
+});
+
 test('an older provider without resolveFamily registers only the Regular face it can vouch for', async () => {
   configureDefaultFonts({
     fonts: {
