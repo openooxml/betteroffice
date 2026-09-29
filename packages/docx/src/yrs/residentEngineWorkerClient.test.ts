@@ -245,3 +245,27 @@ describe('wasm trap', () => {
     expect(worker.posted).toHaveLength(3);
   });
 });
+
+describe('queued snapshots', () => {
+  test('a sync sent before the bootstrap answers diffs against the bootstrap state', async () => {
+    const { worker, client } = setup();
+    const sent = new Uint8Array([7, 7]);
+    const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 3 }, '', {
+      stateVector: sent,
+      layoutExtras: '{}',
+    });
+    expect(client.bootstrapSent()).toBe(true);
+    expect(client.remoteStateVector()).toEqual(sent);
+    expect(client.syncedFontsRevision()).toBe(3);
+    expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', layoutExtras: '{}' });
+
+    const sync = client.sync(snapshot, '', 0, false, { stateVector: new Uint8Array([8]) });
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([8]));
+    expect(worker.posted[1]).not.toHaveProperty('layoutExtras');
+
+    worker.reply({ ...frameReply(worker.posted[0].id), layoutJson: '{"layout":{}}' });
+    expect((await bootstrap).layoutJson).toBe('{"layout":{}}');
+    worker.reply(frameReply(worker.posted[1].id));
+    expect((await sync).layoutJson).toBeUndefined();
+  });
+});

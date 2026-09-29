@@ -790,6 +790,14 @@ export interface YrsSession extends CollaborationReplica {
   layoutDocumentWithRegionsRetainedJson(input: string): string;
   /** Retained `{ measured, options }` for the main-thread display fallback. */
   retainedKernelInputsJson(expectedLayoutRevision: number): string;
+  /**
+   * Record region layout `input` as the resident layout without running it
+   * here: a resident worker replica runs it, and snapshots carry it there.
+   * Returns the new layout revision. @internal
+   */
+  adoptResidentWorkerLayout?(input: string): number;
+  /** The current resident layout ran only in a worker replica. @internal */
+  residentLayoutInWorker?(): boolean;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
@@ -1315,6 +1323,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let residentLayoutInput: string | null = null;
   let residentLayoutWithRegions = false;
   let residentLayoutRevision = 0;
+  // The current resident layout ran only in a resident worker replica.
+  let layoutRanInWorker = false;
   let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
   let docxSource: Uint8Array | null = null;
@@ -1467,6 +1477,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutInput = input;
       residentLayoutWithRegions = false;
       residentLayoutRevision += 1;
+      layoutRanInWorker = false;
       return output;
     },
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
@@ -1475,6 +1486,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
+      layoutRanInWorker = false;
       return output;
     },
     layoutDocumentWithRegionsRetainedJson: (input) => {
@@ -1482,9 +1494,21 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
+      layoutRanInWorker = false;
       return output;
     },
+    adoptResidentWorkerLayout: (input) => {
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = true;
+      return residentLayoutRevision;
+    },
+    residentLayoutInWorker: () => layoutRanInWorker,
     retainedKernelInputsJson: (expectedLayoutRevision) => {
+      if (layoutRanInWorker) {
+        throw new Error('the retained layout was computed in the resident worker');
+      }
       if (expectedLayoutRevision !== residentLayoutRevision) {
         throw new Error(
           `retained layout revision mismatch: expected ${expectedLayoutRevision}, current ${residentLayoutRevision}`
