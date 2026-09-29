@@ -2906,17 +2906,25 @@ impl EngineSession {
             .borrow()
             .as_ref()
             .and_then(|state| state.headers_footers.clone());
-        // The shown frame's extras, from the host, carry these headers and footers
-        // in its own JSON: keep them verbatim, so the next frame can build on it.
-        if json_option_equal(fields.get("headersFooters"), headers_footers.as_ref()) {
+        let shown = if let Some(headers_footers) = headers_footers {
+            fields.insert("headersFooters".to_owned(), headers_footers)
+        } else {
+            fields.remove("headersFooters")
+        };
+        let rebuilt = serde_json::to_string(&value)
+            .map_err(|error| format!("serialize display extras: {error}"))?;
+        if rebuilt == extras {
             return Ok(extras);
         }
-        if let Some(headers_footers) = headers_footers {
-            fields.insert("headersFooters".to_owned(), headers_footers);
-        } else {
-            fields.remove("headersFooters");
+        // The host writes the shown frame's extras in its own JSON. When they
+        // carry these headers and footers, keep them verbatim, so the next
+        // frame builds on the shown one.
+        let reparsed: serde_json::Value = serde_json::from_str(&rebuilt)
+            .map_err(|error| format!("parse display extras: {error}"))?;
+        if json_option_equal(reparsed.get("headersFooters"), shown.as_ref()) {
+            return Ok(extras);
         }
-        serde_json::to_string(&value).map_err(|error| format!("serialize display extras: {error}"))
+        Ok(rebuilt)
     }
 
     /// Profiled twin of [`Self::apply_and_layout`]. The caller supplies a
