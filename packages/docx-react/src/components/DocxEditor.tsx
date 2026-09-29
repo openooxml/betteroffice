@@ -1004,10 +1004,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     cleanOrphanedCommentsTimerRef,
   });
   const { resetSettled } = canvasRenderer;
+  const resetTotalPagesRef = useRef<() => void>(() => {});
   const resetForNewDocument = useCallback(() => {
     beginPluginLoadRef.current();
     resetEditorState();
     resetSettled();
+    resetTotalPagesRef.current();
   }, [resetEditorState, resetSettled]);
 
   const {
@@ -1469,6 +1471,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     scrollContainerRef,
     pagedEditorRef,
   });
+  resetTotalPagesRef.current = () =>
+    setScrollPageInfo((prev) => (prev.totalPages === 0 ? prev : { ...prev, totalPages: 0 }));
 
   const pluginOverlayTarget = useCanvasOverlayTarget((plugins?.length ?? 0) > 0, editorContentRef);
   const pluginHost = useDocxPluginHost({

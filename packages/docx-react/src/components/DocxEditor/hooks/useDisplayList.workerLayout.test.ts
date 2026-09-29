@@ -301,9 +301,12 @@ function settleHarness() {
   };
   const layout = (partial: boolean) =>
     ({ pageSize: { w: 816, h: 1056 }, pages: [], ...(partial ? { partial } : {}) }) as Layout;
-  const hook = renderHook(({ layout }) => useRustDisplayList(layout, overrides), {
-    initialProps: { layout: layout(false) },
-  });
+  const initial = layout(false);
+  const hook = renderHook(
+    ({ layout, resolved }: { layout: Layout; resolved?: ReadonlySet<number> }) =>
+      useRustDisplayList(layout, overrides, undefined, resolved),
+    { initialProps: { layout: initial } as { layout: Layout; resolved?: ReadonlySet<number> } }
+  );
   const settle = () => {
     const state = { settled: false, failure: null as Error | null };
     void hook.result.current.settledDisplayList(null, null).then(
@@ -316,7 +319,7 @@ function settleHarness() {
     );
     return state;
   };
-  return { ...hook, layout, settle };
+  return { ...hook, initial, layout, settle };
 }
 
 test('a layout of part of the document never settles, even after a full one did', async () => {
@@ -336,12 +339,15 @@ test('a layout of part of the document never settles, even after a full one did'
 });
 
 test('a reset waits for the next layout and a failure rejects', async () => {
-  const { result, rerender, layout, settle } = settleHarness();
+  const { result, rerender, initial, layout, settle } = settleHarness();
   const first = settle();
   await waitFor(() => expect(first.settled).toBe(true));
   act(() => result.current.resetSettled());
   const next = settle();
-  await act(async () => {});
+  // Rebuilding the replaced document's layout, as clearing its comments does, settles nothing.
+  await act(async () => {
+    rerender({ layout: initial, resolved: new Set([1]) });
+  });
   expect(next.settled).toBe(false);
   await act(async () => {
     rerender({ layout: layout(false) });
