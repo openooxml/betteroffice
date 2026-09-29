@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # run_id, not ref: a shared group still drops a queued run between two
+  # quick main pushes even with cancel-in-progress false.
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   packages:
     name: Package gate
