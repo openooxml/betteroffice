@@ -1,11 +1,11 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import type { YrsDocxHost } from '@betteroffice/docx/yrs';
-import { useYrsCoreSession } from './useYrsCoreSession';
+import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
+import { useCompatibilityWarm, useYrsCoreSession } from './useYrsCoreSession';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -88,4 +88,52 @@ test('a requested warm materializes once when the main thread is idle', async ()
   await act(idle);
   expect(project()).not.toBeNull();
   expect(materializations()).toBe(1);
+});
+
+describe('useCompatibilityWarm', () => {
+  const sessions = [{ name: 'first' }, { name: 'replacement' }] as unknown as YrsSession[];
+
+  function warmer(initial: { session: YrsSession | null; ready: boolean; projects: boolean }) {
+    const calls: string[] = [];
+    const hook = renderHook(
+      ({ session, ready, projects }) =>
+        useCompatibilityWarm(
+          session,
+          ready,
+          projects,
+          () => calls.push('schedule'),
+          () => calls.push('cancel')
+        ),
+      { initialProps: initial }
+    );
+    return { calls, rerender: hook.rerender };
+  }
+
+  test('waits for the session\'s own first render', () => {
+    const { calls, rerender } = warmer({ session: null, ready: false, projects: true });
+    rerender({ session: sessions[0]!, ready: false, projects: true });
+    expect(calls.filter((call) => call === 'schedule')).toEqual([]);
+    rerender({ session: sessions[0]!, ready: true, projects: true });
+    expect(calls.filter((call) => call === 'schedule')).toHaveLength(1);
+  });
+
+  test('a replacement inheriting the previous readiness waits for its own layout', () => {
+    const { calls, rerender } = warmer({ session: sessions[0]!, ready: false, projects: true });
+    rerender({ session: sessions[0]!, ready: true, projects: true });
+    calls.length = 0;
+    rerender({ session: sessions[1]!, ready: true, projects: true });
+    expect(calls).toEqual([]);
+    rerender({ session: sessions[1]!, ready: false, projects: true });
+    expect(calls).toEqual(['cancel']);
+    rerender({ session: sessions[1]!, ready: true, projects: true });
+    expect(calls).toEqual(['cancel', 'schedule']);
+  });
+
+  test('never warms for a host that does not project changes', () => {
+    const { calls, rerender } = warmer({ session: sessions[0]!, ready: false, projects: false });
+    rerender({ session: sessions[0]!, ready: true, projects: false });
+    expect(calls.filter((call) => call === 'schedule')).toEqual([]);
+    rerender({ session: sessions[0]!, ready: true, projects: true });
+    expect(calls.filter((call) => call === 'schedule')).toHaveLength(1);
+  });
 });

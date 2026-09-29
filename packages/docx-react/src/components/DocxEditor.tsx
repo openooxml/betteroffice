@@ -77,7 +77,7 @@ import { useTableDialogs } from './DocxEditor/hooks/useTableDialogs';
 import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditing';
 import type { PartEditTarget } from './DocxEditor/partEdit';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
-import { useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
+import { useCompatibilityWarm, useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
 import { useContextMenus } from './DocxEditor/hooks/useContextMenus';
 import { useCommentManagement } from './DocxEditor/hooks/useCommentManagement';
 import { useCommentLifecycle } from './DocxEditor/hooks/useCommentLifecycle';
@@ -1001,13 +1001,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   );
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.
-  const { scheduleCompatibilityWarm } = yrsCore;
-  const projectsEveryChange = Boolean(onChange) || contentSubscriberCount > 0;
-  useEffect(() => {
-    if (projectsEveryChange && yrsCore.session && canvasRenderer.status === 'ready') {
-      scheduleCompatibilityWarm();
-    }
-  }, [canvasRenderer.status, projectsEveryChange, scheduleCompatibilityWarm, yrsCore.session]);
+  useCompatibilityWarm(
+    yrsCore.session,
+    canvasRenderer.status === 'ready',
+    Boolean(onChange) || contentSubscriberCount > 0,
+    yrsCore.scheduleCompatibilityWarm,
+    yrsCore.cancelCompatibilityWarm
+  );
 
   const {
     imageInputRef,

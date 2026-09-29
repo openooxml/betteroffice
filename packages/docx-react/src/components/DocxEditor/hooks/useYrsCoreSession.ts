@@ -36,6 +36,7 @@ export interface YrsCoreSession {
    * for a host that projects the document on every change.
    */
   scheduleCompatibilityWarm(): void;
+  cancelCompatibilityWarm(): void;
 }
 
 interface YrsCoreSessionCallbacks {
@@ -279,6 +280,11 @@ export function useYrsCoreSession(
     cancelCompatibilityWarmRef.current = () => clearTimeout(id);
   }, []);
 
+  const cancelCompatibilityWarm = useCallback((): void => {
+    cancelCompatibilityWarmRef.current?.();
+    cancelCompatibilityWarmRef.current = null;
+  }, []);
+
   useEffect(() => {
     const onReplica = collaboration?.onReplica;
     if (!onReplica || !session) return;
@@ -382,5 +388,37 @@ export function useYrsCoreSession(
     documentFromYrs,
     publishDirectInput,
     scheduleCompatibilityWarm,
+    cancelCompatibilityWarm,
   };
+}
+
+/**
+ * Warms the compatibility base for a host that projects every change, once
+ * the session's own first display list is ready. A replacement session can
+ * inherit the previous renderer's readiness until its layout resets, so a
+ * session only qualifies after the renderer has been not-ready under it; a
+ * renderer leaving readiness cancels a pending warm.
+ */
+export function useCompatibilityWarm(
+  session: YrsSession | null,
+  rendererReady: boolean,
+  projectsEveryChange: boolean,
+  schedule: () => void,
+  cancel: () => void
+): void {
+  const renderedRef = useRef<{ session: YrsSession | null; loaded: boolean }>({
+    session: null,
+    loaded: false,
+  });
+  useEffect(() => {
+    if (renderedRef.current.session !== session) {
+      renderedRef.current = { session, loaded: false };
+    }
+    if (!rendererReady) {
+      renderedRef.current.loaded = true;
+      cancel();
+      return;
+    }
+    if (session && projectsEveryChange && renderedRef.current.loaded) schedule();
+  }, [cancel, projectsEveryChange, rendererReady, schedule, session]);
 }

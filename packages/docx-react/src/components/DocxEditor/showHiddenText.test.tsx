@@ -59,6 +59,7 @@ function yrsCore(): YrsCoreSession {
     documentFromYrs: () => null,
     publishDirectInput: () => {},
     scheduleCompatibilityWarm: () => {},
+    cancelCompatibilityWarm: () => {},
   };
 }
 
