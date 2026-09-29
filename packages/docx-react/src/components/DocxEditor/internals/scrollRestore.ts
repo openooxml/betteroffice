@@ -223,9 +223,7 @@ function pagesReachingViewport(
     const size = queries.pageSize(pageIndex);
     if (
       !extent ||
-      (size &&
-        extent.top >= PAGE_FILTER_SLACK &&
-        extent.bottom <= size.height - PAGE_FILTER_SLACK)
+      (size && extent.top >= PAGE_FILTER_SLACK && extent.bottom <= size.height - PAGE_FILTER_SLACK)
     ) {
       continue;
     }
@@ -233,10 +231,7 @@ function pagesReachingViewport(
     if (!projection) return null;
     const top = projection.top + extent.top * projection.scaleY;
     const bottom = projection.top + extent.bottom * projection.scaleY;
-    if (
-      bottom + PAGE_FILTER_SLACK >= viewport.top &&
-      top - PAGE_FILTER_SLACK <= viewport.bottom
-    ) {
+    if (bottom + PAGE_FILTER_SLACK >= viewport.top && top - PAGE_FILTER_SLACK <= viewport.bottom) {
       pages.push(pageIndex);
     }
   }
