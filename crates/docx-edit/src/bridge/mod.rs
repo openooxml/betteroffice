@@ -255,7 +255,7 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
-    let (blocks, _) = lower_story(
+    let (mut blocks, _) = lower_story(
         &txn,
         story_id,
         env,
@@ -265,6 +265,10 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         CellEdges::default(),
         &mut map,
     )?;
+    // Word numbers SEQ fields in the main text only.
+    if story_id == "body" {
+        docx_layout::sequence_fields::number_sequence_fields(&mut blocks);
+    }
     map.finish();
     Ok((blocks, map))
 }
@@ -588,6 +592,10 @@ fn lower_story<T: ReadTxn>(
                             } else {
                                 shared_map_string(&field, txn, "displayText").unwrap_or_default()
                             }),
+                            locked: shared_any(&field, txn, "fldLock")
+                                .as_ref()
+                                .and_then(any_bool)
+                                .unwrap_or(false),
                         },
                         formatting: lower_run_formatting(attributes, env),
                         story_start: story_index,
@@ -1788,6 +1796,9 @@ fn lower_inline_sdt_values(
                                 .and_then(|payload| map_string(payload, "displayText"))
                                 .unwrap_or_default(),
                         ),
+                        locked: payload
+                            .and_then(|payload| map_bool(payload, "fldLock"))
+                            .unwrap_or(false),
                     },
                     formatting,
                     story_start: story_index,
@@ -2002,6 +2013,7 @@ enum RawRunKind {
         raw_type: Option<String>,
         instruction: Option<String>,
         fallback: Option<String>,
+        locked: bool,
     },
 }
 
@@ -2594,12 +2606,14 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             raw_type,
             instruction,
             fallback,
+            locked,
         } => Run::Field(FieldRun {
             fmt: raw.formatting,
             field_type,
             raw_type,
             instruction,
             fallback,
+            locked,
             pm_start,
             pm_end,
         }),

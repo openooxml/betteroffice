@@ -360,16 +360,20 @@ export type FieldRun = RunFormatting & {
   fieldType: 'PAGE' | 'NUMPAGES' | 'DATE' | 'TIME' | 'OTHER';
   /**
    * Raw Word field type token (e.g. `TOC`, `PAGEREF`) when `fieldType`
-   * collapsed it to a painter category. Carried for a11y announcement only.
+   * collapsed it to a painter category. Carried for a11y announcement, and
+   * read to number `SEQ` fields.
    */
   rawType?: string;
   /**
    * Raw field instruction text (`w:instrText`), carried INERT so the display
-   * list can announce field identity. Never parsed into behavior or executed.
+   * list can announce field identity. Never executed; only a `SEQ` field's is
+   * parsed, to number it.
    */
   instruction?: string;
-  /** Fallback text if field can't be resolved */
+  /** Text shown when the painter doesn't resolve the field: Word's cached result, or a `SEQ` field's number. */
   fallback?: string;
+  /** `w:fldLock`: the field keeps its cached result. */
+  locked?: boolean;
   pmStart?: number;
   pmEnd?: number;
 };

@@ -407,14 +407,21 @@ pub struct FieldRun {
     pub fmt: RunFormatting,
     pub field_type: String,
     /// Raw Word field type token, kept when `field_type` collapsed it to a
-    /// coarse category. Inert identity for announcement; never evaluated.
+    /// coarse category. Carried for announcement, and read to number SEQ
+    /// fields (see [`crate::sequence_fields`]); never evaluated otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
-    /// raw field instruction text carried INERT for a11y announcement only
+    /// Raw field instruction text, carried for a11y announcement. Only a SEQ
+    /// field's is read, to number it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
+    /// The result the field shows: Word's cached result, or a SEQ field's
+    /// recomputed number.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
+    /// `w:fldLock`: Word keeps the cached result when it updates fields.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1414,6 +1421,7 @@ impl PartialEq for FieldRun {
             raw_type: _,
             instruction: _,
             fallback: _,
+            locked: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1422,6 +1430,7 @@ impl PartialEq for FieldRun {
             && self.raw_type == other.raw_type
             && self.instruction == other.instruction
             && self.fallback == other.fallback
+            && self.locked == other.locked
     }
 }
 
