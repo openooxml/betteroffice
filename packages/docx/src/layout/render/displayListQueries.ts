@@ -725,11 +725,6 @@ export function createDisplayListQueries(
       if (page && revisions[index] !== displayPageRevision(page)) replace.push([index, page]);
     }
     if (replace.length === 0) return;
-    const replaced = new Set(replace.map(([index]) => index));
-    const reuse: Array<[number, number]> = [];
-    for (let index = 0; index < list.pages.length; index += 1) {
-      if (!replaced.has(index)) reuse.push([index, index]);
-    }
     try {
       eng.updateDisplayList(
         handle,
@@ -738,7 +733,7 @@ export function createDisplayListQueries(
           ...(list.contractVersion !== undefined
             ? { contractVersion: list.contractVersion }
             : {}),
-          reuse,
+          keep: true,
           replace,
         })
       );
