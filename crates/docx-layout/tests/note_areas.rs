@@ -65,7 +65,7 @@ fn note_primitives_carry_their_own_story_range() {
         ("and more", "footnote-2", 14, 22),
     ] {
         let attrs = &note_run(&dl, text).attrs;
-        assert_eq!(attrs.group_id.as_deref(), Some(group));
+        assert_eq!(attrs.group_id.as_deref().map(String::as_str), Some(group));
         // the note story's own range, not the body anchor the mark sits at
         assert_eq!(
             (attrs.doc_start, attrs.doc_end),

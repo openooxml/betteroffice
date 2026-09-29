@@ -241,6 +241,7 @@ pub fn build_display_list_value_from_resident_observed(
 pub fn build_resident_display_list_observed(
     pagination: &types::Input,
     layout: &types::Layout,
+    input_epoch: u64,
     extras: &str,
     observe_phase: &mut impl FnMut(),
 ) -> Result<
@@ -254,6 +255,7 @@ pub fn build_resident_display_list_observed(
         display_list::build_resident_display_list_with_fonts_observed(
             pagination,
             layout,
+            input_epoch,
             extras,
             &store.borrow(),
             observe_phase,
@@ -266,6 +268,7 @@ pub fn build_resident_display_list_observed(
 pub fn build_resident_display_list_partial_observed(
     pagination: &types::Input,
     layout: &types::Layout,
+    input_epoch: u64,
     extras: &str,
     build: &dyn Fn(usize) -> bool,
     observe_phase: &mut impl FnMut(),
@@ -280,6 +283,7 @@ pub fn build_resident_display_list_partial_observed(
         display_list::build_resident_display_list_partial_with_fonts_observed(
             pagination,
             layout,
+            input_epoch,
             extras,
             &store.borrow(),
             build,
@@ -292,6 +296,7 @@ pub fn build_resident_display_list_partial_observed(
 pub fn build_resident_display_pages(
     pagination: &types::Input,
     layout: &types::Layout,
+    input_epoch: u64,
     resident: &mut display_list::ResidentDisplayInput,
     list: &mut display_list::DisplayList,
     pages: &[usize],
@@ -300,6 +305,7 @@ pub fn build_resident_display_pages(
         display_list::build_resident_display_pages_with_fonts(
             pagination,
             layout,
+            input_epoch,
             &store.borrow(),
             resident,
             list,
@@ -388,6 +394,7 @@ pub fn update_display_list_value_from_resident_incremental_observed(
 pub fn update_resident_display_list_incremental_observed(
     pagination: &types::Input,
     layout: &types::Layout,
+    input_epoch: u64,
     resident: &mut display_list::ResidentDisplayInput,
     previous: &mut display_list::DisplayList,
     rebuilt_page_start: usize,
@@ -400,6 +407,7 @@ pub fn update_resident_display_list_incremental_observed(
         display_list::update_resident_display_list_incremental_with_fonts_observed(
             pagination,
             layout,
+            input_epoch,
             &store.borrow(),
             resident,
             previous,
