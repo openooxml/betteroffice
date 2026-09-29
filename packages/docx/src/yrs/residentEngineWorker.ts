@@ -105,6 +105,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // corrupt the update; a fresh id lets yrs merge queued/local operations
     // safely while the main replica applies worker updates with local origin.
     session = await createResidentEngineSession();
+    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
     const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
     if (provisional) {
       incompleteLayout = {
@@ -143,6 +144,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
+    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
     const { layoutJson } = hydrate(request.snapshot);
     subscribe();
     const started = performance.now();
@@ -160,6 +162,22 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       false,
       request.paintCaret,
       request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined)
+    );
+    return;
+  }
+  if (request.type === 'buildPages') {
+    pendingUpdates = [];
+    const started = performance.now();
+    const frame = session.buildDisplayPagesFrame(request.pages, request.expectedFrameEpoch);
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      pendingUpdates,
+      undefined,
+      started,
+      false,
+      request.paintCaret
     );
     return;
   }

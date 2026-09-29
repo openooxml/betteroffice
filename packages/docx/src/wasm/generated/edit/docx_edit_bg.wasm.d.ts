@@ -20,6 +20,7 @@ export const editsession_apply_update_with_inference: (a: number, b: number, c: 
 export const editsession_begin_opening: (a: number, b: number, c: number) => void;
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_can_redo: (a: number) => number;
 export const editsession_can_undo: (a: number) => number;
 export const editsession_cell_selection: (a: number) => [number, number, number, number];
@@ -121,6 +122,7 @@ export const editsession_set_column_width: (a: number, b: number, c: number, d: 
 export const editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+export const editsession_set_display_window: (a: number, b: number, c: number) => void;
 export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -158,6 +160,7 @@ export const list_docx_content_controls_json: (a: number, b: number, c: number, 
 export const render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
+export const clear_measure_fonts: () => void;
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -174,7 +177,6 @@ export const register_substitute_measure_font: (a: number, b: number, c: number)
 export const update_display_list: (a: number, b: number, c: number) => [number, number];
 export const vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-export const clear_measure_fonts: () => void;
 export const install_panic_hook: () => void;
 export const close_display_list: (a: number) => void;
 export const decodeTiffPng: (a: number, b: number) => [number, number, number, number];
