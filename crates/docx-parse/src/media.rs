@@ -41,12 +41,14 @@ pub fn build_media_map(parts: &[(String, Vec<u8>)]) -> MediaMap {
 pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, Vec<String>) {
     let mut media = MediaMap::new();
     let mut warnings = Vec::new();
+    let mut budget = DisplayBudget::default();
     for (path, data) in parts {
         if !path.to_ascii_lowercase().starts_with("word/media/") {
             continue;
         }
         let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
-        let (data, mime_type, warning) = display_form(data, media_mime_type(path), path);
+        let (data, mime_type, warning) =
+            display_form(data, media_mime_type(path), path, &mut budget);
         warnings.extend(warning);
         let mime_type = mime_type.to_owned();
         let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -108,19 +110,50 @@ pub fn resolve_image_data(
     }
 }
 
-/// Browsers have no TIFF decoder, so the display copy carries a PNG transcode.
-/// Save reads the untouched package part, so the original bytes still round-trip.
-/// An encoding the decoder does not support keeps the TIFF source — decoders that
-/// do handle it still render — and reports why the transcode was skipped.
-#[cfg(feature = "tiff")]
+/// The copy of a media part the renderer paints: formats browsers cannot
+/// decode get a transcode, with a warning when that fails. Save reads the
+/// untouched package part, so the original bytes still round-trip.
 fn display_form<'a>(
     data: &'a [u8],
     mime_type: &'static str,
     path: &str,
+    budget: &mut DisplayBudget,
 ) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
-    if !is_tiff(data) {
-        return (Cow::Borrowed(data), mime_type, None);
+    #[cfg(feature = "tiff")]
+    if is_tiff(data) {
+        return tiff_display_form(data, mime_type, path);
     }
+    #[cfg(feature = "metafile")]
+    if ooxml_metafile::is_metafile(data) {
+        return metafile_display_form(data, path, budget);
+    }
+    let _ = (path, &budget);
+    (Cow::Borrowed(data), mime_type, None)
+}
+
+/// SVG bytes one document's metafile transcodes may take together.
+#[derive(Debug)]
+struct DisplayBudget {
+    #[cfg_attr(not(feature = "metafile"), allow(dead_code))]
+    svg_bytes: usize,
+}
+
+impl Default for DisplayBudget {
+    fn default() -> Self {
+        Self {
+            svg_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+/// An encoding the decoder does not support keeps the TIFF source, so
+/// decoders that do handle it still render, and reports why.
+#[cfg(feature = "tiff")]
+fn tiff_display_form<'a>(
+    data: &'a [u8],
+    mime_type: &'static str,
+    path: &str,
+) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
     match ooxml_drawingml::media::decode_tiff_png(data) {
         Ok(png) => (Cow::Owned(png), "image/png", None),
         Err(error) => (
@@ -133,13 +166,60 @@ fn display_form<'a>(
     }
 }
 
-#[cfg(not(feature = "tiff"))]
-fn display_form<'a>(
+/// Largest metafile part transcoded for display.
+#[cfg(feature = "metafile")]
+const MAX_METAFILE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Browsers have no EMF or WMF decoder, so the display copy is an SVG replay.
+/// A metafile the replay refuses shows a neutral placeholder instead of
+/// nothing, and ink it drew without is reported.
+#[cfg(feature = "metafile")]
+fn metafile_display_form<'a>(
     data: &'a [u8],
-    mime_type: &'static str,
-    _path: &str,
+    path: &str,
+    budget: &mut DisplayBudget,
 ) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
-    (Cow::Borrowed(data), mime_type, None)
+    let kind = if ooxml_metafile::is_wmf(data) {
+        "WMF"
+    } else {
+        "EMF"
+    };
+    let placeholder = |why: String| {
+        let (width, height) = ooxml_metafile::picture_size(data).unwrap_or((96.0, 96.0));
+        (
+            Cow::Owned(ooxml_metafile::placeholder_svg(width, height).into_bytes()),
+            "image/svg+xml",
+            Some(format!(
+                "{kind} image {path} could not be converted for display: {why}"
+            )),
+        )
+    };
+    if data.len() > MAX_METAFILE_BYTES {
+        return placeholder("it exceeds the display size limit".to_owned());
+    }
+    match ooxml_metafile::to_svg(data) {
+        Ok(svg) if svg.markup.len() <= budget.svg_bytes => {
+            budget.svg_bytes -= svg.markup.len();
+            let warning = (!svg.omissions.is_empty()).then(|| {
+                let omitted: Vec<String> = svg
+                    .omissions
+                    .iter()
+                    .map(|omission| format!("{} ({})", omission.what, omission.count))
+                    .collect();
+                format!(
+                    "{kind} image {path} is displayed without {}",
+                    omitted.join(", ")
+                )
+            });
+            (
+                Cow::Owned(svg.markup.into_bytes()),
+                "image/svg+xml",
+                warning,
+            )
+        }
+        Ok(_) => placeholder("the document's pictures exceed the display size limit".to_owned()),
+        Err(refusal) => placeholder(refusal.to_string()),
+    }
 }
 
 #[cfg(feature = "tiff")]

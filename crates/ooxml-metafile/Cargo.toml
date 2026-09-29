@@ -1,0 +1,36 @@
+[package]
+name = "betteroffice-metafile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Bounded EMF, EMF+ and WMF metafile replay into vector drawings and SVG."
+readme = "README.md"
+keywords = ["emf", "wmf", "metafile", "svg", "office"]
+categories = ["graphics", "rendering", "parser-implementations"]
+
+[lib]
+name = "ooxml_metafile"
+
+[features]
+default = []
+svg = ["dep:base64", "ooxml-drawingml/png"]
+fuzzing = []
+
+[dependencies]
+base64 = { version = "0.22", optional = true }
+ooxml-drawingml.workspace = true
+
+[dev-dependencies]
+png = "0.18"
+resvg = { version = "0.48", default-features = false, features = ["raster-images", "text"] }
+
+[[test]]
+name = "golden"
+required-features = ["svg"]
+
+[[test]]
+name = "malformed"
+required-features = ["svg"]

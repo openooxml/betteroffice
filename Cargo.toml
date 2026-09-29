@@ -22,6 +22,7 @@ xlsx-raster = { package = "betteroffice-xlsx-raster", path = "crates/xlsx-raster
 ooxml-text = { package = "betteroffice-ooxml-text", path = "crates/ooxml-text", version = "0.3.0" }
 ooxml-diff = { package = "betteroffice-ooxml-diff", path = "crates/ooxml-diff", version = "0.3.0" }
 ooxml-drawingml = { package = "betteroffice-drawingml", path = "crates/ooxml-drawingml", version = "0.3.0" }
+ooxml-metafile = { package = "betteroffice-metafile", path = "crates/ooxml-metafile", version = "0.3.0" }
 docx-parse = { package = "betteroffice-docx-parse", path = "crates/docx-parse", version = "0.3.0" }
 docx-layout = { package = "betteroffice-docx-layout", path = "crates/docx-layout", version = "0.3.0" }
 docx-raster = { package = "betteroffice-docx-raster", path = "crates/docx-raster", version = "0.3.0" }

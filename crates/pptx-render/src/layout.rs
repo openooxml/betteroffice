@@ -30,12 +30,12 @@ use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
-use crate::metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
     Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
     StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
 };
+use ooxml_metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
 const EMU_PER_POINT: f64 = 12_700.0;
