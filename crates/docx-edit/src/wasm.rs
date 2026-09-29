@@ -1953,6 +1953,22 @@ impl EditSession {
         self.open_docx_inner(bytes, seed_stories, generation.as_deref())
     }
 
+    /// Opens `bytes` for display only, seeded from the body's first `blocks`
+    /// blocks (see `seed::seed_docx_preview`): the reply is the host metadata
+    /// of that parse. The session keeps no source package, so it cannot save.
+    pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<String, JsValue> {
+        let envelope = crate::seed::parse_docx_preview(bytes, blocks as usize).map_err(js_err)?;
+        let host_envelope = thin_docx_envelope(&envelope);
+        let referenced_fonts =
+            crate::seed::seed_preview_envelope(self.engine.doc(), envelope).map_err(js_err)?;
+        self.engine.doc().rotate_version(js_entropy());
+        serde_json::to_string(&DocxHostWire {
+            envelope: host_envelope,
+            referenced_fonts,
+        })
+        .map_err(js_err)
+    }
+
     /// Re-parses the DOCX bytes retained by the last
     /// [`EditSession::open_docx`] and returns the COMPLETE package envelope as
     /// JSON, or `None` when no DOCX has been opened. Unlike `open_docx` this

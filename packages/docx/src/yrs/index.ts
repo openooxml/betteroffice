@@ -857,6 +857,17 @@ export interface YrsSession extends CollaborationReplica {
    */
   openDocx(bytes: Uint8Array, seedStories: boolean, options?: YrsOpeningOptions): YrsDocxHost;
   /**
+   * Opens a DOCX for display only, from the body's first `blocks` blocks:
+   * enough to lay out its first pages with a prefix pass before the whole
+   * document is opened. The session cannot save. @internal
+   */
+  openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost;
+  /**
+   * The region layout of only as much of the body as fills `pages` pages;
+   * a reply marked `provisional` covers a prefix. @internal
+   */
+  layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+  /**
    * Starts a new opening of the document: its generation, replicated to
    * every replica, becomes part of every session anchor. Every seeding entry
    * point calls it; call it after building a document another way.
@@ -1438,6 +1449,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
   const facade: YrsSession = {
     clientId,
+    openDocxPreview: (bytes, blocks) => {
+      markDirty('all');
+      const json = mutate(() => session.open_docx_preview(bytes, blocks));
+      return decodeDocxHost(json, bytes);
+    },
+    layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
+      session.layout_document_with_regions_prefix_retained_json(input, pages),
 
     registerFont: (bytes) => {
       // The Rust font store is module-global, while document sessions are

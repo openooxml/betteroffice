@@ -613,6 +613,12 @@ export class EditSession {
      */
     open_docx(bytes: Uint8Array, seed_stories: boolean, generation?: string | null): string;
     /**
+     * Opens `bytes` for display only, seeded from the body's first `blocks`
+     * blocks (see `seed::seed_docx_preview`): the reply is the host metadata
+     * of that parse. The session keeps no source package, so it cannot save.
+     */
+    open_docx_preview(bytes: Uint8Array, blocks: number): string;
+    /**
      * One glyph outline from this session's resident font store:
      * `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
      * units, y-up. `font_id` comes from
@@ -1381,6 +1387,7 @@ export interface InitOutput {
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];

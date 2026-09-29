@@ -5071,6 +5071,14 @@ pub fn seed_from_docx_with_generation(
 /// (`layout_document_with_regions_prefix_retained_json`); a pass that reaches
 /// it needs more blocks.
 pub fn seed_docx_preview(document: &EditingDoc, bytes: &[u8], blocks: usize) -> Result<(), String> {
+    seed_preview_envelope(document, parse_docx_preview(bytes, blocks)?).map(|_| ())
+}
+
+/// The parse [`seed_docx_preview`] seeds from.
+pub(crate) fn parse_docx_preview(
+    bytes: &[u8],
+    blocks: usize,
+) -> Result<docx_parse::S9WireEnvelope, String> {
     let is_media = |path: &str| path.to_ascii_lowercase().starts_with("word/media/");
     let mut parts = ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| !is_media(path))?;
     let parse = |parts: &[(String, Vec<u8>)]| {
@@ -5086,18 +5094,26 @@ pub fn seed_docx_preview(document: &EditingDoc, bytes: &[u8], blocks: usize) -> 
         )
         .map_err(|error| error.to_string())
     };
-    let mut envelope = parse(&parts)?;
+    let envelope = parse(&parts)?;
     // Inflate only the images the parsed prefix and the page stories use.
     let media = preview_media(&envelope, &parts)?;
-    if !media.is_empty() {
-        parts.extend(ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| {
-            media.contains(&path.to_ascii_lowercase())
-        })?);
-        envelope = parse(&parts)?;
+    if media.is_empty() {
+        return Ok(envelope);
     }
+    parts.extend(ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| {
+        media.contains(&path.to_ascii_lowercase())
+    })?);
+    parse(&parts)
+}
+
+/// Seeds a preview parse; returns the fonts it references.
+pub(crate) fn seed_preview_envelope(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+) -> Result<Vec<String>, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
-    seed_lowered(document, lowered, None).map(|_| ())
+    seed_lowered(document, lowered, None)
 }
 
 /// The seed for IDs a preview's parse generates. A preview is never saved,
