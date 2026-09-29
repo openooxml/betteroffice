@@ -33,7 +33,13 @@ import {
   deriveDisplayListTableFragments,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
+import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { projectPageLocalRect } from '../internals/canvasProjection';
+import {
+  buildRemotePresencePageMetrics,
+  remotePresencePageWindow,
+  type RemotePresencePageWindow,
+} from './remotePresenceGeometry';
 import type { YrsEditorCommand } from '../yrsCommands';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 
@@ -94,11 +100,60 @@ export function CanvasTableResizeOverlay({
   sidebarOpen,
   zoom,
 }: CanvasTableResizeOverlayProps): React.ReactPortal | null {
+  // Handles exist only on the pages around the viewport; the window follows
+  // scrolling a frame at a time.
+  const [pageWindow, setPageWindow] = useState<RemotePresencePageWindow | null>(null);
+  useLayoutEffect(() => {
+    const host = canvasHostRef.current;
+    if (!host) {
+      setPageWindow(null);
+      return;
+    }
+    const metrics = buildRemotePresencePageMetrics(displayListQueries.displayList, zoom);
+    const scrollParent = findVerticalScrollParentOrRoot(host);
+    const usesWindow =
+      scrollParent === document.scrollingElement || scrollParent === document.documentElement;
+    const scrollTarget: EventTarget = usesWindow ? window : scrollParent;
+    const update = () => {
+      const column = host.firstElementChild as HTMLElement | null;
+      const viewportTop = usesWindow ? 0 : scrollParent.getBoundingClientRect().top;
+      const viewportBottom =
+        viewportTop + (usesWindow ? window.innerHeight : scrollParent.clientHeight);
+      const next = column
+        ? remotePresencePageWindow(
+            metrics,
+            column.getBoundingClientRect().top,
+            viewportTop,
+            viewportBottom
+          )
+        : null;
+      setPageWindow((previous) =>
+        previous?.start === next?.start && previous?.end === next?.end ? previous : next
+      );
+    };
+    update();
+    let frame: number | null = null;
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        update();
+      });
+    };
+    scrollTarget.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    return () => {
+      scrollTarget.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  }, [canvasHostRef, displayListQueries, sidebarOpen, zoom]);
+
   // Page-local handle specs + commit params, rebuilt whenever the display list
   // rebuilds (its identity changes per build, including after a resize commit).
   const specs = useMemo<HandleSpec[]>(() => {
     if (readOnly) return [];
-    if (!positionProjection) return [];
+    if (!positionProjection || !pageWindow) return [];
 
     // Cell content primitives carry each cell-paragraph's block id, so the core
     // grouper needs a table identity: resolve an in-cell doc position to the
@@ -124,10 +179,12 @@ export function CanvasTableResizeOverlay({
     };
 
     const out: HandleSpec[] = [];
-    for (const frag of deriveDisplayListTableFragments(
-      displayListQueries.displayList,
-      tableKeyOf
-    )) {
+    const displayList = displayListQueries.displayList;
+    const nearViewport = {
+      ...displayList,
+      pages: displayList.pages.slice(pageWindow.start, pageWindow.end + 1),
+    };
+    for (const frag of deriveDisplayListTableFragments(nearViewport, tableKeyOf)) {
       const table = tableAt.get(frag.tableKey);
       if (!table || table.widthsTwips.length === 0) continue;
       const { pmStart, widthsTwips, rowCount } = table;
@@ -176,7 +233,7 @@ export function CanvasTableResizeOverlay({
       }
     }
     return out;
-  }, [displayListQueries, positionProjection, readOnly]);
+  }, [displayListQueries, pageWindow, positionProjection, readOnly]);
 
   // Project page-local specs onto the visible canvas via the live canvas rects.
   const [projected, setProjected] = useState<ProjectedHandle[]>([]);
