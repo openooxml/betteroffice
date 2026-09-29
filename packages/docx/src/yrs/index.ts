@@ -44,6 +44,13 @@ import type {
   DocxValidationResult,
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
+import {
+  createProposalRegistry,
+  type DocxProposalRequest,
+  type DocxProposalResult,
+  type DocxProposalSnapshot,
+  type DocxProposalStateRequest,
+} from './proposals';
 import type {
   DocxContentControlQuery,
   DocxContentControlsOptions,
@@ -85,6 +92,18 @@ export {
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 export * from './paragraphIdentity';
+export {
+  proposalRevisionPreview,
+  type DocxOccurrence,
+  type DocxProposalFailure,
+  type DocxProposalInput,
+  type DocxProposalRecord,
+  type DocxProposalRequest,
+  type DocxProposalResult,
+  type DocxProposalSnapshot,
+  type DocxProposalState,
+  type DocxProposalStateRequest,
+} from './proposals';
 export {
   captureSessionSave,
   saveYrsDocx,
@@ -480,6 +499,8 @@ export interface YrsRenderEnv {
   numericIds?: Record<string, number>;
   /** Include hidden text in visible layout without changing the document. */
   showHiddenText?: boolean;
+  /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
+  revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
 }
 
 /** Receipt of {@link YrsSession.addComment}. */
@@ -594,6 +615,8 @@ export interface YrsResidentWorkerSnapshot {
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;
+  /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
+  partialDocument?: boolean;
 }
 
 /**
@@ -827,6 +850,13 @@ export interface YrsSession extends CollaborationReplica {
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
   buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  /**
+   * Limit full display builds to pages `start..end` plus the pages already
+   * built; the rest stay unbuilt placeholders carrying their geometry. @internal
+   */
+  setDisplayWindow(start: number, end: number): void;
+  /** Build the listed unbuilt pages into a FrameDelta v1. @internal */
+  buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
   /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
   resetFrameBase(): void;
   /** Caret geometry from the current resident display frame. */
@@ -889,6 +919,25 @@ export interface YrsSession extends CollaborationReplica {
    * one seeded alike by the same client; see {@link beginOpening}.
    */
   openDocx(bytes: Uint8Array, seedStories: boolean, options?: YrsOpeningOptions): YrsDocxHost;
+  /**
+   * Opens a DOCX for display only, from the body's first `blocks` blocks:
+   * enough to lay out its first pages with a prefix pass before the whole
+   * document is opened. The session cannot save. `null`, opening nothing,
+   * for a document with a float placed from outside the text or a section
+   * with columns, which no cut of the body lays out like the whole: open it
+   * with {@link openDocx}. @internal
+   */
+  openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
+  /**
+   * Marks whether the document is a preview's, as a replica of one is: its
+   * layouts render NUMPAGES empty. @internal
+   */
+  setPartialDocument(partial: boolean): void;
+  /**
+   * The region layout of only as much of the body as fills `pages` pages;
+   * a reply marked `provisional` covers a prefix. @internal
+   */
+  layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /**
    * Starts a new opening of the document: its generation, replicated to
    * every replica, becomes part of every session anchor. Every seeding entry
@@ -1204,6 +1253,25 @@ export interface YrsSession extends CollaborationReplica {
   /** Accepted-view texts around a paragraph-keyed selection. @internal */
   selectionText(range: YrsStoryRange): YrsSelectionText;
 
+  // -- host proposals --
+
+  /**
+   * Proposes a round of tracked changes: every new proposal resolves against `expectVersion` and
+   * the round applies as one batch outside undo history, or nothing changes. A retried id with
+   * the same edit is a no-op; the same id with another edit refuses. Opening another document
+   * forgets every proposal.
+   */
+  proposeChanges(request: DocxProposalRequest): DocxProposalResult;
+  /**
+   * Sets how proposals render. Decisions change neither the document, its version nor undo
+   * history; each call that changes one increments `previewVersion`.
+   */
+  setProposalStates(request: DocxProposalStateRequest): DocxProposalResult;
+  /** The proposals in the order they were made. */
+  getProposals(): DocxProposalSnapshot;
+  /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */
+  onProposalChange(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
+
   // -- structured export --
 
   /**
@@ -1382,7 +1450,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   // The current resident layout ran only in a resident worker replica.
   let layoutRanInWorker = false;
   let residentFontsRevision = 0;
-  let ownsResidentFontStore = false;
   let docxSource: Uint8Array | null = null;
 
   const invalidateReadCaches = (): void => {
@@ -1411,6 +1478,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     }
   };
 
+  // A preview's cut of a package, whose layouts count only its own pages.
+  let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
     invalidateReadCaches();
     wasmCallDepth += 1;
@@ -1486,26 +1555,52 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    const json = mutate(() =>
-      session.open_docx(source, seedStories, options.generation, preparedDigests.get(bytes))
-    );
+    const json = mutate(() => {
+      const opened = session.open_docx(
+        source,
+        seedStories,
+        options.generation,
+        preparedDigests.get(bytes)
+      );
+      proposals.reset();
+      return opened;
+    });
     const host = decodeDocxHost(json, source);
     docxSource = source;
+    partialDocument = false;
     return host;
   };
 
+  const proposals = createProposalRegistry({
+    version: () => facade.version(),
+    resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
+    findText: (request) => facade.findText(request),
+    applyEdits: (request) => facade.applyEdits(request),
+  });
+
   const facade: YrsSession = {
     clientId,
+    openDocxPreview: (bytes, blocks) => {
+      markDirty('all');
+      const json = mutate(() => session.open_docx_preview(bytes, blocks));
+      if (json === undefined) return null;
+      partialDocument = true;
+      return decodeDocxHost(json, bytes);
+    },
+    setPartialDocument: (partial) => {
+      partialDocument = partial;
+      session.set_partial_document(partial);
+    },
+    layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) => {
+      const output = session.layout_document_with_regions_prefix_retained_json(input, pages);
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = false;
+      return output;
+    },
 
     registerFont: (bytes) => {
-      // The Rust font store is module-global, while document sessions are
-      // replaceable. Claim a fresh id space on the first registration for a
-      // new session so a worker replay sees the same dense ids (0..N) after a
-      // document load; otherwise ids would retain gaps from the old session.
-      if (!ownsResidentFontStore) {
-        session.clear_measure_fonts();
-        ownsResidentFontStore = true;
-      }
       const id = session.register_measure_font(bytes);
       residentFonts.push(bytes.slice());
       residentFontsRevision += 1;
@@ -1523,7 +1618,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentFonts.length = 0;
       residentMeasureInputs.clear();
       residentFontsRevision += 1;
-      ownsResidentFontStore = true;
     },
     measureParagraphJson: (input) => {
       const output = session.measure_paragraph_json(input);
@@ -1580,6 +1674,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
+      session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     applyInput: (text, expectedFrameEpoch) => {
@@ -1640,6 +1737,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutInput: residentLayoutInput,
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
+        ...(partialDocument ? { partialDocument: true } : {}),
       };
     },
     residentWorkerProbe: () => {
@@ -1658,11 +1756,19 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
     loadState: (update) => {
       markDirty('all');
-      mutate(() => session.load(update));
+      mutate(() => {
+        session.load(update);
+        proposals.reset();
+      });
     },
     seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
     openDocx,
-    beginOpening: (generation) => mutate(() => session.begin_opening(generation)),
+    beginOpening: (generation) => {
+      mutate(() => {
+        session.begin_opening(generation);
+        proposals.reset();
+      });
+    },
     materializeDocx: () => {
       const source = docxSource;
       const json = session.materialize_docx();
@@ -2330,6 +2436,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         if (result.ok && result.applied) markDirty(result.changedStories);
         return result;
       }),
+    proposeChanges: (request) => mutate(() => proposals.propose(request)),
+    setProposalStates: (request) => proposals.setStates(request),
+    getProposals: () => proposals.snapshot(),
+    onProposalChange: (listener) => {
+      if (destroyed) throw new Error('yrs session is destroyed');
+      return proposals.subscribe(listener);
+    },
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
       return mutate(
@@ -2366,6 +2479,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (destroyed) return;
       destroyed = true;
       listeners.clear();
+      proposals.destroy();
       pendingUpdates.length = 0;
       if (observing) session.clear_update_observer();
       session.free();
@@ -2375,7 +2489,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   registerSessionInternals(facade, {
     compareDocx: (original, revised, options) => {
       markDirty('all');
-      const json = mutate(() => session.compare_docx_json(original, revised, options));
+      const json = mutate(() => {
+        const compared = session.compare_docx_json(original, revised, options);
+        proposals.reset();
+        return compared;
+      });
       docxSource = original.slice();
       return json;
     },
