@@ -9,10 +9,13 @@ use serde_json::Value;
 /// `fontTable.xml` character sets (hex) of East Asian and of complex-script fonts.
 const EAST_ASIAN_CHARSETS: [&str; 5] = ["80", "81", "82", "86", "88"];
 const COMPLEX_SCRIPT_CHARSETS: [&str; 2] = ["b1", "b2"];
+/// Longer strings in an embed's payload are not taken for font names.
+const MAX_FONT_NAME_BYTES: usize = 128;
 
 /// What a document's seeded runs measure with, gathered unit by unit: the
 /// lowered run takes its `w:rFonts` slots and `w:cs` from its own attributes,
-/// or else from its paragraph's run defaults.
+/// or else from its paragraph's run defaults. Embeds count conservatively:
+/// any short string in a payload may name the font something is drawn with.
 #[derive(Default)]
 pub(crate) struct ScriptFontUse {
     /// Lowercased names some text may be measured or drawn with whatever its script.
@@ -24,8 +27,6 @@ pub(crate) struct ScriptFontUse {
     /// `eastAsia` hint from the paragraph.
     unfonted: FontSlotUse,
     unfonted_hinted_east_asia: bool,
-    /// Whether some run text takes its `w:cs` from its paragraph.
-    text_without_cs: bool,
     /// Whether some paragraph's run defaults hint `eastAsia`, or set `w:cs`.
     default_hint: bool,
     default_cs: bool,
@@ -63,9 +64,10 @@ impl ScriptFontUse {
         if text.is_empty() {
             return;
         }
-        let complex_script = attrs.get("complexScript").and_then(complex_script_flag);
-        self.text_without_cs |= complex_script.is_none();
-        let complex_script = complex_script.unwrap_or(false);
+        let complex_script = attrs
+            .get("complexScript")
+            .and_then(complex_script_flag)
+            .unwrap_or(false);
         match attrs.get("fontFamily").and_then(Value::as_object) {
             Some(fonts) => {
                 let hint = fonts.get("hint").and_then(Value::as_str);
@@ -87,8 +89,8 @@ impl ScriptFontUse {
 
     /// A seeded embed's payload and attributes, including JSON-encoded parts
     /// such as `shapeJson`. Text inside a payload counts as text that may take
-    /// its fonts and `w:cs` from the paragraph, and as hinted or `w:cs` text
-    /// when the payload holds such formatting anywhere.
+    /// its fonts from the paragraph, and as hinted or `w:cs` text when the
+    /// payload holds such formatting anywhere.
     pub(crate) fn embed(
         &mut self,
         payload: &BTreeMap<String, Value>,
@@ -98,19 +100,24 @@ impl ScriptFontUse {
         let mut embedded = Embedded::default();
         self.object(payload.iter(), is_rtl(payload.get("rtl")), &mut embedded);
         let hint = embedded.hinted.then_some("eastAsia");
+        let complex_script: &[bool] = if embedded.complex_script {
+            &[false, true]
+        } else {
+            &[false]
+        };
         for text in embedded.texts.iter().filter(|text| !text.is_empty()) {
-            let complex_script = embedded.complex_script;
-            merge(
-                &mut self.measured,
-                font_slot_use(text, complex_script, hint),
-            );
-            merge(
-                &mut self.unfonted,
-                font_slot_use(text, complex_script, None),
-            );
-            self.unfonted_hinted_east_asia |=
-                font_slot_use(text, complex_script, Some("eastAsia")).east_asia;
-            self.text_without_cs = true;
+            for &complex_script in complex_script {
+                merge(
+                    &mut self.measured,
+                    font_slot_use(text, complex_script, hint),
+                );
+                merge(
+                    &mut self.unfonted,
+                    font_slot_use(text, complex_script, None),
+                );
+                self.unfonted_hinted_east_asia |=
+                    font_slot_use(text, complex_script, Some("eastAsia")).east_asia;
+            }
         }
     }
 
@@ -138,9 +145,8 @@ impl ScriptFontUse {
         let east_asian_text = self.measured.east_asia
             || self.unfonted.east_asia
             || (self.default_hint && self.unfonted_hinted_east_asia);
-        let complex_text = self.measured.complex_script
-            || self.unfonted.complex_script
-            || (self.default_cs && self.text_without_cs);
+        let complex_text =
+            self.measured.complex_script || self.unfonted.complex_script || self.default_cs;
         referenced
             .into_iter()
             .filter(|name| {
@@ -180,7 +186,12 @@ impl ScriptFontUse {
                     }
                 }
                 ("cs" | "complexScript", Value::Bool(true)) => embedded.complex_script = true,
-                ("hint", Value::String(hint)) if hint == "eastAsia" => embedded.hinted = true,
+                ("hint", Value::String(hint)) => embedded.hinted |= hint == "eastAsia",
+                ("eastAsia" | "ea", Value::String(name)) => self.east_asian.extend(lowercase(name)),
+                ("cs", Value::String(name)) => self.complex.extend(lowercase(name)),
+                (_, Value::String(name)) if name.len() <= MAX_FONT_NAME_BYTES => {
+                    self.latin.extend(lowercase(name));
+                }
                 _ => {}
             }
             self.walk(value, embedded);
@@ -380,6 +391,27 @@ mod tests {
             unused(&shape, &NAMES),
             ["宋体", "Batang", "Traditional Arabic", "Shared"]
         );
+
+        let mut chart = latin_document();
+        let chart_json = json!({"legend": {"text": {"font": "SimSun"}}});
+        chart.embed(
+            &attrs(json!({"chartJson": chart_json.to_string()})),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            unused(&chart, &NAMES),
+            ["宋体", "Batang", "Traditional Arabic", "Shared"]
+        );
+
+        let mut runs = latin_document();
+        runs.embed(
+            &attrs(json!({"runs": [
+                {"cs": false, "text": "\u{6f22}"},
+                {"cs": true, "text": "abc"}
+            ]})),
+            &BTreeMap::new(),
+        );
+        assert!(unused(&runs, &NAMES).is_empty());
     }
 
     #[test]
