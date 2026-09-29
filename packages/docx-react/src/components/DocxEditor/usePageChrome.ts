@@ -3,6 +3,8 @@ import { displayPageRevision, type DisplayPage } from '@betteroffice/docx/layout
 import type { TFunction } from '@betteroffice/docx-i18n';
 
 type MakeChrome = (page: DisplayPage, t: TFunction) => HTMLElement;
+/** `chrome` is the page's current chrome, if built for this page, which it may take over. */
+type MakeFallback = (page: DisplayPage, t: TFunction, chrome: HTMLElement | null) => HTMLElement;
 
 export interface PageChromeOptions {
   page: DisplayPage;
@@ -23,7 +25,7 @@ export interface PageChromeOptions {
   register?: (handle: PageChromeHandle | null) => void;
   make: MakeChrome;
   /** What an inactive page shows, built at idle time; null for nothing. */
-  fallback?: MakeChrome | null;
+  fallback?: MakeFallback | null;
 }
 
 /** Builds one page's chrome outside its render cycle. */
@@ -56,6 +58,7 @@ function tabStops(root: ParentNode): HTMLElement[] {
  * the same place in `next`: a rebuild keeps its stops in order.
  */
 function replaceKeepingFocus(host: HTMLElement, next: HTMLElement | null): void {
+  if (next && host.childNodes.length === 1 && host.firstChild === next) return;
   const focused = host.ownerDocument.activeElement;
   const at = focused instanceof HTMLElement && host.contains(focused)
     ? tabStops(host).indexOf(focused)
@@ -128,7 +131,8 @@ export function usePageChrome(
       builtForRef.current = null;
       return;
     }
-    replaceKeepingFocus(host, fallback(page, t));
+    const chrome = shows('chrome') ? (host.firstElementChild as HTMLElement | null) : null;
+    replaceKeepingFocus(host, fallback(page, t, chrome));
     builtForRef.current = {
       kind: 'fallback',
       page,
@@ -181,5 +185,5 @@ export function usePageChrome(
     }
     return idle(build);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, t, revision, urgentRevision, active, build, showFallback, fallback]);
+  }, [page, t, revision, urgentRevision, active, defer, build, showFallback, fallback]);
 }

@@ -37,6 +37,7 @@ export {
   buildMirrorPageLinks,
   displayPageHoldsMirrorId,
   mirrorPageHasTabStops,
+  reduceMirrorToLinks,
   MIRROR_CLASS_NAMES,
   type BuildMirrorPageOptions,
   type MirrorLabels,

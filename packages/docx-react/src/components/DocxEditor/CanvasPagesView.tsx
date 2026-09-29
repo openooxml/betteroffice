@@ -770,8 +770,9 @@ export function CanvasPagesView({
           // Every page keeps its sized canvas, so page geometry never
           // changes; the a11y mirror and SDT overlay hold content only for
           // pages in the window, the page holding focus, and pages built on
-          // demand. A page's first build waits for idle time; after a
-          // content change a page in the window rebuilds at once.
+          // demand. A page in the measured window builds at once, others at
+          // idle time; after a content change a page in the window rebuilds
+          // at once.
           return (
             <CanvasPageSurface
               key={surfaceKey}
@@ -787,7 +788,7 @@ export function CanvasPagesView({
                 onDemandPageKeys.has(pageKey)
               }
               inWindow={chromeInWindow(i)}
-              deferChrome={windowingEnabled}
+              deferChrome={windowPending || !chromeInWindow(i)}
               registerCanvas={registerCanvas}
               registerChrome={registerChrome}
             />

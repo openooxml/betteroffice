@@ -91,3 +91,62 @@ test("a page's links-only mirror holds the full mirror's links and ids, in order
     expect(ids(linksOnly)).toEqual(ids(full));
   }
 });
+
+test("a links-only mirror keeps the full mirror's nesting order and header labels", () => {
+  const outer = { tableId: 't1' };
+  const inner = { tableId: 't2', parentTableId: 't1' };
+  const cell = (row: number, extra: object = {}) => ({
+    row,
+    col: 0,
+    rowSpan: 1,
+    colSpan: 1,
+    ...extra,
+  });
+  const header = cell(0, { cellId: 'h', isHeader: true });
+  const data = (row: number) => cell(row, { headerIds: ['h'] });
+  const shade = (ref: object, y: number, h: number) =>
+    ({
+      kind: 'rect',
+      x: 0,
+      y,
+      w: 200,
+      h,
+      fill: '#eee',
+      blockKey: 'outer',
+      table: outer,
+      cell: ref,
+    }) as unknown as DisplayPrimitive;
+  const run = (key: string, table: object, ref: object, x: number, y: number, extra: object) => {
+    const fields = { blockKey: key, table, cell: ref, x, baselineY: y, width: 10, ...extra };
+    return text(fields as Partial<DisplayPrimitive>);
+  };
+  const page: DisplayPage = {
+    pageIndex: 0,
+    width: 200,
+    height: 200,
+    primitives: [
+      run('inner', inner, cell(0), 20, 40, { text: 'C', href: '#c' }),
+      shade(header, 0, 20),
+      run('outer', outer, header, 5, 15, { text: 'Name' }),
+      shade(data(1), 20, 80),
+      run('outer', outer, data(1), 5, 90, { text: 'A', href: '#a' }),
+      run('outer', outer, data(1), 50, 90, { text: 'words' }),
+      shade(data(2), 100, 40),
+      run('outer', outer, data(2), 5, 120, { text: 'B', href: '#b' }),
+    ],
+  };
+  const full = buildMirrorPage(page);
+  const linksOnly = buildMirrorPageLinks(page);
+  const hrefs = (root: HTMLElement) =>
+    Array.from(root.querySelectorAll('a'), (a) => a.getAttribute('href'));
+  expect(full.querySelector('[data-table-id="t1"] [data-table-id="t2"]')).not.toBeNull();
+  expect(hrefs(linksOnly)).toEqual(hrefs(full));
+  expect(linksOnly.textContent).not.toContain('words');
+  const labelled = Array.from(linksOnly.querySelectorAll('[aria-labelledby]'));
+  expect(labelled.length).toBeGreaterThan(0);
+  for (const element of labelled) {
+    for (const id of element.getAttribute('aria-labelledby')!.split(' ')) {
+      expect(linksOnly.querySelector(`[id="${id}"]`)?.textContent).toBe('Name');
+    }
+  }
+});

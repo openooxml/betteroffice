@@ -130,46 +130,58 @@ export function mirrorPageHasTabStops(page: DisplayPage): boolean {
   );
 }
 
+/** Attributes through which a mirror element names the elements that label it. */
+const MIRROR_LABEL_REFERENCES = ['aria-labelledby', 'aria-describedby'] as const;
+const MIRROR_LABELLED = MIRROR_LABEL_REFERENCES.map((name) => `[${name}]`).join(', ');
+
 /**
- * `buildMirrorPage` of only `page`'s links: hyperlinks, note references, and
- * each note's backlink. The page's element ids and link order are the full
- * mirror's, so links stay reachable (by Tab, link lists and fragment
- * targets) without building every run of the page.
+ * Reduces a `buildMirrorPage` tree, in place, to its links, its notes (the
+ * targets of note references) and the elements that label what stays. Every
+ * other element and text goes; the ancestors of what stays keep their
+ * attributes, so the ids, order, positions and table semantics that remain
+ * are the full mirror's.
  */
+export function reduceMirrorToLinks(mirror: HTMLElement): HTMLElement {
+  const byId = new Map<string, Element>();
+  for (const element of mirror.querySelectorAll('[id]')) byId.set(element.id, element);
+  const kept = new Set<Element>();
+  const onPath = new Set<Element>([mirror]);
+  const pending = Array.from(mirror.querySelectorAll(`a[href], .${MIRROR_CLASS_NAMES.note}`));
+  while (pending.length > 0) {
+    const element = pending.pop()!;
+    if (kept.has(element)) continue;
+    kept.add(element);
+    const labelled = [element, ...element.querySelectorAll(MIRROR_LABELLED)];
+    for (let node = element.parentElement; node && !onPath.has(node); node = node.parentElement) {
+      onPath.add(node);
+      labelled.push(node);
+    }
+    for (const node of labelled) {
+      for (const name of MIRROR_LABEL_REFERENCES) {
+        for (const id of node.getAttribute(name)?.split(/\s+/) ?? []) {
+          const label = byId.get(id);
+          if (label && !kept.has(label)) pending.push(label);
+        }
+      }
+    }
+  }
+  const prune = (element: Element): void => {
+    for (const child of Array.from(element.childNodes)) {
+      if (kept.has(child as Element)) continue;
+      if (onPath.has(child as Element)) prune(child as Element);
+      else child.remove();
+    }
+  };
+  prune(mirror);
+  return mirror;
+}
+
+/** `buildMirrorPage(page)` reduced to its links: see `reduceMirrorToLinks`. */
 export function buildMirrorPageLinks(
   page: DisplayPage,
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
-  const noteArea = (area: NoteRegion): NoteRegion => {
-    const kind = area.kind ?? 'footnote';
-    // Each note keeps one of its primitives, so its aside (the target of its
-    // references) and any backlink still build.
-    const keep = new Set(
-      (area.noteIds ?? []).map((noteId) =>
-        (area.primitives ?? []).find((p) => p.groupId === `${kind}-${noteId}`)
-      )
-    );
-    return {
-      ...area,
-      separatorPrimitives: [],
-      primitives: (area.primitives ?? []).filter((p) => mirrorLinks(p) || keep.has(p)),
-    };
-  };
-  return buildMirrorPage(
-    {
-      ...page,
-      primitives: page.primitives.filter(mirrorLinks),
-      pageBorders: [],
-      ...(page.header
-        ? { header: { ...page.header, primitives: page.header.primitives.filter(mirrorLinks) } }
-        : {}),
-      ...(page.footer
-        ? { footer: { ...page.footer, primitives: page.footer.primitives.filter(mirrorLinks) } }
-        : {}),
-      ...(page.noteAreas ? { noteAreas: page.noteAreas.map(noteArea) } : {}),
-    },
-    options
-  );
+  return reduceMirrorToLinks(buildMirrorPage(page, options));
 }
 
 /** Whether `page`'s mirror holds the note or note reference with element id `id`. */

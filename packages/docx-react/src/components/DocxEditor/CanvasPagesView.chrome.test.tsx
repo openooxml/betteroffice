@@ -203,6 +203,55 @@ test('controls on every page and links on pages outside the window stay built', 
   expect(mirror.textContent).not.toContain('plain words');
 });
 
+test('pages in the window hold their links and controls before idle time', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const link = {
+    kind: 'text',
+    x: 10,
+    y: 10,
+    text: 'near link',
+    font: '11px sans-serif',
+    color: '#000',
+    href: '#near',
+  } as unknown as DisplayPrimitive;
+  const pages = blankPages(40, (index) => (index === 0 ? [widget('near'), link] : []));
+  render(
+    <CanvasPagesView
+      displayList={{ pages }}
+      hostRef={hostRef}
+      interactive
+      glyphOutlineProvider={() => ''}
+    />
+  );
+  await act(async () => {});
+  const page = hostRef.current!.querySelector<HTMLElement>('.canvas-page[data-page-index="0"]')!;
+  expect(page.querySelector('button[data-sdt-group-id="near"]')).not.toBeNull();
+  expect(page.querySelector('.canvas-page-mirror a[href="#near"]')).not.toBeNull();
+});
+
+test('a page leaving the window keeps the links it built', async () => {
+  const link = {
+    kind: 'text',
+    x: 10,
+    y: 10,
+    text: 'kept link',
+    font: '11px sans-serif',
+    color: '#000',
+    href: '#kept',
+  } as unknown as DisplayPrimitive;
+  const words = { ...link, text: 'plain words', href: undefined } as unknown as DisplayPrimitive;
+  const page: DisplayPage = { pageIndex: 0, width: 100, height: 100, primitives: [link, words] };
+  const { container, rerender } = render(<CanvasPageMirror page={page} />);
+  await act(async () => {});
+  const built = container.querySelector('a[href="#kept"]');
+  expect(built).not.toBeNull();
+  expect(container.textContent).toContain('plain words');
+  rerender(<CanvasPageMirror page={page} active={false} />);
+  await act(async () => {});
+  expect(container.querySelector('a[href="#kept"]')).toBe(built);
+  expect(container.textContent).not.toContain('plain words');
+});
+
 test('a link to a note on a page whose chrome is not built builds that page first', async () => {
   const hostRef = createRef<HTMLDivElement>();
   const reference = {

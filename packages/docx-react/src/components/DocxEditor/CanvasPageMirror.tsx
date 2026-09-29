@@ -15,6 +15,7 @@ import {
   buildMirrorPage,
   buildMirrorPageLinks,
   mirrorPageHasTabStops,
+  reduceMirrorToLinks,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
@@ -30,9 +31,14 @@ const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
 });
 const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
   buildMirrorPage(page, mirrorLabels(page, t));
-// A page outside the window keeps its links, for Tab, link lists and targets.
-const makeMirrorLinks = (page: DisplayPage, t: TFunction): HTMLElement =>
-  buildMirrorPageLinks(page, mirrorLabels(page, t));
+// A page outside the window keeps its links, for Tab, link lists and targets,
+// reduced from its built mirror when it has one.
+const makeMirrorLinks = (
+  page: DisplayPage,
+  t: TFunction,
+  mirror: HTMLElement | null
+): HTMLElement =>
+  mirror ? reduceMirrorToLinks(mirror) : buildMirrorPageLinks(page, mirrorLabels(page, t));
 
 export function CanvasPageMirror({
   page,
