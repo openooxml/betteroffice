@@ -45,7 +45,7 @@ A changeset body is a tl;dr for the changelog, not a design doc: 1–2 plain,
 compact sentences on what changed for package users. New or changed public
 API names (props, options, methods, events) go in backticks; state whether a
 feature is opt-in or on by default. Leave out internals, rationale,
-benchmarks and em dashes. CI fails a body over ~45 words.
+benchmarks and em dashes. CI fails a body over 45 words.
 
 Example: "Adds `previewFirstPage`, which paints the first pages before the
 full open finishes. Off by default."
