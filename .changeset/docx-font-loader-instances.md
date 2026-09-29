@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Editors sharing a page keep fonts apart: `onFontsLoaded` and `onError` no longer hear other editors' font loads, and different embedded fonts under one name no longer override each other and are released on unmount. Adds `createFontLoadScope`, `registerDocumentFaces` and `loadEmbeddedFontFamilies`.
+By default, editors sharing a page keep fonts apart: `onFontsLoaded` and `onError` ignore other editors' font loads, and same-named embedded fonts no longer override each other and are released on unmount. Direct callers opt in via `createFontLoadScope`, `registerDocumentFaces` and `loadEmbeddedFontFamilies`.
