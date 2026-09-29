@@ -220,7 +220,8 @@ function registerBundledFamily(
   family: string,
   sources: string[],
   weights?: number[],
-  styles?: ('normal' | 'italic')[]
+  styles?: ('normal' | 'italic')[],
+  deadlineMs = BUNDLED_FONT_DEADLINE_MS
 ): Promise<BundledRegistration> {
   if (typeof FontFace === 'undefined' || document.fonts === undefined) {
     return Promise.resolve('none');
@@ -252,7 +253,7 @@ function registerBundledFamily(
       clearTimeout(timer);
       resolve(summarize());
     };
-    const timer = setTimeout(finish, BUNDLED_FONT_DEADLINE_MS);
+    const timer = setTimeout(finish, deadlineMs);
     void (async () => {
       const provider = await resolveDefaultFontProvider();
       if (!provider) return;
@@ -375,7 +376,8 @@ export function loadFont(
 
 /**
  * {@link loadFont}, where a bundle lacking `fontFamily` may serve the faces of
- * `bundledFallback` under the `fontFamily` name instead.
+ * `bundledFallback` under the `fontFamily` name instead. `deadlineAt` carries
+ * a retry's original bundled deadline.
  */
 async function loadFontFrom(
   fontFamily: string,
@@ -383,7 +385,8 @@ async function loadFontFrom(
     weights?: number[];
     styles?: ('normal' | 'italic')[];
   },
-  bundledFallback?: string
+  bundledFallback?: string,
+  deadlineAt?: number
 ): Promise<boolean> {
   // Skip font loading in non-browser environments (Node.js, SSR)
   if (typeof document === 'undefined') {
@@ -402,14 +405,15 @@ async function loadFontFrom(
   const existingLoad = loadingFonts.get(normalizedFamily);
   if (existingLoad) {
     // An in-flight load may lack this call's bundled fallback; retry with it
-    // only when the bundle had nothing under this name, not after a timeout.
-    return bundledFallback
-      ? existingLoad.then((loaded) =>
-          loaded || !bundledAbsentFamilies.has(normalizedFamily)
-            ? loaded
-            : loadFontFrom(fontFamily, options, bundledFallback)
-        )
-      : existingLoad;
+    // only when the bundle had nothing under this name, not after a timeout,
+    // and within the deadline this call started with.
+    if (!bundledFallback) return existingLoad;
+    const retryDeadline = deadlineAt ?? Date.now() + BUNDLED_FONT_DEADLINE_MS;
+    return existingLoad.then((loaded) =>
+      loaded || !bundledAbsentFamilies.has(normalizedFamily)
+        ? loaded
+        : loadFontFrom(fontFamily, options, bundledFallback, retryDeadline)
+    );
   }
 
   // Already satisfied by a system font — fetching the Google copy would be a
@@ -463,7 +467,10 @@ async function loadFontFrom(
           normalizedFamily,
           bundledFallback ? [normalizedFamily, bundledFallback.trim()] : [normalizedFamily],
           options?.weights,
-          options?.styles
+          options?.styles,
+          deadlineAt === undefined
+            ? BUNDLED_FONT_DEADLINE_MS
+            : Math.max(0, deadlineAt - Date.now())
         );
         if (registration === 'absent') bundledAbsentFamilies.add(normalizedFamily);
         else bundledAbsentFamilies.delete(normalizedFamily);

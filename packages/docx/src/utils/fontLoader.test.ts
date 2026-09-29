@@ -386,6 +386,38 @@ test('aliases waiting on one stalled equivalent settle at a single deadline', as
   release();
 });
 
+test('a mapped retry after an absent equivalent keeps the deadline it started with', async () => {
+  jest.useFakeTimers();
+  let providerReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    providerReady = resolve;
+  });
+  const stalled = new Promise<ArrayBuffer>(() => undefined);
+  configureDefaultFonts({
+    load: async () => {
+      await ready;
+      return {
+        createFontProvider: () => ({
+          resolve: () => undefined,
+          resolveFamily: (family: string) => (family === 'Monaco' ? () => stalled : undefined),
+        }),
+      };
+    },
+  });
+  let settled = false;
+  const direct = loadFont('Fira Code');
+  const mapped = loadFontWithMapping('Monaco').finally(() => {
+    settled = true;
+  });
+  jest.advanceTimersByTime(3000);
+  providerReady();
+  expect(await direct).toBe(false);
+  jest.advanceTimersByTime(2000);
+  for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
+  expect(settled).toBe(true);
+  expect(await mapped).toBe(false);
+});
+
 test('an older provider without resolveFamily registers only the Regular face it can vouch for', async () => {
   configureDefaultFonts({
     fonts: {
