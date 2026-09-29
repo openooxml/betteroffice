@@ -22,7 +22,7 @@ import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
-import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { isPresented, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
@@ -35,6 +35,7 @@ import {
 import { resolveParagraph } from './createPluginClients';
 import { createPluginGeometry, pluginLayout } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
+import { currentPreviewKey } from './proposalPreview';
 import type {
   DocxEditorPluginProps,
   DocxPluginGeometry,
@@ -224,14 +225,25 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   }, [managed, options.canvasHostRef, options.overlayTarget, options.queries]);
 
   const version = useSyncExternalStore(host.subscribe, host.version, host.version);
+  const previewVersion = useSyncExternalStore(
+    host.subscribe,
+    host.previewVersion,
+    host.previewVersion
+  );
+  const previewKey = currentPreviewKey(options.session);
   const layout = useMemo(
-    () => pluginLayout(options.queries, managed ? version : null, options.zoom),
-    [managed, options.queries, options.zoom, version]
+    () =>
+      pluginLayout(options.queries, managed ? version : null, options.zoom, {
+        key: previewKey,
+        previewVersion,
+      }),
+    [managed, options.queries, options.zoom, version, previewKey, previewVersion]
   );
   const layoutStable = useRef<DocxPluginLayout | null>(null);
   if (
     layout?.id !== layoutStable.current?.id ||
     layout?.version !== layoutStable.current?.version ||
+    layout?.previewVersion !== layoutStable.current?.previewVersion ||
     layout?.zoom !== layoutStable.current?.zoom
   ) {
     layoutStable.current = layout;
@@ -248,6 +260,8 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
             layer,
             () =>
               host.layoutId() === currentLayout.id &&
+              host.previewVersion() === currentLayout.previewVersion &&
+              latest.current.zoom === currentLayout.zoom &&
               domRef.current === dom &&
               dom.context.pagesContainer.isConnected,
             (hit) =>
@@ -256,7 +270,19 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
                 hit,
                 dom.context.pagesContainer,
                 dom.queries
-              )
+              ),
+            dom.queries,
+            () => {
+              const editor = latest.current.pagedEditorRef.current;
+              const session = editor?.getYrsSession();
+              return editor && session
+                ? {
+                    session,
+                    editor,
+                    presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
+                  }
+                : null;
+            }
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.
@@ -272,7 +298,21 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   useEffect(() => {
     host.geometryChanged();
-  }, [host, geometry]);
+    if (!geometry || !dom) return;
+    const shown = () => isPresented(dom.context.pagesContainer, dom.queries.displayList);
+    if (shown()) return;
+    let frame = 0;
+    const settle = () => {
+      if (!shown()) {
+        frame = requestAnimationFrame(settle);
+        return;
+      }
+      host.geometryChanged();
+      host.layoutPresented(geometry.layout);
+    };
+    frame = requestAnimationFrame(settle);
+    return () => cancelAnimationFrame(frame);
+  }, [host, geometry, dom]);
 
   const place = useCallback(
     (anchor: DocxPluginSidebarItem<unknown>['anchor']) => {

@@ -68,6 +68,7 @@ test('continues the frame epochs after a worker with a higher epoch fails', asyn
     },
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
     onUpdate: () => () => {},
     selection: () => null,
     applyUpdate: () => null,
@@ -153,6 +154,7 @@ test('recovers from a worker whose frame number the host engine already used', a
       expectedEpochs.push(epoch);
       return native.build_display_list_frame(input, epoch);
     },
+    encodeStateVector: () => new Uint8Array(),
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     onUpdate: () => () => {},
@@ -285,6 +287,7 @@ test('falls back to the main thread and keeps the keystroke when the worker cras
     residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
     onUpdate: () => () => {},
     selection: () => JSON.parse(native.selection()) as YrsSelection,
     applyUpdate: () => null,
@@ -360,6 +363,7 @@ test('a layout after a worker crash the host cannot absorb as input still render
     applyInput: () => {
       throw new Error('resident input state is not ready for this paragraph');
     },
+    encodeStateVector: () => new Uint8Array(),
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     onUpdate: () => () => {},
@@ -431,6 +435,7 @@ test('surfaces an engine-level input rejection instead of falling back', async (
     residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
     onUpdate: () => () => {},
     selection: () => JSON.parse(native.selection()) as YrsSelection,
     applyUpdate: () => null,
@@ -499,6 +504,7 @@ test('falls back to the main thread and keeps the keystroke when the worker retu
     residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
     onUpdate: () => () => {},
     selection: () => JSON.parse(native.selection()) as YrsSelection,
     applyUpdate: () => null,

@@ -267,3 +267,52 @@ describe('wasm trap', () => {
     expect(worker.posted).toHaveLength(3);
   });
 });
+
+describe('queued snapshots', () => {
+  test('a sync sent before the bootstrap answers diffs against the bootstrap state', async () => {
+    const { worker, client } = setup();
+    const sent = new Uint8Array([7, 7]);
+    const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 3 }, '', {
+      stateVector: sent,
+      layoutExtras: '{}',
+    });
+    expect(client.bootstrapSent()).toBe(true);
+    expect(client.remoteStateVector()).toEqual(sent);
+    expect(client.syncedFontsRevision()).toBe(3);
+    expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', layoutExtras: '{}' });
+
+    const sync = client.sync(snapshot, '', 0, false, { stateVector: new Uint8Array([8]) });
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([8]));
+    expect(worker.posted[1]).not.toHaveProperty('layoutExtras');
+
+    const layoutReply = frameReply(worker.posted[0].id);
+    if (layoutReply.ok) layoutReply.layoutJson = '{"layout":{}}';
+    worker.reply(layoutReply);
+    expect((await bootstrap).layoutJson).toBe('{"layout":{}}');
+    worker.reply(frameReply(worker.posted[1].id));
+    expect((await sync).layoutJson).toBeUndefined();
+  });
+});
+
+describe('sent snapshot state', () => {
+  test('a reply to an earlier request does not replace a later snapshot hint', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '', {
+      stateVector: new Uint8Array([1]),
+    });
+    const sync = client.sync({ ...snapshot, fontsRevision: 2 }, '', 0, false, {
+      stateVector: new Uint8Array([2]),
+    });
+    const early = frameReply(worker.posted[0].id);
+    if (early.ok) early.stateVector = new Uint8Array([9]).buffer;
+    worker.reply(early);
+    await bootstrap;
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([2]));
+    expect(client.syncedFontsRevision()).toBe(2);
+    const late = frameReply(worker.posted[1].id);
+    if (late.ok) late.stateVector = new Uint8Array([3]).buffer;
+    worker.reply(late);
+    await sync;
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([3]));
+  });
+});

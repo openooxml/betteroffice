@@ -358,6 +358,13 @@ function isWasmTrap(error: unknown): boolean {
 type StoreShiftRun = [start: number, count: number, mask: number, delta: number];
 type StoreNoteAnchor = [area: number, note: number, start: number | null, end: number | null];
 
+/** A store page not parsed yet: its slot and size, but no primitives. */
+const UNLOADED = -1;
+
+function placeholderPage(page: DisplayPage): Pick<DisplayPage, 'pageIndex' | 'width' | 'height' | 'primitives'> {
+  return { pageIndex: page.pageIndex, width: page.width, height: page.height, primitives: [] };
+}
+
 /** The baseline of a primitive that forms part of a visual line, or null. */
 function visualLineBaseline(primitive: DisplayPrimitive): number | null {
   if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') return null;
@@ -395,11 +402,15 @@ function visualLineExtent(page: DisplayPage): VisualLineExtent | null {
  * invariant that unchanged pages keep object identity across builds. A page
  * whose identity and in-place mutation revision are unchanged since the store
  * parsed it is reused outright; a page that only accumulated recorded
- * position shifts ships those shifts as compact ops the store replays,
- * instead of re-serializing the page. Returns null when nothing is reusable
- * (a full open costs the same).
+ * position shifts ships those shifts as compact ops the store replays. Any
+ * other page becomes an unloaded placeholder that is parsed when a query first
+ * needs it. Returns null when nothing is reusable (a fresh open costs the
+ * same).
  */
-function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): string | null {
+function buildDisplayListUpdateJson(
+  seed: FacadeDeltaSeed,
+  next: DisplayList
+): { json: string; revisions: number[] } | null {
   const storeRevisions = seed.storeRevisions();
   if (!storeRevisions) return null;
   const previousIndex = new Map<unknown, number>();
@@ -409,16 +420,19 @@ function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): s
   const shift: Array<
     [number, number, StoreShiftRun[][]] | [number, number, StoreShiftRun[][], StoreNoteAnchor[][]]
   > = [];
+  const revisions: number[] = [];
   next.pages.forEach((page, index) => {
     const from = previousIndex.get(page);
-    if (from === undefined) {
-      replace.push([index, page]);
+    if (from !== undefined) previousIndex.delete(page);
+    const storeRevision = from === undefined ? undefined : storeRevisions[from];
+    if (from === undefined || storeRevision === undefined) {
+      replace.push([index, placeholderPage(page)]);
+      revisions.push(UNLOADED);
       return;
     }
-    previousIndex.delete(page);
-    const storeRevision = storeRevisions[from];
-    if (storeRevision === undefined) {
-      replace.push([index, page]);
+    if (storeRevision === UNLOADED) {
+      reuse.push([index, from]);
+      revisions.push(UNLOADED);
       return;
     }
     const shifts =
@@ -426,9 +440,11 @@ function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): s
         ? []
         : displayPageShiftsSince(page, storeRevision);
     if (shifts === null) {
-      replace.push([index, page]);
+      replace.push([index, placeholderPage(page)]);
+      revisions.push(UNLOADED);
     } else if (shifts.length === 0) {
       reuse.push([index, from]);
+      revisions.push(storeRevision);
     } else {
       const runLists = shifts.map((step: DisplayPageShift) =>
         step.runs.map((run): StoreShiftRun => [run.start, run.count, run.changedMask, run.delta])
@@ -443,16 +459,76 @@ function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): s
       } else {
         shift.push([index, from, runLists]);
       }
+      revisions.push(displayPageRevision(page));
     }
   });
   if (reuse.length === 0 && shift.length === 0) return null;
-  return JSON.stringify({
-    total: next.pages.length,
-    ...(next.contractVersion !== undefined ? { contractVersion: next.contractVersion } : {}),
-    reuse,
-    replace,
-    ...(shift.length > 0 ? { shift } : {}),
+  return {
+    json: JSON.stringify({
+      total: next.pages.length,
+      ...(next.contractVersion !== undefined ? { contractVersion: next.contractVersion } : {}),
+      reuse,
+      replace,
+      ...(shift.length > 0 ? { shift } : {}),
+    }),
+    revisions,
+  };
+}
+
+/** Lowest and highest body document position a page paints. */
+interface PagePositionSpan {
+  revision: number;
+  min: number;
+  max: number;
+}
+
+const pagePositionSpans = new WeakMap<DisplayPage, PagePositionSpan>();
+
+function pagePositionSpan(page: DisplayPage): PagePositionSpan {
+  const revision = displayPageRevision(page);
+  const cached = pagePositionSpans.get(page);
+  if (cached && cached.revision === revision) return cached;
+  let min = Infinity;
+  let max = -Infinity;
+  const include = (value: number | null | undefined): void => {
+    if (typeof value !== 'number') return;
+    if (value < min) min = value;
+    if (value > max) max = value;
+  };
+  for (const primitive of page.primitives) {
+    include(primitive.docStart);
+    include(primitive.docEnd);
+    include(primitive.fragmentDocStart);
+    include(primitive.fragmentDocEnd);
+    include(primitive.inlineSdtWidget?.pos);
+  }
+  const span = { revision, min, max };
+  pagePositionSpans.set(page, span);
+  return span;
+}
+
+/**
+ * Pages whose body positions can answer a query over `[from, to]`, plus
+ * `spread` pages on either side of each (a vertical move reads neighbours).
+ */
+function pagesTouchingPositions(
+  list: DisplayList,
+  from: number,
+  to: number,
+  spread = 0
+): number[] {
+  const lower = Math.min(from, to) - 1;
+  const upper = Math.max(from, to) + 1;
+  const pages = new Set<number>();
+  list.pages.forEach((page, index) => {
+    const span = pagePositionSpan(page);
+    if (span.min > upper || span.max < lower) return;
+    for (let offset = -spread; offset <= spread; offset += 1) {
+      const neighbour = index + offset;
+      if (neighbour >= 0 && neighbour < list.pages.length) pages.add(neighbour);
+    }
   });
+  return [...pages];
 }
 
 /**
@@ -472,17 +548,14 @@ export function createDisplayListQueries(
   previous?: DisplayListQueries | null
 ): DisplayListQueries {
   let json: string | null = null;
-  let jsonRevisions: readonly number[] | null = null;
   const getJson = (): string => {
-    if (json === null) {
-      jsonRevisions = list.pages.map(displayPageRevision);
-      json = JSON.stringify(list);
-    }
+    json ??= JSON.stringify(list);
     return json;
   };
-  // Revisions of the pages as parsed into the Rust store; null until a handle
-  // is opened or adopted. Kept exact so shift replay can never double-apply.
-  let storeRevisions: readonly number[] | null = null;
+  // Revisions of the pages as parsed into the Rust store, UNLOADED for a
+  // placeholder; null until a handle is opened or adopted. Kept exact so shift
+  // replay can never double-apply.
+  let storeRevisions: number[] | null = null;
 
   const resident: ResidentDisplayListQueryEngine | null = isResidentQueryEngine(engine)
     ? engine
@@ -581,15 +654,14 @@ export function createDisplayListQueries(
     if (!donor || !eng?.updateDisplayList || !eng.hasDisplayListUpdate?.()) return false;
     const seed = facadeDeltaSeeds.get(donor);
     if (!seed || seed.engine() !== eng) return false;
-    const revisionsAtBuild = list.pages.map(displayPageRevision);
     const update = buildDisplayListUpdateJson(seed, list);
     if (!update) return false;
     const adopted = seed.takeHandle();
     if (adopted === null) return false;
     try {
-      eng.updateDisplayList(adopted, update);
+      eng.updateDisplayList(adopted, update.json);
       handle = adopted;
-      storeRevisions = revisionsAtBuild;
+      storeRevisions = update.revisions;
       return true;
     } catch (error) {
       // the Rust side closes the handle on a failed update; close defensively
@@ -613,8 +685,22 @@ export function createDisplayListQueries(
     handleAttempted = true;
     if (adoptHandle()) return;
     try {
-      handle = eng.openDisplayList(getJson());
-      storeRevisions = jsonRevisions;
+      if (eng.updateDisplayList && eng.hasDisplayListUpdate?.()) {
+        // Pages are parsed into the store when a query first needs them, so
+        // opening costs their sizes only.
+        handle = eng.openDisplayList(
+          JSON.stringify({
+            ...(list.contractVersion !== undefined
+              ? { contractVersion: list.contractVersion }
+              : {}),
+            pages: list.pages.map(placeholderPage),
+          })
+        );
+        storeRevisions = list.pages.map(() => UNLOADED);
+      } else {
+        handle = eng.openDisplayList(getJson());
+        storeRevisions = list.pages.map(displayPageRevision);
+      }
     } catch (error) {
       handle = null;
       if (isWasmTrap(error)) {
@@ -627,6 +713,52 @@ export function createDisplayListQueries(
       );
     }
   };
+
+  // Parse the pages a query reads into the store. A failed update closes the
+  // handle on the Rust side; the query then takes the JSON-arg path.
+  const ensurePages = (pageIndices: readonly number[]): void => {
+    if (handle === null || !storeRevisions || !eng?.updateDisplayList) return;
+    const revisions = storeRevisions;
+    const replace: Array<[number, DisplayPage]> = [];
+    for (const index of pageIndices) {
+      const page = list.pages[index];
+      if (page && revisions[index] !== displayPageRevision(page)) replace.push([index, page]);
+    }
+    if (replace.length === 0) return;
+    const replaced = new Set(replace.map(([index]) => index));
+    const reuse: Array<[number, number]> = [];
+    for (let index = 0; index < list.pages.length; index += 1) {
+      if (!replaced.has(index)) reuse.push([index, index]);
+    }
+    try {
+      eng.updateDisplayList(
+        handle,
+        JSON.stringify({
+          total: list.pages.length,
+          ...(list.contractVersion !== undefined
+            ? { contractVersion: list.contractVersion }
+            : {}),
+          reuse,
+          replace,
+        })
+      );
+      for (const [index, page] of replace) revisions[index] = displayPageRevision(page);
+    } catch (error) {
+      if (isWasmTrap(error)) {
+        killSource('display-list page load', error);
+        storeRevisions = null;
+        return;
+      }
+      // Rust closes the handle on a failed update; close defensively in case
+      // the failure happened before wasm ran.
+      closeHandle();
+      handleFinalizers?.unregister(finalizerToken);
+      storeRevisions = null;
+      console.warn('[CanvasRenderer] display-list page load failed; using JSON-arg queries', error);
+    }
+  };
+
+  const allPages = (): number[] => list.pages.map((_, index) => index);
 
   if (resident || eng) {
     resolveReady();
@@ -651,10 +783,13 @@ export function createDisplayListQueries(
   const runQuery = (
     byHandle: ((h: number) => string) | undefined,
     byJson: () => string,
-    label: string
+    label: string,
+    pages: () => readonly number[]
   ): string | null => {
     if (!eng || isDead()) return null;
     if (handle === null) openHandle();
+    if (handle !== null && byHandle) ensurePages(pages());
+    if (isDead()) return null;
     if (handle !== null && byHandle) {
       try {
         return byHandle(handle);
@@ -721,7 +856,8 @@ export function createDisplayListQueries(
       eng?.hitTestRegionsByHandle &&
         ((h: number) => eng!.hitTestRegionsByHandle!(h, pageIndex, x, y)),
       () => eng!.hitTestRegionsJson(getJson(), pageIndex, x, y),
-      'hit_test_regions'
+      'hit_test_regions',
+      () => [pageIndex]
     );
     return parseQuery(raw, null, 'hit_test_regions');
   };
@@ -737,7 +873,8 @@ export function createDisplayListQueries(
     const raw = runQuery(
       eng?.rangeRectsByHandle && ((h: number) => eng!.rangeRectsByHandle!(h, from, to)),
       () => eng!.rangeRectsJson(getJson(), from, to),
-      'range_rects'
+      'range_rects',
+      () => pagesTouchingPositions(list, from, to)
     );
     return parseQuery(raw, [], 'range_rects');
   };
@@ -763,7 +900,8 @@ export function createDisplayListQueries(
       eng.verticalMoveByHandle &&
         ((h: number) => eng!.verticalMoveByHandle!(h, position, direction, resolvedGoalX)),
       () => eng!.verticalMoveJson!(getJson(), position, direction, resolvedGoalX),
-      'vertical_move'
+      'vertical_move',
+      () => pagesTouchingPositions(list, position, position, 1)
     );
     return parseQuery(raw, null, 'vertical_move');
   };
@@ -794,7 +932,8 @@ export function createDisplayListQueries(
       eng.rangeRectsRegionByHandle &&
         ((h: number) => eng!.rangeRectsRegionByHandle!(h, region, partId, from, to)),
       () => eng!.rangeRectsRegionJson!(getJson(), region, partId, from, to),
-      'range_rects_region'
+      'range_rects_region',
+      allPages
     );
     return parseQuery(raw, [], 'range_rects_region');
   };

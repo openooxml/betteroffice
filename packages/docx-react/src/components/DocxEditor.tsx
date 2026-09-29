@@ -2126,6 +2126,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
                 );
               }}
               onLayoutComputed={canvasRenderer.onLayoutComputed}
+              layoutInWorker={canvasRenderer.layoutInWorker}
               applyResidentInput={canvasRenderer.applyInput}
               applyResidentDelete={canvasRenderer.applyDelete}
               displayListQueries={canvasRenderer.queries}
