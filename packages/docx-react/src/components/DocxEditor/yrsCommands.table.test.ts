@@ -33,6 +33,12 @@ test('table state reads its own table, not the whole story', async () => {
   session.insertTable({ story: 'body', paraId, offset: 0 }, 1, 1);
   const { table } = session.insertTable({ story: 'body', paraId, offset: 6 }, 2, 3);
   expect(table.tableIndex).toBe(1);
+  const border = (rgb: string) => ({ style: 'single', size: 4, color: { rgb } });
+  const corner = { ...table, row: 0, column: 0 };
+  session.setCellBorders(
+    { anchor: corner, head: corner },
+    { bottom: border('111111'), left: border('222222'), right: border('333333'), top: border('444444') }
+  );
 
   const payloads = session
     .storySegments('body')
@@ -40,7 +46,10 @@ test('table state reads its own table, not the whole story', async () => {
       segment.kind === 'embed' && segment.embedKind === 'table' ? [segment.payload] : []
     );
   expect(payloads).toHaveLength(2);
-  payloads.forEach((payload, index) => expect(session.tablePayload('body', index)).toEqual(payload));
+  // Key order too: the table context reports the first border color it finds.
+  payloads.forEach((payload, index) =>
+    expect(JSON.stringify(session.tablePayload('body', index))).toBe(JSON.stringify(payload))
+  );
   expect(session.tablePayload('body', 2)).toBeNull();
   expect(() => session.tablePayload('missing', 0)).toThrow();
 

@@ -3994,7 +3994,9 @@ impl EditSession {
             .doc()
             .table_payload(&TableLocator::new(story, table_index))
         {
-            Ok(payload) => serde_json::to_string(&payload).map(Some).map_err(js_err),
+            Ok(payload) => serde_json::to_string(&attrs_value(&payload)?)
+                .map(Some)
+                .map_err(js_err),
             Err(OpError::UnknownTable { .. }) => Ok(None),
             Err(error) => Err(js_err(error)),
         }
