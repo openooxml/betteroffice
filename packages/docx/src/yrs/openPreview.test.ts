@@ -71,6 +71,8 @@ test('a preview open lays out the first page of the document it previews', async
   const previewHost = preview.openDocxPreview(PAGES, 6)!;
   expect(preview.paragraphs('body').length).toBeLessThan(full.paragraphs('body').length);
   expect(firstPage(preview, previewHost)).toEqual(fullPage);
+  // The prefix layout is the resident one a worker bootstraps from.
+  expect(preview.residentWorkerSnapshot({})?.partialDocument).toBe(true);
   full.destroy();
   preview.destroy();
 });

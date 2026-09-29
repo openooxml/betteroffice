@@ -4816,27 +4816,32 @@ mod tests {
     }
 
     #[test]
-    fn a_preview_refuses_a_document_with_a_float_placed_from_the_margin() {
+    fn a_preview_refuses_a_document_whose_later_body_reaches_its_first_pages() {
         let anchor = r#"<w:p><w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapTopAndBottom/><wp:docPr id="1" name="Float"/></wp:anchor></w:drawing></w:r></w:p>"#;
-        let body = (0..200)
-            .map(|index| {
-                let float = if index == 149 { anchor } else { "" };
-                format!("{float}<w:p><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>")
-            })
-            .collect::<String>();
-        let document = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body>{body}</w:body></w:document>"#
-        );
-        let bytes = ooxml_opc::rezip_parts(&[
-            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
-            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
-            ("word/document.xml".to_owned(), document.into_bytes()),
-        ])
-        .unwrap();
-        let preview = EditSession::new(82.0).unwrap();
-        assert!(preview.open_preview(&bytes, 60).unwrap().is_none());
-        assert!(preview.story_ids().is_empty());
-        preview.open_docx(&bytes, true, None).unwrap();
+        let section_break = r#"<w:p><w:pPr><w:sectPr/></w:pPr></w:p>"#;
+        let columns = r#"<w:sectPr><w:cols w:num="2"/></w:sectPr>"#;
+        // A margin float late in the body, and a late section with columns.
+        for (late, end) in [(anchor, ""), (section_break, columns)] {
+            let body = (0..200)
+                .map(|index| {
+                    let late = if index == 149 { late } else { "" };
+                    format!("{late}<w:p><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>")
+                })
+                .collect::<String>();
+            let document = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body>{body}{end}</w:body></w:document>"#
+            );
+            let bytes = ooxml_opc::rezip_parts(&[
+                ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+                ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+                ("word/document.xml".to_owned(), document.into_bytes()),
+            ])
+            .unwrap();
+            let preview = EditSession::new(82.0).unwrap();
+            assert!(preview.open_preview(&bytes, 60).unwrap().is_none());
+            assert!(preview.story_ids().is_empty());
+            preview.open_docx(&bytes, true, None).unwrap();
+        }
     }
 
     #[test]

@@ -40,13 +40,16 @@ pub struct DocumentBody {
     pub comments: Option<Vec<Comment>>,
 }
 
-/// Whether `document` holds a float placed from outside the text: a
-/// drawing anchored to the page or margin, a table or frame not anchored to
-/// the text, or VML positioned from the page or margin.
-pub(crate) fn places_floats_off_the_text(document: &XmlElement) -> bool {
+/// Whether `document` holds what the layout may apply to the body's first
+/// pages from anywhere in it, so that no cut of the body lays out like the
+/// whole: a float placed from outside the text (a drawing anchored to the page
+/// or margin, a table or frame not anchored to the text, VML positioned from
+/// the page or margin), or a section with columns, whose settings sections
+/// without their own may take.
+pub(crate) fn refuses_a_body_cut(document: &XmlElement) -> bool {
     let mut pending = vec![document];
     while let Some(element) = pending.pop() {
-        let off_the_text = match element.local_name() {
+        let refused = match element.local_name() {
             "anchor" => {
                 element.attribute(None, "simplePos") == Some("1")
                     || element
@@ -56,9 +59,15 @@ pub(crate) fn places_floats_off_the_text(document: &XmlElement) -> bool {
             }
             "tblpPr" => element.attribute(Some("w"), "vertAnchor") != Some("text"),
             "framePr" => element.attribute(Some("w"), "vAnchor") != Some("text"),
+            "cols" => {
+                element
+                    .attribute(Some("w"), "num")
+                    .is_some_and(|count| !matches!(count.trim(), "" | "0" | "1"))
+                    || element.children_named("w", "col").nth(1).is_some()
+            }
             _ => crate::vml::placed_off_the_text(element),
         };
-        if off_the_text {
+        if refused {
             return true;
         }
         pending.extend(element.child_elements());
@@ -397,15 +406,15 @@ mod tests {
     }
 
     #[test]
-    fn finds_floats_placed_from_outside_the_text() {
-        let off_the_text = |body: &str| {
+    fn refuses_a_cut_of_a_body_with_floats_off_the_text_or_columns() {
+        let refused = |body: &str| {
             let limits = ParseLimits::default();
             let mut budget = ParseBudget::new(&limits);
             let xml = format!(
                 r#"<w:document xmlns:w="w" xmlns:wp="wp" xmlns:v="v"><w:body>{body}</w:body></w:document>"#
             );
             let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
-            places_floats_off_the_text(document.root().unwrap())
+            refuses_a_body_cut(document.root().unwrap())
         };
         let anchor = |attributes: &str, vertical: &str| {
             format!(
@@ -417,6 +426,8 @@ mod tests {
         };
         let frame =
             |attributes: &str| format!("<w:p><w:pPr><w:framePr {attributes}/></w:pPr></w:p>");
+        let section =
+            |columns: &str| format!("<w:p><w:pPr><w:sectPr>{columns}</w:sectPr></w:pPr></w:p>");
         let vml = |style: &str| {
             format!(r#"<w:p><w:r><w:pict><v:shape style="{style}"/></w:pict></w:r></w:p>"#)
         };
@@ -434,8 +445,10 @@ mod tests {
             frame(r#"w:w="2000""#),
             vml("position:absolute;mso-position-vertical-relative:margin"),
             vml("position:absolute;mso-position-vertical-relative:page"),
+            section(r#"<w:cols w:num="2"/>"#),
+            section(r#"<w:cols><w:col w:w="3000"/><w:col w:w="3000"/></w:cols>"#),
         ] {
-            assert!(off_the_text(&body), "{body}");
+            assert!(refused(&body), "{body}");
         }
         for body in [
             anchor("", r#"<wp:positionV relativeFrom="paragraph"/>"#),
@@ -445,8 +458,10 @@ mod tests {
             frame(r#"w:dropCap="drop" w:vAnchor="text""#),
             vml("position:absolute;mso-position-vertical-relative:text"),
             vml("width:300pt;height:165pt"),
+            section(r#"<w:cols w:num="1" w:space="720"/>"#),
+            section(r#"<w:cols w:space="720"/>"#),
         ] {
-            assert!(!off_the_text(&body), "{body}");
+            assert!(!refused(&body), "{body}");
         }
     }
 

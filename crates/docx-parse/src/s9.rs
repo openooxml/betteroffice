@@ -209,9 +209,9 @@ pub fn parse_docx_s9_wire_parts_with_limits(
 /// Parses already inflated package parts with only the body's first
 /// `blocks` blocks, for a preview of its first pages: at least that many, and
 /// on until no field spans past the last one. `None` when the document holds
-/// a float placed from outside the text, which the layout may apply from the
-/// body's first block, so no cut of the body lays out like the whole. The
-/// parts alone cannot be hashed into generated IDs, so
+/// a float placed from outside the text or a section with columns, which the
+/// layout may apply to the body's first pages, so no cut of the body lays out
+/// like the whole. The parts alone cannot be hashed into generated IDs, so
 /// `options.determinism_seed` is required.
 pub fn parse_docx_s9_preview_from_parts(
     parts: &[(String, Vec<u8>)],
@@ -310,7 +310,7 @@ fn parse_s9_package(
             let parsed = parse_xml(xml, path, &mut budget)?;
             match parsed.root() {
                 Some(root) => {
-                    if body_blocks.is_some() && crate::document::places_floats_off_the_text(root) {
+                    if body_blocks.is_some() && crate::document::refuses_a_body_cut(root) {
                         return Ok(None);
                     }
                     let mut parser = StoryParser {

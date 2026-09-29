@@ -862,8 +862,9 @@ export interface YrsSession extends CollaborationReplica {
    * Opens a DOCX for display only, from the body's first `blocks` blocks:
    * enough to lay out its first pages with a prefix pass before the whole
    * document is opened. The session cannot save. `null`, opening nothing,
-   * for a document with a float placed from outside the text, which no cut
-   * of the body lays out like the whole: open it with {@link openDocx}. @internal
+   * for a document with a float placed from outside the text or a section
+   * with columns, which no cut of the body lays out like the whole: open it
+   * with {@link openDocx}. @internal
    */
   openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
   /**
@@ -1472,8 +1473,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       partialDocument = partial;
       session.set_partial_document(partial);
     },
-    layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
-      session.layout_document_with_regions_prefix_retained_json(input, pages),
+    layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) => {
+      const output = session.layout_document_with_regions_prefix_retained_json(input, pages);
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = false;
+      return output;
+    },
 
     registerFont: (bytes) => {
       // The Rust font store is module-global, while document sessions are
