@@ -372,7 +372,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       if (openedVersionRef.current?.session !== session) {
         openedVersionRef.current = { session, version: sourceVersion };
       }
-      let workerPass: Promise<LayoutComputation | null> | null = null;
+      let workerPass: ReturnType<LayoutInWorker> = null;
       if (
         !onHost &&
         sourceVersion !== null &&
@@ -401,11 +401,20 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           (computation) => {
             if (pass !== passRef.current || sessionRef.current !== session) return;
             // A change that landed meanwhile makes the worker's layout stale.
-            if (computation && readSessionVersion(session) === sourceVersion) {
-              applyComputation(computation);
-            } else {
+            if (!computation || readSessionVersion(session) !== sourceVersion) {
               layOutHere();
+              return;
             }
+            applyComputation(computation);
+            // The first pages paint now; the full layout replaces them.
+            void computation.complete?.then((complete) => {
+              if (pass !== passRef.current || sessionRef.current !== session) return;
+              if (complete && readSessionVersion(session) === sourceVersion) {
+                applyComputation(complete);
+              } else {
+                layOutHere();
+              }
+            });
           },
           (error: unknown) => {
             if (pass !== passRef.current) return;
