@@ -1546,6 +1546,8 @@ export type Layout = {
   footers?: Record<string, HeaderFooterLayout>;
   /** Gap between pages in pixels (for rendering). */
   pageGap?: number;
+  /** Lays out only part of the document, so its page count is not the document's. */
+  partial?: boolean;
 };
 
 // =============================================================================

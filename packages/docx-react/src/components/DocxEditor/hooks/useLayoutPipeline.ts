@@ -22,6 +22,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
+import { documentPageCount } from './documentPageCount';
 import type { LayoutInWorker } from './useDisplayList';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
@@ -175,7 +176,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const lastTotalPagesRef = useRef<number>(0);
   useEffect(() => {
     onLayoutComputedRef.current?.(layout);
-    const total = layout?.pages.length ?? 0;
+    const total = documentPageCount(layout);
     if (total === lastTotalPagesRef.current) return;
     lastTotalPagesRef.current = total;
     onTotalPagesChangeRef.current?.(total);
