@@ -2271,7 +2271,10 @@ impl EngineSession {
         pagination.measured_with = None;
         pagination.lowered_from = None;
         pagination.note_changed_pages.clear();
-        pagination.layout = Some(run.layout);
+        let mut layout = run.layout;
+        // Every pass over part of a package, the resident edit paths' too.
+        layout.partial = self.partial_document.get();
+        pagination.layout = Some(layout);
         pagination.checkpoints = run.checkpoints;
         pagination.block_fingerprints = block_fingerprints;
         pagination.options_fingerprint = input_options_fingerprint;

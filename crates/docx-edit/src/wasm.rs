@@ -5031,6 +5031,38 @@ mod tests {
         let (text, preview_pages) = numpages(&preview);
         assert!(preview_pages < pages);
         assert_eq!(text, "");
+
+        // An edit's resident pass lays out part of the package too.
+        preview
+            .engine
+            .doc()
+            .insert_text(
+                &EditCtx::local("", ""),
+                Position::new("body", 40),
+                "x",
+                FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = preview.engine.stats().frame_epoch;
+        preview.engine.apply_and_layout("body", epoch).unwrap();
+        assert!(preview.engine.stats().incremental_pagination_calls > 0);
+        preview
+            .engine
+            .build_display_list_frame("{\"changed\":1}", 0)
+            .unwrap();
+        let text = preview
+            .engine
+            .with_display_list(|list| {
+                serde_json::to_value(&list.pages[0]).unwrap()["primitives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|primitive| primitive["field"]["category"] == "NUMPAGES")
+                    .map(|primitive| primitive["text"].as_str().unwrap_or("").to_owned())
+                    .collect::<String>()
+            })
+            .unwrap();
+        assert_eq!(text, "");
     }
 
     #[test]
