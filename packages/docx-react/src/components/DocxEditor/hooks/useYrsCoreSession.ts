@@ -31,6 +31,12 @@ export interface YrsCoreSession {
   documentFromYrs(baseDocument?: Document | null): Document | null;
   /** Marks stories changed outside the save projection; the live selection's story by default. */
   publishDirectInput(stories?: string | readonly string[]): void;
+  /**
+   * Materializes the save projection base when the main thread is next idle,
+   * for a host that projects the document on every change.
+   */
+  scheduleCompatibilityWarm(): void;
+  cancelCompatibilityWarm(): void;
 }
 
 interface YrsCoreSessionCallbacks {
@@ -138,7 +144,7 @@ export function seedYrsSession(
 /**
  * Materializes the save-projection base once. `materializeDocx` re-parses the
  * retained source and ships the full envelope (every media entry, twice, as
- * JSON), so no interactive event should be the first to pay for it.
+ * JSON), so a host projecting every change warms it before the first edit.
  */
 export function warmCompatibilityBase(
   session: Pick<YrsSession, 'materializeDocx'>,
@@ -177,6 +183,9 @@ export function useYrsCoreSession(
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
   const compatibilityBaseRef = useRef<Document | null>(null);
+  const cancelCompatibilityWarmRef = useRef<(() => void) | null>(null);
+  const seedBytesRef = useRef(seedBytes);
+  seedBytesRef.current = seedBytes;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
   const projectionStoriesRef = useRef(new Set<string>());
   const enabledRef = useRef(enabled);
@@ -194,6 +203,9 @@ export function useYrsCoreSession(
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
+        // A copy hashed with Web Crypto keeps the package's hash off this thread.
+        const bytes = seedBytes ? await yrs.prepareDocxBytes(seedBytes) : null;
+        if (cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false) return;
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
         if (
           cancelled ||
@@ -203,7 +215,7 @@ export function useYrsCoreSession(
           return;
         }
         const host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
-          bytes: seedBytes,
+          bytes,
           document: seedDocument,
           initialUpdate: collaborationInitialUpdate,
         });
@@ -228,6 +240,8 @@ export function useYrsCoreSession(
 
     return () => {
       cancelled = true;
+      cancelCompatibilityWarmRef.current?.();
+      cancelCompatibilityWarmRef.current = null;
       sessionRef.current?.destroy();
       sessionRef.current = null;
       facadeRef.current = null;
@@ -243,20 +257,36 @@ export function useYrsCoreSession(
     collaborationInitialUpdate,
   ]);
 
-  // Off the interaction path: the first host onChange, ruler drag or save would
-  // otherwise re-parse the source document mid-keystroke.
-  useEffect(() => {
-    if (!enabled || !session || !seedBytes) return;
+  // Save, export and getDocument materialize the base on first use; only a
+  // host projecting every change asks for it ahead of the first edit.
+  const scheduleCompatibilityWarm = useCallback((): void => {
+    const live = sessionRef.current;
+    if (
+      !enabledRef.current ||
+      !live ||
+      !seedBytesRef.current ||
+      compatibilityBaseRef.current ||
+      cancelCompatibilityWarmRef.current
+    ) {
+      return;
+    }
     const warm = (): void => {
-      if (sessionRef.current === session) warmCompatibilityBase(session, compatibilityBaseRef);
+      cancelCompatibilityWarmRef.current = null;
+      if (sessionRef.current === live) warmCompatibilityBase(live, compatibilityBaseRef);
     };
     if (typeof requestIdleCallback === 'function') {
       const id = requestIdleCallback(warm);
-      return () => cancelIdleCallback(id);
+      cancelCompatibilityWarmRef.current = () => cancelIdleCallback(id);
+      return;
     }
     const id = setTimeout(warm, 200);
-    return () => clearTimeout(id);
-  }, [enabled, seedBytes, session]);
+    cancelCompatibilityWarmRef.current = () => clearTimeout(id);
+  }, []);
+
+  const cancelCompatibilityWarm = useCallback((): void => {
+    cancelCompatibilityWarmRef.current?.();
+    cancelCompatibilityWarmRef.current = null;
+  }, []);
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;
@@ -269,7 +299,7 @@ export function useYrsCoreSession(
     if (!enabledRef.current) return null;
     try {
       const live = sessionRef.current;
-      if (!live || !live.storyIds().includes(storyId)) return null;
+      if (!live || !live.hasStory(storyId)) return null;
       return live.yrsBlocksForStory(storyId, env) as LayoutBlock[];
     } catch (error) {
       console.error(`[yrs] failed to lower story ${storyId}`, error);
@@ -285,7 +315,7 @@ export function useYrsCoreSession(
   const inputPositionMap = useCallback((storyId = 'body'): YrsInputPositionMap | null => {
     const live = sessionRef.current;
     const facade = facadeRef.current;
-    if (!enabledRef.current || !live || !facade || !live.storyIds().includes(storyId)) return null;
+    if (!enabledRef.current || !live || !facade || !live.hasStory(storyId)) return null;
     const cached = inputPositionMapsRef.current.get(storyId);
     if (cached) return cached;
     const map = facade.createYrsInputPositionMap(storyId, live.paragraphSpans(storyId));
@@ -339,7 +369,7 @@ export function useYrsCoreSession(
 
   const publishDirectInput = useCallback((stories?: string | readonly string[]): void => {
     const live = sessionRef.current;
-    if (!live || !live.storyIds().includes('body')) return;
+    if (!live || !live.hasStory('body')) return;
     inputPositionMapsRef.current.clear();
     const dirty =
       stories === undefined
@@ -360,5 +390,39 @@ export function useYrsCoreSession(
     locToDisplayPosition,
     documentFromYrs,
     publishDirectInput,
+    scheduleCompatibilityWarm,
+    cancelCompatibilityWarm,
   };
+}
+
+/**
+ * Warms the compatibility base for a host that projects every change, once
+ * the session's own first display list is on screen. A replacement session
+ * can inherit the previous session's frame until its own layout lands, so the
+ * frame shown when the session changed never qualifies it. A renderer leaving
+ * readiness, or the host losing its last content listener, cancels a pending
+ * warm.
+ */
+export function useCompatibilityWarm(
+  session: YrsSession | null,
+  renderedFrame: object | null,
+  projectsEveryChange: boolean,
+  schedule: () => void,
+  cancel: () => void
+): void {
+  const inheritedRef = useRef<{ session: YrsSession | null; frame: object | null }>({
+    session: null,
+    frame: null,
+  });
+  if (inheritedRef.current.session !== session) {
+    inheritedRef.current = { session, frame: renderedFrame };
+  }
+  const ownFrame = renderedFrame !== null && renderedFrame !== inheritedRef.current.frame;
+  useEffect(() => {
+    if (!ownFrame || !projectsEveryChange) {
+      cancel();
+      return;
+    }
+    if (session) schedule();
+  }, [cancel, ownFrame, projectsEveryChange, schedule, session]);
 }

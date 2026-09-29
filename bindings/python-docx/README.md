@@ -139,13 +139,14 @@ paints them.
 
 ## Rasterize
 
-Register a face for each text family before rasterizing:
+Register a face under each family the text names before rasterizing; here
+Carlito stands in for Calibri:
 
 ```python
 from pathlib import Path
 
-document.register_font("Carlito", Path("Carlito-Regular.ttf").read_bytes())
-document.register_font("Carlito", Path("Carlito-Bold.ttf").read_bytes(), bold=True)
+document.register_font("Calibri", Path("Carlito-Regular.ttf").read_bytes())
+document.register_font("Calibri", Path("Carlito-Bold.ttf").read_bytes(), bold=True)
 
 png = document.render_png(layout.display_list, 0)
 png.write("page-0.png")

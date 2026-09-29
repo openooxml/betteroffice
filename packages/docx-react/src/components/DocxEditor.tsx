@@ -77,7 +77,7 @@ import { useTableDialogs } from './DocxEditor/hooks/useTableDialogs';
 import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditing';
 import type { PartEditTarget } from './DocxEditor/partEdit';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
-import { useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
+import { useCompatibilityWarm, useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
 import { useContextMenus } from './DocxEditor/hooks/useContextMenus';
 import { useCommentManagement } from './DocxEditor/hooks/useCommentManagement';
 import { useCommentLifecycle } from './DocxEditor/hooks/useCommentLifecycle';
@@ -868,6 +868,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // onSelectionChange paths so multiple listeners (host app, MCP server, etc.)
   // can observe edits without competing for the single React prop.
   const contentChangeSubscribersRef = useRef(new Set<(doc: Document) => void>());
+  const [contentSubscriberCount, setContentSubscriberCount] = useState(0);
   const selectionChangeSubscribersRef = useRef(new Set<(s: SelectionState | null) => void>());
   const legacyProjectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -1000,6 +1001,15 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
     }
+  );
+  // Content listeners project the document on every edit; warm its base once
+  // the first pages are on screen so neither opening nor the first key pays.
+  useCompatibilityWarm(
+    yrsCore.session,
+    canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
+    Boolean(onChange) || contentSubscriberCount > 0,
+    yrsCore.scheduleCompatibilityWarm,
+    yrsCore.cancelCompatibilityWarm
   );
 
   const {
@@ -1536,6 +1546,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     setComments,
     setShowCommentsSidebar,
     contentChangeSubscribersRef,
+    onContentSubscribersChange: setContentSubscriberCount,
     selectionChangeSubscribersRef,
     getCachedStyleResolver,
     commentIdAllocator: commentIdAllocatorRef.current,

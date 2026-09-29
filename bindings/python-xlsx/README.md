@@ -114,6 +114,8 @@ apply it anyway with `force=True`:
 ```python
 from betteroffice_xlsx import StaleProposalError
 
+proposal = wb.propose("copilot", [("Sheet1", "H1", "=B3*3")])
+sheet["H1"] = 0
 try:
     wb.accept_proposal(proposal.id)
 except StaleProposalError as stale:
