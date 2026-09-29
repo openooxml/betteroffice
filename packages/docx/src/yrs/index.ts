@@ -203,31 +203,31 @@ export interface YrsOpeningOptions {
    * as one session. Each opening mints a fresh one by default.
    */
   generation?: string;
-  /**
-   * The SHA-256 of the opened bytes as lowercase hex, when the host already has
-   * it (see {@link docxPackageDigest}); the open hashes the bytes otherwise.
-   * @internal
-   */
-  digest?: string;
 }
 
+/** SHA-256 digests of the byte copies {@link prepareDocxBytes} made, by copy. */
+const preparedDigests = new WeakMap<Uint8Array, string>();
+
 /**
- * The SHA-256 of `bytes` as lowercase hex, taken by the platform off the
- * calling thread, for {@link YrsOpeningOptions.digest}; undefined where the
- * platform has no Web Crypto.
+ * A copy of `bytes` whose SHA-256 the platform takes off the calling thread,
+ * where it has Web Crypto. Opening that copy unchanged skips hashing the
+ * package on the calling thread; any other bytes open as before.
  * @internal
  */
-export async function docxPackageDigest(bytes: Uint8Array): Promise<string | undefined> {
+export async function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(bytes);
   const subtle = globalThis.crypto?.subtle;
-  if (!subtle) return undefined;
+  if (!subtle) return copy;
   try {
-    const data =
-      bytes.buffer instanceof ArrayBuffer ? (bytes as Uint8Array<ArrayBuffer>) : bytes.slice();
-    const hash = new Uint8Array(await subtle.digest('SHA-256', data));
-    return Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    const hash = new Uint8Array(await subtle.digest('SHA-256', copy));
+    preparedDigests.set(
+      copy,
+      Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    );
   } catch {
-    return undefined;
+    // Opening hashes the copy itself.
   }
+  return copy;
 }
 
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
@@ -1446,7 +1446,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     const source = bytes.slice();
     markDirty('all');
     const json = mutate(() =>
-      session.open_docx(source, seedStories, options.generation, options.digest)
+      session.open_docx(source, seedStories, options.generation, preparedDigests.get(bytes))
     );
     const host = decodeDocxHost(json, source);
     docxSource = source;
