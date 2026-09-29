@@ -21,8 +21,8 @@
 //! test thread.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 
 use crate::display_list::{DisplayList, DisplayPage};
 use crate::hit::{
@@ -157,13 +157,17 @@ pub fn close_display_list(handle: u32) {
 /// Page-delta update payload for [`update_display_list`]: the next page array
 /// is assembled from retained pages (`reuse`: `[next_index, previous_index]`
 /// pairs) plus freshly parsed replacements (`replace`: `[next_index, page]`).
-/// Every one of the `total` slots must be filled exactly once.
+/// Every one of the `total` slots must be filled exactly once. With `keep`,
+/// the update only replaces pages in place: `total` is the stored page count,
+/// `replace` lists distinct slots, and every other slot keeps its page.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DisplayListUpdate {
     total: usize,
     #[serde(default)]
     contract_version: Option<u32>,
+    #[serde(default)]
+    keep: bool,
     #[serde(default)]
     reuse: Vec<(usize, usize)>,
     #[serde(default)]
@@ -364,6 +368,9 @@ fn apply_display_list_update(
     spans: &mut Vec<BodySpan>,
     update: DisplayListUpdate,
 ) -> Result<(), String> {
+    if update.keep {
+        return replace_pages_in_place(dl, spans, update);
+    }
     let slots = update
         .reuse
         .len()
@@ -446,6 +453,36 @@ fn apply_display_list_update(
         .collect::<Result<Vec<_>, _>>()?;
     dl.contract_version = update.contract_version;
     *spans = next_spans;
+    Ok(())
+}
+
+/// A `keep` update: each replaced slot gets its new page, and every other
+/// slot keeps the page it holds, so loading a few pages costs those pages.
+fn replace_pages_in_place(
+    dl: &mut DisplayList,
+    spans: &mut [BodySpan],
+    update: DisplayListUpdate,
+) -> Result<(), String> {
+    if !update.reuse.is_empty() || !update.shift.is_empty() {
+        return Err("an update that keeps pages in place only replaces them".to_owned());
+    }
+    if update.total != dl.pages.len() {
+        return Err("an update that keeps pages in place cannot change the page total".to_owned());
+    }
+    let mut targets = HashSet::new();
+    for (index, _) in &update.replace {
+        if *index >= update.total {
+            return Err(format!("page target {index} out of range"));
+        }
+        if !targets.insert(*index) {
+            return Err(format!("duplicate page target {index}"));
+        }
+    }
+    for (index, page) in update.replace {
+        dl.pages[index] = page;
+        spans[index] = BodySpan::Unknown;
+    }
+    dl.contract_version = update.contract_version;
     Ok(())
 }
 
@@ -699,6 +736,66 @@ mod tests {
         }
         close_display_list(handle);
         close_display_list(fresh);
+    }
+
+    #[test]
+    fn an_update_that_keeps_pages_replaces_only_its_slots() {
+        drain();
+        let pages = |texts: [&str; 3]| {
+            let page = |index: usize, text: &str| {
+                serde_json::json!({
+                    "pageIndex": index, "width": 816, "height": 1056,
+                    "primitives": [{
+                        "kind": "text", "text": text, "x": 100, "baselineY": 200,
+                        "width": 50, "font": "400 16px Arial", "color": "#000000",
+                        "docStart": 1 + index * 6, "docEnd": 6 + index * 6
+                    }]
+                })
+            };
+            serde_json::json!({
+                "pages": texts.iter().enumerate().map(|(i, text)| page(i, text)).collect::<Vec<_>>()
+            })
+        };
+        let handle =
+            open_display_list(&pages(["Hello", "world", "again"]).to_string()).expect("opens");
+        let next = pages(["Hello", "patch!", "again"]);
+        let update = serde_json::json!({
+            "total": 3,
+            "keep": true,
+            "replace": [[1, next["pages"][1]]],
+        });
+        update_display_list(handle, &update.to_string()).expect("updates");
+
+        let fresh = open_display_list(&next.to_string()).expect("opens");
+        for (from, to) in [(1, 6), (7, 12), (13, 18), (1, 18), (0, 0)] {
+            assert_eq!(
+                range_rects_by_handle(handle, from, to).unwrap(),
+                range_rects_by_handle(fresh, from, to).unwrap(),
+                "range ({from},{to}) differs from a fresh open"
+            );
+        }
+        close_display_list(fresh);
+
+        let refused = |update: serde_json::Value| {
+            let handle =
+                open_display_list(&pages(["Hello", "world", "again"]).to_string()).expect("opens");
+            assert!(
+                update_display_list(handle, &update.to_string()).is_err(),
+                "{update}"
+            );
+            assert!(
+                range_rects_by_handle(handle, 1, 6).is_err(),
+                "a refused update closes the handle"
+            );
+        };
+        let page = next["pages"][1].clone();
+        refused(serde_json::json!({ "total": 2, "keep": true, "replace": [[1, page]] }));
+        refused(serde_json::json!({ "total": 3, "keep": true, "replace": [[3, page]] }));
+        refused(serde_json::json!({ "total": 3, "keep": true, "replace": [[1, page], [1, page]] }));
+        refused(
+            serde_json::json!({ "total": 3, "keep": true, "reuse": [[0, 0]], "replace": [[1, page]] }),
+        );
+        close_display_list(handle);
     }
 
     #[test]

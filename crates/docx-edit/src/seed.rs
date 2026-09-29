@@ -5477,6 +5477,46 @@ mod tests {
     }
 
     #[test]
+    fn a_numeric_field_the_preview_leaves_out_releases_its_cached_blocks() {
+        let cached = json!({"type":"paragraph","paraId":"cached","content":[run("Cached second")]});
+        let end = json!({"type":"paragraph","paraId":"end","content":[]});
+        let field = block_field("0", &[cached.clone(), end.clone()]);
+        let document = seed_body(&[
+            json!({"type":"paragraph","paraId":"owner","content":[field]}),
+            cached,
+            end,
+        ]);
+        let stamp = Any::Map(Arc::new(HashMap::from([
+            ("id".to_owned(), Any::from("9")),
+            ("author".to_owned(), Any::from("Ann")),
+            ("date".to_owned(), Any::from("2026-09-29T12:00:00Z")),
+        ])));
+        document
+            .apply_raw_ops(
+                "body",
+                vec![crate::RawOp::Format {
+                    index: 0,
+                    len: 1,
+                    attrs: Attrs::from([(Arc::from("ins"), stamp)]),
+                }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        let lower = |env: crate::bridge::RenderEnv| {
+            serde_json::to_string(
+                &crate::bridge::yrs_doc_to_layout_blocks(&document, "body", &env).unwrap(),
+            )
+            .unwrap()
+        };
+        let preview = |decision| {
+            lower(crate::bridge::RenderEnv::default().with_revision_preview("9", decision))
+        };
+        assert!(!lower(crate::bridge::RenderEnv::default()).contains("Cached"));
+        assert!(!preview(crate::bridge::RevisionPreview::Accepted).contains("Cached"));
+        assert!(preview(crate::bridge::RevisionPreview::Rejected).contains("Cached second"));
+    }
+
+    #[test]
     fn numeric_fields_hide_non_paragraph_cached_blocks() {
         for instruction in ["0", "TOC"] {
             let cell = json!({"type":"tableCell","content":[

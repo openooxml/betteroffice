@@ -236,7 +236,12 @@ describe('createDisplayListQueries lazy store pages', () => {
 
   function recordingEngine() {
     const opened: string[] = [];
-    const updates: Array<{ reuse: number[][]; replace: Array<[number, DisplayPage]> }> = [];
+    const updates: Array<{
+      total: number;
+      keep?: boolean;
+      reuse?: number[][];
+      replace: Array<[number, DisplayPage]>;
+    }> = [];
     const { engine, calls } = fakeEngine();
     engine.openDisplayList = (json: string) => {
       calls.open += 1;
@@ -265,10 +270,8 @@ describe('createDisplayListQueries lazy store pages', () => {
     ]);
     expect(updates).toHaveLength(1);
     expect(updates[0].replace.map(([index]) => index)).toEqual([1]);
-    expect(updates[0].reuse).toEqual([
-      [0, 0],
-      [2, 2],
-    ]);
+    expect(updates[0]).toMatchObject({ total: 3, keep: true });
+    expect(updates[0].reuse).toBeUndefined();
     expect(updates[0].replace[0][1].primitives).toHaveLength(1);
 
     queries.rangeRects(15, 16);
@@ -464,5 +467,60 @@ describe('visual lines', () => {
     expect(
       createDisplayListQueries({ pages: [blank] }, fakeEngine().engine).visualLineExtent(0)
     ).toBeNull();
+  });
+});
+
+describe('createDisplayListQueries page loads in the real store', () => {
+  test('pages loaded one query at a time answer as a store holding every page', async () => {
+    const { preloadLayoutWasm } = await import('../../wasm/layout');
+    const { loadRustDisplayListQueryEngine } = await import('./rustDisplayList');
+    await preloadLayoutWasm();
+    const engine = await loadRustDisplayListQueryEngine();
+    const textPage = (pageIndex: number): DisplayPage => ({
+      pageIndex,
+      width: 816,
+      height: 1056,
+      primitives: [0, 1, 2].map(
+        (line) =>
+          ({
+            kind: 'text',
+            text: `Page ${pageIndex} line ${line}`,
+            x: 100,
+            baselineY: 100 + line * 20,
+            width: 200,
+            font: '400 16px Arial',
+            color: '#000000',
+            docStart: pageIndex * 100 + line * 20 + 1,
+            docEnd: pageIndex * 100 + line * 20 + 15,
+          }) as DisplayPage['primitives'][number]
+      ),
+    });
+    const list = { pages: Array.from({ length: 12 }, (_, index) => textPage(index)) };
+    const calls = { byHandle: 0, json: 0, updates: 0 };
+    const counted = {
+      ...engine,
+      rangeRectsByHandle: (handle: number, from: number, to: number) => {
+        calls.byHandle += 1;
+        return engine.rangeRectsByHandle!(handle, from, to);
+      },
+      rangeRectsJson: (json: string, from: number, to: number) => {
+        calls.json += 1;
+        return engine.rangeRectsJson(json, from, to);
+      },
+      updateDisplayList: (handle: number, update: string) => {
+        calls.updates += 1;
+        engine.updateDisplayList!(handle, update);
+      },
+    };
+    const lazy = createDisplayListQueries(list, counted);
+    const order = [7, 2, 11, 2, 0, 5];
+    const answers = order.map((index) => lazy.rangeRects(index * 100 + 3, index * 100 + 50));
+    expect(calls).toEqual({ byHandle: 6, json: 0, updates: 5 });
+    const eager = createDisplayListQueries(list, engine);
+    eager.rangeRects(1, 1200);
+    expect(order.map((index) => eager.rangeRects(index * 100 + 3, index * 100 + 50))).toEqual(
+      answers
+    );
+    expect(answers.every((rects) => rects.length > 0)).toBe(true);
   });
 });
