@@ -203,6 +203,26 @@ test('controls on every page and links on pages outside the window stay built', 
   expect(mirror.textContent).not.toContain('plain words');
 });
 
+test('a far page keeps the header cells that cells on other pages name', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const header = {
+    kind: 'text',
+    x: 10,
+    y: 10,
+    text: 'Account',
+    font: '11px sans-serif',
+    color: '#000',
+    blockKey: 't',
+    table: { tableId: 't' },
+    cell: { row: 0, col: 0, rowSpan: 1, colSpan: 1, cellId: 'account', isHeader: true },
+  } as unknown as DisplayPrimitive;
+  const pages = blankPages(40, (index) => (index === 30 ? [header] : []));
+  render(<CanvasPagesView displayList={{ pages }} hostRef={hostRef} glyphOutlineProvider={() => ''} />);
+  await idle();
+  const page = hostRef.current!.querySelector<HTMLElement>('.canvas-page[data-page-index="30"]')!;
+  expect(page.querySelector('[id="account"]')?.textContent).toBe('Account');
+});
+
 test('pages in the window hold their links and controls before idle time', async () => {
   const hostRef = createRef<HTMLDivElement>();
   const link = {

@@ -120,6 +120,11 @@ function noteHasBacklink(area: NoteRegion, noteId: number): boolean {
   );
 }
 
+/** Whether `buildMirrorPage(page)` holds a table header cell, which cells on other pages may name. */
+export function mirrorPageHasHeaderCells(page: DisplayPage): boolean {
+  return pageRegionPrimitives(page).some((p) => p.cell?.isHeader === true);
+}
+
 /** Whether `buildMirrorPage(page)` holds a link Tab stops at. */
 export function mirrorPageHasTabStops(page: DisplayPage): boolean {
   return (
@@ -134,21 +139,39 @@ export function mirrorPageHasTabStops(page: DisplayPage): boolean {
 const MIRROR_LABEL_REFERENCES = ['aria-labelledby', 'aria-describedby'] as const;
 const MIRROR_LABELLED = MIRROR_LABEL_REFERENCES.map((name) => `[${name}]`).join(', ');
 
+const MIRROR_CELL = `.${MIRROR_CLASS_NAMES.tableCell}`;
+const MIRROR_HEADER_CELL = `${MIRROR_CELL}[role="columnheader"]`;
+
 /**
  * Reduces a `buildMirrorPage` tree, in place, to its links, its notes (the
- * targets of note references) and the elements that label what stays. Every
- * other element and text goes; the ancestors of what stays keep their
+ * targets of note references), its header cells (which cells on any page may
+ * name) and the elements that label what stays. What stays inside a table
+ * cell keeps the whole outermost cell, so the cell keeps its accessible name.
+ * Every other element and text goes; the ancestors of what stays keep their
  * attributes, so the ids, order, positions and table semantics that remain
  * are the full mirror's.
  */
 export function reduceMirrorToLinks(mirror: HTMLElement): HTMLElement {
   const byId = new Map<string, Element>();
   for (const element of mirror.querySelectorAll('[id]')) byId.set(element.id, element);
+  const outermostCell = (element: Element): Element => {
+    let outer = element;
+    for (
+      let cell = element.closest(MIRROR_CELL);
+      cell && mirror.contains(cell);
+      cell = cell.parentElement?.closest(MIRROR_CELL) ?? null
+    ) {
+      outer = cell;
+    }
+    return outer;
+  };
   const kept = new Set<Element>();
   const onPath = new Set<Element>([mirror]);
-  const pending = Array.from(mirror.querySelectorAll(`a[href], .${MIRROR_CLASS_NAMES.note}`));
+  const pending = Array.from(
+    mirror.querySelectorAll(`a[href], .${MIRROR_CLASS_NAMES.note}, ${MIRROR_HEADER_CELL}`)
+  );
   while (pending.length > 0) {
-    const element = pending.pop()!;
+    const element = outermostCell(pending.pop()!);
     if (kept.has(element)) continue;
     kept.add(element);
     const labelled = [element, ...element.querySelectorAll(MIRROR_LABELLED)];

@@ -6,6 +6,7 @@ import {
   buildMirrorPage,
   buildMirrorPageLinks,
   displayPageHoldsMirrorId,
+  mirrorPageHasHeaderCells,
   mirrorPageHasTabStops,
 } from './mirrorDom';
 
@@ -129,10 +130,11 @@ test("a links-only mirror keeps the full mirror's nesting order and header label
       shade(header, 0, 20),
       run('outer', outer, header, 5, 15, { text: 'Name' }),
       shade(data(1), 20, 80),
-      run('outer', outer, data(1), 5, 90, { text: 'A', href: '#a' }),
-      run('outer', outer, data(1), 50, 90, { text: 'words' }),
+      run('outer', outer, data(1), 5, 90, { text: 'Account ', href: undefined }),
+      run('outer', outer, data(1), 50, 90, { text: 'A', href: '#a' }),
       shade(data(2), 100, 40),
       run('outer', outer, data(2), 5, 120, { text: 'B', href: '#b' }),
+      text({ blockKey: 'after', x: 5, baselineY: 180, width: 10, text: 'words' }),
     ],
   };
   const full = buildMirrorPage(page);
@@ -142,6 +144,10 @@ test("a links-only mirror keeps the full mirror's nesting order and header label
   expect(full.querySelector('[data-table-id="t1"] [data-table-id="t2"]')).not.toBeNull();
   expect(hrefs(linksOnly)).toEqual(hrefs(full));
   expect(linksOnly.textContent).not.toContain('words');
+  // A kept cell keeps the text that names it.
+  const cellText = (root: HTMLElement) =>
+    Array.from(root.querySelectorAll('[role="cell"]'), (cell) => cell.textContent);
+  expect(cellText(linksOnly)).toEqual(cellText(full));
   const labelled = Array.from(linksOnly.querySelectorAll('[aria-labelledby]'));
   expect(labelled.length).toBeGreaterThan(0);
   for (const element of labelled) {
@@ -149,4 +155,29 @@ test("a links-only mirror keeps the full mirror's nesting order and header label
       expect(linksOnly.querySelector(`[id="${id}"]`)?.textContent).toBe('Name');
     }
   }
+});
+
+test("a page's header cells stay in its links-only mirror, with their whole text", () => {
+  const ref = (extra: object) => ({ row: 0, col: 0, rowSpan: 1, colSpan: 1, ...extra });
+  const header = ref({ cellId: 'account', isHeader: true });
+  const run = (extra: object) => {
+    const fields = { blockKey: 't', table: { tableId: 't' }, cell: header, baselineY: 15, ...extra };
+    return text(fields as Partial<DisplayPrimitive>);
+  };
+  const withLink: DisplayPage = {
+    pageIndex: 0,
+    width: 200,
+    height: 100,
+    primitives: [
+      run({ x: 5, width: 40, text: 'Account ' }),
+      run({ x: 50, width: 20, text: 'help', href: '#help' }),
+    ],
+  };
+  const withoutLink: DisplayPage = { ...withLink, primitives: [withLink.primitives[0]!] };
+  for (const page of [withLink, withoutLink]) {
+    expect(mirrorPageHasHeaderCells(page)).toBe(true);
+    const cell = (root: HTMLElement) => root.querySelector('[id="account"]')?.textContent;
+    expect(cell(buildMirrorPageLinks(page))).toBe(cell(buildMirrorPage(page)));
+  }
+  expect(mirrorPageHasHeaderCells(pages[2]!)).toBe(false);
 });

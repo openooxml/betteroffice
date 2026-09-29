@@ -14,6 +14,7 @@ import { useMemo, useRef } from 'react';
 import {
   buildMirrorPage,
   buildMirrorPageLinks,
+  mirrorPageHasHeaderCells,
   mirrorPageHasTabStops,
   reduceMirrorToLinks,
   type DisplayPage,
@@ -32,7 +33,8 @@ const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
 const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
   buildMirrorPage(page, mirrorLabels(page, t));
 // A page outside the window keeps its links, for Tab, link lists and targets,
-// reduced from its built mirror when it has one.
+// and its header cells, which cells on other pages may name; reduced from its
+// built mirror when it has one.
 const makeMirrorLinks = (
   page: DisplayPage,
   t: TFunction,
@@ -67,7 +69,10 @@ export function CanvasPageMirror({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
-  const fallback = useMemo(() => (mirrorPageHasTabStops(page) ? makeMirrorLinks : null), [page]);
+  const fallback = useMemo(
+    () => (mirrorPageHasTabStops(page) || mirrorPageHasHeaderCells(page) ? makeMirrorLinks : null),
+    [page]
+  );
   usePageChrome(hostRef, {
     page,
     t,
