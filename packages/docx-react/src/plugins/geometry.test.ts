@@ -6,12 +6,21 @@ if (ownsDom) GlobalRegistrator.register();
 
 import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
 import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
-import type { DocxSessionParagraphAnchor, DocxTextRange, YrsSession } from '@betteroffice/docx/yrs';
+import {
+  proposalRevisionPreview,
+  type DocxSessionParagraphAnchor,
+  type DocxTextRange,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import {
   createCanvasHostProjector,
   createRenderedDomContext,
 } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import { stampSourceVersion } from '../components/DocxEditor/internals/layoutProvenance';
+import {
+  revisionPreviewKey,
+  stampRevisionPreviewKey,
+  stampSourceVersion,
+} from '../components/DocxEditor/internals/layoutProvenance';
 import { createPluginGeometry, pluginLayout, toOverlayRect } from './geometry';
 import * as proposalPreview from './proposalPreview';
 import type { DocxProposalSnapshot } from './proposalPreview';
@@ -302,8 +311,12 @@ function semanticGeometry(zoom = 1) {
     setPresented: (value: boolean) => {
       presented = value;
     },
-    setSnapshot: (value: Partial<DocxProposalSnapshot>) => {
+    /** Updates the registry; `rendered` also stamps the queries as showing its preview. */
+    setSnapshot: (value: Partial<DocxProposalSnapshot>, rendered = true) => {
       snapshot = { ...snapshot, ...value };
+      if (rendered) {
+        stampRevisionPreviewKey(source, revisionPreviewKey(proposalRevisionPreview(snapshot)));
+      }
     },
   };
 }
@@ -600,6 +613,38 @@ describe('semantic anchor geometry', () => {
     } finally {
       key.mockRestore();
     }
+  });
+
+  test('follows a preview change only once the queries show the new preview', () => {
+    const { geometry, setSnapshot, source, session } = semanticGeometry();
+    const accepted = {
+      id: 'proposal',
+      paragraph: PARAGRAPH,
+      state: 'accepted' as const,
+      changed: true,
+      revisionIds: ['r1', 'r2'],
+    };
+    const target: DocxGeometryTarget = { kind: 'proposal', id: 'proposal' };
+    stampSourceVersion(source, 'v1');
+    expect(proposalPreview.currentPreviewKey(session)).toBe('');
+    expect(proposalPreview.renderedPreviewKey(source)).toBe('');
+    anchored(geometry.getAnchorGeometry(target));
+    expect(pluginLayout(source, 'v1', 1, { key: '', previewVersion: 0 })).not.toBeNull();
+
+    setSnapshot({ proposals: [accepted] }, false);
+    const key = revisionPreviewKey({ r1: 'accepted', r2: 'accepted' });
+    expect(proposalPreview.currentPreviewKey(session)).toBe(key);
+    expect(proposalPreview.renderedPreviewKey(source)).toBe('');
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
+    expect(pluginLayout(source, 'v1', 1, { key, previewVersion: 0 })).toBeNull();
+
+    stampRevisionPreviewKey(source, key);
+    expect(proposalPreview.renderedPreviewKey(source)).toBe(key);
+    anchored(geometry.getAnchorGeometry(target));
+    expect(pluginLayout(source, 'v1', 1, { key, previewVersion: 0 })).not.toBeNull();
+
+    setSnapshot({ proposals: [{ ...accepted, state: 'proposed' }] }, false);
+    refused(geometry.getAnchorGeometry(target), 'layout-unavailable');
   });
 
   test('refuses missing page bounds or unmappable display positions', () => {
