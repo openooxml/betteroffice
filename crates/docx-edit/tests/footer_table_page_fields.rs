@@ -201,6 +201,10 @@ fn page_and_numpages_fields_in_a_nested_footer_table_stay_right_aligned() {
         twelve.left,
         two.left
     );
+    // Every field shows "12" in the same formatting, so each is as wide as PAGE's.
+    let width = |field: &Painted| field.right - field.left;
+    assert_close(width(&total_two), width(&twelve));
+    assert_close(width(&total_twelve), width(&twelve));
     assert_close(total_two.right, total_two.clip_right);
     assert_close(total_twelve.right, total_twelve.clip_right);
 }
