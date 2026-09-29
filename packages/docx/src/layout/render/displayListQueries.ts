@@ -170,6 +170,8 @@ export interface DisplayListQueries {
   paragraphRects(pos: number): DisplayListParagraphGeometry[];
   /** Ordered body visual lines across all pages. */
   visualLines(): readonly DisplayListVisualLine[];
+  /** The part of {@link visualLines} on one page, computed for that page alone. */
+  visualLinesOnPage(pageIndex: number): readonly DisplayListVisualLine[];
   /** Visual line containing `pos`, or null. */
   visualLineAtPosition(pos: number): DisplayListVisualLine | null;
   /** Topmost image under a page-local point. Body by default. */
@@ -1135,55 +1137,63 @@ export function createDisplayListQueries(
   };
 
   const VISUAL_BASELINE_EPSILON = 1.5;
+  const pageVisualLines: Array<readonly DisplayListVisualLine[] | undefined> = [];
+  const visualLinesOnPage = (pageIndex: number): readonly DisplayListVisualLine[] => {
+    const cached = pageVisualLines[pageIndex];
+    if (cached) return cached;
+    const page = list.pages[pageIndex];
+    if (!page) return [];
+    const pageLines: DisplayListVisualLine[] = [];
+    // A line is found among the lines of its own identity, in the order they began.
+    const linesByIdentity = new Map<string, DisplayListVisualLine[]>();
+    let anonymous = 0;
+    for (const primitive of page.primitives) {
+      if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') continue;
+      if (primitive.docStart === undefined || primitive.docEnd === undefined) continue;
+      if (primitive.kind === 'glyphRun' && primitive.glyphs.length === 0) continue;
+      const baseline =
+        primitive.kind === 'text'
+          ? primitive.baselineY
+          : primitive.glyphs.reduce((max, glyph) => Math.max(max, glyph.y), -Infinity);
+      if (!Number.isFinite(baseline)) continue;
+      const identity = primitiveIdentity(primitive) ?? `anonymous:${anonymous++}`;
+      const rect = displayPrimitiveRect(primitive);
+      const sameIdentity = linesByIdentity.get(identity);
+      const current = sameIdentity?.find(
+        (line) => Math.abs(line.baseline - baseline) <= VISUAL_BASELINE_EPSILON
+      );
+      if (!current) {
+        const line: DisplayListVisualLine = {
+          ...pageRect(page.pageIndex, rect),
+          baseline,
+          from: primitive.docStart,
+          to: primitive.docEnd,
+          blockId: publicBlockId(primitive),
+          paraId: primitive.paraId,
+        };
+        pageLines.push(line);
+        if (sameIdentity) sameIdentity.push(line);
+        else linesByIdentity.set(identity, [line]);
+        continue;
+      }
+      const left = Math.min(current.x, rect.x);
+      const top = Math.min(current.y, rect.y);
+      const right = Math.max(current.x + current.width, rect.x + rect.w);
+      const bottom = Math.max(current.y + current.height, rect.y + rect.h);
+      current.x = left;
+      current.y = top;
+      current.width = right - left;
+      current.height = bottom - top;
+      current.from = Math.min(current.from, primitive.docStart);
+      current.to = Math.max(current.to, primitive.docEnd);
+    }
+    pageVisualLines[pageIndex] = pageLines;
+    return pageLines;
+  };
+
   let visualLineCache: DisplayListVisualLine[] | null = null;
   const visualLines = (): readonly DisplayListVisualLine[] => {
-    if (visualLineCache) return visualLineCache;
-    const lines: DisplayListVisualLine[] = [];
-    for (const page of list.pages) {
-      const pageLines: Array<DisplayListVisualLine & { identity: string }> = [];
-      let anonymous = 0;
-      for (const primitive of page.primitives) {
-        if (primitive.kind !== 'text' && primitive.kind !== 'glyphRun') continue;
-        if (primitive.docStart === undefined || primitive.docEnd === undefined) continue;
-        if (primitive.kind === 'glyphRun' && primitive.glyphs.length === 0) continue;
-        const baseline =
-          primitive.kind === 'text'
-            ? primitive.baselineY
-            : primitive.glyphs.reduce((max, glyph) => Math.max(max, glyph.y), -Infinity);
-        if (!Number.isFinite(baseline)) continue;
-        const identity = primitiveIdentity(primitive) ?? `anonymous:${anonymous++}`;
-        const rect = displayPrimitiveRect(primitive);
-        const current = pageLines.find(
-          (line) =>
-            line.identity === identity &&
-            Math.abs(line.baseline - baseline) <= VISUAL_BASELINE_EPSILON
-        );
-        if (!current) {
-          pageLines.push({
-            identity,
-            ...pageRect(page.pageIndex, rect),
-            baseline,
-            from: primitive.docStart,
-            to: primitive.docEnd,
-            blockId: publicBlockId(primitive),
-            paraId: primitive.paraId,
-          });
-          continue;
-        }
-        const left = Math.min(current.x, rect.x);
-        const top = Math.min(current.y, rect.y);
-        const right = Math.max(current.x + current.width, rect.x + rect.w);
-        const bottom = Math.max(current.y + current.height, rect.y + rect.h);
-        current.x = left;
-        current.y = top;
-        current.width = right - left;
-        current.height = bottom - top;
-        current.from = Math.min(current.from, primitive.docStart);
-        current.to = Math.max(current.to, primitive.docEnd);
-      }
-      lines.push(...pageLines.map(({ identity: _identity, ...line }) => line));
-    }
-    visualLineCache = lines;
+    visualLineCache ??= list.pages.flatMap((_, pageIndex) => visualLinesOnPage(pageIndex));
     return visualLineCache;
   };
 
@@ -1259,6 +1269,7 @@ export function createDisplayListQueries(
     columnBounds,
     paragraphRects,
     visualLines,
+    visualLinesOnPage,
     visualLineAtPosition,
     imageAtPoint,
     imageByPos,

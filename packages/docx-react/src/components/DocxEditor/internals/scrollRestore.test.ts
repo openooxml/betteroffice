@@ -157,6 +157,7 @@ function queries(
     pageCount: () => pageCount,
     pageSize: () => ({ width: 600, height: PAGE_HEIGHT }),
     visualLines: () => lines,
+    visualLinesOnPage: (pageIndex: number) => lines.filter((line) => line.pageIndex === pageIndex),
     anchorRect: () => anchorRect ?? null,
   } as unknown as DisplayListQueries;
 }
@@ -477,6 +478,55 @@ describe('viewport anchoring across a page boundary', () => {
     restoreDisplayListViewportAnchor(anchor, after, host, scroller, () => 1);
 
     expect(scroller.scrollTop).toBe(documentTop(1, 700) - anchor.viewportOffset);
+  });
+
+  test('reads the lines of the pages around the viewport only', () => {
+    const pageCount = 40;
+    const lines = Array.from({ length: pageCount }, (_, pageIndex) => [
+      visualLine(`p${pageIndex}a`, pageIndex * 100 + 1, pageIndex * 100 + 20, 100, pageIndex),
+      visualLine(`p${pageIndex}b`, pageIndex * 100 + 21, pageIndex * 100 + 40, 500, pageIndex),
+    ]).flat();
+    const scrollTop = documentTop(30, 450);
+    const { host, scroller } = createScene(scrollTop, pageCount);
+    const read: number[] = [];
+    let wholeReads = 0;
+    const counted = {
+      ...queries(lines, pageCount),
+      visualLines: () => {
+        wholeReads += 1;
+        return lines;
+      },
+      visualLinesOnPage: (pageIndex: number) => {
+        read.push(pageIndex);
+        return lines.filter((line) => line.pageIndex === pageIndex);
+      },
+    } as DisplayListQueries;
+    const captured: number[] = [];
+    const anchor = captureDisplayListViewportAnchor(counted, host, scroller, (position) => {
+      captured.push(position);
+      return STICKY;
+    });
+
+    expect(captured).toEqual([30 * 100 + 21]);
+    expect(anchor.viewportOffset).toBe(documentTop(30, 500) - scrollTop);
+    expect(wholeReads).toBe(0);
+    expect(read).toEqual([29, 30, 31]);
+    const everyLine = queries(lines, pageCount);
+    expect(captureDisplayListViewportAnchor(everyLine, host, scroller, () => STICKY)).toEqual(
+      anchor
+    );
+  });
+
+  test('looks past the pages around the viewport when they show no line', () => {
+    // Pages 1 to 3 around the viewport on page 2 are empty.
+    const { host, scroller } = createScene(documentTop(2, 50), 6);
+    const lines = [visualLine(paraId, 1, 20, 700, 0), visualLine('far', 40, 60, 100, 5)];
+    const captured: number[] = [];
+    captureDisplayListViewportAnchor(queries(lines, 6), host, scroller, (position) => {
+      captured.push(position);
+      return STICKY;
+    });
+    expect(captured).toEqual([1]);
   });
 
   test('holds the captured offset when the anchor is lost at a page boundary', () => {

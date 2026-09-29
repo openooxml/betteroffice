@@ -133,8 +133,9 @@ function nearestLineAnchor(
   queries: DisplayListQueries,
   host: HTMLElement,
   viewport: DOMRect,
-  lines: readonly DisplayListVisualLine[],
-  capturePosition: CaptureViewportPosition
+  lines: Iterable<DisplayListVisualLine>,
+  capturePosition: CaptureViewportPosition,
+  visibleOnly = false
 ): { target: PositionViewportTarget; clientY: number } | null {
   const visible: Array<{ line: DisplayListVisualLine; clientY: number }> = [];
   let nearest: { line: DisplayListVisualLine; clientY: number; distance: number } | null = null;
@@ -158,7 +159,7 @@ function nearestLineAnchor(
     }
   }
   const candidates = visible.sort((left, right) => left.clientY - right.clientY);
-  if (candidates.length === 0 && nearest) candidates.push(nearest);
+  if (candidates.length === 0 && nearest && !visibleOnly) candidates.push(nearest);
   for (const candidate of candidates.slice(0, ANCHOR_CANDIDATE_LIMIT)) {
     const position = capturePosition(candidate.line.from);
     if (position) {
@@ -166,6 +167,39 @@ function nearestLineAnchor(
     }
   }
   return null;
+}
+
+/** The first page, in their top-to-bottom stacking, whose client rect reaches `top`. */
+function firstPageReaching(
+  queries: DisplayListQueries,
+  host: HTMLElement,
+  top: number
+): number | null {
+  let low = 0;
+  let high = queries.pageCount() - 1;
+  let found: number | null = null;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const rect = resolveDisplayPageClientRect(host, queries, middle);
+    if (!rect) return null;
+    if (rect.bottom >= top) {
+      found = middle;
+      high = middle - 1;
+    } else {
+      low = middle + 1;
+    }
+  }
+  return found;
+}
+
+function* linesOnPages(
+  queries: DisplayListQueries,
+  first: number,
+  last: number
+): Generator<DisplayListVisualLine> {
+  for (let pageIndex = first; pageIndex <= last; pageIndex += 1) {
+    yield* queries.visualLinesOnPage(pageIndex);
+  }
 }
 
 /**
@@ -232,9 +266,20 @@ export function captureDisplayListViewportAnchor(
     scrollParent.style.setProperty('overflow-anchor', 'none');
   }
   const viewport = scrollParent.getBoundingClientRect();
-  const lines = queries.visualLines();
+  // Only lines of the pages the viewport shows, and of one page either side,
+  // can be visible, so scanning those finds the visible lines a scan of every
+  // line would. The full scan remains for a viewport showing no line, where
+  // the nearest line anywhere wins.
+  const lastPage = queries.pageCount() - 1;
+  const first = firstPageReaching(queries, host, viewport.top);
+  const last = firstPageReaching(queries, host, viewport.bottom) ?? lastPage;
+  const shown =
+    first === null
+      ? null
+      : linesOnPages(queries, Math.max(0, first - 1), Math.min(last + 1, lastPage));
   const resolved =
-    nearestLineAnchor(queries, host, viewport, lines, capturePosition) ??
+    (shown && nearestLineAnchor(queries, host, viewport, shown, capturePosition, true)) ??
+    nearestLineAnchor(queries, host, viewport, queries.visualLines(), capturePosition) ??
     visiblePageAnchor(queries, host, viewport);
   return {
     target: resolved?.target ?? null,
