@@ -59,9 +59,9 @@ use yrs::types::{Attrs, Delta};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Assoc, ClientID, Doc, In, IndexedSequence, Map, MapPrelim, MapRef, OffsetKind, Options,
-    Out, ReadTxn, StateVector, StickyIndex, Subscription, Text, TextPrelim, TextRef, Transact,
-    Update,
+    Any, Assoc, ClientID, DeepObservable, Doc, In, IndexedSequence, Map, MapPrelim, MapRef,
+    OffsetKind, Options, Out, ReadTxn, StateVector, StickyIndex, Subscription, Text, TextPrelim,
+    TextRef, Transact, Update,
 };
 
 mod batch;
@@ -73,6 +73,7 @@ mod control_source;
 mod control_values;
 mod ctx;
 mod deterministic;
+mod fingerprint;
 mod format;
 mod heading;
 mod identity;
@@ -249,6 +250,121 @@ pub struct StorySegment {
     pub attributes: BTreeMap<String, Any>,
 }
 
+/// `segments` split after each pilcrow into units.
+fn split_segment_units(segments: Vec<StorySegment>) -> Vec<Vec<StorySegment>> {
+    let mut units = Vec::new();
+    let mut unit = Vec::new();
+    for segment in segments {
+        let closes = matches!(segment.content, SegmentContent::Pilcrow(_));
+        unit.push(segment);
+        if closes {
+            units.push(std::mem::take(&mut unit));
+        }
+    }
+    if !unit.is_empty() {
+        units.push(unit);
+    }
+    units
+}
+
+/// A 128-bit digest of `segments`' content: equal digests mean equal
+/// segments.
+pub fn segments_digest(segments: &[StorySegment]) -> u128 {
+    use std::hash::{Hash, Hasher};
+
+    /// Two independent word-wise multiply-rotate lanes over the same bytes,
+    /// for 128 bits in one walk.
+    #[derive(Default)]
+    struct Digest {
+        low: u64,
+        high: u64,
+    }
+    impl Digest {
+        fn add(&mut self, word: u64) {
+            self.low = (self.low.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+            self.high = (self.high ^ word)
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .rotate_left(29);
+        }
+        fn finish128(&self) -> u128 {
+            fn mix(mut value: u64) -> u64 {
+                value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                value ^ (value >> 31)
+            }
+            (u128::from(mix(self.high)) << 64) | u128::from(mix(self.low))
+        }
+    }
+    impl Hasher for Digest {
+        fn write(&mut self, bytes: &[u8]) {
+            let (words, rest) = bytes.as_chunks::<8>();
+            for word in words {
+                self.add(u64::from_le_bytes(*word));
+            }
+            let mut tail = [0u8; 8];
+            tail[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(tail) ^ ((bytes.len() as u64) << 56));
+        }
+        fn finish(&self) -> u64 {
+            self.finish128() as u64
+        }
+    }
+
+    fn any(value: &Any, hasher: &mut Digest) {
+        match value {
+            Any::Null => 0u8.hash(hasher),
+            Any::Undefined => 1u8.hash(hasher),
+            Any::Bool(value) => (2u8, value).hash(hasher),
+            Any::Number(value) => (3u8, value.to_bits()).hash(hasher),
+            Any::BigInt(value) => (4u8, value).hash(hasher),
+            Any::String(value) => (5u8, &**value).hash(hasher),
+            Any::Buffer(value) => (6u8, &**value).hash(hasher),
+            Any::Array(values) => {
+                (7u8, values.len()).hash(hasher);
+                for value in values.iter() {
+                    any(value, hasher);
+                }
+            }
+            Any::Map(entries) => {
+                // Map iteration order is arbitrary, so entries combine commutatively.
+                let mut combined = 0u128;
+                for (key, value) in entries.iter() {
+                    let mut entry = Digest::default();
+                    key.hash(&mut entry);
+                    any(value, &mut entry);
+                    combined = combined.wrapping_add(entry.finish128());
+                }
+                (8u8, entries.len(), combined).hash(hasher);
+            }
+        }
+    }
+    fn map(entries: &BTreeMap<String, Any>, hasher: &mut Digest) {
+        entries.len().hash(hasher);
+        for (key, value) in entries {
+            key.hash(hasher);
+            any(value, hasher);
+        }
+    }
+
+    let mut hasher = Digest::default();
+    segments.len().hash(&mut hasher);
+    for segment in segments {
+        match &segment.content {
+            SegmentContent::Text(text) => (0u8, text).hash(&mut hasher),
+            SegmentContent::Pilcrow(properties) => {
+                (1u8, &properties.para_id).hash(&mut hasher);
+                map(&properties.values, &mut hasher);
+            }
+            SegmentContent::OtherEmbed { kind, payload } => {
+                (2u8, kind).hash(&mut hasher);
+                map(payload, &mut hasher);
+            }
+        }
+        map(&segment.attributes, &mut hasher);
+    }
+    hasher.finish128()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParagraphSnapshot {
     pub para_id: ParagraphId,
@@ -325,6 +441,72 @@ impl std::error::Error for EditError {}
 
 static DOC_INSTANCES: AtomicU64 = AtomicU64::new(1);
 
+/// Per-story values built at one committed epoch. Older values are never served, so the
+/// first value of a newer epoch drops them all at once.
+struct EpochCache<T> {
+    epoch: u64,
+    entries: HashMap<Box<str>, Arc<T>>,
+}
+
+impl<T> Default for EpochCache<T> {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+/// The revision each story last changed at. Every committed change to the
+/// stories map stamps the stories it touched (content, embedded maps, the
+/// story entry itself) with the next revision.
+#[derive(Default)]
+struct StoryRevisions {
+    current: u64,
+    stamped: HashMap<Arc<str>, u64>,
+}
+
+impl StoryRevisions {
+    fn stamp(&mut self, txn: &yrs::TransactionMut, events: &yrs::types::Events) {
+        self.current += 1;
+        for event in events.iter() {
+            match event.path().front() {
+                Some(yrs::types::PathSegment::Key(story)) => {
+                    self.stamped.insert(Arc::clone(story), self.current);
+                }
+                Some(yrs::types::PathSegment::Index(_)) => {}
+                None => {
+                    if let yrs::types::Event::Map(entries) = event {
+                        for story in entries.keys(txn).keys() {
+                            self.stamped.insert(Arc::clone(story), self.current);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T> EpochCache<T> {
+    fn get(&self, story_id: &str, epoch: u64) -> Option<Arc<T>> {
+        if self.epoch != epoch {
+            return None;
+        }
+        self.entries.get(story_id).cloned()
+    }
+
+    fn insert(&mut self, story_id: &str, epoch: u64, value: Arc<T>) {
+        if epoch < self.epoch {
+            return;
+        }
+        if epoch > self.epoch {
+            self.entries.clear();
+            self.epoch = epoch;
+        }
+        self.entries.insert(story_id.into(), value);
+    }
+}
+
 /// A single yrs replica of the DOCX editing model.
 pub struct EditingDoc {
     doc: Doc,
@@ -338,11 +520,13 @@ pub struct EditingDoc {
     /// Rotated whenever the replica's content or retained source is replaced.
     version_nonce: AtomicU64,
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
-    segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
-    chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
+    segment_indexes: Mutex<EpochCache<SegmentIndex>>,
+    chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     source: Mutex<Option<identity::SourcePackage>>,
     seen: identity::SeenCell,
+    story_revisions: Arc<Mutex<StoryRevisions>>,
     _update_sub: Subscription,
+    _story_revision_sub: Subscription,
     _seen_subs: Vec<Subscription>,
 }
 
@@ -369,6 +553,11 @@ impl EditingDoc {
                 }
             })
             .expect("a fresh doc accepts an update observer");
+        let story_revisions = Arc::new(Mutex::new(StoryRevisions::default()));
+        let stamped = Arc::clone(&story_revisions);
+        let story_revision_sub = doc
+            .get_or_insert_map(STORIES)
+            .observe_deep(move |txn, events| stamped.lock().unwrap().stamp(txn, events));
         let seen = identity::SeenCell::default();
         let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
@@ -379,11 +568,13 @@ impl EditingDoc {
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
             metadata: Mutex::new(None),
-            segment_indexes: Mutex::new(HashMap::new()),
-            chunk_snapshots: Mutex::new(HashMap::new()),
+            segment_indexes: Mutex::default(),
+            chunk_snapshots: Mutex::default(),
             source: Mutex::new(None),
             seen,
+            story_revisions,
             _update_sub: update_sub,
+            _story_revision_sub: story_revision_sub,
             _seen_subs: seen_subs,
         }
     }
@@ -423,23 +614,17 @@ impl EditingDoc {
         // Sampling before the read txn lets a racing commit tag the fresh index
         // stale rather than serve a pre-commit snapshot as current.
         let epoch = self.epoch.load(Ordering::Relaxed);
-        {
-            let cache = self.segment_indexes.lock().unwrap();
-            if let Some((cached_epoch, index)) = cache.get(story_id) {
-                if *cached_epoch == epoch {
-                    return Ok(Arc::clone(index));
-                }
-            }
+        if let Some(index) = self.segment_indexes.lock().unwrap().get(story_id, epoch) {
+            return Ok(index);
         }
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         let index = Arc::new(SegmentIndex::build(&story, &txn));
-        let mut cache = self.segment_indexes.lock().unwrap();
-        if let Some(stories) = txn.get_map(STORIES) {
-            cache.retain(|key, _| &**key == story_id || stories.get(&txn, key).is_some());
-        }
         drop(txn);
-        cache.insert(story_id.into(), (epoch, Arc::clone(&index)));
+        self.segment_indexes
+            .lock()
+            .unwrap()
+            .insert(story_id, epoch, Arc::clone(&index));
         Ok(index)
     }
 
@@ -451,20 +636,14 @@ impl EditingDoc {
         txn: &T,
     ) -> Arc<Vec<ops::Chunk>> {
         let epoch = self.epoch.load(Ordering::Relaxed);
-        {
-            let cache = self.chunk_snapshots.lock().unwrap();
-            if let Some((cached_epoch, chunks)) = cache.get(story_id)
-                && *cached_epoch == epoch
-            {
-                return Arc::clone(chunks);
-            }
+        if let Some(chunks) = self.chunk_snapshots.lock().unwrap().get(story_id, epoch) {
+            return chunks;
         }
         let chunks = Arc::new(ops::snapshot(story, txn));
-        let mut cache = self.chunk_snapshots.lock().unwrap();
-        if let Some(stories) = txn.get_map(STORIES) {
-            cache.retain(|key, _| &**key == story_id || stories.get(txn, key).is_some());
-        }
-        cache.insert(story_id.into(), (epoch, Arc::clone(&chunks)));
+        self.chunk_snapshots
+            .lock()
+            .unwrap()
+            .insert(story_id, epoch, Arc::clone(&chunks));
         chunks
     }
 
@@ -658,7 +837,11 @@ impl EditingDoc {
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
         if stories.remove(&mut txn, story_id).is_some() {
-            self.chunk_snapshots.lock().unwrap().remove(story_id);
+            self.chunk_snapshots
+                .lock()
+                .unwrap()
+                .entries
+                .remove(story_id);
             Ok(())
         } else {
             Err(EditError::StoryNotFound(story_id.to_owned()))
@@ -830,6 +1013,25 @@ impl EditingDoc {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         Ok(story.len(&txn))
+    }
+
+    /// The current story revision, and the stories that changed after `since`
+    /// (created, edited, or deleted), sorted.
+    pub fn stories_changed_since(&self, since: u64) -> (u64, Vec<String>) {
+        let revisions = self.story_revisions.lock().unwrap();
+        let mut stories: Vec<String> = revisions
+            .stamped
+            .iter()
+            .filter(|(_, revision)| **revision > since)
+            .map(|(story, _)| story.to_string())
+            .collect();
+        stories.sort();
+        (revisions.current, stories)
+    }
+
+    /// [`Self::story_segments`] split after each pilcrow into units.
+    pub fn story_segment_units(&self, story_id: &str) -> EditResult<Vec<Vec<StorySegment>>> {
+        Ok(split_segment_units(self.story_segments(story_id)?))
     }
 
     pub fn story_segments(&self, story_id: &str) -> EditResult<Vec<StorySegment>> {
@@ -1120,27 +1322,30 @@ fn segment_content<T: ReadTxn>(value: Out, txn: &T) -> SegmentContent {
                 .collect();
             SegmentContent::Pilcrow(ParagraphProperties { para_id, values })
         }
-        Out::YMap(map) => {
-            let kind = map_string(&map, txn, KIND_KEY).unwrap_or_default();
-            let payload = map
-                .iter(txn)
-                .filter_map(|(key, value)| {
-                    if key == KIND_KEY {
-                        return None;
-                    }
-                    let Out::Any(value) = value else {
-                        return None;
-                    };
-                    Some((key.to_string(), value))
-                })
-                .collect();
-            SegmentContent::OtherEmbed { kind, payload }
-        }
+        Out::YMap(map) => SegmentContent::OtherEmbed {
+            kind: map_string(&map, txn, KIND_KEY).unwrap_or_default(),
+            payload: embed_payload(&map, txn),
+        },
         _ => SegmentContent::OtherEmbed {
             kind: String::new(),
             payload: BTreeMap::new(),
         },
     }
+}
+
+/// An embed's plain values other than its kind: a story segment's `payload`.
+pub(crate) fn embed_payload<T: ReadTxn>(map: &MapRef, txn: &T) -> BTreeMap<String, Any> {
+    map.iter(txn)
+        .filter_map(|(key, value)| {
+            if key == KIND_KEY {
+                return None;
+            }
+            let Out::Any(value) = value else {
+                return None;
+            };
+            Some((key.to_string(), value))
+        })
+        .collect()
 }
 
 fn anchor_value(story: &str, start: &StickyIndex, end: &StickyIndex) -> Any {
@@ -1196,6 +1401,97 @@ mod tests {
         doc.create_story("header:rId7", "Header", "Header", "center")
             .unwrap();
         doc
+    }
+
+    #[test]
+    fn epoch_cache_serves_only_the_current_epoch() {
+        let mut cache = EpochCache::default();
+        cache.insert("body", 1, Arc::new(1));
+        cache.insert("hdr", 1, Arc::new(2));
+        assert_eq!(cache.get("body", 1).as_deref(), Some(&1));
+        assert_eq!(cache.get("body", 2), None);
+        cache.insert("body", 2, Arc::new(3));
+        assert_eq!(
+            cache.get("hdr", 2),
+            None,
+            "a newer epoch drops the older values"
+        );
+        cache.insert("hdr", 1, Arc::new(4));
+        assert_eq!(
+            cache.get("hdr", 2),
+            None,
+            "a value built before a commit is not kept"
+        );
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn story_revisions_name_the_stories_each_change_touched() {
+        let (a, b) = peers("one two", 1, 2);
+        let (since, stories) = b.stories_changed_since(0);
+        assert_eq!(stories, ["body", "header:rId7"]);
+        assert_eq!(b.stories_changed_since(since).1, Vec::<String>::new());
+
+        a.insert_text(
+            &local("A"),
+            Position::new("body", 3),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        let (since, stories) = b.stories_changed_since(since);
+        assert_eq!(stories, ["body"], "a remote text edit");
+
+        let header = b.paragraphs("header:rId7").unwrap()[0].para_id.clone();
+        b.set_paragraph_attr(&header, "keepNext", Any::Bool(true))
+            .unwrap();
+        let (since, stories) = b.stories_changed_since(since);
+        assert_eq!(stories, ["header:rId7"], "a pilcrow property");
+
+        b.create_story("fn:1", "note", "Normal", "left").unwrap();
+        b.delete_story("header:rId7").unwrap();
+        let (_, stories) = b.stories_changed_since(since);
+        assert_eq!(
+            stories,
+            ["fn:1", "header:rId7"],
+            "created and deleted stories"
+        );
+    }
+
+    #[test]
+    fn segment_units_split_a_story_after_each_pilcrow() {
+        let doc = seed("alpha beta");
+        doc.split_paragraph(&local("A"), Position::new("body", 5), None)
+            .unwrap();
+        let units = doc.story_segment_units("body").unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units.concat(), doc.story_segments("body").unwrap());
+
+        doc.insert_text(
+            &local("A"),
+            Position::new("body", 8),
+            "x",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let edited = doc.story_segment_units("body").unwrap();
+        let digest = |unit: &[StorySegment]| segments_digest(unit);
+        assert_eq!(
+            digest(&edited[0]),
+            digest(&units[0]),
+            "an untouched paragraph"
+        );
+        assert_ne!(digest(&edited[1]), digest(&units[1]));
+        assert_eq!(
+            digest(&doc.story_segment_units("header:rId7").unwrap()[0]),
+            digest(
+                &seed("alpha beta")
+                    .story_segment_units("header:rId7")
+                    .unwrap()[0]
+            ),
+            "equal content, equal digest"
+        );
     }
 
     fn peers(text: &str, a_id: u64, b_id: u64) -> (EditingDoc, EditingDoc) {

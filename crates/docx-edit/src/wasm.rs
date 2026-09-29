@@ -36,7 +36,7 @@
 //! Story lengths, selection indices and every other unit count in this module
 //! are UTF-16 units in which each embed, pilcrows included, counts as one.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -58,12 +58,12 @@ use crate::structured::ExportOptions;
 use crate::{
     AnchorResolution, AnchorUnsupported, CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx,
     EditRefusal, EditRequest, EditTextView, EditingDoc, EngineSession, FindTextRequest,
-    FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, ParaAttrDelta,
-    ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal,
-    ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position, RawOp,
-    ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, StoryRange, TabStop, TableLocator, TableRange, TextTarget,
-    TriState, UndoCaptureMode, UndoSession, story_ref,
+    FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, OpError,
+    ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
+    ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
+    RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
+    SourceStory, SourceStoryKind, StoryRange, StorySegment, TabStop, TableLocator, TableRange,
+    TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -268,6 +268,13 @@ fn adjacent_story_unit(
         SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
         SegKind::Embed => AdjacentStoryUnit::Content(1),
     }))
+}
+
+fn embed_at(doc: &EditingDoc, story: &str, index: u32) -> Result<bool, JsValue> {
+    let segments = doc.segment_index(story).map_err(js_err)?;
+    Ok(segments
+        .segment_at(index)
+        .is_some_and(|segment| matches!(segment.kind, SegKind::Embed)))
 }
 
 /// Per-peer selection state. These sticky positions are deliberately held
@@ -698,6 +705,34 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
         default_text_formatting,
         other,
     })
+}
+
+fn segments_json(segments: Vec<StorySegment>) -> Result<Vec<Value>, JsValue> {
+    segments
+        .into_iter()
+        .map(|segment| {
+            let attributes = attrs_value(&segment.attributes)?;
+            Ok(match segment.content {
+                SegmentContent::Text(text) => {
+                    json!({ "kind": "text", "text": text, "attributes": attributes })
+                }
+                SegmentContent::Pilcrow(properties) => json!({
+                    "kind": "pilcrow",
+                    "paraId": properties.para_id,
+                    "properties": attrs_value(&properties.values)?,
+                    "attributes": attributes,
+                }),
+                SegmentContent::OtherEmbed { kind, payload } => {
+                    json!({
+                        "kind": "embed",
+                        "embedKind": kind,
+                        "payload": attrs_value(&payload)?,
+                        "attributes": attributes,
+                    })
+                }
+            })
+        })
+        .collect()
 }
 
 fn attrs_value(attrs: &std::collections::BTreeMap<String, Any>) -> Result<Value, JsValue> {
@@ -1141,6 +1176,7 @@ pub struct EditSession {
     selection: RefCell<Option<LocalSelection>>,
     cell_selection: RefCell<Option<LocalCellSelection>>,
     last_apply_profile_json: RefCell<String>,
+    resident_deleted_units: Cell<u32>,
     /// The comparison applied here, awaiting its saved bytes.
     compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
 }
@@ -1341,6 +1377,58 @@ impl EditSession {
         Ok((story, loc.para_id, head))
     }
 
+    fn delete_resident_units(&self, direction: &str, count: u32) -> Result<String, JsValue> {
+        self.resident_deleted_units.set(0);
+        if count == 0 {
+            return Err(js_err("resident delete count must be positive"));
+        }
+        // Resident layout absorbs one paragraph merge per pass.
+        let mut story = None;
+        let mut merged = false;
+        let mut deleted = 0;
+        while deleted < count {
+            let step = self
+                .collapsed_resident_input_selection()
+                .and_then(|selection| {
+                    let merges = self.resident_unit_is_pilcrow(direction, &selection)?;
+                    if merges && merged {
+                        return Ok(None);
+                    }
+                    Ok(Some((
+                        self.delete_resident_input(direction, selection)?,
+                        merges,
+                    )))
+                });
+            match step {
+                Ok(Some((from, merges))) => {
+                    story = Some(from);
+                    merged |= merges;
+                    deleted += 1;
+                }
+                Err(error) if deleted == 0 => return Err(error),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        self.resident_deleted_units.set(deleted);
+        Ok(story.expect("the first resident deletion succeeded"))
+    }
+
+    fn resident_unit_is_pilcrow(
+        &self,
+        direction: &str,
+        selection: &(String, String, u32),
+    ) -> Result<bool, JsValue> {
+        let direction = match direction {
+            "backward" => DeleteDirection::Backward,
+            "forward" => DeleteDirection::Forward,
+            _ => return Err(js_err("delete direction must be backward or forward")),
+        };
+        Ok(matches!(
+            adjacent_story_unit(self.engine.doc(), &selection.0, selection.2, direction)?,
+            Some(AdjacentStoryUnit::Pilcrow)
+        ))
+    }
+
     fn delete_resident_input(
         &self,
         direction: &str,
@@ -1369,6 +1457,15 @@ impl EditSession {
                     .map_err(js_err)?;
             }
             (direction, Some(AdjacentStoryUnit::Pilcrow)) => {
+                // Merging forward over a table or other embed would pull it
+                // into the paragraph; the host path owns that case.
+                if matches!(direction, DeleteDirection::Forward)
+                    && embed_at(self.engine.doc(), &story, head + 1)?
+                {
+                    return Err(js_err(
+                        "resident input state is not ready for this paragraph",
+                    ));
+                }
                 let paragraphs = self.engine.doc().paragraphs(&story).map_err(js_err)?;
                 let paragraph_index = paragraphs
                     .iter()
@@ -1434,6 +1531,7 @@ impl EditSession {
             selection: RefCell::new(None),
             cell_selection: RefCell::new(None),
             last_apply_profile_json: RefCell::new("{}".to_owned()),
+            resident_deleted_units: Cell::new(0),
             compared: RefCell::new(None),
         };
         session.engine.doc().rotate_version(js_entropy());
@@ -1527,6 +1625,12 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Makes the next display frame a full one whatever epoch its caller
+    /// passes, for a host that switches to this engine from another.
+    pub fn reset_frame_base(&self) {
+        self.engine.reset_frame_base();
+    }
+
     /// `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
     /// against the same resident font store this session measures with.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {
@@ -1538,7 +1642,8 @@ impl EditSession {
     /// Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
     /// a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
     /// frame the caller currently holds; pass `0` for the first frame. A
-    /// mismatch makes the engine emit a full frame instead of a delta. Errors
+    /// mismatch makes the engine emit a full frame instead of a delta, and the
+    /// returned frame's epoch is always greater than `expected_frame_epoch`. Errors
     /// unless the epoch is a non-negative safe integer, and on build failure.
     pub fn build_display_list_frame(
         &self,
@@ -1759,19 +1864,24 @@ impl EditSession {
         Ok(frame)
     }
 
-    /// Deletes one character at this session's collapsed selection and returns
-    /// the resulting binary `FrameDelta`. `direction` is `"backward"` or
-    /// `"forward"`; a surrogate pair is removed whole. At a paragraph boundary
-    /// this merges with the neighbouring paragraph instead.
+    /// Deletes up to `count` characters at this session's collapsed selection,
+    /// lays out once, and returns the resulting binary `FrameDelta`.
+    /// `direction` is `"backward"` or `"forward"`; a surrogate pair is removed
+    /// whole. At a paragraph boundary a deletion merges with the neighbouring
+    /// paragraph instead. Deleting stops early at the document start or end,
+    /// before a second paragraph merge, or at a paragraph the resident state
+    /// cannot absorb; [`EditSession::resident_deleted_units`] reports how many
+    /// were removed.
     ///
-    /// Errors on an unknown `direction`, when `expected_frame_epoch` is not a
-    /// non-negative safe integer, under the same selection and readiness
-    /// conditions as [`EditSession::apply_input`], and when there is no
-    /// character to delete in that direction (document start or end).
+    /// Errors on an unknown `direction`, a zero `count`, when
+    /// `expected_frame_epoch` is not a non-negative safe integer, under the
+    /// same selection and readiness conditions as [`EditSession::apply_input`],
+    /// and when there is no character to delete in that direction.
     pub fn apply_delete(
         &self,
         direction: &str,
         expected_frame_epoch: f64,
+        count: u32,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         if !(expected_frame_epoch.is_finite()
@@ -1783,11 +1893,15 @@ impl EditSession {
                 "expected_frame_epoch must be a non-negative safe integer",
             ));
         }
-        let selection = self.collapsed_resident_input_selection()?;
-        let story = self.delete_resident_input(direction, selection)?;
+        let story = self.delete_resident_units(direction, count)?;
         self.engine
             .apply_and_layout(&story, expected_frame_epoch as u64)
             .map_err(js_err)
+    }
+
+    /// Characters the last [`EditSession::apply_delete`] removed.
+    pub fn resident_deleted_units(&self) -> u32 {
+        self.resident_deleted_units.get()
     }
 
     /// Instrumented twin of [`EditSession::apply_delete`]: identical arguments,
@@ -1797,6 +1911,7 @@ impl EditSession {
         &self,
         direction: &str,
         expected_frame_epoch: f64,
+        count: u32,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         if !(expected_frame_epoch.is_finite()
@@ -1810,11 +1925,11 @@ impl EditSession {
         }
 
         let started = performance_now();
-        let selection = self.collapsed_resident_input_selection()?;
+        self.collapsed_resident_input_selection()?;
         let selection_ms = performance_now() - started;
 
         let started = performance_now();
-        let story = self.delete_resident_input(direction, selection)?;
+        let story = self.delete_resident_units(direction, count)?;
         let edit_ms = performance_now() - started;
         let (frame, engine_profile) = self
             .engine
@@ -3894,6 +4009,20 @@ impl EditSession {
         serde_json::to_string(&matches).map_err(js_err)
     }
 
+    /// Whether the document has a story with this id.
+    pub fn has_story(&self, story: &str) -> bool {
+        let txn = self.engine.doc().yrs_doc().transact();
+        txn.get_map(STORIES)
+            .is_some_and(|stories| stories.contains_key(&txn, story))
+    }
+
+    /// `{"revision","stories":[…]}`: the current story revision and the sorted
+    /// ids of the stories created, edited, or deleted after revision `since`.
+    pub fn stories_changed_since(&self, since: f64) -> String {
+        let (revision, stories) = self.engine.doc().stories_changed_since(since as u64);
+        json!({ "revision": revision, "stories": stories }).to_string()
+    }
+
     /// Every story id in the document, sorted so the order is stable across
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {
@@ -3998,32 +4127,60 @@ impl EditSession {
     /// tracked-change stamps. Errors on an unknown story.
     pub fn story_segments(&self, story: &str) -> Result<String, JsValue> {
         let segments = self.engine.doc().story_segments(story).map_err(js_err)?;
-        let items = segments
+        serde_json::to_string(&segments_json(segments)?).map_err(js_err)
+    }
+
+    /// `story_segments` split after each pilcrow into units, as one hex digest
+    /// per unit: `["digest", …]`. Equal digests mean equal segments.
+    pub fn story_segment_unit_digests(&self, story: &str) -> Result<String, JsValue> {
+        let units = self
+            .engine
+            .doc()
+            .story_segment_units(story)
+            .map_err(js_err)?;
+        let digests: Vec<String> = units
+            .iter()
+            .map(|unit| format!("{:032x}", crate::segments_digest(unit)))
+            .collect();
+        serde_json::to_string(&digests).map_err(js_err)
+    }
+
+    /// The segments of the listed units (indices into
+    /// `story_segment_unit_digests`), each as `story_segments` gives them:
+    /// `[[segment, …], …]`. Errors on an index past the last unit.
+    pub fn story_segment_units(&self, story: &str, units: Vec<u32>) -> Result<String, JsValue> {
+        let all = self
+            .engine
+            .doc()
+            .story_segment_units(story)
+            .map_err(js_err)?;
+        let requested = units
             .into_iter()
-            .map(|segment| {
-                let attributes = attrs_value(&segment.attributes)?;
-                Ok(match segment.content {
-                    SegmentContent::Text(text) => {
-                        json!({ "kind": "text", "text": text, "attributes": attributes })
-                    }
-                    SegmentContent::Pilcrow(properties) => json!({
-                        "kind": "pilcrow",
-                        "paraId": properties.para_id,
-                        "properties": attrs_value(&properties.values)?,
-                        "attributes": attributes,
-                    }),
-                    SegmentContent::OtherEmbed { kind, payload } => {
-                        json!({
-                            "kind": "embed",
-                            "embedKind": kind,
-                            "payload": attrs_value(&payload)?,
-                            "attributes": attributes,
-                        })
-                    }
-                })
+            .map(|index| {
+                let unit = all
+                    .get(index as usize)
+                    .ok_or_else(|| js_err(format!("no segment unit {index} in {story}")))?;
+                segments_json(unit.clone())
             })
-            .collect::<Result<Vec<Value>, JsValue>>()?;
-        serde_json::to_string(&items).map_err(js_err)
+            .collect::<Result<Vec<Vec<Value>>, JsValue>>()?;
+        serde_json::to_string(&requested).map_err(js_err)
+    }
+
+    /// The `payload` of the story's `table_index`-th table embed, as
+    /// `story_segments` gives it, or `None` when the story has no such
+    /// table. Errors on an unknown story.
+    pub fn table_payload(&self, story: &str, table_index: u32) -> Result<Option<String>, JsValue> {
+        match self
+            .engine
+            .doc()
+            .table_payload(&TableLocator::new(story, table_index))
+        {
+            Ok(payload) => serde_json::to_string(&attrs_value(&payload)?)
+                .map(Some)
+                .map_err(js_err),
+            Err(OpError::UnknownTable { .. }) => Ok(None),
+            Err(error) => Err(js_err(error)),
+        }
     }
 
     /// `{"start","end"}` — the paragraph's span in story-global UTF-16 units.
