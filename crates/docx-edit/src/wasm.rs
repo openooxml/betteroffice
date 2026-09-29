@@ -5021,7 +5021,7 @@ mod tests {
             (text, layout["layout"]["pages"].as_array().unwrap().len())
         };
         let full = EditSession::new(80.0).unwrap();
-        full.open_docx(&bytes, true, None).unwrap();
+        full.open_docx(&bytes, true, None, None).unwrap();
         let (text, pages) = numpages(&full);
         assert!(pages > 1);
         assert_eq!(text, pages.to_string());
