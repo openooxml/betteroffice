@@ -4579,11 +4579,30 @@ fn lower_docx(
     let relationships = envelope.document.package.relationship_entries.clone();
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
-    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let mut parsed = Err(String::new());
+    let mut serialized = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| serde_json::to_string(&envelope.document));
+        parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string());
+        serialized = Some(
+            handle
+                .join()
+                .expect("document serialization thread panicked"),
+        );
+    });
+    #[cfg(target_arch = "wasm32")]
+    {
+        parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string());
+    }
+    let parsed = parsed?;
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if needs_source_json(&parsed) {
-        let serialized =
-            serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
+        let serialized = match serialized {
+            Some(Ok(serialized)) => serialized,
+            Some(Err(error)) => return Err(error.to_string()),
+            None => serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?,
+        };
         let ordered: OrderedValue =
             serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
         let mut values = BTreeMap::new();
@@ -4657,8 +4676,13 @@ fn seed_lowered(
         crate::media_srcs::intern_ops_media(ops, &mut media);
     }
     document.set_media_srcs(media.into_srcs());
+    let mut pins = read.provenance.pending_pins();
     document
-        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+        .apply_raw_story_batches_pinned(
+            batches,
+            &EditCtx::local(String::new(), String::new()),
+            &mut pins,
+        )
         .map_err(|error| error.to_string())?;
     read.pin(document);
     read.comment_writes = CommentWrites::watch(document);

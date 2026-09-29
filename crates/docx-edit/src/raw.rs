@@ -1,13 +1,13 @@
 //! Raw story mutations using UTF-16 story indices.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use yrs::types::text::YChange;
 use yrs::types::{Attrs, Delta};
 use yrs::{
-    Any, Assoc, ClientID, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef,
-    TransactionMut,
+    Any, Assoc, ClientID, ID, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn,
+    StickyIndex, Text, TextRef, TransactionMut,
 };
 
 use docx_parse::paragraph_identity::parse_paragraph_id;
@@ -15,10 +15,14 @@ use docx_parse::paragraph_identity::parse_paragraph_id;
 use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::identity::{OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC};
 use crate::op::{OpError, OpResult};
+use crate::structured::source::Pin;
 use crate::{
     COMMENTS, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PILCROW_KIND, anchor_value, is_pilcrow,
     map_string, out_len, story_ref,
 };
+
+/// Unresolved pins grouped by story, resolved while each story's stream is still short.
+pub(crate) type StoryPins<'a> = HashMap<String, Vec<&'a mut Pin>>;
 
 /// One low-level story mutation. Indices are UTF-16 story units (every embed = 1).
 #[derive(Clone, Debug, PartialEq)]
@@ -132,7 +136,15 @@ impl EditingDoc {
             })
             .collect();
         let mut rekeyed = Vec::new();
-        apply_raw_ops_to_story(&mut txn, story_id, ops, false, &mut rekeyed)?;
+        apply_raw_ops_to_story(
+            &mut txn,
+            story_id,
+            ops,
+            false,
+            &mut rekeyed,
+            None,
+            ClientID::new(self.client_id()),
+        )?;
         if !reanchored.is_empty() {
             crate::comment_references::reconcile(&mut txn, &reanchored, true);
         }
@@ -150,13 +162,43 @@ impl EditingDoc {
         batches: Vec<(String, Vec<RawOp>)>,
         ctx: &EditCtx,
     ) -> OpResult<()> {
+        self.raw_story_batches(batches, ctx, None)
+    }
+
+    /// [`apply_raw_story_batches`] that also resolves `pins` against each story as its
+    /// batches apply.
+    pub(crate) fn apply_raw_story_batches_pinned(
+        &self,
+        batches: Vec<(String, Vec<RawOp>)>,
+        ctx: &EditCtx,
+        pins: &mut StoryPins<'_>,
+    ) -> OpResult<()> {
+        self.raw_story_batches(batches, ctx, Some(pins))
+    }
+
+    fn raw_story_batches(
+        &self,
+        batches: Vec<(String, Vec<RawOp>)>,
+        ctx: &EditCtx,
+        mut pins: Option<&mut StoryPins<'_>>,
+    ) -> OpResult<()> {
         for (_, ops) in &batches {
             guard_inserted_values(ops)?;
         }
         {
             let mut txn = self.transact_for(ctx);
+            let client = ClientID::new(self.client_id());
             for (story_id, ops) in batches {
-                apply_raw_ops_to_story(&mut txn, &story_id, ops, true, &mut Vec::new())?;
+                let pins = pins.as_deref_mut().and_then(|pins| pins.remove(&story_id));
+                apply_raw_ops_to_story(
+                    &mut txn,
+                    &story_id,
+                    ops,
+                    true,
+                    &mut Vec::new(),
+                    pins,
+                    client,
+                )?;
             }
         }
         self.forget_seen();
@@ -164,12 +206,13 @@ impl EditingDoc {
     }
 }
 
-struct InsertRun {
+struct InsertRun<'a> {
     deltas: Vec<Delta<In>>,
     deterministic: bool,
     embeds: Vec<InsertedEmbed>,
     formats: BTreeMap<Arc<str>, Vec<FormatSpan>>,
     cursor: Option<u32>,
+    pins: Option<Vec<&'a mut Pin>>,
 }
 
 struct InsertedEmbed {
@@ -184,14 +227,15 @@ struct FormatSpan {
     value: Any,
 }
 
-impl InsertRun {
-    fn new(deterministic: bool) -> Self {
+impl<'a> InsertRun<'a> {
+    fn new(deterministic: bool, pins: Option<Vec<&'a mut Pin>>) -> Self {
         Self {
             deltas: Vec::new(),
             deterministic,
             embeds: Vec::new(),
             formats: BTreeMap::new(),
             cursor: None,
+            pins,
         }
     }
 
@@ -220,9 +264,45 @@ impl InsertRun {
         }
     }
 
-    fn flush(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) -> OpResult<()> {
+    fn flush(
+        &mut self,
+        story: &TextRef,
+        txn: &mut TransactionMut<'_>,
+        client: ClientID,
+    ) -> OpResult<()> {
         if !self.deltas.is_empty() {
+            let clock = txn.store().get_local_state();
+            let mut start = 0u32;
+            let mut inserted = 0u32;
+            let mut contiguous = true;
+            for (index, delta) in self.deltas.iter().enumerate() {
+                match delta {
+                    Delta::Retain(len, _) if index == 0 => start = *len,
+                    Delta::Inserted(In::Any(Any::String(text)), _) => {
+                        inserted += text.encode_utf16().count() as u32
+                    }
+                    Delta::Inserted(In::Map(_), _) => inserted += 1,
+                    _ => contiguous = false,
+                }
+            }
             story.apply_delta(txn, std::mem::take(&mut self.deltas));
+            contiguous &= txn.store().get_local_state() == clock + inserted;
+            if let Some(pins) = self.pins.as_deref_mut() {
+                for pin in pins.iter_mut() {
+                    if pin.position.is_some() {
+                        continue;
+                    }
+                    let offset = pin.unit.wrapping_sub(start);
+                    pin.position = if contiguous && offset < inserted {
+                        Some(StickyIndex::from_id(
+                            ID::new(client, clock + offset),
+                            Assoc::After,
+                        ))
+                    } else {
+                        story.sticky_index(txn, pin.unit, Assoc::After)
+                    };
+                }
+            }
         }
         if self.deterministic {
             self.hydrate_embeds(story, txn)?;
@@ -418,15 +498,17 @@ fn authors_last_paragraph(ops: &[RawOp], mut len: u32) -> bool {
 
 /// Applies `ops` to one story, collecting into `rekeyed` the pilcrows whose
 /// `paraId` they set.
-fn apply_raw_ops_to_story(
+fn apply_raw_ops_to_story<'a>(
     txn: &mut TransactionMut<'_>,
     story_id: &str,
     ops: Vec<RawOp>,
     deterministic: bool,
     rekeyed: &mut Vec<MapRef>,
+    pins: Option<Vec<&'a mut Pin>>,
+    client: ClientID,
 ) -> OpResult<()> {
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
-    let mut run = InsertRun::new(deterministic);
+    let mut run = InsertRun::new(deterministic, pins);
     for mut op in ops {
         if let RawOp::InsertEmbed { kind, payload, .. } = &mut op
             && kind == PILCROW_KIND
@@ -466,12 +548,12 @@ fn apply_raw_ops_to_story(
                 run.insert_embed(index, kind, payload, attrs);
             }
             op => {
-                run.flush(&story, txn)?;
+                run.flush(&story, txn, client)?;
                 apply_raw_op_absolute(txn, &story, story_id, op, rekeyed)?;
             }
         }
     }
-    run.flush(&story, txn)?;
+    run.flush(&story, txn, client)?;
     Ok(())
 }
 

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use yrs::types::{DeepObservable, Event, PathSegment};
-use yrs::{Assoc, IndexedSequence, ReadTxn, StickyIndex, Text, Transact};
+use yrs::{Assoc, IndexedSequence, ReadTxn, StickyIndex, Transact};
 
 use super::{Anchor, BreakType, Revision, StoryKind};
 use crate::control_source::{
@@ -61,7 +61,6 @@ impl Pin {
     fn sticky<T: ReadTxn>(txn: &T, story: &str, unit: u32) -> Option<StickyIndex> {
         story_ref(txn, story)
             .ok()
-            .filter(|text| unit < text.len(txn))
             .and_then(|text| text.sticky_index(txn, unit, Assoc::After))
     }
 
@@ -189,8 +188,27 @@ pub(crate) struct Provenance {
 }
 
 impl Provenance {
-    /// Pins every recorded position to `doc`, which seeding just filled, each distinct one once,
-    /// and indexes the records by story.
+    /// The recorded pins grouped by story, for resolving while a story's stream is still
+    /// short.
+    pub(crate) fn pending_pins(&mut self) -> HashMap<String, Vec<&mut Pin>> {
+        let mut pending: HashMap<String, Vec<&mut Pin>> = HashMap::new();
+        for record in self.inline.iter_mut() {
+            pending
+                .entry(record.pin.story.clone())
+                .or_default()
+                .push(&mut record.pin);
+        }
+        for relocated in self.relocated.iter_mut() {
+            pending
+                .entry(relocated.pin.story.clone())
+                .or_default()
+                .push(&mut relocated.pin);
+        }
+        pending
+    }
+
+    /// Pins every unresolved position to `doc`, which seeding just filled, each distinct one
+    /// once, and indexes the records by story.
     pub(crate) fn pin(&mut self, doc: &EditingDoc) {
         let txn = doc.yrs_doc().transact();
         let mut pinned: HashMap<(String, u32), Option<StickyIndex>> = HashMap::new();
@@ -200,6 +218,9 @@ impl Provenance {
                 .map(|relocated| &mut relocated.pin),
         );
         for pin in pins {
+            if pin.position.is_some() {
+                continue;
+            }
             pin.position = pinned
                 .entry((pin.story.clone(), pin.unit))
                 .or_insert_with(|| Pin::sticky(&txn, &pin.story, pin.unit))

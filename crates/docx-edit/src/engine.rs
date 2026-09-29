@@ -1247,8 +1247,10 @@ impl EngineSession {
         let observer_epoch = Rc::clone(&doc_epoch);
         let observer = doc
             .yrs_doc()
-            .observe_update_v1(move |_txn, _event| {
-                observer_epoch.set(observer_epoch.get().wrapping_add(1));
+            .observe_after_transaction(move |txn| {
+                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                    observer_epoch.set(observer_epoch.get().wrapping_add(1));
+                }
             })
             .expect("EngineSession document update observer registers");
         Self {
