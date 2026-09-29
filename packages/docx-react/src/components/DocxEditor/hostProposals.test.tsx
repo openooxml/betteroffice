@@ -164,3 +164,65 @@ test('allowHostProposals admits only the proposal methods in a read-only editor'
   });
   expect(sidebar).not.toContain(true);
 });
+
+test("proposals' tracked changes do not open the comments sidebar; the user's still do", async () => {
+  const sidebar: boolean[] = [];
+  const ref = createRef<DocxEditorRef>();
+  const bytes = readFileSync(FIXTURE);
+  const buffer = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength
+  ) as ArrayBuffer;
+  render(
+    <DocxEditor
+      ref={ref}
+      documentBuffer={buffer}
+      onCommentsSidebarOpenChange={(open) => sidebar.push(open)}
+    />
+  );
+  await until(() => ref.current?.commands.getState('save').enabled === true);
+  const session = ref.current!.getEditorRef()!.getYrsSession()!;
+  const paragraphs = session.paragraphs('body').filter((candidate) => candidate.text.length >= 3);
+  const [first, second] = paragraphs;
+  const suggest = { author: 'Atira', date: '2026-09-29T00:00:00Z' };
+  const sessionId = session.paragraphIdentities().sessionId;
+  const proposed = await act(() =>
+    ref.current!.proposeChanges({
+      expectVersion: session.version(),
+      proposals: [first!, second!].map((paragraph, index) => ({
+        id: `p${index}`,
+        paragraph: { kind: 'session', sessionId, story: 'body', paraId: paragraph.paraId },
+        suggest,
+        op: 'insertText',
+        at: 'end',
+        text: ` proposal ${index}`,
+      })),
+    })
+  );
+  if (!proposed.ok) throw new Error(proposed.failure.message);
+  const [kept, accepted] = proposed.snapshot.proposals;
+  await act(async () => {
+    await ref.current!.commands.execute('reviewAccept', { revisionId: accepted!.revisionIds[0]! });
+  });
+  expect(sidebar).not.toContain(true);
+
+  const typed = await act(() =>
+    ref.current!.applyEdits({
+      expectVersion: session.version(),
+      steps: [
+        {
+          op: 'insertText',
+          target: { kind: 'paragraph', story: 'body', paraId: first!.paraId },
+          at: 'start',
+          text: 'User ',
+          suggest: { author: 'User', date: '2026-09-29T00:00:00Z' },
+        },
+      ],
+    })
+  );
+  expect(typed).toMatchObject({ ok: true, applied: true });
+  await act(async () => {
+    await ref.current!.commands.execute('reviewAccept', { revisionId: kept!.revisionIds[0]! });
+  });
+  expect(sidebar).toContain(true);
+});

@@ -131,7 +131,6 @@ function Harness({ session, layout, overrides, pagedRef, docxRef, display }: Har
     commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef: { current: 'editing' },
     allowHostProposalsRef: { current: false },
-    sidebarAutoOpenedRef: { current: false },
   });
   // Position callbacks are rebuilt on every render, as the editor's are after each new frame,
   // so every render also rebuilds the input's imperative handle.

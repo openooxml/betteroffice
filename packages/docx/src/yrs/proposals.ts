@@ -141,7 +141,8 @@ function proposalKey(input: DocxProposalInput): string {
           op: input.op,
           search: input.search,
           replaceWith: input.replaceWith,
-          occurrence: input.occurrence ?? 'first',
+          occurrence:
+            input.occurrence === undefined || input.occurrence === 1 ? 'first' : input.occurrence,
         }
       : { op: input.op, at: input.at, text: input.text };
   return JSON.stringify(canonical({ paragraph: input.paragraph, ...edit }));
@@ -183,15 +184,18 @@ function nonOverlapping(matches: readonly DocxTextMatch[]): DocxTextMatch[] {
 }
 
 /**
- * The first pair of steps from different proposals whose ranges touch. The engine keeps them
- * apart but merges adjacent suggestions into one revision, which one decision could not split.
+ * The first pair of changing steps from different proposals whose ranges touch. The engine keeps
+ * them apart but merges adjacent suggestions into one revision, which one decision could not split.
  */
 function adjoining(
   steps: readonly DocxEditStep[],
-  owners: readonly number[]
+  owners: readonly number[],
+  inert: readonly boolean[]
 ): [number, number] | null {
   const spans = steps.flatMap((step, index) =>
-    step.op === 'replaceText' && step.target.kind === 'range' ? [{ index, range: step.target }] : []
+    step.op === 'replaceText' && step.target.kind === 'range' && !inert[index]
+      ? [{ index, range: step.target }]
+      : []
   );
   for (const left of spans) {
     for (const right of spans) {
@@ -216,6 +220,9 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
   const records = new Map<string, { record: DocxProposalRecord; key: string }>();
   const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
   let previewVersion = 0;
+  let generation = 0;
+  let notifying = false;
+  let renotify = false;
 
   const snapshot = (): DocxProposalSnapshot => ({
     version: session.version(),
@@ -227,15 +234,28 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     })),
   });
 
+  /** Delivers the latest snapshot; a change made by a listener restarts delivery with a newer one. */
   const notify = (): void => {
-    if (listeners.size === 0) return;
-    const current = snapshot();
-    for (const listener of [...listeners]) {
-      try {
-        listener(current);
-      } catch (error) {
-        console.error('[yrs] a proposal listener threw', error);
+    renotify = true;
+    if (notifying) return;
+    notifying = true;
+    try {
+      while (renotify) {
+        renotify = false;
+        if (listeners.size === 0) return;
+        const current = snapshot();
+        for (const listener of [...listeners]) {
+          try {
+            listener(current);
+          } catch (error) {
+            console.error('[yrs] a proposal listener threw', error);
+          }
+          if (renotify) break;
+        }
       }
+    } finally {
+      notifying = false;
+      renotify = false;
     }
   };
 
@@ -353,7 +373,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       occurrence === 'all'
         ? matches
         : matches.slice(occurrence === 'first' ? 0 : occurrence - 1).slice(0, 1);
-    if (found.truncated && (occurrence === 'all' || selected.length === 0)) {
+    if (found.truncated) {
       return failure(
         'limit-exceeded',
         `proposal ${input.id} matches more than ${SEARCH_LIMIT} times`
@@ -416,6 +436,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     }
     const steps: DocxEditStep[] = [];
     const owners: number[] = [];
+    const inert: boolean[] = [];
     const planned: Array<{ anchor: DocxSessionParagraphAnchor; first: number; count: number }> = [];
     for (const [index, { input }] of fresh.entries()) {
       const located = locate(input);
@@ -426,9 +447,10 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       for (const step of built.steps) {
         steps.push(step);
         owners.push(index);
+        inert.push(input.op === 'replaceText' && input.replaceWith === input.search);
       }
     }
-    const touching = adjoining(steps, owners);
+    const touching = adjoining(steps, owners, inert);
     if (touching) {
       const [earlier, later] = touching.map((step) => fresh[owners[step]!]!.input.id);
       return refuse({
@@ -437,11 +459,18 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
         proposalId: later,
       });
     }
+    const opened = generation;
     const result = session.applyEdits({
       expectVersion: request.expectVersion,
       history: 'none',
       steps,
     });
+    if (opened !== generation) {
+      return refuse({
+        code: 'stale-version',
+        message: 'another document was opened while the proposals applied',
+      });
+    }
     if (!result.ok) {
       const { stepIndex, conflictingStepIndex, ...failure } = result.failure;
       const owner = stepIndex === undefined ? undefined : fresh[owners[stepIndex]!]?.input.id;
@@ -560,6 +589,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       };
     },
     reset() {
+      generation += 1;
       if (records.size === 0) return;
       if ([...records.values()].some(({ record }) => record.state !== 'proposed'))
         previewVersion += 1;

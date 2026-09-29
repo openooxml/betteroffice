@@ -179,7 +179,6 @@ export function useDocxEditorRefApi({
   commands,
   modeRef,
   allowHostProposalsRef,
-  sidebarAutoOpenedRef,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -207,8 +206,6 @@ export function useDocxEditorRefApi({
   modeRef: React.RefObject<EditorMode>;
   /** Whether proposal methods run while the editor is read-only. */
   allowHostProposalsRef: React.RefObject<boolean>;
-  /** Latched once the comments sidebar has opened on its own. */
-  sidebarAutoOpenedRef: React.RefObject<boolean>;
 }) {
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
@@ -252,11 +249,9 @@ export function useDocxEditorRefApi({
       },
 
       proposeChanges: (request) =>
-        applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) => {
-          const result = session.proposeChanges(request);
-          if (result.ok) sidebarAutoOpenedRef.current = true;
-          return result;
-        }),
+        applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
+          session.proposeChanges(request)
+        ),
       setProposalStates: (request) =>
         applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
           session.setProposalStates(request)

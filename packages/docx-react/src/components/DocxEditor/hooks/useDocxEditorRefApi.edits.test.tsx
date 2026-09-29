@@ -89,7 +89,6 @@ async function setup(
   const pagedEditorRef = { current: editor as PagedEditorRef | null };
   const modeRef = { current: options.mode ?? ('editing' as EditorMode) };
   const allowHostProposalsRef = { current: options.allowHostProposals ?? false };
-  const sidebarAutoOpenedRef = { current: false };
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
@@ -119,7 +118,6 @@ async function setup(
       commands: UNAVAILABLE_DOCX_COMMANDS,
       modeRef,
       allowHostProposalsRef,
-      sidebarAutoOpenedRef,
     });
     return ref;
   });
@@ -135,7 +133,6 @@ async function setup(
     pagedEditorRef,
     modeRef,
     allowHostProposalsRef,
-    sidebarAutoOpenedRef,
     api,
     comments,
   };
@@ -329,7 +326,6 @@ test('host proposals refuse a read-only editor unless allowed, and never enable 
   const proposed = await allowed.api().proposeChanges(proposal(allowed.session));
   expect(proposed).toMatchObject({ ok: true, snapshot: { proposals: [{ id: 'p1', changed: true }] } });
   expect(allowed.events).toEqual(['flush', 'sync:true:body']);
-  expect(allowed.sidebarAutoOpenedRef.current).toBe(true);
   expect(bodyTexts(allowed.session, 'original')[1]).toBe('Tail');
   expect(bodyTexts(allowed.session)[1]).toBe('Head');
   expect(allowed.session.canUndo()).toBe(false);

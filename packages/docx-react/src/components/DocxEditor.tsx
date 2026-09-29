@@ -676,6 +676,17 @@ function displayRangeToYrsRange(
   };
 }
 
+/** Sidebar anchor keys of host proposals' revisions, which never open the sidebar themselves. */
+function proposalAnchorKeys(session: YrsSession | null): Set<string> {
+  const keys = new Set<string>();
+  for (const proposal of session?.getProposals().proposals ?? []) {
+    for (const revisionId of proposal.revisionIds) {
+      keys.add(`revision-${yrsIdToNumericId(revisionId)}`);
+    }
+  }
+  return keys;
+}
+
 function yrsStoryOffset(session: YrsSession, loc: YrsLoc): number {
   return session.locateParagraph(loc.story, loc.paraId).start + loc.offset;
 }
@@ -1576,7 +1587,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commands: commandController.store,
     modeRef: writeModeRef,
     allowHostProposalsRef,
-    sidebarAutoOpenedRef,
   });
 
   const initialSectionProperties = useMemo(
@@ -1905,8 +1915,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // cursor-driven open above doesn't fire. Latches via a ref so a later
   // manual close stays closed.
   useEffect(() => {
-    if (sidebarAutoOpenedRef.current) return;
-    if (commentSidebarItems.length === 0) return;
+    if (sidebarAutoOpenedRef.current || commentSidebarItems.length === 0) return;
+    const proposed = proposalAnchorKeys(pagedEditorRef.current?.getYrsSession() ?? null);
+    if (commentSidebarItems.every((item) => proposed.has(item.anchorKey ?? ''))) return;
     sidebarAutoOpenedRef.current = true;
     setShowCommentsSidebar(true);
   }, [commentSidebarItems]);

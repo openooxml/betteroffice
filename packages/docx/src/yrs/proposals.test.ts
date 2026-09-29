@@ -256,6 +256,16 @@ describe('YrsSession host proposals', () => {
     expect(state(session)).toEqual(unchanged);
     snapshotOf(propose(session, replace('one', '00000005', 'a', 'b', 200)));
     expect(texts(session, 'accepted')[5]!.endsWith('a b')).toBe(true);
+
+    const crowded = await open(fixture(paragraph('00000001', run('a'.repeat(10_001)))));
+    const untouched = state(crowded);
+    for (const occurrence of ['first', 1, 'all'] as const) {
+      expect(propose(crowded, replace('crowded', '00000001', 'a', 'b', occurrence))).toMatchObject({
+        ok: false,
+        failure: { code: 'limit-exceeded', proposalId: 'crowded' },
+      });
+    }
+    expect(state(crowded)).toEqual(untouched);
   });
 
   it('proposes into table cells through their persisted paragraph id', async () => {
@@ -374,6 +384,51 @@ describe('YrsSession host proposals', () => {
     const mixed = snapshotOf(propose(session, proposal, replace('p2', '00000006', 'Tail', 'End')));
     expect(mixed.proposals.map((record) => record.id)).toEqual(['p1', 'p2']);
     expect(events).toHaveLength(2);
+    expect(propose(session, replace('p1', '00000003', 'Keep', 'Hold', 1))).toMatchObject({
+      ok: true,
+    });
+    expect(events).toHaveLength(2);
+  });
+
+  it('refuses a round whose document is reopened while it applies', async () => {
+    const session = await open();
+    let reopened = false;
+    session.onUpdate(() => {
+      if (reopened) return;
+      reopened = true;
+      session.beginOpening('next');
+    });
+    expect(propose(session, replace('p1', '00000003', 'Keep', 'Hold'))).toMatchObject({
+      ok: false,
+      failure: { code: 'stale-version' },
+    });
+    expect(session.getProposals().proposals).toEqual([]);
+  });
+
+  it('delivers the newest snapshot last when a listener decides again', async () => {
+    const session = await open();
+    snapshotOf(
+      propose(
+        session,
+        replace('a', '00000003', 'Keep', 'Hold'),
+        replace('b', '00000006', 'Tail', 'End')
+      )
+    );
+    const first: number[] = [];
+    const second: number[] = [];
+    session.onProposalChange((snapshot) => {
+      first.push(snapshot.previewVersion);
+      if (snapshot.previewVersion === 1)
+        snapshotOf(decide(session, [{ id: 'b', state: 'rejected' }]));
+    });
+    session.onProposalChange((snapshot) => second.push(snapshot.previewVersion));
+    snapshotOf(decide(session, [{ id: 'a', state: 'accepted' }]));
+    expect(first).toEqual([1, 2]);
+    expect(second).toEqual([2]);
+    expect(session.getProposals().proposals.map((record) => record.state)).toEqual([
+      'accepted',
+      'rejected',
+    ]);
   });
 
   it('keeps the engine refusal for locked content', async () => {
@@ -406,6 +461,14 @@ describe('YrsSession host proposals', () => {
       expect.objectContaining({ id: 'empty', changed: false, revisionIds: [] }),
     ]);
     expect(session.listRevisions()).toEqual([]);
+    const beside = snapshotOf(
+      propose(
+        session,
+        replace('kept', '00000003', 'Keep ', 'Keep '),
+        replace('this', '00000003', 'this', 'that')
+      )
+    );
+    expect(beside.proposals.map((record) => record.changed)).toEqual([false, false, false, true]);
   });
 
   it('keeps proposal rounds out of undo history', async () => {
