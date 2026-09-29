@@ -173,6 +173,12 @@ export class EditSession {
      */
     build_display_list_json(input: string): string;
     /**
+     * Build the listed pages that are still unbuilt and return a FrameDelta
+     * v1 carrying them; `expected_frame_epoch` works as for
+     * [`Self::build_display_list_frame`].
+     */
+    build_display_pages_frame(pages: Uint32Array, expected_frame_epoch: number): Uint8Array;
+    /**
      * Whether [`EditSession::redo`] would reapply something.
      */
     can_redo(): boolean;
@@ -356,7 +362,7 @@ export class EditSession {
      * snapshot. `fonts` holds the font files back to back, `font_lengths` their byte lengths;
      * `request` is a region layout request whose font chains name fonts by their index. The
      * reply is `{"ok":true,"content"}` or `{"ok":false,"failure"}`; a rejected font or an
-     * unusable request throws. The module's shared measurement fonts are left untouched.
+     * unusable request throws. The session's measurement fonts are left untouched.
      */
     export_snapshot_with_private_fonts_json(fonts: Uint8Array, font_lengths: Uint32Array, request: string, options: string): string;
     /**
@@ -879,6 +885,12 @@ export class EditSession {
      */
     set_content_control_value_at(story: string, para_id: string, offset: number, value_json: string): void;
     /**
+     * Limit full display builds to pages `start..end` plus the pages already
+     * built; the others stay unbuilt placeholders carrying their geometry
+     * until [`Self::build_display_pages_frame`] builds them.
+     */
+    set_display_window(start: number, end: number): void;
+    /**
      * Sets or clears the hyperlink attribute over `[start, end)`.
      * `hyperlink_json` is `{"href", "tooltip"?, "rId"?}` or `null` to unlink.
      * The attribute is protected: ordinary formatting ops cannot write or
@@ -1372,6 +1384,7 @@ export interface InitOutput {
     readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_can_redo: (a: number) => number;
     readonly editsession_can_undo: (a: number) => number;
     readonly editsession_cell_selection: (a: number) => [number, number, number, number];
@@ -1473,6 +1486,7 @@ export interface InitOutput {
     readonly editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly editsession_set_display_window: (a: number, b: number, c: number) => void;
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_image_geometry_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
@@ -1510,6 +1524,7 @@ export interface InitOutput {
     readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
+    readonly clear_measure_fonts: () => void;
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1526,7 +1541,6 @@ export interface InitOutput {
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-    readonly clear_measure_fonts: () => void;
     readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
