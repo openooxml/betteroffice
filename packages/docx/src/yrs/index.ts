@@ -116,6 +116,12 @@ export {
 export interface YrsDocxHost {
   document: Document;
   referencedFonts: string[];
+  /**
+   * The `referencedFonts` a document seeded from its package names only for
+   * East Asian or complex-script text it does not contain, so no text is
+   * measured or drawn with them. Empty when its stories were not seeded.
+   */
+  unusedScriptFonts?: string[];
   embeddedFonts: Map<string, ArrayBuffer>;
   fontTableRelationshipsXml?: string;
 }
@@ -1410,10 +1416,18 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   ) {
     throw new TypeError('DOCX host referencedFonts must be a string array');
   }
+  const unusedScriptFonts = wire.unusedScriptFonts ?? [];
+  if (
+    !Array.isArray(unusedScriptFonts) ||
+    !unusedScriptFonts.every((name) => typeof name === 'string')
+  ) {
+    throw new TypeError('DOCX host unusedScriptFonts must be a string array');
+  }
   const result = decodeS9EnvelopeValue(wire.envelope, docxSourceBuffer(source));
   return {
     document: result.document,
     referencedFonts: wire.referencedFonts,
+    unusedScriptFonts,
     embeddedFonts: result.embeddedFonts,
     ...(result.fontTableRelationshipsXml === undefined
       ? {}

@@ -4,6 +4,7 @@ import type { Comment } from '@betteroffice/docx/types/content';
 import type { YrsDocxHost } from '@betteroffice/docx/yrs';
 import {
   extractEmbeddedFontFaces,
+  extractFontsFromDocument,
   loadEmbeddedFontFamilies,
   registerDocumentFaces,
   getRenderableDocumentFonts,
@@ -159,11 +160,14 @@ export function useDocumentLoader({
         ),
         () => loadGeneration.isCurrent(generation),
         setFontAliases,
-        () =>
-          Promise.all([
-            fontScope.loadFontsWithMapping(host.referencedFonts),
-            fontScope.loadDocumentFonts(doc),
-          ])
+        () => {
+          const unused = new Set(host.unusedScriptFonts?.map(fontKey));
+          const used = (family: string) => !unused.has(fontKey(family));
+          return Promise.all([
+            fontScope.loadFontsWithMapping(host.referencedFonts.filter(used)),
+            fontScope.loadFontsWithMapping([...extractFontsFromDocument(doc)].filter(used)),
+          ]);
+        }
       );
     },
     [loadGeneration, history, setDocumentFonts, setLoadingState, fontScope]
@@ -257,6 +261,8 @@ export function useDocumentLoader({
 }
 
 const NO_FONT_ALIASES: ReadonlyMap<string, string> = new Map();
+
+const fontKey = (family: string): string => family.trim().toLowerCase();
 
 /**
  * Takes the aliases of a document's embedded faces once they registered, and

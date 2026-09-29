@@ -1203,6 +1203,8 @@ struct UpdateEventObserver {
 struct DocxHostWire {
     envelope: docx_parse::S9WireEnvelope,
     referenced_fonts: Vec<String>,
+    /// Empty unless the stories were seeded from the whole package.
+    unused_script_fonts: Vec<String>,
 }
 
 fn thin_header_footer(
@@ -1321,7 +1323,7 @@ impl EditSession {
         let (envelope, parts) = crate::seed::parse_docx_package_with_digest(bytes, digest.clone())
             .map_err(|error| error.to_string())?;
         let host_envelope = thin_docx_envelope(&envelope);
-        let referenced_fonts = if seed_stories {
+        let fonts = if seed_stories {
             let fonts = crate::seed::seed_parsed_docx(
                 self.engine.doc(),
                 envelope,
@@ -1344,11 +1346,15 @@ impl EditSession {
                 .doc()
                 .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
             drop(envelope);
-            fonts
+            crate::seed::SeededFonts {
+                referenced: fonts,
+                unused_script: Vec::new(),
+            }
         };
         let host = DocxHostWire {
             envelope: host_envelope,
-            referenced_fonts,
+            referenced_fonts: fonts.referenced,
+            unused_script_fonts: fonts.unused_script,
         };
         let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
@@ -1374,6 +1380,7 @@ impl EditSession {
         serde_json::to_string(&DocxHostWire {
             envelope: host_envelope,
             referenced_fonts,
+            unused_script_fonts: Vec::new(),
         })
         .map(Some)
         .map_err(|error| error.to_string())
@@ -2170,7 +2177,9 @@ impl EditSession {
     /// Seeding starts a new opening, with `generation` or a fresh one, so its
     /// session anchors are its own; see [`EditingDoc::begin_opening`].
     ///
-    /// Returns `{"envelope","referencedFonts":[string, …]}`. The envelope is
+    /// Returns `{"envelope","referencedFonts":[string, …],"unusedScriptFonts":[string, …]}`:
+    /// `unusedScriptFonts` are the referenced fonts a seeded package names only
+    /// for East Asian or complex-script text it does not contain. The envelope is
     /// the parsed package with the parts the host does not need stripped —
     /// body content, header/footer and note content, numbering, media and
     /// charts are emptied, section entries keep only their properties — so
@@ -5158,6 +5167,57 @@ mod tests {
             ("word/document.xml".to_owned(), document.into_bytes()),
         ])
         .unwrap()
+    }
+
+    fn script_fonts_docx(text: &str) -> Vec<u8> {
+        const MAIN: &str =
+            r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
+        let document = format!(
+            r#"<w:document {MAIN}><w:body><w:p><w:r><w:t>Latin text</w:t></w:r></w:p><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let styles = format!(
+            r#"<w:styles {MAIN}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="SimSun" w:cs="Times New Roman"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+        );
+        let fonts = format!(
+            r#"<w:fonts {MAIN}><w:font w:name="Calibri"><w:charset w:val="00"/></w:font><w:font w:name="SimSun"><w:altName w:val="宋体"/><w:charset w:val="86"/></w:font><w:font w:name="Batang"><w:charset w:val="81"/></w:font></w:fonts>"#
+        );
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+            ("word/styles.xml".to_owned(), styles.into_bytes()),
+            ("word/fontTable.xml".to_owned(), fonts.into_bytes()),
+        ])
+        .unwrap()
+    }
+
+    fn unused_script_fonts(text: &str, seed_stories: bool) -> Value {
+        let session = EditSession::new(78.0).unwrap();
+        let host: Value = serde_json::from_str(
+            &session
+                .open_docx(&script_fonts_docx(text), seed_stories, None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        host["unusedScriptFonts"].clone()
+    }
+
+    #[test]
+    fn an_opened_document_names_the_script_fonts_its_text_does_not_use() {
+        assert_eq!(
+            unused_script_fonts("More Latin", true),
+            json!(["Batang", "SimSun", "Times New Roman", "宋体"])
+        );
+        assert_eq!(
+            unused_script_fonts("漢字", true),
+            json!(["Times New Roman"])
+        );
+        assert_eq!(
+            unused_script_fonts("مرحبا", true),
+            json!(["Batang", "SimSun", "宋体"])
+        );
+        assert_eq!(unused_script_fonts("More Latin", false), json!([]));
     }
 
     #[test]
