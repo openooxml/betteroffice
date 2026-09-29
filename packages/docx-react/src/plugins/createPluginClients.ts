@@ -96,7 +96,7 @@ export function resolveParagraph(
 ): { loc: YrsLoc; position: number } | DocxPluginNavigationFailureCode {
   const { story, paraId } = target ?? {};
   if (typeof story !== 'string' || typeof paraId !== 'string') return 'missing-target';
-  if (!session.storyIds().includes(story)) return 'missing-target';
+  if (!session.hasStory(story)) return 'missing-target';
   const matches = session.paragraphs(story).filter((paragraph) => paragraph.paraId === paraId);
   if (matches.length === 0) return 'missing-target';
   if (matches.length > 1) return 'ambiguous-target';

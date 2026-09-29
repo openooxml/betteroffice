@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useInsertionEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -11,6 +12,8 @@ import {
 } from 'react';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
+  bindDisplayPageRegistry,
+  DisplayPageRegistry,
   presentDisplayPageBackBuffer,
   rasterizeDisplayPageToBackBuffer,
   GlyphCache,
@@ -207,10 +210,25 @@ export function CanvasPagesView({
   onWorkerPresentationChange?: (active: boolean) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
-  const registerCanvas = useCallback((pageKey: string, el: HTMLCanvasElement | null) => {
-    if (el) canvasesRef.current.set(pageKey, el);
-    else canvasesRef.current.delete(pageKey);
-  }, []);
+  // Page lookups (pointer, overlays, caret) read this instead of searching
+  // the host, which also holds every page's accessibility mirror.
+  const [pageRegistry] = useState(() => new DisplayPageRegistry());
+  const registerCanvas = useCallback(
+    (pageKey: string, el: HTMLCanvasElement | null) => {
+      const previous = canvasesRef.current.get(pageKey);
+      if (previous && previous !== el) pageRegistry.delete(previous);
+      if (el) {
+        canvasesRef.current.set(pageKey, el);
+        pageRegistry.add(el);
+      } else {
+        canvasesRef.current.delete(pageKey);
+      }
+    },
+    [pageRegistry]
+  );
+  // Runs after this render's page DOM is in place and before any layout effect
+  // reads it: memoized pages can move or renumber without their refs rerunning.
+  useInsertionEffect(() => pageRegistry.invalidate());
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
   const [replayState] = useState(() => new CanvasReplayState());
   const offscreenSignatureRef = useRef('');
@@ -254,11 +272,15 @@ export function CanvasPagesView({
   const setHostRef = useMemo(
     () =>
       (element: HTMLDivElement | null): void => {
+        if (innerHostRef.current && innerHostRef.current !== element) {
+          bindDisplayPageRegistry(innerHostRef.current, null);
+        }
         innerHostRef.current = element;
+        if (element) bindDisplayPageRegistry(element, pageRegistry);
         if (typeof hostRef === 'function') hostRef(element);
         else if (hostRef) (hostRef as { current: HTMLDivElement | null }).current = element;
       },
-    [hostRef]
+    [hostRef, pageRegistry]
   );
   const pageWindowAllowed = useMemo(() => {
     if (typeof window === 'undefined') return false;

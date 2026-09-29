@@ -49,7 +49,8 @@ async function seededSession(): Promise<YrsSession> {
 function inputFor(
   session: YrsSession,
   input: React.Ref<YrsInputRef>,
-  applyResidentInput?: YrsInputProps['applyResidentInput']
+  applyResidentInput?: YrsInputProps['applyResidentInput'],
+  applyResidentDelete?: YrsInputProps['applyResidentDelete']
 ) {
   const map = () =>
     createYrsInputPositionMap(
@@ -71,14 +72,18 @@ function inputFor(
       onStateChange={() => {}}
       onDirectInput={() => {}}
       applyResidentInput={applyResidentInput}
+      applyResidentDelete={applyResidentDelete}
     />
   );
 }
 
-async function mount(applyResidentInput?: YrsInputProps['applyResidentInput']) {
+async function mount(
+  applyResidentInput?: YrsInputProps['applyResidentInput'],
+  applyResidentDelete?: YrsInputProps['applyResidentDelete']
+) {
   const session = await seededSession();
   const input = createRef<YrsInputRef>();
-  const view = render(inputFor(session, input, applyResidentInput));
+  const view = render(inputFor(session, input, applyResidentInput, applyResidentDelete));
   return { session, input, view };
 }
 
@@ -211,6 +216,56 @@ test('a command seals the text batch so input on either side stays separate', as
     await input.current!.flushPendingInput();
   });
   expect(calls).toEqual(['x', 'format', 'y']);
+});
+
+test('a key queued behind resident typing seals the text batch', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { session, input, view } = await mount(async () => {
+    await blocked;
+    return null;
+  });
+  const textarea = view.getByTestId('yrs-input');
+  act(() => input.current!.insertText('A'));
+  act(() => input.current!.insertText('B'));
+  fireEvent.keyDown(textarea, { key: 'Backspace' });
+  act(() => input.current!.insertText('C'));
+  fireEvent.keyDown(textarea, { key: 'ArrowLeft' });
+  act(() => input.current!.insertText('D'));
+  await act(async () => {
+    release();
+    await input.current!.flushPendingInput();
+  });
+  expect(text(session)).toBe('SeedADC');
+});
+
+test('deletes queued behind busy input reach the resident engine as one batch', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const deletes: string[] = [];
+  const { session, input, view } = await mount(
+    async () => {
+      await blocked;
+      return null;
+    },
+    async (direction, count) => {
+      deletes.push(`${direction}:${count}`);
+      return null;
+    }
+  );
+  const textarea = view.getByTestId('yrs-input');
+  act(() => input.current!.insertText('XYZ'));
+  for (let i = 0; i < 3; i += 1) fireEvent.keyDown(textarea, { key: 'Backspace' });
+  await act(async () => {
+    release();
+    await input.current!.flushPendingInput();
+  });
+  expect(deletes[0]).toBe('backward:3');
+  expect(text(session)).toBe('Seed');
 });
 
 test('repeated undo requests each run', async () => {

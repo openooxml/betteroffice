@@ -58,6 +58,8 @@ function yrsCore(): YrsCoreSession {
     locToDisplayPosition: () => null,
     documentFromYrs: () => null,
     publishDirectInput: () => {},
+    scheduleCompatibilityWarm: () => {},
+    cancelCompatibilityWarm: () => {},
   };
 }
 

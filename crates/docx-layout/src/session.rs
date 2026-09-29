@@ -26,8 +26,8 @@ use std::collections::VecDeque;
 
 use crate::display_list::{DisplayList, DisplayPage};
 use crate::hit::{
-    VerticalDirection, hit_test_regions, parse_region_scope, range_rects, range_rects_in_region,
-    vertical_move,
+    RegionScope, VerticalDirection, body_range_span, hit_test_regions, parse_region_scope,
+    range_rects_in_region, range_rects_on_pages, vertical_move,
 };
 
 /// Upper bound on concurrently-open handles. The facade keeps exactly one live,
@@ -35,10 +35,59 @@ use crate::hit::{
 /// evicted so the map stays bounded.
 pub const MAX_SESSIONS: usize = 8;
 
+/// What the store knows of a page's [`body_range_span`].
+#[derive(Clone, Copy)]
+enum BodySpan {
+    Unknown,
+    Exact(Option<(i64, i64)>),
+    /// Covers the span, which a position shift moved after it was read.
+    Widened(i64, i64),
+}
+
+/// A stored display list and the body spans its range queries have read, one
+/// per page.
+struct Stored {
+    list: DisplayList,
+    spans: RefCell<Vec<BodySpan>>,
+}
+
+impl Stored {
+    fn new(list: DisplayList) -> Self {
+        let spans = RefCell::new(vec![BodySpan::Unknown; list.pages.len()]);
+        Self { list, spans }
+    }
+
+    /// Body range rects over `[from, to)`, reading only the pages whose body
+    /// span it meets.
+    fn body_range_rects(&self, from: i64, to: i64) -> Vec<crate::hit::RangeRect> {
+        let (low, high) = (from.min(to), from.max(to));
+        if low == high {
+            return Vec::new();
+        }
+        let mut spans = self.spans.borrow_mut();
+        let mut pages = Vec::new();
+        for (index, page) in self.list.pages.iter().enumerate() {
+            let span = match spans[index] {
+                BodySpan::Exact(span) => span,
+                BodySpan::Widened(start, end) if end <= low || start >= high => None,
+                _ => {
+                    let span = body_range_span(page);
+                    spans[index] = BodySpan::Exact(span);
+                    span
+                }
+            };
+            if span.is_some_and(|(start, end)| start < high && end > low) {
+                pages.push(index);
+            }
+        }
+        range_rects_on_pages(&self.list, pages, from, to)
+    }
+}
+
 /// The handle registry: parsed display lists keyed by handle id, plus the
 /// insertion order used for oldest-first eviction.
 struct Sessions {
-    map: HashMap<u32, DisplayList>,
+    map: HashMap<u32, Stored>,
     /// handle ids in insertion order (front = oldest); the eviction queue
     order: VecDeque<u32>,
     /// monotonic id source; never hands out 0 (a reserved "no handle" sentinel)
@@ -69,13 +118,13 @@ impl Sessions {
                 None => break,
             }
         }
-        self.map.insert(id, dl);
+        self.map.insert(id, Stored::new(dl));
         self.order.push_back(id);
         id
     }
 
     fn get(&self, handle: u32) -> Option<&DisplayList> {
-        self.map.get(&handle)
+        self.map.get(&handle).map(|stored| &stored.list)
     }
 
     fn close(&mut self, handle: u32) {
@@ -139,11 +188,11 @@ pub fn update_display_list(handle: u32, update_json: &str) -> Result<(), String>
         .and_then(|update| {
             SESSIONS.with(|s| {
                 let mut sessions = s.borrow_mut();
-                let dl = sessions
+                let stored = sessions
                     .map
                     .get_mut(&handle)
                     .ok_or_else(|| format!("unknown display-list handle {handle}"))?;
-                apply_display_list_update(dl, update)
+                apply_display_list_update(&mut stored.list, stored.spans.get_mut(), update)
             })
         });
     // Any failure (including a malformed payload) closes the handle: the
@@ -287,6 +336,7 @@ fn shift_page_positions(
 
 fn apply_display_list_update(
     dl: &mut DisplayList,
+    spans: &mut Vec<BodySpan>,
     update: DisplayListUpdate,
 ) -> Result<(), String> {
     let slots = update
@@ -298,9 +348,20 @@ fn apply_display_list_update(
         return Err("update slots do not cover the page total exactly".to_owned());
     }
     let mut previous: Vec<Option<DisplayPage>> = dl.pages.drain(..).map(Some).collect();
+    let previous_spans = std::mem::take(spans);
+    let span_of = |index: usize| {
+        previous_spans
+            .get(index)
+            .copied()
+            .unwrap_or(BodySpan::Unknown)
+    };
     let mut next: Vec<Option<DisplayPage>> = Vec::new();
     next.resize_with(update.total, || None);
+    let mut next_spans = vec![BodySpan::Unknown; update.total];
     for (next_index, previous_index) in update.reuse {
+        if let Some(span) = next_spans.get_mut(next_index) {
+            *span = span_of(previous_index);
+        }
         let page = previous
             .get_mut(previous_index)
             .and_then(Option::take)
@@ -330,6 +391,9 @@ fn apply_display_list_update(
         for runs in &run_lists {
             shift_page_positions(&mut page, runs)?;
         }
+        if let Some(span) = next_spans.get_mut(next_index) {
+            *span = widened(span_of(previous_index), &run_lists);
+        }
         let slot = next
             .get_mut(next_index)
             .ok_or_else(|| format!("page target {next_index} out of range"))?;
@@ -344,7 +408,23 @@ fn apply_display_list_update(
         .map(|(index, page)| page.ok_or_else(|| format!("page {index} missing from update")))
         .collect::<Result<Vec<_>, _>>()?;
     dl.contract_version = update.contract_version;
+    *spans = next_spans;
     Ok(())
+}
+
+/// `span` after its page's positions moved by the shift runs' deltas.
+fn widened(span: BodySpan, run_lists: &[Vec<(usize, usize, u8, i64)>]) -> BodySpan {
+    let (mut start, mut end) = match span {
+        BodySpan::Unknown | BodySpan::Exact(None) => return span,
+        BodySpan::Exact(Some((start, end))) | BodySpan::Widened(start, end) => (start, end),
+    };
+    // Each run list moves a position by at most its extreme deltas.
+    for runs in run_lists {
+        let deltas = runs.iter().map(|run| run.3);
+        start = start.saturating_add(deltas.clone().min().unwrap_or(0).min(0));
+        end = end.saturating_add(deltas.max().unwrap_or(0).max(0));
+    }
+    BodySpan::Widened(start, end)
 }
 
 /// Region-aware hit test against a stored display list — the by-handle twin of
@@ -399,10 +479,12 @@ pub fn vertical_move_by_handle(
 pub fn range_rects_by_handle(handle: u32, from: i64, to: i64) -> Result<String, String> {
     SESSIONS.with(|s| {
         let sessions = s.borrow();
-        let dl = sessions
-            .get(handle)
+        let stored = sessions
+            .map
+            .get(&handle)
             .ok_or_else(|| format!("unknown display-list handle {handle}"))?;
-        serde_json::to_string(&range_rects(dl, from, to)).map_err(|e| format!("serialize: {e}"))
+        serde_json::to_string(&stored.body_range_rects(from, to))
+            .map_err(|e| format!("serialize: {e}"))
     })
 }
 
@@ -420,12 +502,15 @@ pub fn range_rects_region_by_handle(
 ) -> Result<String, String> {
     SESSIONS.with(|s| {
         let sessions = s.borrow();
-        let dl = sessions
-            .get(handle)
+        let stored = sessions
+            .map
+            .get(&handle)
             .ok_or_else(|| format!("unknown display-list handle {handle}"))?;
-        let scope = parse_region_scope(region, part_id)?;
-        serde_json::to_string(&range_rects_in_region(dl, scope, from, to))
-            .map_err(|e| format!("serialize: {e}"))
+        let rects = match parse_region_scope(region, part_id)? {
+            RegionScope::Body => stored.body_range_rects(from, to),
+            scope => range_rects_in_region(&stored.list, scope, from, to),
+        };
+        serde_json::to_string(&rects).map_err(|e| format!("serialize: {e}"))
     })
 }
 
@@ -622,6 +707,95 @@ mod tests {
         }
         close_display_list(handle);
         close_display_list(fresh);
+    }
+
+    #[test]
+    fn body_ranges_read_after_updates_match_a_fresh_open() {
+        drain();
+        let pages = |starts: &[i64], marker: Option<i64>| {
+            let text = |start: i64| {
+                format!(
+                    r##"{{"kind": "text", "text": "Hello", "x": 100, "baselineY": 200,
+                        "width": 50, "font": "400 16px Arial", "color": "#000000",
+                        "docStart": {start}, "docEnd": {end}}}"##,
+                    end = start + 5
+                )
+            };
+            let pages: Vec<String> = starts
+                .iter()
+                .enumerate()
+                .map(|(index, start)| {
+                    let mut primitives = vec![text(*start)];
+                    if index == 1
+                        && let Some(at) = marker
+                    {
+                        primitives.push(format!(
+                            r##"{{"kind": "text", "text": "", "x": 100, "baselineY": 240,
+                                "width": 0, "font": "400 16px Arial", "color": "#000000",
+                                "docStart": {at}, "docEnd": {at}}}"##
+                        ));
+                    }
+                    format!(
+                        r##"{{"pageIndex": {index}, "width": 816, "height": 1056,
+                            "primitives": [{}]}}"##,
+                        primitives.join(",")
+                    )
+                })
+                .collect();
+            format!(r##"{{"pages": [{}]}}"##, pages.join(","))
+        };
+        let every_range = |handle: u32, fresh: u32| {
+            for from in 0..40 {
+                for to in [from, from + 1, from + 3, from + 12] {
+                    assert_eq!(
+                        range_rects_by_handle(handle, from, to).unwrap(),
+                        range_rects_by_handle(fresh, from, to).unwrap(),
+                        "range ({from},{to})"
+                    );
+                }
+            }
+        };
+        let handle = open_display_list(&pages(&[1, 8, 16], Some(14))).expect("opens");
+        let fresh = open_display_list(&pages(&[1, 8, 16], Some(14))).expect("opens");
+        every_range(handle, fresh);
+
+        let update = serde_json::json!({
+            "total": 3,
+            "reuse": [[0, 0]],
+            "shift": [[1, 1, [[[0, 2, 3, -4]]]], [2, 2, [[[0, 1, 3, 9]]]]],
+        });
+        update_display_list(handle, &update.to_string()).expect("updates");
+        let shifted = open_display_list(&pages(&[1, 4, 25], Some(10))).expect("opens");
+        every_range(handle, shifted);
+
+        let replacement: serde_json::Value =
+            serde_json::from_str(&pages(&[2, 4, 25], None)).expect("list json");
+        let update = serde_json::json!({
+            "total": 3,
+            "reuse": [[1, 1], [2, 2]],
+            "replace": [[0, replacement["pages"][0]]],
+        });
+        update_display_list(handle, &update.to_string()).expect("updates");
+        let replaced = open_display_list(&pages(&[2, 4, 25], Some(10))).expect("opens");
+        every_range(handle, replaced);
+        for handle in [handle, fresh, shifted, replaced] {
+            close_display_list(handle);
+        }
+    }
+
+    #[test]
+    fn a_span_widened_to_the_position_limits_still_covers_its_page() {
+        drain();
+        let handle = open_display_list(SAMPLE).expect("opens");
+        range_rects_by_handle(handle, 1, 2).unwrap();
+        let update = serde_json::json!({
+            "total": 1,
+            "shift": [[0, 0, [[[0, 1, 3, i64::MIN]], [[0, 1, 3, -1]]]]],
+        });
+        update_display_list(handle, &update.to_string()).expect("updates");
+        let shifted = range_rects_by_handle(handle, i64::MIN, i64::MIN + 1).unwrap();
+        assert_ne!(shifted, "[]");
+        close_display_list(handle);
     }
 
     #[test]
