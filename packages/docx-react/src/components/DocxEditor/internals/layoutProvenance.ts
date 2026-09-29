@@ -22,10 +22,18 @@ export function readSessionVersion(
 }
 
 const presentedLists = new WeakMap<object, object>();
+const presentListeners = new Set<(displayList: object) => void>();
 
 /** Records that the canvas pages under `host` finished painting `displayList`. */
 export function markPresented(host: object, displayList: object): void {
   presentedLists.set(host, displayList);
+  for (const listener of [...presentListeners]) listener(displayList);
+}
+
+/** Calls `listener` with each display list whose pages finish painting. */
+export function onPresented(listener: (displayList: object) => void): () => void {
+  presentListeners.add(listener);
+  return () => presentListeners.delete(listener);
 }
 
 /** Forgets what `host` shows, while its canvas pages repaint for a new surface or zoom. */
