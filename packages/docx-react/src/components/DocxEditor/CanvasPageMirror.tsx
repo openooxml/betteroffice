@@ -36,6 +36,10 @@ export function CanvasPageMirror({
   defer?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  // Read when a build is scheduled: a change of scheduling alone keeps the
+  // built DOM (and any focus inside it) in place.
+  const deferRef = useRef(defer);
+  deferRef.current = defer;
   // Position-shift deltas mutate primitives in place — identity alone is stale.
   const builtForRef = useRef<{ page: DisplayPage; revision: number; t: TFunction } | null>(null);
   const { t } = useTranslation();
@@ -61,7 +65,7 @@ export function CanvasPageMirror({
       host.replaceChildren(mirror);
       builtForRef.current = { page, revision: displayPageRevision(page), t };
     };
-    if (!defer) {
+    if (!deferRef.current) {
       build();
       return;
     }
@@ -71,7 +75,7 @@ export function CanvasPageMirror({
     }
     const id = setTimeout(build, 150);
     return () => clearTimeout(id);
-  }, [page, t, defer, noteAnchorRevision]);
+  }, [page, t, noteAnchorRevision]);
 
   return (
     <div
