@@ -1,5 +1,7 @@
 //! Legacy VML image and watermark parsing.
 
+use std::sync::Arc;
+
 use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -168,7 +170,7 @@ pub enum Watermark {
         #[serde(rename = "contentType", skip_serializing_if = "Option::is_none")]
         content_type: Option<String>,
         #[serde(rename = "dataUrl", skip_serializing_if = "Option::is_none")]
-        data_url: Option<String>,
+        data_url: Option<Arc<str>>,
         scale: f64,
         washout: bool,
         #[serde(rename = "widthEmu", skip_serializing_if = "Option::is_none")]
@@ -518,7 +520,7 @@ pub fn extract_watermark(
 
 #[derive(Default)]
 struct ResolvedWatermarkImage {
-    data_url: Option<String>,
+    data_url: Option<Arc<str>>,
     media_path: Option<String>,
     content_type: Option<String>,
 }
@@ -554,11 +556,7 @@ fn resolve_watermark_image(
             .map(|(_, file)| file)
         {
             return ResolvedWatermarkImage {
-                data_url: Some(if file.data_url.is_empty() {
-                    file.base64.clone()
-                } else {
-                    file.data_url.clone()
-                }),
+                data_url: Some(Arc::clone(file.data_url())),
                 media_path: Some(file.path.clone()),
                 content_type: Some(file.mime_type.clone()),
             };

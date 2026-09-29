@@ -1,5 +1,7 @@
 //! DrawingML picture parsing and WordprocessingML anchor/wrap helpers.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::drawingml::{ShapeOutline, Transform2D, parse_outline, rot_to_degrees};
@@ -116,7 +118,7 @@ pub struct Image {
     #[serde(rename = "rId")]
     pub relationship_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub src: Option<String>,
+    pub src: Option<Arc<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

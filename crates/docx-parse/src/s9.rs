@@ -712,19 +712,19 @@ fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValu
     entries
         .iter()
         .map(|(key, file)| {
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(&file.base64)
-                .map_err(|error| ParseError::Canonical(error.to_string()))?;
             let mut values = vec![
                 ("path".to_owned(), CanonicalValue::String(file.path.clone())),
                 (
                     "mimeType".to_owned(),
                     CanonicalValue::String(file.mime_type.clone()),
                 ),
-                ("data".to_owned(), CanonicalValue::Binary(data)),
+                (
+                    "data".to_owned(),
+                    CanonicalValue::Binary(file.data().to_vec()),
+                ),
                 (
                     "dataUrl".to_owned(),
-                    CanonicalValue::String(file.data_url.clone()),
+                    CanonicalValue::String(file.data_url().to_string()),
                 ),
             ];
             if let Some(filename) = &file.filename {
