@@ -5,7 +5,12 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
-import { anchorFailure, resolveAnchorTarget } from './anchorGeometry';
+import {
+  anchorFailure,
+  hiddenRanges,
+  resolveAnchorTarget,
+  type RawAnchorRange,
+} from './anchorGeometry';
 import { currentPreviewKey, proposalSnapshot, renderedPreviewKey } from './proposalPreview';
 import type { DocxAnchorRect, DocxPluginGeometry, DocxPluginLayout, DocxPluginRect } from './types';
 
@@ -75,7 +80,26 @@ export interface AnchorGeometryAccess {
   presented: boolean;
 }
 
-const EDGE = 0.5;
+interface Interval {
+  from: number;
+  to: number;
+}
+
+/** `ranges` without the parts `holes` cover. */
+function subtract(ranges: readonly Interval[], holes: readonly Interval[]): Interval[] {
+  let pieces = [...ranges];
+  for (const hole of holes) {
+    pieces = pieces.flatMap((piece) =>
+      hole.to <= piece.from || hole.from >= piece.to
+        ? [piece]
+        : [
+            { from: piece.from, to: hole.from },
+            { from: hole.to, to: piece.to },
+          ].filter((part) => part.from < part.to)
+    );
+  }
+  return pieces;
+}
 
 function sameLine(a: DisplayListRect, b: DisplayListRect): boolean {
   return a.pageIndex === b.pageIndex && a.y < b.y + b.height && b.y < a.y + a.height;
@@ -119,23 +143,19 @@ export function createPluginGeometry(
   };
   const unavailable = () =>
     anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
-  /** The trailing edge of the unit before `to`, on the side its line of `rects` runs toward. */
-  const endEdge = (to: number, rects: readonly DisplayListRect[]): DisplayListRect | null => {
+  /** The trailing edge of the unit before `to`: its left edge when the caret stop there is `to`. */
+  const endEdge = (to: number): DisplayListRect | null => {
     const unit = queries
       .rangeRects(to - 1, to)
       .filter((rect) => rect.width > 0)
       .at(-1);
     if (!unit) return null;
-    const line = rects.find(
-      (rect) =>
-        sameLine(rect, unit) &&
-        rect.x <= unit.x + EDGE &&
-        unit.x + unit.width <= rect.x + rect.width + EDGE
+    const hit = queries.hitTestRegions(
+      unit.pageIndex,
+      unit.x + Math.min(1, unit.width / 4),
+      unit.y + unit.height / 2
     );
-    const rtl =
-      !!line &&
-      Math.abs(unit.x - line.x) <= EDGE &&
-      line.x + line.width - (unit.x + unit.width) > EDGE;
+    const rtl = hit?.region === 'body' && hit.pos === to;
     return { ...unit, x: rtl ? unit.x : unit.x + unit.width, width: 0 };
   };
   return {
@@ -163,26 +183,30 @@ export function createPluginGeometry(
         return unavailable();
       const resolved = resolveAnchorTarget(session, target, layout.version);
       if (!resolved.ok) return resolved;
-      const ranges: { from: number; to: number; hidden?: boolean }[] = [];
-      for (const range of resolved.ranges) {
+      const display = (range: RawAnchorRange): Interval | null => {
         const from = editor.yrsLocToDisplayPosition(range.start);
         const to = editor.yrsLocToDisplayPosition(range.end);
-        if (from === null || to === null) {
-          return anchorFailure('unsupported', 'The target has no body display position');
-        }
-        ranges.push({ from, to, hidden: range.hidden });
+        return from === null || to === null ? null : { from, to };
+      };
+      const ranges: Interval[] = [];
+      for (const range of resolved.ranges) {
+        const mapped = display(range);
+        if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+        ranges.push(mapped);
       }
       ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-      const union: { from: number; to: number }[] = [];
-      for (const range of ranges) {
-        if (range.hidden) continue;
+      const hidden = hiddenRanges(session)
+        .map(display)
+        .filter((range): range is Interval => range !== null);
+      const union: Interval[] = [];
+      for (const range of subtract(ranges, hidden)) {
         const previous = union.at(-1);
         if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
-        else union.push({ from: range.from, to: range.to });
+        else union.push({ ...range });
       }
       const rects: DocxAnchorRect[] = [];
       const drawn: DisplayListRect[] = [];
-      let tail: { to: number; rects: DisplayListRect[] } | null = null;
+      let tail: number | null = null;
       for (const { from, to } of union) {
         if (from >= to) continue;
         const visible = queries.rangeRects(from, to).filter((rect) => rect.width > 0);
@@ -192,9 +216,9 @@ export function createPluginGeometry(
           rects.push(projected);
           drawn.push(rect);
         }
-        if (visible.length > 0) tail = { to, rects: visible };
+        if (visible.length > 0) tail = to;
       }
-      const end = tail ? (endEdge(tail.to, tail.rects) ?? lastInReadingOrder(drawn)) : null;
+      const end = tail !== null ? (endEdge(tail) ?? lastInReadingOrder(drawn)) : null;
       let anchor = end ? project(end) : null;
       const lastRange = ranges.at(-1);
       if (!anchor && lastRange) {

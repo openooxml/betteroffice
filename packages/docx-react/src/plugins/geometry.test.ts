@@ -208,6 +208,7 @@ function semanticGeometry(zoom = 1) {
     },
     caretRect: () => ({ ...RANGE, x: 8, width: 1 }),
     anchorRect: () => ({ ...RANGE, x: 3, width: 5 }),
+    hitTestRegions: () => null,
     pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, ...PAGE }),
   } as unknown as DisplayListQueries;
   let snapshot: DocxProposalSnapshot = {
@@ -401,12 +402,20 @@ describe('semantic anchor geometry', () => {
     const target: DocxGeometryTarget = { kind: 'range', version: 'v1', range: TEXT_RANGE };
     const text = { ...RANGE, x: 30, width: 40 };
     const image = { ...RANGE, x: 10, width: 20 };
-    const probe = (unit: DisplayListRect[], line: DisplayListRect[]) => {
+    const probes: [number, number, number][] = [];
+    const probe = (unit: DisplayListRect[], line: DisplayListRect[], stop: number | null = 3) => {
       source.rangeRects = (from, to) => (to - from === 1 ? unit : line);
+      source.hitTestRegions = (pageIndex, x, y) => {
+        probes.push([pageIndex, x, y]);
+        return stop === null ? null : { region: 'body', pos: stop, target: 'text' };
+      };
       return anchored(geometry.getAnchorGeometry(target)).anchor;
     };
     expect(probe([{ ...text, x: 66, width: 4 }], [text, image])).toMatchObject({ x: 213 });
-    expect(probe([{ ...text, width: 4 }], [text])).toMatchObject({ x: 173 });
+    expect(probes.at(-1)).toEqual([0, 67, 40]);
+    expect(probe([{ ...text, width: 4 }], [text], 4)).toMatchObject({ x: 173 });
+    expect(probe([{ ...text, x: 66, width: 4 }], [text], 4)).toMatchObject({ x: 209 });
+    expect(probe([{ ...text, width: 4 }], [text], null)).toMatchObject({ x: 177 });
     expect(probe([], [text, { ...text, y: 70, x: 10, width: 25 }, image])).toMatchObject({
       x: 178,
       y: 164,
@@ -527,6 +536,46 @@ describe('semantic anchor geometry', () => {
     });
     expect(calls).toEqual([]);
     expect(carets).toEqual([0]);
+  });
+
+  test('hides the same text from range and search targets as from its revision', () => {
+    const { geometry, calls, setSnapshot, source } = semanticGeometry();
+    const carets: number[] = [];
+    source.caretRect = (position) => {
+      carets.push(position);
+      return { ...RANGE, x: 8, width: 0 };
+    };
+    const decide = (state: 'accepted' | 'rejected') =>
+      setSnapshot({
+        proposals: [
+          { id: 'proposal', paragraph: PARAGRAPH, state, changed: true, revisionIds: ['r1', 'r2'] },
+        ],
+      });
+    decide('accepted');
+    const deleted: DocxGeometryTarget = {
+      kind: 'range',
+      version: 'v1',
+      range: { ...TEXT_RANGE, end: { paraId: 'p', offset: 1 } },
+    };
+    for (const target of [deleted, { kind: 'revision', revisionId: 'r1' } as const]) {
+      expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+        rects: [],
+        anchor: { x: 151, width: 0 },
+      });
+    }
+    expect(calls).toEqual([]);
+    decide('rejected');
+    const inserted = anchored(
+      geometry.getAnchorGeometry({ kind: 'search', paragraph: PARAGRAPH, text: 'aa', occurrence: 2 })
+    );
+    expect(inserted.rects).toEqual([]);
+    expect(carets).toEqual([0, 0, 2]);
+    const partly = anchored(geometry.getAnchorGeometry({ kind: 'paragraph', paragraph: PARAGRAPH }));
+    expect(partly.rects).toHaveLength(1);
+    expect(calls).toEqual([
+      [0, 2],
+      [1, 2],
+    ]);
   });
 
   test('coalesces overlapping revision ranges', () => {

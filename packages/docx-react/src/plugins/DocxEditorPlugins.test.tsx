@@ -77,7 +77,12 @@ function documentBytes(): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-async function inlineImageDocument(): Promise<ArrayBuffer> {
+const DRAWING =
+  '<w:r><w:drawing><wp:inline><wp:extent cx="457200" cy="228600"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+
+async function inlineImageDocument(
+  body = `<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Before </w:t></w:r>${DRAWING}<w:r><w:t xml:space="preserve"> and the text after it</w:t></w:r></w:p>`
+): Promise<ArrayBuffer> {
   const zip = new JSZip();
   const office = 'application/vnd.openxmlformats-officedocument';
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -94,11 +99,9 @@ async function inlineImageDocument(): Promise<ArrayBuffer> {
     `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="${rel}/image" Target="media/image1.png"/></Relationships>`
   );
   zip.file('word/media/image1.png', new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
-  const drawing =
-    '<w:r><w:drawing><wp:inline><wp:extent cx="457200" cy="228600"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
   zip.file(
     'word/document.xml',
-    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Before </w:t></w:r>${drawing}<w:r><w:t xml:space="preserve"> and the text after it</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body}<w:sectPr/></w:body></w:document>`
   );
   return zip.generateAsync({ type: 'arraybuffer' });
 }
@@ -966,6 +969,61 @@ describe('DocxEditor plugins', () => {
     expect(result.rects.length).toBeGreaterThan(1);
     expect(ends.at(-1)).toBeLessThan(Math.max(...ends));
     expect(result.anchor.x).toBeCloseTo(Math.max(...ends));
+  });
+
+  test('an anchor ends where the text of its last unit ends, left in right-to-left runs', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.bidi-anchor',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const rtl = (text: string) => `<w:r><w:rPr><w:rtl/></w:rPr><w:t>${text}</w:t></w:r>`;
+    const ltr = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const body = [
+      `<w:p w14:paraId="00000001"><w:pPr><w:bidi/></w:pPr>${rtl('\u05D0\u05D1\u05D2')}</w:p>`,
+      `<w:p w14:paraId="00000002">${ltr('abc ')}${rtl('\u05D0\u05D1\u05D2')}${ltr(' def')}</w:p>`,
+    ].join('');
+    const { ref } = await mount({ plugins: [plugin] }, false, await inlineImageDocument(body));
+    await until(() => geometry !== null);
+    const read = await ref.current!.readParagraphs({ view: 'accepted' });
+    if (!read.ok) throw new Error(read.failure.message);
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === read.version);
+    const current = geometry! as DocxPluginGeometry;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+    }
+    const anchor = (paraId: string, start: number, end: number) => {
+      const result = current.getAnchorGeometry({
+        kind: 'range',
+        version: read.version,
+        range: {
+          story: 'body',
+          start: { paraId, offset: start },
+          end: { paraId, offset: end },
+          view: 'accepted',
+        },
+      });
+      if (!result.ok) throw new Error(result.failure.message);
+      return result;
+    };
+    const [hebrew, mixed] = read.paragraphs;
+    for (const [paragraph, start] of [
+      [hebrew!, 0],
+      [mixed!, 4],
+    ] as const) {
+      const last = anchor(paragraph.paraId, start + 2, start + 3);
+      expect(last.rects).toHaveLength(1);
+      expect(last.anchor.x).toBeCloseTo(last.rects[0]!.x);
+      const word = anchor(paragraph.paraId, start, start + 3);
+      expect(word.anchor.x).toBeCloseTo(Math.min(...word.rects.map((rect) => rect.x)));
+    }
+    const english = anchor(mixed!.paraId, 0, 3);
+    expect(english.anchor.x).toBeCloseTo(english.rects[0]!.x + english.rects[0]!.width);
   });
 
   test('public presenters and hooks bind contributed commands', async () => {

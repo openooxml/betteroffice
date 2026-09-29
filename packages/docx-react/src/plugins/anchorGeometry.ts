@@ -23,8 +23,6 @@ export type AnchorSession = Pick<
 export interface RawAnchorRange {
   start: YrsLoc;
   end: YrsLoc;
-  /** The proposal preview hides it, so it contributes only its boundary. */
-  hidden?: boolean;
 }
 
 type AnchorResolution = { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc } | AnchorFailure;
@@ -180,6 +178,24 @@ function resolveParagraph(
   return { ok: true, loc: { story, paraId, offset: 0 }, length: spans[0]!.length };
 }
 
+/** The revisions the proposal preview hides: accepted deletions and rejected insertions. */
+export function hiddenRanges(session: AnchorSession): RawAnchorRange[] {
+  const snapshot = proposalSnapshot(session);
+  const preview = snapshot ? revisionPreview(snapshot) : undefined;
+  if (!preview) return [];
+  return session
+    .listRevisions()
+    .filter(
+      ({ revisionId, kind }) =>
+        (kind === 'deletion' && preview[revisionId] === 'accepted') ||
+        (kind === 'insertion' && preview[revisionId] === 'rejected')
+    )
+    .map(({ story, range }) => ({
+      start: { story, ...range.start },
+      end: { story, ...range.end },
+    }));
+}
+
 export function resolveAnchorTarget(
   session: AnchorSession,
   target: DocxGeometryTarget,
@@ -206,10 +222,9 @@ export function resolveAnchorTarget(
   }
 
   if (target.kind === 'proposal' || target.kind === 'revision') {
-    const snapshot = proposalSnapshot(session);
     const proposal =
       target.kind === 'proposal'
-        ? snapshot?.proposals.find((record) => record.id === target.id)
+        ? proposalSnapshot(session)?.proposals.find((record) => record.id === target.id)
         : null;
     if (target.kind === 'proposal' && !proposal) {
       return anchorFailure('unknown-proposal', 'The proposal is not registered in this document');
@@ -224,13 +239,9 @@ export function resolveAnchorTarget(
     if (target.kind === 'revision' && !revisions.length) {
       return anchorFailure('missing-target', 'The revision no longer exists');
     }
-    const preview = snapshot ? revisionPreview(snapshot) : undefined;
-    const ranges = revisions.map(({ revisionId, kind, story, range }) => ({
+    const ranges = revisions.map(({ story, range }) => ({
       start: { story, ...range.start },
       end: { story, ...range.end },
-      hidden:
-        (kind === 'deletion' && preview?.[revisionId] === 'accepted') ||
-        (kind === 'insertion' && preview?.[revisionId] === 'rejected'),
     }));
     if (ranges.some((range) => !isBodyStory(range.start.story))) {
       return anchorFailure('unsupported', 'The revision has no body display position');

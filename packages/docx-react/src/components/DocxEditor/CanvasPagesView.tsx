@@ -232,6 +232,7 @@ export function CanvasPagesView({
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
   const [replayState] = useState(() => new CanvasReplayState());
   const offscreenSignatureRef = useRef('');
+  const surfaceRef = useRef('');
   const replayGenerationRef = useRef(0);
   const [offscreenFailed, setOffscreenFailed] = useState(false);
   const offscreenFailedRef = useRef(false);
@@ -499,6 +500,11 @@ export function CanvasPagesView({
         if (offscreenAttachedRef.current) publishWorkerPresentation(true);
       }
       return;
+    }
+    const surface = `${dpr}|${zoom}`;
+    if (surface !== surfaceRef.current) {
+      surfaceRef.current = surface;
+      if (innerHostRef.current) clearPresented(innerHostRef.current);
     }
     const glyphCache = glyphCacheRef.current ?? undefined;
     replayState.updateFrame(frame);
