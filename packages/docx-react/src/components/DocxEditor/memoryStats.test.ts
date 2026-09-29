@@ -60,7 +60,7 @@ test('pressure is reported on level changes only, and never while memory stays l
   const workerMemory = () => worker;
   const hook = renderHook(
     ({ tick }: { tick: number }) =>
-      useMemoryPressure((pressure) => reports.push(pressure), undefined, workerMemory, tick),
+      useMemoryPressure((pressure) => reports.push(pressure), undefined, workerMemory, [tick]),
     { initialProps: { tick: 0 } }
   );
   hook.rerender({ tick: 1 });
@@ -84,9 +84,25 @@ test('a callback supplied after mount hears the current level', () => {
   const workerMemory = () => [edit(3.8 * GIB)];
   const hook = renderHook(
     ({ report }: { report?: (pressure: DocxMemoryPressure) => void }) =>
-      useMemoryPressure(report, undefined, workerMemory, 0),
+      useMemoryPressure(report, undefined, workerMemory, [0]),
     { initialProps: {} as { report?: (pressure: DocxMemoryPressure) => void } }
   );
   hook.rerender({ report: (pressure) => reports.push(pressure) });
   expect(reports.map((report) => report.level)).toEqual(['critical']);
+});
+
+test('a worker that goes away without a new frame is heard', () => {
+  const reports: DocxMemoryPressure[] = [];
+  let worker: WasmModuleMemory[] | null = [edit(3.8 * GIB)];
+  const hook = renderHook(
+    ({ failure }: { failure: Error | null }) =>
+      useMemoryPressure((pressure) => reports.push(pressure), undefined, () => worker, [
+        'same frame',
+        failure,
+      ]),
+    { initialProps: { failure: null as Error | null } }
+  );
+  worker = null;
+  hook.rerender({ failure: new Error('out of memory') });
+  expect(reports.map((report) => report.level)).toEqual(['critical', 'normal']);
 });

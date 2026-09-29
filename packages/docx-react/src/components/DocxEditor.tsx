@@ -897,7 +897,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
   }, [canvasRenderer.error, onError]);
-  useMemoryPressure(onMemoryPressure, memoryBudget, canvasRenderer.workerMemory, canvasRenderer.frame);
+  useMemoryPressure(onMemoryPressure, memoryBudget, canvasRenderer.workerMemory, [
+    canvasRenderer.frame,
+    canvasRenderer.error,
+  ]);
 
   const [yrsTrackedChangesResult, setYrsTrackedChangesResult] = useState<TrackedChangesResult>(
     () => ({

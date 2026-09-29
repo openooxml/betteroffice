@@ -71,14 +71,14 @@ export function memoryPressureLevel(
 }
 
 /**
- * Calls `onPressure` when the pressure level changes, checked whenever `tick`
- * changes. Nothing is reported while the level stays `normal`.
+ * Calls `onPressure` when the pressure level changes, checked whenever one of
+ * `ticks` changes. Nothing is reported while the level stays `normal`.
  */
 export function useMemoryPressure(
   onPressure: ((pressure: DocxMemoryPressure) => void) | undefined,
   budget: DocxMemoryBudget | undefined,
   workerMemory: () => WasmModuleMemory[] | null,
-  tick: unknown
+  ticks: readonly unknown[]
 ): void {
   const levelRef = useRef<DocxMemoryPressureLevel>('normal');
   const onPressureRef = useRef(onPressure);
@@ -94,5 +94,5 @@ export function useMemoryPressure(
     if (level === levelRef.current) return;
     levelRef.current = level;
     report({ level, stats });
-  }, [tick, workerMemory, warningBytes, criticalBytes, reporting]);
+  }, [workerMemory, warningBytes, criticalBytes, reporting, ...ticks]);
 }
