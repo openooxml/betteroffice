@@ -148,6 +148,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
     <div
       className="canvas-page"
       data-page-index={page.pageIndex}
+      data-page-key={pageKey}
       style={{ position: 'relative', width: page.width * zoom, height: page.height * zoom }}
     >
       <canvas
@@ -362,21 +363,20 @@ export function CanvasPagesView({
       ? !windowingEnabled || index < PAGE_WINDOW_MIN_PAGES
       : pageInWindow(index);
   // The page holding focus (an SDT widget, or assistive-technology focus in
-  // its mirror) keeps its chrome when it leaves the window.
-  const [focusedPage, setFocusedPage] = useState<number | null>(null);
+  // its mirror) keeps its chrome when it leaves the window. Pages are pinned
+  // by their surface key, which renumbering keeps.
+  const [focusedPageKey, setFocusedPageKey] = useState<string | null>(null);
   useEffect(() => {
     const host = innerHostRef.current;
     if (!host) return;
-    const pageOf = (target: EventTarget | null): number | null => {
-      const surface =
-        target instanceof Element ? target.closest<HTMLElement>('.canvas-page') : null;
-      const index = surface ? Number(surface.dataset.pageIndex) : NaN;
-      return Number.isInteger(index) ? index : null;
-    };
-    const onFocusIn = (event: FocusEvent) => setFocusedPage(pageOf(event.target));
+    const pageKeyOf = (target: EventTarget | null): string | null =>
+      (target instanceof Element
+        ? target.closest<HTMLElement>('.canvas-page')?.dataset.pageKey
+        : undefined) ?? null;
+    const onFocusIn = (event: FocusEvent) => setFocusedPageKey(pageKeyOf(event.target));
     const onFocusOut = (event: FocusEvent) => {
       if (!(event.relatedTarget instanceof Node) || !host.contains(event.relatedTarget)) {
-        setFocusedPage(null);
+        setFocusedPageKey(null);
       }
     };
     host.addEventListener('focusin', onFocusIn);
@@ -386,6 +386,13 @@ export function CanvasPagesView({
       host.removeEventListener('focusout', onFocusOut);
     };
   }, []);
+  // Focus removed along with its element fires no focusout.
+  useEffect(() => {
+    const host = innerHostRef.current;
+    if (focusedPageKey !== null && !host?.contains(document.activeElement)) {
+      setFocusedPageKey(null);
+    }
+  });
 
   // One glyph-outline cache for the canvas lifetime (task contract: not
   // per-render). The wasm-backed outline provider loads lazily through the
@@ -621,7 +628,7 @@ export function CanvasPagesView({
               pageKey={pageKey}
               zoom={zoom}
               interactive={interactive}
-              chrome={chromeInWindow(i) || i === focusedPage}
+              chrome={chromeInWindow(i) || pageKey === focusedPageKey}
               deferChrome={windowingEnabled}
               registerCanvas={registerCanvas}
             />
