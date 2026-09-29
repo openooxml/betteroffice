@@ -371,7 +371,7 @@ pub fn layout_document_incremental(
         .filter(|checkpoint| checkpoint.page_index < resume.page_index)
         .cloned()
         .collect();
-    let mut paginator = Paginator::resume(
+    let mut paginator = Paginator::resume_in_section(
         &resume.flow,
         resume.page_number,
         resume.section_index,

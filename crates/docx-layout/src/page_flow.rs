@@ -171,6 +171,15 @@ impl Paginator {
     pub fn resume(
         geometry: &PageFlowGeometry,
         start_page_number: u32,
+        footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
+    ) -> Result<Self, LayoutError> {
+        Self::resume_in_section(geometry, start_page_number, 0, footnote_reserved_heights)
+    }
+
+    /// [`Paginator::resume`] with section `section_index` already in force.
+    pub fn resume_in_section(
+        geometry: &PageFlowGeometry,
+        start_page_number: u32,
         section_index: usize,
         footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
     ) -> Result<Self, LayoutError> {
