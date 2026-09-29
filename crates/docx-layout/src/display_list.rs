@@ -10583,18 +10583,18 @@ pub fn build_resident_display_list_partial_with_fonts_observed(
     build: &dyn Fn(usize) -> bool,
     observe_phase: &mut impl FnMut(),
 ) -> Result<(ResidentDisplayInput, DisplayList), String> {
-    let input = resident_build_input(pagination, layout, extras)?;
-    observe_phase();
-    let selected: HashSet<usize> = (0..input.layout.pages.len())
+    let selected: HashSet<usize> = (0..layout.pages.len())
         .filter(|&index| build(index))
         .collect();
+    let input = resident_build_input_for(pagination, layout, extras, Some(&selected))?;
+    observe_phase();
     let built = build_display_list_selected(&input, fonts, Some(&selected));
     let mut built_pages: HashMap<usize, DisplayPage> = built
         .pages
         .into_iter()
         .map(|page| (page.page_index as usize, page))
         .collect();
-    let blocks = measured_blocks_by_key(&input);
+    let blocks = source_blocks_by_key(pagination);
     let pages = input
         .layout
         .pages
@@ -10656,28 +10656,13 @@ pub fn build_resident_display_pages_with_fonts(
     Ok(wanted)
 }
 
-fn measured_blocks_by_key(input: &BuildInput) -> HashMap<String, &MeasuredBlockIn> {
-    let mut blocks = HashMap::new();
-    for measured in &input.measured {
-        let key = match &measured.block {
-            BlockIn::Paragraph(block) => block_key(&block.id),
-            BlockIn::Table(block) => block_key(&block.id),
-            BlockIn::Image(block) => block_key(&block.id),
-            BlockIn::TextBox(block) => block_key(&block.id),
-            BlockIn::Shape(block) => block_key(&block.id),
-            BlockIn::Chart(block) => block_key(&block.id),
-            BlockIn::Unsupported => continue,
-        };
-        blocks.entry(key).or_insert(measured);
-    }
-    blocks
-}
-
-/// The lowest and highest body position `page`'s fragments place.
+/// The lowest and highest body position `page`'s fragments place; table
+/// fragments read their rows from the pagination's own blocks.
 fn page_position_span(
     page: &PageIn,
-    blocks: &HashMap<String, &MeasuredBlockIn>,
+    blocks: &HashMap<String, &crate::types::MeasuredBlock>,
 ) -> Option<[i64; 2]> {
+    use crate::types::LayoutBlock;
     let mut span: Option<[i64; 2]> = None;
     let mut include = |start: Option<i64>, end: Option<i64>| {
         for value in [start, end].into_iter().flatten() {
@@ -10686,15 +10671,22 @@ fn page_position_span(
             }));
         }
     };
-    fn block(block: &BlockIn, include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
+    fn position(value: Option<f64>) -> Option<i64> {
+        value
+            .filter(|value| value.is_finite() && value.fract() == 0.0)
+            .map(|value| value as i64)
+    }
+    fn block(block: &LayoutBlock, include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
         match block {
-            BlockIn::Paragraph(paragraph) => include(paragraph.pm_start, paragraph.pm_end),
-            BlockIn::Image(image) => include(image.pm_start, image.pm_end),
-            BlockIn::Table(table) => rows(&table.rows, include),
+            LayoutBlock::Paragraph(paragraph) => {
+                include(position(paragraph.pm_start), position(paragraph.pm_end))
+            }
+            LayoutBlock::Image(image) => include(position(image.pm_start), position(image.pm_end)),
+            LayoutBlock::Table(table) => rows(&table.rows, include),
             _ => {}
         }
     }
-    fn rows(rows: &[TableRowIn], include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
+    fn rows(rows: &[crate::types::TableRow], include: &mut dyn FnMut(Option<i64>, Option<i64>)) {
         for row in rows {
             for cell in &row.cells {
                 for nested in &cell.blocks {
@@ -10712,7 +10704,7 @@ fn page_position_span(
             FragmentIn::Chart(fragment) => include(fragment.pm_start, fragment.pm_end),
             FragmentIn::Table(fragment) => {
                 if let Some(measured) = blocks.get(&block_key(&fragment.block_id))
-                    && let BlockIn::Table(table) = &measured.block
+                    && let LayoutBlock::Table(table) = &measured.block
                 {
                     let end = fragment.row_end.min(table.rows.len());
                     let start = fragment.row_start.min(end);
@@ -10725,10 +10717,24 @@ fn page_position_span(
     span
 }
 
+/// The pagination's measured blocks by key, first occurrence winning as in
+/// [`build_display_list_selected`].
+fn source_blocks_by_key(
+    pagination: &crate::types::Input,
+) -> HashMap<String, &crate::types::MeasuredBlock> {
+    let mut blocks = HashMap::new();
+    for measured in &pagination.measured {
+        blocks
+            .entry(crate_block_key(&measured.block))
+            .or_insert(measured);
+    }
+    blocks
+}
+
 fn unbuilt_page(
     page: &PageIn,
     page_index: usize,
-    blocks: &HashMap<String, &MeasuredBlockIn>,
+    blocks: &HashMap<String, &crate::types::MeasuredBlock>,
 ) -> DisplayPage {
     let (content_bounds, column_bounds) = page_content_geometry(page);
     DisplayPage {
@@ -10758,6 +10764,18 @@ fn resident_build_input(
     layout: &crate::types::Layout,
     extras: &str,
 ) -> Result<BuildInput, String> {
+    resident_build_input_for(pagination, layout, extras, None)
+}
+
+/// [`resident_build_input`] holding only the measured blocks that `pages`
+/// place; [`refresh_resident_display_pages`] adds the others as their pages
+/// build.
+fn resident_build_input_for(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    extras: &str,
+    pages: Option<&HashSet<usize>>,
+) -> Result<BuildInput, String> {
     let mut fields: serde_json::Map<String, Value> =
         serde_json::from_str(extras).map_err(|e| format!("parse display extras: {e}"))?;
     for key in ["measured", "options", "layout"] {
@@ -10768,17 +10786,29 @@ fn resident_build_input(
     let extras: ResidentExtrasWire =
         serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
     let mut transcoder = crate::transcode::Transcoder::default();
+    let layout: LayoutIn = transcoder
+        .convert(layout)
+        .map_err(|e| format!("parse resident display input: {e}"))?;
+    let placed: Option<HashSet<String>> = pages.map(|pages| {
+        pages
+            .iter()
+            .filter_map(|&index| layout.pages.get(index))
+            .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key))
+            .collect()
+    });
     let measured = pagination
         .measured
         .iter()
+        .filter(|measured| {
+            placed
+                .as_ref()
+                .is_none_or(|keys| keys.contains(&crate_block_key(&measured.block)))
+        })
         .map(|measured| transcoder.convert(measured))
         .collect::<Result<Vec<MeasuredBlockIn>, _>>()
         .map_err(|e| format!("parse resident display input: {e}"))?;
     let options = transcoder
         .convert(&pagination.options)
-        .map_err(|e| format!("parse resident display input: {e}"))?;
-    let layout = transcoder
-        .convert(layout)
         .map_err(|e| format!("parse resident display input: {e}"))?;
     let headers_footers = extras
         .headers_footers
@@ -11020,12 +11050,11 @@ fn refresh_resident_display_pages(
         if !pending_blocks.remove(&key) {
             continue;
         }
-        let index = current_indices
-            .get(&key)
-            .copied()
-            .ok_or_else(|| format!("resident display measured block {key:?} is missing"))?;
-        input.measured[index] =
-            convert_resident_value(measured, "resident display measured block")?;
+        let block = convert_resident_value(measured, "resident display measured block")?;
+        match current_indices.get(&key) {
+            Some(&index) => input.measured[index] = block,
+            None => input.measured.push(block),
+        }
     }
     if let Some(key) = pending_blocks.into_iter().next() {
         return Err(format!(
@@ -11259,6 +11288,67 @@ mod tests {
                 "{extras}"
             );
         }
+    }
+
+    #[test]
+    fn a_partial_resident_build_converts_only_built_pages_and_completes_to_a_full_build() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut names: Vec<String> = std::fs::read_dir(&fixtures)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.strip_suffix(".input.json").map(str::to_owned)
+            })
+            .collect();
+        names.sort();
+        let extras = r#"{"contractVersion":2,"fontChains":{"arial|0|0":[]}}"#;
+        let fonts = ooxml_text::FontStore::default();
+        let mut fewer_blocks = 0;
+        for name in names {
+            let text =
+                std::fs::read_to_string(fixtures.join(format!("{name}.input.json"))).unwrap();
+            let Ok(mut pagination) = serde_json::from_str::<crate::types::Input>(&text) else {
+                continue;
+            };
+            let Ok(layout) = crate::compute_layout_input(&mut pagination) else {
+                continue;
+            };
+            let expected = serde_json::to_value(build_display_list(
+                &resident_build_input(&pagination, &layout, extras).unwrap(),
+                &fonts,
+            ))
+            .unwrap();
+            let (mut resident, mut list) = build_resident_display_list_partial_with_fonts_observed(
+                &pagination,
+                &layout,
+                extras,
+                &fonts,
+                &|index| index == 0,
+                &mut || {},
+            )
+            .unwrap();
+            if layout.pages.len() > 1 {
+                assert!(list.pages[1].unbuilt, "{name}");
+                if resident.input.measured.len() < pagination.measured.len() {
+                    fewer_blocks += 1;
+                }
+            }
+            let rest: Vec<usize> = (1..layout.pages.len()).collect();
+            build_resident_display_pages_with_fonts(
+                &pagination,
+                &layout,
+                &fonts,
+                &mut resident,
+                &mut list,
+                &rest,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(&list).unwrap(), expected, "{name}");
+        }
+        assert!(
+            fewer_blocks >= 3,
+            "only {fewer_blocks} fixtures skipped blocks"
+        );
     }
 
     #[test]
