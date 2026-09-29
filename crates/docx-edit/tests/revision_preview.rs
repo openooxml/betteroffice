@@ -558,9 +558,14 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
 
     let mut epoch = engine.stats().frame_epoch;
     let mut frame = |env: &RenderEnv| {
+        let incremental = engine.stats().incremental_pagination_calls;
         engine
             .layout_document_with_regions_json(&layout_request(env, font))
             .unwrap();
+        assert!(
+            engine.stats().incremental_pagination_calls > incremental,
+            "a preview change keeps the pagination checkpoints"
+        );
         engine.build_display_list_frame("{}", epoch).unwrap();
         assert!(engine.stats().frame_epoch > epoch);
         epoch = engine.stats().frame_epoch;
