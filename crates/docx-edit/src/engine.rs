@@ -832,6 +832,36 @@ fn measured_fingerprint(measured: &MeasuredBlock) -> Result<u64, String> {
         .map_err(|error| format!("fingerprint measured block: {error}"))
 }
 
+/// JSON equality with numbers compared by value, as a host's `1` and Rust's `1.0`.
+fn json_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => {
+            left == right
+                || left
+                    .as_f64()
+                    .is_some_and(|value| Some(value) == right.as_f64())
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len() && left.iter().zip(right).all(|(l, r)| json_equal(l, r))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .all(|(key, l)| right.get(key).is_some_and(|r| json_equal(l, r)))
+        }
+        _ => left == right,
+    }
+}
+
+fn json_option_equal(left: Option<&serde_json::Value>, right: Option<&serde_json::Value>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => json_equal(left, right),
+        (left, right) => left.is_none() && right.is_none(),
+    }
+}
+
 /// A section break's extent never depends on its margins, which header and
 /// footer extents widen after measurement.
 fn section_breaks_match_but_margins(next: &LayoutBlock, retained: &LayoutBlock) -> bool {
@@ -2876,6 +2906,11 @@ impl EngineSession {
             .borrow()
             .as_ref()
             .and_then(|state| state.headers_footers.clone());
+        // The shown frame's extras, from the host, carry these headers and footers
+        // in its own JSON: keep them verbatim, so the next frame can build on it.
+        if json_option_equal(fields.get("headersFooters"), headers_footers.as_ref()) {
+            return Ok(extras);
+        }
         if let Some(headers_footers) = headers_footers {
             fields.insert("headersFooters".to_owned(), headers_footers);
         } else {
@@ -6158,6 +6193,55 @@ mod tests {
             .layout_document_with_regions_json(&request)
             .unwrap();
         assert_eq!(retained_pages(&engine), retained_pages(&reference));
+    }
+
+    #[test]
+    fn the_first_edit_after_an_open_builds_on_the_hosts_frame() {
+        fn integral(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Number(number) => {
+                    if let Some(whole) = number.as_f64().filter(|value| value.fract() == 0.0) {
+                        *value = serde_json::json!(whole as i64);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(integral),
+                serde_json::Value::Object(fields) => fields.values_mut().for_each(integral),
+                _ => {}
+            }
+        }
+        let (bytes, request) = sectioned_header_fixture();
+        let open = |client_id| {
+            let engine = open_sectioned(&bytes, client_id);
+            let output: serde_json::Value =
+                serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+                    .unwrap();
+            // A host writes whole numbers without a fraction.
+            let mut headers_footers = output["headersFooters"].clone();
+            assert!(headers_footers.is_object());
+            integral(&mut headers_footers);
+            let extras = serde_json::json!({ "headersFooters": headers_footers }).to_string();
+            engine.build_display_list_frame(&extras, 0).unwrap();
+            (engine, extras)
+        };
+        let (engine, _) = open(146);
+        insert_x(&engine, "body", 2);
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let after = engine.stats();
+        assert_eq!(
+            after.incremental_display_builds - before.incremental_display_builds,
+            1
+        );
+
+        let (reference, extras) = open(146);
+        insert_x(&reference, "body", 2);
+        reference
+            .layout_document_with_regions_json(&request)
+            .unwrap();
+        reference.build_display_list_frame(&extras, 0).unwrap();
+        let pages = |engine: &EngineSession| engine.with_display_list(|list| list.pages.clone());
+        assert_eq!(pages(&engine), pages(&reference));
     }
 
     #[test]
