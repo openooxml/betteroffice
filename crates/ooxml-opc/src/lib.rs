@@ -23,7 +23,8 @@ pub use sanitize::{
 };
 
 /// A well-formed document stays far under this; a decompression bomb blows past it.
-const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+/// The most bytes one package may inflate to.
+pub const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 /// No legitimate package carries this many parts.
 const MAX_ENTRY_COUNT: usize = 5000;

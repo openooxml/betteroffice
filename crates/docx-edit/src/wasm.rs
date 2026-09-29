@@ -1284,6 +1284,23 @@ impl EditSession {
         Ok(json)
     }
 
+    fn open_preview(&self, bytes: &[u8], blocks: usize) -> Result<String, String> {
+        // A preview holds a cut of the document and must never be saved, so
+        // it only opens into a session with nothing to save.
+        if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
+            return Err("a preview opens only into an empty session".to_owned());
+        }
+        let envelope = crate::seed::parse_docx_preview(bytes, blocks)?;
+        let host_envelope = thin_docx_envelope(&envelope);
+        let referenced_fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope)?;
+        self.engine.doc().rotate_version(js_entropy());
+        serde_json::to_string(&DocxHostWire {
+            envelope: host_envelope,
+            referenced_fonts,
+        })
+        .map_err(|error| error.to_string())
+    }
+
     fn collapsed_resident_input_selection(&self) -> Result<(String, String, u32), JsValue> {
         let selection = self.selection.borrow();
         let selection = selection
@@ -1957,16 +1974,8 @@ impl EditSession {
     /// blocks (see `seed::seed_docx_preview`): the reply is the host metadata
     /// of that parse. The session keeps no source package, so it cannot save.
     pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<String, JsValue> {
-        let envelope = crate::seed::parse_docx_preview(bytes, blocks as usize).map_err(js_err)?;
-        let host_envelope = thin_docx_envelope(&envelope);
-        let referenced_fonts =
-            crate::seed::seed_preview_envelope(self.engine.doc(), envelope).map_err(js_err)?;
-        self.engine.doc().rotate_version(js_entropy());
-        serde_json::to_string(&DocxHostWire {
-            envelope: host_envelope,
-            referenced_fonts,
-        })
-        .map_err(js_err)
+        self.open_preview(bytes, blocks as usize)
+            .map_err(|error| js_err(&error))
     }
 
     /// Re-parses the DOCX bytes retained by the last
@@ -4679,6 +4688,20 @@ mod tests {
         let applied = envelope(&session.apply_edits_json(&request).unwrap());
         assert_eq!(applied["source"], "agent");
         assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn a_preview_opens_only_into_an_empty_session() {
+        let bytes = batch_docx();
+        let opened = EditSession::new(77.0).unwrap();
+        opened.open_docx(&bytes, false, None).unwrap();
+        assert!(opened.open_preview(&bytes, 1).is_err());
+        let seeded = EditSession::new(78.0).unwrap();
+        seeded.open_docx(&bytes, true, None).unwrap();
+        assert!(seeded.open_preview(&bytes, 1).is_err());
+        let preview = EditSession::new(79.0).unwrap();
+        preview.open_preview(&bytes, 1).unwrap();
+        assert!(preview.materialize_docx().unwrap().is_none());
     }
 
     #[test]
