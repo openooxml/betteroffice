@@ -271,6 +271,42 @@ describe('FrameDelta wire round-trip', () => {
     expect(pageText).toContain('typed');
   });
 
+  it('retains owned primitive ids, so no retained page keeps its frame buffer alive', () => {
+    const session = createEditSession(12);
+    session.create_story('body', 'Hello frame', 'Normal', 'left');
+    const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
+    const output = JSON.parse(
+      session.layout_document_with_regions_json(
+        JSON.stringify({
+          bodyStory: 'body',
+          regions: { sections: [{ sectionId: 'main', properties: {} }] },
+          measurement: {
+            fontChains: { 'calibri|0|0': [fontId] },
+            defaults: { fontSize: 11, fontFamily: 'Calibri' },
+            authoritativeShaping: true,
+          },
+          renderEnv: {},
+        })
+      )
+    ) as { measured: unknown; options: unknown; layout: unknown };
+    const frame = session.build_display_list_frame(
+      JSON.stringify({ ...output, fontChains: { 'calibri|0|0': [fontId] } }),
+      0
+    );
+    const delta = decodeFrameDelta(frame);
+    const upserted = delta.operations.flatMap((operation) =>
+      operation.kind === 'upsert' ? [[...operation.primitiveIds]] : []
+    );
+    const retained = [applyFrameDelta(null, delta), applyFrameDeltaOwned(null, delta)];
+    // Detaching the frame buffer empties every view into it.
+    structuredClone(frame.buffer, { transfer: [frame.buffer] });
+    expect(frame.byteLength).toBe(0);
+    expect(upserted.length).toBeGreaterThan(0);
+    for (const frameAfter of retained) {
+      expect(frameAfter.pages.map((page) => [...page.primitiveIds])).toEqual(upserted);
+    }
+  });
+
   it('records owned position shifts and ships them as query-store shift ops', () => {
     const session = createEditSession(13);
     const sentence = 'shift the following pages with enough text to fill several tiny pages. ';
