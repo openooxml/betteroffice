@@ -273,8 +273,12 @@ test('a page leaving the window keeps the links it built', async () => {
 });
 
 test('a rebuild keeps focus on the same link when links before it change', async () => {
-  // Links in a block content control carry its group too.
-  for (const sdt of [undefined, { groupId: 'sdt@5', sdtType: 'richText' }]) {
+  // Links in a content control carry its attributes too.
+  for (const sdt of [
+    {},
+    { sdt: { groupId: 'sdt@5', sdtType: 'richText' } },
+    { inlineSdtWidget: { kind: 'dropdown', groupId: 'sdt@5', pos: 5 } },
+  ]) {
     const link = (href: string, y: number) =>
       ({
         kind: 'text',
@@ -284,7 +288,7 @@ test('a rebuild keeps focus on the same link when links before it change', async
         font: '11px sans-serif',
         color: '#000',
         href,
-        sdt,
+        ...sdt,
       }) as unknown as DisplayPrimitive;
     const page = (primitives: DisplayPrimitive[]): DisplayPage => ({
       pageIndex: 0,

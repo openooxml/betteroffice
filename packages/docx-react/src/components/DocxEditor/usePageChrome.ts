@@ -55,12 +55,12 @@ function tabStops(root: ParentNode): HTMLElement[] {
 
 /**
  * What identifies a tab stop across a rebuild, whatever changed around it;
- * null when only its place does. A control's group is its position and its
- * text shows its state, so only its control id names it.
+ * null when only its place does. A content control's button shows its state
+ * and its group is its position, so only its control id names it.
  */
 const stopKey = (stop: HTMLElement): string | null => {
-  const { sdtControlId, sdtWidget, sdtRepeat } = stop.dataset;
-  if (sdtWidget !== undefined || sdtRepeat !== undefined) {
+  const { sdtGroupId, sdtControlId, sdtWidget, sdtRepeat } = stop.dataset;
+  if (stop.tagName === 'BUTTON' && sdtGroupId !== undefined) {
     return sdtControlId === undefined
       ? null
       : ['control', sdtControlId, sdtWidget, sdtRepeat].join('\u0000');
