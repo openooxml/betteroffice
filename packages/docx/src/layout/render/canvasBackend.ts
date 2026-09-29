@@ -1569,10 +1569,12 @@ function hasHorizontalScale(horizontalScale: number | undefined): horizontalScal
 
 const CSS_FONT_FAMILY_LIST = /^(.*?\d*\.?\d+px(?:\/\S+)?\s+)(.+)$/;
 
-/** `font` with each family of its family list that `families` maps replaced by the mapped one. */
+/**
+ * `font`, a CSS font shorthand or a bare family list, with each family that
+ * `families` maps replaced by the mapped one.
+ */
 export function withFontFamilies(font: string, families: ReadonlyMap<string, string>): string {
-  const match = CSS_FONT_FAMILY_LIST.exec(font);
-  if (!match) return font;
+  const match = CSS_FONT_FAMILY_LIST.exec(font) ?? ['', '', font];
   let changed = false;
   const list = match[2].split(',').map((entry) => {
     const name = entry.trim().replace(/^(["'])(.*)\1$/, '$2');

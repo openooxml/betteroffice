@@ -454,6 +454,7 @@ describe('Canvas font families', () => {
     expect(withFontFamilies('400 11px calibri, sans-serif', families)).toBe(
       '400 11px "Calibri#1f2e", sans-serif'
     );
+    expect(withFontFamilies('Calibri', families)).toBe('"Calibri#1f2e"');
   });
 
   it('paints browser text with the family the document registered', async () => {
