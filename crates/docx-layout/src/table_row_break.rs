@@ -3,6 +3,7 @@
 use serde::Serialize;
 
 use crate::cell_layout::{cell_vertical_offset, layout_cell_content, nested_table_float_offset};
+use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::table_grid::resolve_cell_grid;
 use crate::types::{BlockExtent, LayoutBlock, TableBlock, TableExtent};
 
@@ -44,11 +45,22 @@ fn cell_unbreakable_ranges(
                 .as_ref()
                 .and_then(|attrs| attrs.spacing.as_ref());
             y += previous_after.max(spacing.and_then(|value| value.before).unwrap_or(0.0));
+            let first = ranges.len();
             for line in &extent.lines {
                 y += line.float_skip_before.unwrap_or(0.0);
                 let top = y;
                 y += line.line_height;
                 ranges.push((top, y));
+            }
+            let lines = &ranges[first..];
+            if let (Some(&(top, _)), Some(&(_, bottom))) = (lines.first(), lines.last()) {
+                if paragraph_is_unbreakable(paragraph, extent) {
+                    ranges.push((top, bottom));
+                } else if paragraph_widow_control(paragraph, extent) {
+                    let (second_bottom, penultimate_top) = (lines[1].1, lines[lines.len() - 2].0);
+                    ranges.push((top, second_bottom));
+                    ranges.push((penultimate_top, bottom));
+                }
             }
             previous_after = spacing.and_then(|value| value.after).unwrap_or(0.0);
             continue;
