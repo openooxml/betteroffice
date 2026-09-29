@@ -173,7 +173,7 @@ const TEXT_RANGE: DocxTextRange = {
 };
 const PARAGRAPH_TARGET: DocxGeometryTarget = { kind: 'paragraph', paragraph: PARAGRAPH };
 
-function semanticGeometry(zoom = 1) {
+function semanticGeometry(zoom = 1, { stableSession = false } = {}) {
   const pages = document.createElement('div');
   const layer = document.createElement('div');
   const canvases = [0, 1].map((index) => {
@@ -285,7 +285,8 @@ function semanticGeometry(zoom = 1) {
     source,
     // Tests swap the session's reads without a version change, which a real document cannot do;
     // a copy per access keeps per-version reads from carrying across those swaps.
-    () => (available ? { session: { ...session }, editor, presented } : null)
+    () =>
+      available ? { session: stableSession ? session : { ...session }, editor, presented } : null
   );
   return {
     geometry,
@@ -653,6 +654,44 @@ describe('semantic anchor geometry', () => {
       rects: [],
       anchor: { x: 154, width: 0 },
     });
+  });
+
+  test('one session reads the document once across preview decisions at a version', () => {
+    const { geometry, setSnapshot, source, session } = semanticGeometry(1, { stableSession: true });
+    const reads = { listRevisions: 0, paragraphSpans: 0 };
+    for (const name of ['listRevisions', 'paragraphSpans'] as const) {
+      const read = session[name].bind(session) as () => unknown;
+      (session as unknown as Record<string, () => unknown>)[name] = () => {
+        reads[name] += 1;
+        return read();
+      };
+    }
+    const decide = (state: 'proposed' | 'accepted' | 'rejected') =>
+      setSnapshot({
+        proposals: [
+          { id: 'proposal', paragraph: PARAGRAPH, state, changed: true, revisionIds: ['r1', 'r2'] },
+        ],
+      });
+    const target: DocxGeometryTarget = { kind: 'proposal', id: 'proposal' };
+    decide('accepted');
+    textLine(source, [0]);
+    expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+      rects: [{ x: 155 }, { x: 156 }],
+      anchor: { x: 157, width: 0 },
+    });
+    decide('rejected');
+    textLine(source, [2, 3]);
+    expect(anchored(geometry.getAnchorGeometry(target))).toMatchObject({
+      rects: [{ x: 153 }],
+      anchor: { x: 154, width: 0 },
+    });
+    decide('proposed');
+    textLine(source);
+    expect(anchored(geometry.getAnchorGeometry(target)).rects).toHaveLength(3);
+    expect(reads).toEqual({ listRevisions: 1, paragraphSpans: 1 });
+
+    session.version = () => 'v2';
+    refused(geometry.getAnchorGeometry(target), 'stale-version');
   });
 
   test('hides the same text from range and search targets as from its revision', () => {
