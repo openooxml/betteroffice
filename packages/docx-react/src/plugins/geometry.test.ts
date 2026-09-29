@@ -283,7 +283,9 @@ function semanticGeometry(zoom = 1) {
     () => current,
     () => null,
     source,
-    () => (available ? { session, editor, presented } : null)
+    // Tests swap the session's reads without a version change, which a real document cannot do;
+    // a copy per access keeps per-version reads from carrying across those swaps.
+    () => (available ? { session: { ...session }, editor, presented } : null)
   );
   return {
     geometry,
