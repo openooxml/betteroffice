@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
@@ -26,10 +26,35 @@ beforeAll(() =>
   )
 );
 
+const originalIdle = globalThis.requestIdleCallback;
+const originalCancelIdle = globalThis.cancelIdleCallback;
+let idleCallbacks = new Map<number, () => void>();
+let nextIdle = 1;
+
+beforeEach(() => {
+  idleCallbacks = new Map();
+  globalThis.requestIdleCallback = ((callback: () => void) => {
+    const id = nextIdle++;
+    idleCallbacks.set(id, callback);
+    return id;
+  }) as typeof requestIdleCallback;
+  globalThis.cancelIdleCallback = ((id: number) => {
+    idleCallbacks.delete(id);
+  }) as typeof cancelIdleCallback;
+});
+
 afterEach(() => {
   cleanup();
   globalThis.Worker = originalWorker;
+  globalThis.requestIdleCallback = originalIdle;
+  globalThis.cancelIdleCallback = originalCancelIdle;
 });
+
+function runIdleCallbacks(): void {
+  const pending = [...idleCallbacks.values()];
+  idleCallbacks.clear();
+  for (const callback of pending) callback();
+}
 
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -46,9 +71,18 @@ class EngineWorker {
   constructor() {
     EngineWorker.last = this;
   }
+  static failPageBuilds = false;
   postMessage(request: ResidentEngineWorkerRequest): void {
     this.posted.push(request);
     const engine = EngineWorker.engine!;
+    if (request.type === 'buildPages' && EngineWorker.failPageBuilds) {
+      queueMicrotask(() =>
+        this.onmessage?.({
+          data: { id: request.id, ok: false, error: 'page build failed' },
+        } as MessageEvent<ResidentEngineWorkerResponse>)
+      );
+      return;
+    }
     let frame: Uint8Array;
     if (request.type === 'bootstrap') {
       if (request.displayWindow) engine.set_display_window(...request.displayWindow);
@@ -78,7 +112,7 @@ class EngineWorker {
   terminate(): void {}
 }
 
-test('a worker frame builds only the pages near the viewport', async () => {
+function lazyFixture() {
   const engine = createEditSession(9401);
   engine.create_story('body', 'Lazy pages. '.repeat(400), 'Normal', 'left');
   const fontId = engine.register_measure_font(
@@ -120,6 +154,7 @@ test('a worker frame builds only the pages near the viewport', async () => {
     )
   );
   EngineWorker.engine = engine;
+  EngineWorker.failPageBuilds = false;
   globalThis.Worker = EngineWorker as unknown as typeof Worker;
   const host = {
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
@@ -129,6 +164,11 @@ test('a worker frame builds only the pages near the viewport', async () => {
     selection: () => null,
     applyUpdate: () => null,
   } as unknown as YrsSession;
+  return { engine, inputs, host };
+}
+
+test('a worker frame builds only the pages near the viewport', async () => {
+  const { engine, inputs, host } = lazyFixture();
   try {
     const overrides = { getInputs: () => inputs };
     const { result, unmount } = renderHook(() =>
@@ -166,6 +206,59 @@ test('a worker frame builds only the pages near the viewport', async () => {
     );
     unmount();
   } finally {
+    engine.free();
+  }
+});
+
+test('pages away from the viewport build in batches while the main thread idles', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const unbuilt = () => result.current.frame!.displayList.pages.filter((page) => page.unbuilt);
+    expect(unbuilt().length).toBeGreaterThan(0);
+    for (let round = 0; round < 50 && unbuilt().length > 0; round += 1) {
+      await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await act(async () => runIdleCallbacks());
+    }
+    expect(unbuilt()).toEqual([]);
+    const batches = EngineWorker.last!.posted.filter((request) => request.type === 'buildPages');
+    expect(batches.length).toBeGreaterThan(0);
+    for (const batch of batches) {
+      if (batch.type === 'buildPages') expect(batch.pages.length).toBeLessThanOrEqual(16);
+    }
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('a failed page build hands rendering back to the main thread', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    EngineWorker.failPageBuilds = true;
+    let relayouts = 0;
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host, () => {
+        relayouts += 1;
+      })
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const last = result.current.frame!.displayList.pages.length - 1;
+    await act(async () => {
+      result.current.setDisplayWindow(last, last + 1);
+    });
+    await waitFor(() => expect(relayouts).toBe(1));
+    expect(result.current.frame).toBeNull();
+    expect(result.current.workerSurfacesActive).toBe(false);
+    unmount();
+  } finally {
+    errors.mockRestore();
     engine.free();
   }
 });

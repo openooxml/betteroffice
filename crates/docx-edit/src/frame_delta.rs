@@ -144,7 +144,10 @@ pub fn encode_frame_delta_incremental(
     )
 }
 
-/// [`encode_frame_delta_incremental`] for an arbitrary set of rebuilt pages.
+/// [`encode_frame_delta_incremental`] for pages built into an unchanged
+/// layout: every page keeps its index, so pages match their previous snapshot
+/// by index. Semantic anchors count occurrences across built pages, and
+/// building an earlier page renumbers the ones after it.
 pub fn encode_frame_delta_pages(
     list: &DisplayList,
     previous: &[FramePageSnapshot],
@@ -152,7 +155,8 @@ pub fn encode_frame_delta_pages(
     next_page_id: &mut u64,
     rebuilt: &dyn Fn(usize) -> bool,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    encode_frame_delta_inner(list, previous, epochs, false, next_page_id, Some(rebuilt))
+    let prepared = prepare_pages(list, previous, next_page_id, Some(rebuilt), false)?;
+    encode_prepared(list, previous, epochs, false, prepared)
 }
 
 fn encode_frame_delta_inner(
@@ -163,7 +167,17 @@ fn encode_frame_delta_inner(
     next_page_id: &mut u64,
     rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
-    let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages)?;
+    let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages, true)?;
+    encode_prepared(list, previous, epochs, full, prepared)
+}
+
+fn encode_prepared(
+    list: &DisplayList,
+    previous: &[FramePageSnapshot],
+    epochs: FrameEpochs,
+    full: bool,
+    prepared: Vec<PreparedPage<'_>>,
+) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     let next_ids: HashSet<u64> = prepared.iter().map(|page| page.snapshot.page_id).collect();
     let previous_by_id: HashMap<u64, &FramePageSnapshot> =
         previous.iter().map(|old| (old.page_id, old)).collect();
@@ -413,6 +427,7 @@ fn prepare_pages<'a>(
     previous: &[FramePageSnapshot],
     next_page_id: &mut u64,
     rebuilt_pages: Option<&dyn Fn(usize) -> bool>,
+    match_anchors: bool,
 ) -> Result<Vec<PreparedPage<'a>>, String> {
     let anchors = page_anchors(list);
     // Anchors are unique within one snapshot list (page_anchors suffixes an
@@ -432,10 +447,12 @@ fn prepare_pages<'a>(
     // Reserve every semantic anchor before considering the index fallback. A
     // newly inserted leading page must not steal the id of the old page at
     // index zero and shift every retained surface identity after it.
-    for (next_index, anchor) in anchors.iter().enumerate() {
-        if let Some(previous_index) = previous_by_anchor.remove(anchor.as_str()) {
-            claimed.insert(previous[previous_index].page_id);
-            matched_previous[next_index] = Some(previous_index);
+    if match_anchors {
+        for (next_index, anchor) in anchors.iter().enumerate() {
+            if let Some(previous_index) = previous_by_anchor.remove(anchor.as_str()) {
+                claimed.insert(previous[previous_index].page_id);
+                matched_previous[next_index] = Some(previous_index);
+            }
         }
     }
     for (next_index, matched) in matched_previous.iter_mut().enumerate() {
@@ -1500,6 +1517,65 @@ mod tests {
         assert_eq!(out[41], GLYPH_LOGICAL_ORDER | GLYPH_BIDI_LEVEL);
         assert_eq!(u64_at(&out, 42), 4);
         assert_eq!(out[50], 1);
+    }
+
+    #[test]
+    fn pages_built_out_of_order_keep_their_own_content() {
+        // Every built page opens with the same header paragraph, so semantic
+        // anchors count occurrences, and building page 5 renumbers 7 and 8.
+        let pages = |built: &[usize]| -> DisplayList {
+            let pages: Vec<_> = (0..10)
+                .map(|index| {
+                    if built.contains(&index) {
+                        serde_json::json!({
+                            "pageIndex": index, "width": 816, "height": 1056,
+                            "primitives": [{
+                                "kind": "text", "text": format!("page {index}"), "x": 96,
+                                "baselineY": 120, "width": 40, "font": "16px serif",
+                                "color": "#000000", "blockId": 7, "paraId": "HEADER"
+                            }]
+                        })
+                    } else {
+                        serde_json::json!({
+                            "pageIndex": index, "width": 816, "height": 1056,
+                            "primitives": [], "unbuilt": true
+                        })
+                    }
+                })
+                .collect();
+            serde_json::from_value(serde_json::json!({ "contractVersion": 1, "pages": pages }))
+                .unwrap()
+        };
+        let epochs = |frame_epoch| FrameEpochs {
+            doc_epoch: 1,
+            layout_epoch: 1,
+            frame_epoch,
+            base_frame_epoch: frame_epoch - 1,
+        };
+        let mut next_id = 0;
+        let (_, snapshots) =
+            encode_frame_delta(&pages(&[0, 1, 2, 3, 4]), &[], epochs(1), true, &mut next_id)
+                .unwrap();
+        let (_, snapshots) = encode_frame_delta_pages(
+            &pages(&[0, 1, 2, 3, 4, 7, 8]),
+            &snapshots,
+            epochs(2),
+            &mut next_id,
+            &|index| index == 7 || index == 8,
+        )
+        .unwrap();
+        let built = pages(&[0, 1, 2, 3, 4, 5, 7, 8]);
+        let (_, snapshots) =
+            encode_frame_delta_pages(&built, &snapshots, epochs(3), &mut next_id, &|index| {
+                index == 5
+            })
+            .unwrap();
+        let (_, fresh) = encode_frame_delta(&built, &[], epochs(3), true, &mut 0).unwrap();
+        for (retained, fresh) in snapshots.iter().zip(&fresh) {
+            assert_eq!(retained.page_index, fresh.page_index);
+            assert_eq!(retained.fingerprint, fresh.fingerprint);
+            assert_eq!(retained.primitive_ids, fresh.primitive_ids);
+        }
     }
 
     #[test]

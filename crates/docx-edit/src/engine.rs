@@ -5315,6 +5315,13 @@ mod tests {
             .unwrap();
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.apply_and_layout("body", epoch).unwrap();
+        let shifted = engine.with_display_list(Clone::clone).unwrap();
+        for (page, before) in shifted.pages.iter().zip(&lazy.pages).skip(1) {
+            if page.unbuilt {
+                let [start, end] = before.position_span.unwrap();
+                assert_eq!(page.position_span, Some([start + 6, end + 6]));
+            }
+        }
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.build_display_pages_frame(&[last, 1], epoch).unwrap();
         let built = engine.with_display_list(Clone::clone).unwrap();

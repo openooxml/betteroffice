@@ -115,6 +115,19 @@ export interface ResidentFrameApplyResult {
 const INITIAL_DISPLAY_WINDOW: [number, number] = [0, 5];
 /** Unbuilt pages built per request while the complete list is awaited. */
 const SETTLE_BUILD_BATCH_PAGES = 32;
+/** Unbuilt pages built per idle period away from the viewport. */
+const BACKGROUND_BUILD_BATCH_PAGES = 16;
+const BACKGROUND_BUILD_DELAY_MS = 200;
+
+type PageBuildTimer = ReturnType<typeof setTimeout> | { idle: number };
+
+function cancelPageBuilds(timer: { current: PageBuildTimer | null }): void {
+  const scheduled = timer.current;
+  timer.current = null;
+  if (scheduled === null) return;
+  if (typeof scheduled === 'object' && 'idle' in scheduled) cancelIdleCallback(scheduled.idle);
+  else clearTimeout(scheduled);
+}
 
 /** test seam: unit tests inject a fake engine/inputs-resolver instead of the wasm module */
 export interface RustDisplayListHookOverrides {
@@ -197,7 +210,8 @@ export function useRustDisplayList(
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
   const pageBuildInFlightRef = useRef(false);
-  const pageBuildTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
+  const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
   const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const suppressWorkerInvalidationRef = useRef(0);
   const [workerSurfacesActive, setWorkerSurfacesActive] = useState(false);
@@ -635,75 +649,135 @@ export function useRustDisplayList(
     [applyResidentInput]
   );
 
-  // Build the unbuilt pages of the worker frame that the viewport shows.
-  const buildUnbuiltPages = useCallback((): void => {
-    pageBuildTimerRef.current = null;
-    if (pageBuildInFlightRef.current) return;
-    const worker = workerRef.current;
-    const frame = snapshotRef.current.frame;
-    if (!worker || !worker.client.isReady() || !frame) return;
-    const pages = frame.displayList.pages;
-    const [start, end] = displayWindowRef.current;
-    const unbuilt: number[] = [];
-    for (let index = 0; index < pages.length; index += 1) {
-      if (pages[index]?.unbuilt) unbuilt.push(index);
-    }
-    if (unbuilt.length === 0) return;
-    let batch = unbuilt.filter((index) => index >= start && index < end);
-    // Pages away from the viewport stay unbuilt unless someone waits for the
-    // complete list (printing).
-    if (batch.length === 0 && settleWaitersRef.current.size > 0) {
-      batch = unbuilt.slice(0, SETTLE_BUILD_BATCH_PAGES);
-    }
-    if (batch.length === 0) return;
-    pageBuildInFlightRef.current = true;
-    const dispatchedEpoch = contentEpochRef.current;
-    void worker.client.buildPages(batch, frame.frameEpoch).then(
-      (result) => {
-        pageBuildInFlightRef.current = false;
-        if (workerRef.current !== worker) return;
-        const previous = snapshotRef.current;
-        const delta = decodeFrameDelta(result.frame);
-        if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) return;
-        const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
-        const caret = residentCaretForSelection(
-          result.caret,
-          result.selection,
-          worker.engine.selection(),
-          nextFrame
-        );
-        const nextSnapshot =
-          contentEpochRef.current === dispatchedEpoch
-            ? createRustDisplayListSnapshot(
-                nextFrame.displayList,
-                nextFrame,
-                caret,
-                null,
-                previous,
-                readSessionVersion(worker.engine)
-              )
-            : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
-        snapshotRef.current = nextSnapshot;
-        publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
-        setSnapshot(nextSnapshot);
-        for (const waiter of [...settleWaitersRef.current]) waiter();
-      },
-      (error) => {
-        pageBuildInFlightRef.current = false;
-        if (!(error instanceof ResidentWorkerFailureError)) {
-          console.warn('[CanvasRenderer] Building display pages failed', error);
-        }
+  // Stop using the worker for `hostEngine`: its frames and queries go, and
+  // every later layout and frame runs on the main thread.
+  const dropWorker = useCallback(
+    (hostEngine: YrsSession): void => {
+      if (workerFallbackEngineRef.current !== hostEngine) {
+        queryEpochGate.clear();
+        const fallbackSnapshot = {
+          ...snapshotRef.current,
+          frame: null,
+          queries: null,
+          caret: null,
+        };
+        snapshotRef.current = fallbackSnapshot;
+        setSnapshot(fallbackSnapshot);
+        workerFallbackEngineRef.current = hostEngine;
       }
-    );
-  }, [publishQuerySnapshot]);
+      if (workerRef.current?.engine === hostEngine) {
+        workerRef.current.client.destroy();
+        workerRef.current = null;
+      }
+      setWorkerSurfacesActive(false);
+      setWorkerPresentationActive(false);
+    },
+    [queryEpochGate, setWorkerPresentationActive]
+  );
+
+  // Build the unbuilt pages of the worker frame: those the viewport shows
+  // first, then the rest while the main thread is idle, since accessibility
+  // mirrors and printing read every page's content.
+  const buildUnbuiltPages = useCallback(
+    (idle = false): void => {
+      pageBuildTimerRef.current = null;
+      if (pageBuildInFlightRef.current) return;
+      const worker = workerRef.current;
+      const frame = snapshotRef.current.frame;
+      if (!worker || !worker.client.isReady() || !frame) return;
+      const pages = frame.displayList.pages;
+      const [start, end] = displayWindowRef.current;
+      const unbuilt: number[] = [];
+      for (let index = 0; index < pages.length; index += 1) {
+        if (pages[index]?.unbuilt) unbuilt.push(index);
+      }
+      if (unbuilt.length === 0) return;
+      let batch = unbuilt.filter((index) => index >= start && index < end);
+      if (batch.length === 0) {
+        const settling = settleWaitersRef.current.size > 0;
+        if (!settling && !idle) {
+          schedulePageBuildsWhenIdleRef.current();
+          return;
+        }
+        const distance = (index: number) => (index < start ? start - index : index - end + 1);
+        batch = unbuilt
+          .sort((a, b) => distance(a) - distance(b))
+          .slice(0, settling ? SETTLE_BUILD_BATCH_PAGES : BACKGROUND_BUILD_BATCH_PAGES)
+          .sort((a, b) => a - b);
+      }
+      pageBuildInFlightRef.current = true;
+      const dispatchedEpoch = contentEpochRef.current;
+      const paintToken = paintedCaretMachine.token();
+      const paintCaret =
+        workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
+      const failed = (cause: unknown): void => {
+        if (workerRef.current !== worker) return;
+        console.error(
+          '[CanvasRenderer] Building display pages failed; falling back to the main-thread engine',
+          cause
+        );
+        dropWorker(worker.engine);
+        requestLayoutRef.current?.();
+      };
+      void worker.client.buildPages(batch, frame.frameEpoch, paintCaret).then(
+        (result) => {
+          pageBuildInFlightRef.current = false;
+          if (workerRef.current !== worker) return;
+          try {
+            const previous = snapshotRef.current;
+            const delta = decodeFrameDelta(result.frame);
+            if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) return;
+            const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
+            const caret = residentCaretForSelection(
+              result.caret,
+              result.selection,
+              worker.engine.selection(),
+              nextFrame
+            );
+            const nextSnapshot =
+              contentEpochRef.current === dispatchedEpoch
+                ? createRustDisplayListSnapshot(
+                    nextFrame.displayList,
+                    nextFrame,
+                    caret,
+                    null,
+                    previous,
+                    readSessionVersion(worker.engine)
+                  )
+                : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
+            snapshotRef.current = nextSnapshot;
+            publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
+            setSnapshot(nextSnapshot);
+            applyPaintedCaretReply(Boolean(result.caretPainted && caret?.caretRect), paintToken);
+          } catch (error) {
+            failed(error);
+            return;
+          }
+          for (const waiter of [...settleWaitersRef.current]) waiter();
+        },
+        (error) => {
+          pageBuildInFlightRef.current = false;
+          failed(error);
+        }
+      );
+    },
+    [applyPaintedCaretReply, dropWorker, paintedCaretMachine, publishQuerySnapshot]
+  );
 
   const schedulePageBuilds = useCallback(
     (delay: number): void => {
-      if (pageBuildTimerRef.current !== null) clearTimeout(pageBuildTimerRef.current);
-      pageBuildTimerRef.current = setTimeout(buildUnbuiltPages, delay);
+      cancelPageBuilds(pageBuildTimerRef);
+      pageBuildTimerRef.current = setTimeout(() => buildUnbuiltPages(), delay);
     },
     [buildUnbuiltPages]
   );
+  schedulePageBuildsWhenIdleRef.current = () => {
+    cancelPageBuilds(pageBuildTimerRef);
+    pageBuildTimerRef.current =
+      typeof requestIdleCallback === 'function'
+        ? { idle: requestIdleCallback(() => buildUnbuiltPages(true)) }
+        : setTimeout(() => buildUnbuiltPages(true), BACKGROUND_BUILD_DELAY_MS);
+  };
 
   const setDisplayWindow = useCallback(
     (start: number, end: number): void => {
@@ -720,12 +794,7 @@ export function useRustDisplayList(
     schedulePageBuilds(pageBuildInFlightRef.current ? 50 : 16);
   }, [schedulePageBuilds, snapshot.frame]);
 
-  useEffect(
-    () => () => {
-      if (pageBuildTimerRef.current !== null) clearTimeout(pageBuildTimerRef.current);
-    },
-    []
-  );
+  useEffect(() => () => cancelPageBuilds(pageBuildTimerRef), []);
 
   const attachOffscreenCanvases = useCallback(
     async (
@@ -841,24 +910,7 @@ export function useRustDisplayList(
           '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
           nextError
         );
-        if (workerFallbackEngineRef.current !== hostEngine) {
-          queryEpochGate.clear();
-          const fallbackSnapshot = {
-            ...snapshotRef.current,
-            frame: null,
-            queries: null,
-            caret: null,
-          };
-          snapshotRef.current = fallbackSnapshot;
-          setSnapshot(fallbackSnapshot);
-          workerFallbackEngineRef.current = hostEngine;
-        }
-        if (workerRef.current?.engine === hostEngine) {
-          workerRef.current.client.destroy();
-          workerRef.current = null;
-        }
-        setWorkerSurfacesActive(false);
-        setWorkerPresentationActive(false);
+        dropWorker(hostEngine);
         return buildOnMainThread();
       };
       try {
@@ -976,6 +1028,7 @@ export function useRustDisplayList(
     resolvedCommentIds,
     engine,
     residentEngine,
+    dropWorker,
     setWorkerPresentationActive,
     paintedCaretMachine,
     applyPaintedCaretReply,
