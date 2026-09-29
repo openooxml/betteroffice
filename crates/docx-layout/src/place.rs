@@ -488,32 +488,34 @@ fn place(
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
 
-    // Balancing belongs to the page a section starts on, so a pass resuming
-    // later in the section leaves it alone.
-    let section_start = section_idx
-        .checked_sub(1)
-        .and_then(|previous| plan.break_indices.get(previous))
-        .map_or(0, |section_break| section_break + 1);
-    if start_index == section_start
-        && plan
-            .section_configs
-            .get(section_idx)
-            .unwrap_or(initial_config)
+    // Balancing belongs to the page a section's column region opens on: a
+    // pass from the document start balances the first section, and a resumed
+    // pass rebalances only when its checkpoint's page is that page.
+    let balances = if start_index == 0 {
+        initial_config
             .columns
             .as_ref()
             .map_or(1.0, |columns| columns.count)
             > 1.0
-        && !section_ends_with_next_column(plan, section_idx)
-    {
+            && !section_ends_with_next_column(plan, 0)
+    } else {
+        paginator.balances_region()
+    };
+    if balances {
+        let section_start = section_idx
+            .checked_sub(1)
+            .and_then(|previous| plan.break_indices.get(previous))
+            .map_or(0, |section_break| section_break + 1);
         hooks::balance_terminal_continuous_text_columns(
             measured,
             paginator,
-            start_index,
+            section_start,
             plan.break_indices
                 .get(section_idx)
                 .copied()
                 .unwrap_or(measured.len()),
         )?;
+        paginator.mark_balanced_region();
     }
 
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
@@ -689,6 +691,7 @@ fn place(
                         i + 1,
                         next_break_index.unwrap_or(measured.len()),
                     )?;
+                    paginator.mark_balanced_region();
                 }
 
                 section_idx += 1;

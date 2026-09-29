@@ -45,6 +45,8 @@ pub struct PageFlowGeometry {
     pub pending_page_size: Option<Size>,
     pub pending_margins: Option<PageMargins>,
     pub pending_columns: Option<ColumnLayout>,
+    /// Whether this page opened a column region that placement balances.
+    pub balanced_region: bool,
 }
 
 /// Current state of a page being laid out.
@@ -92,6 +94,8 @@ pub struct Paginator {
     /// resets to 0 once the fragment lands, so checkpoints taken after it are
     /// recorded against this preserved value.
     page_start_spacing_spent: f64,
+    /// The column the current page's first fragment landed in.
+    page_start_column: usize,
     numbering_parity_offset: bool,
     pub pages: Vec<Page>,
     states: Vec<FlowState>,
@@ -107,6 +111,9 @@ pub struct Paginator {
     footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
     start_page_number: u32,
     section_index: usize,
+    /// The page whose column region placement balanced; on a resumed
+    /// paginator, the checkpoint's page until placement balances it again.
+    balanced_page: Option<usize>,
 }
 
 impl Paginator {
@@ -130,6 +137,7 @@ impl Paginator {
         Ok(Paginator {
             leading_spacing_spent: 0.0,
             page_start_spacing_spent: 0.0,
+            page_start_column: 0,
             numbering_parity_offset: false,
             pages: Vec::new(),
             states: Vec::new(),
@@ -145,6 +153,7 @@ impl Paginator {
             footnote_reserved_heights,
             start_page_number: 1,
             section_index: 0,
+            balanced_page: None,
         })
     }
 
@@ -169,7 +178,20 @@ impl Paginator {
         paginator.start_page_number = start_page_number;
         paginator.leading_spacing_spent = geometry.leading_spacing_spent;
         paginator.numbering_parity_offset = geometry.numbering_parity_offset;
+        paginator.balanced_page = geometry.balanced_region.then_some(0);
         Ok(paginator)
+    }
+
+    /// Records that placement balances the column region on the current page.
+    pub fn mark_balanced_region(&mut self) {
+        let idx = self.get_current();
+        self.balanced_page = Some(self.states[idx].page_index);
+    }
+
+    /// Whether the current page opened a column region placement balances.
+    pub fn balances_region(&mut self) -> bool {
+        let idx = self.get_current();
+        self.balanced_page == Some(self.states[idx].page_index)
     }
 
     pub fn restart_page_numbering(&mut self, start: u64) {
@@ -203,6 +225,10 @@ impl Paginator {
             pending_page_size: self.pending_page_size.clone(),
             pending_margins: self.pending_margins.clone(),
             pending_columns: self.pending_columns.clone(),
+            balanced_region: self
+                .states
+                .last()
+                .is_some_and(|state| self.balanced_page == Some(state.page_index)),
         }
     }
 
@@ -232,6 +258,9 @@ impl Paginator {
         let page = self.pages.get(state.page_index)?;
         let mut flow = self.snapshot_geometry();
         if !page.fragments.is_empty() {
+            if self.page_start_column != 0 {
+                return None;
+            }
             flow.leading_spacing_spent = self.page_start_spacing_spent;
         }
         Some((state.page_index, page.number, flow))
@@ -481,6 +510,7 @@ impl Paginator {
         self.pages[page_index].fragments.push(fragment);
         if self.pages[page_index].fragments.len() == 1 {
             self.page_start_spacing_spent = self.leading_spacing_spent;
+            self.page_start_column = self.states[idx].column_index;
         }
 
         let state = &mut self.states[idx];
@@ -553,6 +583,7 @@ impl Paginator {
     /// Applies a column layout below content already placed in the region.
     pub fn update_columns(&mut self, new_columns: ColumnLayout) {
         self.pending_columns = None;
+        self.balanced_page = None;
         self.columns = new_columns;
         self.column_width = calculate_column_width(
             self.page_size.w,
@@ -631,6 +662,9 @@ impl Paginator {
         let idx = self.get_current();
         let page_index = self.states[idx].page_index;
         self.pages[page_index].fragments.push(fragment);
+        if self.pages[page_index].fragments.len() == 1 {
+            self.page_start_column = self.states[idx].column_index;
+        }
     }
 
     #[allow(dead_code)] // reached once the floating-table hook is swapped in
