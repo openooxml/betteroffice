@@ -26,6 +26,12 @@ export interface ResidentEngineWorkerFrame {
   layoutRevision: number;
 }
 
+/** How a bootstrap or sync builds its frame. */
+export interface ResidentEngineWorkerSnapshotOptions {
+  /** Pages `[start, end)` the frame builds; the rest stay unbuilt. */
+  displayWindow?: [number, number];
+}
+
 export interface ResidentEngineOffscreenPage {
   pageId: string;
   canvas: OffscreenCanvas;
@@ -52,6 +58,7 @@ const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
   sync: 15_000,
   attachCanvases: 15_000,
   buildFrame: 5_000,
+  buildPages: 5_000,
   applyInput: 5_000,
   applyDelete: 5_000,
 };
@@ -126,11 +133,18 @@ export class ResidentEngineWorkerClient {
 
   async bootstrap(
     snapshot: YrsResidentWorkerSnapshot,
-    extras: string
+    extras: string,
+    { displayWindow }: ResidentEngineWorkerSnapshotOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
-      { type: 'bootstrap', snapshot, extras, expectedFrameEpoch: 0 },
+      {
+        type: 'bootstrap',
+        snapshot,
+        extras,
+        expectedFrameEpoch: 0,
+        ...(displayWindow ? { displayWindow } : {}),
+      },
       snapshotTransfers(snapshot)
     );
     const result = frameResult(response);
@@ -144,11 +158,19 @@ export class ResidentEngineWorkerClient {
     snapshot: YrsResidentWorkerSnapshot,
     extras: string,
     expectedFrameEpoch: number,
-    paintCaret = false
+    paintCaret = false,
+    { displayWindow }: ResidentEngineWorkerSnapshotOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
-      { type: 'sync', snapshot, extras, expectedFrameEpoch, paintCaret },
+      {
+        type: 'sync',
+        snapshot,
+        extras,
+        expectedFrameEpoch,
+        paintCaret,
+        ...(displayWindow ? { displayWindow } : {}),
+      },
       snapshotTransfers(snapshot)
     );
     const result = frameResult(response);
@@ -167,6 +189,17 @@ export class ResidentEngineWorkerClient {
       await this.request({ type: 'buildFrame', extras, expectedFrameEpoch, paintCaret })
     );
     return result;
+  }
+
+  /** Build unbuilt display pages; the reply frame carries them. */
+  async buildPages(
+    pages: number[],
+    expectedFrameEpoch: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame> {
+    return frameResult(
+      await this.request({ type: 'buildPages', pages, expectedFrameEpoch, paintCaret })
+    );
   }
 
   async applyInput(

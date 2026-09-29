@@ -211,3 +211,22 @@ describe('createDisplayListQueries wasm trap containment', () => {
     expect(isDisplayListQuerySourceDead(resident)).toBe(true);
   });
 });
+
+describe('createDisplayListQueries unbuilt pages', () => {
+  test('a position on an unbuilt page anchors to its content box', () => {
+    const { engine } = fakeEngine();
+    const unbuilt: DisplayPage = {
+      pageIndex: 1,
+      width: 100,
+      height: 100,
+      primitives: [],
+      unbuilt: true,
+      positionSpan: [40, 80],
+      contentBounds: { x: 10, y: 12, width: 80, height: 70 },
+    };
+    const queries = createDisplayListQueries({ pages: [page(0), unbuilt] }, engine);
+    expect(queries.caretRect(50)).toEqual({ pageIndex: 1, x: 10, y: 12, width: 0, height: 0 });
+    expect(queries.anchorRect(50)).toEqual({ pageIndex: 1, x: 10, y: 12, width: 0, height: 0 });
+    expect(queries.caretRect(90)).toBeNull();
+  });
+});

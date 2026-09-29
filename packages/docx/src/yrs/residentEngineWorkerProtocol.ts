@@ -13,12 +13,22 @@ export type ResidentEngineWorkerRequest =
       snapshot: YrsResidentWorkerSnapshot;
       extras: string;
       expectedFrameEpoch: number;
+      /** Pages `[start, end)` a full build compiles; the rest stay unbuilt. */
+      displayWindow?: [number, number];
     }
   | {
       id: number;
       type: 'sync';
       snapshot: YrsResidentWorkerSnapshot;
       extras: string;
+      expectedFrameEpoch: number;
+      paintCaret: boolean;
+      displayWindow?: [number, number];
+    }
+  | {
+      id: number;
+      type: 'buildPages';
+      pages: number[];
       expectedFrameEpoch: number;
       paintCaret: boolean;
     }
