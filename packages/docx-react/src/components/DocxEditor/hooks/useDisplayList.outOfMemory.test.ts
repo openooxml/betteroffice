@@ -347,3 +347,34 @@ test('typing into a worker that runs out of memory keeps the keystroke for the h
     native.free();
   }
 });
+
+test('a failure that arrives after unmount starts no worker', async () => {
+  const { native, frame, engine, layoutJson } = setup();
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, null)
+    );
+    const provisional = result.current.layoutInWorker(engine, REQUEST)!;
+    const [first] = FakeWorker.spawned;
+    await act(async () =>
+      first!.replyFrame(frame(1), 1, { layoutJson, layoutProvisional: true })
+    );
+    await provisional;
+    // An overlapping pass runs the first worker out of memory and is retried.
+    await act(async () => {
+      const retried = result.current.layoutInWorker(engine, REQUEST)!;
+      first!.outOfMemory();
+      await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+      FakeWorker.spawned[1]!.replyFrame(frame(2), 2, { layoutJson });
+      await retried;
+    });
+    unmount();
+    // The first pass's completion is still due, and fails with the old error.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(FakeWorker.spawned).toHaveLength(2);
+  } finally {
+    warnings.mockRestore();
+    native.free();
+  }
+});

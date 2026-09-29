@@ -284,6 +284,8 @@ export function useRustDisplayList(
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   // The engine whose worker ran out of memory, and the failure once its
   // replacement did too.
+  // No worker starts once the hook is gone, whatever failure arrives late.
+  const unmountedRef = useRef(false);
   const outOfMemoryRef = useRef<{
     engine: YrsSession;
     failure: ResidentWorkerOutOfMemoryError | null;
@@ -449,8 +451,10 @@ export function useRustDisplayList(
     });
   }, [queryEpochGate, requestSettleRelayout, residentEngine]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
       if (paintedCaretIdleTimerRef.current !== null) {
         clearTimeout(paintedCaretIdleTimerRef.current);
       }
@@ -460,9 +464,8 @@ export function useRustDisplayList(
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
-    },
-    [queryEpochGate]
-  );
+    };
+  }, [queryEpochGate]);
 
   const publishQuerySnapshot = useCallback(
     (nextSnapshot: RustDisplayListSnapshot, contentEpoch: number): void => {
@@ -534,7 +537,7 @@ export function useRustDisplayList(
     ): 'retry' | 'stale' | 'failed' => {
       const previous = outOfMemoryRef.current?.engine === hostEngine ? outOfMemoryRef.current : null;
       if (previous?.failure) return 'failed';
-      if (workerFallbackEngineRef.current === hostEngine) return 'stale';
+      if (unmountedRef.current || workerFallbackEngineRef.current === hostEngine) return 'stale';
       const current = workerRef.current;
       if (current && current.engine !== hostEngine) return 'stale';
       // Another request of the failed worker already replaced it.
