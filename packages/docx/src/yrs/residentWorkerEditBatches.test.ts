@@ -152,3 +152,26 @@ test('typing in a table cell goes through the resident worker', async () => {
   expect(main.paragraphs(cell)[0]!.text).toBe('Cell typed');
   expect(typed.selection?.head).toMatchObject({ story: cell, offset: 10 });
 });
+
+test('a resident delete does not merge a paragraph forward over a table', async () => {
+  const main = await createYrsSession({ clientId: 5105 });
+  sessions.push(main);
+  const { paraId } = main.createStory('body', 'Alpha');
+  const { secondParaId } = main.splitParagraph({ story: 'body', paraId, offset: 5 });
+  main.insertText({ story: 'body', paraId: secondParaId, offset: 0 }, 'Omega');
+  main.insertTable({ story: 'body', paraId: secondParaId, offset: 0 }, 1, 1);
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.layoutDocumentWithRegionsJson(LAYOUT);
+  main.setSelection({ story: 'body', paraId, offset: 5 });
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  const booted = await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  const frame = applyFrameDeltaOwned(null, decodeFrameDelta(booted.frame));
+  const before = accepted(main);
+
+  expect(
+    await client.applyDelete('forward', main.selection()!, frame.frameEpoch, false, false)
+  ).toEqual({ applied: false });
+  expect(accepted(main)).toEqual(before);
+  expect(client.isReady()).toBe(true);
+});

@@ -2390,6 +2390,10 @@ impl EngineSession {
                                 regions.paragraph_spacing_line_px(0),
                             );
                             resolve_doc_grid_pitch(next_block, regions.doc_grid_snap_pitch_px(0));
+                            // as the region pass measures a changed table
+                            docx_layout::paragraph_spacing::apply_contextual_spacing_blocks(
+                                std::slice::from_mut(next_block),
+                            );
                             docx_layout::measure_blocks::measure_block(
                                 next_block,
                                 width,

@@ -83,3 +83,50 @@ fn a_table_cell_is_not_resident_input_without_region_layout() {
         .clone();
     assert!(!engine.can_apply_input("body:t0:r0c1", &paragraph));
 }
+
+#[test]
+fn a_cell_edit_beside_contextual_spacing_lays_out_as_the_region_pass_would() {
+    let paragraph = |id: &str, text: &str| {
+        format!(
+            concat!(
+                r#"<w:p w14:paraId="{}"><w:pPr><w:contextualSpacing/>"#,
+                r#"<w:spacing w:before="240" w:after="240"/></w:pPr>{}</w:p>"#
+            ),
+            id,
+            fixture::r(text)
+        )
+    };
+    let body = format!(
+        concat!(
+            "{}",
+            r#"<w:tbl><w:tblPr><w:tblW w:w="4800" w:type="dxa"/></w:tblPr>"#,
+            r#"<w:tblGrid><w:gridCol w:w="4800"/></w:tblGrid><w:tr><w:tc><w:tcPr>"#,
+            r#"<w:tcW w:w="4800" w:type="dxa"/></w:tcPr>{}{}</w:tc></w:tr></w:tbl>{}"#
+        ),
+        fixture::p("10000001", &fixture::r("Before")),
+        paragraph("10000002", "One"),
+        paragraph("10000003", "Two"),
+        fixture::p("10000004", &fixture::r("After")),
+    );
+    let (engine, request) = fixture::laid_out(&fixture::with_body(&body), 9403);
+    // without note contents the region fast path owns plain edits
+    let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+    request["notes"]["contents"] = serde_json::json!([]);
+    let request = request.to_string();
+    engine.layout_document_with_regions_json(&request).unwrap();
+    engine.build_display_list_frame("{}", 0).unwrap();
+    let cell = "body:t0:r0c0";
+    engine
+        .doc()
+        .insert_text(
+            &EditCtx::local("", ""),
+            Position::new(cell, 1),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    engine.apply_and_layout(cell, 1).unwrap();
+    let resident = engine.retained_kernel_inputs_json().unwrap();
+    engine.layout_document_with_regions_json(&request).unwrap();
+    assert_eq!(engine.retained_kernel_inputs_json().unwrap(), resident);
+}
