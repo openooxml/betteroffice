@@ -78,6 +78,7 @@ mod format;
 mod heading;
 mod identity;
 mod list_marker;
+mod media_srcs;
 mod op;
 mod ops;
 mod policy;
@@ -525,6 +526,9 @@ pub struct EditingDoc {
     source: Mutex<Option<identity::SourcePackage>>,
     seen: identity::SeenCell,
     story_revisions: Arc<Mutex<StoryRevisions>>,
+    /// Parser-minted image URLs interned out of yrs payloads at seed; see
+    /// [`media_srcs`]. The frame encoder resolves the tokens back on the wire.
+    media_srcs: Mutex<Arc<[Arc<str>]>>,
     _update_sub: Subscription,
     _story_revision_sub: Subscription,
     _seen_subs: Vec<Subscription>,
@@ -568,6 +572,7 @@ impl EditingDoc {
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
             metadata: Mutex::new(None),
+            media_srcs: Mutex::new(Arc::from(Vec::new())),
             segment_indexes: Mutex::default(),
             chunk_snapshots: Mutex::default(),
             source: Mutex::new(None),
@@ -600,6 +605,15 @@ impl EditingDoc {
     }
 
     /// Retains the opened package's style and structure context and rotates the version.
+    /// The interned media URL table for this document's seeded content.
+    pub fn media_srcs(&self) -> Arc<[Arc<str>]> {
+        Arc::clone(&self.media_srcs.lock().unwrap())
+    }
+
+    pub(crate) fn set_media_srcs(&self, srcs: Arc<[Arc<str>]>) {
+        *self.media_srcs.lock().unwrap() = srcs;
+    }
+
     pub(crate) fn install_source(&self, source: seed::SourceMetadata, entropy: u64) {
         *self.metadata.lock().unwrap() = Some(Arc::new(source));
         self.rotate_version(entropy);

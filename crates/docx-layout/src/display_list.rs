@@ -243,6 +243,11 @@ pub enum Primitive {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DocAttrs {
+    /// Set at build time when a serialized member was seeded as a `media:`
+    /// token, so frame emission can spot materialization candidates without
+    /// re-walking the payload Values.
+    #[serde(skip)]
+    pub media_token: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_start: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -7951,10 +7956,15 @@ fn emit_shape_fragment(
         .and_then(Value::as_str)
         .map(str::to_string);
     attrs.fill_paint = shape_fill_paint(block.fill.as_ref());
+    attrs.media_token = attrs.fill_paint.as_ref().is_some_and(value_has_media_token);
     attrs.stroke_paint = shape_stroke_paint(block.stroke.as_ref());
     attrs.effects = block.effects.clone();
     attrs.effect_extent = block.effect_extent.clone();
     attrs.drawing_scene = block.scene.clone();
+    attrs.media_token |= attrs
+        .drawing_scene
+        .as_ref()
+        .is_some_and(value_has_media_token);
     attrs.text_body_properties = block.text_body_properties.clone();
 
     let decorative = block.decorative.unwrap_or_else(|| {
@@ -8064,6 +8074,20 @@ fn shape_fill_color(fill: Option<&ShapeFillIn>) -> Option<String> {
     ooxml_drawingml::resolve_shape_fill_color(fill.kind.as_deref(), fill.color.as_deref())
 }
 
+/// Scheme prefix `docx-edit` writes in place of resolved media URLs when it
+/// interns them — the interned form is `media:{index}`.
+pub const MEDIA_SRC_PREFIX: &str = "media:";
+
+/// Whether any string leaf under `value` starts with [`MEDIA_SRC_PREFIX`].
+fn value_has_media_token(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.starts_with(MEDIA_SRC_PREFIX),
+        Value::Array(items) => items.iter().any(value_has_media_token),
+        Value::Object(map) => map.values().any(value_has_media_token),
+        _ => false,
+    }
+}
+
 fn shape_fill_paint(fill: Option<&ShapeFillIn>) -> Option<Value> {
     let fill = fill?;
     let mut paint = serde_json::Map::new();
@@ -8095,13 +8119,12 @@ fn shape_fill_paint(fill: Option<&ShapeFillIn>) -> Option<Value> {
         }
     }
     // resolved picture-fill source: pass through only parser-minted embedded
-    // schemes (data:/blob:) so a hand-crafted input cannot smuggle an external
-    // URL to the canvas image resolver
-    if let Some(src) = fill
-        .picture_src
-        .as_ref()
-        .filter(|src| src.starts_with("data:") || src.starts_with("blob:"))
-    {
+    // schemes (data:/blob:) and session-media tokens (media:), so a
+    // hand-crafted input cannot smuggle an external URL to the canvas image
+    // resolver
+    if let Some(src) = fill.picture_src.as_ref().filter(|src| {
+        src.starts_with("data:") || src.starts_with("blob:") || src.starts_with(MEDIA_SRC_PREFIX)
+    }) {
         paint.insert("pictureSrc".to_string(), Value::String(src.clone()));
     }
     for (key, value) in [

@@ -3146,8 +3146,17 @@ impl EngineSession {
     /// Builds and retains the typed display list.
     pub fn build_display_list_json(&self, input_json: &str) -> Result<String, String> {
         let list = docx_layout::build_display_list_value(input_json)?;
+        let media_srcs = self.doc().media_srcs();
+        let mut wire = list.clone();
+        for page in &mut wire.pages {
+            if let std::borrow::Cow::Owned(materialized) =
+                crate::media_srcs::materialize_page_media(page, &media_srcs)
+            {
+                *page = materialized;
+            }
+        }
         let display_json =
-            serde_json::to_string(&list).map_err(|error| format!("serialize: {error}"))?;
+            serde_json::to_string(&wire).map_err(|error| format!("serialize: {error}"))?;
         let mut display = self.display.borrow_mut();
         display.list = Some(list);
         display.resident_input = None;
@@ -3286,6 +3295,7 @@ impl EngineSession {
             frame_epoch,
             base_frame_epoch: binary_frame_epoch,
         };
+        let media_srcs = self.doc().media_srcs();
         let (bytes, pages) =
             if incremental_build && !full && previous_pages.len() == list.pages.len() {
                 encode_frame_delta_incremental(
@@ -3294,9 +3304,17 @@ impl EngineSession {
                     epochs,
                     &mut next_page_id,
                     &rebuilt_pages,
+                    &media_srcs,
                 )?
             } else {
-                encode_frame_delta(list, previous_pages, epochs, full, &mut next_page_id)?
+                encode_frame_delta(
+                    list,
+                    previous_pages,
+                    epochs,
+                    full,
+                    &mut next_page_id,
+                    &media_srcs,
+                )?
             };
         display.pages = pages;
         display.next_page_id = next_page_id;
@@ -3363,12 +3381,25 @@ impl EngineSession {
             .list
             .as_ref()
             .expect("display list built before FrameDelta encoding");
+        let media_srcs = self.doc().media_srcs();
         let (bytes, snapshots) = if !full && display.pages.len() == list.pages.len() {
-            encode_frame_delta_pages(list, &display.pages, epochs, &mut next_page_id, &|index| {
-                rebuilt.contains(&index)
-            })?
+            encode_frame_delta_pages(
+                list,
+                &display.pages,
+                epochs,
+                &mut next_page_id,
+                &|index| rebuilt.contains(&index),
+                &media_srcs,
+            )?
         } else {
-            encode_frame_delta(list, &display.pages, epochs, full, &mut next_page_id)?
+            encode_frame_delta(
+                list,
+                &display.pages,
+                epochs,
+                full,
+                &mut next_page_id,
+                &media_srcs,
+            )?
         };
         display.pages = snapshots;
         display.next_page_id = next_page_id;
@@ -6433,8 +6464,9 @@ mod tests {
             .layout_document_with_regions_prefix_retained_json(&request, 3)
             .unwrap();
         let page = first_page(&preview);
+        let wire = crate::media_srcs::materialize_page_media(&page, &preview.doc().media_srcs());
         assert!(
-            serde_json::to_string(&page)
+            serde_json::to_string(&wire)
                 .unwrap()
                 .contains("data:image/png;base64,")
         );

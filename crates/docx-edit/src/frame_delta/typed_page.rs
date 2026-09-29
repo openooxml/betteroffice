@@ -38,11 +38,14 @@ use docx_layout::display_list::DisplayPage;
 use serde::Serialize;
 use serde::ser::{self, Serializer};
 
+use std::sync::Arc;
+
 use super::{
     GLYPH_BIDI_LEVEL, GLYPH_LOGICAL_ORDER, StringTable, VALUE_ARRAY, VALUE_F64, VALUE_FALSE,
     VALUE_GLYPH_ARRAY, VALUE_I64, VALUE_NULL, VALUE_OBJECT, VALUE_STRING, VALUE_TRUE, VALUE_U64,
     checked_u32, hash_write, patch_u32, write_f64, write_i64, write_u32, write_u64,
 };
+use crate::media_srcs::resolve_token;
 
 pub(super) struct PageHashes {
     /// Changes whenever the page's content changes, ignoring only its index.
@@ -53,7 +56,7 @@ pub(super) struct PageHashes {
 }
 
 /// Structural + visual fingerprints in one streaming pass.
-pub(super) fn hash_page(page: &DisplayPage) -> Result<PageHashes, String> {
+pub(super) fn hash_page(page: &DisplayPage, srcs: &[Arc<str>]) -> Result<PageHashes, String> {
     let mut state = HashState {
         fingerprint: super::FNV_OFFSET,
         visual: super::FNV_OFFSET,
@@ -64,6 +67,8 @@ pub(super) fn hash_page(page: &DisplayPage) -> Result<PageHashes, String> {
         vfp_on: true,
         root: true,
         slot: Slot::None,
+        srcs,
+        media: false,
     })
     .map_err(|error| format!("hash display page: {error}"))?;
     Ok(PageHashes {
@@ -106,11 +111,14 @@ pub(super) fn encode_page(
     page: &DisplayPage,
     ids: Interner<'_>,
     out: &mut Vec<u8>,
+    srcs: &[Arc<str>],
 ) -> Result<(), String> {
     page.serialize(EmitSer {
         ids,
         out,
         hash: None,
+        srcs,
+        media: false,
     })
     .map_err(|error| format!("encode display page: {error}"))
 }
@@ -122,6 +130,7 @@ pub(super) fn encode_page_hashed(
     page: &DisplayPage,
     ids: Interner<'_>,
     out: &mut Vec<u8>,
+    srcs: &[Arc<str>],
 ) -> Result<PageHashes, String> {
     let mut state = HashState {
         fingerprint: super::FNV_OFFSET,
@@ -137,6 +146,8 @@ pub(super) fn encode_page_hashed(
             fields_root: true,
             slot: Slot::None,
         }),
+        srcs,
+        media: false,
     })
     .map_err(|error| format!("encode display page: {error}"))?;
     Ok(PageHashes {
@@ -151,9 +162,24 @@ pub(super) fn encode_page_hashed(
 pub(super) fn collect_page_strings(
     page: &DisplayPage,
     ids: &mut StringTable,
+    srcs: &[Arc<str>],
 ) -> Result<(), String> {
-    page.serialize(CollectSer { ids })
-        .map_err(|error| format!("collect display page strings: {error}"))
+    page.serialize(CollectSer {
+        ids,
+        srcs,
+        media: false,
+    })
+    .map_err(|error| format!("collect display page strings: {error}"))
+}
+
+/// Field and object keys whose string leaves can hold `media:` tokens.
+/// Keeping token resolution scoped to them means a body-text string that
+/// happens to spell one can never be rewritten.
+fn is_media_src_key(key: &str) -> bool {
+    matches!(
+        key,
+        "src" | "dataUrl" | "data_url" | "pictureSrc" | "relId" | "rel_id"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +412,10 @@ struct HashSer<'a> {
     root: bool,
     /// The key this value sits under (drives the `inlineSdtWidget.pos` rule).
     slot: Slot,
+    /// Interned media URLs `media:` tokens resolve against.
+    srcs: &'a [Arc<str>],
+    /// True when this value sits under a media-source key.
+    media: bool,
 }
 
 impl HashSer<'_> {
@@ -400,6 +430,8 @@ struct HashContainer<'a> {
     vfp_on: bool,
     fields_root: bool,
     slot: Slot,
+    srcs: &'a [Arc<str>],
+    media: bool,
     key_buf: String,
 }
 
@@ -420,6 +452,8 @@ impl HashContainer<'_> {
             vfp_on,
             root: false,
             slot: classify(key),
+            srcs: self.srcs,
+            media: is_media_src_key(key),
         })
     }
 
@@ -432,6 +466,8 @@ impl HashContainer<'_> {
             // Array elements inherit the array's slot, so a glyph object
             // still counts as sitting under "glyphs".
             slot: self.slot,
+            srcs: self.srcs,
+            media: self.media,
         })
     }
 }
@@ -505,6 +541,11 @@ impl<'a> Serializer for HashSer<'a> {
     }
     fn serialize_str(mut self, value: &str) -> Result<(), SerError> {
         self.write(&[VALUE_STRING]);
+        let value = if self.media {
+            resolve_token(value, self.srcs)
+        } else {
+            value
+        };
         self.write(value.as_bytes());
         Ok(())
     }
@@ -562,6 +603,8 @@ impl<'a> Serializer for HashSer<'a> {
             vfp_on: self.vfp_on,
             root: false,
             slot: Slot::None,
+            srcs: self.srcs,
+            media: false,
         })
     }
 
@@ -575,6 +618,8 @@ impl<'a> Serializer for HashSer<'a> {
             vfp_on: self.vfp_on,
             fields_root: false,
             slot: self.slot,
+            srcs: self.srcs,
+            media: self.media,
             key_buf: String::new(),
         })
     }
@@ -605,6 +650,8 @@ impl<'a> Serializer for HashSer<'a> {
             vfp_on: self.vfp_on,
             fields_root: self.root,
             slot: self.slot,
+            srcs: self.srcs,
+            media: false,
             key_buf: String::new(),
         })
     }
@@ -771,6 +818,8 @@ struct EmitSer<'a> {
     ids: Interner<'a>,
     out: &'a mut Vec<u8>,
     hash: Option<FuseHash<'a>>,
+    srcs: &'a [Arc<str>],
+    media: bool,
 }
 
 impl EmitSer<'_> {
@@ -786,6 +835,9 @@ struct EmitContainer<'a> {
     ids: Interner<'a>,
     out: &'a mut Vec<u8>,
     hash: Option<FuseHash<'a>>,
+    srcs: &'a [Arc<str>],
+    /// Sequences inherit it; maps and structs re-derive from their own keys.
+    media: bool,
     length_at: usize,
     count_at: usize,
     payload_at: usize,
@@ -804,6 +856,8 @@ impl<'a> EmitContainer<'a> {
         ids: Interner<'a>,
         out: &'a mut Vec<u8>,
         hash: Option<FuseHash<'a>>,
+        srcs: &'a [Arc<str>],
+        media: bool,
     ) -> Self {
         out.push(opcode);
         let length_at = out.len();
@@ -815,6 +869,8 @@ impl<'a> EmitContainer<'a> {
             ids,
             out,
             hash,
+            srcs,
+            media,
             length_at,
             count_at,
             payload_at,
@@ -888,6 +944,8 @@ impl<'a> EmitContainer<'a> {
             ids: self.ids.reborrow(),
             out: &mut *self.out,
             hash,
+            srcs: self.srcs,
+            media: self.media,
         })
     }
 
@@ -910,6 +968,8 @@ impl<'a> EmitContainer<'a> {
                     vfp_on: hash.vfp_on,
                     root: false,
                     slot: hash.slot,
+                    srcs: self.srcs,
+                    media: false,
                 })?;
             }
             return emit_glyph_array(&glyphs, self.out);
@@ -918,6 +978,8 @@ impl<'a> EmitContainer<'a> {
             ids: self.ids.reborrow(),
             out: &mut *self.out,
             hash: field_hash,
+            srcs: self.srcs,
+            media: is_media_src_key(key),
         })
     }
 }
@@ -1006,6 +1068,11 @@ impl<'a> Serializer for EmitSer<'a> {
     }
     fn serialize_str(mut self, value: &str) -> Result<(), SerError> {
         self.out.push(VALUE_STRING);
+        let value = if self.media {
+            resolve_token(value, self.srcs)
+        } else {
+            value
+        };
         write_u32(self.out, self.ids.id(value).map_err(SerError)?);
         self.feed(&[VALUE_STRING]);
         self.feed(value.as_bytes());
@@ -1068,7 +1135,8 @@ impl<'a> Serializer for EmitSer<'a> {
                 slot: Slot::None,
             }
         });
-        let mut container = EmitContainer::open(VALUE_OBJECT, self.ids, self.out, None);
+        let mut container =
+            EmitContainer::open(VALUE_OBJECT, self.ids, self.out, None, self.srcs, false);
         container.count = 1;
         let key_id = container.ids.id(variant).map_err(SerError)?;
         container.entries.push((key_id, container.out.len()));
@@ -1077,6 +1145,8 @@ impl<'a> Serializer for EmitSer<'a> {
             ids: container.ids.reborrow(),
             out: &mut *container.out,
             hash,
+            srcs: self.srcs,
+            media: false,
         })?;
         container.close()
     }
@@ -1091,6 +1161,8 @@ impl<'a> Serializer for EmitSer<'a> {
             self.ids,
             self.out,
             self.hash,
+            self.srcs,
+            self.media,
         ))
     }
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, SerError> {
@@ -1119,6 +1191,8 @@ impl<'a> Serializer for EmitSer<'a> {
             self.ids,
             self.out,
             self.hash,
+            self.srcs,
+            false,
         ))
     }
     fn serialize_struct(
@@ -1889,11 +1963,15 @@ impl ser::SerializeStruct for GlyphFieldProbe {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct CollectSer<'a> {
     ids: &'a mut StringTable,
+    srcs: &'a [Arc<str>],
+    media: bool,
 }
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct CollectContainer<'a> {
     ids: &'a mut StringTable,
+    srcs: &'a [Arc<str>],
+    media: bool,
     key_buf: String,
 }
 
@@ -1902,6 +1980,8 @@ impl CollectContainer<'_> {
     fn element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), SerError> {
         value.serialize(CollectSer {
             ids: &mut *self.ids,
+            srcs: self.srcs,
+            media: self.media,
         })
     }
 
@@ -1912,6 +1992,8 @@ impl CollectContainer<'_> {
         }
         value.serialize(CollectSer {
             ids: &mut *self.ids,
+            srcs: self.srcs,
+            media: is_media_src_key(key),
         })
     }
 }
@@ -1967,6 +2049,11 @@ impl<'a> Serializer for CollectSer<'a> {
         Ok(())
     }
     fn serialize_str(self, value: &str) -> Result<(), SerError> {
+        let value = if self.media {
+            resolve_token(value, self.srcs)
+        } else {
+            value
+        };
         self.ids.id(value).map_err(SerError)?;
         Ok(())
     }
@@ -2013,11 +2100,17 @@ impl<'a> Serializer for CollectSer<'a> {
         value: &T,
     ) -> Result<(), SerError> {
         self.ids.id(variant).map_err(SerError)?;
-        value.serialize(CollectSer { ids: self.ids })
+        value.serialize(CollectSer {
+            ids: self.ids,
+            srcs: self.srcs,
+            media: false,
+        })
     }
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, SerError> {
         Ok(CollectContainer {
             ids: self.ids,
+            srcs: self.srcs,
+            media: self.media,
             key_buf: String::new(),
         })
     }
@@ -2043,6 +2136,8 @@ impl<'a> Serializer for CollectSer<'a> {
     fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, SerError> {
         Ok(CollectContainer {
             ids: self.ids,
+            srcs: self.srcs,
+            media: self.media,
             key_buf: String::new(),
         })
     }
