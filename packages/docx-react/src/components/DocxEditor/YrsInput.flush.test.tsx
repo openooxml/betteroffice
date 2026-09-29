@@ -50,7 +50,8 @@ function inputFor(
   session: YrsSession,
   input: React.Ref<YrsInputRef>,
   applyResidentInput?: YrsInputProps['applyResidentInput'],
-  applyResidentDelete?: YrsInputProps['applyResidentDelete']
+  applyResidentDelete?: YrsInputProps['applyResidentDelete'],
+  props: Pick<YrsInputProps, 'isSuggesting' | 'author'> = {}
 ) {
   const map = () =>
     createYrsInputPositionMap(
@@ -73,6 +74,7 @@ function inputFor(
       onDirectInput={() => {}}
       applyResidentInput={applyResidentInput}
       applyResidentDelete={applyResidentDelete}
+      {...props}
     />
   );
 }
@@ -135,6 +137,76 @@ test('flush seals a queued text batch before subsequent input', async () => {
   });
   expect(calls).toEqual(['A', 'B']);
   expect(session.paragraphs('body')[0].text).toBe('SeedAB');
+});
+
+test('suggesting type-over places the caret and stored formatting on the inserted text', async () => {
+  const session = await seededSession();
+  const paraId = session.paragraphs('body')[0]!.paraId;
+  session.setSelection(
+    { story: 'body', paraId, offset: 1 },
+    { story: 'body', paraId, offset: 3 }
+  );
+  const input = createRef<YrsInputRef>();
+  render(inputFor(session, input, undefined, undefined, { isSuggesting: true, author: 'Ada' }));
+  act(() => {
+    input.current!.applyStoredFormatting({ type: 'set', delta: { bold: true } });
+    input.current!.insertText('X');
+  });
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  expect(text(session)).toBe('SeeXd');
+  expect(session.selection()).toEqual({
+    anchor: { story: 'body', paraId, offset: 4 },
+    head: { story: 'body', paraId, offset: 4 },
+  });
+  const segments = session.storySegments('body');
+  const inserted = segments.find((segment) => segment.kind === 'text' && segment.text === 'X');
+  expect(inserted?.attributes.ins).toMatchObject({ author: 'Ada' });
+  expect(inserted?.attributes.bold).toBe(true);
+  const deleted = segments.find((segment) => segment.kind === 'text' && segment.text === 'ee');
+  expect(deleted?.attributes.del).toMatchObject({ author: 'Ada' });
+  expect(deleted?.attributes.bold).not.toBe(true);
+  act(() => input.current!.insertText('Y'));
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  expect(text(session)).toBe('SeeXYd');
+  expect(session.selection()?.head).toEqual({ story: 'body', paraId, offset: 5 });
+});
+
+test('suggesting type-over across paragraphs keeps the stored formatting at the caret', async () => {
+  const session = await seededSession();
+  const first = session.paragraphs('body')[0]!.paraId;
+  const { secondParaId: second } = session.splitParagraph({
+    story: 'body',
+    paraId: first,
+    offset: 2,
+  });
+  session.setSelection(
+    { story: 'body', paraId: second, offset: 1 },
+    { story: 'body', paraId: first, offset: 1 }
+  );
+  const input = createRef<YrsInputRef>();
+  render(inputFor(session, input, undefined, undefined, { isSuggesting: true, author: 'Ada' }));
+  act(() => {
+    input.current!.applyStoredFormatting({ type: 'set', delta: { bold: true } });
+    input.current!.insertText('X');
+  });
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  act(() => input.current!.insertText('Y'));
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  const typed = session
+    .storySegments('body')
+    .filter((segment) => segment.kind === 'text' && /[XY]/.test(segment.text));
+  expect(typed.map((segment) => (segment.kind === 'text' ? segment.text : '')).join('')).toBe(
+    'XY'
+  );
+  expect(typed.every((segment) => segment.attributes.bold === true)).toBe(true);
 });
 
 test('flush includes a completed IME composition exactly once', async () => {

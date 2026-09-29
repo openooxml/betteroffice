@@ -729,7 +729,7 @@ export class EditSession {
      * Replaces `[start, end)` with `text` in one transaction. The inserted
      * text adopts the first replaced unit's formatting; in suggesting mode
      * the deletion and the insertion share one revision id. Receipt:
-     * `{"revisionId": string|null}`.
+     * `{"revisionId": string|null, "range": {"story", "start": {"paraId", "offset"}, "end": {"paraId", "offset"}}}`.
      */
     replace_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text: string, author_name?: string | null, author_date?: string | null): string;
     /**

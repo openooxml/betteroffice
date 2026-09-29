@@ -439,6 +439,11 @@ export interface YrsRevisionReceipt {
   revisionId: string | null;
 }
 
+/** Where the replacement text landed; after the struck-out text when suggesting. */
+export interface YrsReplaceReceipt extends YrsRevisionReceipt {
+  range?: YrsStoryRange;
+}
+
 /**
  * Receipt of {@link YrsSession.splitParagraph}. The first half keeps the
  * original paraId and the second half is re-minted; suggesting
@@ -1055,7 +1060,7 @@ export interface YrsSession extends CollaborationReplica {
    */
   deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsRevisionReceipt;
   /** Replaces a range with text in one transaction (one shared revision when suggesting). */
-  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Splits a paragraph by inserting one pilcrow. The FIRST half keeps the
    * original paraId; the SECOND half is re-minted (`secondParaId`).
@@ -2078,7 +2083,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     splitParagraph: (at, suggesting) => {

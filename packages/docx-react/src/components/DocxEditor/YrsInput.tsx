@@ -504,16 +504,32 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           for (let i = 0; i < pieces.length; i += 1) {
             const piece = pieces[i];
             if (piece || (i === 0 && hasSelection)) {
-              const insertedAt = caret;
+              let insertedAt = caret;
+              let insertedStored: YrsStoredFormatting | undefined;
               if (i === 0 && hasSelection) {
-                session.replaceRange(selectedRange, piece, suggestingAuthor());
+                const receipt = session.replaceRange(selectedRange, piece, suggestingAuthor());
+                if (receipt.range) {
+                  insertedAt = { story: receipt.range.story, ...receipt.range.start };
+                  caret = { story: receipt.range.story, ...receipt.range.end };
+                } else {
+                  caret = { ...caret, offset: caret.offset + piece.length };
+                }
+                // A suggested replacement lands after the struck-out text, possibly
+                // in another paragraph: the caret's stored formatting goes with it.
+                insertedStored = stored;
+                if (stored) {
+                  storedFormattingByParagraphRef.current.set(
+                    `${caret.story}\u0000${caret.paraId}`,
+                    stored
+                  );
+                }
               } else {
                 session.insertText(caret, piece, suggestingAuthor());
+                caret = { ...caret, offset: caret.offset + piece.length };
+                insertedStored = storedFormattingByParagraphRef.current.get(
+                  `${insertedAt.story}\u0000${insertedAt.paraId}`
+                );
               }
-              caret = { ...caret, offset: caret.offset + piece.length };
-              const insertedStored = storedFormattingByParagraphRef.current.get(
-                `${insertedAt.story}\u0000${insertedAt.paraId}`
-              );
               if (insertedStored) {
                 const insertedRange: YrsStoryRange = {
                   story: insertedAt.story,

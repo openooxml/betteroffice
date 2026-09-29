@@ -3045,7 +3045,7 @@ impl EditSession {
     /// Replaces `[start, end)` with `text` in one transaction. The inserted
     /// text adopts the first replaced unit's formatting; in suggesting mode
     /// the deletion and the insertion share one revision id. Receipt:
-    /// `{"revisionId": string|null}`.
+    /// `{"revisionId": string|null, "range": {"story", "start": {"paraId", "offset"}, "end": {"paraId", "offset"}}}`.
     #[allow(clippy::too_many_arguments)]
     pub fn replace_range(
         &self,
@@ -3066,7 +3066,18 @@ impl EditSession {
             .doc()
             .replace_range(&ctx, StoryRange::new(story, start, end), text)
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        let range = receipt.range.map(|range| {
+            json!({
+                "story": range.start.story,
+                "start": { "paraId": range.start.para, "offset": range.start.offset },
+                "end": { "paraId": range.end.para, "offset": range.end.offset },
+            })
+        });
+        Ok(json!({
+            "revisionId": receipt.revision_ids.into_iter().next(),
+            "range": range,
+        })
+        .to_string())
     }
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
