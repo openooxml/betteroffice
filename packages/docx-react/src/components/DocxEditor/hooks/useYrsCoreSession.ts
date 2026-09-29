@@ -300,6 +300,7 @@ export function useYrsCoreSession(
           if (stale()) return;
         }
         const bytes = await pendingBytes;
+        if (stale()) return;
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
         if (stale()) {
           next.destroy();
