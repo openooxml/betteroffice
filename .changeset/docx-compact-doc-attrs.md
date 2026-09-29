@@ -1,5 +1,4 @@
 ---
-"@betteroffice/rust-crates": patch
 "@betteroffice/docx": patch
 ---
 
