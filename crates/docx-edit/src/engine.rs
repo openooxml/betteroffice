@@ -3539,7 +3539,7 @@ impl EngineSession {
     /// Lays this private session out with `fonts` alone and exports it as
     /// [`Self::export_snapshot_with_pages`] does. The fonts are registered, in order, in a
     /// measurement font store of their own, so `request_json`'s font chains name them by their
-    /// index, and the module's shared store is left exactly as it was. The outer error is a font
+    /// index, and the store in use is left exactly as it was. The outer error is a font
     /// the engine rejects or a request it cannot lay out.
     pub fn export_snapshot_with_private_fonts(
         &self,
