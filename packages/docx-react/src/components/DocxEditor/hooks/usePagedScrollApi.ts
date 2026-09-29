@@ -112,12 +112,9 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
         clientY / viewport.zoom -
         viewport.top / viewport.zoom -
         viewport.height / 2;
-      const distance = Math.abs(top - scroller.scrollTop);
-      scroller.scrollTo({
-        top,
-        behavior:
-          smooth && distance <= viewport.height * SMOOTH_SCROLL_VIEWPORTS ? 'smooth' : 'auto',
-      });
+      const near = Math.abs(top - scroller.scrollTop) <= viewport.height * SMOOTH_SCROLL_VIEWPORTS;
+      // 'auto' would follow a CSS `scroll-behavior: smooth` and animate anyway
+      scroller.scrollTo({ top, behavior: smooth ? (near ? 'smooth' : 'instant') : 'auto' });
       return true;
     },
     [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef]

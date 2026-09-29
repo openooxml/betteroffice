@@ -115,12 +115,32 @@ test('scrollToPage centres the page in the window when the root scrolls', () => 
   }
 });
 
-test('scrollToPage animates a near page and jumps to a far one', () => {
+test('scrollToPage animates within two viewports and jumps farther, in layout pixels', () => {
+  for (const zoom of [0.8, 1, 1.25]) {
+    const { host, scroller, behaviors } = scene(zoom, 0);
+    const api = scrollApi(host, scroller);
+    for (let page = 1; page <= 4; page += 1) api.scrollToPageImpl(page);
+    expect(behaviors).toEqual(['smooth', 'smooth', 'smooth', 'instant']);
+  }
+});
+
+test('an explicitly unanimated scroll keeps the default behaviour at any distance', () => {
   const { host, scroller, behaviors } = scene(1, 0);
-  const api = scrollApi(host, scroller);
-  api.scrollToPageImpl(2);
-  api.scrollToPageImpl(PAGES);
-  expect(behaviors).toEqual(['smooth', 'auto']);
+  const far = { pageIndex: PAGES - 1, x: 0, y: 0, width: 10, height: 10 };
+  const api = renderHook(() =>
+    usePagedScrollApi({
+      pagesContainerRef: { current: host as HTMLDivElement },
+      yrsInputRef: { current: null },
+      yrsSession: null,
+      yrsLocToDisplayPosition: () => null,
+      getScrollContainer: () => scroller as HTMLDivElement,
+      displayListQueries: { ...queries, anchorRect: () => far } as DisplayListQueries,
+      canvasHostRef: { current: host as HTMLDivElement },
+    })
+  ).result.current;
+  api.scrollToPositionImpl(1, true);
+  api.revealPositionImpl(1);
+  expect(behaviors).toEqual(['auto', 'instant']);
 });
 
 test('scrollToPage computes an unzoomed target exactly as before', () => {
