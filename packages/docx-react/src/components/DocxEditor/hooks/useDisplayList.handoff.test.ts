@@ -295,3 +295,43 @@ test('a display-only preview never asks the worker for the rest of its layout', 
     preview.native.free();
   }
 });
+
+test('releasing lets go of the worker and the engine the pages showed', async () => {
+  FakeWorker.created = [];
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const preview = hostWithPage(9520, 'Preview page');
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) =>
+        useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pending = result.current.layoutInWorker(preview.engine, REQUEST);
+    const worker = FakeWorker.created[0]!;
+    worker.reply({
+      id: worker.posted[0]!.id,
+      ok: true,
+      frame: preview.frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson: preview.layoutJson,
+    });
+    const computation = await pending!;
+    await act(async () => {
+      rerender({ layout: computation!.layout, source: preview.engine });
+    });
+    await waitFor(() => expect(result.current.presentedEngine).toBe(preview.engine));
+
+    await act(async () => {
+      result.current.release();
+      rerender({ layout: null, source: null });
+    });
+    expect(worker.posted.at(-1)?.type).toBe('destroy');
+    expect(result.current.presentedEngine).toBeNull();
+    expect(result.current.displayList).toBeNull();
+    unmount();
+  } finally {
+    preview.native.free();
+  }
+});

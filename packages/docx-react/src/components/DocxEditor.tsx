@@ -1451,6 +1451,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     scrollContainerRef,
     pagedEditorRef,
   });
+  // The error view unmounts the pages before they report none: a failed load,
+  // a preview's included, keeps nothing of what they showed.
+  const resetCanvasRenderer = canvasRenderer.reset;
+  useEffect(() => {
+    if (!state.parseError) return;
+    resetCanvasRenderer();
+    setScrollPageInfo((prev) => (prev.totalPages === 0 ? prev : { ...prev, totalPages: 0 }));
+  }, [state.parseError, resetCanvasRenderer, setScrollPageInfo]);
 
   const pluginOverlayTarget = useCanvasOverlayTarget((plugins?.length ?? 0) > 0, editorContentRef);
   const pluginHost = useDocxPluginHost({

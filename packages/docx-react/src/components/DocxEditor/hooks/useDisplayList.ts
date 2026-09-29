@@ -88,6 +88,8 @@ export interface UseRustDisplayListResult {
   layoutInWorker: LayoutInWorker;
   /** The engine whose layout the latest published frame shows. */
   presentedEngine: unknown;
+  /** Lets go of every engine the pages showed: the resident worker and the presented engine. */
+  release(): void;
   /**
    * True while the worker owns the visible page surfaces. Sticky across
    * invalidation (remote/structural updates) so the canvas keeps its last
@@ -752,6 +754,15 @@ export function useRustDisplayList(
     [adoptHostEngine, setWorkerPresentationActive]
   );
 
+  const release = useCallback((): void => {
+    workerRef.current?.client.destroy();
+    workerRef.current = null;
+    frameEngineRef.current = null;
+    setPresentedEngine(null);
+    setWorkerSurfacesActive(false);
+    setWorkerPresentationActive(false);
+  }, [setWorkerPresentationActive]);
+
   // The worker client for `hostEngine`: its own, the one of the session it
   // takes over from, or a new one.
   const workerFor = useCallback((hostEngine: YrsSession): ResidentEngineWorkerClient => {
@@ -1222,6 +1233,7 @@ export function useRustDisplayList(
     applyDelete,
     layoutInWorker,
     presentedEngine,
+    release,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1324,6 +1336,8 @@ export interface UseCanvasRendererResult {
     layout: Layout | null,
     engine?: (RustDisplayListEngine & { outlineGlyphJson?: GlyphOutlineProvider }) | null
   ) => void;
+  /** Drops the pages, their engine and the resident worker, for a load that failed. */
+  reset(): void;
   /** media resolver for CanvasPagesView */
   resolveImage: ImageResolver;
   /** Rust display-list query facade for adapter interactions. */
@@ -1415,6 +1429,7 @@ export function useCanvasRenderer(
     applyDelete,
     layoutInWorker,
     presentedEngine,
+    release,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1432,6 +1447,11 @@ export function useCanvasRenderer(
     requestLayout,
     handoffFromRef
   );
+  const reset = useCallback((): void => {
+    setLayout(null);
+    setEngine(null);
+    release();
+  }, [release]);
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
@@ -1502,6 +1522,7 @@ export function useCanvasRenderer(
     status,
     error,
     onLayoutComputed,
+    reset,
     resolveImage,
     queries: geometryReady ? snapshotQueries : null,
     resolveQueries,
