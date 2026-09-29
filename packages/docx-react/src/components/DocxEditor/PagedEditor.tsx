@@ -693,6 +693,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       runLayoutPipeline,
       scheduleLayout,
       cancelPendingScrollRestore,
+      navigationEpoch,
       getLayoutRequest,
     } = useLayoutPipeline({
       onError,
@@ -1341,8 +1342,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsLocToDisplayPosition,
         getScrollContainer,
         displayListQueries,
+        layout,
         canvasHostRef,
         onNavigationIntent: cancelPendingScrollRestore,
+        navigationEpoch,
         requestCanvasParagraphFlash,
       });
 

@@ -86,7 +86,7 @@ const selection: YrsSelection = {
   head: { story: 'body', paraId: 'p1', offset: 0 },
 };
 
-function frameReply(id: number): ResidentEngineWorkerResponse {
+function frameReply(id: number): Extract<ResidentEngineWorkerResponse, { ok: true }> {
   return {
     id,
     ok: true,
@@ -314,5 +314,24 @@ describe('sent snapshot state', () => {
     worker.reply(late);
     await sync;
     expect(client.remoteStateVector()).toEqual(new Uint8Array([3]));
+  });
+});
+
+describe('provisional layout', () => {
+  test('a bootstrap asks for the first pages and completeLayout brings the rest', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap(snapshot, '', { layoutExtras: '{}', provisionalPages: 3 });
+    expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', provisionalPages: 3 });
+    worker.reply({ ...frameReply(worker.lastId()), layoutJson: '{}', layoutProvisional: true });
+    expect((await bootstrap).layoutProvisional).toBe(true);
+
+    const complete = client.completeLayout(4);
+    expect(worker.posted[1]).toMatchObject({ type: 'completeLayout', expectedFrameEpoch: 4 });
+    worker.reply({ ...frameReply(worker.lastId()), layoutJson: '{"full":1}' });
+    expect(await complete).toMatchObject({ layoutJson: '{"full":1}' });
+
+    const superseded = client.completeLayout(5);
+    worker.reply({ id: worker.lastId(), ok: true });
+    expect(await superseded).toBeNull();
   });
 });

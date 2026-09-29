@@ -14,6 +14,11 @@ export type ResidentEngineWorkerRequest =
       extras: string;
       expectedFrameEpoch: number;
       layoutExtras?: string;
+      /**
+       * Lay out only as much of the body as fills this many pages; a reply
+       * marked `layoutProvisional` is finished by `completeLayout`.
+       */
+      provisionalPages?: number;
     }
   | {
       id: number;
@@ -28,6 +33,12 @@ export type ResidentEngineWorkerRequest =
        * from the layout it runs and returns that layout as `layoutJson`.
        */
       layoutExtras?: string;
+    }
+  | {
+      id: number;
+      type: 'completeLayout';
+      expectedFrameEpoch: number;
+      paintCaret: boolean;
     }
   | {
       id: number;
@@ -102,6 +113,8 @@ export type ResidentEngineWorkerResponse =
       stateVector?: ArrayBuffer;
       /** The region layout the worker ran, for a request carrying `layoutExtras`. */
       layoutJson?: string;
+      /** `layoutJson` covers only the first pages of the body. */
+      layoutProvisional?: boolean;
     }
   | {
       id: number;

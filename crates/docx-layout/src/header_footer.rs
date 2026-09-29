@@ -158,7 +158,11 @@ pub fn resolve_header_footer_field_widths(
     layout: &Layout,
     config: &MeasurementConfig,
 ) -> Result<(), String> {
-    let total_pages = layout.pages.len().to_string();
+    let total_pages = if layout.partial {
+        String::new()
+    } else {
+        layout.pages.len().to_string()
+    };
     for variant in &mut payload.variants {
         let mut widths = Vec::new();
         for measured in &variant.measured {
@@ -193,7 +197,12 @@ pub fn resolve_header_footer_field_widths(
                                 u64::from(page.number),
                             )
                         };
-                        measure_field_text(field, &text, config)
+                        // A partial layout's NUMPAGES renders empty.
+                        if layout.partial && field.field_type == "NUMPAGES" {
+                            Ok(0.0)
+                        } else {
+                            measure_field_text(field, &text, config)
+                        }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 widths.push(HeaderFooterFieldWidths {
@@ -716,5 +725,65 @@ mod tests {
         assert_eq!(widths.pm_start, 2);
         assert_eq!(widths.fallback_width, widths.per_page[0]);
         assert!(widths.per_page[1] > widths.per_page[0]);
+    }
+
+    #[test]
+    fn numpages_of_a_partial_layout_takes_no_width() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        crate::clear_measure_fonts();
+        let font_id = crate::register_measure_font(FONT).unwrap();
+        let config: MeasurementConfig = serde_json::from_value(json!({
+            "fontChains": {"liberation sans|0|0": [font_id]},
+            "defaults": {"fontSize": 11, "fontFamily": "Liberation Sans"}
+        }))
+        .unwrap();
+        let measured: MeasuredBlock = serde_json::from_value(json!({
+            "block": {
+                "kind": "paragraph",
+                "id": "field-paragraph",
+                "runs": [{
+                    "kind": "field",
+                    "fieldType": "NUMPAGES",
+                    "fallback": "9",
+                    "fontFamily": "Liberation Sans",
+                    "fontSize": 11,
+                    "pmStart": 2,
+                    "pmEnd": 3
+                }]
+            },
+            "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0}
+        }))
+        .unwrap();
+        let mut input: crate::types::Input = serde_json::from_value(json!({
+            "measured": [],
+            "options": {}
+        }))
+        .unwrap();
+        let mut layout = crate::place::layout_document(&mut input).unwrap();
+        let payload = || HeaderFooterPayload {
+            variants: vec![HeaderFooterVariant {
+                r_id: "rId1".to_owned(),
+                kind: HeaderFooterKind::Footer,
+                hf_type: HeaderFooterType::Default,
+                section_index: 0,
+                measured: vec![measured.clone()],
+                height: 0.0,
+                flow_height: 0.0,
+                visual_top: 0.0,
+                visual_bottom: 0.0,
+                field_widths: Vec::new(),
+            }],
+            ..HeaderFooterPayload::default()
+        };
+
+        let mut whole = payload();
+        resolve_header_footer_field_widths(&mut whole, &layout, &config).unwrap();
+        assert!(whole.variants[0].field_widths[0].per_page[0] > 0.0);
+
+        layout.partial = true;
+        let mut partial = payload();
+        resolve_header_footer_field_widths(&mut partial, &layout, &config).unwrap();
+        assert_eq!(partial.variants[0].field_widths[0].per_page[0], 0.0);
     }
 }

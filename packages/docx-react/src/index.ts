@@ -87,6 +87,9 @@ export { defineDocxPlugin } from './plugins/defineDocxPlugin';
 export { DocxPluginToolbar } from './plugins/DocxPluginToolbar';
 export type {
   DocxEditorPluginProps,
+  DocxAnchorGeometryResult,
+  DocxAnchorRect,
+  DocxGeometryTarget,
   DocxPlugin,
   DocxPluginCommand,
   DocxPluginCommandClient,

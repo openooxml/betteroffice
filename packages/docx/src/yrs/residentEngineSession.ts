@@ -35,7 +35,10 @@ export type ResidentEngineSession = Pick<
   | 'selection'
   | 'setSelection'
   | 'yrsBlocksForStory'
->;
+> & {
+  /** The region layout of only as much of the body as fills `pages` pages. */
+  layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+};
 
 export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
   await preloadEditWasm();
@@ -75,6 +78,8 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
     layoutDocumentWithRegionsRetainedJson: (input) =>
       session.layout_document_with_regions_retained_json(input),
+    layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
+      session.layout_document_with_regions_prefix_retained_json(input, pages),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     residentCaretSnapshot: () =>

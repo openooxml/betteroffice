@@ -2741,6 +2741,9 @@ struct TableCellExtentIn {
 struct LayoutIn {
     #[serde(default)]
     pages: Vec<PageIn>,
+    /// See `Layout::partial`.
+    #[serde(default)]
+    partial: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -4954,7 +4957,12 @@ fn build_display_list_selected(
         by_id.entry(key).or_insert(mb);
     }
 
-    let total_pages = input.layout.pages.len() as u64;
+    // 0 while the layout covers part of the document: NUMPAGES renders empty.
+    let total_pages = if input.layout.partial {
+        0
+    } else {
+        input.layout.pages.len() as u64
+    };
     let mut pages =
         Vec::with_capacity(selected_pages.map_or(input.layout.pages.len(), HashSet::len));
 
@@ -7265,6 +7273,7 @@ fn field_text(f: &FieldRunIn, ctx: &RenderCtx<'_>) -> String {
         Some("PAGE") => {
             crate::regions::page_field_text(ctx.page_label.as_deref(), ctx.page_number).into_owned()
         }
+        Some("NUMPAGES") if ctx.total_pages == 0 => String::new(),
         Some("NUMPAGES") => ctx.total_pages.to_string(),
         _ => f.fallback.clone().unwrap_or_default(),
     }

@@ -335,7 +335,8 @@ const review = defineDocxPlugin<State>({
   `document-change` (the committed version only, for typing, remote edits, undo,
   commands and batches, its own included, never for refusals or no-ops),
   `selection-change`, `mode-change` (with the effective `readOnly`),
-  `layout-change` and `grants-change`. Events describe current state: several
+  `layout-change`, `proposal-change` (host proposals or their preview decisions
+  changed, with `previewVersion`) and `grants-change`. Events describe current state: several
   changes may arrive as one, and a newer one aborts the hook still handling the
   previous (`context.signal`), except a change that hook's own edit batch
   made. Replacing the document, removing the plugin,
@@ -387,6 +388,14 @@ const review = defineDocxPlugin<State>({
   `geometry.getPositionAtPoint(clientX, clientY)` returns the text under a client
   point with the layout's `layoutId` and `version` and an edit batch `target`, or
   null likewise, while input is pending, and until the pages show that layout.
+  `geometry.getAnchorGeometry(target)` resolves a proposal, revision, paragraph,
+  search match or text range to overlay-layer pixels: every visible fragment with
+  its zero-based `pageIndex`, an `anchor` collapsed at the end of the last one (at
+  the boundary of a target the preview hides, else at its paragraph) and the
+  anchor's `pageRect`. It refuses with a typed failure rather than answer from a
+  stale or unpainted layout, and `layout-change` repeats once the pages have painted
+  a layout that arrived before its pixels; `layout.previewVersion` is the proposal
+  preview the pixels show.
   The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit

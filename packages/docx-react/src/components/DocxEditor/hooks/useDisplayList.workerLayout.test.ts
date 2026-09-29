@@ -221,3 +221,74 @@ test('a reply without a layout hands the pass back to the main thread', async ()
     native.free();
   }
 });
+
+test('a provisional layout paints first and settles only once the full layout follows', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  try {
+    const fullLayoutJson = native.layout_document_with_regions_retained_json(REQUEST);
+    const fullFrame = native.build_display_list_frame(JSON.stringify({}), 1);
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', provisionalPages: 3 });
+    worker.reply({
+      id: worker.posted[0].id,
+      ok: true,
+      frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson,
+      layoutProvisional: true,
+    });
+    const provisional = await pending!;
+    await act(async () => {
+      rerender({ layout: provisional!.layout, source: engine });
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    expect(result.current.loading).toBe(false);
+    // The rest waits until the first surfaces are attached, so the worker
+    // paints them first.
+    expect(worker.posted).toHaveLength(1);
+    await act(async () => {
+      void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+    });
+    worker.reply({ id: worker.posted[1].id, ok: true });
+    await waitFor(() => expect(worker.posted).toHaveLength(3));
+    expect(worker.posted.map((request) => request.type)).toEqual([
+      'bootstrap',
+      'attachCanvases',
+      'completeLayout',
+    ]);
+    expect(worker.posted[2]).toMatchObject({ expectedFrameEpoch: 1 });
+    let settled = false;
+    void result.current.settledDisplayList(() => {}).then(() => {
+      settled = true;
+    });
+    await act(async () => {});
+    expect(settled).toBe(false);
+
+    worker.reply({
+      id: worker.posted[2].id,
+      ok: true,
+      frame: fullFrame.slice().buffer,
+      caret: { frameEpoch: 2, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson: fullLayoutJson,
+    });
+    const complete = await provisional!.complete!;
+    await act(async () => {
+      rerender({ layout: complete!.layout, source: engine });
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(2));
+    await waitFor(() => expect(settled).toBe(true));
+    expect(worker.posted).toHaveLength(3);
+    unmount();
+  } finally {
+    native.free();
+  }
+});
