@@ -96,6 +96,9 @@ test('a cached projection re-reads only the paragraphs an edit changed', async (
     clear();
     cache.completeDigests();
     expect(reads.digests).toEqual(['body']);
+    const [first, again] = session.storySegmentUnits('body', [0, 0]);
+    expect(again).toEqual(first!);
+    expect(first!.length).toBeGreaterThan(0);
 
     const [, second] = session.paragraphs('body');
     session.insertText({ story: 'body', paraId: second!.paraId, offset: 3 }, 'xyz');

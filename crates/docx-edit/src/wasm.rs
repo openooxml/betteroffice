@@ -4014,7 +4014,7 @@ impl EditSession {
     /// `story_segment_unit_digests`), each as `story_segments` gives them:
     /// `[[segment, …], …]`. Errors on an index past the last unit.
     pub fn story_segment_units(&self, story: &str, units: Vec<u32>) -> Result<String, JsValue> {
-        let mut all = self
+        let all = self
             .engine
             .doc()
             .story_segment_units(story)
@@ -4023,9 +4023,9 @@ impl EditSession {
             .into_iter()
             .map(|index| {
                 let unit = all
-                    .get_mut(index as usize)
+                    .get(index as usize)
                     .ok_or_else(|| js_err(format!("no segment unit {index} in {story}")))?;
-                segments_json(std::mem::take(unit))
+                segments_json(unit.clone())
             })
             .collect::<Result<Vec<Vec<Value>>, JsValue>>()?;
         serde_json::to_string(&requested).map_err(js_err)
