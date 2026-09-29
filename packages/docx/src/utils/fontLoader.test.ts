@@ -511,6 +511,16 @@ test('documents embedding different faces under one name each keep their own', a
   second.dispose();
 });
 
+test("a scope's next document takes the family name its previous one held", async () => {
+  const scope = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Swapped Face', data: fontBytes(1) }], scope);
+  expect(await registerDocumentFaces([{ family: 'Swapped Face', data: fontBytes(2) }], scope)).toEqual(
+    new Map([['Swapped Face', 'Swapped Face']])
+  );
+  expect(faceStyles()).toEqual(['Swapped Face']);
+  scope.dispose();
+});
+
 test('embedded faces live as long as a scope holds them', async () => {
   const revoked: string[] = [];
   const revoke = URL.revokeObjectURL;

@@ -1000,12 +1000,21 @@ function bufferFaceKey(slot: string, bytes: Uint8Array): string {
 /**
  * The CSS family `faces` of one family register under: the family's own name
  * unless a live registration holds different bytes for one of its faces under
- * that name, and then an alias unique to these faces' bytes.
+ * that name, and then an alias unique to these faces' bytes. Faces only
+ * `replacing` holds, a document being replaced, are no collision.
  */
-function cssFamilyFor(family: string, faces: readonly BufferFaceInput[]): string {
+function cssFamilyFor(
+  family: string,
+  faces: readonly BufferFaceInput[],
+  replacing?: FaceOwner
+): string {
   const collides = faces.some((face) => {
     const holder = realNameFaces.get(faceKey(family, face.weight, face.style ?? 'normal'));
-    return holder !== undefined && !sameBytes(holder.bytes, bytesOf(face));
+    return (
+      holder !== undefined &&
+      !sameBytes(holder.bytes, bytesOf(face)) &&
+      [...holder.owners].some((owner) => owner !== replacing)
+    );
   });
   if (!collides) return family;
   return `${family}#${fingerprint(new TextEncoder().encode(faces.map((face) => fingerprint(bytesOf(face))).join()))}`;
@@ -1150,7 +1159,7 @@ export async function registerDocumentFaces(
   }
   const loads: Array<Promise<[string, string, boolean]>> = [];
   for (const [family, group] of families) {
-    const cssFamily = cssFamilyFor(family, group);
+    const cssFamily = cssFamilyFor(family, group, previous);
     for (const face of group) {
       loads.push(
         registerBufferFace(face, owner, cssFamily).then((ok) => [family, cssFamily, ok])
