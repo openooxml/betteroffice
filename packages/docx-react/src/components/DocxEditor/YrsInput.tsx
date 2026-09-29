@@ -27,6 +27,7 @@ import {
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import { whenIdle } from './internals/whenIdle';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { findWordBoundaries } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
@@ -66,6 +67,8 @@ export interface YrsInputRef {
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
   displaySelection(): YrsDisplaySelection | null;
+  /** Whether the selection is a caret, found without mapping it to display positions. */
+  selectionIsCollapsed(): boolean;
   applyStoredFormatting(action: YrsStoredFormattingAction): void;
   clearStoredFormatting(): void;
   storedFormatting(): YrsStoredFormatting | null;
@@ -1168,6 +1171,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         setSelection({ ...loc, offset: 0 }, { ...loc, offset: paragraph.text.length });
       },
       displaySelection,
+      selectionIsCollapsed() {
+        const current = ensureSelection();
+        return (
+          current !== null &&
+          current.anchor.story === current.head.story &&
+          current.anchor.paraId === current.head.paraId &&
+          current.anchor.offset === current.head.offset
+        );
+      },
       applyStoredFormatting,
       clearStoredFormatting() {
         const current = ensureSelection();
@@ -1221,11 +1233,41 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     pendingResidentFrameEpochRef.current = null;
   }, [session, story]);
 
-  useEffect(() => {
-    if (!enabled || !session) return;
+  // A session's first selection event maps the caret through a position
+  // projection of the whole document, so it waits for idle time, behind the
+  // first layout request; the selection itself is still settled at once. Runs
+  // of this effect before then leave the event to the pending one, which reads
+  // the latest callbacks.
+  const firstSelectionRef = useRef<{ session: YrsSession; cancel: (() => void) | null } | null>(
+    null
+  );
+  const emitCurrentSelectionRef = useRef<() => void>(() => {});
+  emitCurrentSelectionRef.current = () => {
     ensureSelection();
     emitSelection(false);
+  };
+  useEffect(() => {
+    if (!enabled || !session) return;
+    const first = firstSelectionRef.current;
+    if (first?.session === session) {
+      if (!first.cancel) emitCurrentSelectionRef.current();
+      return;
+    }
+    first?.cancel?.();
+    const entry: { session: YrsSession; cancel: (() => void) | null } = { session, cancel: null };
+    firstSelectionRef.current = entry;
+    ensureSelection();
+    entry.cancel = whenIdle(() => {
+      entry.cancel = null;
+      const lifetime = inputLifetimeRef.current;
+      if (lifetime.mounted && lifetime.enabled && lifetime.session === session) {
+        emitCurrentSelectionRef.current();
+      } else if (firstSelectionRef.current === entry) {
+        firstSelectionRef.current = null;
+      }
+    });
   }, [emitSelection, enabled, ensureSelection, session]);
+  useEffect(() => () => firstSelectionRef.current?.cancel?.(), []);
 
   useEffect(() => {
     if (!enabled || !session || readOnly) return;
