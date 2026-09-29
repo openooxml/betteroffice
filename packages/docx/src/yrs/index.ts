@@ -566,7 +566,6 @@ export function sameYrsSelection(left: YrsSelection | null, right: YrsSelection 
   );
 }
 
-/** Opt-in internal stage timings for one resident engine input. @internal */
 /** How far a region layout begun with {@link YrsSession.beginRegionLayout} has come. */
 export interface YrsRegionLayoutProgress {
   measuredBlocks: number;
@@ -575,6 +574,7 @@ export interface YrsRegionLayoutProgress {
   layoutJson?: string;
 }
 
+/** Opt-in internal stage timings for one resident engine input. @internal */
 export interface YrsEngineApplyProfile {
   selectionMs: number;
   editMs: number;
