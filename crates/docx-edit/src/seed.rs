@@ -4395,7 +4395,7 @@ fn collect_font_table_fonts(envelope: &docx_parse::S9WireEnvelope, fonts: &mut B
 fn units_to_raw_ops(
     units: Vec<InlineUnit>,
     referenced_fonts: &mut BTreeSet<String>,
-    script_fonts: &mut ScriptFontUse,
+    mut script_fonts: Option<&mut ScriptFontUse>,
 ) -> Result<Vec<RawOp>, String> {
     let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
     let mut index = 0u32;
@@ -4420,9 +4420,11 @@ fn units_to_raw_ops(
         Ok(())
     };
     for unit in units {
-        match &unit.content {
-            UnitContent::Text(value) => script_fonts.text(value, &unit.attrs),
-            UnitContent::Embed { payload, .. } => script_fonts.embed(payload, &unit.attrs),
+        if let Some(script_fonts) = script_fonts.as_deref_mut() {
+            match &unit.content {
+                UnitContent::Text(value) => script_fonts.text(value, &unit.attrs),
+                UnitContent::Embed { payload, .. } => script_fonts.embed(payload, &unit.attrs),
+            }
         }
         for (key, value) in &unit.attrs {
             collect_font_entry(key, value, referenced_fonts);
@@ -4465,7 +4467,7 @@ fn units_to_raw_ops(
 
 fn seed_plan(
     plan: StoryPlan,
-    script_fonts: &mut ScriptFontUse,
+    script_fonts: Option<&mut ScriptFontUse>,
 ) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
     let StoryPlan {
         story_id,
@@ -4669,7 +4671,7 @@ fn seed_lowered(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     for plan in context.plans {
-        let (story_id, ops, fonts) = seed_plan(plan, &mut script_fonts)?;
+        let (story_id, ops, fonts) = seed_plan(plan, Some(&mut script_fonts))?;
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
@@ -4834,7 +4836,7 @@ pub(crate) fn seed_blocks(
     let mut provenance = std::mem::take(&mut context.provenance);
     let mut batches = Vec::with_capacity(context.plans.len());
     for plan in context.plans {
-        let (story_id, ops, _) = seed_plan(plan, &mut ScriptFontUse::default())?;
+        let (story_id, ops, _) = seed_plan(plan, None)?;
         batches.push((story_id, ops));
     }
     doc.apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
@@ -5434,7 +5436,7 @@ mod tests {
             .plans
             .into_iter()
             .map(|plan| {
-                let (story_id, ops, _) = seed_plan(plan, &mut ScriptFontUse::default()).unwrap();
+                let (story_id, ops, _) = seed_plan(plan, None).unwrap();
                 (story_id, ops)
             })
             .collect();

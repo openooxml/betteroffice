@@ -85,9 +85,10 @@ impl ScriptFontUse {
         }
     }
 
-    /// A seeded embed's payload and attributes. Text inside a payload counts
-    /// by its characters, and as hinted or `w:cs` text when the payload holds
-    /// such formatting anywhere.
+    /// A seeded embed's payload and attributes, including JSON-encoded parts
+    /// such as `shapeJson`. Text inside a payload counts as text that may take
+    /// its fonts and `w:cs` from the paragraph, and as hinted or `w:cs` text
+    /// when the payload holds such formatting anywhere.
     pub(crate) fn embed(
         &mut self,
         payload: &BTreeMap<String, Value>,
@@ -97,11 +98,19 @@ impl ScriptFontUse {
         let mut embedded = Embedded::default();
         self.object(payload.iter(), is_rtl(payload.get("rtl")), &mut embedded);
         let hint = embedded.hinted.then_some("eastAsia");
-        for text in embedded.texts {
+        for text in embedded.texts.iter().filter(|text| !text.is_empty()) {
+            let complex_script = embedded.complex_script;
             merge(
                 &mut self.measured,
-                font_slot_use(text, embedded.complex_script, hint),
+                font_slot_use(text, complex_script, hint),
             );
+            merge(
+                &mut self.unfonted,
+                font_slot_use(text, complex_script, None),
+            );
+            self.unfonted_hinted_east_asia |=
+                font_slot_use(text, complex_script, Some("eastAsia")).east_asia;
+            self.text_without_cs = true;
         }
     }
 
@@ -159,12 +168,17 @@ impl ScriptFontUse {
         &mut self,
         entries: impl Iterator<Item = (&'a String, &'a Value)>,
         rtl: bool,
-        embedded: &mut Embedded<'a>,
+        embedded: &mut Embedded,
     ) {
         for (key, value) in entries {
             self.entry(key, value, rtl);
             match (key.as_str(), value) {
-                ("text", Value::String(text)) => embedded.texts.push(text.as_str()),
+                ("text" | "plainText", Value::String(text)) => embedded.texts.push(text.clone()),
+                (key, Value::String(encoded)) if key.ends_with("Json") => {
+                    if let Ok(decoded) = serde_json::from_str::<Value>(encoded) {
+                        self.walk(&decoded, embedded);
+                    }
+                }
                 ("cs" | "complexScript", Value::Bool(true)) => embedded.complex_script = true,
                 ("hint", Value::String(hint)) if hint == "eastAsia" => embedded.hinted = true,
                 _ => {}
@@ -173,7 +187,7 @@ impl ScriptFontUse {
         }
     }
 
-    fn walk<'a>(&mut self, value: &'a Value, embedded: &mut Embedded<'a>) {
+    fn walk(&mut self, value: &Value, embedded: &mut Embedded) {
         match value {
             Value::Array(values) => {
                 for value in values {
@@ -233,8 +247,8 @@ impl ScriptFontUse {
 }
 
 #[derive(Default)]
-struct Embedded<'a> {
-    texts: Vec<&'a str>,
+struct Embedded {
+    texts: Vec<String>,
     hinted: bool,
     complex_script: bool,
 }
@@ -351,6 +365,21 @@ mod tests {
             &BTreeMap::new(),
         );
         assert_eq!(unused(&scan, &NAMES), ["Traditional Arabic"]);
+
+        let mut math = latin_document();
+        math.embed(&attrs(json!({"plainText": "\u{6f22}"})), &BTreeMap::new());
+        assert_eq!(unused(&math, &NAMES), ["Traditional Arabic"]);
+
+        let mut shape = latin_document();
+        let shape_json = json!({"paragraphs": [{"runs": [{"fontFamily": {"ascii": "SimSun"}}]}]});
+        shape.embed(
+            &attrs(json!({"shapeJson": shape_json.to_string()})),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            unused(&shape, &NAMES),
+            ["宋体", "Batang", "Traditional Arabic", "Shared"]
+        );
     }
 
     #[test]

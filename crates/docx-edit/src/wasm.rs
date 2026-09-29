@@ -5169,14 +5169,11 @@ mod tests {
         .unwrap()
     }
 
-    fn script_fonts_docx(text: &str) -> Vec<u8> {
-        const MAIN: &str =
-            r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
-        let document = format!(
-            r#"<w:document {MAIN}><w:body><w:p><w:r><w:t>Latin text</w:t></w:r></w:p><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
-        );
+    fn script_fonts_docx(body: &str, defaults: &str) -> Vec<u8> {
+        const MAIN: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
+        let document = format!(r#"<w:document {MAIN}><w:body>{body}</w:body></w:document>"#);
         let styles = format!(
-            r#"<w:styles {MAIN}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="SimSun" w:cs="Times New Roman"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+            r#"<w:styles {MAIN}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="SimSun" w:cs="Times New Roman"/>{defaults}</w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
         );
         let fonts = format!(
             r#"<w:fonts {MAIN}><w:font w:name="Calibri"><w:charset w:val="00"/></w:font><w:font w:name="SimSun"><w:altName w:val="宋体"/><w:charset w:val="86"/></w:font><w:font w:name="Batang"><w:charset w:val="81"/></w:font></w:fonts>"#
@@ -5192,32 +5189,47 @@ mod tests {
         .unwrap()
     }
 
-    fn unused_script_fonts(text: &str, seed_stories: bool) -> Value {
+    fn unused_script_fonts(body: &str, defaults: &str, seed_stories: bool) -> Value {
         let session = EditSession::new(78.0).unwrap();
-        let host: Value = serde_json::from_str(
-            &session
-                .open_docx(&script_fonts_docx(text), seed_stories, None, None)
-                .unwrap(),
-        )
-        .unwrap();
+        let bytes = script_fonts_docx(body, defaults);
+        let host: Value =
+            serde_json::from_str(&session.open_docx(&bytes, seed_stories, None, None).unwrap())
+                .unwrap();
         host["unusedScriptFonts"].clone()
     }
 
     #[test]
     fn an_opened_document_names_the_script_fonts_its_text_does_not_use() {
+        let run = |text: &str| format!("<w:r><w:t>{text}</w:t></w:r>");
+        let latin = |text: &str| format!("<w:p>{}</w:p><w:p>{text}</w:p>", run("Latin"));
+        let all = json!(["Batang", "SimSun", "Times New Roman", "宋体"]);
+        assert_eq!(unused_script_fonts(&latin(&run("More")), "", true), all);
         assert_eq!(
-            unused_script_fonts("More Latin", true),
-            json!(["Batang", "SimSun", "Times New Roman", "宋体"])
-        );
-        assert_eq!(
-            unused_script_fonts("漢字", true),
+            unused_script_fonts(&latin(&run("漢字")), "", true),
             json!(["Times New Roman"])
         );
         assert_eq!(
-            unused_script_fonts("مرحبا", true),
+            unused_script_fonts(&latin(&run("مرحبا")), "", true),
             json!(["Batang", "SimSun", "宋体"])
         );
-        assert_eq!(unused_script_fonts("More Latin", false), json!([]));
+        assert_eq!(
+            unused_script_fonts(&latin(&run("More")), "", false),
+            json!([])
+        );
+        let control = format!(
+            "<w:p><w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt></w:p>",
+            run("abc")
+        );
+        assert_eq!(unused_script_fonts(&control, "", true), all);
+        assert_eq!(
+            unused_script_fonts(&control, "<w:cs/>", true),
+            json!(["Batang", "SimSun", "宋体"])
+        );
+        let text_box = r#"<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Text box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:rFonts w:ascii="SimSun" w:hAnsi="SimSun"/></w:rPr><w:t>Hello</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#;
+        assert_eq!(
+            unused_script_fonts(&latin(text_box), "", true),
+            json!(["Batang", "Times New Roman", "宋体"])
+        );
     }
 
     #[test]
