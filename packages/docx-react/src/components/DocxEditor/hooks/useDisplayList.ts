@@ -789,18 +789,22 @@ export function useRustDisplayList(
   );
 
   // A worker that ran out of memory is replaced by a fresh one once. The main
-  // thread never builds the display in its place: its memory has the same
-  // limit and already holds the document. Returns whether to use a worker again.
+  // thread never takes over its work: its memory has the same limit and
+  // already holds the document. `retry` asks the caller to use the current
+  // worker, `stale` means the failed worker no longer serves this engine.
   const replaceOutOfMemoryWorker = useCallback(
     (
       hostEngine: YrsSession,
       client: ResidentEngineWorkerClient | null,
       failure: ResidentWorkerOutOfMemoryError
-    ): boolean => {
+    ): 'retry' | 'stale' | 'failed' => {
       const previous = outOfMemoryRef.current?.engine === hostEngine ? outOfMemoryRef.current : null;
-      if (previous?.failure) return false;
+      if (previous?.failure) return 'failed';
+      if (workerFallbackEngineRef.current === hostEngine) return 'stale';
       const current = workerRef.current;
-      if (current?.engine !== hostEngine || current.client !== client) return true;
+      if (current && current.engine !== hostEngine) return 'stale';
+      // Another request of the failed worker already replaced it.
+      if (current?.client !== client) return previous ? 'retry' : 'stale';
       current.client.destroy();
       workerRef.current = null;
       setWorkerSurfacesActive(false);
@@ -811,7 +815,7 @@ export function useRustDisplayList(
           '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
           failure
         );
-        return true;
+        return 'retry';
       }
       outOfMemoryRef.current = { engine: hostEngine, failure };
       console.error('[CanvasRenderer] Resident engine worker ran out of memory again', failure);
@@ -819,7 +823,7 @@ export function useRustDisplayList(
       setError(failure);
       setLoading(false);
       markSettled(null, failure);
-      return false;
+      return 'failed';
     },
     [markSettled, queryEpochGate, setWorkerPresentationActive]
   );
@@ -862,7 +866,7 @@ export function useRustDisplayList(
       const failed = (cause: unknown): void => {
         if (workerRef.current !== worker) return;
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
-          if (replaceOutOfMemoryWorker(worker.engine, worker.client, cause)) {
+          if (replaceOutOfMemoryWorker(worker.engine, worker.client, cause) === 'retry') {
             requestLayoutRef.current?.();
           }
           return;
@@ -964,10 +968,12 @@ export function useRustDisplayList(
         !canUseResidentEngineWorker() ||
         !isWorkerHostEngine(hostEngine) ||
         !hostEngine.adoptResidentWorkerLayout ||
-        workerFallbackEngineRef.current === hostEngine ||
-        (outOfMemoryRef.current?.engine === hostEngine && outOfMemoryRef.current.failure)
+        workerFallbackEngineRef.current === hostEngine
       ) {
         return null;
+      }
+      if (outOfMemoryRef.current?.engine === hostEngine && outOfMemoryRef.current.failure) {
+        return Promise.reject(outOfMemoryRef.current.failure);
       }
       if (workerRef.current?.engine !== hostEngine) {
         workerRef.current?.client.destroy();
@@ -1009,10 +1015,16 @@ export function useRustDisplayList(
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
-      const unavailable = (cause: unknown): null => {
+      // A worker out of memory runs the pass again in a fresh worker; once
+      // that one runs out too, the pass rejects and nothing lays out here.
+      const unavailable = (
+        cause: unknown
+      ): Promise<WorkerLayoutComputation | null> | null => {
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
-          replaceOutOfMemoryWorker(hostEngine, worker, cause);
-          return null;
+          const outcome = replaceOutOfMemoryWorker(hostEngine, worker, cause);
+          if (outcome === 'failed') return Promise.reject(cause);
+          if (outcome === 'stale') return null;
+          return layoutInWorkerRef.current?.(hostEngine, request) ?? null;
         }
         console.error(
           '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
@@ -1061,13 +1073,18 @@ export function useRustDisplayList(
               const base = snapshotRef.current.frame;
               return adopt(completed, base?.frameEpoch === provisionalEpoch ? base : undefined);
             })
-            .catch(unavailable);
+            .catch(async (cause: unknown): Promise<LayoutComputation | null> => {
+              const retried = await unavailable(cause);
+              return retried?.complete ?? retried;
+            });
           return { ...computation, complete };
         })
         .catch(unavailable);
     },
     [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine, replaceOutOfMemoryWorker]
   );
+  const layoutInWorkerRef = useRef(layoutInWorker);
+  layoutInWorkerRef.current = layoutInWorker;
 
   const attachOffscreenCanvases = useCallback(
     async (
@@ -1195,7 +1212,9 @@ export function useRustDisplayList(
         client: ResidentEngineWorkerClient | null = null
       ): Promise<BuiltDisplay> => {
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
-          if (!replaceOutOfMemoryWorker(hostEngine, client, cause)) return Promise.reject(cause);
+          if (replaceOutOfMemoryWorker(hostEngine, client, cause) !== 'retry') {
+            return Promise.reject(cause);
+          }
           try {
             return requestWorkerFrame();
           } catch (error) {
