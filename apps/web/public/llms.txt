@@ -86,6 +86,7 @@ The per-layer crates expose individual pipeline stages:
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
 - [betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff): the bounded token LCS diff behind PPTX proposal previews and DOCX comparison.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all four formats.
+- [betteroffice-metafile](https://crates.io/crates/betteroffice-metafile): bounded EMF, EMF+ and WMF replay into vector drawings and SVG.
 
 ## Python packages
 

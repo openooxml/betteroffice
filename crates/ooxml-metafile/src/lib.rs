@@ -193,6 +193,9 @@ pub(crate) fn play_emf<const FULL: bool>(
                 return Err("the EMF EOF record is malformed".to_owned());
             }
             player.flush_pending();
+            if player.overflowed {
+                return Err("the metafile draws more than the replay limits".to_owned());
+            }
             return Ok(player);
         }
         let skipped = FULL && player.plus_only && !player.plus_gdi && kind != emf::EMF_COMMENT;

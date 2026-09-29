@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use crate::drawing::{
-    Bitmap, Clip, ClipChain, ClipRegion, Font, Image, LineCap, LineJoin, LinearGradient, Op, Paint,
-    PathCommand, Pixels, Rgba, Shape, Spread, Stroke, Text, TextAnchor,
+    Bitmap, Clip, ClipChain, ClipRegion, Drawing, Font, Image, LineCap, LineJoin, LinearGradient,
+    Op, Paint, PathCommand, Pixels, Rgba, Shape, Spread, Stroke, Text, TextAnchor,
 };
 use crate::player::{ARC_SEGMENTS, IDENTITY, Player, Xform, apply, chain, concat, rect_path};
 use crate::read::{finite_at, i16_at, i32_at, u8_at, u16_at, u32_at};
@@ -68,7 +68,15 @@ enum Region {
 
 enum PlusImage {
     Bitmap(Arc<Bitmap>),
-    Metafile(Vec<u8>),
+    Metafile(Nested),
+}
+
+/// A metafile image, replayed once when its object is defined.
+enum Nested {
+    TooDeep,
+    Failed,
+    /// The drawing, and the path commands each placement of it copies.
+    Drawn(Drawing, usize),
 }
 
 struct PlusFont {
@@ -151,7 +159,7 @@ pub(crate) fn comment<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8])
         let flags = u16_at(bytes, at + 2)?;
         let size = u32_at(bytes, at + 4)? as usize;
         let data_size = u32_at(bytes, at + 8)? as usize;
-        if size < 12 || at + size > end || data_size > size - 12 {
+        if size < 12 || size > end - at || data_size > size - 12 {
             return player.refuse("an EMF+ record has an invalid size");
         }
         let data = &bytes[at + 12..at + 12 + data_size];
@@ -533,6 +541,13 @@ fn play<const FULL: bool>(
             let (dx, dy) = (finite_at(data, 0)?, finite_at(data, 4)?);
             let m = concat(state.to_device(), player.device_to_output());
             let (ox, oy) = (dx * m[0] + dy * m[2], dx * m[1] + dy * m[3]);
+            let mut copied = 0;
+            let mut at = state.graphics.clip.as_deref();
+            while let Some(link) = at {
+                copied += link.region.path.len();
+                at = link.parent.as_deref();
+            }
+            player.charge(copied, 0)?;
             state.graphics.clip = offset_chain(&state.graphics.clip, ox, oy);
         }
         0x4037 => player.omit("EMF+ stroke-and-fill paths")?,
@@ -788,7 +803,7 @@ fn cardinal(
         segments: Vec::new(),
         closed,
     };
-    for index in first..(first + taken).min(spans) {
+    for index in first..first.saturating_add(taken).min(spans) {
         let i = index as isize;
         let (p0, p1, p2, p3) = (point(i - 1), point(i), point(i + 1), point(i + 2));
         figure.segments.push(Segment::Cubic([
@@ -871,13 +886,11 @@ fn object<const FULL: bool>(
         2 => parse_pen(player, state, data).map(Object::Pen),
         3 => parse_path(data, player.limits.points_per_record)
             .map(|(path, _)| Object::Path(Arc::new(path))),
-        4 => parse_region(
-            data,
-            8,
-            u32_at(data, 4).unwrap_or(0) as usize + 1,
-            player.limits.points_per_record,
-        )
-        .map(|(region, _)| Object::Region(Arc::new(region))),
+        4 => {
+            let mut nodes = (u32_at(data, 4).unwrap_or(0) as usize).saturating_add(1);
+            parse_region(data, 8, &mut nodes, 0, player.limits.points_per_record)
+                .map(|(region, _)| Object::Region(Arc::new(region)))
+        }
         5 => parse_image(player, data).map(|image| Object::Image(Arc::new(image))),
         6 => parse_font(data).map(|font| Object::Font(Arc::new(font))),
         7 => Some(Object::Format(Format {
@@ -889,6 +902,7 @@ fn object<const FULL: bool>(
     };
     let object = match parsed {
         Some(object) => object,
+        None if player.refusal.is_some() => return None,
         None => {
             player.omit("EMF+ objects that could not be decoded")?;
             Object::Other
@@ -1089,18 +1103,18 @@ fn parse_pen<const FULL: bool>(
             dash.push(finite_at(data, at + 4 + index * 4)?.max(0.0));
         }
         custom = Some(dash);
-        at += 4 + u32_at(data, at)? as usize * 4;
+        at = skip_counted(data, at, 4)?;
     }
     if flags & 0x0200 != 0 {
         at += 4;
     }
     if flags & 0x0400 != 0 {
-        at += 4 + u32_at(data, at)? as usize * 4;
+        at = skip_counted(data, at, 4)?;
     }
     for bit in [0x0800, 0x1000] {
         if flags & bit != 0 {
             decorated = true;
-            at += 4 + u32_at(data, at)? as usize;
+            at = skip_counted(data, at, 1)?;
         }
     }
     let paint = parse_brush(player, state, data.get(at..)?)?;
@@ -1131,6 +1145,12 @@ fn parse_pen<const FULL: bool>(
         }
         pen
     })
+}
+
+/// The offset past a `u32` count at `at` and that many `unit`-byte items.
+fn skip_counted(data: &[u8], at: usize, unit: usize) -> Option<usize> {
+    let count = u32_at(data, at)? as usize;
+    at.checked_add(4)?.checked_add(count.checked_mul(unit)?)
 }
 
 /// An `EmfPlusPath` object, and the bytes it spans.
@@ -1208,15 +1228,26 @@ fn parse_path(data: &[u8], limit: usize) -> Option<(Path, usize)> {
     Some((Path { figures }, at.div_ceil(4) * 4))
 }
 
-fn parse_region(data: &[u8], at: usize, budget: usize, limit: usize) -> Option<(Region, usize)> {
-    if budget == 0 {
+/// Deepest region combination tree replayed.
+const MAX_REGION_DEPTH: usize = 64;
+
+/// A region node and the offset after it, spending one of `nodes` per node.
+fn parse_region(
+    data: &[u8],
+    at: usize,
+    nodes: &mut usize,
+    depth: usize,
+    limit: usize,
+) -> Option<(Region, usize)> {
+    if *nodes == 0 || depth > MAX_REGION_DEPTH {
         return None;
     }
+    *nodes -= 1;
     let kind = u32_at(data, at)?;
     Some(match kind {
         1..=5 => {
-            let (left, after) = parse_region(data, at + 4, budget - 1, limit)?;
-            let (right, after) = parse_region(data, after, budget - 1, limit)?;
+            let (left, after) = parse_region(data, at.checked_add(4)?, nodes, depth + 1, limit)?;
+            let (right, after) = parse_region(data, after, nodes, depth + 1, limit)?;
             (
                 Region::Combine(kind, Box::new(left), Box::new(right)),
                 after,
@@ -1232,10 +1263,11 @@ fn parse_region(data: &[u8], at: usize, budget: usize, limit: usize) -> Option<(
             )
         }
         0x1000_0001 => {
-            let length = u32_at(data, at + 4)? as usize;
-            let bytes = data.get(at + 8..at + 8 + length)?;
-            let (path, _) = parse_path(bytes, limit)?;
-            (Region::Path(Arc::new(path)), at + 8 + length)
+            let length = u32_at(data, at.checked_add(4)?)? as usize;
+            let start = at.checked_add(8)?;
+            let end = start.checked_add(length)?;
+            let (path, _) = parse_path(data.get(start..end)?, limit)?;
+            (Region::Path(Arc::new(path)), end)
         }
         0x1000_0002 => (Region::Empty, at + 4),
         0x1000_0003 => (Region::Infinite, at + 4),
@@ -1343,6 +1375,7 @@ fn set_clip<const FULL: bool>(
 ) -> Option<()> {
     let mut clips = Vec::new();
     let mut exact = region_clips(state, player, region, &mut clips);
+    player.charge(clips.iter().map(|clip| clip.path.len()).sum(), 0)?;
     let base = match mode {
         0 => None,
         1 => state.graphics.clip.clone(),
@@ -1454,10 +1487,52 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
         2 => {
             let size = u32_at(data, 12)? as usize;
             let bytes = data.get(16..16usize.checked_add(size)?)?;
-            Some(PlusImage::Metafile(bytes.to_vec()))
+            Some(PlusImage::Metafile(nested(player, bytes)?))
         }
         _ => None,
     }
+}
+
+/// Replays a metafile image, charging what it holds to the enclosing
+/// picture's budgets.
+fn nested<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8]) -> Option<Nested> {
+    if player.depth + 1 >= crate::MAX_NESTING {
+        return Some(Nested::TooDeep);
+    }
+    let Ok(drawing) = crate::play_nested(bytes, player.depth + 1) else {
+        return Some(Nested::Failed);
+    };
+    let mut commands = 0;
+    let mut pixels = 0;
+    let mut clips = std::collections::HashSet::new();
+    let mut bitmaps = std::collections::HashSet::new();
+    for op in &drawing.ops {
+        let clip = match op {
+            Op::Shape(shape) => {
+                commands += shape.path.len();
+                &shape.clip
+            }
+            Op::Text(text) => {
+                commands += text.text.len();
+                &text.clip
+            }
+            Op::Image(image) => {
+                if bitmaps.insert(Arc::as_ptr(&image.bitmap)) {
+                    pixels += u64::from(image.bitmap.width) * u64::from(image.bitmap.height);
+                }
+                &image.clip
+            }
+        };
+        let mut at = clip.as_deref();
+        while let Some(link) = at
+            && clips.insert(std::ptr::from_ref(link))
+        {
+            commands += link.region.path.len();
+            at = link.parent.as_deref();
+        }
+    }
+    player.charge(commands, pixels)?;
+    Some(Nested::Drawn(drawing, commands))
 }
 
 /// GDI+ pixel formats to straight RGBA.
@@ -1586,6 +1661,9 @@ fn draw_image<const FULL: bool>(
             if x1 <= x0 || y1 <= y0 {
                 return Some(());
             }
+            if (x1 - x0, y1 - y0) != (f64::from(bitmap.width), f64::from(bitmap.height)) {
+                player.charge(0, ((x1 - x0) * (y1 - y0)) as u64)?;
+            }
             let cropped = crop(
                 bitmap,
                 x0 as u32,
@@ -1605,14 +1683,12 @@ fn draw_image<const FULL: bool>(
                 clip,
             }));
         }
-        PlusImage::Metafile(bytes) => {
-            if player.depth + 1 >= crate::MAX_NESTING {
-                return player.omit("metafiles nested too deeply");
-            }
-            let nested = match crate::play_nested(bytes, player.depth + 1) {
-                Ok(nested) => nested,
-                Err(_) => return player.omit("embedded metafiles that could not be replayed"),
-            };
+        PlusImage::Metafile(Nested::TooDeep) => player.omit("metafiles nested too deeply")?,
+        PlusImage::Metafile(Nested::Failed) => {
+            player.omit("embedded metafiles that could not be replayed")?
+        }
+        PlusImage::Metafile(Nested::Drawn(nested, commands)) => {
+            player.charge(*commands, 0)?;
             let (nw, nh) = (nested.width, nested.height);
             let m = [
                 (b.0 - a.0) / nw,
@@ -1624,11 +1700,11 @@ fn draw_image<const FULL: bool>(
             ];
             let clip = state.graphics.clip.clone();
             let mut cache = std::collections::HashMap::new();
-            for op in nested.ops {
-                let op = crate::transform::op(op, m, &clip, &mut cache);
+            for op in &nested.ops {
+                let op = crate::transform::op(op.clone(), m, &clip, &mut cache);
                 player.push_op(op);
             }
-            for omission in nested.omissions {
+            for omission in &nested.omissions {
                 *player.omissions.entry(omission.what).or_default() += omission.count;
             }
         }

@@ -298,6 +298,17 @@ impl<const FULL: bool> Player<FULL> {
         None
     }
 
+    /// Spends path commands and bitmap pixels built outside `push`, such as
+    /// clip regions and nested drawings, refusing past the limits.
+    pub(crate) fn charge(&mut self, commands: usize, pixels: u64) -> Option<()> {
+        self.commands = self.commands.saturating_add(commands);
+        self.bitmap_pixels = self.bitmap_pixels.saturating_add(pixels);
+        if self.commands > self.limits.commands || self.bitmap_pixels > self.limits.bitmap_pixels {
+            return self.refuse("the metafile draws more than the replay limits");
+        }
+        Some(())
+    }
+
     /// Notes ink drawn without; only the full profile tolerates omissions.
     pub(crate) fn omit(&mut self, what: &'static str) -> Option<()> {
         if !FULL {
@@ -826,6 +837,9 @@ impl<const FULL: bool> Player<FULL> {
         if ClipChain::depth(&clip) > self.limits.clip_depth {
             return self.refuse("clip regions nest past the depth limit");
         }
+        if FULL && let Some(link) = clip.as_deref() {
+            self.charge(link.region.path.len(), 0)?;
+        }
         self.dc.clip = clip;
         Some(())
     }
@@ -850,8 +864,12 @@ impl<const FULL: bool> Player<FULL> {
                 merged[2].max(merged[0]),
                 merged[3].max(merged[1]),
             ];
+            let parent = own.parent.clone();
+            if FULL {
+                self.charge(5, 0)?;
+            }
             self.dc.clip = chain(
-                own.parent.clone(),
+                parent,
                 ClipRegion {
                     path: rect_path(merged),
                     even_odd: false,
@@ -872,24 +890,27 @@ impl<const FULL: bool> Player<FULL> {
     }
 
     /// Moves the application clip by a device offset in output units.
-    pub(crate) fn offset_clip(&mut self, dx: f64, dy: f64) {
-        let mut regions = Vec::new();
+    pub(crate) fn offset_clip(&mut self, dx: f64, dy: f64) -> Option<()> {
+        let mut links = Vec::new();
         let mut at = self.dc.clip.clone();
         while let Some(link) = at.clone() {
             if same_clip(&at, &self.dc.meta) {
                 break;
             }
-            regions.push(link.region.clone());
             at = link.parent.clone();
+            links.push(link);
         }
+        self.charge(links.iter().map(|link| link.region.path.len()).sum(), 0)?;
         let mut clip = self.dc.meta.clone();
-        for mut region in regions.into_iter().rev() {
+        for link in links.into_iter().rev() {
+            let mut region = link.region.clone();
             for command in &mut region.path {
                 translate(command, dx, dy);
             }
             clip = chain(clip, region);
         }
         self.dc.clip = clip;
+        Some(())
     }
 
     /// The logical rectangle `(l, t, r, b)` as a path in output units.

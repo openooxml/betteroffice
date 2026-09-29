@@ -45,6 +45,9 @@ fn header(bmi: &[u8]) -> Result<Header, &'static str> {
         let width = u32::from(u16_at(bmi, 4).ok_or(malformed)?);
         let height = u32::from(u16_at(bmi, 6).ok_or(malformed)?);
         let bits = u16_at(bmi, 10).ok_or(malformed)?;
+        if width == 0 || height == 0 {
+            return Err("a bitmap has no pixels");
+        }
         return Ok(Header {
             size,
             width,

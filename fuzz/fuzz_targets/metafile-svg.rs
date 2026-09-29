@@ -56,7 +56,10 @@ fuzz_target!(|data: &[u8]| {
     let Ok(svg) = to_svg(data) else {
         return;
     };
-    assert!(svg.markup.len() <= MAX_SVG_BYTES, "the SVG outgrew its budget");
+    assert!(
+        svg.markup.len() <= MAX_SVG_BYTES,
+        "the SVG outgrew its budget"
+    );
     assert!(
         svg.markup.starts_with("<svg ") && svg.markup.ends_with("</svg>"),
         "the SVG is not one document"

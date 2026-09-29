@@ -147,3 +147,105 @@ fn nesting_stops_at_the_depth_limit() {
     let svg = to_svg(&inner).unwrap();
     assert_eq!(svg.omissions[0].what, "metafiles nested too deeply");
 }
+
+#[test]
+fn a_dib_without_width_or_height_is_survivable() {
+    for (width, height) in [(0u16, 4u16), (4, 0), (0, 0)] {
+        let mut bmi = u32s(&[12]);
+        bmi.extend(u16s(&[width, height, 1, 24]));
+        let dib = (bmi, vec![0; 64]);
+        check(
+            &Emf::new(10, 10)
+                .recs(vec![stretch_dibits([0, 0, 10, 10], &dib, 0x00CC_0020)])
+                .bytes(),
+        );
+    }
+}
+
+#[test]
+fn an_emf_plus_record_claiming_4_gib_refuses() {
+    let mut comment = plus(&[plus_header(false)]).1;
+    comment.extend(u16s(&[0x400A, 0x8000]));
+    comment.extend(u32s(&[u32::MAX - 3, u32::MAX - 15]));
+    let size = (comment.len() - 4) as u32;
+    comment[0..4].copy_from_slice(&size.to_le_bytes());
+    assert!(to_svg(&Emf::new(10, 10).rec(70, &comment).bytes()).is_err());
+}
+
+#[test]
+fn a_deep_emf_plus_region_tree_stays_off_the_stack() {
+    let depth = 200_000;
+    let mut region = u32s(&[0xDBC0_1002, 2 * depth]);
+    region.extend(u32s(&vec![1; depth as usize]));
+    region.extend(u32s(&vec![0x1000_0003; depth as usize + 1]));
+    let bytes = Emf::new(10, 10)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(false),
+                (0x4008, 0x0400, region),
+                (0x4034, 0, Vec::new()),
+                plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 5.0, 5.0]]),
+            ])
+            .1,
+        )
+        .bytes();
+    check(&bytes);
+}
+
+fn nested_image(inner: &[u8]) -> (u16, u16, Vec<u8>) {
+    let mut image = u32s(&[0xDBC0_1002, 2, 3, inner.len() as u32]);
+    image.extend(inner);
+    (0x4008, 0x0500, image)
+}
+
+#[test]
+fn every_placement_of_a_nested_metafile_spends_the_budget() {
+    let rects: Vec<[f32; 4]> = (0..20_000).map(|i| [i as f32, 0.0, 1.0, 1.0]).collect();
+    let inner = Emf::new(10, 10)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(false),
+                plus_fill_rects(0xff00_0000, &rects),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .bytes();
+    let outer = |draws: usize| {
+        let mut records = vec![plus_header(false), nested_image(&inner)];
+        records.extend(
+            (0..draws).map(|_| plus_draw_image(0, [0.0, 0.0, 10.0, 10.0], [0.0, 0.0, 10.0, 10.0])),
+        );
+        records.push(plus_eof());
+        Emf::new(10, 10).rec(70, &plus(&records).1).bytes()
+    };
+    assert!(to_svg(&outer(3)).is_ok());
+    assert!(to_svg(&outer(100)).is_err());
+}
+
+#[test]
+fn united_clip_regions_spend_the_budget() {
+    let mut records = vec![select_clip_region(5, &[[0, 0, 1, 1]])];
+    for index in 0..3_000 {
+        records.push(select_clip_region(
+            2,
+            &[[index % 100, 0, index % 100 + 1, 1]],
+        ));
+        records.push(rect(0, 0, 10, 10));
+    }
+    assert!(to_svg(&Emf::new(100, 100).recs(records).bytes()).is_err());
+}
+
+#[test]
+fn a_last_pending_line_past_the_strict_op_limit_refuses() {
+    let drawing = |rects: usize| {
+        let mut records: Vec<(u32, Vec<u8>)> = (0..rects).map(|_| rect(0, 0, 5, 5)).collect();
+        records.push(move_to(0, 0));
+        records.push(line_to(5, 5));
+        Emf::new(10, 10).recs(records).bytes()
+    };
+    assert!(decode(&drawing(4_095)).is_some());
+    assert!(decode(&drawing(4_096)).is_none());
+}

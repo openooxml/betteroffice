@@ -649,7 +649,7 @@ fn full_record<const FULL: bool>(
         26 => {
             let (dx, dy) = (int(0)?, int(4)?);
             let m = player.logical_to_output();
-            player.offset_clip(dx * m[0] + dy * m[2], dx * m[1] + dy * m[3]);
+            player.offset_clip(dx * m[0] + dy * m[2], dx * m[1] + dy * m[3])?;
         }
         28 => player.set_meta_region(),
         29 | 30 => {

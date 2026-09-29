@@ -155,6 +155,9 @@ pub(crate) fn play_wmf<const FULL: bool>(
         }
     }
     player.flush_pending();
+    if player.overflowed {
+        return player.refuse("the metafile draws more than the replay limits");
+    }
     Some(())
 }
 
@@ -404,7 +407,7 @@ fn full_record<const FULL: bool>(
         0x0220 => {
             let (dy, dx) = (word(0)?, word(2)?);
             let m = player.logical_to_output();
-            player.offset_clip(dx * m[0] + dy * m[2], dx * m[1] + dy * m[3]);
+            player.offset_clip(dx * m[0] + dy * m[2], dx * m[1] + dy * m[3])?;
         }
         0x061C => {
             let (height, width) = (word(0)?, word(2)?);
@@ -566,7 +569,7 @@ pub(crate) fn embedded_emf(bytes: &[u8], records: &[(usize, usize, usize)]) -> O
         }
         let total = u32_at(record, 40)? as usize;
         let size = u32_at(record, 32)? as usize;
-        if *expected.get_or_insert(total) != total || emf.len() + size > total {
+        if *expected.get_or_insert(total) != total || emf.len().checked_add(size)? > total {
             return None;
         }
         emf.extend_from_slice(record.get(44..44usize.checked_add(size)?)?);

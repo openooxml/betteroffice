@@ -71,6 +71,8 @@ struct Writer {
     out: String,
     clips: HashMap<*const ClipChain, usize>,
     paints: HashMap<String, usize>,
+    /// Each bitmap's `data:` URL, encoded once however often it is drawn.
+    bitmaps: HashMap<*const Bitmap, Option<Arc<str>>>,
     next: usize,
     width: f64,
     height: f64,
@@ -81,6 +83,7 @@ pub(crate) fn write(drawing: &Drawing) -> Result<String, Refusal> {
         out: String::new(),
         clips: HashMap::new(),
         paints: HashMap::new(),
+        bitmaps: HashMap::new(),
         next: 0,
         width: drawing.width,
         height: drawing.height,
@@ -424,7 +427,12 @@ impl Writer {
     }
 
     fn image(&mut self, image: &Image) {
-        let Some(href) = data_url(&image.bitmap) else {
+        let Some(href) = self
+            .bitmaps
+            .entry(Arc::as_ptr(&image.bitmap))
+            .or_insert_with(|| data_url(&image.bitmap).map(Arc::from))
+            .clone()
+        else {
             return;
         };
         let m = image.transform;
