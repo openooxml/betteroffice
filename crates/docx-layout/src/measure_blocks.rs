@@ -1979,7 +1979,6 @@ fn measure_table(
         };
     }
 
-    let natural: Vec<f64> = rows.iter().map(|row| row.height).collect();
     for row_index in 0..rows.len() {
         for cell_index in 0..table.rows[row_index].cells.len() {
             let source_cell = &table.rows[row_index].cells[cell_index];
@@ -1989,7 +1988,10 @@ fn measure_table(
             }
             let last = (row_index + row_span - 1).min(rows.len() - 1);
             let needed = rows[row_index].cells[cell_index].height + cell_border_height(source_cell);
-            let spanned = natural[row_index..=last].iter().sum::<f64>();
+            let spanned = rows[row_index..=last]
+                .iter()
+                .map(|row| row.height)
+                .sum::<f64>();
             let deficit = needed - spanned;
             if deficit <= 0.0 {
                 continue;
@@ -2789,6 +2791,76 @@ mod tests {
             assert_eq!(measured.rows[0].height, expected);
             assert_eq!(measured.total_height, expected);
         }
+    }
+
+    #[test]
+    fn merged_cells_share_row_growth_without_changing_exact_rows() {
+        for (heights, exact, expected) in [
+            ([128.0, 160.0], [false, false, false], [16.0, 16.0, 128.0]),
+            ([160.0, 128.0], [false, false, false], [16.0, 16.0, 128.0]),
+            ([160.0, 160.0], [false, false, false], [16.0, 16.0, 128.0]),
+            ([16.0, 32.0], [false, false, false], [16.0, 16.0, 16.0]),
+            ([128.0, 160.0], [false, false, true], [16.0, 128.0, 16.0]),
+            ([160.0, 128.0], [true, false, true], [16.0, 128.0, 16.0]),
+            ([128.0, 160.0], [false, true, true], [128.0, 16.0, 16.0]),
+            ([128.0, 160.0], [true, true, true], [16.0, 16.0, 16.0]),
+        ] {
+            let cell = |id: &str, height: f64, row_span: usize| {
+                json!({
+                    "id":id, "rowSpan":row_span,
+                    "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                    "blocks":[{"kind":"image","id":id,"src":"","width":10,"height":height}]
+                })
+            };
+            let rows: Vec<_> = exact
+                .iter()
+                .enumerate()
+                .map(|(index, exact)| {
+                    let mut cells = Vec::new();
+                    if index == 0 {
+                        cells.push(cell("left", heights[0], 3));
+                        cells.push(cell("right", heights[1], 3));
+                    }
+                    cells.push(cell(&format!("marker{index}"), 16.0, 1));
+                    json!({
+                        "id":format!("row{index}"), "height":16,
+                        "heightRule":if *exact { "exact" } else { "atLeast" }, "cells":cells
+                    })
+                })
+                .collect();
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id":"table", "columnWidths":[100,100,100], "rows":rows
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 300.0, &MeasurementConfig::default()).unwrap();
+            let actual: Vec<_> = measured.rows.iter().map(|row| row.height).collect();
+            assert_eq!(actual, expected, "heights {heights:?}, exact {exact:?}");
+            assert_eq!(measured.total_height, expected.iter().sum::<f64>());
+        }
+    }
+
+    #[test]
+    fn overlapping_merged_cells_use_growth_in_their_shared_rows() {
+        let cell = |id: &str, height: f64, row_span: usize, column: usize| {
+            json!({
+                "id":id, "rowSpan":row_span, "gridStart":column,
+                "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                "blocks":[{"kind":"image","id":id,"src":"","width":10,"height":height}]
+            })
+        };
+        let mut table: TableBlock = serde_json::from_value(json!({
+            "id":"table", "columnWidths":[100,100,100], "rows":[
+                {"id":"row0", "cells":[cell("left", 80.0, 3, 0), cell("marker0", 16.0, 1, 2)]},
+                {"id":"row1", "cells":[cell("right", 96.0, 3, 1), cell("marker1", 16.0, 1, 2)]},
+                {"id":"row2", "cells":[cell("marker2", 16.0, 1, 2)]},
+                {"id":"row3", "cells":[cell("marker3", 16.0, 1, 2)]}
+            ]
+        }))
+        .unwrap();
+        let measured = measure_table(&mut table, 300.0, &MeasurementConfig::default()).unwrap();
+        let actual: Vec<_> = measured.rows.iter().map(|row| row.height).collect();
+        assert_eq!(actual, [16.0, 16.0, 48.0, 32.0]);
+        assert_eq!(measured.total_height, 112.0);
     }
 
     #[test]
