@@ -257,3 +257,41 @@ test('input for a session the worker does not serve takes the host path', async 
     preview.native.free();
   }
 });
+
+test('a display-only preview never asks the worker for the rest of its layout', async () => {
+  FakeWorker.created = [];
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const preview = hostWithPage(9515, 'Preview page');
+  Object.assign(preview.engine, { isDisplayOnly: () => true });
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) =>
+        useRustDisplayList(layout, undefined, undefined, undefined, source, undefined, {
+          current: null,
+        }),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const pending = result.current.layoutInWorker(preview.engine, REQUEST);
+    const worker = FakeWorker.created[0]!;
+    worker.reply({
+      id: worker.posted[0]!.id,
+      ok: true,
+      frame: preview.frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson: preview.layoutJson,
+      layoutProvisional: true,
+    });
+    const computation = await pending!;
+    expect(computation!.complete).toBeUndefined();
+    await act(async () => {
+      rerender({ layout: computation!.layout, source: preview.engine });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(worker.posted.map((request) => request.type)).not.toContain('completeLayout');
+    unmount();
+  } finally {
+    preview.native.free();
+  }
+});

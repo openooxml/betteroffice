@@ -827,7 +827,9 @@ export function useRustDisplayList(
       return reply
         .then((result): WorkerLayoutComputation => {
           const computation = adopt(result, previousFrame);
-          if (!result.layoutProvisional) return computation;
+          // A display-only preview is replaced by the full document before
+          // anything needs the rest of its pages.
+          if (!result.layoutProvisional || hostEngine.isDisplayOnly?.()) return computation;
           // The rest is laid out against the provisional frame, once its page
           // surfaces are attached: the worker answers in order, so asking
           // sooner would hold back the first paint until it is done.
