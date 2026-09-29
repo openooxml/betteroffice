@@ -7,7 +7,6 @@
 //! page reaches canvas replay.
 
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
 use std::rc::Rc;
 
 use docx_layout::display_list::{DisplayList, DisplayPage, DocAttrs, Primitive};
@@ -132,7 +131,7 @@ pub fn encode_frame_delta_incremental(
     previous: &[FramePageSnapshot],
     epochs: FrameEpochs,
     next_page_id: &mut u64,
-    rebuilt_pages: Range<usize>,
+    rebuilt_pages: &HashSet<usize>,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     encode_frame_delta_inner(
         list,

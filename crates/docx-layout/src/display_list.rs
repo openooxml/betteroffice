@@ -10919,6 +10919,9 @@ pub fn update_display_list_value_from_resident_incremental_with_fonts_observed(
 /// Incremental engine path backed by a retained parsed display input. Only
 /// rebuilt layout pages and the measured blocks referenced by those pages
 /// cross the typed-layout compatibility adapter on each edit.
+/// `extra_pages` outside the range are rebuilt too: pages whose note areas
+/// changed although their body did not.
+#[allow(clippy::too_many_arguments)]
 pub fn update_resident_display_list_incremental_with_fonts_observed(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
@@ -10927,6 +10930,7 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
     previous: &mut DisplayList,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
+    extra_pages: &[usize],
     position_deltas: &HashMap<String, i64>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
@@ -10935,19 +10939,24 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
     {
         return Ok(false);
     }
-    if rebuilt_page_start > rebuilt_page_end || rebuilt_page_end > layout.pages.len() {
+    if rebuilt_page_start > rebuilt_page_end
+        || rebuilt_page_end > layout.pages.len()
+        || extra_pages.iter().any(|&page| page >= layout.pages.len())
+    {
         return Err("resident display incremental page range is invalid".to_owned());
     }
+    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end)
+        .chain(extra_pages.iter().copied())
+        .collect();
 
     refresh_resident_display_pages(
         &mut resident.input,
         pagination,
         layout,
-        rebuilt_page_start..rebuilt_page_end,
+        selected.iter().copied(),
     )?;
     observe_phase();
 
-    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end).collect();
     let rebuilt = build_display_list_selected(&resident.input, fonts, Some(&selected));
     observe_phase();
     previous.contract_version = rebuilt.contract_version;
@@ -10956,6 +10965,9 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
         previous.pages[page_index] = page;
     }
     for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
+        if selected.contains(&page_index) {
+            continue;
+        }
         page.page_index = page_index as u64;
         shift_page_body_positions(page, position_deltas);
         // The retained layout page may predate this edit, but a converged
