@@ -544,7 +544,12 @@ fn place(
             let page_content_height =
                 paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
             let page_has_content = paginator.page_fragment_count(state_idx) > 0;
-            let group_height = hooks::measure_keep_with_next_group(group, measured)?;
+            let group_height = hooks::measure_keep_with_next_group_at(
+                group,
+                measured,
+                |before| paginator.leading_spacing(before),
+                paginator.state(state_idx).deferred_spacing,
+            )?;
             let must_advance = hooks::keep_with_next_group_must_advance(
                 group_height,
                 paginator.get_available_height(),
