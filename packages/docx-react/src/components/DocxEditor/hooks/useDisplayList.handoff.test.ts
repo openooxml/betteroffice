@@ -335,3 +335,134 @@ test('releasing lets go of the worker and the engine the pages showed', async ()
     preview.native.free();
   }
 });
+
+const lazyRequest = (fontId: number) =>
+  JSON.stringify({
+    bodyStory: 'body',
+    regions: {
+      sections: [
+        {
+          sectionId: 'main',
+          properties: {
+            pageWidth: 4320,
+            pageHeight: 2880,
+            marginTop: 300,
+            marginBottom: 300,
+            marginLeft: 300,
+            marginRight: 300,
+          },
+        },
+      ],
+    },
+    measurement: {
+      fontChains: { 'calibri|0|0': [fontId] },
+      defaults: { fontSize: 11, fontFamily: 'Calibri' },
+      authoritativeShaping: true,
+    },
+    renderEnv: {},
+  });
+
+/** Like `hostWithPage`, over several pages of which only the first is built. */
+function hostWithLazyPages(clientId: number, text: string) {
+  const native = createEditSession(clientId);
+  native.create_story('body', `${text} `.repeat(400), 'Normal', 'left');
+  const fontId = native.register_measure_font(
+    new Uint8Array(
+      readFileSync(
+        resolve(
+          import.meta.dir,
+          '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+        )
+      )
+    )
+  );
+  native.set_display_window(0, 1);
+  const request = lazyRequest(fontId);
+  const layoutJson = native.layout_document_with_regions_retained_json(request);
+  const frame = native.build_display_list_frame(JSON.stringify({}), 0);
+  const host = hostWithPage(clientId, text);
+  host.native.free();
+  return { native, layoutJson, frame, engine: host.engine, request };
+}
+
+test("a worker handed to another session builds no pages of the old session's frame", async () => {
+  FakeWorker.created = [];
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const preview = hostWithLazyPages(9530, 'Preview');
+  const full = hostWithLazyPages(9531, 'Full');
+  const handoffFrom = { current: null as YrsSession | null };
+  const reply = (
+    worker: FakeWorker,
+    request: ResidentEngineWorkerRequest,
+    host: ReturnType<typeof hostWithLazyPages>,
+    frame: Uint8Array
+  ) =>
+    worker.reply({
+      id: request.id,
+      ok: true,
+      frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson: host.layoutJson,
+    });
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) =>
+        useRustDisplayList(layout, undefined, undefined, undefined, source, undefined, handoffFrom),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const first = result.current.layoutInWorker(preview.engine, preview.request)!;
+    const worker = FakeWorker.created[0]!;
+    reply(worker, worker.posted[0]!, preview, preview.frame);
+    const previewLayout = await first;
+    await act(async () => {
+      rerender({ layout: previewLayout!.layout, source: preview.engine });
+    });
+    const last = result.current.displayList!.pages.length - 1;
+    expect(result.current.displayList!.pages[last]!.unbuilt).toBe(true);
+
+    handoffFrom.current = preview.engine;
+    const second = result.current.layoutInWorker(full.engine, full.request)!;
+    const bootstrap = worker.posted.at(-1)!;
+    await act(async () => {
+      result.current.setDisplayWindow(last, last + 1);
+      await new Promise((done) => setTimeout(done, 50));
+    });
+    expect(worker.posted.map((request) => request.type)).not.toContain('buildPages');
+
+    reply(worker, bootstrap, full, full.frame);
+    const fullLayout = await second;
+    await act(async () => {
+      rerender({ layout: fullLayout!.layout, source: full.engine });
+    });
+    await waitFor(() => expect(worker.posted.at(-1)!.type).toBe('buildPages'));
+    const build = worker.posted.at(-1)! as ResidentEngineWorkerRequest & {
+      pages: number[];
+      expectedFrameEpoch: number;
+    };
+    expect(build.expectedFrameEpoch).toBe(result.current.frame!.frameEpoch);
+    await act(async () => {
+      reply(
+        worker,
+        build,
+        full,
+        full.native.build_display_pages_frame(
+          Uint32Array.from(build.pages),
+          build.expectedFrameEpoch
+        )
+      );
+    });
+    await waitFor(() =>
+      expect(build.pages.every((index) => !result.current.displayList!.pages[index]!.unbuilt)).toBe(
+        true
+      )
+    );
+    expect(result.current.workerSurfacesActive).toBe(true);
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    preview.native.free();
+    full.native.free();
+  }
+});

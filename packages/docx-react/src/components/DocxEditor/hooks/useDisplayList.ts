@@ -823,6 +823,9 @@ export function useRustDisplayList(
       const worker = workerRef.current;
       const frame = snapshotRef.current.frame;
       if (!worker || !worker.client.isReady() || !frame) return;
+      // A worker handed to another session builds its pages once it has
+      // presented that session's frame.
+      if (frameEngineRef.current !== worker.engine) return;
       const pages = frame.displayList.pages;
       const [start, end] = displayWindowRef.current;
       const unbuilt: number[] = [];
@@ -861,6 +864,10 @@ export function useRustDisplayList(
         (result) => {
           pageBuildInFlightRef.current = false;
           if (workerRef.current !== worker) return;
+          if (frameEngineRef.current !== worker.engine) {
+            schedulePageBuildsWhenIdleRef.current();
+            return;
+          }
           try {
             const previous = snapshotRef.current;
             const delta = decodeFrameDelta(result.frame);
