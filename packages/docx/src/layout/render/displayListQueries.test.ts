@@ -236,7 +236,12 @@ describe('createDisplayListQueries lazy store pages', () => {
 
   function recordingEngine() {
     const opened: string[] = [];
-    const updates: Array<{ reuse: number[][]; replace: Array<[number, DisplayPage]> }> = [];
+    const updates: Array<{
+      total: number;
+      keep?: boolean;
+      reuse?: number[][];
+      replace: Array<[number, DisplayPage]>;
+    }> = [];
     const { engine, calls } = fakeEngine();
     engine.openDisplayList = (json: string) => {
       calls.open += 1;
@@ -265,10 +270,8 @@ describe('createDisplayListQueries lazy store pages', () => {
     ]);
     expect(updates).toHaveLength(1);
     expect(updates[0].replace.map(([index]) => index)).toEqual([1]);
-    expect(updates[0].reuse).toEqual([
-      [0, 0],
-      [2, 2],
-    ]);
+    expect(updates[0]).toMatchObject({ total: 3, keep: true });
+    expect(updates[0].reuse).toBeUndefined();
     expect(updates[0].replace[0][1].primitives).toHaveLength(1);
 
     queries.rangeRects(15, 16);
