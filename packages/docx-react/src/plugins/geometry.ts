@@ -80,6 +80,8 @@ export interface AnchorGeometryAccess {
   presented: boolean;
 }
 
+const LAST_UNIT_SCAN = 64;
+
 interface Interval {
   from: number;
   to: number;
@@ -144,18 +146,27 @@ export function createPluginGeometry(
   };
   const unavailable = () =>
     anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
+  /** Just past the last unit of `[from, to)` that draws, looking back at most `LAST_UNIT_SCAN`. */
+  const lastUnitEnd = (from: number, to: number): number | null => {
+    for (let end = to; end > from && to - end < LAST_UNIT_SCAN; end -= 1) {
+      if (unitAt(end - 1)) return end;
+    }
+    return null;
+  };
   const unitAt = (from: number): DisplayListRect | null =>
     queries
       .rangeRects(from, from + 1)
       .filter((rect) => rect.width > 0)
       .at(-1) ?? null;
+  /** The text caret stop nearest `x` on `unit`'s line; null over an image or shape atom. */
   const stopAt = (unit: DisplayListRect, x: number): number | null => {
     const hit = queries.hitTestRegions(unit.pageIndex, x, unit.y + unit.height / 2);
-    return hit?.region === 'body' ? hit.pos : null;
+    return hit?.region === 'body' && hit.target !== 'image' ? hit.pos : null;
   };
   /**
    * The collapsed caret at `pos`, on the edge of a neighbouring unit whose caret stop is nearest
-   * `pos`: the unit before it first when `before`, else the unit after it first.
+   * `pos`: the unit before it first when `before`, else the unit after it first. An atom, which
+   * has no text stops, keeps the caret on its near side.
    */
   const caretAt = (pos: number, before = false): DisplayListRect | null => {
     for (const from of before ? [pos - 1, pos] : [pos, pos - 1]) {
@@ -171,6 +182,10 @@ export function createPluginGeometry(
       return { ...unit, x: atLeft ? unit.x : unit.x + unit.width, width: 0 };
     }
     return null;
+  };
+  const endOf = ({ from, to }: Interval): DisplayListRect | null => {
+    const end = lastUnitEnd(from, to);
+    return end === null ? null : caretAt(end, true);
   };
   return {
     layout,
@@ -220,7 +235,7 @@ export function createPluginGeometry(
       }
       const rects: DocxAnchorRect[] = [];
       const drawn: DisplayListRect[] = [];
-      let tail: number | null = null;
+      let tail: Interval | null = null;
       for (const { from, to } of union) {
         if (from >= to) continue;
         const visible = queries.rangeRects(from, to).filter((rect) => rect.width > 0);
@@ -230,13 +245,13 @@ export function createPluginGeometry(
           rects.push(projected);
           drawn.push(rect);
         }
-        if (visible.length > 0) tail = to;
+        if (visible.length > 0) tail = { from, to };
       }
       const last = ranges.at(-1);
       const paragraph = editor.yrsLocToDisplayPosition(resolved.paragraph);
       const end =
         tail !== null
-          ? (caretAt(tail, true) ?? lastInReadingOrder(drawn))
+          ? (endOf(tail) ?? lastInReadingOrder(drawn))
           : ((last && (caretAt(last.from, true) ?? caretAt(last.to))) ??
             (paragraph === null ? null : caretAt(paragraph)));
       const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);

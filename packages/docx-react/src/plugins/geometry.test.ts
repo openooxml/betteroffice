@@ -203,7 +203,9 @@ function semanticGeometry(zoom = 1) {
     pageSize: () => PAGE,
     pageCount: () => 2,
     rangeRects: (from: number, to: number) => {
-      calls.push([from, to]);
+      const previous = calls.at(-1);
+      const probe = to - from === 1 && !!previous && to <= previous[1] && from >= previous[0];
+      if (!probe) calls.push([from, to]);
       return [{ ...RANGE, x: 10 + from, width: to - from }];
     },
     caretRect: () => ({ ...RANGE, x: 8, width: 1 }),
@@ -458,6 +460,8 @@ describe('semantic anchor geometry', () => {
     };
     const last = { ...text, x: 66, width: 4 };
     expect(probe([last], [text, image], [3, 4])).toMatchObject({ x: 213 });
+    source.hitTestRegions = () => ({ region: 'body', pos: 3, target: 'image' });
+    expect(anchored(geometry.getAnchorGeometry(target)).anchor).toMatchObject({ x: 213 });
     expect(probe([last], [text], [4, 3])).toMatchObject({ x: 209 });
     source.hitTestRegions = () => null;
     source.rangeRects = (from, to) => (to - from === 1 ? [last] : [text]);
@@ -553,7 +557,6 @@ describe('semantic anchor geometry', () => {
     expect(calls).toEqual([
       [0, 1],
       [2, 4],
-      [3, 4],
     ]);
     session.listRevisions = () => [];
     const fallback = anchored(geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }));
@@ -629,10 +632,7 @@ describe('semantic anchor geometry', () => {
     revisions[1]!.range.end.offset = 3;
     session.listRevisions = () => revisions;
     anchored(geometry.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }));
-    expect(calls).toEqual([
-      [0, 4],
-      [3, 4],
-    ]);
+    expect(calls).toEqual([[0, 4]]);
   });
 
   test('anchors no-op proposals at their paragraph and refuses unknown ids', () => {
@@ -712,27 +712,16 @@ describe('semantic anchor geometry', () => {
 
   test('selects first, nth and all non-overlapping search occurrences', () => {
     const { geometry, calls } = semanticGeometry();
-    const first = [
-      [0, 2],
-      [1, 2],
-    ];
     for (const [occurrence, expected] of [
-      [undefined, first],
-      ['first', first],
-      [1, first],
-      [
-        2,
-        [
-          [2, 4],
-          [3, 4],
-        ],
-      ],
+      [undefined, [[0, 2]]],
+      ['first', [[0, 2]]],
+      [1, [[0, 2]]],
+      [2, [[2, 4]]],
       [
         'all',
         [
           [0, 2],
           [2, 4],
-          [3, 4],
         ],
       ],
     ] as const) {

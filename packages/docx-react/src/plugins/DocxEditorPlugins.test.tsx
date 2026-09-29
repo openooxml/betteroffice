@@ -993,6 +993,71 @@ describe('DocxEditor plugins', () => {
     expect(result.rects.length).toBeGreaterThan(1);
     expect(ends.at(-1)).toBeLessThan(Math.max(...ends));
     expect(result.anchor.x).toBeCloseTo(Math.max(...ends));
+    const atom = paragraph.text.indexOf('\uFFFC');
+    const image = current.getAnchorGeometry({
+      kind: 'range',
+      version: read.version,
+      range: {
+        story: paragraph.story,
+        start: { paraId: paragraph.paraId, offset: atom },
+        end: { paraId: paragraph.paraId, offset: atom + 1 },
+        view: 'accepted',
+      },
+    });
+    if (!image.ok) throw new Error(image.failure.message);
+    expect(image.rects).toHaveLength(1);
+    expect(image.anchor.x).toBeCloseTo(image.rects[0]!.x + image.rects[0]!.width);
+  });
+
+  test('an anchor stays inside its range across a line break and after an image', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.break-anchor',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const body = [
+      '<w:p w14:paraId="00000001"><w:r><w:t>Alpha</w:t><w:br/><w:t>Beta</w:t></w:r></w:p>',
+      `<w:p w14:paraId="00000002">${DRAWING}</w:p>`,
+    ].join('');
+    const { ref } = await mount({ plugins: [plugin] }, false, await inlineImageDocument(body));
+    await until(() => geometry !== null);
+    const read = await ref.current!.readParagraphs({ view: 'accepted' });
+    if (!read.ok) throw new Error(read.failure.message);
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === read.version);
+    const current = geometry! as DocxPluginGeometry;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+    }
+    const anchor = (paraId: string, start: number, end: number) => {
+      const result = current.getAnchorGeometry({
+        kind: 'range',
+        version: read.version,
+        range: {
+          story: 'body',
+          start: { paraId, offset: start },
+          end: { paraId, offset: end },
+          view: 'accepted',
+        },
+      });
+      if (!result.ok) throw new Error(result.failure.message);
+      return result;
+    };
+    const [broken, picture] = read.paragraphs;
+    const alpha = anchor(broken!.paraId, 0, 6);
+    const line = alpha.rects.at(-1)!;
+    expect(alpha.anchor.y).toBeCloseTo(line.y);
+    expect(alpha.anchor.x).toBeCloseTo(line.x + line.width);
+    const image = anchor(picture!.paraId, 0, 1).rects.reduce((wide, rect) =>
+      rect.width > wide.width ? rect : wide
+    );
+    expect(anchor(picture!.paraId, 0, 1).anchor.x).toBeCloseTo(image.x + image.width);
+    expect(anchor(picture!.paraId, 1, 1).anchor.x).toBeCloseTo(image.x + image.width);
+    expect(anchor(picture!.paraId, 0, 0).anchor.x).toBeCloseTo(image.x);
   });
 
   test('an anchor ends where the text of its last unit ends, left in right-to-left runs', async () => {
