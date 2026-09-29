@@ -538,6 +538,7 @@ fn shape_field_run(field_value: &Value) -> Run {
         field_type,
         instruction,
         fallback: Some(fallback),
+        locked: field_value.get("fldLock").and_then(Value::as_bool) == Some(true),
         pm_start: None,
         pm_end: None,
     })
