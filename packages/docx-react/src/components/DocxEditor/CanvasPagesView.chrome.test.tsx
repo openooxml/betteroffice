@@ -459,6 +459,50 @@ test('elements a plugin query returned stay connected through other queries', as
   expect(first[0]!.isConnected).toBe(true);
 });
 
+test('a query across many far pages keeps their chrome only for the most recent', async () => {
+  const hostRef = createRef<HTMLDivElement>();
+  const run = (docStart: number) =>
+    ({
+      kind: 'text',
+      x: 10,
+      y: 10,
+      text: 'far',
+      font: '11px sans-serif',
+      color: '#000',
+      blockId: `p${docStart}`,
+      docStart,
+      docEnd: docStart + 3,
+    }) as unknown as DisplayPrimitive;
+  const pages = blankPages(60, (index) => [run(index * 10)]);
+  render(<CanvasPagesView displayList={{ pages }} hostRef={hostRef} glyphOutlineProvider={() => ''} />);
+  await idle();
+  const host = hostRef.current!;
+  const before = mirroredPages(host);
+  const queries = {
+    rangeRects: (from: number, to: number) =>
+      Array.from({ length: Math.ceil((to - from) / 10) }, (_, i) => ({
+        pageIndex: Math.floor(from / 10) + i,
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+      })),
+  } as unknown as DisplayListQueries;
+  const context = createRenderedDomContext(host, 1, {
+    displayListQueries: queries,
+    projector: { projectRect: () => null, getPageBounds: () => null },
+  });
+  let elements: Element[] = [];
+  await act(async () => {
+    elements = context.findElementsForRange(300, 600);
+    expect(elements).toHaveLength(30);
+    expect(elements.every((element) => element.isConnected)).toBe(true);
+  });
+  await idle();
+  const far = mirroredPages(host).filter((index) => !before.includes(index));
+  expect(far).toEqual(Array.from({ length: 12 }, (_, i) => 48 + i));
+});
+
 test('chrome built on demand for an inactive page is cleared on release', async () => {
   const page: DisplayPage = { pageIndex: 0, width: 100, height: 100, primitives: [] };
   let handle: PageChromeHandle | null = null;

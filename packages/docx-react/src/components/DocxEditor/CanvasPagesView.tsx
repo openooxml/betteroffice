@@ -98,6 +98,8 @@ const PAGE_WINDOW_BUFFER = 2;
 // Documents at or below this page count never window — zero behavior change
 // for ordinary documents.
 const PAGE_WINDOW_MIN_PAGES = 12;
+/** Pages built on demand, most recent first, that keep their chrome past the task that built them. */
+const ON_DEMAND_CHROME_PAGES = 12;
 // A page already mounted stays mounted until it drifts one page beyond the
 // mount band, so slow scrolling at a boundary cannot thrash mount/unmount.
 const PAGE_WINDOW_HYSTERESIS = 1;
@@ -485,23 +487,57 @@ export function CanvasPagesView({
   );
   // Pages built on demand keep their chrome until the page window moves, so
   // what a plugin query returned stays connected while the view stays put.
+  // Past the most recent ON_DEMAND_CHROME_PAGES, they keep it only until the
+  // task that built them ends: a scan of the document does not build it all.
   const onDemandKeysRef = useRef(new Set<string>());
   const [onDemandPageKeys, setOnDemandPageKeys] = useState<ReadonlySet<string>>(
     () => new Set()
   );
-  const materializePages = useCallback((pageIndices: readonly number[]) => {
+  const releaseOnDemand = useCallback((keys: Iterable<string>) => {
     const onDemand = onDemandKeysRef.current;
-    const size = onDemand.size;
-    for (const index of pageIndices) {
-      const key = pageKeysRef.current[index];
-      if (key === undefined) continue;
+    for (const key of [...keys]) {
       const handles = chromeHandlesRef.current.get(key);
-      handles?.mirror?.build();
-      handles?.overlay?.build();
-      onDemand.add(key);
+      handles?.mirror?.release();
+      handles?.overlay?.release();
+      onDemand.delete(key);
     }
-    if (onDemand.size !== size) setOnDemandPageKeys(new Set(onDemand));
+    setOnDemandPageKeys(new Set(onDemand));
   }, []);
+  const trimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (trimTimerRef.current !== null) clearTimeout(trimTimerRef.current);
+    },
+    []
+  );
+  const materializePages = useCallback(
+    (pageIndices: readonly number[]) => {
+      const onDemand = onDemandKeysRef.current;
+      let added = false;
+      for (const index of pageIndices) {
+        const key = pageKeysRef.current[index];
+        if (key === undefined) continue;
+        const handles = chromeHandlesRef.current.get(key);
+        handles?.mirror?.build();
+        handles?.overlay?.build();
+        added ||= !onDemand.has(key);
+        // Least recently built first.
+        onDemand.delete(key);
+        onDemand.add(key);
+      }
+      if (added) setOnDemandPageKeys(new Set(onDemand));
+      if (onDemand.size > ON_DEMAND_CHROME_PAGES && trimTimerRef.current === null) {
+        trimTimerRef.current = setTimeout(() => {
+          trimTimerRef.current = null;
+          const keys = [...onDemandKeysRef.current];
+          if (keys.length > ON_DEMAND_CHROME_PAGES) {
+            releaseOnDemand(keys.slice(0, keys.length - ON_DEMAND_CHROME_PAGES));
+          }
+        }, 0);
+      }
+    },
+    [releaseOnDemand]
+  );
   useEffect(() => {
     pageRegistry.setMaterializer(materializePages);
     return () => pageRegistry.setMaterializer(null);
@@ -579,16 +615,8 @@ export function CanvasPagesView({
     else onPageWindowChange?.(windowStart, windowEnd + 1);
   }, [onPageWindowChange, pageCount, windowEnd, windowPending, windowStart]);
   useEffect(() => {
-    const onDemand = onDemandKeysRef.current;
-    if (onDemand.size === 0) return;
-    for (const key of onDemand) {
-      const handles = chromeHandlesRef.current.get(key);
-      handles?.mirror?.release();
-      handles?.overlay?.release();
-    }
-    onDemand.clear();
-    setOnDemandPageKeys(new Set());
-  }, [windowStart, windowEnd]);
+    if (onDemandKeysRef.current.size > 0) releaseOnDemand(onDemandKeysRef.current);
+  }, [releaseOnDemand, windowStart, windowEnd]);
   useEffect(() => {
     // The window measurement lands pre-paint (layout effect) and re-runs this
     // effect; rastering before it exists would process every page.
