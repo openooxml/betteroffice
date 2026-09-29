@@ -455,6 +455,9 @@ describe('Canvas font families', () => {
       '400 11px "Calibri#1f2e", sans-serif'
     );
     expect(withFontFamilies('Calibri', families)).toBe('"Calibri#1f2e"');
+    expect(
+      withFontFamilies('400 11px "Review, Sans", Calibri', new Map([['Review, Sans', 'Review#2']]))
+    ).toBe('400 11px "Review#2", Calibri');
   });
 
   it('paints browser text with the family the document registered', async () => {

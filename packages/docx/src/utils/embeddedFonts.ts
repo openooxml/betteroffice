@@ -16,7 +16,7 @@ import { readDocxContainer } from '../docx/zipContainer';
 import { preloadParseWasm } from '../docx/parseWasm';
 import { preloadOpcWasm } from '../docx/wasm';
 import { deobfuscateFont, isValidFontKey } from './fontDeobfuscation';
-import { registerDocumentFaces, type FontLoadScope } from './fontLoader';
+import { claimDocumentFaces, type FontLoadScope } from './fontLoader';
 import type { FontTable, FontInfo, FontEmbed } from '../types/styles';
 import type { Document } from '../types/document';
 
@@ -208,7 +208,9 @@ export async function loadEmbeddedFonts(
  * {@link loadEmbeddedFonts}, resolving to the CSS family each embedded family
  * was registered under: its own name, or an alias when another live document
  * registered different faces under that name (see {@link registerDocumentFaces}).
- * With a scope, the faces are held until its next document or its disposal.
+ * With a scope, the faces are held until its next document or its disposal,
+ * and a call that a later document load into the scope overtook resolves to
+ * an empty map.
  *
  * @public
  */
@@ -218,23 +220,29 @@ export async function loadEmbeddedFontFamilies(
   fontTableRelsXml: string | null | undefined,
   scope?: FontLoadScope
 ): Promise<Map<string, string>> {
-  if (!fontTable || !fontTableRelsXml || rawFonts.size === 0) {
-    return registerDocumentFaces([], scope);
-  }
-  await preloadParseWasm();
-  const faces = getEmbeddedFontFaces(fontTable, rawFonts, fontTableRelsXml);
-  const registered = await registerDocumentFaces(faces, scope);
-  if (typeof document !== 'undefined' && !scope?.disposed) {
-    for (const family of new Set(faces.map((face) => face.family.trim()))) {
-      // A missing family genuinely failed (corrupt bytes, timeout); the picker
-      // may still list it (see getEmbeddedFontFamilies), and its text falls
-      // back to the CSS stack.
-      if (!registered.has(family)) {
-        console.warn(
-          `[embeddedFonts] embedded font "${family}" failed to load; text using it falls back to the CSS stack`
-        );
-      }
+  const register = claimDocumentFaces(scope);
+  const faces = embeddedFaces(fontTable, rawFonts, fontTableRelsXml);
+  const registered = await register(faces);
+  if (!registered) return new Map();
+  for (const family of new Set((await faces).map((face) => face.family.trim()))) {
+    // A missing family genuinely failed (corrupt bytes, timeout); the picker
+    // may still list it (see getEmbeddedFontFamilies), and its text falls
+    // back to the CSS stack.
+    if (!registered.has(family)) {
+      console.warn(
+        `[embeddedFonts] embedded font "${family}" failed to load; text using it falls back to the CSS stack`
+      );
     }
   }
   return registered;
+}
+
+async function embeddedFaces(
+  fontTable: FontTable | undefined,
+  rawFonts: ReadonlyMap<string, ArrayBuffer>,
+  fontTableRelsXml: string | null | undefined
+): Promise<EmbeddedFontFace[]> {
+  if (!fontTable || !fontTableRelsXml || rawFonts.size === 0) return [];
+  await preloadParseWasm();
+  return getEmbeddedFontFaces(fontTable, rawFonts, fontTableRelsXml);
 }

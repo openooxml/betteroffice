@@ -1568,6 +1568,8 @@ function hasHorizontalScale(horizontalScale: number | undefined): horizontalScal
 }
 
 const CSS_FONT_FAMILY_LIST = /^(.*?\d*\.?\d+px(?:\/\S+)?\s+)(.+)$/;
+// One entry of a family list; a quoted name may hold commas.
+const CSS_FAMILY_ENTRY = /(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^,"'])+/g;
 
 /**
  * `font`, a CSS font shorthand or a bare family list, with each family that
@@ -1576,8 +1578,9 @@ const CSS_FONT_FAMILY_LIST = /^(.*?\d*\.?\d+px(?:\/\S+)?\s+)(.+)$/;
 export function withFontFamilies(font: string, families: ReadonlyMap<string, string>): string {
   const match = CSS_FONT_FAMILY_LIST.exec(font) ?? ['', '', font];
   let changed = false;
-  const list = match[2].split(',').map((entry) => {
-    const name = entry.trim().replace(/^(["'])(.*)\1$/, '$2');
+  const list = (match[2].match(CSS_FAMILY_ENTRY) ?? []).map((entry) => {
+    const trimmed = entry.trim();
+    const name = /^["']/.test(trimmed) ? trimmed.slice(1, -1).replace(/\\(.)/g, '$1') : trimmed;
     const folded = name.toLowerCase();
     const mapped =
       families.get(name) ??

@@ -65,8 +65,10 @@ interface FaceOwner {
 interface ScopeState extends FontLoadScope {
   readonly loadCallbacks: Set<(fonts: string[]) => void>;
   readonly errorCallbacks: Set<(error: Error) => void>;
-  /** Owner of the embedded faces of the document this scope shows now. */
+  /** Owner of the embedded faces of the document this scope loaded last. */
   embedded: FaceOwner;
+  /** Owners of its earlier documents, released once the last one's faces load. */
+  readonly retiring: Set<FaceOwner>;
 }
 
 /** Scopes that asked for one load; `null` is a module-level call, which every scope hears. */
@@ -74,6 +76,7 @@ type Requesters = ReadonlySet<ScopeState | null>;
 
 const MODULE_LEVEL: Requesters = new Set([null]);
 const PERMANENT: FaceOwner = { scope: null };
+const NO_OWNERS: ReadonlySet<FaceOwner> = new Set();
 // Scopes with at least one listener; a scope nobody listens to stays collectable.
 const liveScopes = new Set<ScopeState>();
 
@@ -397,16 +400,22 @@ function satisfiedBySystemFont(family: string, requesters: Requesters): boolean 
 }
 
 // In-flight buffer/URL registrations for a family (loadingFaces is keyed
-// `family|weight`).
-function inFlightFacePromises(family: string): Promise<boolean>[] {
+// `family|weight`), with the requesters each one notifies.
+function inFlightFaces(family: string): {
+  promises: Promise<boolean>[];
+  requesters: Requesters[];
+} {
   const prefix = `${family.toLowerCase()}|`;
-  const pending: Promise<boolean>[] = [];
+  const promises: Promise<boolean>[] = [];
+  const requesters: Requesters[] = [];
   for (const [key, promise] of loadingFaces) {
     if (key.toLowerCase().startsWith(prefix)) {
-      pending.push(promise);
+      promises.push(promise);
+      const notified = bufferFaces.get(key)?.requesters ?? faceRequesters.get(key);
+      if (notified) requesters.push(notified);
     }
   }
-  return pending;
+  return { promises, requesters };
 }
 
 // Shared success bookkeeping for the buffer/URL face loaders. One place, so
@@ -532,17 +541,17 @@ async function loadFontFrom(
   // A buffer/URL registration for this family may be mid-flight (its
   // waitForFontAvailable can take up to 3s). Snapshot here, in the same
   // synchronous frame as the dedupe checks above.
-  const pendingFaces = inFlightFacePromises(normalizedFamily);
+  const pendingFaces = inFlightFaces(normalizedFamily);
 
   // Remote disabled, not locally satisfied, and no in-flight registration
   // that could change the answer — statically false. Skip the promise
   // machinery instead of re-paying it on every loadDocumentFonts pass.
   const bundled = hasDefaultFontSource();
-  if (!googleFontsEnabled && !bundled && pendingFaces.length === 0) {
+  if (!googleFontsEnabled && !bundled && pendingFaces.promises.length === 0) {
     return false;
   }
   const googleUrl = getGoogleFontsUrl(normalizedFamily, options?.weights, options?.styles);
-  if (!bundled && pendingFaces.length === 0 && failedGoogleStylesheets.has(googleUrl)) {
+  if (!bundled && pendingFaces.promises.length === 0 && failedGoogleStylesheets.has(googleUrl)) {
     return false;
   }
 
@@ -556,10 +565,10 @@ async function loadFontFrom(
       // redundant fetch this path exists to skip nor report a spurious
       // failure under googleFontsEnabled=false. Skipped when nothing was in
       // flight — the synchronous checks above already gave the answer.
-      if (pendingFaces.length > 0) {
-        await Promise.all(pendingFaces);
+      if (pendingFaces.promises.length > 0) {
+        await Promise.all(pendingFaces.promises);
         if (loadedFonts.has(normalizedFamily)) {
-          notifyCallbacks([normalizedFamily], requesters);
+          notifyJoiners([normalizedFamily], requesters, pendingFaces.requesters);
           return true;
         }
         if (!options && satisfiedBySystemFont(normalizedFamily, requesters)) {
@@ -787,6 +796,25 @@ function notifyCallbacks(fonts: string[], requesters: Requesters = MODULE_LEVEL)
 }
 
 /**
+ * Notify the scopes among `requesters` that no load in `notified` told;
+ * module-level callbacks heard those loads already.
+ */
+function notifyJoiners(fonts: string[], requesters: Requesters, notified: Requesters[]): void {
+  const told = new Set<ScopeState>();
+  for (const heard of notified) for (const scope of scopesHearing(heard)) told.add(scope);
+  for (const scope of scopesHearing(requesters)) {
+    if (told.has(scope)) continue;
+    for (const callback of [...scope.loadCallbacks]) {
+      try {
+        callback(fonts);
+      } catch (error) {
+        reportFontError(error, 'load callback threw', new Set([scope]));
+      }
+    }
+  }
+}
+
+/**
  * Register a callback to be notified when a font fails to load.
  *
  * Adapters subscribe and forward to their `onError` prop. Returns the unsub.
@@ -950,15 +978,14 @@ export interface BufferFaceInput {
 /** One registered `@font-face` over one font file's bytes, held by its owners. */
 interface BufferFace {
   readonly key: string;
-  /** `family|weight|style` of the document family, case-folded. */
-  readonly slot: string;
-  /** The same of the CSS family it registers under. */
+  /** `cssFamily|weight|style`, case-folded, with the weight in CSS numbers. */
   readonly cssSlot: string;
   readonly cssFamily: string;
-  /** Whether it registers under the document family's own name. */
-  readonly realName: boolean;
-  /** Scopes that asked for it while it loaded. */
-  readonly requesters: Set<ScopeState | null>;
+  /** Spellings of the family it registered under their own name, as `loadedFonts` holds them. */
+  readonly families: Set<string>;
+  /** Scopes to notify when it loads; emptied once it settles. */
+  requesters: Set<ScopeState | null>;
+  settled: boolean;
   readonly bytes: Uint8Array<ArrayBuffer>;
   readonly owners: Set<FaceOwner>;
   promise: Promise<boolean>;
@@ -966,10 +993,8 @@ interface BufferFace {
   url: string | null;
 }
 
-// Buffer faces by `cssFamily|weight|style|content`, and the face holding each
-// `family|weight|style` under the family's own name.
+// Buffer faces by `cssFamily|weight|style|content`.
 const bufferFaces = new Map<string, BufferFace>();
-const realNameFaces = new Map<string, BufferFace>();
 // Families loadedFonts holds only because buffer faces are registered.
 const bufferOnlyFamilies = new Set<string>();
 // Mapped originals loadedFonts holds only because their equivalent is such a family.
@@ -979,6 +1004,12 @@ function markFamilyLoaded(family: string): void {
   loadedFonts.add(family);
   bufferOnlyFamilies.delete(family);
   mappedOriginals.delete(family);
+}
+
+function markBufferFamily(entry: BufferFace, family: string): void {
+  if (!loadedFonts.has(family)) bufferOnlyFamilies.add(family);
+  loadedFonts.add(family);
+  entry.families.add(family);
 }
 
 function bytesOf(face: BufferFaceInput): Uint8Array<ArrayBuffer> {
@@ -1002,9 +1033,19 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return true;
 }
 
-/** CSS matches family names case-insensitively, so keys and collisions do too. */
+function cssWeight(weight: number | string | undefined): string {
+  const value = String(weight ?? 'normal')
+    .trim()
+    .toLowerCase();
+  if (value === 'normal') return '400';
+  if (value === 'bold') return '700';
+  const numeric = Number(value);
+  return value !== '' && Number.isFinite(numeric) ? String(numeric) : value;
+}
+
+/** CSS matches family names case-insensitively and `bold` as 700, so keys and collisions do too. */
 function familySlot(family: string, weight: number | string | undefined, style: string): string {
-  return faceKey(family.toLowerCase(), weight, style as 'normal' | 'italic');
+  return `${family.trim().toLowerCase()}|${cssWeight(weight)}|${style}`;
 }
 
 function bufferFaceKey(slot: string, bytes: Uint8Array): string {
@@ -1016,11 +1057,11 @@ function bufferFaceKey(slot: string, bytes: Uint8Array): string {
   }
 }
 
-/** Whether a live registration other than `replacing`'s holds different bytes for `face` under `cssFamily`. */
+/** Whether a live registration of an owner outside `replacing` holds different bytes for `face` under `cssFamily`. */
 function heldByOthers(
   cssFamily: string,
   face: BufferFaceInput,
-  replacing: FaceOwner | undefined
+  replacing: ReadonlySet<FaceOwner>
 ): boolean {
   const slot = familySlot(cssFamily, face.weight, face.style ?? 'normal');
   const bytes = bytesOf(face);
@@ -1028,7 +1069,7 @@ function heldByOthers(
     (entry) =>
       entry.cssSlot === slot &&
       !sameBytes(entry.bytes, bytes) &&
-      [...entry.owners].some((owner) => owner !== replacing)
+      [...entry.owners].some((owner) => !replacing.has(owner))
   );
 }
 
@@ -1036,18 +1077,18 @@ function heldByOthers(
  * The CSS family `faces` of one family register under: the family's own name
  * unless a live registration holds different bytes for one of its faces under
  * that name, and then an alias unique to these faces' bytes. Faces only
- * `replacing` holds, a document being replaced, are no collision.
+ * `replacing` hold, documents being replaced, are no collision.
  */
 function cssFamilyFor(
   family: string,
   faces: readonly BufferFaceInput[],
-  replacing?: FaceOwner
+  replacing: ReadonlySet<FaceOwner> = NO_OWNERS
 ): string {
   if (!faces.some((face) => heldByOthers(family, face, replacing))) return family;
   const base = `${family}#${fingerprint(new TextEncoder().encode(faces.map((face) => fingerprint(bytesOf(face))).join()))}`;
   for (let attempt = 0; ; attempt += 1) {
     const alias = attempt === 0 ? base : `${base}~${attempt}`;
-    if (!faces.some((face) => heldByOthers(alias, face, undefined))) return alias;
+    if (!faces.some((face) => heldByOthers(alias, face, NO_OWNERS))) return alias;
   }
 }
 
@@ -1060,6 +1101,7 @@ function registerBufferFace(
   const style = input.style ?? 'normal';
   const cssSlot = familySlot(cssFamily, input.weight, style);
   const key = bufferFaceKey(cssSlot, bytesOf(input));
+  const realName = cssFamily.toLowerCase() === family.toLowerCase();
 
   // Provenance: mark before the async work so an in-flight registration
   // already counts as registered (see loadFontWithMapping). Marking a family
@@ -1070,28 +1112,30 @@ function registerBufferFace(
   const existing = bufferFaces.get(key);
   if (existing) {
     existing.owners.add(owner);
-    if (existing.realName) realNameFaces.set(existing.slot, existing);
-    if (!loadedFaces.has(key)) existing.requesters.add(owner.scope);
-    return existing.promise;
+    if (!existing.settled) existing.requesters.add(owner.scope);
+    if (!realName) return existing.promise;
+    // The same face under another spelling of its name: CSS renders that spelling too.
+    return existing.promise.then((loaded) => {
+      if (loaded && bufferFaces.get(key) === existing) markBufferFamily(existing, family);
+      return loaded;
+    });
   }
 
   const bytes = bytesOf(input).slice();
-  const realName = cssFamily.toLowerCase() === family.toLowerCase();
   const entry: BufferFace = {
     key,
-    slot: familySlot(family, input.weight, style),
     cssSlot,
     cssFamily,
-    realName,
+    families: new Set(),
+    requesters: new Set([owner.scope]),
+    settled: false,
     bytes,
     owners: new Set([owner]),
-    requesters: new Set([owner.scope]),
     promise: Promise.resolve(false),
     style: null,
     url: null,
   };
   bufferFaces.set(key, entry);
-  if (realName) realNameFaces.set(entry.slot, entry);
 
   entry.promise = (async (): Promise<boolean> => {
     isLoadingAny = true;
@@ -1112,13 +1156,9 @@ function registerBufferFace(
       await waitForFontAvailable(cssFamily, 3000);
 
       if (bufferFaces.get(key) !== entry) return false;
-      if (realName) {
-        if (!loadedFonts.has(family)) bufferOnlyFamilies.add(family);
-        markFaceLoaded(key, family, entry.requesters);
-      } else {
-        loadedFaces.add(key);
-        notifyCallbacks([family], entry.requesters);
-      }
+      loadedFaces.add(key);
+      if (realName) markBufferFamily(entry, family);
+      notifyCallbacks([family], entry.requesters);
 
       return true;
     } catch (error) {
@@ -1126,6 +1166,8 @@ function registerBufferFace(
       dropBufferFace(entry);
       return false;
     } finally {
+      entry.settled = true;
+      entry.requesters = new Set();
       if (loadingFaces.get(key) === entry.promise) loadingFaces.delete(key);
       if (loadingFonts.size === 0 && loadingFaces.size === 0) {
         isLoadingAny = false;
@@ -1141,22 +1183,17 @@ function dropBufferFace(entry: BufferFace): void {
   if (bufferFaces.get(entry.key) !== entry) return;
   bufferFaces.delete(entry.key);
   loadedFaces.delete(entry.key);
-  if (realNameFaces.get(entry.slot) === entry) {
-    const successor = [...bufferFaces.values()].find(
-      (face) => face.realName && face.slot === entry.slot
-    );
-    if (successor) realNameFaces.set(entry.slot, successor);
-    else realNameFaces.delete(entry.slot);
-  }
   entry.style?.remove();
   if (entry.url) URL.revokeObjectURL(entry.url);
   entry.style = null;
   entry.url = null;
-  const family = entry.cssFamily;
-  if (
-    bufferOnlyFamilies.has(family) &&
-    ![...bufferFaces.values()].some((face) => face.cssFamily === family)
-  ) {
+  for (const family of entry.families) {
+    if (
+      !bufferOnlyFamilies.has(family) ||
+      [...bufferFaces.values()].some((face) => face.families.has(family))
+    ) {
+      continue;
+    }
     bufferOnlyFamilies.delete(family);
     loadedFonts.delete(family);
     for (const [original, source] of mappedOriginals) {
@@ -1175,6 +1212,81 @@ function releaseFaceOwner(owner: FaceOwner): void {
   }
 }
 
+/** Releases what a scope's document load replaced, once that load is the scope's last one. */
+function settleDocumentFaces(state: ScopeState | null, owner: FaceOwner): void {
+  if (!state) return;
+  if (state.disposed) {
+    releaseFaceOwner(owner);
+    return;
+  }
+  if (state.embedded !== owner) return;
+  for (const retired of state.retiring) releaseFaceOwner(retired);
+  state.retiring.clear();
+}
+
+/**
+ * Claims `scope` for a document's faces now, so that of two documents loading
+ * into one scope the later claim wins, whichever faces arrive first. The
+ * returned registration resolves to null when a later claim or disposal made
+ * it obsolete.
+ */
+export function claimDocumentFaces(
+  scope?: FontLoadScope
+): (
+  faces: readonly BufferFaceInput[] | PromiseLike<readonly BufferFaceInput[]>
+) => Promise<Map<string, string> | null> {
+  if (typeof document === 'undefined' || scope?.disposed) {
+    return async (faces) => {
+      await faces;
+      return null;
+    };
+  }
+  const state = scope ? (scope as ScopeState) : null;
+  const owner: FaceOwner = state ? { scope: state } : PERMANENT;
+  if (state) {
+    state.retiring.add(state.embedded);
+    state.embedded = owner;
+  }
+  const current = () => !state || (!state.disposed && state.embedded === owner);
+  const register = async (list: readonly BufferFaceInput[]) => {
+    if (!current()) {
+      settleDocumentFaces(state, owner);
+      return null;
+    }
+    const families = new Map<string, BufferFaceInput[]>();
+    for (const face of list) {
+      const family = face.family.trim();
+      families.set(family, [...(families.get(family) ?? []), face]);
+    }
+    const loads: Array<Promise<[string, string, boolean]>> = [];
+    for (const [family, group] of families) {
+      const cssFamily = cssFamilyFor(family, group, state?.retiring);
+      for (const face of group) {
+        loads.push(
+          registerBufferFace(face, owner, cssFamily).then((ok) => [family, cssFamily, ok])
+        );
+      }
+    }
+    const results = await Promise.all(loads);
+    settleDocumentFaces(state, owner);
+    if (!current()) return null;
+    const registered = new Map<string, string>();
+    for (const [family, cssFamily, ok] of results) {
+      if (ok) registered.set(family, cssFamily);
+    }
+    return registered;
+  };
+  // Faces in hand register at once, so a load of their family made right
+  // after this call finds them in flight.
+  return (faces) =>
+    'then' in faces
+      ? Promise.resolve(faces).then(register, (error: unknown) => {
+          settleDocumentFaces(state, owner);
+          throw error;
+        })
+      : register(faces);
+}
+
 /**
  * Registers one document's font faces from their bytes. Each family takes its
  * own name, as {@link loadFontFromBuffer} registers it, unless a live
@@ -1182,42 +1294,19 @@ function releaseFaceOwner(owner: FaceOwner): void {
  * an alias, so both documents keep their own glyphs. Faces with the same bytes
  * are registered once. With a scope, the faces are held until the scope loads
  * its next document or is disposed; without one, for the page's lifetime.
- * Resolves to the CSS family each family was registered under, for the
- * families with at least one face that loaded.
+ * `faces` may be a promise: the scope's next document is the one whose call
+ * came last, whichever faces arrive first. Resolves to the CSS family each
+ * family was registered under, for the families with at least one face that
+ * loaded, or to an empty map once a later document or disposal replaced it.
  *
  * @public
  */
 export async function registerDocumentFaces(
-  faces: readonly BufferFaceInput[],
+  faces: readonly BufferFaceInput[] | PromiseLike<readonly BufferFaceInput[]>,
   scope?: FontLoadScope
 ): Promise<Map<string, string>> {
-  const registered = new Map<string, string>();
-  if (typeof document === 'undefined' || scope?.disposed) return registered;
-  const state = scope ? (scope as ScopeState) : null;
-  const owner: FaceOwner = state ? { scope: state } : PERMANENT;
-  const previous = state?.embedded;
-  if (state) state.embedded = owner;
-
-  const families = new Map<string, BufferFaceInput[]>();
-  for (const face of faces) {
-    const family = face.family.trim();
-    families.set(family, [...(families.get(family) ?? []), face]);
-  }
-  const loads: Array<Promise<[string, string, boolean]>> = [];
-  for (const [family, group] of families) {
-    const cssFamily = cssFamilyFor(family, group, previous);
-    for (const face of group) {
-      loads.push(
-        registerBufferFace(face, owner, cssFamily).then((ok) => [family, cssFamily, ok])
-      );
-    }
-  }
-  for (const [family, cssFamily, ok] of await Promise.all(loads)) {
-    if (ok) registered.set(family, cssFamily);
-  }
-  if (previous) releaseFaceOwner(previous);
-  if (state?.disposed) releaseFaceOwner(owner);
-  return registered;
+  const register = claimDocumentFaces(scope);
+  return (await register(faces)) ?? new Map();
 }
 
 function guessFontFormat(src: string): string {
@@ -1459,7 +1548,8 @@ async function loadWithMapping(fontFamily: string, requester: ScopeState | null)
       return true;
     }
     const result = await loadFontFrom(googleFont, undefined, trimmed, undefined, requester);
-    if (result && !partialBundledFamilies.has(googleFont)) {
+    // The equivalent may have been released while this call waited on it.
+    if (result && isFontLoaded(googleFont) && !partialBundledFamilies.has(googleFont)) {
       if (!bufferOnlyFamilies.has(googleFont)) {
         markFamilyLoaded(trimmed);
       } else if (!loadedFonts.has(trimmed)) {
@@ -1604,6 +1694,7 @@ export function createFontLoadScope(): FontLoadScope {
     loadCallbacks: new Set(),
     errorCallbacks: new Set(),
     embedded: PERMANENT,
+    retiring: new Set(),
     disposed: false,
     onFontsLoaded(callback) {
       revive();
@@ -1633,6 +1724,8 @@ export function createFontLoadScope(): FontLoadScope {
       scope.loadCallbacks.clear();
       scope.errorCallbacks.clear();
       releaseFaceOwner(scope.embedded);
+      for (const retired of scope.retiring) releaseFaceOwner(retired);
+      scope.retiring.clear();
     },
   };
   // A remount (React StrictMode replays effects) subscribes again: the same

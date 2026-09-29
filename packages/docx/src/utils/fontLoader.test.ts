@@ -15,6 +15,7 @@ const {
   registerDocumentFaces,
   setGoogleFontsEnabled,
 } = await import('./fontLoader');
+type BufferFaceInput = import('./fontLoader').BufferFaceInput;
 
 type Face = { family: string; weight?: string; style?: string };
 
@@ -632,4 +633,83 @@ test('a mapped family is no longer loaded once the scoped face it relied on is r
   scope.dispose();
   expect(isFontLoaded('Arimo')).toBe(false);
   expect(isFontLoaded('Arial')).toBe(false);
+});
+
+test('a face joined by a family load is announced once to each listener', async () => {
+  const mine = createFontLoadScope();
+  const other = createFontLoadScope();
+  const heard = { module: [] as string[], mine: [] as string[], other: [] as string[] };
+  const unsubscribe = onFontsLoaded((fonts) => heard.module.push(...fonts));
+  mine.onFontsLoaded((fonts) => heard.mine.push(...fonts));
+  other.onFontsLoaded((fonts) => heard.other.push(...fonts));
+  await Promise.all([
+    registerDocumentFaces([{ family: 'Joined Once', data: fontBytes(10) }], mine),
+    loadFont('Joined Once'),
+    mine.loadFontsWithMapping(['Joined Once']),
+  ]);
+  expect(heard).toEqual({ module: ['Joined Once'], mine: ['Joined Once'], other: ['Joined Once'] });
+  unsubscribe();
+  mine.dispose();
+  other.dispose();
+});
+
+test('a mapped family released while its load waited is not marked loaded', async () => {
+  const scope = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Libre Franklin', data: fontBytes(11) }], scope);
+  const mapping = loadFontWithMapping('Franklin Gothic');
+  scope.dispose();
+  await mapping;
+  expect(isFontLoaded('Libre Franklin')).toBe(false);
+  expect(isFontLoaded('Franklin Gothic')).toBe(false);
+});
+
+test('the same face under another spelling of its name is loaded under that spelling too', async () => {
+  setGoogleFontsEnabled(false);
+  expect(await loadFontFromBuffer('Review Casing', fontBytes(12))).toBe(true);
+  expect(await loadFontFromBuffer('review casing', fontBytes(12))).toBe(true);
+  expect(faceStyles()).toEqual(['Review Casing']);
+  expect(isFontLoaded('review casing')).toBe(true);
+  expect(await loadFont('review casing')).toBe(true);
+});
+
+test('weights CSS treats as equal collide', async () => {
+  const first = createFontLoadScope();
+  const second = createFontLoadScope();
+  for (const [weight, same] of [['normal', 400], ['bold', '700']] as const) {
+    const family = `Weighted ${weight}`;
+    await registerDocumentFaces([{ family, data: fontBytes(13), weight }], first);
+    const [cssFamily] = (
+      await registerDocumentFaces([{ family, data: fontBytes(14), weight: same }], second)
+    ).values();
+    expect(cssFamily).not.toBe(family);
+  }
+  first.dispose();
+  second.dispose();
+});
+
+test('of two documents loading into one scope the later call wins, whichever faces arrive first', async () => {
+  const scope = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Shown Face', data: fontBytes(15) }], scope);
+  let arrive!: (faces: BufferFaceInput[]) => void;
+  const older = registerDocumentFaces(new Promise<BufferFaceInput[]>((resolve) => (arrive = resolve)), scope);
+  expect(await registerDocumentFaces([], scope)).toEqual(new Map());
+  expect(isFontLoaded('Shown Face')).toBe(false);
+  expect(faceStyles()).toEqual([]);
+  arrive([{ family: 'Overtaken Face', data: fontBytes(16) }]);
+  expect(await older).toEqual(new Map());
+  expect(faceStyles()).toEqual([]);
+  scope.dispose();
+});
+
+test('a parsed document an editor shows takes back the name its previous document held', async () => {
+  const shown = createFontLoadScope();
+  await registerDocumentFaces([{ family: 'Parsed Collision', data: fontBytes(17) }], shown);
+  const parsed = [{ family: 'Parsed Collision', data: fontBytes(18) }];
+  const [pageAlias] = (await registerDocumentFaces(parsed)).values();
+  expect(pageAlias).not.toBe('Parsed Collision');
+  expect(await registerDocumentFaces(parsed, shown)).toEqual(
+    new Map([['Parsed Collision', 'Parsed Collision']])
+  );
+  expect(faceStyles()).toEqual([pageAlias, 'Parsed Collision']);
+  shown.dispose();
 });

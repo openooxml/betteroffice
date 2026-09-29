@@ -1,5 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
+import { useEffect } from 'react';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -34,4 +35,15 @@ test('under StrictMode each editor hears its own font loads and not the other on
   first.unmount();
   expect(first.result.current.disposed).toBe(true);
   second.unmount();
+});
+
+test('under StrictMode the scope is live again when the effects after it replay', () => {
+  configure({ reactStrictMode: true });
+  const seen: boolean[] = [];
+  const { unmount } = renderHook(() => {
+    const scope = useFontLoadScope();
+    useEffect(() => void seen.push(scope.disposed), [scope]);
+  });
+  expect(seen).toEqual([false, false]);
+  unmount();
 });

@@ -3,6 +3,7 @@ import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { YrsDocxHost } from '@betteroffice/docx/yrs';
 import {
+  extractEmbeddedFontFaces,
   loadEmbeddedFontFamilies,
   registerDocumentFaces,
   getRenderableDocumentFonts,
@@ -90,13 +91,15 @@ export function useDocumentLoader({
       setYrsSeedGeneration(generation);
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
-      // A parsed document's embedded faces were registered when it was
-      // parsed; release the ones the previous document held here.
-      void registerDocumentFaces([], fontScope);
       setFontAliases(NO_FONT_ALIASES);
-      fontScope.loadDocumentFonts(doc).catch((err) => {
-        console.warn('Failed to load document fonts:', err);
-      });
+      // parseDocx registered the embedded faces for the page; this editor
+      // holds them again, under the names its neighbours leave free.
+      loadDocumentFontsInOrder(
+        registerDocumentFaces(doc.package ? extractEmbeddedFontFaces(doc) : [], fontScope),
+        () => loadGeneration.isCurrent(generation),
+        setFontAliases,
+        () => fontScope.loadDocumentFonts(doc)
+      );
       // Offer the document's own renderable fonts (embedded faces are loaded by
       // parseDocx; system fonts are probed) in the picker.
       setDocumentFonts(
@@ -113,6 +116,7 @@ export function useDocumentLoader({
       const generation = loadGeneration.begin();
       resetForNewDocument();
       setLoadingState({ isLoading: true, parseError: null });
+      setFontAliases(NO_FONT_ALIASES);
       setYrsSeedDocument(null);
       setYrsSeedBytes(null);
       setYrsSeedGeneration(generation);
@@ -146,31 +150,21 @@ export function useDocumentLoader({
       setDocumentFonts(
         [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
       );
-      void loadEmbeddedFontFamilies(
-        doc.package.fontTable,
-        host.embeddedFonts,
-        host.fontTableRelationshipsXml,
-        fontScope
-      )
-        .then((families) => {
-          if (!loadGeneration.isCurrent(generation)) return;
-          const aliases = [...families].filter(([family, cssFamily]) => family !== cssFamily);
-          setFontAliases((current) =>
-            aliases.length === 0 && current.size === 0 ? current : new Map(aliases)
-          );
-        })
-        .catch((error) => {
-          console.warn('Failed to load embedded document fonts:', error);
-        })
-        .then(() =>
+      loadDocumentFontsInOrder(
+        loadEmbeddedFontFamilies(
+          doc.package.fontTable,
+          host.embeddedFonts,
+          host.fontTableRelationshipsXml,
+          fontScope
+        ),
+        () => loadGeneration.isCurrent(generation),
+        setFontAliases,
+        () =>
           Promise.all([
             fontScope.loadFontsWithMapping(host.referencedFonts),
             fontScope.loadDocumentFonts(doc),
           ])
-        )
-        .catch((error) => {
-          console.warn('Failed to load document fonts:', error);
-        });
+      );
     },
     [loadGeneration, history, setDocumentFonts, setLoadingState, fontScope]
   );
@@ -263,3 +257,31 @@ export function useDocumentLoader({
 }
 
 const NO_FONT_ALIASES: ReadonlyMap<string, string> = new Map();
+
+/**
+ * Takes the aliases of a document's embedded faces once they registered, and
+ * only then loads the fonts it references: the previous document's faces are
+ * released by then, so none of their loaded state stands in for this one's.
+ */
+function loadDocumentFontsInOrder(
+  embedded: Promise<ReadonlyMap<string, string>>,
+  isCurrent: () => boolean,
+  setFontAliases: React.Dispatch<React.SetStateAction<ReadonlyMap<string, string>>>,
+  loadReferenced: () => Promise<unknown>
+): void {
+  void embedded
+    .then((families) => {
+      if (!isCurrent()) return;
+      const aliases = [...families].filter(([family, cssFamily]) => family !== cssFamily);
+      setFontAliases((current) =>
+        aliases.length === 0 && current.size === 0 ? current : new Map(aliases)
+      );
+    })
+    .catch((error) => {
+      console.warn('Failed to load embedded document fonts:', error);
+    })
+    .then(() => (isCurrent() ? loadReferenced() : undefined))
+    .catch((error) => {
+      console.warn('Failed to load document fonts:', error);
+    });
+}
