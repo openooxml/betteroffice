@@ -251,6 +251,22 @@ pub struct FontStore {
     shape_cache: Mutex<ShapeCache>,
 }
 
+/// Everything measurement reads from a store, cloned into plain `Send` data.
+/// [`FontStore::from_snapshot`] rehydrates it as a store that measures and
+/// outlines identically — entries keep their indices, so [`FontId`]s stay
+/// valid across the replica.
+pub struct FontStoreSnapshot {
+    id: u64,
+    entries: Vec<FontEntrySnapshot>,
+}
+
+struct FontEntrySnapshot {
+    bytes_of: Option<usize>,
+    data: Box<[u8]>,
+    metrics: FontMetrics,
+    advance_scale: f32,
+}
+
 static NEXT_FONT_STORE_ID: AtomicU64 = AtomicU64::new(0);
 
 impl Default for FontStore {
@@ -407,6 +423,53 @@ impl FontStore {
     /// Per-font design-space metrics captured at registration.
     pub fn metrics(&self, id: FontId) -> Result<&FontMetrics, FontError> {
         self.entry(id).map(|e| &e.metrics)
+    }
+
+    /// A `Send` snapshot of everything measurement reads, for
+    /// [`FontStore::from_snapshot`].
+    pub fn snapshot(&self) -> FontStoreSnapshot {
+        FontStoreSnapshot {
+            id: self.id,
+            entries: self
+                .fonts
+                .iter()
+                .map(|entry| FontEntrySnapshot {
+                    bytes_of: entry.bytes_of,
+                    data: entry.data.clone(),
+                    metrics: entry.metrics,
+                    advance_scale: entry.advance_scale,
+                })
+                .collect(),
+        }
+    }
+
+    /// A store answering every query identically to the snapshotted one,
+    /// rebuilt on a worker thread the original cannot cross. It keeps the
+    /// snapshot's id so caches keyed by [`FontStore::id`] stay valid across
+    /// the replica: the two stores hold the same fonts, so the outlines an
+    /// id binds to are the same.
+    pub fn from_snapshot(snapshot: &FontStoreSnapshot) -> Self {
+        let mut store = Self::new();
+        store.id = snapshot.id;
+        for entry in &snapshot.entries {
+            let data = entry.data.clone();
+            let face = if entry.bytes_of.is_none() {
+                let pinned: &'static [u8] =
+                    unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len()) };
+                rustybuzz::Face::from_slice(pinned, 0)
+            } else {
+                None
+            };
+            store.fonts.push(FontEntry {
+                bytes_of: entry.bytes_of,
+                face,
+                data,
+                metrics: entry.metrics,
+                advance_scale: entry.advance_scale,
+                char_cache: RefCell::new(HashMap::new()),
+            });
+        }
+        store
     }
 
     #[cfg(test)]

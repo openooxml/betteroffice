@@ -67,7 +67,9 @@ pub use bidi::{
 pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
-pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
+pub use font_store::{
+    FontError, FontId, FontMetrics, FontStore, FontStoreSnapshot, RequestedLineMetrics,
+};
 pub use line_break::{BreakOpportunity, break_opportunities, presentation_break_opportunities};
 pub use measure::{
     FontChains, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut, TypesetRowOut,
