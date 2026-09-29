@@ -5093,7 +5093,7 @@ pub fn seed_docx_preview(
     bytes: &[u8],
     paragraphs: usize,
 ) -> Result<(), String> {
-    let (envelope, _) = parse_docx_package(bytes)?;
+    let (envelope, _) = parse_docx_package_with_digest(bytes, package_digest(bytes))?;
     let mut lowered = lower_docx(envelope, None)?;
     if let Some(body) = lowered
         .context
