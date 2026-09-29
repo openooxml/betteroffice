@@ -92,48 +92,49 @@ test('a requested warm materializes once when the main thread is idle', async ()
 
 describe('useCompatibilityWarm', () => {
   const sessions = [{ name: 'first' }, { name: 'replacement' }] as unknown as YrsSession[];
+  const frames = [{ frame: 0 }, { frame: 1 }, { frame: 2 }];
 
-  function warmer(initial: { session: YrsSession | null; ready: boolean; projects: boolean }) {
+  function warmer(initial: {
+    session: YrsSession | null;
+    frame: object | null;
+    projects: boolean;
+  }) {
     const calls: string[] = [];
+    const schedule = () => calls.push('schedule');
+    const cancel = () => calls.push('cancel');
     const hook = renderHook(
-      ({ session, ready, projects }) =>
-        useCompatibilityWarm(
-          session,
-          ready,
-          projects,
-          () => calls.push('schedule'),
-          () => calls.push('cancel')
-        ),
+      ({ session, frame, projects }) =>
+        useCompatibilityWarm(session, frame, projects, schedule, cancel),
       { initialProps: initial }
     );
     return { calls, rerender: hook.rerender };
   }
 
-  test('waits for the session\'s own first render', () => {
-    const { calls, rerender } = warmer({ session: null, ready: false, projects: true });
-    rerender({ session: sessions[0]!, ready: false, projects: true });
+  test("waits for the session's own first frame", () => {
+    const { calls, rerender } = warmer({ session: null, frame: null, projects: true });
+    rerender({ session: sessions[0]!, frame: null, projects: true });
     expect(calls.filter((call) => call === 'schedule')).toEqual([]);
-    rerender({ session: sessions[0]!, ready: true, projects: true });
+    rerender({ session: sessions[0]!, frame: frames[0]!, projects: true });
     expect(calls.filter((call) => call === 'schedule')).toHaveLength(1);
   });
 
-  test('a replacement inheriting the previous readiness waits for its own layout', () => {
-    const { calls, rerender } = warmer({ session: sessions[0]!, ready: false, projects: true });
-    rerender({ session: sessions[0]!, ready: true, projects: true });
+  test('a replacement showing the previous frame waits for a frame of its own', () => {
+    const { calls, rerender } = warmer({ session: sessions[0]!, frame: null, projects: true });
+    rerender({ session: sessions[0]!, frame: frames[0]!, projects: true });
     calls.length = 0;
-    rerender({ session: sessions[1]!, ready: true, projects: true });
-    expect(calls).toEqual([]);
-    rerender({ session: sessions[1]!, ready: false, projects: true });
+    rerender({ session: sessions[1]!, frame: frames[0]!, projects: true });
     expect(calls).toEqual(['cancel']);
-    rerender({ session: sessions[1]!, ready: true, projects: true });
+    rerender({ session: sessions[1]!, frame: frames[1]!, projects: true });
+    expect(calls).toEqual(['cancel', 'schedule']);
+    rerender({ session: sessions[1]!, frame: frames[2]!, projects: true });
     expect(calls).toEqual(['cancel', 'schedule']);
   });
 
   test('never warms for a host that does not project changes', () => {
-    const { calls, rerender } = warmer({ session: sessions[0]!, ready: false, projects: false });
-    rerender({ session: sessions[0]!, ready: true, projects: false });
+    const { calls, rerender } = warmer({ session: sessions[0]!, frame: null, projects: false });
+    rerender({ session: sessions[0]!, frame: frames[0]!, projects: false });
     expect(calls.filter((call) => call === 'schedule')).toEqual([]);
-    rerender({ session: sessions[0]!, ready: true, projects: true });
+    rerender({ session: sessions[0]!, frame: frames[0]!, projects: true });
     expect(calls.filter((call) => call === 'schedule')).toHaveLength(1);
   });
 });

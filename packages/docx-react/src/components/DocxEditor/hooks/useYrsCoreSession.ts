@@ -394,31 +394,31 @@ export function useYrsCoreSession(
 
 /**
  * Warms the compatibility base for a host that projects every change, once
- * the session's own first display list is ready. A replacement session can
- * inherit the previous renderer's readiness until its layout resets, so a
- * session only qualifies after the renderer has been not-ready under it; a
- * renderer leaving readiness cancels a pending warm.
+ * the session's own first display list is on screen. A replacement session
+ * can inherit the previous session's frame until its own layout lands, so the
+ * frame shown when the session changed never qualifies it; a renderer leaving
+ * readiness cancels a pending warm.
  */
 export function useCompatibilityWarm(
   session: YrsSession | null,
-  rendererReady: boolean,
+  renderedFrame: object | null,
   projectsEveryChange: boolean,
   schedule: () => void,
   cancel: () => void
 ): void {
-  const renderedRef = useRef<{ session: YrsSession | null; loaded: boolean }>({
+  const inheritedRef = useRef<{ session: YrsSession | null; frame: object | null }>({
     session: null,
-    loaded: false,
+    frame: null,
   });
+  if (inheritedRef.current.session !== session) {
+    inheritedRef.current = { session, frame: renderedFrame };
+  }
+  const ownFrame = renderedFrame !== null && renderedFrame !== inheritedRef.current.frame;
   useEffect(() => {
-    if (renderedRef.current.session !== session) {
-      renderedRef.current = { session, loaded: false };
-    }
-    if (!rendererReady) {
-      renderedRef.current.loaded = true;
+    if (!ownFrame) {
       cancel();
       return;
     }
-    if (session && projectsEveryChange && renderedRef.current.loaded) schedule();
-  }, [cancel, projectsEveryChange, rendererReady, schedule, session]);
+    if (session && projectsEveryChange) schedule();
+  }, [cancel, ownFrame, projectsEveryChange, schedule, session]);
 }

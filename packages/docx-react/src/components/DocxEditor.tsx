@@ -1003,7 +1003,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // the first pages are on screen so neither opening nor the first key pays.
   useCompatibilityWarm(
     yrsCore.session,
-    canvasRenderer.status === 'ready',
+    canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
     Boolean(onChange) || contentSubscriberCount > 0,
     yrsCore.scheduleCompatibilityWarm,
     yrsCore.cancelCompatibilityWarm
