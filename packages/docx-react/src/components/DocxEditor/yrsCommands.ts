@@ -255,32 +255,26 @@ function positiveSpan(value: unknown): number {
 }
 
 function tablePayload(session: YrsSession, table: YrsTableLoc): TablePayload | null {
-  let tableIndex = 0;
-  for (const segment of session.storySegments(table.story)) {
-    if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
-    if (tableIndex === table.tableIndex) {
-      const rows = segment.payload.rows;
-      if (!Array.isArray(rows)) return null;
-      return {
-        tblPr:
-          segment.payload.tblPr && typeof segment.payload.tblPr === 'object'
-            ? (segment.payload.tblPr as Record<string, unknown>)
-            : undefined,
-        grid: Array.isArray(segment.payload.grid) ? segment.payload.grid : undefined,
-        rows: rows as TablePayloadRow[],
-      };
-    }
-    tableIndex += 1;
-  }
-  return null;
+  const payload = session.tablePayload(table.story, table.tableIndex);
+  if (!payload) return null;
+  const rows = payload.rows;
+  if (!Array.isArray(rows)) return null;
+  return {
+    tblPr:
+      payload.tblPr && typeof payload.tblPr === 'object'
+        ? (payload.tblPr as Record<string, unknown>)
+        : undefined,
+    grid: Array.isArray(payload.grid) ? payload.grid : undefined,
+    rows: rows as TablePayloadRow[],
+  };
 }
 
 /** Current table properties for the properties dialog. */
 export function currentYrsTableProperties(
   session: YrsSession
 ): Record<string, unknown> | undefined {
-  const target = currentYrsTableTarget(session);
-  return target ? tablePayload(session, target.focused)?.tblPr : undefined;
+  const resolved = resolveYrsTableTarget(session);
+  return resolved ? resolved.payload()?.tblPr : undefined;
 }
 
 function tableAnchors(payload: TablePayload): { anchors: TableCellAnchor[]; columns: number } {
@@ -337,7 +331,10 @@ export function yrsCellLocFromStory(story: string): YrsCellLoc | null {
 /** Resolve a current grid cell back to its stable independent story id. */
 export function yrsCellStory(session: YrsSession, at: YrsCellLoc): string | null {
   const payload = tablePayload(session, at);
-  if (!payload) return null;
+  return payload ? cellStoryIn(payload, at) : null;
+}
+
+function cellStoryIn(payload: TablePayload, at: YrsCellLoc): string | null {
   const { anchors } = tableAnchors(payload);
   return (
     anchors.find(
@@ -356,6 +353,13 @@ export function yrsCellStory(session: YrsSession, at: YrsCellLoc): string | null
  * after preceding row/column edits even though authored story ids do not rename.
  */
 export function currentYrsTableTarget(session: YrsSession): YrsTableTarget | null {
+  return resolveYrsTableTarget(session)?.target ?? null;
+}
+
+/** The table target, with its table's payload read at most once. */
+function resolveYrsTableTarget(
+  session: YrsSession
+): { target: YrsTableTarget; payload: () => TablePayload | null } | null {
   const selection = session.selection();
   if (!selection || !yrsCellLocFromStory(selection.head.story)) return null;
 
@@ -368,8 +372,9 @@ export function currentYrsTableTarget(session: YrsSession): YrsTableTarget | nul
     return null;
   }
   if (selected && sameTable(selected.anchor, selected.head)) {
-    const anchorStory = yrsCellStory(session, selected.anchor);
-    const headStory = yrsCellStory(session, selected.head);
+    const payload = tablePayload(session, selected.anchor);
+    const anchorStory = payload ? cellStoryIn(payload, selected.anchor) : null;
+    const headStory = payload ? cellStoryIn(payload, selected.head) : null;
     const focused =
       anchorStory && storyContains(anchorStory, selection.head.story)
         ? selected.anchor
@@ -380,21 +385,27 @@ export function currentYrsTableTarget(session: YrsSession): YrsTableTarget | nul
       sameCell(focused, selected.anchor) || sameCell(focused, selected.head)
         ? selected
         : { anchor: focused, head: focused };
-    return { focused, range };
+    return { target: { focused, range }, payload: () => payload };
   }
 
   // Compatibility fallback for programmatic selections that predate the
   // pointer adapter's cell-selection publication.
   const focused = yrsCellLocFromStory(selection.head.story);
-  return focused ? { focused, range: { anchor: focused, head: focused } } : null;
+  if (!focused) return null;
+  let payload: TablePayload | null | undefined;
+  return {
+    target: { focused, range: { anchor: focused, head: focused } },
+    payload: () => (payload === undefined ? (payload = tablePayload(session, focused)) : payload),
+  };
 }
 
 /** Stable story ids of the anchor and head cells of the table selection. */
 export function yrsTableSelectionStories(session: YrsSession): [string, string] | null {
-  const target = currentYrsTableTarget(session);
-  if (!target) return null;
-  const anchor = yrsCellStory(session, target.range.anchor);
-  const head = yrsCellStory(session, target.range.head);
+  const resolved = resolveYrsTableTarget(session);
+  const payload = resolved?.payload();
+  if (!resolved || !payload) return null;
+  const anchor = cellStoryIn(payload, resolved.target.range.anchor);
+  const head = cellStoryIn(payload, resolved.target.range.head);
   return anchor && head ? [anchor, head] : null;
 }
 
@@ -414,9 +425,10 @@ function cellBorderColor(tcPr: Record<string, unknown> | undefined): TableContex
 
 /** Build the toolbar/context-menu table state from the authoritative yrs payload. */
 export function currentYrsTableContext(session: YrsSession): TableContextInfo | null {
-  const target = currentYrsTableTarget(session);
-  if (!target) return null;
-  const payload = tablePayload(session, target.focused);
+  const resolved = resolveYrsTableTarget(session);
+  if (!resolved) return null;
+  const { target } = resolved;
+  const payload = resolved.payload();
   if (!payload) return null;
   const { anchors, columns } = tableAnchors(payload);
   const focusedAnchor = anchors.find(
@@ -460,9 +472,10 @@ export function currentYrsSplitCellConfig(session: YrsSession): {
   minRows: number;
   minCols: number;
 } | null {
-  const target = currentYrsTableTarget(session);
-  if (!target) return null;
-  const payload = tablePayload(session, target.focused);
+  const resolved = resolveYrsTableTarget(session);
+  if (!resolved) return null;
+  const { target } = resolved;
+  const payload = resolved.payload();
   if (!payload) return null;
   const anchor = tableAnchors(payload).anchors.find(
     (candidate) =>

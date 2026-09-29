@@ -1229,7 +1229,8 @@ mod tests {
         )
         .unwrap();
         let full = crate::place::layout_document_checkpointed(&mut input).unwrap();
-        assert_eq!(incremental.rebuilt_page_start, 1);
+        // the changed paragraph opens page 1, so placement resumes a page earlier
+        assert_eq!(incremental.rebuilt_page_start, 0);
         assert_eq!(
             serde_json::to_value(&incremental.layout).unwrap(),
             serde_json::to_value(&full.layout).unwrap()

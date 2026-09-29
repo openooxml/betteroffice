@@ -2,7 +2,11 @@
 
 import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
+import {
+  displayPageCanvas,
+  type DisplayListQueries,
+  type DisplayListRect,
+} from '@betteroffice/docx/layout/render';
 import {
   DEFAULT_PARAGRAPH_FLASH_COLOR,
   DEFAULT_PARAGRAPH_FLASH_DURATION_MS,
@@ -81,9 +85,7 @@ export function CanvasParagraphFlashOverlay({
       // live `<canvas>` rect — identical to CanvasFindHighlightOverlay. The rect
       // already folds in centering, the sidebar shift, and zoom.
       const project = (r: DisplayListRect): ProjectedRect | null => {
-        const canvasEl = host.querySelector<HTMLCanvasElement>(
-          `canvas[data-page-index="${r.pageIndex}"]`
-        );
+        const canvasEl = displayPageCanvas(host, r.pageIndex);
         const size = displayListQueries.pageSize(r.pageIndex);
         if (!canvasEl || !size) return null;
         const canvasRect = canvasEl.getBoundingClientRect();
