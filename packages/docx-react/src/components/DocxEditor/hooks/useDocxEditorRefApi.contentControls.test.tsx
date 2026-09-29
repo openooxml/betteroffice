@@ -92,6 +92,7 @@ async function setup(options: { flush?: () => void; mode?: EditorMode } = {}) {
       commentIdAllocator: createCommentIdAllocator(),
       commands: UNAVAILABLE_DOCX_COMMANDS,
       modeRef,
+      allowHostProposalsRef: { current: false },
     });
     return ref;
   });
@@ -258,6 +259,7 @@ function Mounted({
     commentIdAllocator: createCommentIdAllocator(),
     commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef,
+    allowHostProposalsRef: { current: false },
   });
   return (
     <PagedEditor

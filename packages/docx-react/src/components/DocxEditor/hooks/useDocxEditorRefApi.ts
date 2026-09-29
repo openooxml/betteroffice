@@ -21,7 +21,7 @@ import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { createComment } from '../commentFactories';
-import { applyEditBatch, flushedSession, modeRefusal } from '../editorBatches';
+import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '../editorBatches';
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 
@@ -178,6 +178,7 @@ export function useDocxEditorRefApi({
   commentIdAllocator,
   commands,
   modeRef,
+  allowHostProposalsRef,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -203,7 +204,11 @@ export function useDocxEditorRefApi({
   commands: DocxCommandStore;
   /** The editor's current write mode; `viewing` also stands for a read-only editor. */
   modeRef: React.RefObject<EditorMode>;
+  /** Whether proposal methods run while the editor is read-only. */
+  allowHostProposalsRef: React.RefObject<boolean>;
 }) {
+  const hostProposalsAllowed = () =>
+    modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
   useImperativeHandle(
     ref,
     () => ({
@@ -242,6 +247,16 @@ export function useDocxEditorRefApi({
         if ('flush' in outcome) throw outcome.flush.error;
         return outcome.result;
       },
+
+      proposeChanges: (request) =>
+        applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
+          session.proposeChanges(request)
+        ),
+      setProposalStates: (request) =>
+        applyProposalCall(pagedEditorRef, hostProposalsAllowed, (session) =>
+          session.setProposalStates(request)
+        ),
+      getProposals: async () => (await flushedSession(pagedEditorRef)).session.getProposals(),
 
       exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options),
       getPositionAtPoint: (clientX, clientY) =>

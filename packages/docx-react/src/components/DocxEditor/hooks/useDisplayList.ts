@@ -87,6 +87,11 @@ export interface UseRustDisplayListResult {
   /** See {@link LayoutInWorker}. */
   layoutInWorker: LayoutInWorker;
   /**
+   * The pages `[start, end)` near the viewport. Only these are built; every
+   * other page arrives as geometry until it comes near.
+   */
+  setDisplayWindow(start: number, end: number): void;
+  /**
    * True while the worker owns the visible page surfaces. Sticky across
    * invalidation (remote/structural updates) so the canvas keeps its last
    * pixels instead of remounting; drops only on genuine fallback or reset.
@@ -154,6 +159,24 @@ export interface ResidentFrameApplyResult {
   caretSynchronized: boolean;
   /** Characters a resident deletion removed; absent when unknown. */
   deletedUnits?: number;
+}
+
+/** Pages a worker's first frame builds before the viewport is known. */
+const INITIAL_DISPLAY_WINDOW: [number, number] = [0, 5];
+/** Unbuilt pages built per request while the complete list is awaited. */
+const SETTLE_BUILD_BATCH_PAGES = 32;
+/** Unbuilt pages built per idle period away from the viewport. */
+const BACKGROUND_BUILD_BATCH_PAGES = 16;
+const BACKGROUND_BUILD_DELAY_MS = 200;
+
+type PageBuildTimer = ReturnType<typeof setTimeout> | { idle: number };
+
+function cancelPageBuilds(timer: { current: PageBuildTimer | null }): void {
+  const scheduled = timer.current;
+  timer.current = null;
+  if (scheduled === null) return;
+  if (typeof scheduled === 'object' && 'idle' in scheduled) cancelIdleCallback(scheduled.idle);
+  else clearTimeout(scheduled);
 }
 
 /** test seam: unit tests inject a fake engine/inputs-resolver instead of the wasm module */
@@ -235,6 +258,10 @@ export function useRustDisplayList(
     client: ResidentEngineWorkerClient;
   } | null>(null);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
+  const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
+  const pageBuildInFlightRef = useRef(false);
+  const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
+  const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
   const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
   const completionGateRef = useRef<(() => void) | null>(null);
   const resolvedCommentIdsRef = useRef(resolvedCommentIds);
@@ -731,6 +758,127 @@ export function useRustDisplayList(
     [adoptHostEngine, setWorkerPresentationActive]
   );
 
+  // Build the unbuilt pages of the worker frame: those the viewport shows
+  // first, then the rest while the main thread is idle, since accessibility
+  // mirrors and printing read every page's content.
+  const buildUnbuiltPages = useCallback(
+    (idle = false): void => {
+      pageBuildTimerRef.current = null;
+      if (pageBuildInFlightRef.current) return;
+      const worker = workerRef.current;
+      const frame = snapshotRef.current.frame;
+      if (!worker || !worker.client.isReady() || !frame) return;
+      const pages = frame.displayList.pages;
+      const [start, end] = displayWindowRef.current;
+      const unbuilt: number[] = [];
+      for (let index = 0; index < pages.length; index += 1) {
+        if (pages[index]?.unbuilt) unbuilt.push(index);
+      }
+      if (unbuilt.length === 0) return;
+      let batch = unbuilt.filter((index) => index >= start && index < end);
+      if (batch.length === 0) {
+        const settling = settleWaitersRef.current.size > 0;
+        if (!settling && !idle) {
+          schedulePageBuildsWhenIdleRef.current();
+          return;
+        }
+        const distance = (index: number) => (index < start ? start - index : index - end + 1);
+        batch = unbuilt
+          .sort((a, b) => distance(a) - distance(b))
+          .slice(0, settling ? SETTLE_BUILD_BATCH_PAGES : BACKGROUND_BUILD_BATCH_PAGES)
+          .sort((a, b) => a - b);
+      }
+      pageBuildInFlightRef.current = true;
+      const dispatchedEpoch = contentEpochRef.current;
+      const paintToken = paintedCaretMachine.token();
+      const paintCaret =
+        workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
+      const failed = (cause: unknown): void => {
+        if (workerRef.current !== worker) return;
+        console.error(
+          '[CanvasRenderer] Building display pages failed; falling back to the main-thread engine',
+          cause
+        );
+        dropWorker(worker.engine);
+        requestLayoutRef.current?.();
+      };
+      void worker.client.buildPages(batch, frame.frameEpoch, paintCaret).then(
+        (result) => {
+          pageBuildInFlightRef.current = false;
+          if (workerRef.current !== worker) return;
+          try {
+            const previous = snapshotRef.current;
+            const delta = decodeFrameDelta(result.frame);
+            if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) return;
+            const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
+            const caret = residentCaretForSelection(
+              result.caret,
+              result.selection,
+              worker.engine.selection(),
+              nextFrame
+            );
+            const nextSnapshot =
+              contentEpochRef.current === dispatchedEpoch
+                ? createRustDisplayListSnapshot(
+                    nextFrame.displayList,
+                    nextFrame,
+                    caret,
+                    null,
+                    previous,
+                    readSessionVersion(worker.engine)
+                  )
+                : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
+            snapshotRef.current = nextSnapshot;
+            publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
+            setSnapshot(nextSnapshot);
+            applyPaintedCaretReply(Boolean(result.caretPainted && caret?.caretRect), paintToken);
+          } catch (error) {
+            failed(error);
+            return;
+          }
+          for (const waiter of [...settleWaitersRef.current]) waiter();
+        },
+        (error) => {
+          pageBuildInFlightRef.current = false;
+          failed(error);
+        }
+      );
+    },
+    [applyPaintedCaretReply, dropWorker, paintedCaretMachine, publishQuerySnapshot]
+  );
+
+  const schedulePageBuilds = useCallback(
+    (delay: number): void => {
+      cancelPageBuilds(pageBuildTimerRef);
+      pageBuildTimerRef.current = setTimeout(() => buildUnbuiltPages(), delay);
+    },
+    [buildUnbuiltPages]
+  );
+  schedulePageBuildsWhenIdleRef.current = () => {
+    cancelPageBuilds(pageBuildTimerRef);
+    pageBuildTimerRef.current =
+      typeof requestIdleCallback === 'function'
+        ? { idle: requestIdleCallback(() => buildUnbuiltPages(true)) }
+        : setTimeout(() => buildUnbuiltPages(true), BACKGROUND_BUILD_DELAY_MS);
+  };
+
+  const setDisplayWindow = useCallback(
+    (start: number, end: number): void => {
+      const current = displayWindowRef.current;
+      if (current[0] === start && current[1] === end) return;
+      displayWindowRef.current = [start, end];
+      schedulePageBuilds(0);
+    },
+    [schedulePageBuilds]
+  );
+
+  useEffect(() => {
+    if (!snapshot.frame?.displayList.pages.some((page) => page.unbuilt)) return;
+    schedulePageBuilds(pageBuildInFlightRef.current ? 50 : 16);
+  }, [schedulePageBuilds, snapshot.frame]);
+
+  useEffect(() => () => cancelPageBuilds(pageBuildTimerRef), []);
+
   const layoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
       if (
@@ -766,6 +914,7 @@ export function useRustDisplayList(
       const options = {
         layoutExtras: JSON.stringify(frameExtrasInputs()),
         stateVector: hostEngine.encodeStateVector(),
+        displayWindow: displayWindowRef.current,
         ...(bootstrapping ? { provisionalPages: PROVISIONAL_LAYOUT_PAGES } : {}),
       };
       const paintCaret =
@@ -1030,15 +1179,15 @@ export function useRustDisplayList(
             workerPresentationActiveRef.current &&
             paintedCaretMachine.shouldPaint(performance.now());
           const workerFrame = bootstrapping
-            ? worker.bootstrap(buildSnapshot(), extras, sent())
+            ? worker.bootstrap(buildSnapshot(), extras, {
+                ...sent(),
+                displayWindow: displayWindowRef.current,
+              })
             : worker.layoutRevision() !== probe.layoutRevision
-              ? worker.sync(
-                  buildSnapshot(),
-                  extras,
-                  previousFrame?.frameEpoch ?? 0,
-                  paintCaret,
-                  sent()
-                )
+              ? worker.sync(buildSnapshot(), extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
+                  ...sent(),
+                  displayWindow: displayWindowRef.current,
+                })
               : worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0, paintCaret);
           pending = workerFrame
             .then((result) => {
@@ -1145,8 +1294,13 @@ export function useRustDisplayList(
           const failure = settleErrorRef.current;
           const displayList = snapshotRef.current.displayList;
           const current =
-            displayList !== null && settledEpochRef.current === contentEpochRef.current;
-          if (!failure && !current) return false;
+            displayList !== null &&
+            settledEpochRef.current === contentEpochRef.current &&
+            !displayList.pages.some((page) => page.unbuilt);
+          if (!failure && !current) {
+            if (displayList?.pages.some((page) => page.unbuilt)) schedulePageBuilds(0);
+            return false;
+          }
           settleWaitersRef.current.delete(waiter);
           if (timer !== undefined) clearTimeout(timer);
           if (failure) reject(failure);
@@ -1165,7 +1319,7 @@ export function useRustDisplayList(
         }, timeoutMs);
         relayout();
       }),
-    []
+    [schedulePageBuilds]
   );
 
   return {
@@ -1180,6 +1334,7 @@ export function useRustDisplayList(
     applyInput,
     applyDelete,
     layoutInWorker,
+    setDisplayWindow,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1307,6 +1462,8 @@ export interface UseCanvasRendererResult {
   ): Promise<ResidentFrameApplyResult | null>;
   /** Hands a layout pass to the resident worker; see {@link LayoutInWorker}. */
   layoutInWorker: LayoutInWorker;
+  /** The pages `[start, end)` near the viewport, built before the others. */
+  setDisplayWindow(start: number, end: number): void;
   setWorkerPresentationActive(active: boolean): void;
   /** OffscreenCanvas replay bridge; null keeps DOM-canvas replay. */
   offscreenReplay: {
@@ -1368,6 +1525,7 @@ export function useCanvasRenderer(
     applyInput,
     applyDelete,
     layoutInWorker,
+    setDisplayWindow,
     workerSurfacesActive,
     workerPresentationActive,
     setWorkerPresentationActive,
@@ -1465,6 +1623,7 @@ export function useCanvasRenderer(
     applyInput,
     applyDelete,
     layoutInWorker,
+    setDisplayWindow,
     setWorkerPresentationActive,
     offscreenReplay,
     paintedCaretActive,
