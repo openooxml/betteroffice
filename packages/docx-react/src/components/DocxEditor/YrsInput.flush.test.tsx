@@ -49,7 +49,8 @@ async function seededSession(): Promise<YrsSession> {
 function inputFor(
   session: YrsSession,
   input: React.Ref<YrsInputRef>,
-  applyResidentInput?: YrsInputProps['applyResidentInput']
+  applyResidentInput?: YrsInputProps['applyResidentInput'],
+  applyResidentDelete?: YrsInputProps['applyResidentDelete']
 ) {
   const map = () =>
     createYrsInputPositionMap(
@@ -71,14 +72,18 @@ function inputFor(
       onStateChange={() => {}}
       onDirectInput={() => {}}
       applyResidentInput={applyResidentInput}
+      applyResidentDelete={applyResidentDelete}
     />
   );
 }
 
-async function mount(applyResidentInput?: YrsInputProps['applyResidentInput']) {
+async function mount(
+  applyResidentInput?: YrsInputProps['applyResidentInput'],
+  applyResidentDelete?: YrsInputProps['applyResidentDelete']
+) {
   const session = await seededSession();
   const input = createRef<YrsInputRef>();
-  const view = render(inputFor(session, input, applyResidentInput));
+  const view = render(inputFor(session, input, applyResidentInput, applyResidentDelete));
   return { session, input, view };
 }
 
@@ -211,6 +216,56 @@ test('a command seals the text batch so input on either side stays separate', as
     await input.current!.flushPendingInput();
   });
   expect(calls).toEqual(['x', 'format', 'y']);
+});
+
+test('a key queued behind resident typing seals the text batch', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { session, input, view } = await mount(async () => {
+    await blocked;
+    return null;
+  });
+  const textarea = view.getByTestId('yrs-input');
+  act(() => input.current!.insertText('A'));
+  act(() => input.current!.insertText('B'));
+  fireEvent.keyDown(textarea, { key: 'Backspace' });
+  act(() => input.current!.insertText('C'));
+  fireEvent.keyDown(textarea, { key: 'ArrowLeft' });
+  act(() => input.current!.insertText('D'));
+  await act(async () => {
+    release();
+    await input.current!.flushPendingInput();
+  });
+  expect(text(session)).toBe('SeedADC');
+});
+
+test('deletes queued behind busy input reach the resident engine as one batch', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const deletes: string[] = [];
+  const { session, input, view } = await mount(
+    async () => {
+      await blocked;
+      return null;
+    },
+    async (direction, count) => {
+      deletes.push(`${direction}:${count}`);
+      return null;
+    }
+  );
+  const textarea = view.getByTestId('yrs-input');
+  act(() => input.current!.insertText('XYZ'));
+  for (let i = 0; i < 3; i += 1) fireEvent.keyDown(textarea, { key: 'Backspace' });
+  await act(async () => {
+    release();
+    await input.current!.flushPendingInput();
+  });
+  expect(deletes[0]).toBe('backward:3');
+  expect(text(session)).toBe('Seed');
 });
 
 test('repeated undo requests each run', async () => {
@@ -392,4 +447,43 @@ test('a stored superscript applies to the next typed text and clears subscript',
   });
   expect(typed.superscript).toBe(true);
   expect(typed.subscript).toBe(false);
+});
+
+test('typing in a table cell is offered to the resident engine', async () => {
+  const session = await seededSession();
+  const paraId = session.paragraphs('body')[0]!.paraId;
+  session.insertTable({ story: 'body', paraId, offset: 0 }, 1, 1);
+  const cell = session.storyIds().find((story) => story.startsWith('body:'))!;
+  const cellParagraph = session.paragraphs(cell)[0]!.paraId;
+  session.setSelection({ story: cell, paraId: cellParagraph, offset: 0 });
+  const map = (story = 'body') =>
+    createYrsInputPositionMap(
+      story,
+      session.paragraphs(story).map((p) => ({ paraId: p.paraId, length: p.text.length }))
+    );
+  const offered: string[] = [];
+  const input = createRef<YrsInputRef>();
+  render(
+    <YrsInput
+      ref={input}
+      enabled
+      readOnly={false}
+      session={session}
+      inputPositionMap={map}
+      displayPositionToLoc={(position, story) => displayPositionToYrsLoc(map(story), position)}
+      locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(loc.story), loc)}
+      onStateChange={() => {}}
+      onDirectInput={() => {}}
+      applyResidentInput={async (text) => {
+        offered.push(text);
+        return null;
+      }}
+    />
+  );
+  act(() => input.current!.insertText('x'));
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  expect(offered).toEqual(['x']);
+  expect(session.paragraphs(cell)[0]!.text).toBe('x');
 });

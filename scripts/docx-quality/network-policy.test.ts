@@ -14,7 +14,7 @@ function request(url, overrides = {}) {
 
 describe('font network policy', () => {
   test('allows pinned legacy and current Latin binaries', () => {
-    for (const version of ['0.1.0', '0.2.0']) {
+    for (const version of ['0.1.0', '0.2.0', '0.3.0']) {
       expect(
         isAllowedFontRequest(
           request(
@@ -26,7 +26,7 @@ describe('font network policy', () => {
   });
 
   test('allows pinned legacy and current CJK binaries', () => {
-    for (const version of ['0.1.0', '0.2.0']) {
+    for (const version of ['0.1.0', '0.2.0', '0.3.0']) {
       expect(
         isAllowedFontRequest(
           request(
@@ -39,11 +39,11 @@ describe('font network policy', () => {
 
   test('blocks unpinned versions and query strings', () => {
     const blocked = [
-      'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.3.0/assets/Carlito-Regular.ttf',
+      'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.0/assets/Carlito-Regular.ttf',
       'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.2.1/assets/Carlito-Regular.ttf',
       'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@1.0.0/assets/Carlito-Regular.ttf',
       'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@latest/assets/Carlito-Regular.ttf',
-      'https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@0.3.0/assets/NotoSansJP-Regular.otf',
+      'https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@0.4.0/assets/NotoSansJP-Regular.otf',
       'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.2.0/assets/Carlito-Regular.ttf?v=1',
       'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.2.0/assets/Carlito-Regular.ttf?foo=bar',
     ];
