@@ -522,6 +522,46 @@ export function useRustDisplayList(
     return () => clearTimeout(id);
   }, [snapshot.queries]);
 
+  // A worker that ran out of memory is replaced by a fresh one once. The main
+  // thread never takes over its work: its memory has the same limit and
+  // already holds the document. `retry` asks the caller to use the current
+  // worker, `stale` means the failed worker no longer serves this engine.
+  const replaceOutOfMemoryWorker = useCallback(
+    (
+      hostEngine: YrsSession,
+      client: ResidentEngineWorkerClient | null,
+      failure: ResidentWorkerOutOfMemoryError
+    ): 'retry' | 'stale' | 'failed' => {
+      const previous = outOfMemoryRef.current?.engine === hostEngine ? outOfMemoryRef.current : null;
+      if (previous?.failure) return 'failed';
+      if (workerFallbackEngineRef.current === hostEngine) return 'stale';
+      const current = workerRef.current;
+      if (current && current.engine !== hostEngine) return 'stale';
+      // Another request of the failed worker already replaced it.
+      if (current?.client !== client) return previous ? 'retry' : 'stale';
+      current.client.destroy();
+      workerRef.current = null;
+      setWorkerSurfacesActive(false);
+      setWorkerPresentationActive(false);
+      if (!previous) {
+        outOfMemoryRef.current = { engine: hostEngine, failure: null };
+        console.warn(
+          '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
+          failure
+        );
+        return 'retry';
+      }
+      outOfMemoryRef.current = { engine: hostEngine, failure };
+      console.error('[CanvasRenderer] Resident engine worker ran out of memory again', failure);
+      queryEpochGate.clear();
+      setError(failure);
+      setLoading(false);
+      markSettled(null, failure);
+      return 'failed';
+    },
+    [markSettled, queryEpochGate, setWorkerPresentationActive]
+  );
+
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
       const replayInputOnMainThread = async (
@@ -629,6 +669,12 @@ export function useRustDisplayList(
             }
           }
         } catch (error) {
+          if (error instanceof ResidentWorkerOutOfMemoryError) {
+            // The edit never reached the host: it takes the structural path there,
+            // and the next frame comes from a fresh worker, or reports the failure.
+            replaceOutOfMemoryWorker(worker.engine, worker.client, error);
+            return null;
+          }
           if (!(error instanceof ResidentWorkerFailureError)) throw error;
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
@@ -742,6 +788,7 @@ export function useRustDisplayList(
       paintedCaretMachine,
       publishQuerySnapshot,
       queryEpochGate,
+      replaceOutOfMemoryWorker,
       requestSettleRelayout,
     ]
   );
@@ -786,46 +833,6 @@ export function useRustDisplayList(
       setWorkerPresentationActive(false);
     },
     [adoptHostEngine, setWorkerPresentationActive]
-  );
-
-  // A worker that ran out of memory is replaced by a fresh one once. The main
-  // thread never takes over its work: its memory has the same limit and
-  // already holds the document. `retry` asks the caller to use the current
-  // worker, `stale` means the failed worker no longer serves this engine.
-  const replaceOutOfMemoryWorker = useCallback(
-    (
-      hostEngine: YrsSession,
-      client: ResidentEngineWorkerClient | null,
-      failure: ResidentWorkerOutOfMemoryError
-    ): 'retry' | 'stale' | 'failed' => {
-      const previous = outOfMemoryRef.current?.engine === hostEngine ? outOfMemoryRef.current : null;
-      if (previous?.failure) return 'failed';
-      if (workerFallbackEngineRef.current === hostEngine) return 'stale';
-      const current = workerRef.current;
-      if (current && current.engine !== hostEngine) return 'stale';
-      // Another request of the failed worker already replaced it.
-      if (current?.client !== client) return previous ? 'retry' : 'stale';
-      current.client.destroy();
-      workerRef.current = null;
-      setWorkerSurfacesActive(false);
-      setWorkerPresentationActive(false);
-      if (!previous) {
-        outOfMemoryRef.current = { engine: hostEngine, failure: null };
-        console.warn(
-          '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
-          failure
-        );
-        return 'retry';
-      }
-      outOfMemoryRef.current = { engine: hostEngine, failure };
-      console.error('[CanvasRenderer] Resident engine worker ran out of memory again', failure);
-      queryEpochGate.clear();
-      setError(failure);
-      setLoading(false);
-      markSettled(null, failure);
-      return 'failed';
-    },
-    [markSettled, queryEpochGate, setWorkerPresentationActive]
   );
 
   // Build the unbuilt pages of the worker frame: those the viewport shows
@@ -1077,6 +1084,8 @@ export function useRustDisplayList(
               const retried = await unavailable(cause);
               return retried?.complete ?? retried;
             });
+          // A pass the host drops never observes this; the renderer reports the failure.
+          complete.catch(() => {});
           return { ...computation, complete };
         })
         .catch(unavailable);

@@ -288,7 +288,7 @@ export class ResidentEngineWorkerClient {
       );
       return { applied: true, ...result };
     } catch (error) {
-      if (error instanceof ResidentWorkerUnavailableError) return { applied: false };
+      if (inputUnavailable(error)) return { applied: false };
       throw error;
     }
   }
@@ -316,7 +316,7 @@ export class ResidentEngineWorkerClient {
       );
       return { applied: true, ...result };
     } catch (error) {
-      if (error instanceof ResidentWorkerUnavailableError) return { applied: false };
+      if (inputUnavailable(error)) return { applied: false };
       throw error;
     }
   }
@@ -444,6 +444,14 @@ export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableErr
   ) {
     super(message);
   }
+}
+
+/** Input the worker could not take; running out of memory is left to the caller. */
+function inputUnavailable(error: unknown): boolean {
+  return (
+    error instanceof ResidentWorkerUnavailableError &&
+    !(error instanceof ResidentWorkerOutOfMemoryError)
+  );
 }
 
 function residentWorkerError(message: string, unavailable = false): Error {

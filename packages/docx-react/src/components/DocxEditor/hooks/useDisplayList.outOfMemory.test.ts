@@ -310,3 +310,40 @@ test('any other worker failure still hands the display to the main thread', asyn
     native.free();
   }
 });
+
+test('typing into a worker that runs out of memory keeps the keystroke for the host and replaces the worker', async () => {
+  const { native, inputs, frame, engine, mainThreadBuilds } = setup();
+  const at = { story: 'body', paraId: 'p', offset: 0 };
+  const typing = { ...engine, selection: () => ({ anchor: at, head: at }) } as YrsSession;
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, typing),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    const [first] = FakeWorker.spawned;
+    await act(async () => first!.replyFrame(frame(100), 100));
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(100));
+
+    let typed: unknown;
+    await act(async () => {
+      const pending = result.current.applyInput('x');
+      await waitFor(() => expect(first!.last()).toMatchObject({ type: 'applyInput' }));
+      first!.outOfMemory();
+      typed = await pending;
+    });
+    expect(typed).toBeNull();
+    expect(first!.terminated).toBe(true);
+    expect(result.current.error).toBeNull();
+
+    await act(async () => rerender({ layout: { ...inputs.layout } }));
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expect(FakeWorker.spawned[1]!.last()).toMatchObject({ type: 'bootstrap' });
+    expect(mainThreadBuilds).toEqual([]);
+    unmount();
+  } finally {
+    warnings.mockRestore();
+    native.free();
+  }
+});

@@ -288,6 +288,23 @@ describe('wasm trap', () => {
     expect(worker.terminated).toBe(true);
   });
 
+  test('input that runs the worker out of memory rejects instead of reporting not applied', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    const input = client.applyInput('x', selection, 1);
+    worker.reply({
+      id: worker.lastId(),
+      ok: false,
+      error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+      terminal: true,
+      outOfMemory: true,
+    });
+    await expect(input).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(await client.applyDelete('backward', selection, 1)).toEqual({ applied: false });
+  });
+
   test('input is reported as not applied after a trap', async () => {
     const { worker, client } = setup();
     const bootstrap = client.bootstrap(snapshot, '');
