@@ -1012,9 +1012,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     },
     { previewFirstPage }
   );
-  // A preview is for display only: nothing edits it before the full document.
-  const readOnly = modeReadOnly || yrsCore.previewing;
-  if (yrsCore.previewing) writeModeRef.current = 'viewing';
+  // Until the full session's pages are shown, the editor takes no input and its
+  // API and commands see a document that is still loading.
+  const opening = yrsCore.opening;
+  const readOnly = modeReadOnly || opening;
+  if (opening) writeModeRef.current = 'viewing';
+  const openingRef = useRef(opening);
+  openingRef.current = opening;
   handoffFromRef.current = yrsCore.handoffFrom;
   const { notifyFramePresented } = yrsCore;
   const shownRef = useRef({
@@ -1067,11 +1071,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const commands = useDocxCommandBinding({
     pagedEditorRef,
     bridgeRef: commandBridgeRef,
-    isLoading: state.isLoading,
+    isLoading: state.isLoading || opening,
     parseError: state.parseError,
     document: history.state,
     session: yrsCore.session,
-    readOnly: readOnlyProp || yrsCore.previewing,
+    readOnly: readOnlyProp || opening,
     mode: editingMode,
     modeControlled: modeProp !== undefined,
     onModeChange,
@@ -1447,7 +1451,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commands: commandController,
     session:
       yrsCore.session &&
-      !yrsCore.previewing &&
+      !opening &&
       yrsCore.sessionGeneration === yrsSeedGeneration &&
       history.state &&
       !state.isLoading &&
@@ -1574,6 +1578,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentIdAllocator: commentIdAllocatorRef.current,
     commands: commandController.store,
     modeRef: writeModeRef,
+    openingRef,
   });
 
   const initialSectionProperties = useMemo(

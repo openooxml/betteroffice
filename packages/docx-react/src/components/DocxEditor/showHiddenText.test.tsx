@@ -60,6 +60,7 @@ function yrsCore(): YrsCoreSession {
     publishDirectInput: () => {},
     previewing: false,
     handoffFrom: null,
+    opening: false,
     notifyFramePresented: () => {},
   };
 }

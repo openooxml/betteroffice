@@ -362,6 +362,8 @@ export function useRustDisplayList(
   );
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
+  const residentEngineRef = useRef(residentEngine);
+  residentEngineRef.current = residentEngine;
 
   useEffect(() => {
     if (!residentEngine) return;
@@ -523,7 +525,15 @@ export function useRustDisplayList(
       const run = async (): Promise<ResidentFrameApplyResult | null> => {
         const worker = workerRef.current;
         const currentFrame = snapshotRef.current.frame;
-        if (!worker || !worker.client.isReady() || !currentFrame) return null;
+        // A worker still on the session being replaced does not take the new one's input.
+        if (
+          !worker ||
+          worker.engine !== residentEngineRef.current ||
+          !worker.client.isReady() ||
+          !currentFrame
+        ) {
+          return null;
+        }
         const selection = worker.engine.selection();
         if (!selection) return null;
         const dispatchedEpoch = contentEpochRef.current;
@@ -784,6 +794,8 @@ export function useRustDisplayList(
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
       const unavailable = (cause: unknown): null => {
+        // A session no longer shown has no worker or frame of this display's to give up.
+        if (residentEngineRef.current !== hostEngine) return null;
         console.error(
           '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
           cause

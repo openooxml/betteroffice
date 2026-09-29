@@ -152,3 +152,62 @@ test('a session handed over keeps its worker and shows the old pages until the n
     full.native.free();
   }
 });
+
+test('a request of the preview failing after the handover leaves the new session its pages', async () => {
+  FakeWorker.created = [];
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const preview = hostWithPage(9512, 'Preview page');
+  const full = hostWithPage(9513, 'Full page');
+  const handoffFrom = { current: null as YrsSession | null };
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) =>
+        useRustDisplayList(layout, undefined, undefined, undefined, source, undefined, handoffFrom),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const layOut = async (
+      host: ReturnType<typeof hostWithPage>,
+      index: number,
+      provisional: boolean
+    ) => {
+      const pending = result.current.layoutInWorker(host.engine, REQUEST);
+      const worker = FakeWorker.created[0]!;
+      worker.reply({
+        id: worker.posted[index]!.id,
+        ok: true,
+        frame: host.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: null,
+        layoutRevision: 1,
+        layoutJson: host.layoutJson,
+        ...(provisional ? { layoutProvisional: true } : {}),
+      });
+      const computation = await pending!;
+      await act(async () => {
+        rerender({ layout: computation!.layout, source: host.engine });
+      });
+    };
+
+    await layOut(preview, 0, true);
+    const worker = FakeWorker.created[0]!;
+    await waitFor(() =>
+      expect(worker.posted.map((request) => request.type)).toContain('completeLayout')
+    );
+    handoffFrom.current = preview.engine;
+    await layOut(full, 2, false);
+    await waitFor(() => expect(text(result.current.displayList)).toContain('Full'));
+    expect(result.current.workerSurfacesActive).toBe(true);
+
+    await act(async () => {
+      worker.reply({ id: worker.posted[1]!.id, ok: false, error: 'late' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(text(result.current.displayList)).toContain('Full');
+    expect(result.current.frame).not.toBeNull();
+    expect(result.current.workerSurfacesActive).toBe(true);
+    unmount();
+  } finally {
+    preview.native.free();
+    full.native.free();
+  }
+});
