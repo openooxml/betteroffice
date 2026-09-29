@@ -128,6 +128,9 @@ interface WorkerLayoutFrame {
   result: ResidentEngineWorkerFrame;
   previousFrame: RetainedFrame | null;
   engine: YrsSession;
+  /** Content epoch and display extras the worker built the frame for. */
+  contentEpoch: number;
+  layoutExtras: string;
 }
 
 /** The display fallback needs a main-thread layout of a worker-run one. */
@@ -738,6 +741,7 @@ export function useRustDisplayList(
             }
       );
       if (!snapshot) return null;
+      const contentEpoch = contentEpochRef.current;
       const options = {
         layoutExtras: JSON.stringify(frameExtrasInputs()),
         stateVector: hostEngine.encodeStateVector(),
@@ -750,8 +754,8 @@ export function useRustDisplayList(
       const reply = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
-      return reply.then(
-        (result) => {
+      return reply
+        .then((result) => {
           if (result.layoutJson === undefined) {
             throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
           }
@@ -760,18 +764,19 @@ export function useRustDisplayList(
             result,
             previousFrame,
             engine: hostEngine,
+            contentEpoch,
+            layoutExtras: options.layoutExtras,
           });
           return computation;
-        },
-        (cause) => {
+        })
+        .catch((cause: unknown) => {
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
             cause
           );
           dropWorker(hostEngine);
           return null;
-        }
-      );
+        });
     },
     [dropWorker, frameExtrasInputs, overrides?.build, paintedCaretMachine]
   );
@@ -990,7 +995,17 @@ export function useRustDisplayList(
       const prebuilt = workerLayoutFramesRef.current.get(layout);
       if (prebuilt) workerLayoutFramesRef.current.delete(layout);
       try {
-        if (prebuilt && prebuilt.engine === hostEngine && workerRef.current?.engine === hostEngine) {
+        // The frame is adopted only while nothing newer reached the session
+        // or the display since the worker built it.
+        if (
+          prebuilt &&
+          prebuilt.engine === hostEngine &&
+          workerRef.current?.engine === hostEngine &&
+          prebuilt.contentEpoch === contentEpoch &&
+          (snapshotRef.current.frame?.frameEpoch ?? null) ===
+            (prebuilt.previousFrame?.frameEpoch ?? null) &&
+          prebuilt.layoutExtras === JSON.stringify(frameExtrasInputs())
+        ) {
           // The worker ran this layout and built its frame in the same pass.
           const { result, previousFrame } = prebuilt;
           const delta = decodeFrameDelta(result.frame);
@@ -1134,6 +1149,7 @@ export function useRustDisplayList(
     engine,
     residentEngine,
     dropWorker,
+    frameExtrasInputs,
     setWorkerPresentationActive,
     paintedCaretMachine,
     applyPaintedCaretReply,

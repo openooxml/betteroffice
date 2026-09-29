@@ -154,3 +154,69 @@ test('a failed worker layout hands the pass back to the main thread', async () =
     native.free();
   }
 });
+
+test('a frame built for other display extras is not adopted', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source, resolved }) =>
+        useRustDisplayList(layout, undefined, undefined, resolved, source),
+      {
+        initialProps: {
+          layout: null as Layout | null,
+          source: null as YrsSession | null,
+          resolved: undefined as ReadonlySet<number> | undefined,
+        },
+      }
+    );
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id,
+      ok: true,
+      frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson,
+    });
+    const computation = await pending!;
+    await act(async () => {
+      rerender({ layout: computation!.layout, source: engine, resolved: new Set([7]) });
+    });
+    expect(worker.posted.at(-1)).toMatchObject({ type: 'buildFrame' });
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test('a reply without a layout hands the pass back to the main thread', async () => {
+  const { native, frame, engine } = setup();
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, null)
+    );
+    let outcome: unknown;
+    await act(async () => {
+      const pending = result.current.layoutInWorker(engine, REQUEST);
+      const worker = FakeWorker.last!;
+      worker.reply({
+        id: worker.posted[0].id,
+        ok: true,
+        frame: frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: null,
+        layoutRevision: 1,
+      });
+      outcome = await pending!;
+    });
+    expect(outcome).toBeNull();
+    expect(result.current.layoutInWorker(engine, REQUEST)).toBeNull();
+    unmount();
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
