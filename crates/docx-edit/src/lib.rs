@@ -482,7 +482,13 @@ impl EditingDoc {
     /// a replica hydrated from state resolves source and persisted anchors and
     /// reserves the package's paragraph IDs. Indexed on first identity use.
     pub fn retain_source_docx(&self, bytes: impl Into<Arc<[u8]>>) {
-        self.retain_source(identity::SourcePackage::Pending(bytes.into()));
+        self.retain_source(identity::SourcePackage::Pending(bytes.into(), None));
+    }
+
+    /// [`Self::retain_source_docx`] with the bytes' known package digest.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn retain_source_docx_with_digest(&self, bytes: Arc<[u8]>, digest: String) {
+        self.retain_source(identity::SourcePackage::Pending(bytes, Some(digest)));
     }
 
     /// Runs `f` over the identities this replica has seen, building them from
@@ -511,8 +517,10 @@ impl EditingDoc {
         let mut source = self.source.lock().unwrap();
         let index = match source.as_ref()? {
             identity::SourcePackage::Ready(index) => return Some(Arc::clone(index)),
-            identity::SourcePackage::Pending(bytes) => {
-                seed::source_index(Arc::clone(bytes)).ok().map(Arc::new)
+            identity::SourcePackage::Pending(bytes, digest) => {
+                seed::source_index(Arc::clone(bytes), digest.clone())
+                    .ok()
+                    .map(Arc::new)
             }
         };
         *source = index.clone().map(identity::SourcePackage::Ready);

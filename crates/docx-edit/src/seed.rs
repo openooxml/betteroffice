@@ -5015,8 +5015,11 @@ fn build_source_index(
 }
 
 /// The identity index of a package, lowered without seeding.
-pub(crate) fn source_index(bytes: Arc<[u8]>) -> Result<SourceIndex, String> {
-    let digest = package_digest(&bytes);
+pub(crate) fn source_index(
+    bytes: Arc<[u8]>,
+    digest: Option<String>,
+) -> Result<SourceIndex, String> {
+    let digest = digest.unwrap_or_else(|| package_digest(&bytes));
     let (envelope, parts) = parse_docx_package_with_digest(&bytes, digest.clone())?;
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
