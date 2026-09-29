@@ -707,6 +707,8 @@ pub struct EngineSession {
     capture: RefCell<Option<LayoutCapture>>,
     /// Content fingerprints of measurement fonts, by font store and font id.
     font_fingerprints: RefCell<HashMap<(u64, u32), String>>,
+    /// The document holds part of a package, such as a preview's first blocks.
+    partial_document: Cell<bool>,
 }
 
 /// The font requirements of `blocks` that `measurement` gives no chain of registered fonts, so
@@ -1122,7 +1124,15 @@ impl EngineSession {
             display: RefCell::new(DisplayState::default()),
             capture: RefCell::new(None),
             font_fingerprints: RefCell::new(HashMap::new()),
+            partial_document: Cell::new(false),
         }
+    }
+
+    /// Marks the document as part of a package, such as a preview's first
+    /// blocks: its layouts count only its own pages, so they render NUMPAGES
+    /// empty.
+    pub fn mark_partial_document(&self) {
+        self.partial_document.set(true);
     }
 
     /// Editing document.
@@ -1718,7 +1728,7 @@ impl EngineSession {
             .layout
             .as_mut()
             .expect("layout retained after successful pagination");
-        layout.partial = provisional;
+        layout.partial = provisional || self.partial_document.get();
         apply_document_regions(layout, &regions);
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);

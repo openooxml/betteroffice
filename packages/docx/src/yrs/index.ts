@@ -569,6 +569,8 @@ export interface YrsResidentWorkerSnapshot {
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;
+  /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
+  partialDocument?: boolean;
 }
 
 /**
@@ -862,6 +864,8 @@ export interface YrsSession extends CollaborationReplica {
    * document is opened. The session cannot save. @internal
    */
   openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost;
+  /** Marks a replica of a preview's document, so its layouts render NUMPAGES empty. @internal */
+  markPartialDocument(): void;
   /**
    * The region layout of only as much of the body as fills `pages` pages;
    * a reply marked `provisional` covers a prefix. @internal
@@ -1366,6 +1370,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     }
   };
 
+  // A preview's cut of a package, whose layouts count only its own pages.
+  let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
     invalidateReadCaches();
     wasmCallDepth += 1;
@@ -1452,7 +1458,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
+      partialDocument = true;
       return decodeDocxHost(json, bytes);
+    },
+    markPartialDocument: () => {
+      partialDocument = true;
+      session.mark_partial_document();
     },
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(input, pages),
@@ -1594,6 +1605,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutInput: residentLayoutInput,
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
+        ...(partialDocument ? { partialDocument: true } : {}),
       };
     },
     residentWorkerProbe: () => {
