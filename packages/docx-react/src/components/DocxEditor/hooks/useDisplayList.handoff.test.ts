@@ -10,7 +10,7 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import { useRustDisplayList } from './useDisplayList';
+import { useCanvasRenderer, useRustDisplayList } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -81,6 +81,7 @@ function hostWithPage(clientId: number, text: string) {
     onUpdate: () => () => {},
     selection: () => null,
     applyUpdate: () => null,
+    outlineGlyphJson: () => text,
   } as unknown as YrsSession;
   return { native, layoutJson, frame, engine };
 }
@@ -146,6 +147,58 @@ test('a session handed over keeps its worker and shows the old pages until the n
     expect(worker.posted[0]).not.toHaveProperty('keepSurfaces');
     // No render between the two documents shows an empty page list.
     expect(shown.slice(firstShown).every((list) => list !== null)).toBe(true);
+    unmount();
+  } finally {
+    preview.native.free();
+    full.native.free();
+  }
+});
+
+test('glyph outlines come from the session whose pages are shown', async () => {
+  FakeWorker.created = [];
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const preview = hostWithPage(9520, 'Preview page');
+  const full = hostWithPage(9521, 'Full page');
+  const handoffFrom = { current: null as YrsSession | null };
+  const shown: Array<[string, string | undefined]> = [];
+  try {
+    const { result, unmount } = renderHook(() => {
+      const renderer = useCanvasRenderer(undefined, undefined, undefined, handoffFrom);
+      shown.push([
+        text(renderer.displayList),
+        (renderer.glyphOutlineProvider as ((json: string) => string) | null)?.(''),
+      ]);
+      return renderer;
+    });
+    const layOut = async (host: ReturnType<typeof hostWithPage>, index: number) => {
+      const pending = result.current.layoutInWorker(host.engine, REQUEST);
+      const worker = FakeWorker.created[0]!;
+      worker.reply({
+        id: worker.posted[index]!.id,
+        ok: true,
+        frame: host.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null },
+        selection: null,
+        layoutRevision: 1,
+        layoutJson: host.layoutJson,
+      });
+      const computation = await pending!;
+      await act(async () => {
+        result.current.onLayoutComputed(
+          computation!.layout,
+          host.engine as unknown as Parameters<typeof result.current.onLayoutComputed>[1]
+        );
+      });
+    };
+    await layOut(preview, 0);
+    await waitFor(() => expect(text(result.current.displayList)).toContain('Preview'));
+    handoffFrom.current = preview.engine;
+    await layOut(full, 1);
+    await waitFor(() => expect(text(result.current.displayList)).toContain('Full'));
+    for (const [pages, outlines] of shown) {
+      if (pages.includes('Preview')) expect(outlines).toBe('Preview page');
+      if (pages.includes('Full')) expect(outlines).toBe('Full page');
+    }
     unmount();
   } finally {
     preview.native.free();

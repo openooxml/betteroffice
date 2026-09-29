@@ -16,28 +16,50 @@ const real = await import('@betteroffice/docx/yrs');
 // Mocking rebinds the module's live exports, `real`'s included.
 const { createYrsSession } = real;
 let created = 0;
-let fullOpen: 'fail' | 'open' = 'fail';
+let fullSession: unknown = null;
+let shownPages = false;
+let fullOpen: 'fail' | 'open' | 'layout-fail' = 'fail';
 mock.module('@betteroffice/docx/yrs', () => ({
   ...real,
-  createYrsSession: (options: Parameters<typeof createYrsSession>[0]) => {
+  createYrsSession: async (options: Parameters<typeof createYrsSession>[0]) => {
     created += 1;
-    if (created === 2 && fullOpen === 'fail') return Promise.reject(new Error('full open failed'));
-    return createYrsSession(options);
+    if (created === 2 && fullOpen === 'fail') {
+      // Fails once the preview shows, however long a loaded machine takes to paint it.
+      for (let waited = 0; !shownPages && waited < 20_000; waited += 20) {
+        await new Promise((done) => setTimeout(done, 20));
+      }
+      throw new Error('full open failed');
+    }
+    const session = await createYrsSession(options);
+    if (created === 2) fullSession = session;
+    if (created === 2 && fullOpen === 'layout-fail') {
+      session.layoutFontRequirementsJson = () => {
+        throw new Error('layout failed');
+      };
+    }
+    return session;
   },
 }));
 const displayList = await import('./hooks/useDisplayList');
 const { useCanvasRenderer } = displayList;
 let renderer: ReturnType<typeof useCanvasRenderer> | null = null;
-// Once the full session exists, its pages fail to render.
+// Once the full session exists, its pages fail to render; or, until the full
+// session's first frame shows, the preview's error stays set.
 const renderFailure = new Error('render failed');
-let failFullRender = false;
+const previewFailure = new Error('preview render failed');
+let failRender: 'full' | 'preview' | null = null;
 mock.module('./hooks/useDisplayList', () => ({
   ...displayList,
   useCanvasRenderer: (...args: Parameters<typeof useCanvasRenderer>) => {
     renderer = useCanvasRenderer(...args);
-    return failFullRender && created >= 2
-      ? { ...renderer, error: renderFailure, status: 'error' as const }
-      : renderer;
+    if (renderer.displayList) shownPages = true;
+    const error =
+      failRender === 'full' && created >= 2
+        ? renderFailure
+        : failRender === 'preview' && (created < 2 || renderer.presentedEngine !== fullSession)
+          ? previewFailure
+          : null;
+    return error ? { ...renderer, error, status: 'error' as const } : renderer;
   },
 }));
 const { DocxEditor } = await import('../../index');
@@ -72,10 +94,20 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
+const documentBuffer = () => {
+  const bytes = readFileSync(PAGES);
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+};
+const load = (buffer: ArrayBuffer, onError: (error: Error) => void, ref = createRef<Editor>()) => (
+  <DocxEditor ref={ref} previewFirstPage documentBuffer={buffer} onError={onError} />
+);
+
 test('a load whose full open fails after its preview painted keeps none of its pages', async () => {
   created = 0;
+  fullSession = null;
+  shownPages = false;
   fullOpen = 'fail';
-  failFullRender = false;
+  failRender = null;
   const bytes = readFileSync(PAGES);
   const ref = createRef<Editor>();
   const errors: string[] = [];
@@ -89,7 +121,7 @@ test('a load whose full open fails after its preview painted keeps none of its p
       onError={(error) => errors.push(error.message)}
     />
   );
-  await waitFor(() => expect(renderer?.displayList).not.toBeNull(), { timeout: 10_000 });
+  await waitFor(() => expect(shownPages).toBe(true), { timeout: 10_000 });
   await waitFor(() => expect(errors).toEqual(['full open failed']), { timeout: 10_000 });
   await act(async () => {});
   expect(view.container.querySelector('.docx-editor-error')).not.toBeNull();
@@ -102,7 +134,7 @@ test('a load whose full open fails after its preview painted keeps none of its p
 test('a load whose full session fails to render fails, and leaves no session behind', async () => {
   created = 0;
   fullOpen = 'open';
-  failFullRender = true;
+  failRender = 'full';
   const bytes = readFileSync(PAGES);
   const ref = createRef<Editor>();
   const errors: string[] = [];
@@ -122,4 +154,37 @@ test('a load whose full session fails to render fails, and leaves no session beh
   expect(renderer!.displayList).toBeNull();
   expect(ref.current!.getTotalPages()).toBe(0);
   expect(ref.current!.getDocument()).toBeNull();
+}, 30_000);
+
+test('a load whose full session fails to lay out fails once, and leaves no session behind', async () => {
+  created = 0;
+  fullOpen = 'layout-fail';
+  failRender = null;
+  const ref = createRef<Editor>();
+  const errors: string[] = [];
+  const view = render(load(documentBuffer(), (error) => errors.push(error.message), ref));
+  await waitFor(() => expect(errors).toContain('layout failed'), { timeout: 10_000 });
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 200));
+  });
+  expect(errors).toEqual(['layout failed']);
+  expect(view.container.querySelector('.docx-editor-error')).not.toBeNull();
+  expect(ref.current!.getTotalPages()).toBe(0);
+  expect(ref.current!.getDocument()).toBeNull();
+}, 30_000);
+
+test("a preview's render error is reported once and does not fail the full session", async () => {
+  created = 0;
+  fullOpen = 'open';
+  failRender = 'preview';
+  const ref = createRef<Editor>();
+  const errors: string[] = [];
+  const buffer = documentBuffer();
+  const view = render(load(buffer, (error) => errors.push(error.message), ref));
+  await waitFor(() => expect(created).toBe(2), { timeout: 10_000 });
+  // A host passing a new callback while the full session opens.
+  view.rerender(load(buffer, (error) => errors.push(`again: ${error.message}`), ref));
+  await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), { timeout: 10_000 });
+  expect(errors).toEqual(['preview render failed']);
+  expect(view.container.querySelector('.docx-editor-error')).toBeNull();
 }, 30_000);

@@ -1696,7 +1696,12 @@ export function useCanvasRenderer(
     caret,
     authoritativeCaretActive,
     canvasHostRef,
-    glyphOutlineProvider: engine?.outlineGlyphJson ?? null,
+    // Glyph ids are a session's own: outlines come from the engine whose
+    // frame is shown, which lags `engine` while a new session's first frame builds.
+    glyphOutlineProvider:
+      (presentedEngine as { outlineGlyphJson?: GlyphOutlineProvider } | null)?.outlineGlyphJson ??
+      engine?.outlineGlyphJson ??
+      null,
     presentedEngine,
     applyInput,
     applyDelete,

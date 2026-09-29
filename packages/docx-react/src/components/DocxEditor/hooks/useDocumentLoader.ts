@@ -173,6 +173,7 @@ export function useDocumentLoader({
       ) {
         return;
       }
+      loadGeneration.fail(generation);
       // A preview's first pages, or a document that failed to show, are not
       // the document the load opened.
       if (options?.opened || previewDocumentRef.current) {

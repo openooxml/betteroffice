@@ -883,13 +883,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     () => pagedEditorRef.current?.relayout(),
     handoffFromRef
   );
-  // The full session failing to render as it opens fails the load, which
-  // reports it.
+  // The full session failing to lay out or render as it opens fails the
+  // load, which reports it. Each render error is handled once: one the
+  // preview left set is not the full session's.
   const failOpeningRef = useRef<(error: Error) => boolean>(() => false);
+  const handledRenderErrorRef = useRef<Error | null>(null);
   useEffect(() => {
-    if (canvasRenderer.error && !failOpeningRef.current(canvasRenderer.error)) {
-      onError?.(canvasRenderer.error);
-    }
+    const error = canvasRenderer.error;
+    if (!error || error === handledRenderErrorRef.current) return;
+    handledRenderErrorRef.current = error;
+    if (!failOpeningRef.current(error)) onError?.(error);
   }, [canvasRenderer.error, onError]);
 
   const [yrsTrackedChangesResult, setYrsTrackedChangesResult] = useState<TrackedChangesResult>(
@@ -1062,6 +1065,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // API and commands see a document that is still loading.
   const opening = yrsCore.opening;
   failOpeningRef.current = yrsCore.failOpening;
+  const reportPagedError = useCallback(
+    (error: Error) => {
+      if (!failOpeningRef.current(error)) reportLayoutError(error);
+    },
+    [reportLayoutError]
+  );
   const readOnly = modeReadOnly || opening;
   if (opening) writeModeRef.current = 'viewing';
   const openingRef = useRef(opening);
@@ -2175,7 +2184,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             <DocxEditorPagedArea
               commandBridgeRef={commandBridgeRef}
               yrsCore={yrsCore}
-              onError={reportLayoutError}
+              onError={reportPagedError}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}
