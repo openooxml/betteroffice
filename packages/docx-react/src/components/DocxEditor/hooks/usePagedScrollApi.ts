@@ -41,6 +41,14 @@ export interface UsePagedScrollApiReturn {
 }
 
 const REFINE_WINDOW_MS = 3000;
+const USER_SCROLL_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+
+interface PendingRefine {
+  position: number;
+  pageIndex: number;
+  until: number;
+  stop: AbortController;
+}
 
 function isUnbuiltPage(queries: DisplayListQueries, pageIndex: number): boolean {
   return queries.displayList?.pages[pageIndex]?.unbuilt === true;
@@ -61,17 +69,20 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   const scrollAbortRef = useRef<AbortController | null>(null);
   // A position on a page that is not built yet scrolls to a best guess. As
   // pages get built, the scroll follows the position until it lands on a built
-  // page or the attempt runs out.
-  const pendingRefineRef = useRef<{ position: number; pageIndex: number; until: number } | null>(
-    null
-  );
+  // page, the attempt runs out, or the user scrolls or navigates on their own.
+  const pendingRefineRef = useRef<PendingRefine | null>(null);
+  const clearPendingRefine = useCallback(() => {
+    pendingRefineRef.current?.stop.abort();
+    pendingRefineRef.current = null;
+  }, []);
 
   useEffect(
     () => () => {
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = null;
+      clearPendingRefine();
     },
-    []
+    [clearPendingRefine]
   );
 
   const scrollRectIntoView = useCallback(
@@ -97,12 +108,21 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
 
   const scrollAnchorIntoView = useCallback(
     (queries: DisplayListQueries, rect: DisplayListRect, position: number, smooth: boolean) => {
-      pendingRefineRef.current = isUnbuiltPage(queries, rect.pageIndex)
-        ? { position, pageIndex: rect.pageIndex, until: performance.now() + REFINE_WINDOW_MS }
-        : null;
+      clearPendingRefine();
+      const host = canvasHostRef?.current ?? pagesContainerRef.current;
+      if (host && isUnbuiltPage(queries, rect.pageIndex)) {
+        const stop = new AbortController();
+        const scroller = getScrollContainer() ?? findVerticalScrollParentOrRoot(host);
+        const listening = { passive: true, signal: stop.signal };
+        for (const type of USER_SCROLL_EVENTS) {
+          scroller.addEventListener(type, clearPendingRefine, listening);
+        }
+        const until = performance.now() + REFINE_WINDOW_MS;
+        pendingRefineRef.current = { position, pageIndex: rect.pageIndex, until, stop };
+      }
       return scrollRectIntoView(rect, smooth);
     },
-    [scrollRectIntoView]
+    [canvasHostRef, clearPendingRefine, getScrollContainer, pagesContainerRef, scrollRectIntoView]
   );
 
   useEffect(() => {
@@ -111,34 +131,36 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     const rect =
       performance.now() <= pending.until ? displayListQueries.anchorRect(pending.position) : null;
     if (!rect) {
-      pendingRefineRef.current = null;
+      clearPendingRefine();
       return;
     }
     if (isUnbuiltPage(displayListQueries, rect.pageIndex)) {
       if (rect.pageIndex === pending.pageIndex) return;
       pending.pageIndex = rect.pageIndex;
     } else {
-      pendingRefineRef.current = null;
+      clearPendingRefine();
     }
     scrollRectIntoView(rect, false);
-  }, [displayListQueries, scrollRectIntoView]);
+  }, [clearPendingRefine, displayListQueries, scrollRectIntoView]);
 
   const scrollToPositionImpl = useCallback(
     (pmPos: number, forParaIdScroll = false) => {
       if (!Number.isInteger(pmPos) || pmPos < 0 || !displayListQueries) return;
       onNavigationIntent?.();
+      clearPendingRefine();
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = new AbortController();
       const rect = displayListQueries.anchorRect(pmPos);
       if (rect) scrollAnchorIntoView(displayListQueries, rect, pmPos, !forParaIdScroll);
     },
-    [displayListQueries, onNavigationIntent, scrollAnchorIntoView]
+    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView]
   );
 
   const revealPositionImpl = useCallback(
     (position: number): RevealPositionOutcome => {
       if (!Number.isInteger(position) || position < 0) return 'unsupported';
       if (!displayListQueries) return 'layout-unavailable';
+      clearPendingRefine();
       const rect = displayListQueries.anchorRect(position);
       if (!rect) return 'unsupported';
       onNavigationIntent?.();
@@ -148,7 +170,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
         ? 'scrolled'
         : 'layout-unavailable';
     },
-    [displayListQueries, onNavigationIntent, scrollAnchorIntoView]
+    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView]
   );
 
   const scrollToPageImpl = useCallback(
@@ -162,11 +184,11 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
         return;
       }
       onNavigationIntent?.();
-      pendingRefineRef.current = null;
+      clearPendingRefine();
       const bounds = displayListQueries.pageBounds(pageNumber - 1);
       if (bounds) scrollRectIntoView(bounds, true);
     },
-    [displayListQueries, onNavigationIntent, scrollRectIntoView]
+    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollRectIntoView]
   );
 
   const scrollToParaIdImpl = useCallback(

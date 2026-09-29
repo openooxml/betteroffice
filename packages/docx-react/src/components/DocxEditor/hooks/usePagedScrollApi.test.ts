@@ -120,3 +120,35 @@ test('a scroll to an unbuilt page follows its position to the page that holds it
   expect(matchTop).toBeGreaterThanOrEqual(0);
   expect(matchTop).toBeLessThanOrEqual(400);
 });
+
+test('a user scroll or a later navigation drops the pending refinement', async () => {
+  const { scroller, host, scrolls } = pagedDom();
+  const placeholder = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
+  const match = { pageIndex: 6, x: 20, y: 900, width: 0, height: 16 };
+  const { result, rerender } = renderHook(
+    ({ displayListQueries }) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: null },
+        yrsSession: null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => scroller,
+        displayListQueries,
+      }),
+    { initialProps: { displayListQueries: queries(false, placeholder) } }
+  );
+  await act(async () => result.current.scrollToPositionImpl(500));
+  scroller.dispatchEvent(new Event('wheel'));
+  await act(async () => rerender({ displayListQueries: queries(true, match) }));
+  expect(scrolls).toHaveLength(1);
+
+  const onlyFirst = {
+    ...queries(false, placeholder),
+    anchorRect: (position: number) => (position === 500 ? placeholder : null),
+  } as unknown as DisplayListQueries;
+  await act(async () => rerender({ displayListQueries: onlyFirst }));
+  await act(async () => result.current.scrollToPositionImpl(500));
+  expect(result.current.revealPositionImpl(600)).toBe('unsupported');
+  await act(async () => rerender({ displayListQueries: queries(true, match) }));
+  expect(scrolls).toHaveLength(2);
+});
