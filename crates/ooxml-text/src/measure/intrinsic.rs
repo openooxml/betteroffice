@@ -2,7 +2,7 @@ use crate::font_store::FontStore;
 use crate::line_break::break_opportunities;
 
 use super::input;
-use super::line_filler::{span_width, visible_span_width};
+use super::line_filler::span_width;
 use super::prepare::{PreparedRun, PreparedText, prepare_runs};
 use super::{MAX_RUNS, MeasureError, MeasureRequest, list_marker, tabs};
 
@@ -68,25 +68,44 @@ fn text_widths(texts: &[(&str, &PreparedText)], widths: &mut Widths) {
     let mut boundary = 0;
     let mut run_start = 0;
     for (_, text) in texts {
-        let mut start = 0;
-        while let Some(&limit) = boundaries.get(boundary) {
-            let end = text
-                .chars
-                .partition_point(|cluster| run_start + (cluster.utf16_offset as usize) < limit);
-            let span = &text.chars[start..end];
-            widths.add(
-                span_width(span, text.letter_spacing),
-                visible_span_width(span, text.letter_spacing),
-            );
-            start = end;
-            if limit > run_start + text.utf16_len as usize {
-                break;
+        let mut break_cursor = 0;
+        for (index, cluster) in text.chars.iter().enumerate() {
+            while boundaries
+                .get(boundary)
+                .is_some_and(|limit| *limit <= run_start + cluster.utf16_offset as usize)
+            {
+                widths.end_word();
+                boundary += 1;
             }
-            widths.end_word();
-            boundary += 1;
+            while text
+                .breaks
+                .get(break_cursor)
+                .is_some_and(|end| *end <= index)
+            {
+                break_cursor += 1;
+            }
+            let end = text
+                .breaks
+                .get(break_cursor)
+                .copied()
+                .unwrap_or(text.chars.len());
+            let tracking = if index + 1 < end {
+                text.letter_spacing
+            } else {
+                0.0
+            };
+            widths.add(
+                cluster.advance + tracking,
+                if cluster.is_fit_space {
+                    0.0
+                } else {
+                    cluster.advance
+                },
+            );
         }
         run_start += text.utf16_len as usize;
     }
+    widths.end_word();
 }
 
 fn following_width(runs: &[PreparedRun]) -> f32 {

@@ -1,8 +1,12 @@
 use ooxml_text::FontStore;
-use ooxml_text::measure::{MeasureInput, measure_intrinsic_widths};
+use ooxml_text::measure::{MeasureInput, measure_intrinsic_widths, measure_paragraph};
 use serde_json::json;
 
 fn widths(runs: serde_json::Value, attrs: serde_json::Value) -> (f32, f32) {
+    measured_widths(runs, attrs).0
+}
+
+fn measured_widths(runs: serde_json::Value, attrs: serde_json::Value) -> ((f32, f32), f32) {
     let mut store = FontStore::new();
     let font = store
         .register(include_bytes!("fonts/LiberationSans-Regular.ttf").to_vec())
@@ -25,7 +29,9 @@ fn widths(runs: serde_json::Value, attrs: serde_json::Value) -> (f32, f32) {
         paragraph_y_offset: None,
         authoritative_shaping: input.authoritative_shaping,
     };
-    measure_intrinsic_widths(&store, &request).unwrap()
+    let intrinsic = measure_intrinsic_widths(&store, &request).unwrap();
+    let measured = measure_paragraph(&store, &input).unwrap();
+    (intrinsic, measured.lines[0].width)
 }
 
 #[test]
@@ -95,4 +101,40 @@ fn inline_images_and_paragraph_indents_constrain_both_widths() {
     );
     assert_eq!(minimum, 104.0);
     assert_eq!(maximum, 104.0);
+}
+
+#[test]
+fn tracking_uses_the_same_run_partitions_as_line_fill() {
+    let ((minimum, maximum), line_width) = measured_widths(
+        json!([
+            {"kind": "text", "text": "(", "letterSpacing": 5},
+            {"kind": "text", "text": " a", "letterSpacing": 5}
+        ]),
+        json!({}),
+    );
+    assert!((line_width - 18.671875).abs() < 0.001);
+    assert!((maximum - line_width).abs() < 0.001);
+    assert!((minimum - maximum).abs() < 0.001);
+
+    for spacing in [5.0, -1.0] {
+        for runs in [
+            json!([
+                {"kind": "text", "text": "(", "letterSpacing": spacing},
+                {"kind": "text", "text": " a b)", "letterSpacing": spacing}
+            ]),
+            json!([
+                {"kind": "text", "text": "hello ", "letterSpacing": spacing},
+                {"kind": "text", "text": "world", "letterSpacing": spacing}
+            ]),
+            json!([{"kind": "text", "text": "a b c", "letterSpacing": spacing}]),
+            json!([
+                {"kind": "text", "text": "long", "letterSpacing": spacing},
+                {"kind": "text", "text": "word", "letterSpacing": spacing}
+            ]),
+        ] {
+            let ((minimum, maximum), line_width) = measured_widths(runs, json!({}));
+            assert!((maximum - line_width).abs() < 0.001);
+            assert!(minimum <= maximum);
+        }
+    }
 }
