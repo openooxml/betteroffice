@@ -44,6 +44,13 @@ import type {
   DocxValidationResult,
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
+import {
+  createProposalRegistry,
+  type DocxProposalRequest,
+  type DocxProposalResult,
+  type DocxProposalSnapshot,
+  type DocxProposalStateRequest,
+} from './proposals';
 import type {
   DocxContentControlQuery,
   DocxContentControlsOptions,
@@ -85,6 +92,18 @@ export {
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 export * from './paragraphIdentity';
+export {
+  proposalRevisionPreview,
+  type DocxOccurrence,
+  type DocxProposalFailure,
+  type DocxProposalInput,
+  type DocxProposalRecord,
+  type DocxProposalRequest,
+  type DocxProposalResult,
+  type DocxProposalSnapshot,
+  type DocxProposalState,
+  type DocxProposalStateRequest,
+} from './proposals';
 export {
   captureSessionSave,
   saveYrsDocx,
@@ -203,6 +222,31 @@ export interface YrsOpeningOptions {
    * as one session. Each opening mints a fresh one by default.
    */
   generation?: string;
+}
+
+/** SHA-256 digests of the byte copies {@link prepareDocxBytes} made, by copy. */
+const preparedDigests = new WeakMap<Uint8Array, string>();
+
+/**
+ * A copy of `bytes` whose SHA-256 the platform takes off the calling thread,
+ * where it has Web Crypto. Opening that copy unchanged skips hashing the
+ * package on the calling thread; any other bytes open as before.
+ * @internal
+ */
+export async function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(bytes);
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return copy;
+  try {
+    const hash = new Uint8Array(await subtle.digest('SHA-256', copy));
+    preparedDigests.set(
+      copy,
+      Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    );
+  } catch {
+    // Opening hashes the copy itself.
+  }
+  return copy;
 }
 
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
@@ -571,6 +615,8 @@ export interface YrsResidentWorkerSnapshot {
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;
+  /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
+  partialDocument?: boolean;
 }
 
 /**
@@ -792,6 +838,14 @@ export interface YrsSession extends CollaborationReplica {
   layoutDocumentWithRegionsRetainedJson(input: string): string;
   /** Retained `{ measured, options }` for the main-thread display fallback. */
   retainedKernelInputsJson(expectedLayoutRevision: number): string;
+  /**
+   * Record region layout `input` as the resident layout without running it
+   * here: a resident worker replica runs it, and snapshots carry it there.
+   * Returns the new layout revision. @internal
+   */
+  adoptResidentWorkerLayout?(input: string): number;
+  /** The current resident layout ran only in a worker replica. @internal */
+  residentLayoutInWorker?(): boolean;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
@@ -858,6 +912,25 @@ export interface YrsSession extends CollaborationReplica {
    * one seeded alike by the same client; see {@link beginOpening}.
    */
   openDocx(bytes: Uint8Array, seedStories: boolean, options?: YrsOpeningOptions): YrsDocxHost;
+  /**
+   * Opens a DOCX for display only, from the body's first `blocks` blocks:
+   * enough to lay out its first pages with a prefix pass before the whole
+   * document is opened. The session cannot save. `null`, opening nothing,
+   * for a document with a float placed from outside the text or a section
+   * with columns, which no cut of the body lays out like the whole: open it
+   * with {@link openDocx}. @internal
+   */
+  openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
+  /**
+   * Marks whether the document is a preview's, as a replica of one is: its
+   * layouts render NUMPAGES empty. @internal
+   */
+  setPartialDocument(partial: boolean): void;
+  /**
+   * The region layout of only as much of the body as fills `pages` pages;
+   * a reply marked `provisional` covers a prefix. @internal
+   */
+  layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /**
    * Starts a new opening of the document: its generation, replicated to
    * every replica, becomes part of every session anchor. Every seeding entry
@@ -1090,6 +1163,18 @@ export interface YrsSession extends CollaborationReplica {
   /** The raw formatted-segment view (the render bridge's input). */
   storySegments(story: string): YrsStorySegment[];
   /**
+   * The current story revision and the sorted ids of the stories created,
+   * edited, or deleted after revision `since` (0 lists every story).
+   */
+  storiesChangedSince(since: number): { revision: number; stories: string[] };
+  /**
+   * One digest per unit of {@link YrsSession.storySegments}, split after each
+   * pilcrow. Equal digests mean equal segments.
+   */
+  storySegmentUnitDigests(story: string): string[];
+  /** The segments of the listed units, each as {@link YrsSession.storySegments} gives them. */
+  storySegmentUnits(story: string, units: readonly number[]): YrsStorySegment[][];
+  /**
    * The payload of the story's `tableIndex`-th table embed, as
    * {@link YrsSession.storySegments} gives it, or null when there is no such
    * table. Reads the one table rather than the whole story.
@@ -1160,6 +1245,25 @@ export interface YrsSession extends CollaborationReplica {
   ): YrsTargetEditResult;
   /** Accepted-view texts around a paragraph-keyed selection. @internal */
   selectionText(range: YrsStoryRange): YrsSelectionText;
+
+  // -- host proposals --
+
+  /**
+   * Proposes a round of tracked changes: every new proposal resolves against `expectVersion` and
+   * the round applies as one batch outside undo history, or nothing changes. A retried id with
+   * the same edit is a no-op; the same id with another edit refuses. Opening another document
+   * forgets every proposal.
+   */
+  proposeChanges(request: DocxProposalRequest): DocxProposalResult;
+  /**
+   * Sets how proposals render. Decisions change neither the document, its version nor undo
+   * history; each call that changes one increments `previewVersion`.
+   */
+  setProposalStates(request: DocxProposalStateRequest): DocxProposalResult;
+  /** The proposals in the order they were made. */
+  getProposals(): DocxProposalSnapshot;
+  /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */
+  onProposalChange(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
 
   // -- structured export --
 
@@ -1336,6 +1440,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let residentLayoutInput: string | null = null;
   let residentLayoutWithRegions = false;
   let residentLayoutRevision = 0;
+  // The current resident layout ran only in a resident worker replica.
+  let layoutRanInWorker = false;
   let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
   let docxSource: Uint8Array | null = null;
@@ -1366,6 +1472,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     }
   };
 
+  // A preview's cut of a package, whose layouts count only its own pages.
+  let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
     invalidateReadCaches();
     wasmCallDepth += 1;
@@ -1441,14 +1549,50 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    const json = mutate(() => session.open_docx(source, seedStories, options.generation));
+    const json = mutate(() => {
+      const opened = session.open_docx(
+        source,
+        seedStories,
+        options.generation,
+        preparedDigests.get(bytes)
+      );
+      proposals.reset();
+      return opened;
+    });
     const host = decodeDocxHost(json, source);
     docxSource = source;
+    partialDocument = false;
     return host;
   };
 
+  const proposals = createProposalRegistry({
+    version: () => facade.version(),
+    resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
+    findText: (request) => facade.findText(request),
+    applyEdits: (request) => facade.applyEdits(request),
+  });
+
   const facade: YrsSession = {
     clientId,
+    openDocxPreview: (bytes, blocks) => {
+      markDirty('all');
+      const json = mutate(() => session.open_docx_preview(bytes, blocks));
+      if (json === undefined) return null;
+      partialDocument = true;
+      return decodeDocxHost(json, bytes);
+    },
+    setPartialDocument: (partial) => {
+      partialDocument = partial;
+      session.set_partial_document(partial);
+    },
+    layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) => {
+      const output = session.layout_document_with_regions_prefix_retained_json(input, pages);
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = false;
+      return output;
+    },
 
     registerFont: (bytes) => {
       // The Rust font store is module-global, while document sessions are
@@ -1488,6 +1632,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutInput = input;
       residentLayoutWithRegions = false;
       residentLayoutRevision += 1;
+      layoutRanInWorker = false;
       return output;
     },
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
@@ -1496,6 +1641,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
+      layoutRanInWorker = false;
       return output;
     },
     layoutDocumentWithRegionsRetainedJson: (input) => {
@@ -1503,9 +1649,21 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
+      layoutRanInWorker = false;
       return output;
     },
+    adoptResidentWorkerLayout: (input) => {
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = true;
+      return residentLayoutRevision;
+    },
+    residentLayoutInWorker: () => layoutRanInWorker,
     retainedKernelInputsJson: (expectedLayoutRevision) => {
+      if (layoutRanInWorker) {
+        throw new Error('the retained layout was computed in the resident worker');
+      }
       if (expectedLayoutRevision !== residentLayoutRevision) {
         throw new Error(
           `retained layout revision mismatch: expected ${expectedLayoutRevision}, current ${residentLayoutRevision}`
@@ -1579,6 +1737,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutInput: residentLayoutInput,
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
+        ...(partialDocument ? { partialDocument: true } : {}),
       };
     },
     residentWorkerProbe: () => {
@@ -1597,11 +1756,19 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
     loadState: (update) => {
       markDirty('all');
-      mutate(() => session.load(update));
+      mutate(() => {
+        session.load(update);
+        proposals.reset();
+      });
     },
     seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
     openDocx,
-    beginOpening: (generation) => mutate(() => session.begin_opening(generation)),
+    beginOpening: (generation) => {
+      mutate(() => {
+        session.begin_opening(generation);
+        proposals.reset();
+      });
+    },
     materializeDocx: () => {
       const source = docxSource;
       const json = session.materialize_docx();
@@ -2175,6 +2342,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+    storiesChangedSince: (since) =>
+      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
+    storySegmentUnitDigests: (story) =>
+      JSON.parse(session.story_segment_unit_digests(story)) as string[],
+    storySegmentUnits: (story, units) =>
+      JSON.parse(session.story_segment_units(story, Uint32Array.from(units))) as YrsStorySegment[][],
     tablePayload: (story, tableIndex) => {
       // No table has an index the u32 boundary would wrap; the story must still exist.
       if (!Number.isInteger(tableIndex) || tableIndex < 0 || tableIndex > 0xffffffff) {
@@ -2263,6 +2436,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         if (result.ok && result.applied) markDirty(result.changedStories);
         return result;
       }),
+    proposeChanges: (request) => mutate(() => proposals.propose(request)),
+    setProposalStates: (request) => proposals.setStates(request),
+    getProposals: () => proposals.snapshot(),
+    onProposalChange: (listener) => {
+      if (destroyed) throw new Error('yrs session is destroyed');
+      return proposals.subscribe(listener);
+    },
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
       return mutate(
@@ -2299,6 +2479,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (destroyed) return;
       destroyed = true;
       listeners.clear();
+      proposals.destroy();
       pendingUpdates.length = 0;
       if (observing) session.clear_update_observer();
       session.free();
@@ -2308,7 +2489,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   registerSessionInternals(facade, {
     compareDocx: (original, revised, options) => {
       markDirty('all');
-      const json = mutate(() => session.compare_docx_json(original, revised, options));
+      const json = mutate(() => {
+        const compared = session.compare_docx_json(original, revised, options);
+        proposals.reset();
+        return compared;
+      });
       docxSource = original.slice();
       return json;
     },

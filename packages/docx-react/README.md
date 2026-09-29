@@ -291,6 +291,40 @@ list the document's content controls with the version they were read at; fill
 plain- and rich-text controls with `setContentControlText` steps through
 `applyEdits`, which refreshes the control's story and the story holding it.
 
+## Host proposals
+
+`DocxEditorRef.proposeChanges()`, `setProposalStates()` and `getProposals()` flush
+pending input, then run the session's host proposals: a round of tracked changes
+grouped by the host's proposal ids, shown with the editor's tracked-change
+highlighting, and decisions that show accepted proposals as plain text and hide
+rejected ones without changing the document or undo history. Set
+`allowHostProposals` to use them in a read-only or viewing editor; typing,
+`applyEdits`, commands and plugin writes stay blocked there. Proposals never save
+or open the comments sidebar.
+
+```tsx
+const round = await editorRef.current!.proposeChanges({
+  expectVersion: (await editorRef.current!.getProposals()).version,
+  proposals: [
+    {
+      id: 'p-17',
+      paragraph: { kind: 'persisted', story: { partUri: '/word/document.xml', kind: 'body' }, paraId: '1A2B3C4D' },
+      suggest: { author: 'Reviewer', date: new Date().toISOString() },
+      op: 'replaceText',
+      search: '30 days',
+      replaceWith: '45 days',
+    },
+  ],
+});
+if (round.ok) {
+  await editorRef.current!.setProposalStates({
+    expectVersion: round.snapshot.version,
+    expectPreviewVersion: round.snapshot.previewVersion,
+    changes: [{ id: 'p-17', state: 'accepted' }],
+  });
+}
+```
+
 ## Host plugins
 
 Host-owned tools (review aids, templates, checks) install through the `plugins`
@@ -335,7 +369,8 @@ const review = defineDocxPlugin<State>({
   `document-change` (the committed version only, for typing, remote edits, undo,
   commands and batches, its own included, never for refusals or no-ops),
   `selection-change`, `mode-change` (with the effective `readOnly`),
-  `layout-change` and `grants-change`. Events describe current state: several
+  `layout-change`, `proposal-change` (host proposals or their preview decisions
+  changed, with `previewVersion`) and `grants-change`. Events describe current state: several
   changes may arrive as one, and a newer one aborts the hook still handling the
   previous (`context.signal`), except a change that hook's own edit batch
   made. Replacing the document, removing the plugin,
@@ -387,6 +422,14 @@ const review = defineDocxPlugin<State>({
   `geometry.getPositionAtPoint(clientX, clientY)` returns the text under a client
   point with the layout's `layoutId` and `version` and an edit batch `target`, or
   null likewise, while input is pending, and until the pages show that layout.
+  `geometry.getAnchorGeometry(target)` resolves a proposal, revision, paragraph,
+  search match or text range to overlay-layer pixels: every visible fragment with
+  its zero-based `pageIndex`, an `anchor` collapsed at the end of the last one (at
+  the boundary of a target the preview hides, else at its paragraph) and the
+  anchor's `pageRect`. It refuses with a typed failure rather than answer from a
+  stale or unpainted layout, and `layout-change` repeats once the pages have painted
+  a layout that arrived before its pixels; `layout.previewVersion` is the proposal
+  preview the pixels show.
   The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit

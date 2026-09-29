@@ -4488,19 +4488,44 @@ fn entry_parts(entry: &Value) -> Option<(&str, &Value)> {
 }
 
 /// Parses a DOCX for editing, each paragraph carrying its source occurrence.
-#[cfg(any(feature = "wasm", test))]
+#[cfg(test)]
 pub(crate) fn parse_docx_for_edit(bytes: &[u8]) -> Result<docx_parse::S9WireEnvelope, String> {
-    parse_docx_package(bytes).map(|(envelope, _)| envelope)
+    parse_docx_package_with_digest(bytes, package_digest(bytes)).map(|(envelope, _)| envelope)
 }
 
-/// [`parse_docx_for_edit`], with the inflated parts the identity index reads.
-pub(crate) fn parse_docx_package(
+/// The SHA-256 of a whole package, hex encoded: the seed of its generated
+/// IDs and the identity of its source index.
+pub(crate) fn package_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// `digest` as a package digest: the lowercase hex form [`package_digest`] gives.
+#[cfg(feature = "wasm")]
+pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
+    if digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        Ok(digest.to_owned())
+    } else {
+        Err("a package digest is 64 lowercase hex digits".to_owned())
+    }
+}
+
+/// Parses a DOCX for editing with the inflated parts the identity index
+/// reads. `digest` is its [`package_digest`], so the parser does not hash the
+/// package again.
+pub(crate) fn parse_docx_package_with_digest(
     bytes: &[u8],
+    digest: String,
 ) -> Result<(docx_parse::S9WireEnvelope, Vec<(String, Vec<u8>)>), String> {
     docx_parse::parse_docx_s9_wire_parts_with_limits(
         bytes,
         docx_parse::S9ParseOptions {
             source_ordinals: true,
+            determinism_seed: Some(digest),
             ..docx_parse::S9ParseOptions::default()
         },
         &docx_parse::xml::ParseLimits::default(),
@@ -4934,6 +4959,7 @@ impl PackageIds {
 /// root stories seeded from it, and the IDs `ids` read from the whole package.
 fn build_source_index(
     bytes: Arc<[u8]>,
+    digest: String,
     parts: &SourceParts,
     ids: PackageIds,
     roots: Vec<SourceRoot>,
@@ -4941,7 +4967,6 @@ fn build_source_index(
     paragraphs: Vec<SeededParagraph>,
 ) -> SourceIndex {
     use crate::structured::source::{COMMENTS_PART, ENDNOTES_PART, FOOTNOTES_PART};
-    use sha2::{Digest, Sha256};
     let document_path = &parts.document;
     let find = |path: &str| {
         parts
@@ -4994,7 +5019,7 @@ fn build_source_index(
     add(ENDNOTES_PART, SourceStoryKind::Endnote, None);
     add(COMMENTS_PART, SourceStoryKind::Comment, None);
     SourceIndex::new(
-        format!("{:x}", Sha256::digest(&bytes)),
+        digest,
         bytes,
         ids.occupied,
         inputs,
@@ -5004,13 +5029,18 @@ fn build_source_index(
 }
 
 /// The identity index of a package, lowered without seeding.
-pub(crate) fn source_index(bytes: Arc<[u8]>) -> Result<SourceIndex, String> {
-    let (envelope, parts) = parse_docx_package(&bytes)?;
+pub(crate) fn source_index(
+    bytes: Arc<[u8]>,
+    digest: Option<String>,
+) -> Result<SourceIndex, String> {
+    let digest = digest.unwrap_or_else(|| package_digest(&bytes));
+    let (envelope, parts) = parse_docx_package_with_digest(&bytes, digest.clone())?;
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
     let lowered = lower_docx(envelope, None)?;
     Ok(build_source_index(
         bytes,
+        digest,
         &parts,
         ids,
         lowered.roots,
@@ -5021,17 +5051,20 @@ pub(crate) fn source_index(bytes: Arc<[u8]>) -> Result<SourceIndex, String> {
 
 /// Seeds every story of the parsed package, resolving source provenance against `parts`, and
 /// retains its identity index.
+/// `digest` is the package's [`package_digest`].
 pub(crate) fn seed_parsed_docx(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
     parts: Vec<(String, Vec<u8>)>,
     bytes: Arc<[u8]>,
+    digest: String,
 ) -> Result<Vec<String>, String> {
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
     let mut lowered = lower_docx(envelope, Some(&parts))?;
     let index = build_source_index(
         bytes,
+        digest,
         &parts,
         ids,
         std::mem::take(&mut lowered.roots),
@@ -5063,13 +5096,283 @@ pub fn seed_from_docx_with_generation(
 }
 
 /// Seeds every story of a DOCX without starting an opening.
+/// Seeds `bytes` with only the body's first `blocks` blocks, parsed and
+/// lowered, and the other stories they or the pages need, to paint the first
+/// pages before the document is seeded in full. The result is for display
+/// only. Its cut is not a real end of the document, so it is laid out with a
+/// prefix pass that stops short of it
+/// (`layout_document_with_regions_prefix_retained_json`); a pass that reaches
+/// it needs more blocks. Seeds nothing and returns `false` for a document no
+/// cut of which lays out like the whole (see
+/// [`docx_parse::parse_docx_s9_preview_from_parts`]), which opens in full.
+pub fn seed_docx_preview(
+    document: &EditingDoc,
+    bytes: &[u8],
+    blocks: usize,
+) -> Result<bool, String> {
+    let Some(envelope) = parse_docx_preview(bytes, blocks)? else {
+        return Ok(false);
+    };
+    seed_preview_envelope(document, envelope).map(|_| true)
+}
+
+/// The parse [`seed_docx_preview`] seeds from, or `None` when it refuses one.
+pub(crate) fn parse_docx_preview(
+    bytes: &[u8],
+    blocks: usize,
+) -> Result<Option<docx_parse::S9WireEnvelope>, String> {
+    let is_media = |path: &str| path.to_ascii_lowercase().starts_with("word/media/");
+    let mut parts = ooxml_opc::unzip_parts_where(bytes, u64::MAX, |path| !is_media(path))?;
+    let parse = |parts: &[(String, Vec<u8>)]| {
+        docx_parse::parse_docx_s9_preview_from_parts(
+            parts,
+            blocks,
+            docx_parse::S9ParseOptions {
+                source_ordinals: true,
+                determinism_seed: Some(PREVIEW_SEED.to_owned()),
+                ..docx_parse::S9ParseOptions::default()
+            },
+            &docx_parse::xml::ParseLimits::default(),
+        )
+        .map_err(|error| error.to_string())
+    };
+    let Some(envelope) = parse(&parts)? else {
+        return Ok(None);
+    };
+    // Inflate only the images the parsed prefix and the other parts use.
+    let media = preview_media(&envelope, &parts)?;
+    if media.is_empty() {
+        return Ok(Some(envelope));
+    }
+    let inflated: u64 = parts.iter().map(|(_, data)| data.len() as u64).sum();
+    parts.extend(ooxml_opc::unzip_parts_where(
+        bytes,
+        ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES.saturating_sub(inflated),
+        |path| media.contains(&path.to_ascii_lowercase()),
+    )?);
+    parse(&parts)
+}
+
+/// Seeds a preview parse; returns the fonts it references.
+pub(crate) fn seed_preview_envelope(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+) -> Result<Vec<String>, String> {
+    let mut lowered = lower_docx(envelope, None)?;
+    retain_referenced_body_stories(&mut lowered.context.plans);
+    seed_lowered(document, lowered, None)
+}
+
+/// The seed for IDs a preview's parse generates. A preview is never saved,
+/// so it does not hash the package for the IDs a full open would generate.
+const PREVIEW_SEED: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+/// Lowercased paths of the media a preview draws: the targets of the document
+/// relationships its parsed document names, and every medium another part
+/// relates to.
+fn preview_media(
+    envelope: &docx_parse::S9WireEnvelope,
+    parts: &[(String, Vec<u8>)],
+) -> Result<HashSet<String>, String> {
+    fn strings<'a>(value: &'a Value, found: &mut HashSet<&'a str>) {
+        match value {
+            Value::String(text) => {
+                found.insert(text);
+            }
+            Value::Object(fields) => fields.values().for_each(|value| strings(value, found)),
+            Value::Array(values) => values.iter().for_each(|value| strings(value, found)),
+            _ => {}
+        }
+    }
+    let media_path = |directory: &str, target: &str| {
+        let target = percent_decoded(target);
+        let joined = match target.strip_prefix('/') {
+            Some(absolute) => absolute.to_owned(),
+            None => format!("{directory}{target}"),
+        };
+        let mut segments: Vec<&str> = Vec::new();
+        for segment in joined.split('/') {
+            match segment {
+                ".." => {
+                    segments.pop();
+                }
+                "." | "" => {}
+                segment => segments.push(segment),
+            }
+        }
+        let path = segments.join("/").to_ascii_lowercase();
+        path.starts_with("word/media/").then_some(path)
+    };
+    let mut document =
+        serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    if let Some(package) = document.get_mut("package").and_then(Value::as_object_mut) {
+        package.remove("relationshipEntries");
+    }
+    let mut mentioned = HashSet::new();
+    strings(&document, &mut mentioned);
+    let mut media: HashSet<String> = envelope
+        .document
+        .package
+        .relationship_entries
+        .iter()
+        .filter(|(id, _)| mentioned.contains(id.as_str()))
+        .filter_map(|(_, relationship)| media_path("word/", &relationship.target))
+        .collect();
+    let limits = docx_parse::xml::ParseLimits::default();
+    for (path, xml) in parts {
+        let lower = path.to_ascii_lowercase();
+        let Some((directory, _)) = lower.split_once("_rels/") else {
+            continue;
+        };
+        if !lower.ends_with(".rels")
+            || lower == "_rels/.rels"
+            || lower == "word/_rels/document.xml.rels"
+        {
+            continue;
+        }
+        let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+        let relationships = docx_parse::relationships::parse_relationships(xml, path, &mut budget)
+            .map_err(|error| error.to_string())?;
+        media.extend(relationships.values().filter_map(|relationship| {
+            (relationship.target_mode != Some(docx_parse::relationships::TargetMode::External))
+                .then(|| media_path(directory, &relationship.target))
+                .flatten()
+        }));
+    }
+    Ok(media)
+}
+
+/// `%XX` escapes in a relationship target, decoded.
+fn percent_decoded(target: &str) -> String {
+    let bytes = target.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let hex = bytes
+            .get(index + 1..index + 3)
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match (bytes[index], hex) {
+            (b'%', Some(byte)) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            (byte, _) => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Drops the body's nested stories, such as table cells, that the (cut) body
+/// no longer reaches. Headers, footers, notes and comments stay whole.
+fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
+    fn reach<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
+        match value {
+            Value::String(text) => found.push(text),
+            Value::Array(values) => values.iter().for_each(|value| reach(value, found)),
+            Value::Object(fields) => fields.values().for_each(|value| reach(value, found)),
+            _ => {}
+        }
+    }
+    let nested = |id: &str| id.starts_with("body:");
+    let index: HashMap<String, usize> = plans
+        .iter()
+        .enumerate()
+        .map(|(position, plan)| (plan.story_id.clone(), position))
+        .collect();
+    let mut keep: HashSet<usize> = plans
+        .iter()
+        .enumerate()
+        .filter(|(_, plan)| !nested(&plan.story_id))
+        .map(|(position, _)| position)
+        .collect();
+    let mut queue: Vec<usize> = keep.iter().copied().collect();
+    while let Some(position) = queue.pop() {
+        let mut found = Vec::new();
+        for unit in &plans[position].units {
+            if let UnitContent::Embed { payload, .. } = &unit.content {
+                payload.values().for_each(|value| reach(value, &mut found));
+            }
+        }
+        for id in found {
+            if let Some(&child) = index.get(id)
+                && keep.insert(child)
+            {
+                queue.push(child);
+            }
+        }
+    }
+    let mut position = 0;
+    plans.retain(|_| {
+        position += 1;
+        keep.contains(&(position - 1))
+    });
+}
+
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
-    let (envelope, parts) = parse_docx_package(bytes)?;
-    seed_parsed_docx(document, envelope, parts, Arc::from(bytes)).map(|_| ())
+    let digest = package_digest(bytes);
+    let (envelope, parts) = parse_docx_package_with_digest(bytes, digest.clone())?;
+    seed_parsed_docx(document, envelope, parts, Arc::from(bytes), digest).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_preview_inflates_the_media_its_document_and_other_parts_use() {
+        const IMAGE: &str =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+        let drawing = |id: &str| {
+            format!(
+                r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="p"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="{id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+            )
+        };
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>{}<w:p><w:r><w:t>After the cut</w:t></w:r></w:p>{}</w:body></w:document>"#,
+            drawing("rIdUsed"),
+            drawing("rIdLater")
+        );
+        let parts = vec![
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdUsed" Type="{IMAGE}" Target="media/used.png"/><Relationship Id="rIdLater" Type="{IMAGE}" Target="media/later.png"/><Relationship Id="rIdMark" Type="{IMAGE}" Target="/word/media/Mark.PNG"/></Relationships>"#).into_bytes()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+            ("word/headers/_rels/header1.xml.rels".to_owned(), format!("<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='{IMAGE}' Target = '../media/logo%201.png'/></Relationships>").into_bytes()),
+        ];
+        let parsed = |blocks| {
+            docx_parse::parse_docx_s9_preview_from_parts(
+                &parts,
+                blocks,
+                docx_parse::S9ParseOptions {
+                    determinism_seed: Some(PREVIEW_SEED.to_owned()),
+                    ..docx_parse::S9ParseOptions::default()
+                },
+                &docx_parse::xml::ParseLimits::default(),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let mut envelope = parsed(1);
+        let media = preview_media(&envelope, &parts).unwrap();
+        assert!(media.contains("word/media/used.png"));
+        assert!(media.contains("word/media/logo 1.png"));
+        assert!(!media.contains("word/media/later.png"));
+        // A document relationship named under any key, as a watermark's `relId` is.
+        envelope.document.warnings = Some(vec!["rIdMark".to_owned()]);
+        assert!(
+            preview_media(&envelope, &parts)
+                .unwrap()
+                .contains("word/media/mark.png")
+        );
+        assert!(
+            preview_media(&parsed(3), &parts)
+                .unwrap()
+                .contains("word/media/later.png")
+        );
+    }
+
     fn seed_body(blocks: &[Value]) -> EditingDoc {
         let mut context = LoweringContext {
             styles: StyleResolver::new(None),
@@ -5652,6 +5955,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_passed_package_digest_parses_like_the_parser_hashing_it() {
+        let bytes = include_bytes!("../../../apps/demo/public/betteroffice-demo.docx");
+        let (hashed, _) = docx_parse::parse_docx_s9_wire_parts_with_limits(
+            bytes,
+            docx_parse::S9ParseOptions {
+                source_ordinals: true,
+                ..docx_parse::S9ParseOptions::default()
+            },
+            &docx_parse::xml::ParseLimits::default(),
+        )
+        .unwrap();
+        let (passed, _) = parse_docx_package_with_digest(bytes, package_digest(bytes)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&passed).unwrap(),
+            serde_json::to_value(&hashed).unwrap()
+        );
+    }
 
     #[test]
     fn resolved_images_and_fonts_survive_media_projection() {

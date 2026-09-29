@@ -18,6 +18,7 @@ import {
   rasterizeDisplayPageToBackBuffer,
   GlyphCache,
   loadGlyphOutlineProvider,
+  displayPageNoteAnchorRevision,
   type DisplayList,
   type DisplayPage,
   type GlyphOutlineProvider,
@@ -30,7 +31,7 @@ import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA11yLiveRegion';
 import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
-import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
+import { ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
@@ -78,11 +79,7 @@ export function CanvasPagedArea({
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
           <ParseError message={renderer.error?.message ?? 'Canvas renderer failed.'} />
         </div>
-      ) : (
-        <div data-testid="canvas-renderer-loading" role="status" style={{ minHeight: 240 }}>
-          <DefaultLoadingIndicator />
-        </div>
-      )}
+      ) : null}
       {children}
       {a11y ? <CanvasA11yLiveRegion active={renderer.status === 'ready'} {...a11y} /> : null}
     </>
@@ -131,6 +128,7 @@ function nextPageWindow(
  */
 const CanvasPageSurface = memo(function CanvasPageSurface({
   page,
+  noteAnchorRevision,
   pageKey,
   zoom,
   interactive,
@@ -138,6 +136,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   registerCanvas,
 }: {
   page: DisplayPage;
+  noteAnchorRevision: number;
   pageKey: string;
   zoom: number;
   interactive: boolean;
@@ -161,7 +160,12 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           boxShadow: '0 1px 3px var(--doc-shadow)',
         }}
       />
-      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} />
+      <CanvasPageMirror
+        page={page}
+        zoom={zoom}
+        defer={deferChrome}
+        noteAnchorRevision={noteAnchorRevision}
+      />
       {interactive ? (
         <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
       ) : null}
@@ -232,6 +236,7 @@ export function CanvasPagesView({
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
   const [replayState] = useState(() => new CanvasReplayState());
   const offscreenSignatureRef = useRef('');
+  const surfaceRef = useRef('');
   const replayGenerationRef = useRef(0);
   const [offscreenFailed, setOffscreenFailed] = useState(false);
   const offscreenFailedRef = useRef(false);
@@ -500,6 +505,11 @@ export function CanvasPagesView({
       }
       return;
     }
+    const surface = `${dpr}|${zoom}`;
+    if (surface !== surfaceRef.current) {
+      surfaceRef.current = surface;
+      if (innerHostRef.current) clearPresented(innerHostRef.current);
+    }
     const glyphCache = glyphCacheRef.current ?? undefined;
     replayState.updateFrame(frame);
     const environment = { dpr, zoom, glyphCache, resolveImage };
@@ -612,6 +622,7 @@ export function CanvasPagesView({
             <CanvasPageSurface
               key={surfaceKey}
               page={page}
+              noteAnchorRevision={displayPageNoteAnchorRevision(page)}
               pageKey={pageKey}
               zoom={zoom}
               interactive={interactive}

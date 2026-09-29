@@ -39,6 +39,12 @@ export type FontScript = 'cjk-sc' | 'cjk-tc' | 'cjk-jp' | 'cjk-kr' | 'arabic' | 
 export interface BundledFontProvider {
   /** Resolve a Word family to bundled metric-compatible face byte loaders, or undefined. */
   resolve(family: string, bold: boolean, italic: boolean): (() => Promise<ArrayBuffer>) | undefined;
+  /** Like {@link BundledFontProvider.resolve}, but also accepts bundled family names such as `"Gelasio"`, and never substitutes another style. */
+  resolveFamily?(
+    family: string,
+    bold: boolean,
+    italic: boolean
+  ): (() => Promise<ArrayBuffer>) | undefined;
   /**
    * Optional per-script coverage fallback (Noto CJK/RTL faces). Same loader
    * contract as {@link BundledFontProvider.resolve}; providers without

@@ -56,12 +56,18 @@ export interface YrsPointerProjectionTarget {
   cell?: YrsCellLoc;
 }
 
+/** Where a projection reads story segments from. */
+export interface YrsStorySegmentSource {
+  segments(story: string): YrsStorySegment[];
+}
+
 export function createYrsPositionProjection(
   session: YrsSession,
-  rootStory: string
+  rootStory: string,
+  source?: YrsStorySegmentSource
 ): YrsPositionProjection | null {
   if (!session.hasStory(rootStory)) return null;
-  return new YrsPositionProjection(session, rootStory);
+  return new YrsPositionProjection(session, rootStory, source);
 }
 
 /** Maps body positions or region-aware hits into their story's input coordinates. */
@@ -96,11 +102,14 @@ export class YrsPositionProjection {
   private readonly stories = new Map<string, StoryProjection>();
   private readonly nodes = new Map<number, YrsProjectedNode>();
   private readonly tables: YrsProjectedTable[] = [];
+  private readonly source: YrsStorySegmentSource;
 
   constructor(
-    private readonly session: YrsSession,
-    readonly rootStory: string
+    session: YrsSession,
+    readonly rootStory: string,
+    source?: YrsStorySegmentSource
   ) {
+    this.source = source ?? { segments: (story) => session.storySegments(story) };
     this.buildStory(rootStory, 0, 0);
   }
 
@@ -216,7 +225,7 @@ export class YrsPositionProjection {
     };
     this.stories.set(storyId, story);
 
-    const segments = this.session.storySegments(storyId);
+    const segments = this.source.segments(storyId);
     let cursor = 0;
     let inlineLength = 0;
     let leading = 0;
