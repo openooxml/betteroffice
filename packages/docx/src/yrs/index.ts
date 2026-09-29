@@ -2154,6 +2154,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     tablePayload: (story, tableIndex) => {
+      // No table has an index the u32 boundary would wrap; the story must still exist.
+      if (!Number.isInteger(tableIndex) || tableIndex < 0 || tableIndex > 0xffffffff) {
+        session.story_len(story);
+        return null;
+      }
       const payload = session.table_payload(story, tableIndex);
       return payload === undefined ? null : (JSON.parse(payload) as Record<string, unknown>);
     },

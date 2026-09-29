@@ -50,8 +50,10 @@ test('table state reads its own table, not the whole story', async () => {
   payloads.forEach((payload, index) =>
     expect(JSON.stringify(session.tablePayload('body', index))).toBe(JSON.stringify(payload))
   );
-  expect(session.tablePayload('body', 2)).toBeNull();
-  expect(() => session.tablePayload('missing', 0)).toThrow();
+  for (const index of [2, 2 ** 32, 2 ** 32 + 1, -1, 0.5]) {
+    expect(session.tablePayload('body', index)).toBeNull();
+    expect(() => session.tablePayload('missing', index)).toThrow();
+  }
 
   const cell = { ...table, row: 1, column: 2 };
   const story = yrsCellStory(session, cell)!;
