@@ -35,7 +35,6 @@ const CompactToolbar = dynamic(
 
 const SHOWCASE = { url: "/betteroffice-demo.docx", name: "betteroffice-demo.docx" };
 
-/** Matches the editor's own loading indicator so the hand-off does not move it. */
 function DocumentLoading() {
   return (
     <div
