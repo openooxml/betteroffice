@@ -5,11 +5,15 @@ const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-
 const PAGES: usize = 12;
 const NAMESPACES: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
 
-/// A complex field with its cached result.
-fn field(instruction: &str, cached: &str) -> String {
+/// A complex field whose cached result is `result`.
+fn field_with_result(instruction: &str, result: &str) -> String {
     format!(
-        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{cached}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{result}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
     )
+}
+
+fn field(instruction: &str, cached: &str) -> String {
+    field_with_result(instruction, &format!("<w:r><w:t>{cached}</w:t></w:r>"))
 }
 
 /// A right-aligned text box anchored at the margin's right edge.
@@ -20,7 +24,9 @@ fn text_box(paragraph: &str) -> String {
 }
 
 /// Twelve pages whose footer is a text box holding `Page {PAGE}`, the field
-/// cached as "2", and whose first page has a text box holding a TIME field.
+/// cached as "2". The first page has a text box holding a TIME field, a PAGE
+/// field in a hyperlink, a REF field whose result holds a PAGE field, and a
+/// field whose instruction is only digits, which shows nothing in body text.
 fn document() -> Vec<u8> {
     let body = (1..=PAGES)
         .map(|page| {
@@ -30,9 +36,12 @@ fn document() -> Vec<u8> {
                 ""
             };
             let boxed = if page == 1 {
+                let page_9 = r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>9</w:t></w:r></w:fldSimple>"#;
                 text_box(&format!(
-                    "<w:p><w:r><w:t xml:space=\"preserve\">At </w:t></w:r>{}</w:p>",
-                    field("TIME", "10:30")
+                    r#"<w:p><w:r><w:t xml:space="preserve">At </w:t></w:r>{}<w:hyperlink w:anchor="top">{page_9}</w:hyperlink>{}{}</w:p>"#,
+                    field("TIME", "10:30"),
+                    field_with_result("REF top \\h", page_9),
+                    field("12345", "HIDDEN"),
                 ))
             } else {
                 String::new()
@@ -106,9 +115,10 @@ fn fields_in_text_boxes_paint() {
     docx_layout::clear_measure_fonts();
     let display = display_list(&document());
     let footer = |page: usize| fields(&display["pages"][page]["footer"]);
-    // Word shows "Page 1" to "Page 12".
     assert_eq!(footer(0), ["1"]);
     assert_eq!(footer(1), ["2"]);
     assert_eq!(footer(PAGES - 1), ["12"]);
-    assert_eq!(fields(&display["pages"][0]["primitives"]), ["10:30"]);
+    let body = &display["pages"][0]["primitives"];
+    assert_eq!(fields(body), ["10:30", "1", "1", ""]);
+    assert!(!body.to_string().contains("HIDDEN"));
 }

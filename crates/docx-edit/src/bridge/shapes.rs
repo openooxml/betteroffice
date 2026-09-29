@@ -457,7 +457,8 @@ fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
     }
     match string(content, "type").as_deref() {
         Some("run") => shape_document_runs(content),
-        Some("hyperlink") => array(content, "children")
+        Some("hyperlink") => array(content, "structuredChildren")
+            .or_else(|| array(content, "children"))
             .into_iter()
             .flatten()
             .flat_map(|child| shape_content_runs(child, depth + 1))
@@ -467,9 +468,33 @@ fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
             .flatten()
             .flat_map(|child| shape_content_runs(child, depth + 1))
             .collect(),
-        Some("simpleField" | "complexField") => vec![shape_field_run(content)],
+        Some("complexField") => match projected_result(content) {
+            Some(result) => result
+                .iter()
+                .flat_map(|child| shape_content_runs(child, depth + 1))
+                .collect(),
+            None => vec![shape_field_run(content)],
+        },
+        Some("simpleField") => vec![shape_field_run(content)],
         _ => Vec::new(),
     }
+}
+
+/// The result of a complex field that holds a hyperlink or a simple field,
+/// which shows its parts, as body text does, so a nested PAGE still resolves.
+fn projected_result(field_value: &Value) -> Option<&Vec<Value>> {
+    let instruction = string(field_value, "instruction").unwrap_or_default();
+    let result = object(field_value, "structuredResult")?
+        .get("inline")?
+        .as_array()?;
+    (!crate::seed::numeric_field_instruction(&instruction)
+        && result.iter().any(|child| {
+            matches!(
+                string(child, "type").as_deref(),
+                Some("hyperlink" | "simpleField")
+            )
+        }))
+    .then_some(result)
 }
 
 /// A field in shape text, lowered like one in body text: PAGE and NUMPAGES
@@ -494,6 +519,14 @@ fn shape_field_run(field_value: &Value) -> Run {
             }
         }
     }
+    let instruction = string(field_value, "instruction").filter(|value| !value.is_empty());
+    // A field whose instruction is only digits shows nothing, as in body text.
+    if instruction
+        .as_deref()
+        .is_some_and(crate::seed::numeric_field_instruction)
+    {
+        fallback.clear();
+    }
     let raw_type = string(field_value, "fieldType").unwrap_or_else(|| "OTHER".to_owned());
     let field_type = match raw_type.as_str() {
         "PAGE" | "NUMPAGES" | "DATE" | "TIME" => raw_type.clone(),
@@ -503,7 +536,7 @@ fn shape_field_run(field_value: &Value) -> Run {
         fmt: shape_run_formatting(formatting.or_else(|| field(field_value, "formatting"))),
         raw_type: (raw_type != field_type).then_some(raw_type),
         field_type,
-        instruction: string(field_value, "instruction").filter(|value| !value.is_empty()),
+        instruction,
         fallback: Some(fallback),
         pm_start: None,
         pm_end: None,
