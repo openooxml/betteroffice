@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
+import { createFontLoadScope } from '@betteroffice/docx/utils';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession } from '@betteroffice/docx/yrs';
 import { useHistory } from '../../../hooks/useHistory';
@@ -40,6 +41,7 @@ test('comments load from the full document, not from its preview', async () => {
   const fullComments = full.document.package.document?.comments;
   expect(fullComments?.length).toBeGreaterThan(0);
 
+  const fontScope = createFontLoadScope();
   const loaded: Comment[][] = [];
   const sidebar: boolean[] = [];
   const { result, unmount } = renderHook(() =>
@@ -61,6 +63,7 @@ test('comments load from the full document, not from its preview', async () => {
       commentsLoadedRef: { current: false },
       commentIdAllocator: createCommentIdAllocator(),
       setDocumentFonts: () => {},
+      fontScope,
     })
   );
   await act(async () => {
@@ -80,6 +83,7 @@ test('comments load from the full document, not from its preview', async () => {
   expect(loaded).toHaveLength(1);
   expect(loaded[0]).toBe(fullComments!);
   unmount();
+  fontScope.dispose();
   previewSession.destroy();
   fullSession.destroy();
 });
@@ -87,6 +91,7 @@ test('comments load from the full document, not from its preview', async () => {
 test('a load whose full open fails keeps nothing of its preview', async () => {
   const previewSession = await createYrsSession();
   const preview = previewSession.openDocxPreview(COMMENTED, 1)!;
+  const fontScope = createFontLoadScope();
   const errors: Error[] = [];
   const { result, unmount } = renderHook(() => {
     const history = useHistory<Document | null>(null);
@@ -104,6 +109,7 @@ test('a load whose full open fails keeps nothing of its preview', async () => {
       commentsLoadedRef: { current: false },
       commentIdAllocator: createCommentIdAllocator(),
       setDocumentFonts: () => {},
+      fontScope,
     });
     return { history, loader };
   });
@@ -122,5 +128,50 @@ test('a load whose full open fails keeps nothing of its preview', async () => {
   expect(result.current.history.state).toBeNull();
   expect(errors.map((error) => error.message)).toEqual(['full open failed']);
   unmount();
+  fontScope.dispose();
   previewSession.destroy();
+});
+
+test("a preview's font loads stop once its load's full document is accepted", async () => {
+  const previewSession = await createYrsSession();
+  const fullSession = await createYrsSession();
+  const preview = previewSession.openDocxPreview(COMMENTED, 1)!;
+  const full = fullSession.openDocx(COMMENTED, true);
+  const fontScope = createFontLoadScope();
+  const fontsFor: unknown[] = [];
+  fontScope.loadDocumentFonts = async (doc) => {
+    fontsFor.push(doc);
+  };
+  const { result, unmount } = renderHook(() =>
+    useDocumentLoader({
+      documentBuffer: null,
+      initialDocument: null,
+      externalContent: false,
+      history: useHistory<Document | null>(null),
+      pagedEditorRef: { current: null },
+      setLoadingState: () => {},
+      setComments: () => {},
+      setShowCommentsSidebar: () => {},
+      onError: undefined,
+      resetForNewDocument: () => {},
+      commentsLoadedRef: { current: false },
+      commentIdAllocator: createCommentIdAllocator(),
+      setDocumentFonts: () => {},
+      fontScope,
+    })
+  );
+  await act(async () => {
+    void result.current.loadBuffer(COMMENTED.slice().buffer);
+  });
+  const generation = result.current.yrsSeedGeneration;
+  await act(async () => {
+    result.current.acceptHostDocument(preview, generation, { preview: true });
+    result.current.acceptHostDocument(full, generation);
+    await new Promise((done) => setTimeout(done, 50));
+  });
+  expect(fontsFor).toEqual([full.document]);
+  unmount();
+  fontScope.dispose();
+  previewSession.destroy();
+  fullSession.destroy();
 });
