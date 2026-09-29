@@ -1,32 +1,116 @@
 //! Embedded media table and image-resolution aliases.
 
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use base64::Engine as _;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::relationships::RelationshipMap;
 
 pub type MediaMap = IndexMap<String, Arc<MediaFile>>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// One embedded media part, kept as its display bytes. Text forms are encoded
+/// once on first use and shared by every reference, so a package's media cost
+/// is its bytes, not N copies of their base64.
+#[derive(Clone, Debug)]
 pub struct MediaFile {
     pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     pub mime_type: String,
-    pub base64: String,
-    pub data_url: String,
+    data: Arc<[u8]>,
+    data_url: OnceLock<Arc<str>>,
+}
+
+impl MediaFile {
+    pub fn new(path: String, filename: Option<String>, mime_type: String, data: Vec<u8>) -> Self {
+        Self {
+            path,
+            filename,
+            mime_type,
+            data: data.into(),
+            data_url: OnceLock::new(),
+        }
+    }
+
+    /// The bytes any text form encodes (the display transcode when one applied).
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// `data:` URL for the display bytes, encoded once and shared.
+    pub fn data_url(&self) -> &Arc<str> {
+        self.data_url.get_or_init(|| {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&self.data);
+            format!("data:{};base64,{encoded}", self.mime_type).into()
+        })
+    }
+
+    /// The base64 payload inside `data_url`, without the scheme prefix.
+    pub fn base64(&self) -> &str {
+        self.data_url()
+            .split_once(',')
+            .map(|(_, encoded)| encoded)
+            .unwrap_or_default()
+    }
+}
+
+impl PartialEq for MediaFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.filename == other.filename
+            && self.mime_type == other.mime_type
+            && self.data == other.data
+    }
+}
+
+impl Eq for MediaFile {}
+
+impl Serialize for MediaFile {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("path", &self.path)?;
+        if let Some(filename) = &self.filename {
+            map.serialize_entry("filename", filename)?;
+        }
+        map.serialize_entry("mimeType", &self.mime_type)?;
+        map.serialize_entry("base64", self.base64())?;
+        map.serialize_entry("dataUrl", self.data_url().as_ref())?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for MediaFile {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            path: String,
+            filename: Option<String>,
+            mime_type: String,
+            base64: String,
+            #[serde(default)]
+            data_url: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(&wire.base64)
+            .map_err(serde::de::Error::custom)?;
+        let file = Self::new(wire.path, wire.filename, wire.mime_type, data);
+        if !wire.data_url.is_empty() {
+            let _ = file.data_url.set(wire.data_url.into());
+        }
+        Ok(file)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedImageData {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub src: Option<String>,
+    pub src: Option<Arc<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,15 +132,12 @@ pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, 
         let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
         let (data, mime_type, warning) = display_form(data, media_mime_type(path), path);
         warnings.extend(warning);
-        let mime_type = mime_type.to_owned();
-        let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
-        let file = Arc::new(MediaFile {
-            path: path.clone(),
-            filename: Some(filename),
-            mime_type: mime_type.clone(),
-            data_url: format!("data:{mime_type};base64,{base64}"),
-            base64,
-        });
+        let file = Arc::new(MediaFile::new(
+            path.clone(),
+            Some(filename),
+            mime_type.to_owned(),
+            data.into_owned(),
+        ));
         media.insert(path.clone(), Arc::clone(&file));
         if let Some(normalized) = path.strip_prefix("word/") {
             media.insert(normalized.to_owned(), file);
@@ -90,11 +171,7 @@ pub fn resolve_image_data(
         ] {
             if let Some(file) = find_case_insensitive(media, &candidate) {
                 return ResolvedImageData {
-                    src: Some(if file.data_url.is_empty() {
-                        file.base64.clone()
-                    } else {
-                        file.data_url.clone()
-                    }),
+                    src: Some(Arc::clone(file.data_url())),
                     mime_type: Some(file.mime_type.clone()),
                     filename,
                 };

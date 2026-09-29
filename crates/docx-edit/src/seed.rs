@@ -5974,13 +5974,12 @@ mod tests {
             .unwrap();
             envelope.document.package.media_entries = vec![(
                 "word/media/image.png".to_owned(),
-                Arc::new(docx_parse::media::MediaFile {
-                    path: "word/media/image.png".to_owned(),
-                    filename: Some("image.png".to_owned()),
-                    mime_type: "image/png".to_owned(),
-                    base64: "AQID".to_owned(),
-                    data_url: src.to_owned(),
-                }),
+                Arc::new(docx_parse::media::MediaFile::new(
+                    "word/media/image.png".to_owned(),
+                    Some("image.png".to_owned()),
+                    "image/png".to_owned(),
+                    vec![1, 2, 3],
+                )),
             )];
             let mut without_media = envelope.clone();
             without_media.document.package.media_entries.clear();

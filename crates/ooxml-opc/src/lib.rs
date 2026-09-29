@@ -92,12 +92,10 @@ pub fn unzip_parts_where(
         return Err(format!("zip entry count exceeds {MAX_ENTRY_COUNT}"));
     }
 
-    let mut parts = Vec::with_capacity(archive.len());
-    let mut total: u64 = 0;
+    let mut wanted = Vec::with_capacity(archive.len());
     let mut seen_paths = HashSet::new();
-
     for i in 0..archive.len() {
-        let mut entry = archive
+        let entry = archive
             .by_index(i)
             .map_err(|e| format!("bad zip entry: {e}"))?;
         if entry.is_dir() {
@@ -110,13 +108,104 @@ pub fn unzip_parts_where(
         if !seen_paths.insert(security_path) {
             return Err(format!("duplicate normalized zip entry path: {name}"));
         }
-        if !keep(&name) {
-            continue;
+        if keep(&name) {
+            wanted.push((i, name, entry.size()));
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let declared: u64 = wanted.iter().map(|(_, _, size)| size).sum();
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(8);
+        if workers > 1 && wanted.len() >= 4 && declared >= PARALLEL_INFLATE_MIN_BYTES {
+            return inflate_parallel(data, budget, &wanted, workers);
+        }
+    }
+    inflate_entries(data, budget, &wanted, budget)
+}
+
+/// Byte capacity reserved for an entry's declared size; a lying header still
+/// cannot reserve more than this.
+const PRESIZE_MAX: u64 = 64 * 1024 * 1024;
+
+/// Below this much declared output, sequential inflation beats thread setup.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_INFLATE_MIN_BYTES: u64 = 8 * 1024 * 1024;
+
+/// One entry kept after validation: archive index, name, declared size.
+type WantedEntry = (usize, String, u64);
+
+type PartList = Vec<(String, Vec<u8>)>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn inflate_parallel(
+    data: &[u8],
+    budget: u64,
+    wanted: &[WantedEntry],
+    workers: usize,
+) -> Result<PartList, String> {
+    let declared: u64 = wanted.iter().map(|(_, _, size)| size).sum();
+    let per_worker = (declared / workers as u64).max(1);
+    let mut chunks: Vec<Vec<WantedEntry>> = Vec::new();
+    let mut current: Vec<WantedEntry> = Vec::new();
+    let mut current_size = 0u64;
+    for entry in wanted {
+        current.push(entry.clone());
+        current_size += entry.2;
+        if current_size >= per_worker {
+            chunks.push(std::mem::take(&mut current));
+            current_size = 0;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    let mut results: Vec<Result<PartList, String>> =
+        (0..chunks.len()).map(|_| Ok(Vec::new())).collect();
+    std::thread::scope(|scope| {
+        for (chunk, result) in chunks.into_iter().zip(results.iter_mut()) {
+            scope.spawn(move || {
+                *result = inflate_entries(data, budget, &chunk, budget);
+            });
+        }
+    });
+    let mut parts = Vec::with_capacity(wanted.len());
+    let mut total: u64 = 0;
+    for result in results {
+        for (name, buf) in result? {
+            total += buf.len() as u64;
+            parts.push((name, buf));
+        }
+    }
+    if total > budget {
+        return Err(format!("inflated size exceeds {budget} bytes"));
+    }
+    Ok(parts)
+}
+
+/// Inflates `wanted` in archive order, per entry against `entry_budget`.
+fn inflate_entries(
+    data: &[u8],
+    budget: u64,
+    wanted: &[WantedEntry],
+    entry_budget: u64,
+) -> Result<PartList, String> {
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("bad zip: {e}"))?;
+    let mut parts = Vec::with_capacity(wanted.len());
+    let mut total: u64 = 0;
+    for (index, name, size) in wanted {
+        let mut entry = archive
+            .by_index(*index)
+            .map_err(|e| format!("bad zip entry: {e}"))?;
 
         // read at most (budget - total) + 1 bytes: one over the limit proves a bomb
-        let remaining = budget - total;
-        let mut buf = Vec::new();
+        let remaining = entry_budget.saturating_sub(total).min(budget);
+        let mut buf = Vec::with_capacity((*size).min(remaining).min(PRESIZE_MAX) as usize);
         entry
             .by_ref()
             .take(remaining + 1)
@@ -126,9 +215,8 @@ pub fn unzip_parts_where(
             return Err(format!("inflated size exceeds {budget} bytes"));
         }
         total += buf.len() as u64;
-        parts.push((name, buf));
+        parts.push((name.clone(), buf));
     }
-
     Ok(parts)
 }
 
