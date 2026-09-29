@@ -11,6 +11,8 @@ const EAST_ASIAN_CHARSETS: [&str; 5] = ["80", "81", "82", "86", "88"];
 const COMPLEX_SCRIPT_CHARSETS: [&str; 2] = ["b1", "b2"];
 /// Longer strings in an embed's payload are not taken for font names.
 const MAX_FONT_NAME_BYTES: usize = 128;
+/// The family the render bridge draws math, and its stand-in text, with.
+const MATH_FONT: &str = "cambria math";
 
 /// What a document's seeded runs measure with, gathered unit by unit: the
 /// lowered run takes its `w:rFonts` slots and `w:cs` from its own attributes,
@@ -179,7 +181,13 @@ impl ScriptFontUse {
         for (key, value) in entries {
             self.entry(key, value, rtl);
             match (key.as_str(), value) {
-                ("text" | "plainText", Value::String(text)) => embedded.texts.push(text.clone()),
+                ("plainText", value) => {
+                    self.latin.insert(MATH_FONT.to_owned());
+                    if let Value::String(text) = value {
+                        embedded.texts.push(text.clone());
+                    }
+                }
+                ("text", Value::String(text)) => embedded.texts.push(text.clone()),
                 (key, Value::String(encoded)) if key.ends_with("Json") => {
                     if let Ok(decoded) = serde_json::from_str::<Value>(encoded) {
                         self.walk(&decoded, embedded);
@@ -380,6 +388,16 @@ mod tests {
         let mut math = latin_document();
         math.embed(&attrs(json!({"plainText": "\u{6f22}"})), &BTreeMap::new());
         assert_eq!(unused(&math, &NAMES), ["Traditional Arabic"]);
+
+        let mut equation = ScriptFontUse::default();
+        let defaults = json!({"fontFamily": {"ascii": "Calibri", "cs": "Cambria Math"}});
+        equation.embed(
+            &attrs(json!({"defaultTextFormatting": defaults})),
+            &BTreeMap::new(),
+        );
+        assert_eq!(unused(&equation, &["Cambria Math"]), ["Cambria Math"]);
+        equation.embed(&attrs(json!({"plainText": ""})), &BTreeMap::new());
+        assert!(unused(&equation, &["Cambria Math"]).is_empty());
 
         let mut shape = latin_document();
         let shape_json = json!({"paragraphs": [{"runs": [{"fontFamily": {"ascii": "SimSun"}}]}]});
