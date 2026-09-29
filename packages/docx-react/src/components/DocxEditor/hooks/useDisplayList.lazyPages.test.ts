@@ -158,6 +158,7 @@ function lazyFixture() {
   globalThis.Worker = EngineWorker as unknown as typeof Worker;
   const host = {
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    resetFrameBase: () => {},
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     encodeStateVector: () => new Uint8Array(),
     onUpdate: () => () => {},

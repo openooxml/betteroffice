@@ -154,6 +154,7 @@ test('recovers from a worker whose frame number the host engine already used', a
       expectedEpochs.push(epoch);
       return native.build_display_list_frame(input, epoch);
     },
+    encodeStateVector: () => new Uint8Array(),
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     onUpdate: () => () => {},
@@ -362,6 +363,7 @@ test('a layout after a worker crash the host cannot absorb as input still render
     applyInput: () => {
       throw new Error('resident input state is not ready for this paragraph');
     },
+    encodeStateVector: () => new Uint8Array(),
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     onUpdate: () => () => {},
