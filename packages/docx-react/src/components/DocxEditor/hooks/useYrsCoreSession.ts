@@ -196,6 +196,7 @@ export function useYrsCoreSession(
       .then(async (yrs) => {
         // A copy hashed with Web Crypto keeps the package's hash off this thread.
         const bytes = seedBytes ? await yrs.prepareDocxBytes(seedBytes) : null;
+        if (cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false) return;
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
         if (
           cancelled ||
