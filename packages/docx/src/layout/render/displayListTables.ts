@@ -397,6 +397,29 @@ export function deriveDisplayListTableFragments(
   return out;
 }
 
+/**
+ * [`deriveDisplayListTableFragments`] for the pages `start..=end` only. Each of
+ * their tables still takes its identity from every page it covers.
+ */
+export function deriveDisplayListTableFragmentsOnPages(
+  list: DisplayList,
+  tableKeyOf: TableKeyResolver,
+  start: number,
+  end: number
+): DisplayListTableFragment[] {
+  const pages = list.pages.slice(start, end + 1);
+  const tableIds = new Set<string>();
+  for (const page of pages) {
+    for (const primitive of page.primitives) {
+      if (primitive.table?.tableId) tableIds.add(primitive.table.tableId);
+    }
+  }
+  const identities = buildTableIdentityMap(list, tableKeyOf, { kind: 'body' }, tableIds);
+  return pages.flatMap((page) =>
+    fragmentsForPage(page.pageIndex, page.primitives, tableKeyOf, identities)
+  );
+}
+
 interface RegionPrimitives {
   kind: 'body' | 'header' | 'footer';
   rId?: string;
@@ -418,7 +441,8 @@ function primitivesForRegion(
 function buildTableIdentityMap(
   list: DisplayList,
   tableKeyOf: TableKeyResolver,
-  region: DisplayListTableRegion
+  region: DisplayListTableRegion,
+  onlyTables?: ReadonlySet<string>
 ): TableIdentityMap {
   const identities: TableIdentityMap = new Map();
   for (const page of list.pages) {
@@ -426,6 +450,7 @@ function buildTableIdentityMap(
     if (!regionPrimitives) continue;
     for (const primitive of regionPrimitives.primitives) {
       if (!primitive.cell || !primitive.table?.tableId || primitive.docStart == null) continue;
+      if (onlyTables && !onlyTables.has(primitive.table.tableId)) continue;
       const tableKey = tableKeyOf(primitive.docStart);
       if (tableKey == null) continue;
       const current = identities.get(primitive.table.tableId);

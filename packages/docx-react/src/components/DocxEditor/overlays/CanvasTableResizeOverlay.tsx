@@ -30,7 +30,7 @@
 import React, { useLayoutEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  deriveDisplayListTableFragments,
+  deriveDisplayListTableFragmentsOnPages,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
@@ -100,8 +100,8 @@ export function CanvasTableResizeOverlay({
   sidebarOpen,
   zoom,
 }: CanvasTableResizeOverlayProps): React.ReactPortal | null {
-  // Handles exist only on the pages around the viewport; the window follows
-  // scrolling a frame at a time.
+  // Handles exist only on the visible pages and one page either side; the
+  // window follows scrolling and resizing a frame at a time.
   const [pageWindow, setPageWindow] = useState<RemotePresencePageWindow | null>(null);
   useLayoutEffect(() => {
     const host = canvasHostRef.current;
@@ -124,7 +124,8 @@ export function CanvasTableResizeOverlay({
             metrics,
             column.getBoundingClientRect().top,
             viewportTop,
-            viewportBottom
+            viewportBottom,
+            Infinity
           )
         : null;
       setPageWindow((previous) =>
@@ -142,9 +143,12 @@ export function CanvasTableResizeOverlay({
     };
     scrollTarget.addEventListener('scroll', schedule, { passive: true });
     window.addEventListener('resize', schedule);
+    const resized = usesWindow ? null : new ResizeObserver(schedule);
+    resized?.observe(scrollParent);
     return () => {
       scrollTarget.removeEventListener('scroll', schedule);
       window.removeEventListener('resize', schedule);
+      resized?.disconnect();
       if (frame !== null) cancelAnimationFrame(frame);
     };
   }, [canvasHostRef, displayListQueries, sidebarOpen, zoom]);
@@ -179,12 +183,12 @@ export function CanvasTableResizeOverlay({
     };
 
     const out: HandleSpec[] = [];
-    const displayList = displayListQueries.displayList;
-    const nearViewport = {
-      ...displayList,
-      pages: displayList.pages.slice(pageWindow.start, pageWindow.end + 1),
-    };
-    for (const frag of deriveDisplayListTableFragments(nearViewport, tableKeyOf)) {
+    for (const frag of deriveDisplayListTableFragmentsOnPages(
+      displayListQueries.displayList,
+      tableKeyOf,
+      pageWindow.start,
+      pageWindow.end
+    )) {
       const table = tableAt.get(frag.tableKey);
       if (!table || table.widthsTwips.length === 0) continue;
       const { pmStart, widthsTwips, rowCount } = table;
