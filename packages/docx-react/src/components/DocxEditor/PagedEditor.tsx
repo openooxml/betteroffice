@@ -72,6 +72,7 @@ import {
   type YrsLoc,
   type YrsRenderEnv,
   type YrsResidentCaretSnapshot,
+  type YrsRevisionInfo,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
@@ -1593,11 +1594,30 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const anchorEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastAnchorEmitAtRef = useRef(0);
     const lastAnchorPositionsRef = useRef<Map<string, number> | null>(null);
+    // Revisions and tracked-change entries depend on the document only, so
+    // display-list changes (lazily built pages, scrolling) reuse them.
+    const sidebarReadsRef = useRef<{
+      session: YrsSession;
+      version: string;
+      revisions: YrsRevisionInfo[];
+      tracked: TrackedChangesResult | null;
+    } | null>(null);
+    const deliveredTrackedRef = useRef<{
+      result: TrackedChangesResult;
+      to: (result: TrackedChangesResult) => void;
+    } | null>(null);
     useEffect(() => {
       const session = yrsCore.session;
       if (!session || !displayListQueries || !onAnchorPositionsChange) {
         return;
       }
+      const deliverTracked = (result: TrackedChangesResult): void => {
+        if (!onYrsTrackedChangesChange) return;
+        const delivered = deliveredTrackedRef.current;
+        if (delivered?.result === result && delivered.to === onYrsTrackedChangesChange) return;
+        deliveredTrackedRef.current = { result, to: onYrsTrackedChangesChange };
+        onYrsTrackedChangesChange(result);
+      };
       let cancelled = false;
       let hostRaf: number | null = null;
       const emit = (): void => {
@@ -1623,9 +1643,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           if (!pageRect || !pageSize || pageSize.height <= 0) return null;
           return pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height);
         };
-        const revisions = session.listRevisions();
+        const version = session.version();
+        let reads = sidebarReadsRef.current;
+        if (reads?.session !== session || reads.version !== version) {
+          reads = { session, version, revisions: session.listRevisions(), tracked: null };
+          sidebarReadsRef.current = reads;
+        }
+        const { revisions } = reads;
         if (sidebarCommentIds.length === 0 && revisions.length === 0) {
-          onYrsTrackedChangesChange?.(EMPTY_TRACKED_CHANGES_RESULT);
+          deliverTracked(EMPTY_TRACKED_CHANGES_RESULT);
           if (lastAnchorPositionsRef.current !== EMPTY_ANCHOR_POSITIONS) {
             lastAnchorPositionsRef.current = EMPTY_ANCHOR_POSITIONS;
             onAnchorPositionsChange(EMPTY_ANCHOR_POSITIONS);
@@ -1633,7 +1659,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           return;
         }
         const projection = createYrsSidebarProjection(session);
-        onYrsTrackedChangesChange?.(extractTrackedChangesFromYrs(revisions, projection));
+        reads.tracked ??= extractTrackedChangesFromYrs(revisions, projection);
+        deliverTracked(reads.tracked);
         const hfRegions = new Map<string, 'header' | 'footer'>();
         for (const rId of document?.package?.headers?.keys() ?? []) {
           hfRegions.set(rId, 'header');
