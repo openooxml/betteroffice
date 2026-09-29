@@ -320,6 +320,9 @@ fn options_through_section(
 /// Measures leading blocks until their pagination runs two pages past
 /// `pages`, far enough that no later block moves the first `pages` pages.
 /// Returns the extents of the measured prefix; all blocks when it never does.
+/// With floats anchored in the text, a float applies from its anchor on, so
+/// the prefix is measured whole each time it grows.
+#[allow(clippy::too_many_arguments)]
 fn measure_page_prefix(
     blocks: &mut [LayoutBlock],
     widths: &[f64],
@@ -328,18 +331,32 @@ fn measure_page_prefix(
     request_options: &docx_layout::types::LayoutOptions,
     regions: &DocumentRegions,
     pages: usize,
+    floats: bool,
 ) -> Result<Vec<BlockExtent>, String> {
     let mut measures = Vec::new();
     let mut step = 32;
     loop {
         let start = measures.len();
         let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
-        measures.extend(docx_layout::measure_blocks::measure_blocks_with_floats(
-            &mut blocks[start..end],
-            &widths[start..end],
-            measurement,
-            Some(geometry),
-        )?);
+        if floats {
+            let mut prefix = blocks[..end].to_vec();
+            measures = docx_layout::measure_blocks::measure_blocks_with_floats(
+                &mut prefix,
+                &widths[..end],
+                measurement,
+                Some(geometry),
+            )?;
+            for (block, measured) in blocks.iter_mut().zip(prefix) {
+                *block = measured;
+            }
+        } else {
+            measures.extend(docx_layout::measure_blocks::measure_blocks_with_floats(
+                &mut blocks[start..end],
+                &widths[start..end],
+                measurement,
+                Some(geometry),
+            )?);
+        }
         if end == blocks.len() {
             return Ok(measures);
         }
@@ -1476,13 +1493,14 @@ impl EngineSession {
         let resident_body = body_story.is_some();
         let mut block_fingerprints: Option<Vec<u64>> = None;
         let mut provisional = false;
+        let mut floats = false;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
                 .as_ref()
                 .ok_or_else(|| "resident body layout requires a render environment".to_owned())?;
             enum Arena {
                 Reused(Vec<MeasuredBlock>, Vec<u64>),
-                /// Blocks to measure, and whether floats tie them to the flow.
+                /// Blocks to measure, and whether floats couple the whole flow.
                 Full(Vec<LayoutBlock>, bool),
             }
             let arena = self
@@ -1492,13 +1510,16 @@ impl EngineSession {
                     let geometry = initial_float_page_geometry(&input, &regions);
                     let default_width = widths.first().copied().unwrap_or(0.0);
                     // floating extents depend on flow position; re-measure all
-                    if docx_layout::measure_blocks::has_floating_zones(
-                        blocks,
-                        default_width,
-                        &measurement,
-                        Some(&geometry),
-                    )? {
-                        return Ok(Arena::Full(blocks.to_vec(), true));
+                    let (anchors_floats, couples_flow) =
+                        docx_layout::measure_blocks::floating_zone_kinds(
+                            blocks,
+                            default_width,
+                            &measurement,
+                            Some(&geometry),
+                        )?;
+                    floats = anchors_floats;
+                    if anchors_floats {
+                        return Ok(Arena::Full(blocks.to_vec(), couples_flow));
                     }
                     match self.resident_region_measured(
                         blocks,
@@ -1518,7 +1539,7 @@ impl EngineSession {
                     block_fingerprints = Some(fingerprints);
                     apply_section_geometry(&mut input, &regions);
                 }
-                Arena::Full(mut blocks, floating) => {
+                Arena::Full(mut blocks, coupled) => {
                     let mut section_index = 0;
                     for block in &mut blocks {
                         resolve_line_unit_spacing(
@@ -1537,7 +1558,7 @@ impl EngineSession {
                     let widths = region_measurement_widths(blocks.iter(), &input, &regions);
                     let geometry = initial_float_page_geometry(&input, &regions);
                     let measures = match prefix_pages {
-                        Some(pages) if !floating => {
+                        Some(pages) if !coupled => {
                             let measures = measure_page_prefix(
                                 &mut blocks,
                                 &widths,
@@ -1546,6 +1567,7 @@ impl EngineSession {
                                 &request_options,
                                 &regions,
                                 pages,
+                                floats,
                             )?;
                             provisional = measures.len() < blocks.len();
                             blocks.truncate(measures.len());
@@ -4027,6 +4049,67 @@ mod tests {
         assert!(
             !short.contains("provisional"),
             "a short body is laid out whole"
+        );
+    }
+
+    #[test]
+    fn a_prefix_with_floating_tables_lays_out_its_first_pages_like_the_full_pass() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let mut body = String::new();
+        for index in 0..200 {
+            if index % 7 == 3 {
+                body.push_str(&format!(
+                    r#"<w:tbl><w:tblPr><w:tblpPr w:leftFromText="120" w:rightFromText="120" w:vertAnchor="text" w:horzAnchor="text" w:tblpY="60"/><w:tblW w:w="1800" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1800"/></w:tblGrid>{rows}</w:tbl>"#,
+                    rows = format!("<w:tr><w:tc><w:p><w:r><w:t>Float {index}</w:t></w:r></w:p></w:tc></w:tr>").repeat(6)
+                ));
+            }
+            body.push_str(&format!(
+                "<w:p><w:r><w:t>Paragraph {index} wraps around the floating tables beside it on this page.</w:t></w:r></w:p>"
+            ));
+        }
+        let bytes = docx_bytes("", &body);
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [{ "sectionId": "main", "properties": {
+                "pageWidth": 5760, "pageHeight": 4320,
+                "marginTop": 360, "marginRight": 360, "marginBottom": 360, "marginLeft": 360
+            } }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        let seeded = || {
+            let engine = EngineSession::new(148);
+            crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+            engine
+        };
+        let full: serde_json::Value = serde_json::from_str(
+            &seeded()
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap(),
+        )
+        .unwrap();
+        let prefix: serde_json::Value = serde_json::from_str(
+            &seeded()
+                .layout_document_with_regions_prefix_retained_json(&request, 3)
+                .unwrap(),
+        )
+        .unwrap();
+        let first_pages = full["layout"]["pages"].as_array().unwrap()[..3].to_vec();
+        assert!(
+            serde_json::to_string(&first_pages)
+                .unwrap()
+                .contains("\"isFloating\":true")
+        );
+        assert_eq!(prefix["provisional"], true);
+        assert_eq!(
+            prefix["layout"]["pages"].as_array().unwrap()[..3],
+            first_pages
         );
     }
 
