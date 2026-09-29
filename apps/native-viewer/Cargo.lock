@@ -227,6 +227,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-metafile"
+version = "0.3.0"
+dependencies = [
+ "betteroffice-drawingml",
+]
+
+[[package]]
 name = "betteroffice-native-viewer"
 version = "0.1.0"
 dependencies = [
@@ -344,6 +351,7 @@ name = "betteroffice-pptx-render"
 version = "0.3.0"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",

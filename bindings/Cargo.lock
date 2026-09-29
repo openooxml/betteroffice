@@ -160,6 +160,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-metafile"
+version = "0.3.0"
+dependencies = [
+ "betteroffice-drawingml",
+]
+
+[[package]]
 name = "betteroffice-ooxml-diff"
 version = "0.3.0"
 
@@ -250,6 +257,7 @@ name = "betteroffice-pptx-render"
 version = "0.3.0"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
