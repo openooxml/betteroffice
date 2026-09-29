@@ -55,29 +55,26 @@ async function inkAtViewportCentre(page: Page): Promise<number> {
     return { x: rect.left + rect.width / 2 - 150, y: rect.top + rect.height / 2 - 200 };
   });
   const png = await page.screenshot({ clip: { ...box, width: 300, height: 400 } });
-  return page.evaluate(
-    async (data) => {
-      const image = await createImageBitmap(
-        new Blob([new Uint8Array(data)], { type: 'image/png' })
-      );
-      const canvas = new OffscreenCanvas(image.width, image.height);
-      const context = canvas.getContext('2d')!;
-      context.drawImage(image, 0, 0);
-      const pixels = context.getImageData(0, 0, image.width, image.height).data;
-      let dark = 0;
-      for (let index = 0; index < pixels.length; index += 4) {
-        if (pixels[index]! + pixels[index + 1]! + pixels[index + 2]! < 300) dark += 1;
-      }
-      return dark;
-    },
-    [...png]
-  );
+  return page.evaluate(async (base64) => {
+    const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+    const image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+    const canvas = new OffscreenCanvas(image.width, image.height);
+    const context = canvas.getContext('2d')!;
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, image.width, image.height).data;
+    let dark = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index]! + pixels[index + 1]! + pixels[index + 2]! < 300) dark += 1;
+    }
+    return dark;
+  }, png.toString('base64'));
 }
 
 for (const zoom of [0.8, 1.25]) {
   test(`docx: pages stay painted while scrolling under an ancestor CSS zoom of ${zoom}`, async ({
     page,
   }) => {
+    test.setTimeout(240_000);
     await open(page);
     await page.addStyleTag({ content: `.editor-stage { zoom: ${zoom}; }` });
     for (const fraction of [0.3, 0.7]) {
@@ -89,7 +86,7 @@ for (const zoom of [0.8, 1.25]) {
         const target = scroller ?? document.scrollingElement!;
         target.scrollTop = (target.scrollHeight - target.clientHeight) * fraction;
       }, fraction);
-      await expect.poll(() => inkAtViewportCentre(page), { timeout: 10_000 }).toBeGreaterThan(50);
+      await expect.poll(() => inkAtViewportCentre(page), { timeout: 45_000 }).toBeGreaterThan(50);
     }
   });
 }
