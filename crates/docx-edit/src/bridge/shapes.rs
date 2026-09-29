@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use docx_layout::types::{
-    AxisPosition, BlockId, BoxEdges, ImageRunPosition, LineBreakRun, ParagraphAttrs,
+    AxisPosition, BlockId, BoxEdges, FieldRun, ImageRunPosition, LineBreakRun, ParagraphAttrs,
     ParagraphBlock, Run, RunFormatting, ShapeBlock, TabRun, TextRun,
 };
 use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
@@ -467,8 +467,47 @@ fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
             .flatten()
             .flat_map(|child| shape_content_runs(child, depth + 1))
             .collect(),
+        Some("simpleField" | "complexField") => vec![shape_field_run(content)],
         _ => Vec::new(),
     }
+}
+
+/// A field in shape text, lowered like one in body text: PAGE and NUMPAGES
+/// resolve per page, and any other field shows its cached result.
+fn shape_field_run(field_value: &Value) -> Run {
+    let results = if string(field_value, "type").as_deref() == Some("simpleField") {
+        array(field_value, "content")
+    } else {
+        array(field_value, "fieldResult")
+    };
+    let mut fallback = String::new();
+    let mut formatting = None;
+    for run in results
+        .into_iter()
+        .flatten()
+        .filter(|run| string(run, "type").as_deref() == Some("run"))
+    {
+        formatting = formatting.or_else(|| field(run, "formatting"));
+        for content in array(run, "content").into_iter().flatten() {
+            if string(content, "type").as_deref() == Some("text") {
+                fallback.push_str(&string(content, "text").unwrap_or_default());
+            }
+        }
+    }
+    let raw_type = string(field_value, "fieldType").unwrap_or_else(|| "OTHER".to_owned());
+    let field_type = match raw_type.as_str() {
+        "PAGE" | "NUMPAGES" | "DATE" | "TIME" => raw_type.clone(),
+        _ => "OTHER".to_owned(),
+    };
+    Run::Field(FieldRun {
+        fmt: shape_run_formatting(formatting.or_else(|| field(field_value, "formatting"))),
+        raw_type: (raw_type != field_type).then_some(raw_type),
+        field_type,
+        instruction: string(field_value, "instruction").filter(|value| !value.is_empty()),
+        fallback: Some(fallback),
+        pm_start: None,
+        pm_end: None,
+    })
 }
 
 fn shape_document_runs(run: &Value) -> Vec<Run> {
