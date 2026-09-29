@@ -4,7 +4,9 @@ mod fixture;
 
 use std::collections::BTreeMap;
 
-use docx_edit::{EditCtx, EngineSession, FormatPolicy, ParaAttrDelta, ParaSelector, Position};
+use docx_edit::{
+    EditCtx, EngineSession, FormatPolicy, ParaAttrDelta, ParaSelector, Position, StoryRange,
+};
 use serde_json::{Value, json};
 
 fn extras(request: &str) -> String {
@@ -284,4 +286,176 @@ fn a_page_numbering_change_with_a_body_edit_restamps_pages_as_a_fresh_layout_wou
         (layout, display(&engine)),
         fresh(&engine, &renumbered, 9313)
     );
+}
+
+fn pages(layout: &str) -> usize {
+    serde_json::from_str::<Value>(layout).unwrap()["layout"]["pages"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+fn small_page(body: &str) -> String {
+    format!(
+        concat!(
+            "{}<w:sectPr><w:pgSz w:w=\"7200\" w:h=\"5760\"/><w:pgMar w:top=\"720\" ",
+            "w:right=\"720\" w:bottom=\"720\" w:left=\"720\" w:header=\"300\" ",
+            "w:footer=\"300\" w:gutter=\"0\"/></w:sectPr>"
+        ),
+        body
+    )
+}
+
+#[test]
+fn shrinking_a_kept_follower_pulls_its_keep_with_next_run_back() {
+    let filler = "filler words to fill most of the first page ".repeat(20);
+    let follower = "a follower kept on its lines with its keep with next head ".repeat(6);
+    let body = small_page(&format!(
+        "{}{}{}",
+        fixture::p("50000001", &fixture::r(&filler)),
+        fixture::p(
+            "50000002",
+            &format!("<w:pPr><w:keepNext/></w:pPr>{}", fixture::r("Kept heading"))
+        ),
+        fixture::p(
+            "50000003",
+            &format!("<w:pPr><w:keepLines/></w:pPr>{}", fixture::r(&follower))
+        ),
+    ));
+    let (engine, request) = fixture::laid_out(&fixture::with_body(&body), 9314);
+    engine
+        .build_display_list_frame(&extras(&request), 0)
+        .unwrap();
+    assert_eq!(
+        pages(&engine.layout_document_with_regions_json(&request).unwrap()),
+        2
+    );
+    engine
+        .build_display_list_frame(&extras(&request), 1)
+        .unwrap();
+
+    let start = engine.doc().paragraphs("body").unwrap()[..2]
+        .iter()
+        .map(|paragraph| paragraph.text.encode_utf16().count() as u32 + 1)
+        .sum::<u32>();
+    engine
+        .doc()
+        .delete_range(
+            &EditCtx::local("", ""),
+            StoryRange::new("body", start + 1, start + follower.len() as u32),
+        )
+        .unwrap();
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    engine
+        .build_display_list_frame(&extras(&request), 2)
+        .unwrap();
+    assert_eq!(pages(&layout), 1);
+    assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9315));
+}
+
+#[test]
+fn a_same_length_edit_around_an_endnote_reference_moves_its_backlink() {
+    let filler = (0..40)
+        .map(|index| {
+            fixture::p(
+                &format!("{:08X}", 0x6000_0010 + index),
+                &fixture::r(&"enough words to spread over several pages ".repeat(4)),
+            )
+        })
+        .collect::<String>();
+    let body = small_page(&format!(
+        "{}{filler}",
+        fixture::p(
+            "60000001",
+            &format!(
+                r#"{}<w:r><w:endnoteReference w:id="1"/></w:r>{}"#,
+                fixture::r("Alpha"),
+                fixture::r("beta")
+            )
+        )
+    ));
+    let (engine, request) = fixture::laid_out(&fixture::with_body(&body), 9316);
+    engine
+        .build_display_list_frame(&extras(&request), 0)
+        .unwrap();
+    assert!(pages(&engine.layout_document_with_regions_json(&request).unwrap()) > 2);
+    engine
+        .build_display_list_frame(&extras(&request), 1)
+        .unwrap();
+
+    let ctx = EditCtx::local("", "");
+    engine
+        .doc()
+        .insert_text(&ctx, Position::new("body", 0), "x", FormatPolicy::Inherit)
+        .unwrap();
+    engine
+        .doc()
+        .delete_range(&ctx, StoryRange::new("body", 7, 8))
+        .unwrap();
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    engine
+        .build_display_list_frame(&extras(&request), 2)
+        .unwrap();
+    assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9317));
+}
+
+#[test]
+fn a_page_side_float_leaving_the_text_area_remeasures_its_neighbours() {
+    let shape = concat!(
+        r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" "#,
+        r#"simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" "#,
+        r#"allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page">"#,
+        r#"<wp:posOffset>2857500</wp:posOffset></wp:positionH><wp:positionV "#,
+        r#"relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#,
+        r#"<wp:extent cx="914400" cy="914400"/><wp:wrapSquare wrapText="bothSides"/>"#,
+        r#"<wp:docPr id="1" name="Page side shape"/><a:graphic><a:graphicData "#,
+        r#"uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>"#,
+        r#"<wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" "#,
+        r#"cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>"#,
+        r#"<wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
+    );
+    let words = "words that wrap beside a shape on the page side ".repeat(5);
+    let margins = |left: u32, right: u32| {
+        format!(
+            concat!(
+                "<w:sectPr><w:pgSz w:w=\"7200\" w:h=\"8640\"/><w:pgMar w:top=\"720\" ",
+                "w:right=\"{}\" w:bottom=\"720\" w:left=\"{}\" w:header=\"300\" ",
+                "w:footer=\"300\" w:gutter=\"0\"/></w:sectPr>"
+            ),
+            right, left
+        )
+    };
+    let body = |left: u32, right: u32| {
+        format!(
+            "{}{}{}",
+            fixture::p("70000001", &format!("{shape}{}", fixture::r(&words))),
+            fixture::p("70000002", &fixture::r(&words)),
+            margins(left, right),
+        )
+    };
+    let (engine, request) = fixture::laid_out(&fixture::with_body(&body(2880, 720)), 9318);
+    engine.layout_document_with_regions_json(&request).unwrap();
+    let swapped = fixture::region_request(
+        &engine,
+        &fixture::with_body(&body(720, 2880)),
+        serde_json::from_str::<Value>(&request).unwrap()["measurement"]["fontChains"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()[0]
+            .as_u64()
+            .unwrap() as u32,
+    )
+    .to_string();
+    let layout = engine.layout_document_with_regions_json(&swapped).unwrap();
+    engine
+        .build_display_list_frame(&extras(&swapped), 0)
+        .unwrap();
+    assert_ne!(
+        layout,
+        fresh(&engine, &request, 9319).0,
+        "the swap moves the shape out"
+    );
+    assert_eq!((layout, display(&engine)), fresh(&engine, &swapped, 9320));
 }

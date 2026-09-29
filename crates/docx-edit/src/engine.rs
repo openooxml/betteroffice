@@ -293,6 +293,33 @@ fn has_wrap_stabilized_shapes(blocks: &[LayoutBlock]) -> bool {
         .any(|block| matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape)))
 }
 
+type NotePageKey = Vec<(Option<i64>, Option<String>, Option<i64>, Option<i64>)>;
+
+/// What each page's note areas show that an edit elsewhere can change.
+fn note_page_keys(layout: Option<&Layout>) -> Vec<NotePageKey> {
+    layout.map_or_else(Vec::new, |layout| {
+        layout
+            .pages
+            .iter()
+            .map(|page| {
+                page.note_areas
+                    .iter()
+                    .flatten()
+                    .flat_map(|area| area.notes.iter().flatten())
+                    .map(|note| {
+                        (
+                            note.id,
+                            note.display_label.clone(),
+                            note.anchor_doc_start,
+                            note.anchor_doc_end,
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    })
+}
+
 fn float_geometry_key(geometry: &docx_layout::measure_blocks::FloatPageGeometry) -> [f64; 5] {
     [
         geometry.page_width,
@@ -459,9 +486,13 @@ struct PaginationState {
     measured_with: Option<u64>,
     /// The body lowering a float document's `input` arena was measured from.
     lowered_from: Option<Rc<Vec<LayoutBlock>>>,
-    /// The widths and float page geometry the `input` arena was measured at.
+    /// The widths and float page geometry the `input` arena was measured at,
+    /// and whether floating zones shaped it.
     measured_widths: Vec<f64>,
     measured_float_geometry: Option<[f64; 5]>,
+    measured_with_floats: bool,
+    /// Pages whose note areas the last region pass changed.
+    note_changed_pages: Vec<usize>,
     layout: Option<Layout>,
     checkpoints: Vec<LayoutCheckpoint>,
     block_fingerprints: Vec<u64>,
@@ -1380,6 +1411,7 @@ impl EngineSession {
         let resident_body = body_story.is_some();
         let mut block_fingerprints: Option<Vec<u64>> = None;
         let mut lowered_from = None;
+        let mut has_floats = false;
         let mut measured_widths = Vec::new();
         let mut measured_float_geometry = None;
         if let Some(story) = body_story.as_deref() {
@@ -1390,7 +1422,6 @@ impl EngineSession {
                 Reused(Vec<MeasuredBlock>, Vec<u64>),
                 Full(Vec<LayoutBlock>),
             }
-            let mut has_floats = false;
             let arena = self
                 .with_lowered_story(story, render_env, |blocks| -> Result<Arena, String> {
                     apply_section_geometry(&mut input, &regions);
@@ -1491,6 +1522,7 @@ impl EngineSession {
             .iter()
             .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
             .collect::<Vec<_>>();
+        let previous_notes = note_page_keys(self.pagination.borrow().layout.as_ref());
         // The note fixpoint replays `base_input`. Without notes `input` is the
         // final pass; with notes the final pass carries reserved heights, so
         // the reservation-free pass stays out of the retained pagination state
@@ -1570,6 +1602,12 @@ impl EngineSession {
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
         attach_note_areas(layout, &page_note_map, &notes.contents, &regions);
+        let note_changed_pages: Vec<usize> = note_page_keys(Some(layout))
+            .iter()
+            .enumerate()
+            .filter(|(index, keys)| previous_notes.get(*index) != Some(*keys))
+            .map(|(index, _)| index)
+            .collect();
         let measured_value = measured_headers_footers
             .as_mut()
             .map(|payload| {
@@ -1578,6 +1616,7 @@ impl EngineSession {
                     .map_err(|error| format!("serialize headers/footers: {error}"))
             })
             .transpose()?;
+        pagination.note_changed_pages = note_changed_pages;
         let serial = pagination.layout_epoch;
         let headers_footers = measured_value.or_else(|| regions.headers_footers.clone());
         let notes_clear = notes.contents.is_empty() && refs.is_empty();
@@ -1611,6 +1650,7 @@ impl EngineSession {
         pagination.lowered_from = lowered_from;
         pagination.measured_widths = measured_widths;
         pagination.measured_float_geometry = measured_float_geometry;
+        pagination.measured_with_floats = has_floats;
         drop(pagination);
         if let (true, Some(render_env)) = (resident_body, parsed_render_env) {
             self.capture.replace(Some(LayoutCapture {
@@ -1932,6 +1972,7 @@ impl EngineSession {
         pagination.input = Some(input);
         pagination.measured_with = None;
         pagination.lowered_from = None;
+        pagination.note_changed_pages.clear();
         pagination.layout = Some(run.layout);
         pagination.checkpoints = run.checkpoints;
         pagination.block_fingerprints = block_fingerprints;
@@ -2185,7 +2226,9 @@ impl EngineSession {
             return Ok(None);
         }
         let previous_widths = &pagination.measured_widths;
-        if previous_widths.len() != blocks.len() {
+        if previous_widths.len() != blocks.len()
+            || (pagination.measured_with_floats && floats.is_none())
+        {
             return Ok(None);
         }
         let lowered_from = match floats {
@@ -2496,9 +2539,11 @@ impl EngineSession {
                 |blocks| -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
                     let (widths, geometry, previous_pages) = {
                         let pagination = self.pagination.borrow();
-                        let (Some(input), Some(layout)) =
-                            (pagination.input.as_ref(), pagination.layout.as_ref())
-                        else {
+                        let (Some(input), Some(layout), false) = (
+                            pagination.input.as_ref(),
+                            pagination.layout.as_ref(),
+                            pagination.measured_with_floats,
+                        ) else {
                             return Ok(None);
                         };
                         (
@@ -2720,19 +2765,16 @@ impl EngineSession {
                 .ok_or_else(|| "resident layout is not built".to_owned())?;
             let mut display = self.display.borrow_mut();
             if pagination.last_incremental && display.extras_fingerprint == extras_fingerprint {
-                // A later page's note areas anchor to references the edit moved.
-                let note_pages: Vec<usize> = if pagination.position_deltas.is_empty() {
-                    Vec::new()
-                } else {
-                    (pagination.rebuilt_page_end..layout.pages.len())
-                        .filter(|&index| {
-                            layout.pages[index]
-                                .note_areas
-                                .as_ref()
-                                .is_some_and(|areas| !areas.is_empty())
-                        })
-                        .collect()
-                };
+                // Pages elsewhere whose notes anchor to references the edit moved.
+                let note_pages: Vec<usize> = pagination
+                    .note_changed_pages
+                    .iter()
+                    .copied()
+                    .filter(|&index| {
+                        !(pagination.rebuilt_page_start..pagination.rebuilt_page_end)
+                            .contains(&index)
+                    })
+                    .collect();
                 let rebuilt_pages: HashSet<usize> = (pagination.rebuilt_page_start
                     ..pagination.rebuilt_page_end)
                     .chain(note_pages.iter().copied())

@@ -10678,8 +10678,8 @@ pub fn update_display_list_value_from_resident_incremental_with_fonts_observed(
 /// Incremental engine path backed by a retained parsed display input. Only
 /// rebuilt layout pages and the measured blocks referenced by those pages
 /// cross the typed-layout compatibility adapter on each edit.
-/// `extra_pages` are rebuilt too, outside the range: pages after it whose
-/// note areas anchor to moved references.
+/// `extra_pages` outside the range are rebuilt too: pages whose note areas
+/// changed although their body did not.
 #[allow(clippy::too_many_arguments)]
 pub fn update_resident_display_list_incremental_with_fonts_observed(
     pagination: &crate::types::Input,
