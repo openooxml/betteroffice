@@ -43,10 +43,10 @@ const MARKUP: DocxPageExportOptions = { revisionView: 'markup', stories: LAID_OU
 let nextClientId = 97100;
 
 /** A session holding the fixture, laid out as the editor lays it out with the pinned font. */
-async function laidOut(): Promise<{ session: YrsSession; request: string }> {
+async function laidOut(data = FONT): Promise<{ session: YrsSession; request: string }> {
   const session = await createYrsSession({ clientId: nextClientId++ });
   const { document } = session.openDocx(PAGES, true);
-  const font = session.registerFont(FONT);
+  const font = session.registerFont(data);
   const request = buildResidentRegionLayoutRequest(document, 24, {});
   const requirements = JSON.parse(
     session.layoutFontRequirementsJson(JSON.stringify(request))
@@ -255,6 +255,23 @@ describe('paged structured export', () => {
     }
   });
 
+  it('keeps a live session measuring with its own fonts when another opens', async () => {
+    const paint = ({ session, request }: { session: YrsSession; request: string }) => ({
+      layout: session.layoutDocumentWithRegionsRetainedJson(request),
+      glyph: session.outlineGlyphJson(0, 36),
+    });
+    const a = await laidOut();
+    const alone = paint(a);
+    const b = await laidOut(OTHER_FONT);
+    try {
+      expect(paint(b)).not.toEqual(alone);
+      expect(paint(a)).toEqual(alone);
+    } finally {
+      a.session.destroy();
+      b.session.destroy();
+    }
+  });
+
   it('exports a live session against its retained layout and refuses stale ones', async () => {
     const empty = await createYrsSession({ clientId: nextClientId++ });
     try {
@@ -319,10 +336,7 @@ describe('paged structured export', () => {
       const other = await createYrsSession({ clientId: nextClientId++ });
       try {
         other.registerFont(FONT);
-        expect(session.exportStructuredWithPages(MARKUP)).toMatchObject({
-          ok: false,
-          failure: { code: 'stale-layout' },
-        });
+        expect(session.exportStructuredWithPages(MARKUP)).toEqual(relaid);
       } finally {
         other.destroy();
       }

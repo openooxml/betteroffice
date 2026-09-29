@@ -1167,6 +1167,9 @@ fn persisted_receipt_json(session_id: &str, persisted: &PersistedParagraphIds) -
 #[wasm_bindgen]
 pub struct EditSession {
     engine: EngineSession,
+    /// Entered by every method that measures, lays out, builds a display list
+    /// or reads glyph outlines, so no other session's fonts reach this one.
+    fonts: docx_layout::MeasureFonts,
     docx_source: RefCell<Option<Arc<[u8]>>>,
     /// The [`crate::seed::package_digest`] of `docx_source`, when known.
     docx_digest: RefCell<Option<String>>,
@@ -1523,6 +1526,7 @@ impl EditSession {
         }
         let session = Self {
             engine: EngineSession::new(client_id as u64),
+            fonts: docx_layout::MeasureFonts::default(),
             docx_source: RefCell::new(None),
             docx_digest: RefCell::new(None),
             update_observer: None,
@@ -1547,6 +1551,7 @@ impl EditSession {
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
     pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
+        let _fonts = self.fonts.enter();
         docx_layout::register_measure_font(bytes)
     }
 
@@ -1559,6 +1564,7 @@ impl EditSession {
         base: u32,
         requested_family: &str,
     ) -> Result<u32, JsValue> {
+        let _fonts = self.fonts.enter();
         docx_layout::register_substitute_measure_font(base, requested_family)
     }
 
@@ -1566,6 +1572,7 @@ impl EditSession {
     /// invalidates the retained paragraph measurement templates, so the next
     /// edit must pass back through the full layout path.
     pub fn clear_measure_fonts(&self) {
+        let _fonts = self.fonts.enter();
         docx_layout::clear_measure_fonts();
         self.engine.clear_measurement_templates();
     }
@@ -1575,6 +1582,7 @@ impl EditSession {
     /// a later resident edit re-measures only the changed block. Errors with
     /// the engine's message for input it cannot measure.
     pub fn measure_paragraph_json(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine.measure_paragraph_json(input).map_err(js_err)
     }
 
@@ -1582,6 +1590,7 @@ impl EditSession {
     /// input and the resulting layout are retained for the resident edit path.
     /// Errors on unparseable input or on layout failure.
     pub fn layout_document_json(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .layout_document_json(input)
             .map_err(|error| JsValue::from_str(&error))
@@ -1599,6 +1608,7 @@ impl EditSession {
     /// regions already composed as JSON out — ready for the display builder
     /// with no host-side layout mutation. Retains the pass for resident edits.
     pub fn layout_document_with_regions_json(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_json(input)
             .map_err(|error| JsValue::from_str(&error))
@@ -1612,6 +1622,7 @@ impl EditSession {
         &self,
         input: &str,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_retained_json(input)
             .map_err(|error| JsValue::from_str(&error))
@@ -1634,6 +1645,7 @@ impl EditSession {
     /// `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
     /// against the same resident font store this session measures with.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         self.engine
             .build_display_list_json(input)
             .map_err(|error| JsValue::from_str(&error))
@@ -1651,6 +1663,7 @@ impl EditSession {
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if !(expected_frame_epoch.is_finite()
             && expected_frame_epoch >= 0.0
             && expected_frame_epoch.fract() == 0.0
@@ -1718,6 +1731,7 @@ impl EditSession {
     /// in that paragraph. The caller must then run the full layout path.
     pub fn apply_input(&self, text: &str, expected_frame_epoch: f64) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if text.is_empty() || text.contains(['\r', '\n']) {
             return Err(js_err(
                 "apply_input requires non-empty paragraph-break-free text",
@@ -1786,6 +1800,7 @@ impl EditSession {
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if text.is_empty() || text.contains(['\r', '\n']) {
             return Err(js_err(
                 "apply_input requires non-empty paragraph-break-free text",
@@ -1884,6 +1899,7 @@ impl EditSession {
         count: u32,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if !(expected_frame_epoch.is_finite()
             && expected_frame_epoch >= 0.0
             && expected_frame_epoch.fract() == 0.0
@@ -1914,6 +1930,7 @@ impl EditSession {
         count: u32,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if !(expected_frame_epoch.is_finite()
             && expected_frame_epoch >= 0.0
             && expected_frame_epoch.fract() == 0.0
@@ -2033,6 +2050,7 @@ impl EditSession {
     /// [`EditSession::register_measure_font`] and `glyph_id` from shaping.
     /// Errors when the glyph cannot be extracted.
     pub fn outline_glyph_json(&self, font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         docx_layout::outline_glyph_json(font_id, glyph_id)
     }
 
@@ -3681,6 +3699,7 @@ impl EditSession {
         options: &str,
         current_request: Option<String>,
     ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
         let options: crate::structured::PageExportOptions =
             serde_json::from_str(options).map_err(js_err)?;
         let read = match current_request {
@@ -3696,7 +3715,7 @@ impl EditSession {
     /// snapshot. `fonts` holds the font files back to back, `font_lengths` their byte lengths;
     /// `request` is a region layout request whose font chains name fonts by their index. The
     /// reply is `{"ok":true,"content"}` or `{"ok":false,"failure"}`; a rejected font or an
-    /// unusable request throws. The module's shared measurement fonts are left untouched.
+    /// unusable request throws. The session's measurement fonts are left untouched.
     pub fn export_snapshot_with_private_fonts_json(
         &self,
         fonts: &[u8],
@@ -4818,6 +4837,81 @@ mod tests {
         );
         assert_eq!(limited["failure"]["code"], "invalid-options");
         assert_eq!(session.version(), version);
+    }
+
+    #[test]
+    fn sessions_measure_and_paint_with_their_own_fonts() {
+        const LIBERATION: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        const CARLITO: &[u8] = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
+        let open = |client_id: f64| {
+            let session = EditSession::new(client_id).unwrap();
+            session.open_docx(&batch_docx(), true, None, None).unwrap();
+            session.clear_measure_fonts();
+            session
+        };
+        let render = |session: &EditSession| {
+            let mut request = json!({
+                "bodyStory": "body",
+                "regions": {"sections": [{"properties": {}}]},
+                "renderEnv": {},
+            });
+            let requirements: Vec<Value> = serde_json::from_str(
+                &session
+                    .layout_font_requirements_json(&request.to_string())
+                    .unwrap(),
+            )
+            .unwrap();
+            let chains: serde_json::Map<String, Value> = requirements
+                .iter()
+                .map(|requirement| {
+                    (
+                        requirement["key"].as_str().unwrap().to_owned(),
+                        json!([0, 1]),
+                    )
+                })
+                .collect();
+            request["measurement"] = json!({
+                "fontChains": chains,
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true,
+            });
+            let layout: Value = serde_json::from_str(
+                &session
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap(),
+            )
+            .unwrap();
+            session.build_display_list_frame("{}", 0.0).unwrap();
+            let pages = session
+                .engine
+                .with_display_list(|list| serde_json::to_value(&list.pages).unwrap())
+                .unwrap();
+            let outline = session.outline_glyph_json(0, 36).unwrap();
+            (layout, pages, outline)
+        };
+        let alone = |client_id: f64, fonts: [&[u8]; 2]| {
+            let session = open(client_id);
+            for (index, font) in fonts.into_iter().enumerate() {
+                assert_eq!(session.register_measure_font(font).unwrap(), index as u32);
+            }
+            render(&session)
+        };
+        let a_alone = alone(81.0, [LIBERATION, CARLITO]);
+        let b_alone = alone(82.0, [CARLITO, LIBERATION]);
+        assert_ne!(a_alone, b_alone);
+
+        let a = open(83.0);
+        assert_eq!(a.register_measure_font(LIBERATION).unwrap(), 0);
+        let b = open(84.0);
+        assert_eq!(b.register_measure_font(CARLITO).unwrap(), 0);
+        assert_eq!(a.register_measure_font(CARLITO).unwrap(), 1);
+        assert_eq!(b.register_measure_font(LIBERATION).unwrap(), 1);
+        assert_eq!(render(&a), a_alone);
+        assert_eq!(render(&b), b_alone);
+        let c = open(85.0);
+        c.register_measure_font(CARLITO).unwrap();
+        assert_eq!(render(&a), a_alone);
     }
 
     #[test]
