@@ -331,6 +331,29 @@ test('a mapped family the bundle lacks under its equivalent name registers the o
   expect(googleLinks()).toHaveLength(0);
 });
 
+test('a mapped family keeps its bundled fallback when its equivalent is already loading, in either order', async () => {
+  configureDefaultFonts({
+    fonts: {
+      createFontProvider: () => ({
+        resolve: () => undefined,
+        resolveFamily: (family: string, _bold: boolean, italic: boolean) =>
+          (family === 'Impact' || family === 'Consolas') && !italic ? bytes : undefined,
+      }),
+    },
+  });
+  expect(await Promise.all([loadFont('Anton'), loadFontWithMapping('Impact')])).toEqual([false, true]);
+  expect(await Promise.all([loadFontWithMapping('Consolas'), loadFont('Inconsolata')])).toEqual([
+    true,
+    true,
+  ]);
+  expect(added.map((face) => face.family).sort()).toEqual([
+    'Anton',
+    'Anton',
+    'Inconsolata',
+    'Inconsolata',
+  ]);
+});
+
 test('an older provider without resolveFamily registers only the Regular face it can vouch for', async () => {
   configureDefaultFonts({
     fonts: {

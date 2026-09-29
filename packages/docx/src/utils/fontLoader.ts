@@ -397,7 +397,10 @@ async function loadFontFrom(
   // Currently loading? Return existing promise
   const existingLoad = loadingFonts.get(normalizedFamily);
   if (existingLoad) {
-    return existingLoad;
+    // An in-flight load may lack this call's bundled fallback; retry with it.
+    return bundledFallback
+      ? existingLoad.then((loaded) => loaded || loadFontFrom(fontFamily, options, bundledFallback))
+      : existingLoad;
   }
 
   // Already satisfied by a system font — fetching the Google copy would be a
