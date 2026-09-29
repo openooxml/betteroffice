@@ -276,7 +276,7 @@ pub fn build_resident_display_list_partial_observed(
     ),
     String,
 > {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         display_list::build_resident_display_list_partial_with_fonts_observed(
             pagination,
             layout,
@@ -296,7 +296,7 @@ pub fn build_resident_display_pages(
     list: &mut display_list::DisplayList,
     pages: &[usize],
 ) -> Result<Vec<usize>, String> {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         display_list::build_resident_display_pages_with_fonts(
             pagination,
             layout,

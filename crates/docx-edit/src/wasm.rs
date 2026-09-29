@@ -1725,6 +1725,7 @@ impl EditSession {
     /// built; the others stay unbuilt placeholders carrying their geometry
     /// until [`Self::build_display_pages_frame`] builds them.
     pub fn set_display_window(&self, start: u32, end: u32) {
+        let _fonts = self.fonts.enter();
         self.engine
             .set_display_window(Some(start as usize..(end.max(start)) as usize));
     }
@@ -1738,6 +1739,7 @@ impl EditSession {
         expected_frame_epoch: f64,
     ) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let _fonts = self.fonts.enter();
         if !(expected_frame_epoch.is_finite()
             && expected_frame_epoch >= 0.0
             && expected_frame_epoch.fract() == 0.0
@@ -5078,6 +5080,14 @@ mod tests {
             );
             record(private["content"]["layout"]["fragments"].clone());
             record(parse(session.outline_glyph_json(0, 36).unwrap()));
+            session.set_display_window(0, 0);
+            session
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            record(json!(session.build_display_list_frame("{}", 0.0).unwrap()));
+            record(json!(
+                session.build_display_pages_frame(vec![0], 0.0).unwrap()
+            ));
             out
         };
         let quiet = || {};
