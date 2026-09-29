@@ -20,8 +20,10 @@ const PROPOSALS: &str = r#"<w:p w14:paraId="00000001"><w:r><w:t xml:space="prese
 
 fn document(body: &str) -> Vec<u8> {
     let parts = [
-        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_owned()),
+        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#.to_owned()),
         ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
+        ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#.to_owned()),
+        ("word/numbering.xml", format!(r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#)),
         ("word/document.xml", format!(r#"<w:document {NS}><w:body>{body}</w:body></w:document>"#)),
     ];
     ooxml_opc::rezip_parts(
@@ -649,6 +651,60 @@ fn a_previewed_block_control_revision_covers_its_blocks() {
     assert!(shown(&preview(&[(&id, Rejected)])).contains("Inside"));
     let accepted = shown(&preview(&[(&id, Accepted)]));
     assert!(!accepted.contains("Inside") && accepted.contains("After"));
+}
+
+#[test]
+fn content_the_preview_leaves_out_does_not_count_in_lists() {
+    let item = |text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let control = format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="block"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+        item("Inside")
+    );
+    let table = format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+        item("Inside")
+    );
+    for (client, container) in [(75108, control), (75109, table)] {
+        let engine = EngineSession::new(client);
+        seed_from_docx(
+            engine.doc(),
+            &document(&format!("{container}{}", item("After"))),
+        )
+        .unwrap();
+        engine
+            .doc()
+            .delete_range(
+                &EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                StoryRange::new("body", 0, 1),
+            )
+            .unwrap();
+        let revisions = engine.doc().list_revisions().unwrap();
+        let id = revisions
+            .iter()
+            .find(|revision| revision.story == "body")
+            .unwrap()
+            .change
+            .revision_id
+            .clone();
+        let after = |env: &RenderEnv| {
+            let blocks = lower(&engine, env);
+            let paragraph = blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|block| block["runs"][0]["text"] == "After")
+                .unwrap()
+                .clone();
+            paragraph["attrs"]["listMarker"].clone()
+        };
+        assert_eq!(after(&RenderEnv::default()), "2.", "{client}");
+        assert_eq!(after(&preview(&[(&id, Rejected)])), "2.", "{client}");
+        assert_eq!(after(&preview(&[(&id, Accepted)])), "1.", "{client}");
+    }
 }
 
 #[test]

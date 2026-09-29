@@ -463,11 +463,13 @@ fn lower_story<T: ReadTxn>(
                             detail: "table embed interrupts paragraph content".to_owned(),
                         });
                     }
-                    let hidden = env.revision_hidden(attributes)
+                    let previewed_out = env.revision_hidden(attributes);
+                    let hidden = previewed_out
                         || shared_map_string(&table, txn, "blockId")
                             .is_some_and(|id| hidden_field_blocks.contains(&id));
                     map.tables.push((pm_cursor, story_slot, table_ordinal));
                     table_ordinal += 1;
+                    let mut unnumbered = previewed_out.then(|| list_state.clone());
                     let (lowered, node_size) = lower_table(
                         &table,
                         txn,
@@ -476,7 +478,7 @@ fn lower_story<T: ReadTxn>(
                         pm_cursor,
                         env,
                         active_stories,
-                        list_state,
+                        unnumbered.as_mut().unwrap_or(&mut *list_state),
                         map,
                     )?;
                     if !hidden {
@@ -567,13 +569,15 @@ fn lower_story<T: ReadTxn>(
                         });
                     };
                     let group = lower_sdt_group(&block_sdt, txn, pm_cursor as i64);
+                    let previewed_out = env.revision_hidden(attributes);
+                    let mut unnumbered = previewed_out.then(|| list_state.clone());
                     let (mut child_blocks, content_size) = lower_story(
                         txn,
                         &child_story,
                         env,
                         pm_cursor + 1,
                         active_stories,
-                        list_state,
+                        unnumbered.as_mut().unwrap_or(&mut *list_state),
                         CellEdges {
                             before: cell_edges.before && story_index == 0,
                             after: cell_edges.after && story_index + 1 == story.len(txn),
@@ -581,9 +585,7 @@ fn lower_story<T: ReadTxn>(
                         map,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
-                    if !env.revision_hidden(attributes)
-                        && !hidden_field_blocks.contains(&child_story)
-                    {
+                    if !previewed_out && !hidden_field_blocks.contains(&child_story) {
                         blocks.extend(child_blocks);
                     }
                     story_index += 1;
