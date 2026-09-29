@@ -2,11 +2,14 @@ import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../../docx/rezip/parts';
 import { createEditSession, preloadEditWasm } from '../../wasm/edit';
+import * as layoutWasm from '../../wasm/layout';
 import {
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  displayPageNoteAnchorRevision,
   displayPageRevision,
   displayPageShiftsSince,
   FRAME_DELTA_VERSION,
@@ -22,6 +25,201 @@ const FONT = resolve(
   import.meta.dir,
   '../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 );
+
+const PRESENT_ONLY = 1 << 7;
+const ABSENT_ANCHOR = -(2n ** 63n);
+
+type CraftedRun = [start: number, count: number, mask: number, delta: number];
+type CraftedAnchor = [area: number, note: number, start: bigint, end: bigint];
+
+/** A one-page shift-positions delta laid out as the engine writes it. */
+function shiftFrame(
+  runs: CraftedRun[],
+  anchors: CraftedAnchor[],
+  options: { recordAnchors?: number; opcode?: number; tail?: number; padding?: number } = {}
+): Uint8Array {
+  const { recordAnchors = anchors.length, opcode = 5, tail = 0, padding = 0 } = options;
+  const dataOffset = 136;
+  const payload =
+    8 + runs.length * 24 + (anchors.length > 0 ? 8 + anchors.length * 24 : 0) + padding;
+  const bytes = new Uint8Array(dataOffset + payload);
+  const view = new DataView(bytes.buffer);
+  bytes.set([0x46, 0x44, 0x56, 0x31]);
+  view.setUint16(4, FRAME_DELTA_VERSION, true);
+  view.setUint16(6, 80, true);
+  view.setUint32(8, bytes.byteLength, true);
+  view.setBigUint64(16, 1n, true);
+  view.setBigUint64(24, 2n, true);
+  view.setBigUint64(32, 2n, true);
+  view.setBigUint64(40, 1n, true);
+  view.setUint32(48, 1, true);
+  view.setUint32(52, 1, true);
+  view.setUint32(56, 80, true);
+  view.setUint32(60, 128, true);
+  view.setUint32(64, 4, true);
+  view.setUint32(68, dataOffset, true);
+  bytes[80] = opcode;
+  view.setBigUint64(88, 1n, true);
+  view.setBigUint64(96, 2n, true);
+  view.setUint32(104, runs.length, true);
+  view.setUint32(112, dataOffset, true);
+  view.setUint32(116, payload, true);
+  view.setUint32(120, recordAnchors, true);
+  view.setUint32(124, tail, true);
+  let at = dataOffset;
+  view.setUint32(at, runs.length, true);
+  at += 8;
+  for (const [start, count, mask, delta] of runs) {
+    view.setUint32(at, start, true);
+    view.setUint32(at + 4, count, true);
+    bytes[at + 8] = mask;
+    view.setBigInt64(at + 16, BigInt(delta), true);
+    at += 24;
+  }
+  if (anchors.length > 0) {
+    view.setUint32(at, anchors.length, true);
+    at += 8;
+    for (const [area, note, start, end] of anchors) {
+      view.setUint32(at, area, true);
+      view.setUint32(at + 4, note, true);
+      view.setBigInt64(at + 8, start, true);
+      view.setBigInt64(at + 16, end, true);
+      at += 24;
+    }
+  }
+  return bytes;
+}
+
+/** A retained one-page frame whose page has a body primitive and one footnote. */
+function notedFrame(): RetainedFrame {
+  const page = {
+    pageIndex: 0,
+    width: 100,
+    height: 100,
+    primitives: [
+      {
+        kind: 'text',
+        text: 'x',
+        x: 10,
+        baselineY: 20,
+        width: 10,
+        font: '400 16px Calibri',
+        color: '#000000',
+        docStart: 1,
+        docEnd: 2,
+      },
+    ],
+    noteAreas: [
+      { kind: 'footnote', noteIds: [1], notes: [{ id: 1, anchorDocStart: 3, anchorDocEnd: 4 }] },
+    ],
+  } as unknown as DisplayPage;
+  return {
+    protocolVersion: FRAME_DELTA_VERSION,
+    docEpoch: 1,
+    layoutEpoch: 1,
+    frameEpoch: 1,
+    pages: [
+      { pageIndex: 0, pageId: 1n, fingerprint: 1n, primitiveIds: new BigUint64Array([1n]), page },
+    ],
+    damagedPageIds: new Set(),
+    removedPageIds: new Set(),
+    displayList: { pages: [page] },
+  };
+}
+
+const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+const OFFICE_DOC = 'application/vnd.openxmlformats-officedocument';
+const FOOTNOTES = [1, 2, 3, 4];
+const ENDNOTES = [1, 2];
+
+/**
+ * Twelve paragraphs on small pages: footnotes on pages spread through the
+ * document, and both endnotes on the last page beside its own footnote.
+ */
+function notedDocx(): Uint8Array {
+  const run = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+  const reference = (kind: 'footnote' | 'endnote', id: number) =>
+    `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:${kind}Reference w:id="${id}"/></w:r>`;
+  const references: Record<number, string> = {
+    1: reference('footnote', 1),
+    2: reference('endnote', 1),
+    5: reference('footnote', 2),
+    9: reference('footnote', 3),
+    10: reference('endnote', 2),
+    11: reference('footnote', 4),
+  };
+  const body = Array.from({ length: 12 }, (_, index) => {
+    const words = Array.from({ length: 40 }, (_, word) => `w${index}_${word}`).join(' ');
+    return `<w:p>${run(words)}${references[index] ?? ''}</w:p>`;
+  }).join('');
+  const notes = (kind: 'footnote' | 'endnote', ids: number[]) =>
+    `<w:${kind}s ${W_NS}>` +
+    `<w:${kind} w:id="-1" w:type="separator"><w:p><w:r><w:separator/></w:r></w:p></w:${kind}>` +
+    `<w:${kind} w:id="0" w:type="continuationSeparator"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:${kind}>` +
+    ids
+      .map((id) => `<w:${kind} w:id="${id}"><w:p>${run(`${kind} ${id}`)}</w:p></w:${kind}>`)
+      .join('') +
+    `</w:${kind}s>`;
+  const relationship = (id: string, type: string, target: string) =>
+    `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}" Target="${target}"/>`;
+  const relationships = (entries: string) =>
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${entries}</Relationships>`;
+  const override = (part: string, type: string) =>
+    `<Override PartName="/word/${part}.xml" ContentType="${OFFICE_DOC}.wordprocessingml.${type}+xml"/>`;
+  const parts: PartsMap = new Map();
+  parts.set(
+    '[Content_Types].xml',
+    toBytes(
+      `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+        `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+        `<Default Extension="xml" ContentType="application/xml"/>` +
+        override('document', 'document.main') +
+        override('footnotes', 'footnotes') +
+        override('endnotes', 'endnotes') +
+        `</Types>`
+    )
+  );
+  parts.set(
+    '_rels/.rels',
+    toBytes(relationships(relationship('rId1', 'officeDocument', 'word/document.xml')))
+  );
+  parts.set(
+    'word/_rels/document.xml.rels',
+    toBytes(
+      relationships(
+        relationship('rId2', 'footnotes', 'footnotes.xml') +
+          relationship('rId3', 'endnotes', 'endnotes.xml')
+      )
+    )
+  );
+  parts.set(
+    'word/document.xml',
+    toBytes(
+      `<w:document ${W_NS}><w:body>${body}<w:sectPr><w:pgSz w:w="4320" w:h="4320"/>` +
+        `<w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300"/></w:sectPr></w:body></w:document>`
+    )
+  );
+  parts.set('word/footnotes.xml', toBytes(notes('footnote', FOOTNOTES)));
+  parts.set('word/endnotes.xml', toBytes(notes('endnote', ENDNOTES)));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+/** The first shift run's mask in `frame`, rewritten, must fail to decode when invalid. */
+function expectStrictShiftMasks(frame: Uint8Array): void {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const operations = view.getUint32(52, true);
+  let maskOffset = -1;
+  for (let index = 0; index < operations && maskOffset < 0; index++) {
+    const record = 80 + index * 48;
+    if (frame[record] === 5) maskOffset = view.getUint32(record + 32, true) + 16;
+  }
+  expect(maskOffset).toBeGreaterThan(0);
+  for (const mask of [PRESENT_ONLY, (frame[maskOffset]! & 0x1f) | 0x40]) {
+    const patched = frame.slice();
+    patched[maskOffset] = mask;
+    expect(() => decodeFrameDelta(patched)).toThrow('position shift run is invalid');
+  }
+}
 
 describe('FrameDelta wire round-trip', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
@@ -154,19 +352,20 @@ describe('FrameDelta wire round-trip', () => {
 
     session.insert_text('body', paraId, 5, 'x', undefined, undefined);
     const second = envelopeFor();
-    const next = applyFrameDeltaOwned(
-      retained,
-      decodeFrameDelta(session.build_display_list_frame(second, retained.frameEpoch))
-    );
+    const deltaFrame = session.build_display_list_frame(second, retained.frameEpoch);
+    expectStrictShiftMasks(deltaFrame);
+    const next = applyFrameDeltaOwned(retained, decodeFrameDelta(deltaFrame));
 
     // trailing pages absorb the insert as an in-place position shift with a
     // recorded, replayable run log
     expect(next.displayList.pages.at(-1)).toBe(trailingPage);
     expect(displayPageRevision(trailingPage)).toBe(revisionBefore + 1);
-    const runLists = displayPageShiftsSince(trailingPage, revisionBefore);
-    expect(runLists).not.toBeNull();
-    expect(runLists!.length).toBe(1);
-    expect(runLists![0].length).toBeGreaterThan(0);
+    const shifts = displayPageShiftsSince(trailingPage, revisionBefore);
+    expect(shifts).not.toBeNull();
+    expect(shifts!.length).toBe(1);
+    // the whole page moves as one run over the fields each primitive has
+    expect(shifts![0]!.runs).toHaveLength(1);
+    expect(shifts![0]!.runs[0]!.changedMask & PRESENT_ONLY).toBe(PRESENT_ONLY);
     expect(displayPageShiftsSince(trailingPage, revisionBefore + 1)).toEqual([]);
 
     // handle adoption ships those shifts as compact ops instead of replacing
@@ -234,6 +433,7 @@ describe('FrameDelta wire round-trip', () => {
           pageId: 1n,
           fingerprint: 2n,
           runs: [{ start: 0, count: 1, changedMask: 1, delta: 1 }],
+          anchors: [],
         },
       ],
       bytes: new Uint8Array(),
@@ -242,5 +442,328 @@ describe('FrameDelta wire round-trip', () => {
     expect(() => applyFrameDeltaOwned(previous, delta)).toThrow('requires retained docStart');
     expect(displayPageRevision(page)).toBe(0);
     expect(displayPageShiftsSince(page, 0)).toEqual([]);
+  });
+
+  it('moves a page the same with present-only and exact shift runs', () => {
+    const text = (start: number, extra: Record<string, unknown> = {}) => ({
+      kind: 'text' as const,
+      text: 'x',
+      x: 10,
+      baselineY: 20,
+      width: 10,
+      font: '400 16px Calibri',
+      color: '#000000',
+      docStart: start,
+      docEnd: start + 1,
+      ...extra,
+    });
+    const page = (): DisplayPage =>
+      ({
+        pageIndex: 0,
+        width: 100,
+        height: 100,
+        primitives: [
+          text(10),
+          {
+            kind: 'rect',
+            x: 0,
+            y: 0,
+            w: 5,
+            h: 5,
+            fill: '#000',
+            fragmentDocStart: 9,
+            fragmentDocEnd: 30,
+          },
+          { kind: 'rect', x: 0, y: 9, w: 5, h: 5, fill: '#000' },
+          text(20, { inlineSdtWidget: { kind: 'checkbox', groupId: 'g', pos: 20 } }),
+        ],
+        noteAreas: [
+          {
+            kind: 'footnote',
+            separatorPrimitives: [{ kind: 'rect', x: 0, y: 90, w: 50, h: 1, fill: '#000' }],
+            primitives: [text(40)],
+          },
+        ],
+        header: { kind: 'header', rId: 'rId1', y: 0, height: 10, primitives: [text(3)] },
+        footer: { kind: 'footer', rId: 'rId2', y: 90, height: 10, primitives: [text(4)] },
+      }) as unknown as DisplayPage;
+    const frameWith = (displayPage: DisplayPage): RetainedFrame => ({
+      protocolVersion: FRAME_DELTA_VERSION,
+      docEpoch: 1,
+      layoutEpoch: 1,
+      frameEpoch: 1,
+      pages: [
+        {
+          pageIndex: 0,
+          pageId: 1n,
+          fingerprint: 1n,
+          primitiveIds: new BigUint64Array([1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n]),
+          page: displayPage,
+        },
+      ],
+      damagedPageIds: new Set(),
+      removedPageIds: new Set(),
+      displayList: { pages: [displayPage] },
+    });
+    type Run = { start: number; count: number; changedMask: number; delta: number };
+    const shiftedBy = (runs: Run[]) =>
+      ({
+        protocolVersion: FRAME_DELTA_VERSION,
+        full: false,
+        docEpoch: 1,
+        layoutEpoch: 2,
+        frameEpoch: 2,
+        baseFrameEpoch: 1,
+        pageCount: 1,
+        operations: [
+          { kind: 'shift-positions', pageIndex: 0, pageId: 1n, fingerprint: 2n, runs, anchors: [] },
+        ],
+        bytes: new Uint8Array(),
+      }) as DecodedFrameDelta;
+    for (const delta of [6, -4]) {
+      const exact = shiftedBy([
+        { start: 0, count: 1, changedMask: 0b11, delta },
+        { start: 1, count: 1, changedMask: 0b1100, delta },
+        { start: 3, count: 1, changedMask: 0b10011, delta },
+        { start: 5, count: 1, changedMask: 0b11, delta },
+      ]);
+      const presentOnly = shiftedBy([
+        { start: 0, count: 4, changedMask: 0b11111 | PRESENT_ONLY, delta },
+        { start: 4, count: 2, changedMask: 0b11 | PRESENT_ONLY, delta },
+      ]);
+      const viaExact = applyFrameDelta(frameWith(page()), exact).displayList;
+      expect(applyFrameDelta(frameWith(page()), presentOnly).displayList).toEqual(viaExact);
+      expect(applyFrameDeltaOwned(frameWith(page()), presentOnly).displayList).toEqual(
+        applyFrameDeltaOwned(frameWith(page()), exact).displayList
+      );
+      expect(viaExact.pages[0]!.header!.primitives[0]).toMatchObject({ docStart: 3 });
+    }
+  });
+});
+
+describe('FrameDelta note anchor shifts', () => {
+  beforeAll(async () => {
+    await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
+    await layoutWasm.preloadLayoutWasm();
+  });
+
+  it('decodes anchor sections strictly', () => {
+    const run: CraftedRun = [0, 1, 0b11, 1];
+    expect(() => decodeFrameDelta(shiftFrame([], []))).toThrow('position shift run count mismatch');
+    expect(decodeFrameDelta(shiftFrame([], [[0, 1, 5n, ABSENT_ANCHOR]])).operations).toEqual([
+      {
+        kind: 'shift-positions',
+        pageIndex: 0,
+        pageId: 1n,
+        fingerprint: 2n,
+        runs: [],
+        anchors: [{ area: 0, note: 1, start: 5, end: null }],
+      },
+    ]);
+    expect(() =>
+      decodeFrameDelta(shiftFrame([run], [[0, 0, 5n, 6n]], { recordAnchors: 2 }))
+    ).toThrow('note anchor count mismatch');
+    expect(() =>
+      decodeFrameDelta(shiftFrame([run], [[0, 0, 5n, 6n]], { recordAnchors: 0 }))
+    ).toThrow('position shift byte length/count mismatch');
+    expect(() => decodeFrameDelta(shiftFrame([run], [[0, 0, 5n, 6n]], { padding: 8 }))).toThrow(
+      'position shift byte length/count mismatch'
+    );
+    expect(() => decodeFrameDelta(shiftFrame([run], [[0, 0, 5n, 6n]], { tail: 1 }))).toThrow(
+      'page operation tail is nonzero'
+    );
+    expect(() => decodeFrameDelta(shiftFrame([run], [], { opcode: 4, recordAnchors: 1 }))).toThrow(
+      'page operation tail is nonzero'
+    );
+    expect(() =>
+      decodeFrameDelta(
+        shiftFrame(
+          [],
+          [
+            [0, 1, 5n, 6n],
+            [0, 1, 7n, 8n],
+          ]
+        )
+      )
+    ).toThrow('note anchors are not in strictly increasing order');
+    expect(() => decodeFrameDelta(shiftFrame([], [[0, 0, 2n ** 60n, 6n]]))).toThrow(
+      'safe-integer range'
+    );
+    const farArea = 2 ** 21;
+    expect(
+      decodeFrameDelta(
+        shiftFrame(
+          [],
+          [
+            [farArea, 0, 5n, 6n],
+            [farArea, 1, 7n, 8n],
+          ]
+        )
+      ).operations
+    ).toHaveLength(1);
+  });
+
+  it('sets anchors after runs and rejects a missing note before touching the page', () => {
+    for (const apply of [applyFrameDelta, applyFrameDeltaOwned]) {
+      const moved = apply(
+        notedFrame(),
+        decodeFrameDelta(shiftFrame([[0, 1, 0b11, 2]], [[0, 0, 7n, ABSENT_ANCHOR]]))
+      ).displayList.pages[0]!;
+      expect(moved.primitives[0]).toMatchObject({ docStart: 3, docEnd: 4 });
+      expect(moved.noteAreas![0]!.notes).toEqual([{ id: 1, anchorDocStart: 7 }]);
+      if (apply === applyFrameDeltaOwned) expect(displayPageNoteAnchorRevision(moved)).toBe(1);
+
+      for (const missing of [
+        [1, 0, 7n, 8n],
+        [0, 1, 7n, 8n],
+      ] as CraftedAnchor[]) {
+        const frame = notedFrame();
+        const page = frame.pages[0]!.page;
+        expect(() =>
+          apply(frame, decodeFrameDelta(shiftFrame([[0, 1, 0b11, 2]], [missing])))
+        ).toThrow('note anchor shift references an unknown note');
+        expect(page.primitives[0]).toMatchObject({ docStart: 1, docEnd: 2 });
+        expect(page.noteAreas![0]!.notes).toEqual([{ id: 1, anchorDocStart: 3, anchorDocEnd: 4 }]);
+        expect(displayPageRevision(page)).toBe(0);
+      }
+    }
+  });
+
+  it('matches a fresh layout on footnote, endnote and mixed pages, in frames and the query store', () => {
+    const session = createEditSession(71);
+    session.seed_from_docx(notedDocx(), undefined);
+    const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
+    const base = {
+      bodyStory: 'body',
+      regions: {
+        sections: [
+          {
+            properties: {
+              pageWidth: 4320,
+              pageHeight: 4320,
+              marginTop: 300,
+              marginRight: 300,
+              marginBottom: 300,
+              marginLeft: 300,
+            },
+          },
+        ],
+      },
+      notes: {
+        contents: [
+          ...FOOTNOTES.map((id) => ({ id, noteKind: 'footnote', height: 0 })),
+          ...ENDNOTES.map((id) => ({ id, noteKind: 'endnote', height: 0 })),
+        ],
+      },
+      renderEnv: {},
+    };
+    const requirements = JSON.parse(
+      session.layout_font_requirements_json(JSON.stringify(base))
+    ) as Array<{
+      key: string;
+    }>;
+    const fontChains = Object.fromEntries(requirements.map(({ key }) => [key, [fontId]]));
+    const request = JSON.stringify({
+      ...base,
+      measurement: {
+        fontChains,
+        defaults: { fontSize: 11, fontFamily: 'Calibri' },
+        authoritativeShaping: true,
+      },
+    });
+    const extras = JSON.stringify({ fontChains });
+    const freshList = (): DisplayList => {
+      const fresh = createEditSession(72);
+      fresh.load(session.encode_state());
+      fresh.layout_document_with_regions_json(request);
+      return applyFrameDelta(null, decodeFrameDelta(fresh.build_display_list_frame(extras, 0)))
+        .displayList;
+    };
+
+    session.layout_document_with_regions_json(request);
+    // Each applier decodes its own copy: the owned one mutates what it retains.
+    const full = session.build_display_list_frame(extras, 0);
+    let owned = applyFrameDeltaOwned(null, decodeFrameDelta(full));
+    let copied = applyFrameDelta(null, decodeFrameDelta(full));
+    const areaKinds = owned.displayList.pages.map((page) =>
+      (page.noteAreas ?? []).map((area) => area.kind).sort()
+    );
+    expect(areaKinds.at(-1)).toEqual(['endnote', 'footnote']);
+
+    const updates: string[] = [];
+    const engine: RustDisplayListQueryEngine = {
+      hitTestRegionsJson: layoutWasm.hitTestRegionsJson,
+      rangeRectsJson: layoutWasm.rangeRectsJson,
+      hasDisplayListSession: layoutWasm.hasDisplayListSession,
+      openDisplayList: layoutWasm.openDisplayList,
+      closeDisplayList: layoutWasm.closeDisplayList,
+      updateDisplayList: (handle, update) => {
+        layoutWasm.updateDisplayList(handle, update);
+        updates.push(update);
+      },
+      hasDisplayListUpdate: layoutWasm.hasDisplayListUpdate,
+      hitTestRegionsByHandle: layoutWasm.hitTestRegionsByHandle,
+      rangeRectsByHandle: layoutWasm.rangeRectsByHandle,
+    };
+    const firstQueries = createDisplayListQueries(owned.displayList, engine);
+    firstQueries.prime();
+
+    const { paraId } = (JSON.parse(session.paragraphs('body')) as Array<{ paraId: string }>)[0]!;
+    for (const text of ['xyz', 'ab']) {
+      session.insert_text('body', paraId, 3, text, undefined, undefined);
+      session.layout_document_with_regions_json(request);
+      const frame = session.build_display_list_frame(extras, owned.frameEpoch);
+      const delta = decodeFrameDelta(frame);
+      const anchored = delta.operations.filter(
+        (operation) => operation.kind === 'shift-positions' && operation.anchors.length > 0
+      );
+      expect(anchored.map((operation) => operation.pageIndex)).toEqual(
+        areaKinds.flatMap((kinds, index) => (kinds.length > 0 ? [index] : []))
+      );
+      owned = applyFrameDeltaOwned(owned, delta);
+      copied = applyFrameDelta(copied, decodeFrameDelta(frame));
+    }
+
+    const rebuilt = freshList();
+    expect(owned.displayList).toEqual(rebuilt);
+    expect(copied.displayList).toEqual(rebuilt);
+
+    const lastPage = owned.displayList.pages.at(-1)!;
+    expect(
+      displayPageShiftsSince(lastPage, displayPageRevision(lastPage) - 2)!.map(
+        (step) => step.anchors.length
+      )
+    ).toEqual([3, 3]);
+    const secondQueries = createDisplayListQueries(owned.displayList, engine, firstQueries);
+    secondQueries.prime();
+    expect(updates).toHaveLength(1);
+    const update = JSON.parse(updates[0]!) as {
+      replace: Array<[number, unknown]>;
+      shift: Array<[number, number, unknown[][], unknown[][]?]>;
+    };
+    expect(update.replace.map(([index]) => index)).toEqual([0]);
+    const anchoredEntries = update.shift.filter((entry) => entry.length === 4);
+    expect(anchoredEntries.map(([index]) => index)).toEqual(
+      areaKinds.flatMap((kinds, index) => (kinds.length > 0 ? [index] : []))
+    );
+    expect(
+      anchoredEntries.every(([, , runs, anchors]) => runs.length === 2 && anchors!.length === 2)
+    ).toBe(true);
+
+    const freshQueries = createDisplayListQueries(rebuilt, engine);
+    for (const [from, to] of [
+      [1, 40],
+      [400, 900],
+      [1300, 1500],
+      [2500, 2900],
+    ]) {
+      expect(secondQueries.rangeRects(from!, to!)).toEqual(freshQueries.rangeRects(from!, to!));
+    }
+    for (const id of FOOTNOTES) {
+      expect(secondQueries.noteRangeRects('footnote', id, 1, 4)).toEqual(
+        freshQueries.noteRangeRects('footnote', id, 1, 4)
+      );
+    }
+    for (const queries of [firstQueries, secondQueries, freshQueries]) queries.dispose();
   });
 });

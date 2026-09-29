@@ -23,8 +23,14 @@ export function CanvasPageMirror({
   page,
   zoom = 1,
   defer = false,
+  noteAnchorRevision = 0,
 }: {
   page: DisplayPage;
+  /**
+   * `displayPageNoteAnchorRevision(page)`: an owned shift moves the note
+   * anchors the mirror renders without replacing the page.
+   */
+  noteAnchorRevision?: number;
   zoom?: number;
   /** Off-window pages build at idle time instead of inside the mount flush. */
   defer?: boolean;
@@ -65,7 +71,7 @@ export function CanvasPageMirror({
     }
     const id = setTimeout(build, 150);
     return () => clearTimeout(id);
-  }, [page, t, defer]);
+  }, [page, t, defer, noteAnchorRevision]);
 
   return (
     <div

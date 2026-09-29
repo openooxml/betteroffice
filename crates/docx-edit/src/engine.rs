@@ -810,6 +810,11 @@ fn options_fingerprint(input: &LayoutInput) -> Result<u64, String> {
         .map_err(|error| format!("fingerprint layout options: {error}"))
 }
 
+/// A table cell or content control story lowered as part of the body.
+fn is_nested_body_story(story: &str) -> bool {
+    story.starts_with("body:")
+}
+
 fn block_key(id: &BlockId) -> Cow<'_, str> {
     match id {
         BlockId::Num(value) if value.fract() == 0.0 => Cow::Owned(format!("{}", *value as i64)),
@@ -1592,16 +1597,28 @@ impl EngineSession {
         // final pass; with notes the final pass carries reserved heights, so
         // the reservation-free pass stays out of the retained pagination state
         // that the next edit paginates against.
-        let base_input = input.clone();
-        let mut initial_layout = if refs.is_empty() {
+        // Placement only zeroes contextual spacing, which every pass applies
+        // again, so the note passes replay the body arena in place. Page-side
+        // wrapping rewrites shapes per pass, so it replays a copy instead.
+        let base_input = (!refs.is_empty()
+            && resident_body
+            && input.measured.iter().any(|measured| {
+                matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
+            }))
+        .then(|| input.clone());
+        let (mut initial_layout, mut arena) = if refs.is_empty() {
             self.layout_document_value_with_fingerprints(input, block_fingerprints.clone())?;
-            self.pagination
+            let layout = self
+                .pagination
                 .borrow_mut()
                 .layout
                 .take()
-                .expect("layout retained after successful pagination")
+                .expect("layout retained after successful pagination");
+            (layout, None)
         } else {
-            docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?
+            let layout =
+                docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?;
+            (layout, Some(input))
         };
         apply_document_regions(&mut initial_layout, &regions);
         let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
@@ -1620,12 +1637,24 @@ impl EngineSession {
         }
         let stabilized = stabilize_note_layout(
             |reserved| {
-                let mut pass = base_input.clone();
+                let mut copy;
+                let pass = match (&base_input, arena.as_mut()) {
+                    (Some(base), _) => {
+                        copy = base.clone();
+                        &mut copy
+                    }
+                    (None, Some(arena)) => arena,
+                    (None, None) => {
+                        return Err(docx_layout::LayoutError::Invalid(
+                            "note passes without a body arena".to_owned(),
+                        ));
+                    }
+                };
                 pass.options.footnote_reserved_heights = reservation_options(reserved);
                 if resident_body {
-                    stabilize_shape_wrapping(&mut pass, &regions, &measurement)?;
+                    stabilize_shape_wrapping(pass, &regions, &measurement)?;
                 }
-                let mut layout = docx_layout::place::layout_document(&mut pass)?;
+                let mut layout = docx_layout::place::layout_document(pass)?;
                 apply_document_regions(&mut layout, &regions);
                 Ok(layout)
             },
@@ -1636,8 +1665,7 @@ impl EngineSession {
         )
         .map_err(layout_error_message)?;
         let notes_converged = stabilized.converged;
-        if !refs.is_empty() {
-            let mut final_input = base_input;
+        if let Some(mut final_input) = base_input.or(arena) {
             final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
             let reshaped = resident_body
@@ -2068,17 +2096,19 @@ impl EngineSession {
     /// Whether the current resident state can complete a plain body-text edit
     /// without consulting the host. This is checked before the document
     /// mutation so `apply_input` cannot discover a missing measurement
-    /// template after committing the text.
+    /// template after committing the text. A table cell or other story nested
+    /// in the body qualifies once the body lays out through regions.
     pub fn can_apply_input(&self, story: &str, para_id: &str) -> bool {
-        if story != "body" {
+        let regions = self.regions.borrow().is_some();
+        if story != "body" && !(regions && is_nested_body_story(story)) {
             return false;
         }
-        let render_ready = self.render.borrow().stories.contains_key(story);
+        let render_ready = self.render.borrow().stories.contains_key("body");
         let pagination = self.pagination.borrow();
         let layout_ready = pagination.input.is_some() && pagination.layout.is_some();
         drop(pagination);
         let display_ready = self.display.borrow().extras_json.is_some();
-        let measure_ready = self.regions.borrow().is_some()
+        let measure_ready = regions
             || self
                 .pagination
                 .borrow()
@@ -2120,6 +2150,7 @@ impl EngineSession {
         self.with_lowered_story_observed(story, &env, after_lower, |blocks| {
             self.resident_layout_input_from_blocks(
                 blocks,
+                false,
                 &mut |_, key, previous_block, next_block| {
                     let mut envelope = self
                         .measurement_envelope_for_block(key, previous_block)
@@ -2150,9 +2181,12 @@ impl EngineSession {
     /// blocks reuse their retained extents (with fresh absolute positions),
     /// changed paragraph blocks are re-measured through `measure_dirty`
     /// (`(block_index, block_key, previous_block, next_block) -> extent`).
+    /// With `any_block`, a changed table or other non-paragraph block with a
+    /// stable id is re-measured too instead of refused.
     fn resident_layout_input_from_blocks(
         &self,
         blocks: &[LayoutBlock],
+        any_block: bool,
         measure_dirty: &mut dyn FnMut(
             usize,
             &str,
@@ -2203,9 +2237,36 @@ impl EngineSession {
                 paragraph_identity(&previous_measured.block),
             ) else {
                 if *next_block != previous_measured.block {
-                    return Err(
-                        "resident plain-text input changed a non-paragraph block".to_owned()
-                    );
+                    let (true, Some(next_id), Some(previous_id)) = (
+                        any_block,
+                        fragment_identity(next_block),
+                        fragment_identity(&previous_measured.block),
+                    ) else {
+                        return Err(
+                            "resident plain-text input changed a non-paragraph block".to_owned()
+                        );
+                    };
+                    let key = block_key(next_id);
+                    if key != block_key(previous_id) {
+                        return Err(
+                            "resident plain-text input changed stable block identity".to_owned()
+                        );
+                    }
+                    let mut next_measured_block = next_block.clone();
+                    let measure = measure_dirty(
+                        block_index,
+                        &key,
+                        &previous_measured.block,
+                        &mut next_measured_block,
+                    )?;
+                    let measured_block = MeasuredBlock {
+                        block: next_measured_block,
+                        measure,
+                    };
+                    block_fingerprints.push(measured_fingerprint(&measured_block)?);
+                    measured.push(measured_block);
+                    resident_measure_calls = resident_measure_calls.wrapping_add(1);
+                    continue;
                 }
                 measured.push(MeasuredBlock {
                     block: next_block.clone(),
@@ -2575,9 +2636,10 @@ impl EngineSession {
         story: &str,
         phase: &mut impl FnMut(RegionResidentPhase),
     ) -> Result<bool, String> {
-        if story != "body" {
+        if story != "body" && !is_nested_body_story(story) {
             return Ok(false);
         }
+        let story = "body";
         let fast_config = {
             let state = self.regions.borrow();
             state.as_ref().and_then(|state| {
@@ -2641,6 +2703,7 @@ impl EngineSession {
                     }
                     match self.resident_layout_input_from_blocks(
                         blocks,
+                        true,
                         &mut |index, _key, _previous_block, next_block| {
                             let width = widths.get(index).copied().unwrap_or(default_width);
                             resolve_line_unit_spacing(
@@ -2648,6 +2711,10 @@ impl EngineSession {
                                 regions.paragraph_spacing_line_px(0),
                             );
                             resolve_doc_grid_pitch(next_block, regions.doc_grid_snap_pitch_px(0));
+                            // as the region pass measures a changed table
+                            docx_layout::paragraph_spacing::apply_contextual_spacing_blocks(
+                                std::slice::from_mut(next_block),
+                            );
                             docx_layout::measure_blocks::measure_block(
                                 next_block,
                                 width,
@@ -4939,7 +5006,7 @@ mod tests {
         let walk = |blocks: &[LayoutBlock]| {
             let mut dirty: Vec<(usize, String)> = Vec::new();
             engine
-                .resident_layout_input_from_blocks(blocks, &mut |index, key, _, _| {
+                .resident_layout_input_from_blocks(blocks, false, &mut |index, key, _, _| {
                     dirty.push((index, key.to_owned()));
                     Ok(BlockExtent::Paragraph(ParagraphExtent {
                         lines: Vec::new(),
