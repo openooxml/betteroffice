@@ -91,11 +91,14 @@ export class ResidentEngineWorkerClient {
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
   private bootstrapped = false;
+  /** Id of the last snapshot request sent; replies to earlier requests must
+   * not replace the state it recorded. */
+  private lastSnapshotId = 0;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
       const response = event.data;
-      if (response.ok && response.stateVector) {
+      if (response.ok && response.stateVector && response.id >= this.lastSnapshotId) {
         this.remoteVector = new Uint8Array(response.stateVector);
       }
       if (!response.ok && response.terminal) {
@@ -329,6 +332,7 @@ export class ResidentEngineWorkerClient {
    */
   private recordSent(stateVector: Uint8Array | undefined, fontsRevision: number): void {
     if (this.terminalError) return;
+    this.lastSnapshotId = this.nextId - 1;
     if (stateVector) this.remoteVector = stateVector.slice();
     this.appliedFontsRevision = fontsRevision;
   }
@@ -336,10 +340,10 @@ export class ResidentEngineWorkerClient {
   /** Record a successfully applied bootstrap/sync payload's fonts revision.
    * The state vector is tracked centrally in `onmessage`. */
   private recordSync(
-    _response: ResidentEngineWorkerResponse & { ok: true },
+    response: ResidentEngineWorkerResponse & { ok: true },
     fontsRevision: number
   ): void {
-    this.appliedFontsRevision = fontsRevision;
+    if (response.id >= this.lastSnapshotId) this.appliedFontsRevision = fontsRevision;
   }
 
   private fail(error: Error): void {

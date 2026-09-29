@@ -161,6 +161,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   sessionRef.current = session;
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
+  // A deferred pass that had to run on this thread keeps that requirement.
+  const pendingOnHostRef = useRef(false);
   onTotalPagesChangeRef.current = onTotalPagesChange;
   onLayoutComputedRef.current = onLayoutComputed;
   onAnchorPositionsChangeRef.current = onAnchorPositionsChange;
@@ -251,6 +253,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
       const pass = ++passRef.current;
+      const onHost = options?.onHost === true || pendingOnHostRef.current;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
       pendingLayoutOriginRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
@@ -264,6 +267,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           pendingLayoutOriginRef.current,
           layoutUpdateOrigin
         );
+        pendingOnHostRef.current = onHost;
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
@@ -286,9 +290,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           pendingLayoutOriginRef.current,
           layoutUpdateOrigin
         );
+        pendingOnHostRef.current = onHost;
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
+      pendingOnHostRef.current = false;
 
       const computeInputs = { document, pageGap, session, renderEnv, measurement };
       const sourceVersion = readSessionVersion(session);
@@ -368,7 +374,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       }
       let workerPass: Promise<LayoutComputation | null> | null = null;
       if (
-        options?.onHost !== true &&
+        !onHost &&
         sourceVersion !== null &&
         sourceVersion === openedVersionRef.current.version
       ) {
@@ -394,8 +400,12 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         .then(
           (computation) => {
             if (pass !== passRef.current || sessionRef.current !== session) return;
-            if (computation) applyComputation(computation);
-            else layOutHere();
+            // A change that landed meanwhile makes the worker's layout stale.
+            if (computation && readSessionVersion(session) === sourceVersion) {
+              applyComputation(computation);
+            } else {
+              layOutHere();
+            }
           },
           (error: unknown) => {
             if (pass !== passRef.current) return;
