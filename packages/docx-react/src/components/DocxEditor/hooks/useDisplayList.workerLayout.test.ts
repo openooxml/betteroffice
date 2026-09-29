@@ -297,7 +297,7 @@ function settleHarness() {
   const displayList = { pages: [] };
   const overrides = {
     build: async () => displayList,
-    getInputs: () => ({ measured: [], options: {} }) as never,
+    getInputs: (): never | undefined => ({ measured: [], options: {} }) as never,
   };
   const layout = (partial: boolean) =>
     ({ pageSize: { w: 816, h: 1056 }, pages: [], ...(partial ? { partial } : {}) }) as Layout;
@@ -319,7 +319,7 @@ function settleHarness() {
     );
     return state;
   };
-  return { ...hook, initial, layout, settle };
+  return { ...hook, initial, layout, settle, overrides };
 }
 
 test('a layout of part of the document never settles, even after a full one did', async () => {
@@ -339,16 +339,25 @@ test('a layout of part of the document never settles, even after a full one did'
 });
 
 test('a reset waits for the next layout and a failure rejects', async () => {
-  const { result, rerender, initial, layout, settle } = settleHarness();
+  const { result, rerender, initial, layout, settle, overrides } = settleHarness();
   const first = settle();
   await waitFor(() => expect(first.settled).toBe(true));
   act(() => result.current.resetSettled());
+  expect(result.current.awaitingDocument()).toBe(true);
   const next = settle();
-  // Rebuilding the replaced document's layout, as clearing its comments does, settles nothing.
+  // Rebuilding the replaced document's layout, as clearing its comments does,
+  // neither settles nor fails the wait.
   await act(async () => {
     rerender({ layout: initial, resolved: new Set([1]) });
   });
+  const getInputs = overrides.getInputs;
+  overrides.getInputs = () => undefined;
+  await act(async () => {
+    rerender({ layout: initial, resolved: new Set([2]) });
+  });
+  overrides.getInputs = getInputs;
   expect(next.settled).toBe(false);
+  expect(next.failure).toBeNull();
   await act(async () => {
     rerender({ layout: layout(false) });
   });

@@ -1038,14 +1038,15 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     setDocumentFonts,
   });
 
-  // Until a load's document is laid out, a layout error may come from the
-  // document it replaces, so it fails no wait.
+  // A layout error of the session a newer load replaced is not the loaded
+  // document's: the old session may already be freed.
+  const sessionGenerationRef = useRef<number | null>(null);
   const reportLayoutError = useCallback(
-    (error: Error) =>
-      reportDocumentLayoutError(error, (current) => {
-        if (!awaitingDocument()) resetSettled(current);
-      }),
-    [reportDocumentLayoutError, resetSettled, awaitingDocument]
+    (error: Error) => {
+      if (sessionGenerationRef.current !== yrsSeedGeneration) return;
+      reportDocumentLayoutError(error, resetSettled);
+    },
+    [reportDocumentLayoutError, resetSettled, yrsSeedGeneration]
   );
   useEffect(() => {
     if (state.parseError) resetSettled(new Error(state.parseError));
@@ -1064,6 +1065,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onError: failHostDocument,
     }
   );
+  sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.
   useCompatibilityWarm(

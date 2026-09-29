@@ -263,15 +263,18 @@ export function useRustDisplayList(
   const settleRelayoutRef = useRef<(() => void) | null>(null);
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
-  // The layout shown when another document started loading. Rebuilding it
-  // settles no wait: waits are for the document being loaded.
+  // The layout shown when another document started loading. What becomes of
+  // it settles no wait: waits are for the document being loaded.
   const replacedLayoutRef = useRef<{ layout: Layout | null } | null>(null);
-  const markSettled = useCallback((epoch: number | null, failure: Error | null = null): void => {
-    if (epoch !== null && replacedLayoutRef.current) return;
-    settledEpochRef.current = epoch;
-    settleErrorRef.current = failure;
-    for (const waiter of [...settleWaitersRef.current]) waiter();
-  }, []);
+  const markSettled = useCallback(
+    (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
+      if (replacedLayoutRef.current && !authoritative) return;
+      settledEpochRef.current = epoch;
+      settleErrorRef.current = failure;
+      for (const waiter of [...settleWaitersRef.current]) waiter();
+    },
+    []
+  );
   const requestSettleRelayout = useCallback((): void => {
     if (settleWaitersRef.current.size === 0) return;
     setTimeout(() => {
@@ -458,7 +461,7 @@ export function useRustDisplayList(
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
-      markSettled(null, new Error('The editor was unmounted'));
+      markSettled(null, new Error('The editor was unmounted'), true);
     },
     [markSettled, queryEpochGate]
   );
@@ -1378,7 +1381,7 @@ export function useRustDisplayList(
         contentEpochRef.current += 1;
         replacedLayoutRef.current = { layout: layoutRef.current };
       }
-      markSettled(null, failure);
+      markSettled(null, failure, true);
     },
     [markSettled]
   );

@@ -25,6 +25,7 @@ import { createComment } from '../commentFactories';
 import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '../editorBatches';
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
+import { documentPageCount } from './documentPageCount';
 
 type LocatedParagraph = {
   story: string;
@@ -230,7 +231,8 @@ export function useDocxEditorRefApi({
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),
       getCurrentPage: () => scrollPageInfo.currentPage,
-      getTotalPages: () => (awaitingDocument?.() ? 0 : scrollPageInfo.totalPages),
+      getTotalPages: () =>
+        awaitingDocument?.() ? 0 : documentPageCount(pagedEditorRef.current?.getLayout()),
       whenLayoutComplete: async (options) => {
         if (!settledDisplayList) throw new Error('This editor paints no display list');
         return (await settledDisplayList(null, options?.timeoutMs ?? null)).pages.length;
