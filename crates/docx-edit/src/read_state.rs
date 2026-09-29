@@ -797,7 +797,9 @@ mod tests {
             FormatPolicy::Plain,
         )
         .unwrap();
-        let last = doc.locate(&doc.loc_at(&Position::new("body", u32::MAX)).unwrap()).unwrap();
+        let last = doc
+            .locate(&doc.loc_at(&Position::new("body", u32::MAX)).unwrap())
+            .unwrap();
         doc.delete_range(
             &suggesting("Eve"),
             StoryRange::new("body", last.index - 3, last.index),
@@ -840,7 +842,10 @@ mod tests {
             assert_eq!(loc.para, naive.para_id, "index {index}");
             assert_eq!(
                 loc.offset,
-                index.min(naive.pilcrow).saturating_sub(naive.start).min(naive.len())
+                index
+                    .min(naive.pilcrow)
+                    .saturating_sub(naive.start)
+                    .min(naive.len())
             );
         }
     }
