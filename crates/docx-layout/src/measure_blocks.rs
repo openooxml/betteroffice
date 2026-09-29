@@ -6,7 +6,6 @@ use serde_json::Value;
 
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
-use crate::paragraph_spacing::apply_contextual_spacing_blocks;
 use crate::table_grid::{
     content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
     resolve_table_column_widths, resolve_table_width_px,
@@ -1822,7 +1821,6 @@ fn measure_table(
     for (row_index, row) in table.rows.iter_mut().enumerate() {
         let mut cells = Vec::with_capacity(row.cells.len());
         for (cell_index, cell) in row.cells.iter_mut().enumerate() {
-            apply_contextual_spacing_blocks(&mut cell.blocks);
             let resolved = grid
                 .iter()
                 .find(|entry| entry.row_index == row_index && entry.cell_index == cell_index);

@@ -42,8 +42,15 @@ representation with the pagination work.
 in nested tables, while body paragraphs keep contextual suppression. It adds
 spacing when enabled, as described by
 [Microsoft's reference](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.allowspaceofsamestyleintable?view=openxml-3.0.1).
-Cell contextual suppression also runs before measurement, so row extents agree
-with the spacing used to paint their paragraphs.
+Unflagged table measurement retains the pre-existing behavior: contextual
+suppression runs during placement, after row extents are measured. For this
+fixture, both variants therefore measure a 96px row and place `TABLE END` at
+240px. The default paints cell paragraphs with 16px (12pt) advances inside that
+row; enabling the flag paints them with 40px (30pt) advances. The test locks the
+default measurement to the parent revision and compares cell advances in both
+variants, plus the enabled body-to-`TABLE END` advance, against Word. Closing the
+gap between unflagged row measurement and contextual cell placement is outside
+this compatibility change.
 
 The table compatibility survey also found missing grid and wrapping settings:
 

@@ -1,4 +1,8 @@
 use docx_edit::{EngineSession, bridge::RenderEnv, seed_from_docx};
+use docx_layout::{
+    cell_layout::layout_cell_content,
+    types::{BlockExtent, LayoutBlock, MeasuredBlock},
+};
 use serde_json::{Value, json};
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -165,7 +169,7 @@ fn hard_page_break_suppression_matches_word_and_preserves_page_break_before() {
 }
 
 #[test]
-fn table_compatibility_allows_cell_spacing_and_preserves_body_contextual_spacing() {
+fn table_compatibility_preserves_unflagged_measurement_and_allows_cell_spacing() {
     let default = render(TABLE_DEFAULT);
     let enabled = render(TABLE_ENABLED);
     let default_blocks = lowered(TABLE_DEFAULT);
@@ -190,10 +194,43 @@ fn table_compatibility_allows_cell_spacing_and_preserves_body_contextual_spacing
     for target in ["BODY 1", "BODY 2"] {
         assert_eq!(fragment(&default, target), fragment(&enabled, target));
     }
+    let default_measure = &default["measured"][2]["measure"];
+    assert_eq!(default_measure["totalHeight"], 96.0);
+    assert_eq!(default_measure["rows"][0]["height"], 96.0);
+    for (index, height) in [40.0, 56.0, 32.0].into_iter().enumerate() {
+        assert_eq!(
+            default_measure["rows"][0]["cells"][0]["blocks"][index]["totalHeight"],
+            height
+        );
+    }
+    assert_eq!(fragment(&default, "TABLE END"), (1, 240.0));
+    assert_eq!(default_measure, &enabled["measured"][2]["measure"]);
+    for (output, fixture) in [(&default, "table-default"), (&enabled, "table-enabled")] {
+        let measured: MeasuredBlock = serde_json::from_value(output["measured"][2].clone()).unwrap();
+        let (LayoutBlock::Table(table), BlockExtent::Table(extent)) =
+            (&measured.block, &measured.measure)
+        else {
+            panic!("expected measured table");
+        };
+        let cell = layout_cell_content(
+            Some(&table.rows[0].cells[0].blocks),
+            Some(&extent.rows[0].cells[0].blocks),
+            0.0,
+        );
+        for (index, (previous, next)) in [("CELL 1", "CELL 2"), ("CELL 2", "CELL 3")]
+            .into_iter()
+            .enumerate()
+        {
+            close(
+                cell.line_tops[index + 1][0] - cell.line_tops[index][0],
+                (word_position(fixture, next).1 - word_position(fixture, previous).1) * 4.0 / 3.0,
+            );
+        }
+    }
     close(
-        fragment(&enabled, "TABLE END").1 - fragment(&default, "TABLE END").1,
+        fragment(&enabled, "TABLE END").1 - fragment(&enabled, "BODY 1").1,
         (word_position("table-enabled", "TABLE END").1
-            - word_position("table-default", "TABLE END").1)
+            - word_position("table-enabled", "BODY 1").1)
             * 4.0
             / 3.0,
     );
