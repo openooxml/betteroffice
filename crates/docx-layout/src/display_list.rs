@@ -11508,7 +11508,20 @@ mod tests {
 
     #[test]
     fn a_break_sharing_a_rendered_block_id_does_not_stand_in_for_it() {
-        let pagination = table_split_fixture();
+        let mut pagination = table_split_fixture();
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("the fixture opens with a table");
+        };
+        let mut position = 1.0;
+        for cell in table.rows.iter_mut().flat_map(|row| row.cells.iter_mut()) {
+            for block in &mut cell.blocks {
+                if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                    paragraph.pm_start = Some(position);
+                    paragraph.pm_end = Some(position + 8.0);
+                    position += 10.0;
+                }
+            }
+        }
         let layout = crate::compute_layout_input(&mut pagination.clone()).unwrap();
         let crate::types::LayoutBlock::Table(table) = &pagination.measured[0].block else {
             panic!("the fixture opens with a table");
