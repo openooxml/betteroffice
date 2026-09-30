@@ -19,12 +19,14 @@ crate-type = ["cdylib", "rlib"]
 default = ["wasm"]
 wasm = ["dep:wasm-bindgen"]
 tiff = ["ooxml-drawingml/tiff"]
+metafile = ["dep:ooxml-metafile"]
 
 [dependencies]
 base64 = "0.22"
 ooxml-opc.workspace = true
 indexmap = { version = "2", features = ["serde"] }
 ooxml-drawingml = { workspace = true, features = ["chart"] }
+ooxml-metafile = { workspace = true, features = ["svg"], optional = true }
 quick-xml = { version = "0.41", features = ["encoding"] }
 ryu-js = "1"
 serde = { version = "1", features = ["derive", "rc"] }

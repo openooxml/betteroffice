@@ -1,5 +1,78 @@
 # @betteroffice/docx
 
+## 0.4.0
+
+### Minor Changes
+
+- e49077d: The DOCX editor now draws EMF, EMF+ and WMF pictures; one it cannot draw shows a placeholder and a `document.warnings` entry. The new `betteroffice-metafile` crate does the replay, enabled in `betteroffice-docx-parse` and `betteroffice-docx-edit` by an opt-in `metafile` feature.
+- 3f1feb8: A superseded display-list query facade now answers from the live layout only within its own document line, never after the editor releases that document, and never across documents when no `line` is given. New `endDisplayListQueriesLine(line)` export from `@betteroffice/docx/layout/render`.
+- 9ef6699: Add host proposals: `YrsSession.proposeChanges()` records a tracked-change batch outside undo history, and `setProposalStates()` previews accept/reject/restore via the new `revisionPreview` entry without changing the document. `getProposals()` and `YrsSession.onProposalChange()` read them; `DocxEditorRef`'s matching methods reach read-only viewers via the new `allowHostProposals` prop, off by default.
+- 76026a5: Adds `withdrawProposals`, which settles finished host proposals as their decisions show, and `search: ''` proposals that fill an empty paragraph. Typing into an empty paragraph in the editor now takes the paragraph mark's formatting, as Word does.
+- 0e8ca7e: Add `YrsRenderEnv.revisionPreview`, an opt-in map that lays out accepted or rejected tracked changes without changing the document. Plugin geometry follows a previewed decision once it is painted, and a paged export of a previewed layout is refused.
+- 751515b: **BREAKING (direct wasm consumers only):** `apply_delete`/`apply_delete_profiled` take a third `count` argument; pass `1` for the previous behaviour. `YrsSession.applyDelete` is unchanged.
+- ae13248: Adds opt-in `experimentalWorkerOpen` for faster DOCX opening. Off by default.
+
+### Patch Changes
+
+- f88ca8b: Accepting or rejecting a tracked change next to a table no longer breaks the document.
+- 66f7145: Pages stay painted, and scroll-to calls land on target, when a host scales the editor with CSS `zoom` on an ancestor. New `effectiveZoom(element)` export from `@betteroffice/docx/layout/render`.
+- 726c5b4: Bundled fonts configured via `configureDefaultFonts` load from the bundle instead of Google Fonts, matched by Word name or bundled name (e.g. `Gelasio`); a font with no bundled CSS match still gets its own bundled faces (e.g. Comic Sans MS).
+- 81a2b31: Built display pages take much less memory, so very long documents lay out in the background worker instead of running out of memory. Rendering is unchanged.
+- c64ae45: A page whose positions all shift by one delta now ships as a single run instead of one per primitive, cutting sync payloads from megabytes to kilobytes.
+- 5f5d4f0: Honors Word compatibility settings for fixed paragraph auto spacing, leading spacing after hard page breaks, and contextual spacing in table cells. Documents without these settings keep their existing spacing behavior.
+- b58c0b5: Fixes a memory leak that could retain an unmounted or replaced `DocxEditor` and its rendered pages.
+- 110414c: Long documents show their first pages sooner after opening, since the first display build prepares only the pages it draws.
+- 3d64f98: `proposeChanges` no longer rebuilds the document's text projection for every proposal in a batch.
+- e4fd867: Highlights, remote cursors, table and image handles, link popups and comment cards now line up with the pages under a host's ancestor CSS `zoom`, and comment cards also at editor zoom other than 100%. `detectDisplayListTableInsertHover` takes an optional `buttonZoom`.
+- a5b9424: Adds `preloadDocxEngine` and the `experimentalPrewarm` editor prop to prepare the editing engine ahead of opening a document. Both are opt-in.
+- a72d500: By default, editors sharing a page keep fonts apart: `onFontsLoaded` and `onError` ignore other editors' font loads, and same-named embedded fonts no longer override each other and are released on unmount. Direct callers opt in via `createFontLoadScope`, `registerDocumentFaces` and `loadEmbeddedFontFamilies`.
+- 384a90c: Show the full page number when a header or footer puts its PAGE or NUMPAGES field in a table, where every digit past the first used to be clipped. Superscript and subscript page numbers in headers and footers now stay aligned too.
+- add4cdb: Adds opt-in `set_windowed_incremental_builds` to limit incremental rebuilds to the display window and caret pages. The editor enables this for edits and proposal decisions, rebuilds other affected pages in the background, and waits for exact visible proposal geometry.
+- 2763a8e: Headers and footers now paint beneath the body, with watermarks beneath both, as in Word. Overlapping body content and controls receive clicks above header and footer content, while empty header and footer areas remain available for editing.
+- a6ac04e: Resolving paragraph anchors and reading paragraph identities reuse one read of the document until it changes, so proposing many edits to a long document no longer rereads it for every anchor.
+- ab5b7a8: Documents with footnotes or floating tables now relayout incrementally: an edit rebuilds only the affected pages and the float segments touching a changed block.
+- 86fcf80: An edit or proposal round early in a long document no longer builds the display of every later page at once; pages away from the viewport stay unbuilt until they are needed.
+- 0aa1c45: A heading kept with the next paragraph no longer moves to the next page when it fits there in Word: its spacing counts once and adjacent spacing collapses.
+- 751515b: The legacy module-level font helpers (`clear_measure_fonts`, `register_measure_font`, `measure_paragraph_json`, `outline_glyph_json`, `loadGlyphOutlineProvider`) must not be called while an editor session is open; use the session's methods.
+- 8a481c6: Embedded images stay compressed in the opened file until a page shows them. `createCanvasImageResolver` accepts a `media` source, and the new `mediaTokens` option (`DocxEditor`, `YrsOpeningOptions`), off by default, keeps images out of the shared document state.
+- 42ce38a: Fix inflated table row heights and excess pages when cells have overlapping vertical merge ranges, including repeated table headers.
+- adb33ac: Selection and story queries on large documents no longer trigger whole-document rework; the first read of every story after an edit was quadratic in story count.
+- bf4471b: Pages scrolled past quickly while the editor was busy no longer stay blank when you scroll back to them.
+- 00f5a64: With opt-in windowed builds, full rebuilds build only visible pages and the caret's page. `set_display_retain_built_pages` keeps every built page, and the editor sets it while a page widget has focus.
+- b204133: Pages that stay unchanged across updates no longer keep whole earlier layout replies in memory, which lowers main-thread memory on long documents.
+- b7f564a: Page canvas lookups (pointer routing, caret, selection, highlight overlays, table handles, viewport anchoring) now read a registry instead of scanning the whole pages subtree.
+- b6c407c: Large documents now keep each page's accessible text in the DOM only near the viewport, on by default. Tab, links, content controls and `RenderedDomContext.findElementsForRange()` still reach every page.
+- 6ac2d8c: Edits and accepted or rejected suggestions repaint sooner, since each changed page is prepared for display in a single pass.
+- 7ca1b0f: Changes far apart in one layout pass, such as a round of host proposals, now lay out again only the pages around each change. `layout_document_incremental_ranges` reports the page ranges placed afresh.
+- 7205060: Each page now reserves room only for the header and footer it shows. Even pages follow the displayed page number, and a missing even band stays blank.
+- 057dbf0: Plugin overlays, anchor geometry, sidebar cards and `RenderedDomContext` rectangles now line up with the pages when a host scales the editor with CSS `zoom` on an ancestor.
+- c4dbef0: Speeds up proposal preview changes on long documents by reusing the font requirements computed for the unchanged document.
+- 89c5d8e: Rebuild the editor's position projection incrementally: an edit now re-reads only changed paragraphs, via new `storiesChangedSince`, `storySegmentUnitDigests` and `storySegmentUnits` session queries.
+- 751515b: Host proposals should use an author distinct from interactive edits. In suggesting mode, typing next to a proposal by the same author joins its revision, and `withdrawProposals` removes both.
+- 7852788: Loading display-list query pages one at a time no longer rewrites every page, so querying each page of a long document stays fast as the page count grows.
+- 77c07ec: Body range and caret queries now read only the pages they touch, via cached per-page position spans, instead of walking every primitive.
+- 6795634: Typing and deleting in table cells now goes through the resident engine worker in one request, like body paragraphs, instead of laying out the document first.
+- f41899b: The resident worker now finishes a document's first layout in short steps, so requests that arrive meanwhile run between them, with identical results. `YrsSession.beginRegionLayout` and `resumeRegionLayout` expose the stepped region layout.
+- 92cd82c: Fix a crash when an edit relays out a document whose later sections have multiple columns, and balance those columns as a full layout does.
+- c15d0ec: Reads a document's revisions and sidebar projection once per document version, so scrolling or building pages of a document with tracked changes no longer relists them.
+- 4ad3ade: Number SEQ fields, such as figure and table captions, in document order as Word does; chapter-numbered sequences and number formats BetterOffice doesn't compute keep their saved result. Hidden text in text boxes and shapes stays hidden unless hidden text is shown.
+- 6a71241: Opening a second document with embedded fonts no longer changes the glyphs shown in another editor on the same page.
+- d9472e7: Show fields in text boxes and shapes, such as a page number in a footer text box, which used to be left out of the text.
+- 85eac34: The tracked-change sidebar reads each story once per document version, so changes and proposals appear sooner in long documents.
+- cd2a6d7: The editor no longer loads, or reports errors for, East Asian or complex-script fonts a document names without having text in that script. `YrsDocxHost` gains `unusedScriptFonts`, which lists them.
+- 9b6cab0: Page and column breaks are now numbered among a story's breaks instead of by position, so early edits no longer repaginate the whole document.
+- 0b8b954: Display-list queries kept from an earlier layout, such as plugin geometry a host holds on to, now answer from the current layout instead of re-reading the whole document on every call.
+- 4b39070: Suggested replacements now show the struck-out text before the new text, as Word does. `replaceRange` receipts carry the new text's `range`.
+- cf221d8: Table resize handles are now built only for pages around the viewport, instead of every table on every page, via the new `deriveDisplayListTableFragmentsOnPages` query.
+- dd9f00d: A new `tablePayload` session query reads just the current table's structure instead of the whole story, cutting per-keystroke cost in the toolbar and dialogs.
+- dfa6b47: A row of an inline table now splits across pages only where Word allows it: widow and orphan control and `w:keepLines` keep a cell paragraph's lines together, as in body text, unless the row cannot fit on a whole page.
+- 4538842: The viewport's scroll anchor now comes from the lines of on-screen pages instead of the whole document, via a new `visualLinesOnPage` query.
+- 5c6e00c: Add `getMemoryStats()` and opt-in `onMemoryPressure` and `memoryBudget` for the editor's wasm memory. A worker that runs out of memory, or past the opt-in `memoryBudget.workerLimitBytes`, is replaced once, then reported as `ResidentWorkerOutOfMemoryError` without a main-thread fallback; other failures fall back as before.
+- 2311375: Text now wraps beside floating tables that are wider than half the column instead of running under them.
+- 91d414c: `ResidentEngineWorkerClient` can open a DOCX in the resident worker (`open`, `fontRequirements`, `encodeState` and the `opened` bootstrap option), and `@betteroffice/docx/yrs` exports `preparedDocxDigest` and `decodeDocxHostJson`. Existing opens are unchanged.
+- 92900b6: Long documents respond faster to edits and suggestion decisions, since the layout worker no longer serializes or parses a layout it does not send.
+- 6809b31: Keep editing on the resident engine worker when a large document takes over five seconds to reply, instead of falling back to the main thread; only a worker silent for a minute is replaced. Queued keystrokes and worker-failure recovery now apply in order.
+
 ## 0.3.0
 
 ### Minor Changes

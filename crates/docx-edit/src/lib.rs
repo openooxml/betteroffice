@@ -51,7 +51,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
@@ -78,6 +78,7 @@ mod format;
 mod heading;
 mod identity;
 mod list_marker;
+pub mod media;
 mod op;
 mod ops;
 mod policy;
@@ -525,7 +526,12 @@ pub struct EditingDoc {
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
+    shared_read_depth: AtomicU32,
+    /// Story projections held only inside a shared-read scope.
+    story_views: Mutex<EpochCache<target::StoryView>>,
     source: Mutex<Option<identity::SourcePackage>>,
+    media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
+    media_sources: Mutex<media::MediaSources>,
     seen: identity::SeenCell,
     scan_cache: identity::ScanCache,
     story_revisions: Arc<Mutex<StoryRevisions>>,
@@ -574,7 +580,11 @@ impl EditingDoc {
             metadata: Mutex::new(None),
             segment_indexes: Mutex::default(),
             chunk_snapshots: Mutex::default(),
+            shared_read_depth: AtomicU32::new(0),
+            story_views: Mutex::default(),
             source: Mutex::new(None),
+            media: Mutex::new(None),
+            media_sources: Mutex::default(),
             seen,
             scan_cache: identity::ScanCache::default(),
             story_revisions,
@@ -607,6 +617,8 @@ impl EditingDoc {
     /// Retains the opened package's style and structure context and rotates the version.
     pub(crate) fn install_source(&self, source: seed::SourceMetadata, entropy: u64) {
         *self.metadata.lock().unwrap() = Some(Arc::new(source));
+        // Story projections read the source, so none built before it is served again.
+        self.epoch.fetch_add(1, Ordering::Relaxed);
         self.rotate_version(entropy);
     }
 
@@ -656,9 +668,64 @@ impl EditingDoc {
         self.client_id
     }
 
+    /// Until the matching `end_shared_reads`, committed reads share story projections of each document state.
+    pub fn begin_shared_reads(&self) {
+        self.shared_read_depth.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Ends a shared-read scope, dropping shared story projections when the last scope ends.
+    pub fn end_shared_reads(&self) {
+        let mut views = self.story_views.lock().unwrap();
+        let previous =
+            self.shared_read_depth
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+                    depth.checked_sub(1)
+                });
+        if previous == Ok(1) {
+            *views = EpochCache::default();
+        }
+    }
+
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
+        *self.media.lock().unwrap() = None;
         *self.source.lock().unwrap() = Some(source);
+    }
+
+    /// Keeps `media`, read from the retained package, as the table the
+    /// stories' `media:{n}` image sources name.
+    pub(crate) fn install_media(&self, media: docx_parse::media::MediaTable) {
+        *self.media.lock().unwrap() = Some(Arc::new(media));
+    }
+
+    /// The fingerprints of the `data:` image sources seeding wrote in place
+    /// of `media:{n}` tokens; see [`media::MediaSources`].
+    pub fn media_sources(&self) -> media::MediaSources {
+        self.media_sources.lock().unwrap().clone()
+    }
+
+    /// Replaces the media sources, keeping the current ones when equal so
+    /// what was lowered with them stays valid.
+    pub(crate) fn set_media_sources(&self, sources: media::MediaSources) {
+        let mut current = self.media_sources.lock().unwrap();
+        if *current != sources {
+            *current = sources;
+        }
+    }
+
+    /// The media behind the `media:{n}` image sources of the stories seeded
+    /// from the retained package, read from that package on first use.
+    pub fn media_table(&self) -> Option<Arc<docx_parse::media::MediaTable>> {
+        let mut media = self.media.lock().unwrap();
+        if media.is_none() {
+            let bytes = match self.source.lock().unwrap().as_ref()? {
+                identity::SourcePackage::Pending(bytes, _) => Arc::clone(bytes),
+                identity::SourcePackage::Ready(index) => index.bytes(),
+            };
+            let package = ooxml_opc::RetainedPackage::new(bytes).ok()?;
+            *media = Some(Arc::new(docx_parse::media::MediaTable::new(package).ok()?));
+        }
+        media.clone()
     }
 
     /// Retains the DOCX package another replica seeded this document from, so

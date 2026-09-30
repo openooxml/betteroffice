@@ -29,6 +29,8 @@ heap-stats = ["wasm"]
 # The seeded yrs image src is what the renderer paints, so this crate needs the
 # same TIFF transcode the docx-parse wasm build enables.
 tiff = ["docx-parse/tiff"]
+# EMF and WMF pictures reach the renderer as SVG, for the same reason.
+metafile = ["docx-parse/metafile"]
 
 [dependencies]
 # 0.27.3 is the newest crates.io release. The repository's minimumReleaseAge is a Bun/npm

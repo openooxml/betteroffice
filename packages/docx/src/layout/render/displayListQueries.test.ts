@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createDisplayListQueries,
+  endDisplayListQueriesLine,
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
+  type DisplayListQueries,
+  type DisplayListRegionHit,
 } from './displayListQueries';
 import type { DisplayPage } from './displayList';
 import type { RustDisplayListQueryEngine } from './rustDisplayList';
@@ -52,6 +55,17 @@ function fakeEngine() {
   return { engine, calls };
 }
 
+function dropFacadeWithDonor(
+  engine: RustDisplayListQueryEngine,
+  hostState: WeakMap<object, { latest: DisplayListQueries }>
+): WeakRef<DisplayListQueries> {
+  const donor = createDisplayListQueries({ pages: [page(0)] }, engine);
+  donor.prime();
+  const facade = createDisplayListQueries({ pages: [page(0)] }, engine, donor);
+  hostState.set(donor, { latest: facade });
+  return new WeakRef(facade);
+}
+
 describe('createDisplayListQueries handle lifecycle', () => {
   test('opens the session handle lazily, on the first query', () => {
     const { engine, calls } = fakeEngine();
@@ -72,6 +86,27 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.open).toBe(1);
   });
 
+  test('a dropped facade whose donor leads back to it is collected', async () => {
+    const { engine } = fakeEngine();
+    // Host state keyed by the donor that reaches its successor, as a display window does.
+    const hostState = new WeakMap<object, { latest: DisplayListQueries }>();
+    const dropped = dropFacadeWithDonor(engine, hostState);
+    const alive = (): boolean => dropped.deref() !== undefined;
+    let collected = false;
+    for (let i = 0; i < 20 && !collected; i++) {
+      await new Promise<void>((resolve) =>
+        setTimeout(() => {
+          Bun.gc(true);
+          resolve();
+        }, 0)
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      collected = !alive();
+    }
+    expect(collected).toBe(true);
+    expect(hostState).toBeInstanceOf(WeakMap);
+  });
+
   test('adoption chains across unqueried generations as one page-delta', () => {
     const { engine, calls } = fakeEngine();
     const shared = page(0);
@@ -87,17 +122,326 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.update).toBe(1);
   });
 
-  test('superseded generations fall back to JSON-arg queries, never reopening', () => {
+  test('a superseded generation answers from the live one, never reopening or serialising', () => {
+    const { engine, calls } = fakeEngine();
+    const line = {};
+    // the store answers with the generation it holds, as the live layout would
+    engine.rangeRectsByHandle = () => {
+      calls.rangeByHandle += 1;
+      return `[{"pageIndex":0,"x":${calls.update},"y":0,"width":1,"height":1}]`;
+    };
+    const shared = page(0);
+    const first = createDisplayListQueries({ pages: [shared] }, engine, null, line);
+    first.rangeRects(0, 1);
+    const second = createDisplayListQueries({ pages: [shared] }, engine, first, line);
+    // still holding the handle, the old generation answers itself
+    expect(first.rangeRects(0, 1)[0]?.x).toBe(0);
+    second.rangeRects(0, 1);
+    const third = createDisplayListQueries({ pages: [shared, page(1)] }, engine, second, line);
+    expect(third.rangeRects(0, 1)[0]?.x).toBe(2);
+
+    expect(first.rangeRects(0, 1)[0]?.x).toBe(2);
+    expect(second.caretRect(0)?.x).toBe(2);
+    expect(calls.open).toBe(1);
+    expect(calls.rangeJson).toBe(0);
+  });
+
+  const rect = (x: number) => ({ pageIndex: 1, x, y: 0, width: 1, height: 1 });
+  const hit = (pos: number): DisplayListRegionHit => ({ region: 'body', pos, target: 'text' });
+
+  test('a superseded generation without a line queries its own list after handle adoption', () => {
+    const { engine, calls } = fakeEngine();
+    const queriedHandles: number[] = [];
+    const jsonQueries: string[] = [];
+    let hitJson = 0;
+    engine.rangeRectsByHandle = (handle) => {
+      calls.rangeByHandle += 1;
+      queriedHandles.push(handle);
+      return JSON.stringify([rect(300)]);
+    };
+    engine.hitTestRegionsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify(hit(300));
+    };
+    engine.rangeRectsJson = (json) => {
+      calls.rangeJson += 1;
+      jsonQueries.push(json);
+      return JSON.stringify([rect(JSON.parse(json).pages[1].width)]);
+    };
+    engine.hitTestRegionsJson = (json) => {
+      hitJson += 1;
+      jsonQueries.push(json);
+      return JSON.stringify(hit(JSON.parse(json).pages[1].width));
+    };
+    const shared = page(0);
+    const firstList = { pages: [shared, { ...page(1), width: 200 }] };
+    const first = createDisplayListQueries(firstList, engine);
+    first.prime();
+    const second = createDisplayListQueries(
+      { pages: [shared, { ...page(1), width: 300 }] },
+      engine,
+      first
+    );
+    expect(second.rangeRects(0, 1)).toEqual([rect(300)]);
+    expect(calls.update).toBe(1);
+    expect(second.hitTestRegions(1, 1, 1)).toEqual(hit(300));
+
+    expect(first.rangeRects(0, 1)).toEqual([rect(200)]);
+    expect(first.hitTestRegions(1, 1, 1)).toEqual(hit(200));
+    expect(queriedHandles).toEqual([1, 1]);
+    expect(jsonQueries).toEqual([JSON.stringify(firstList), JSON.stringify(firstList)]);
+    expect(calls.rangeByHandle).toBe(1);
+    expect(calls.rangeJson).toBe(1);
+    expect(hitJson).toBe(1);
+    expect(calls.open).toBe(1);
+  });
+
+  test('a document line rejoins after a gap in the previous facade chain', () => {
+    const { engine, calls } = fakeEngine();
+    const queriedHandles: number[] = [];
+    const jsonQueries: string[] = [];
+    engine.rangeRectsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify([rect(handle)]);
+    };
+    engine.hitTestRegionsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify(hit(handle));
+    };
+    engine.rangeRectsJson = () => {
+      calls.rangeJson += 1;
+      jsonQueries.push('rangeRects');
+      return '[]';
+    };
+    engine.hitTestRegionsJson = () => {
+      jsonQueries.push('hitTestRegions');
+      return 'null';
+    };
+    const shared = page(0);
+    const line = {};
+    const first = createDisplayListQueries({ pages: [shared, page(1)] }, engine, null, line);
+    first.prime();
+    const second = createDisplayListQueries({ pages: [shared, page(1)] }, engine, first, line);
+    expect(second.rangeRects(0, 1)).toEqual([rect(1)]);
+    expect(calls.update).toBe(1);
+    expect(second.hitTestRegions(1, 1, 1)).toEqual(hit(1));
+    const third = createDisplayListQueries(
+      { pages: [shared, { ...page(1), width: 300 }] },
+      engine,
+      null,
+      line
+    );
+    third.prime();
+
+    expect(first.rangeRects(0, 1)).toEqual([rect(2)]);
+    expect(first.hitTestRegions(1, 1, 1)).toEqual(hit(2));
+    expect(second.rangeRects(0, 1)).toEqual([rect(1)]);
+    expect(queriedHandles).toEqual([1, 1, 2, 2, 1]);
+    expect(jsonQueries).toEqual([]);
+    expect(calls.rangeJson).toBe(0);
+    expect(calls.open).toBe(2);
+  });
+
+  test('ending a document line silences superseded facades until the line rejoins', () => {
+    const { engine, calls } = fakeEngine();
+    const queriedHandles: number[] = [];
+    const jsonQueries: string[] = [];
+    engine.rangeRectsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify([rect(handle)]);
+    };
+    engine.hitTestRegionsByHandle = (handle) => {
+      queriedHandles.push(handle);
+      return JSON.stringify(hit(handle));
+    };
+    engine.rangeRectsJson = () => {
+      calls.rangeJson += 1;
+      jsonQueries.push('rangeRects');
+      return '[]';
+    };
+    engine.hitTestRegionsJson = () => {
+      jsonQueries.push('hitTestRegions');
+      return 'null';
+    };
+    const shared = page(0);
+    const line = {};
+    const first = createDisplayListQueries({ pages: [shared, page(1)] }, engine, null, line);
+    first.prime();
+    const second = createDisplayListQueries({ pages: [shared, page(1)] }, engine, first, line);
+    second.prime();
+    const third = createDisplayListQueries({ pages: [shared, page(1)] }, engine, second, line);
+    expect(third.rangeRects(0, 1)).toEqual([rect(1)]);
+    expect(calls.open).toBe(1);
+    expect(calls.update).toBe(2);
+
+    endDisplayListQueriesLine(line);
+    for (const queries of [first, second]) {
+      expect(queries.rangeRects(0, 1)).toEqual([]);
+      expect(queries.hitTestRegions(1, 1, 1)).toBeNull();
+    }
+    expect(queriedHandles).toEqual([1]);
+    expect(jsonQueries).toEqual([]);
+    expect(calls.open).toBe(1);
+
+    const rejoined = createDisplayListQueries({ pages: [shared, page(1)] }, engine, null, line);
+    rejoined.prime();
+    for (const queries of [first, second]) {
+      expect(queries.rangeRects(0, 1)).toEqual([rect(2)]);
+      expect(queries.hitTestRegions(1, 1, 1)).toEqual(hit(2));
+    }
+    expect(queriedHandles).toEqual([1, 2, 2, 2, 2]);
+    expect(jsonQueries).toEqual([]);
+    expect(calls.rangeJson).toBe(0);
+    expect(calls.open).toBe(2);
+  });
+
+  const lineQueries = [
+    {
+      name: 'rangeRects',
+      read: (queries: DisplayListQueries) => queries.rangeRects(0, 1),
+      a: [rect(200)],
+      b: [rect(300)],
+      empty: [],
+    },
+    {
+      name: 'anchorRect',
+      read: (queries: DisplayListQueries) => queries.anchorRect(0),
+      a: rect(200),
+      b: rect(300),
+      empty: null,
+    },
+    {
+      name: 'hitTestRegions',
+      read: (queries: DisplayListQueries) => queries.hitTestRegions(1, 1, 1),
+      a: hit(200),
+      b: hit(300),
+      empty: null,
+    },
+  ];
+
+  for (const query of lineQueries) {
+    test(`a document line split ends ${query.name} forwarding for every superseded generation`, () => {
+      const { engine, calls } = fakeEngine();
+      const queriedHandles: number[] = [];
+      const adoptedHandles: number[] = [];
+      const jsonQueries: string[] = [];
+      let storedWidth = 100;
+      engine.updateDisplayList = (handle, json) => {
+        calls.update += 1;
+        const update = JSON.parse(json) as {
+          reuse?: Array<[number, number]>;
+          replace: Array<[number, DisplayPage]>;
+        };
+        if (update.reuse) adoptedHandles.push(handle);
+        const changed = update.replace.find(([index]) => index === 1);
+        if (changed) storedWidth = changed[1].width;
+      };
+      engine.rangeRectsByHandle = (handle) => {
+        calls.rangeByHandle += 1;
+        queriedHandles.push(handle);
+        return JSON.stringify([rect(storedWidth)]);
+      };
+      engine.hitTestRegionsByHandle = (handle) => {
+        queriedHandles.push(handle);
+        return JSON.stringify(hit(storedWidth));
+      };
+      engine.rangeRectsJson = () => {
+        calls.rangeJson += 1;
+        jsonQueries.push('rangeRects');
+        return '[]';
+      };
+      engine.hitTestRegionsJson = () => {
+        jsonQueries.push('hitTestRegions');
+        return 'null';
+      };
+      const read = (queries: DisplayListQueries) => {
+        const handleStart = queriedHandles.length;
+        const jsonStart = jsonQueries.length;
+        const answer = query.read(queries);
+        return {
+          answer,
+          handles: queriedHandles.slice(handleStart),
+          json: jsonQueries.slice(jsonStart),
+        };
+      };
+      const shared = page(0);
+      const lineA = {};
+      const lineB = {};
+      const first = createDisplayListQueries({ pages: [shared, page(1)] }, engine, null, lineA);
+      first.prime();
+      const second = createDisplayListQueries(
+        { pages: [shared, { ...page(1), width: 200 }] },
+        engine,
+        first,
+        lineA
+      );
+      const currentA = read(second);
+      const forwardedA = read(first);
+      const replacement = createDisplayListQueries(
+        { pages: [shared, { ...page(1), width: 300 }] },
+        engine,
+        second,
+        lineB
+      );
+      const currentB = read(replacement);
+      const staleA1 = read(second);
+      const staleA0 = read(first);
+
+      expect({
+        currentA,
+        forwardedA,
+        currentB,
+        staleA1,
+        staleA0,
+        opens: calls.open,
+        adoptedHandles,
+      }).toEqual({
+        currentA: { answer: query.a, handles: [1], json: [] },
+        forwardedA: { answer: query.a, handles: [1], json: [] },
+        currentB: { answer: query.b, handles: [1], json: [] },
+        staleA1: { answer: query.empty, handles: [], json: [] },
+        staleA0: { answer: query.empty, handles: [], json: [] },
+        opens: 1,
+        adoptedHandles: [1, 1],
+      });
+    });
+  }
+
+  test('a superseded generation reads page metadata from the live layout too', () => {
     const { engine, calls } = fakeEngine();
     const shared = page(0);
-    const first = createDisplayListQueries({ pages: [shared] }, engine);
+    const line = {};
+    const first = createDisplayListQueries({ pages: [shared] }, engine, null, line);
     first.rangeRects(0, 1);
-    const second = createDisplayListQueries({ pages: [shared] }, engine, first);
+    const landscape = { ...page(1), width: 140 };
+    const second = createDisplayListQueries({ pages: [shared, landscape] }, engine, first, line);
+    expect(first.pageCount()).toBe(1);
     second.rangeRects(0, 1);
     expect(calls.update).toBe(1);
+    expect(first.pageCount()).toBe(2);
+    expect(first.pageSize(1)).toEqual({ width: 140, height: 100 });
+    expect(first.displayList).toBe(second.displayList);
+  });
+
+  test('a superseded generation whose successor is gone answers nothing', () => {
+    const { engine, calls } = fakeEngine();
+    const line = {};
+    engine.rangeRectsByHandle = () => {
+      calls.rangeByHandle += 1;
+      return '[{"pageIndex":0,"x":1,"y":0,"width":1,"height":1}]';
+    };
+    const shared = page(0);
+    const first = createDisplayListQueries({ pages: [shared] }, engine, null, line);
     first.rangeRects(0, 1);
-    expect(calls.open).toBe(1);
-    expect(calls.rangeJson).toBe(1);
+    const second = createDisplayListQueries({ pages: [shared] }, engine, first, line);
+    expect(second.rangeRects(0, 1)).toHaveLength(1);
+    expect(calls.update).toBe(1);
+    expect(first.rangeRects(0, 1)).toHaveLength(1);
+    second.dispose();
+    expect(first.rangeRects(0, 1)).toEqual([]);
+    expect(first.hitTestRegions(0, 1, 1)).toBeNull();
+    expect(first.anchorRect(0)).toBeNull();
+    expect(calls.rangeJson).toBe(0);
   });
 
   test('routes vertical movement through the retained handle', () => {

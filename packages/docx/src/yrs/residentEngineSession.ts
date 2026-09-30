@@ -9,6 +9,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
 export type ResidentEngineSession = Pick<
@@ -27,6 +28,7 @@ export type ResidentEngineSession = Pick<
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
+  | 'loadMediaSources'
   | 'loadState'
   | 'setPartialDocument'
   | 'measureParagraphJson'
@@ -38,12 +40,15 @@ export type ResidentEngineSession = Pick<
   | 'residentDeletedUnits'
   | 'resumeRegionLayout'
   | 'selection'
+  | 'setDisplayRetainBuiltPages'
   | 'setDisplayWindow'
   | 'setSelection'
   | 'yrsBlocksForStory'
 > & {
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+  /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
+  setWindowedIncrementalBuilds(enabled: boolean): void;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
   /** The whole document state as one yrs v1 update. */
@@ -85,7 +90,11 @@ export async function createResidentEngineSession(
   };
 
   return {
-    openDocx: (bytes, digest, generation) => session.open_docx(bytes, true, generation, digest),
+    openDocx: (bytes, digest, generation) =>
+      resolveHostJsonCommentMedia(
+        session.open_docx(bytes, true, generation, digest),
+        (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
+      ),
     encodeState: () => session.encode_state(),
     registerFont: (bytes) => session.register_measure_font(bytes),
     registerSubstituteFont: (base, family) =>
@@ -110,6 +119,8 @@ export async function createResidentEngineSession(
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
+    setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     residentCaretSnapshot: () =>
@@ -137,6 +148,7 @@ export async function createResidentEngineSession(
       return { frame, profile };
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
+    loadMediaSources: (json) => session.load_media_sources(json),
     loadState: (update) => session.load(update),
     applyUpdate: (update) =>
       JSON.parse(

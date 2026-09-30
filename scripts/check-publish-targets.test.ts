@@ -154,9 +154,10 @@ describe('release wiring', () => {
       'node scripts/check-publish-targets.mjs --crates',
       'node scripts/check-publish-targets.mjs --npm'
     ]);
-    for (const step of guards) {
-      expect(step.if).toBe("steps.pending.outputs.publishing == 'true'");
-    }
+    expect(guards.map((step: any) => step.if)).toEqual([
+      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'",
+      "steps.pending.outputs.publishing == 'true'"
+    ]);
   });
 
   test('both registries are checked before the first upload of either', () => {
@@ -180,12 +181,14 @@ describe('release wiring', () => {
 describe('crates OIDC-first wiring', () => {
   const named = new Map(release.jobs.release.steps.map((step: any) => [step.name, step]));
 
-  test('the OIDC exchange always runs on the publish path', () => {
+  test('the OIDC exchange runs on the publish path unless crates are skipped', () => {
     const auth = named.get('Authenticate to crates.io');
     expect(auth.uses).toBe(
       'rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18'
     );
-    expect(auth.if).toBe("steps.pending.outputs.publishing == 'true'");
+    expect(auth.if).toBe(
+      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
+    );
   });
 
   test('an OIDC failure continues only when the bootstrap token is detected', () => {

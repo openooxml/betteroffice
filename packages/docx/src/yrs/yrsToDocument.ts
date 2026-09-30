@@ -553,6 +553,7 @@ function fieldFromPayload(payload: Attrs, attributes: Attrs): SimpleField | Comp
   if (fieldData && fieldData.length <= 2_000_000) {
     try {
       const stored = JSON.parse(fieldData) as SimpleField | ComplexField;
+      if (fieldData.includes('"media:')) resolveMediaSrcs(stored);
       const children = stored.type === 'simpleField' ? stored.content : stored.fieldResult;
       if (
         (stored.type === 'simpleField' || stored.type === 'complexField') &&
@@ -638,6 +639,26 @@ function horizontalRuleRun(payload: Attrs, attributes: Attrs): Run {
   };
 }
 
+/** Reads the `media:{n}` image sources of the projection under way as `data:` URLs. */
+let projectedMedia: ((token: string) => string | null) | null = null;
+
+function mediaSrc(src: string): string {
+  return projectedMedia && src.startsWith('media:') ? (projectedMedia(src) ?? src) : src;
+}
+
+function resolveMediaSrcs(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) resolveMediaSrcs(item);
+    return;
+  }
+  const object = asObject(value);
+  if (!object) return;
+  for (const [key, field] of Object.entries(object)) {
+    if (key === 'src' && typeof field === 'string') object[key] = mediaSrc(field);
+    else resolveMediaSrcs(field);
+  }
+}
+
 function imageRunFromPayload(payload: Attrs): Run {
   const attrs = payload as YrsImageAttrs & Attrs;
   const wrap: Image['wrap'] = {
@@ -652,7 +673,7 @@ function imageRunFromPayload(payload: Attrs): Run {
   const image: Image = {
     type: 'image',
     rId: asString(attrs.rId) || '',
-    src: asString(attrs.src) || '',
+    src: mediaSrc(asString(attrs.src) || ''),
     alt: asString(attrs.alt) || undefined,
     title: asString(attrs.title) || undefined,
     shapeType: asString(attrs.shapeType) || undefined,
@@ -743,6 +764,7 @@ function storedShape(value: unknown): Shape | undefined {
     const parsed = JSON.parse(json) as Shape;
     if (parsed?.type !== 'shape' || typeof parsed.shapeType !== 'string') return undefined;
     if (!asObject(parsed.size)) parsed.size = { width: 0, height: 0 };
+    if (json.includes('"media:')) resolveMediaSrcs(parsed);
     return parsed;
   } catch {
     return undefined;
@@ -754,6 +776,7 @@ function chartRunFromPayload(payload: Attrs): Run | null {
   if (!json) return null;
   try {
     const chart = JSON.parse(json) as Chart;
+    if (json.includes('"media:')) resolveMediaSrcs(chart);
     if (chart?.type !== 'chart' || typeof chart.chartType !== 'string') return null;
     return { type: 'run', content: [{ type: 'chart', chart }] };
   } catch {
@@ -849,6 +872,7 @@ function inlineSdtFromPayload(payload: Attrs): InlineSdt {
   if (propertiesJson && propertiesJson.length <= 1_000_000) {
     try {
       const parsed = JSON.parse(propertiesJson) as SdtProperties;
+      if (propertiesJson.includes('"media:')) resolveMediaSrcs(parsed);
       if (parsed && typeof parsed === 'object' && typeof parsed.sdtType === 'string') {
         properties = parsed;
       }
@@ -2536,6 +2560,21 @@ export function yrsBodyToDocumentWithRevisionIds(
 }
 
 function projectDocument(
+  session: YrsSession,
+  base: Document,
+  options: YrsToDocumentOptions,
+  revisionIds?: RevisionIds
+): Document {
+  const previous = projectedMedia;
+  projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
+  try {
+    return projectStories(session, base, options, revisionIds);
+  } finally {
+    projectedMedia = previous;
+  }
+}
+
+function projectStories(
   session: YrsSession,
   base: Document,
   options: YrsToDocumentOptions,

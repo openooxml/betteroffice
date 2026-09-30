@@ -112,6 +112,18 @@ export function presentOffscreenPageBackBuffer(
 }
 
 /**
+ * Release a worker-owned transferred canvas's bitmap and keep the canvas usable.
+ * Chromium never shows a canvas's later frames once it is resized to 0x0 while a
+ * presented frame is in flight, so it shrinks to one pixel and presents an empty bitmap.
+ */
+export function releaseOffscreenPageCanvas(canvas: OffscreenCanvas): void {
+  if (canvas.width === 1 && canvas.height === 1) return;
+  canvas.width = 1;
+  canvas.height = 1;
+  canvas.getContext('bitmaprenderer')?.transferFromImageBitmap(null);
+}
+
+/**
  * Present a page buffer with a caret line composited at present time. The
  * stroke goes through `stage`, so `buffer` keeps its clean raster and the
  * line can later be dropped by re-presenting `buffer` without re-rastering.
@@ -188,7 +200,7 @@ export async function rasterizeDisplayListPages(
   return canvases;
 }
 
-/** Replays a page in primitive order, including body and header/footer bands. */
+/** Replays watermark, header/footer, body and note layers. */
 export async function drawDisplayPage(
   ctx: CanvasRenderingContext2D,
   page: DisplayPage,
@@ -202,20 +214,27 @@ export async function drawDisplayPage(
   for (const border of (page.pageBorders ?? []).filter((p) => p.zOrder === 'back')) {
     drawPageBorder(ctx, border);
   }
-  for (const primitive of page.primitives) {
-    await drawPrimitive(ctx, primitive, options);
+  const watermarkPrimitiveCount = Math.min(
+    page.watermarkPrimitiveCount ?? 0,
+    page.primitives.length
+  );
+  for (let index = 0; index < watermarkPrimitiveCount; index += 1) {
+    await drawPrimitive(ctx, page.primitives[index]!, options);
+  }
+  for (const region of [page.header, page.footer]) {
+    if (!region) continue;
+    for (const primitive of region.primitives) {
+      await drawPrimitive(ctx, primitive, options);
+    }
+  }
+  for (let index = watermarkPrimitiveCount; index < page.primitives.length; index += 1) {
+    await drawPrimitive(ctx, page.primitives[index]!, options);
   }
   for (const area of page.noteAreas ?? []) {
     for (const primitive of area.separatorPrimitives ?? []) {
       await drawPrimitive(ctx, primitive, options);
     }
     for (const primitive of area.primitives ?? []) {
-      await drawPrimitive(ctx, primitive, options);
-    }
-  }
-  for (const region of [page.header, page.footer]) {
-    if (!region) continue;
-    for (const primitive of region.primitives) {
       await drawPrimitive(ctx, primitive, options);
     }
   }
