@@ -12,7 +12,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from './index';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
-import type { DocxProposalInput, DocxProposalResult } from './proposals';
+import type { DocxProposalInput, DocxProposalResult, DocxProposalSnapshot } from './proposals';
 import { resolveNavigationTarget } from './proposalGeometry';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
@@ -527,6 +527,193 @@ test('worker registry operations match a direct registry and hand their records 
   client.rebootstrap();
   await client.bootstrap(source.residentWorkerSnapshot()!, '{}', { frameEpoch: booted.caret.frameEpoch });
   expect((await client.handOver()).proposals).toEqual({ previewVersion: 0, entries: [] });
+});
+
+test('worker withdrawal refuses a revision joined by typing with a foreign stamp', async () => {
+  const source = await createYrsSession({ clientId: 5109 });
+  sessions.push(source);
+  source.openDocx(proposalDocument(), true);
+  source.registerFont(new Uint8Array(readFileSync(FONT)));
+  source.adoptResidentWorkerLayout!(LAYOUT);
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await client.bootstrap(source.residentWorkerSnapshot()!, '{}');
+  const initial = await client.handOver();
+  const snapshot = await client.proposal({ kind: 'snapshot' });
+  const paragraph = source.paragraphIdentities().paragraphs.find(
+    (paragraph) => paragraph.session?.story === 'body'
+  )!.session!;
+  if (paragraph.kind !== 'session') throw new Error('expected a session anchor');
+  const proposal: DocxProposalInput = {
+    id: 'shared',
+    paragraph,
+    suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+    op: 'insertText',
+    at: 'end',
+    text: ' proposed',
+  };
+  const applied = await client.proposal({
+    kind: 'propose',
+    request: { expectVersion: snapshot.mirror.version, proposals: [proposal] },
+  });
+  if (!applied.result?.ok) throw new Error('expected a worker proposal');
+  const record = applied.result.snapshot.proposals[0]!;
+  expect(record.revisionIds).toHaveLength(1);
+  expect(applied.mirror.proposals.entries.map(({ suggest }) => suggest)).toEqual([proposal.suggest]);
+  const main = await createYrsSession({ clientId: Number(record.revisionIds[0]!.split(':')[0]) });
+  sessions.push(main);
+  main.loadState(initial.state);
+  const directApplied = main.proposeChanges({ expectVersion: main.version(), proposals: [proposal] });
+  expect(proposalResultWithoutVersion(directApplied)).toEqual(
+    proposalResultWithoutVersion(applied.result)
+  );
+  const beforeTyping = main.encodeStateVector();
+  const typed = main.insertText(
+    { story: paragraph.story, paraId: paragraph.paraId, offset: 'Alpha proposed'.length },
+    ' typed',
+    { name: proposal.suggest.author, date: '2026-09-30T00:01:00Z' }
+  );
+  expect(typed.revisionId).toBe(record.revisionIds[0]);
+  client.invalidate(main.encodeStateAsUpdate(beforeTyping), null);
+  const joined = await client.proposal({ kind: 'snapshot' });
+  expect(joined.mirror.version).not.toBe(applied.mirror.version);
+  const beforeWithdrawal = await client.encodeState();
+  const refused = await client.proposal({
+    kind: 'withdraw',
+    request: { expectVersion: joined.mirror.version, ids: ['shared'] },
+  });
+  const direct = main.withdrawProposals({ expectVersion: main.version(), ids: ['shared'] });
+  expect(refused.result).toMatchObject({
+    ok: false,
+    failure: {
+      code: 'tracked-revision-conflict',
+      proposalId: 'shared',
+      message:
+        `proposal shared shares revision ${record.revisionIds[0]}` +
+        ' with changes made outside the proposals',
+    },
+  });
+  expect(proposalResultWithoutVersion(refused.result!)).toEqual(
+    proposalResultWithoutVersion(direct)
+  );
+  expect(refused.mirror).toEqual(joined.mirror);
+  expect(refused.updates).toEqual([]);
+  expect(refused.changedStories).toEqual([]);
+  expect(await client.encodeState()).toEqual(beforeWithdrawal);
+  const read = await client.documentRead({ kind: 'readParagraphs', request: { view: 'accepted' } });
+  expect(read.value).toMatchObject({
+    ok: true,
+    paragraphs: [{ text: 'Alpha proposed typed' }, { text: 'Beta' }, { text: 'Gamma' }],
+  });
+
+  const handoff = await client.handOver();
+  expect(handoff.state).toEqual(beforeWithdrawal);
+  expect(handoff.proposals).toEqual(joined.mirror.proposals);
+  expect(handoff.proposals.entries.map(({ suggest }) => suggest)).toEqual([proposal.suggest]);
+  const restored = await createYrsSession({ clientId: 5111 });
+  sessions.push(restored);
+  restored.loadState(handoff.state);
+  restored.mirrorWorkerDocument(structuredClone({
+    version: handoff.version,
+    proposals: handoff.proposals,
+  }));
+  restored.mirrorWorkerDocument(null);
+  expect(restored.getProposals()).toEqual({
+    version: restored.version(),
+    previewVersion: handoff.proposals.previewVersion,
+    proposals: handoff.proposals.entries.map(({ record }) => record),
+  });
+  const restoredState = restored.encodeState();
+  const restoredProposals = restored.getProposals();
+  const events: DocxProposalSnapshot[] = [];
+  restored.onProposalChange((snapshot) => events.push(snapshot));
+  const restoredRefusal = restored.withdrawProposals({
+    expectVersion: restored.version(),
+    ids: ['shared'],
+  });
+  expect(proposalResultWithoutVersion(restoredRefusal)).toEqual(
+    proposalResultWithoutVersion(direct)
+  );
+  expect(restored.encodeState()).toEqual(restoredState);
+  expect(restored.getProposals()).toEqual(restoredProposals);
+  expect(events).toEqual([]);
+  expect(accepted(restored)).toEqual(['Alpha proposed typed', 'Beta', 'Gamma']);
+});
+
+test('the main document mirror supplies the worker proposal version precondition', async () => {
+  const main = await createYrsSession({ clientId: 5110 });
+  sessions.push(main);
+  main.registerFont(new Uint8Array(readFileSync(FONT)));
+  main.adoptResidentWorkerLayout!(LAYOUT);
+  const localVersion = main.version();
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await client.open(proposalDocument());
+  await client.bootstrap(main.residentWorkerSnapshot()!, '{}', { opened: true });
+  const snapshot = await client.proposal({ kind: 'snapshot' });
+  main.mirrorWorkerDocument(snapshot.mirror);
+  expect(main.workerDocumentMirrored()).toBe(true);
+  expect(main.version()).toBe(snapshot.mirror.version);
+  expect(main.version()).toBe(snapshot.geometry.version);
+  expect(main.version()).not.toBe(localVersion);
+  const identities = await client.documentRead({ kind: 'paragraphIdentities' });
+  expect(identities.version).toBe(main.version());
+  const paragraph = identities.value.paragraphs.find(
+    (paragraph) => paragraph.session?.story === 'body'
+  )!.session!;
+  const proposal: DocxProposalInput = {
+    id: 'mirrored',
+    paragraph,
+    suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+    op: 'insertText',
+    at: 'end',
+    text: '!',
+  };
+  const firstVersion = main.version();
+  const applied = await client.proposal({
+    kind: 'propose',
+    request: { expectVersion: firstVersion, proposals: [proposal] },
+  });
+  expect(applied.result?.ok).toBe(true);
+  main.mirrorWorkerDocument(applied.mirror);
+  expect(main.version()).toBe(applied.mirror.version);
+  expect(main.version()).not.toBe(firstVersion);
+  const stale = await client.proposal({
+    kind: 'propose',
+    request: { expectVersion: firstVersion, proposals: [{ ...proposal, id: 'stale' }] },
+  });
+  expect(stale.result).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  expect(stale.mirror).toEqual(applied.mirror);
+  expect(stale.updates).toEqual([]);
+  expect(stale.changedStories).toEqual([]);
+  main.mirrorWorkerDocument(stale.mirror);
+  const decided = await client.proposal({
+    kind: 'setStates',
+    request: {
+      expectVersion: main.version(),
+      expectPreviewVersion: main.getProposals().previewVersion,
+      changes: [{ id: 'mirrored', state: 'rejected' }],
+    },
+  });
+  expect(decided.result).toMatchObject({
+    ok: true,
+    snapshot: { previewVersion: 1, proposals: [{ id: 'mirrored', state: 'rejected' }] },
+  });
+  main.mirrorWorkerDocument(decided.mirror);
+  expect(main.version()).toBe(decided.mirror.version);
+  const withdrawn = await client.proposal({
+    kind: 'withdraw',
+    request: { expectVersion: main.version(), ids: ['mirrored'] },
+  });
+  expect(withdrawn.result).toMatchObject({ ok: true, snapshot: { proposals: [] } });
+  main.mirrorWorkerDocument(withdrawn.mirror);
+  expect(main.getProposals().proposals).toEqual([]);
+  expect(main.version()).toBe(withdrawn.mirror.version);
+  const read = await client.documentRead({ kind: 'readParagraphs', request: { view: 'accepted' } });
+  expect(read.value).toMatchObject({
+    ok: true,
+    paragraphs: [{ text: 'Alpha' }, { text: 'Beta' }, { text: 'Gamma' }],
+  });
 });
 
 test('worker-authoritative bootstraps and syncs retain the opened document and serve ordered reads', async () => {

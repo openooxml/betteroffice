@@ -1067,7 +1067,7 @@ export interface YrsSession extends CollaborationReplica {
   /** Apply a same-user worker update under the local undo origin. @internal */
   applyLocalUpdate(update: Uint8Array): void;
   /** Adopt another replica's host batch outside undo history. @internal */
-  applyHostUpdate(update: Uint8Array): void;
+  applyHostUpdate(update: Uint8Array, stories?: readonly string[]): void;
   /**
    * Subscribes to every committed transaction's v1 update (local AND
    * applied-remote). Returns an unsubscribe function.
@@ -2029,8 +2029,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty('all');
       mutate(() => session.apply_local_update(update));
     },
-    applyHostUpdate: (update) => {
-      markDirty('all');
+    applyHostUpdate: (update, stories) => {
+      markDirty(stories ?? 'all');
       mutate(() => session.apply_host_update(update));
     },
     onUpdate: (listener) => {

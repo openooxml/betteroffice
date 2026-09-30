@@ -21,6 +21,7 @@ import {
   type DocxSourceStory,
   type YrsSession,
 } from './index';
+import { yrsToDocument } from './yrsToDocument';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const OFFICE = 'application/vnd.openxmlformats-officedocument';
@@ -190,10 +191,14 @@ describe('proposal registry', () => {
     const exported = source.exportState();
     expect(exported.entries.map(({ record }) => record.id)).toEqual(['first', 'second']);
     expect(exported.entries.every(({ key }) => typeof key === 'string')).toBe(true);
+    expect(exported.entries.map(({ suggest }) => suggest)).toEqual([SUGGEST, SUGGEST]);
     exported.entries[0]!.record.paragraph.paraId = 'changed';
     (exported.entries[0]!.record.revisionIds as string[]).push('changed');
     exported.entries[0]!.record.state = 'rejected';
+    exported.entries[0]!.suggest.author = 'Other';
+    exported.entries[0]!.suggest.date = '2026-09-29T12:01:00Z';
     expect(source.snapshot()).toEqual(original);
+    expect(source.exportState().entries.map(({ suggest }) => suggest)).toEqual([SUGGEST, SUGGEST]);
 
     const registry = createProposalRegistry(engine);
     const events: DocxProposalSnapshot[] = [];
@@ -218,9 +223,14 @@ describe('proposal registry', () => {
     );
 
     mirror.proposals.entries[0]!.record.paragraph.paraId = 'external';
+    mirror.proposals.entries[0]!.suggest.author = 'External';
     const copied = registry.exportState();
     copied.entries[0]!.record.state = 'rejected';
+    copied.entries[0]!.suggest.date = '2026-09-29T12:02:00Z';
     expect(registry.snapshot()).toEqual({ ...original, version: 'worker-v1' });
+    expect(
+      registry.exportState().entries.map(({ suggest }) => suggest)
+    ).toEqual([SUGGEST, SUGGEST]);
     const next = { version: 'worker-v2', proposals: source.exportState() };
     registry.mirror(next);
     expect(events).toHaveLength(1);
@@ -241,22 +251,28 @@ describe('proposal registry', () => {
       previewVersion: 2,
       proposals: next.proposals.entries.map(({ record }) => record),
     });
+    expect(events[3]).toEqual(registry.snapshot());
+    expect(
+      registry.exportState().entries.map(({ suggest }) => suggest)
+    ).toEqual([SUGGEST, SUGGEST]);
     registry.mirror(null);
     expect(events).toHaveLength(4);
     expect(snapshotOf(registry.propose({ expectVersion: 'stale', proposals: inputs }))).toEqual(
       registry.snapshot()
     );
+    expect(events).toHaveLength(4);
     expect(registry.propose({
       expectVersion: session.version(),
       proposals: [{ ...inputs[0]!, op: 'replaceText', search: 'world', replaceWith: 'other' }],
     })).toMatchObject({ ok: false, failure: { code: 'proposal-id-conflict' } });
-    expect(events).toHaveLength(5);
+    expect(events).toHaveLength(4);
     expect(snapshotOf(registry.setStates({
       expectVersion: session.version(),
       expectPreviewVersion: 2,
       changes: [{ id: 'first', state: 'proposed' }],
     })).previewVersion).toBe(3);
-    expect(events).toHaveLength(6);
+    expect(events).toHaveLength(5);
+    expect(events[4]).toEqual(registry.snapshot());
     source.destroy();
     registry.destroy();
   });
@@ -1247,6 +1263,62 @@ it('adopts a replica proposal round with the same text and revisions as a direct
   expect(main.getProposals().proposals).toEqual([]);
   expect(peer.getProposals().proposals).toEqual([]);
 });
+
+for (const scoped of [true, false]) {
+  it(
+    scoped
+      ? 'rebuilds only changed stories when adopting a host update with story hints'
+      : 'rebuilds every story when adopting a host update without story hints',
+    async () => {
+      const main = await open(
+        fixture(
+          paragraph('00000001', run('Hello world')) +
+            `<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr>${cell(
+              paragraph('0000C001', run('cell value'))
+            )}</w:tr></w:tbl>`
+        )
+      );
+      const base = main.materializeDocx();
+      if (!base) throw new Error('expected an opened document');
+      const before = yrsToDocument(main, base);
+      const rebuilt: string[] = [];
+      const storyParagraphIds = main.storyParagraphIds;
+      main.storyParagraphIds = (story) => {
+        rebuilt.push(story);
+        return storyParagraphIds(story);
+      };
+      expect(yrsToDocument(main, before).package.document.content).toBe(
+        before.package.document.content
+      );
+      expect(rebuilt).toEqual([]);
+
+      const peer = await createYrsSession({ clientId: nextClientId++ });
+      sessions.push(peer);
+      peer.applyUpdate(main.encodeState());
+      const resolved = main.resolveParagraphAnchor(at('00000001'));
+      if (resolved.status !== 'found') throw new Error('expected a resolved paragraph');
+      const updates: Uint8Array[] = [];
+      peer.onUpdate((update) => updates.push(update));
+      const outcome = executeProposalRound(
+        roundEngine(peer),
+        [{ ...replace('replica', '00000001', 'world', 'earth'), paragraph: resolved.anchor }],
+        peer.version()
+      );
+      if (!outcome.ok) throw new Error(outcome.failure.message);
+      expect(outcome.changedStories).toEqual(['body']);
+      expect(updates.length).toBeGreaterThan(0);
+      for (const update of updates) {
+        if (scoped) main.applyHostUpdate(update, outcome.changedStories);
+        else main.applyHostUpdate(update);
+      }
+      const after = yrsToDocument(main, before);
+      expect(after.package.document.content).not.toBe(before.package.document.content);
+      expect(rebuilt.sort()).toEqual(scoped ? ['body'] : ['body', 'body:t0:r0c0']);
+      expect(texts(main, 'accepted')).toEqual(['Hello earth']);
+      expect(texts(main, 'accepted', 'body:t0:r0c0')).toEqual(['cell value']);
+    }
+  );
+}
 
 it('notifies adopted host updates as local and keeps earlier edits undoable', async () => {
   const main = await open(

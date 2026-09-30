@@ -78,7 +78,11 @@ export interface DocxProposalSnapshot {
 /** @internal */
 export interface DocxProposalRegistryState {
   previewVersion: number;
-  entries: { record: DocxProposalRecord; key: string }[];
+  entries: {
+    record: DocxProposalRecord;
+    key: string;
+    suggest: { author: string; date: string };
+  }[];
 }
 
 export type DocxProposalFailure = Omit<DocxEditFailure, 'code'> & {
@@ -263,7 +267,7 @@ export interface ProposalWithdrawal {
   reject: readonly string[];
   proposalIds?: Readonly<Record<string, string>>;
   /** Per owned revision, the stamp its proposal suggested; a revision holding another is refused. */
-  suggested?: Readonly<Record<string, { author: string; date: string }>>;
+  suggested: Readonly<Record<string, { author: string; date: string }>>;
   /** Refuses as `stale-version` when the document is no longer at this version. */
   expectVersion?: string;
 }
@@ -534,7 +538,7 @@ export function executeProposalWithdrawal(
       },
     };
   }
-  if (suggested && session.revisionStamps) {
+  if (session.revisionStamps) {
     const stamps = session.revisionStamps(owned);
     for (const revisionId of owned) {
       const suggest = suggested[revisionId];
@@ -565,10 +569,7 @@ export function executeProposalWithdrawal(
 
 /** The session holds update notifications until `propose` returns, so they see the round. */
 export function createProposalRegistry(session: DocxProposalSession): DocxProposalRegistry {
-  const records = new Map<
-    string,
-    { record: DocxProposalRecord; key: string; suggest: { author: string; date: string } }
-  >();
+  const records = new Map<string, DocxProposalRegistryState['entries'][number]>();
   const listeners = new Set<(snapshot: DocxProposalSnapshot) => void>();
   let previewVersion = 0;
   let mirrored: { version: string; proposals: DocxProposalRegistryState } | null = null;

@@ -281,6 +281,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (!unsubscribe) throw new Error('Resident engine worker has not laid out its document');
     await completeProvisionalLayout();
     pendingUpdates = [];
+    let committed = false;
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
       const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
@@ -296,6 +297,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           result = registry.withdraw(request.operation.request);
           break;
       }
+      committed = request.operation.kind !== 'snapshot';
       const changedStories = session.storiesChangedSince(since).stories;
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
@@ -315,6 +317,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         },
         [...updates, stateVector]
       );
+    } catch (error) {
+      if (trap) throw trap;
+      if (error instanceof WebAssembly.RuntimeError) throw error;
+      reply({
+        id: request.id,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        ...(committed || pendingUpdates.length > 0 ? { terminal: true } : {}),
+      });
     } finally {
       pendingUpdates = [];
     }
