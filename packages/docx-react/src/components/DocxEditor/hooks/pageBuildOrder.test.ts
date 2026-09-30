@@ -25,7 +25,7 @@ describe('nearestPages', () => {
     const unbuilt = Object.freeze([1, 3, 5, 10, 12, 14]);
     expect(nearestPages(unbuilt, 7, 9, 1)).toEqual([5]);
     expect(nearestPages(unbuilt, 7, 9, 3)).toEqual([3, 5, 10]);
-    expect(nearestPages(unbuilt, 7, 9, 20)).toEqual(unbuilt);
+    expect(nearestPages(unbuilt, 7, 9, 20)).toEqual([...unbuilt]);
   });
 
   test('handles windows past either end of the input', () => {
