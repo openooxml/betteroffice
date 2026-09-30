@@ -205,6 +205,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (request.type === 'sync') {
+    // Each message is its own task, so a turn lets syncs posted meanwhile queue behind this one.
+    if (request.supersedable) await new Promise<void>((resolve) => nextTurn(resolve));
     unsubscribe?.();
     unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);

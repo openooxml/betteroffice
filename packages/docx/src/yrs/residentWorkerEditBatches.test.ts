@@ -265,6 +265,7 @@ test('queued syncs load their state and only the newest lays out and builds a fr
   main.registerFont(new Uint8Array(readFileSync(FONT)));
   main.adoptResidentWorkerLayout!(LAYOUT);
   const worker = startWorker();
+  worker.deliverAsTasks();
   const client = new ResidentEngineWorkerClient(worker);
   clients.push(client);
   const layoutOptions = () => ({ layoutExtras: '{}', stateVector: main.encodeStateVector() });
