@@ -995,7 +995,10 @@ export function useRustDisplayList(
 
   const release = useCallback((): void => {
     // A failed load's failure holds for later waits until the next load.
-    replacedLayoutRef.current = { layout: null };
+    replacedLayoutRef.current = {
+      layout: null,
+      line: replacedLayoutRef.current?.line ?? documentLineRef.current,
+    };
     cancelPageBuilds(pageBuildTimerRef);
     workerRef.current?.client.destroy();
     workerRef.current = null;
