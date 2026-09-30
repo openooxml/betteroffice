@@ -296,6 +296,18 @@ export class ResidentEngineWorkerClient {
     return new Uint8Array(response.state);
   }
 
+  async revisionCount(): Promise<number> {
+    const response = await this.request({ type: 'revisionCount' });
+    if (
+      typeof response.revisionCount !== 'number' ||
+      !Number.isInteger(response.revisionCount) ||
+      response.revisionCount < 0
+    ) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted a valid revision count');
+    }
+    return response.revisionCount;
+  }
+
   async warm(): Promise<void> {
     await this.request({ type: 'warm' });
   }

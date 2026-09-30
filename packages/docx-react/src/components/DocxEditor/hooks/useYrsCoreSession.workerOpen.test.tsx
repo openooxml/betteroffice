@@ -93,6 +93,7 @@ function installWorker(options: {
   holdOpen?: boolean;
   oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState';
   holdRetryOpen?: boolean;
+  revisionCount?: number;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
@@ -114,6 +115,10 @@ function installWorker(options: {
             (options.failState && request.type === 'encodeState')) {
           queueMicrotask(() => worker.onmessage?.({
             data: { id: request.id, ok: false, error: 'open failed', terminal: true },
+          } as MessageEvent));
+        } else if (request.type === 'revisionCount') {
+          queueMicrotask(() => worker.onmessage?.({
+            data: { id: request.id, ok: true, revisionCount: options.revisionCount ?? 0 },
           } as MessageEvent));
         } else send(request, transfer);
       };
@@ -340,6 +345,7 @@ test('an on-demand replica stays empty after frames and the open wait until requ
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 5100));
     });
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(result.current.core.replicaReady).toBe(false);
     expect(result.current.core.replicaReadyRef?.current).toBe(false);
@@ -362,6 +368,38 @@ test('an on-demand replica stays empty after frames and the open wait until requ
     frames.restore();
   }
 }, 15_000);
+
+test('tracked changes start an on-demand replica without a replica request', async () => {
+  const { workers, posted } = installWorker({ holdState: true, revisionCount: 1 });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, hydrateOnDemand: true },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+    expect(result.current.core.replicaReady).toBe(false);
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    cleanup();
+    frames.restore();
+  }
+});
 
 test('turning off on-demand hydration starts a pending replica after two frames', async () => {
   const { workers, posted } = installWorker({ holdState: true });

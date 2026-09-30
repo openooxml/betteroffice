@@ -587,6 +587,31 @@ describe('resident worker opening', () => {
     expect(client.isReady()).toBe(true);
   });
 
+  for (const count of [0, 2]) {
+    test(`reads a revision count of ${count} and reports memory`, async () => {
+      const { worker, client } = setup();
+      const pending = client.revisionCount();
+      expect(worker.posted[0]).toMatchObject({ type: 'revisionCount' });
+      const memory = [{ label: 'docx-edit', bufferBytes: 65536 }];
+      worker.reply({ id: worker.lastId(), ok: true, revisionCount: count, memory });
+      expect(await pending).toBe(count);
+      expect(client.memory()).toEqual(memory);
+    });
+  }
+
+  for (const count of [undefined, -1, 0.5, NaN, Infinity, '1', null]) {
+    test(`rejects a malformed revision count of ${String(count)}`, async () => {
+      const { worker, client } = setup();
+      const pending = client.revisionCount();
+      worker.reply({
+        id: worker.lastId(),
+        ok: true,
+        revisionCount: count,
+      } as ResidentEngineWorkerResponse);
+      await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+    });
+  }
+
   test('a package that fails to open leaves the client able to open another', async () => {
     const { worker, client } = setup();
     const failed = client.open(new Uint8Array([1]));
@@ -671,7 +696,7 @@ describe('resident worker opening', () => {
     expect(worker.posted).toHaveLength(1);
   });
 
-  for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
+  for (const type of ['open', 'fontRequirements', 'encodeState', 'revisionCount'] as const) {
     test(`${type} propagates the worker's OOM error and memory`, async () => {
       const { worker, client } = setup();
       const pending =
@@ -679,7 +704,9 @@ describe('resident worker opening', () => {
           ? client.open(new Uint8Array([1]))
           : type === 'fontRequirements'
             ? client.fontRequirements('{}')
-            : client.encodeState();
+            : type === 'encodeState'
+              ? client.encodeState()
+              : client.revisionCount();
       const memory = [{ label: 'docx-edit', bufferBytes: 65536, failedAllocationBytes: 64 }];
       worker.reply({
         id: worker.lastId(),

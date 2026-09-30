@@ -252,6 +252,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true, state }, [state]);
     return;
   }
+  if (request.type === 'revisionCount') {
+    if (!session) throw new Error('Resident engine worker is not initialized');
+    reply({ id: request.id, ok: true, revisionCount: session.revisionCount() });
+    return;
+  }
   if (request.type === 'eraseCaret') {
     caretPaintRect = null;
     if (paintedCaretPageId !== null) await replayOffscreen(false);

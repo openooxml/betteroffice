@@ -349,6 +349,8 @@ export function useYrsCoreSession(
   workerOpenEnabledRef.current = Boolean(openInWorker);
   const pendingReplicaRef = useRef<ReturnType<typeof deferWorkerOpenReplica> | null>(null);
   const startReplicaRef = useRef<(() => void) | null>(null);
+  // Asks the worker whether the document has tracked changes, once per session.
+  const revisionQueryRef = useRef<(() => void) | null>(null);
   const replicaWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inheritedFrameRef = useRef<object | null>(null);
   const renderedFrameRef = useRef(workerOpen?.renderedFrame ?? null);
@@ -612,6 +614,18 @@ export function useYrsCoreSession(
               () => hydrateOnDemandRef.current
             );
             pendingReplicaRef.current = pending;
+            let revisionsQueried = false;
+            revisionQueryRef.current = () => {
+              if (revisionsQueried) return;
+              revisionsQueried = true;
+              // Tracked changes show cards that read the replica.
+              void worker.revisionCount().then(
+                (count) => {
+                  if (count > 0) startReplicaRef.current?.();
+                },
+                () => {}
+              );
+            };
             startReplicaRef.current = () => {
               if (
                 stale() ||
@@ -683,6 +697,7 @@ export function useYrsCoreSession(
       pendingReplicaRef.current?.cancel();
       pendingReplicaRef.current = null;
       startReplicaRef.current = null;
+      revisionQueryRef.current = null;
       if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
       replicaWaitTimerRef.current = null;
       openedWorker?.destroy();
@@ -713,7 +728,7 @@ export function useYrsCoreSession(
   ]);
 
   useEffect(() => {
-    if (!openInWorker || workerOpen?.hydrateOnDemand) return;
+    if (!openInWorker) return;
     const frame = workerOpen?.renderedFrame;
     const pending = pendingReplicaRef.current;
     const start = startReplicaRef.current;
@@ -728,6 +743,11 @@ export function useYrsCoreSession(
     if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
     // The replica blocks this thread: it loads once the worker is laying out the rest.
     if (workerOpen?.pendingCompletion === session) return;
+    // Asked after the first frame and the layout's completion, so it delays neither.
+    if (workerOpen?.hydrateOnDemand) {
+      revisionQueryRef.current?.();
+      return;
+    }
     if (replicaWaitTimerRef.current !== null) {
       clearTimeout(replicaWaitTimerRef.current);
     }

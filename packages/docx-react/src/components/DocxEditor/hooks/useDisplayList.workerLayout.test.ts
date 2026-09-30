@@ -507,6 +507,10 @@ test('a worker-opened document reuses its worker for the first layout', async ()
     await waitFor(() => expect(worker.posted[2]?.type).toBe('encodeState'));
     worker.reply({ id: worker.posted[2].id, ok: true, state: Uint8Array.of(4, 5).buffer });
     expect(await encoded).toEqual(Uint8Array.of(4, 5));
+    const count = opened!.revisionCount();
+    await waitFor(() => expect(worker.posted[3]?.type).toBe('revisionCount'));
+    worker.reply({ id: worker.posted[3].id, ok: true, revisionCount: 1 });
+    expect(await count).toBe(1);
     unmount();
   } finally {
     native.free();

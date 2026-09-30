@@ -159,6 +159,9 @@ function worker() {
       encodeStateVector() {
         return new Uint8Array([1]);
       },
+      revisionCount() {
+        return 0;
+      },
       destroy() {},
     },
     async rasterize(
@@ -1416,7 +1419,27 @@ describe('resident worker opening', () => {
     expect(calls).toEqual(['loadState', 'font', 'prefix:{"request":1}:3', 'frame:0']);
   });
 
-  for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
+  for (const count of [0, 2]) {
+    test(`reports ${count} revisions from the opened session`, async () => {
+      const { w } = openingWorker();
+      w.harness.session.revisionCount = () => count;
+      await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer });
+      const response = await w.send({ type: 'revisionCount' });
+      expect(response.ok && response.revisionCount).toBe(count);
+      expect(response.memory).toEqual(w.harness.memories);
+    });
+  }
+
+  test('revision count requires an initialized session', async () => {
+    const { w } = openingWorker();
+    const response = await w.send({ type: 'revisionCount' });
+    expect(response).toMatchObject({
+      ok: false,
+      error: 'Resident engine worker is not initialized',
+    });
+  });
+
+  for (const type of ['open', 'fontRequirements', 'encodeState', 'revisionCount'] as const) {
     test(`${type} attributes an OOM trap and refuses queued requests`, async () => {
       const { w, calls } = openingWorker();
       if (type !== 'open') {
@@ -1428,6 +1451,7 @@ describe('resident worker opening', () => {
         open: 'openDocx',
         fontRequirements: 'layoutFontRequirementsJson',
         encodeState: 'encodeState',
+        revisionCount: 'revisionCount',
       }[type];
       Object.assign(w.harness.session, {
         [method]: () => {

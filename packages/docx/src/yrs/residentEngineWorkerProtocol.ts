@@ -47,6 +47,7 @@ export type ResidentEngineWorkerRequest =
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
+  | { id: number; type: 'revisionCount' }
   | {
       id: number;
       type: 'sync';
@@ -168,6 +169,7 @@ export type ResidentEngineWorkerResponse = (
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
+      revisionCount?: number;
     }
   | {
       id: number;
