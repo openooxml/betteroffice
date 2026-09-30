@@ -468,7 +468,8 @@ impl Paginator {
         {
             top = band.bottom;
         }
-        let mut bottom = height - margins.bottom;
+        let edge = height - margins.bottom;
+        let mut bottom = edge;
         while let Some(band) = bands
             .iter()
             .find(|band| band.bottom >= bottom && band.top < bottom)
@@ -477,7 +478,9 @@ impl Paginator {
         }
         if top < bottom {
             margins.top = top;
-            margins.bottom = height - bottom;
+            if bottom != edge {
+                margins.bottom = height - bottom;
+            }
         }
     }
 
@@ -1152,6 +1155,28 @@ mod tests {
             separator: None,
             columns: None,
         }
+    }
+
+    #[test]
+    fn folding_keeps_an_edge_no_band_covers_exact() {
+        let mut paginator = Paginator::new(
+            Size { w: 500.0, h: 500.0 },
+            margins(96.0, 96.1),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_section_page_float_bands(vec![SectionPageFloatBands {
+            default: vec![PageFloatBand {
+                top: 90.0,
+                bottom: 120.0,
+                odd_page: None,
+            }],
+            ..Default::default()
+        }]);
+        let mut folded = margins(96.0, 96.1);
+        paginator.fold_edge_float_bands(&mut folded, false, 1);
+        assert_eq!((folded.top, folded.bottom), (120.0, 96.1));
     }
 
     #[test]
