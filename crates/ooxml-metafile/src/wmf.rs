@@ -136,6 +136,7 @@ pub(crate) fn wmf_records(
             _ => {}
         }
     }
+    let org = if placeable { org } else { org.or(Some((0, 0))) };
     let mut frame = placeable_frame.unwrap_or((0.0, 0.0, 1.0, 1.0));
     let windowed = if let (Some(org), Some((width, height))) = (org, ext)
         && width != 0
