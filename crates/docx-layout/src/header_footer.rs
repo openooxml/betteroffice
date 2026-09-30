@@ -119,6 +119,7 @@ pub fn measure_header_footer(
     }
     let mut blocks = blocks;
     apply_contextual_spacing_blocks(&mut blocks);
+    float_detached_top_and_bottom_images(&mut blocks);
     let measures = measure_blocks(&mut blocks, content_width, config)?;
     let height = measures.iter().map(extent_height).sum();
     let mut flow = HeaderFooterFlow::default();
@@ -151,6 +152,32 @@ pub fn measure_header_footer(
         visual_bottom,
         field_widths: Vec::new(),
     }))
+}
+
+/// Floats top-and-bottom images positioned away from their paragraph (relative
+/// to the page or a margin), which measurement would otherwise stack under
+/// the paragraph's text and so count in the band's flow height. Their
+/// exclusion band keeps body text clear of them instead.
+fn float_detached_top_and_bottom_images(blocks: &mut [LayoutBlock]) {
+    for block in blocks {
+        let LayoutBlock::Paragraph(paragraph) = block else {
+            continue;
+        };
+        for run in &mut paragraph.runs {
+            let Run::Image(image) = run else {
+                continue;
+            };
+            let detached = image
+                .position
+                .as_ref()
+                .and_then(|position| position.vertical.as_ref())
+                .and_then(|vertical| vertical.relative_to.as_deref())
+                .is_some_and(|relative| !matches!(relative, "paragraph" | "line"));
+            if detached && image.wrap_type.as_deref() == Some("topAndBottom") {
+                image.display_mode = Some("float".to_owned());
+            }
+        }
+    }
 }
 
 pub fn resolve_header_footer_field_widths(

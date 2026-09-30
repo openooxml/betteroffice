@@ -354,10 +354,43 @@ impl Paginator {
                     None
                 }
             });
-        variant.map_or_else(
+        let mut margins = variant.map_or_else(
             || self.margins.clone(),
             |variant| effective_margins(variant.clone()),
-        )
+        );
+        self.fold_edge_float_bands(&mut margins, opens_section, page_number);
+        margins
+    }
+
+    /// Moves a page's body edge past float bands that cover it, so a band at
+    /// the top or bottom of the body reserves room as the band's own flow
+    /// does; bands inside the body are cleared during placement.
+    fn fold_edge_float_bands(
+        &self,
+        margins: &mut PageMargins,
+        opens_section: bool,
+        page_number: u32,
+    ) {
+        let bands = self.page_float_bands(opens_section, page_number);
+        let height = self.page_size.h;
+        let mut top = margins.top;
+        while let Some(band) = bands
+            .iter()
+            .find(|band| band.top <= top && band.bottom > top)
+        {
+            top = band.bottom;
+        }
+        let mut bottom = height - margins.bottom;
+        while let Some(band) = bands
+            .iter()
+            .find(|band| band.bottom >= bottom && band.top < bottom)
+        {
+            bottom = band.top;
+        }
+        if top < bottom {
+            margins.top = top;
+            margins.bottom = height - bottom;
+        }
     }
 
     fn page_float_bands(&self, opens_section: bool, page_number: u32) -> Vec<PageFloatBand> {
@@ -661,7 +694,6 @@ impl Paginator {
                 if self.states[idx].pen_y != self.states[idx].content_top {
                     idx = self.advance_column(idx).0;
                 }
-                while !self.fits(safe_height, idx) && self.clear_next_float_band(idx) {}
                 return idx;
             }
             if self.clear_next_float_band(idx) {

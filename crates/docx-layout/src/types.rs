@@ -1960,6 +1960,7 @@ pub struct SectionPageMargins {
 
 /// A full-width float exclusion in page coordinates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PageFloatBand {
     pub top: f64,
     pub bottom: f64,
