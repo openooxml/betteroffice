@@ -70,6 +70,8 @@ pub struct RegionSection {
 #[serde(rename_all = "camelCase")]
 pub struct AuthoredRegionSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_flags: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footnote_pr: Option<NoteProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endnote_pr: Option<NoteProperties>,
@@ -455,6 +457,16 @@ impl RegionLayoutInput {
         Option<String>,
     ) {
         self.regions.normalize_authored();
+        if let Some(compatibility) = self
+            .regions
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.compatibility_flags.as_ref())
+            && let Some(env) = self.render_env.as_object_mut()
+        {
+            env.entry("compatibilityFlags")
+                .or_insert_with(|| compatibility.clone());
+        }
         (
             Input {
                 measured: self.measured,
