@@ -1342,6 +1342,11 @@ export function render_docx_markdown_json(content: string, options: string): str
 export function render_docx_markdown_with_pages_json(content: string, options: string): string;
 
 /**
+ * Starts a new peak window at the current live bytes.
+ */
+export function reset_wasm_peak_bytes(): void;
+
+/**
  * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -1357,6 +1362,12 @@ export function serialize_docx_s11(request_json: string): string;
 export function serialize_docx_s12(request_json: string): string;
 
 /**
+ * Caps the bytes allocated at once; an allocation past the cap fails. A
+ * non-finite or negative value removes the cap.
+ */
+export function set_wasm_heap_limit(bytes: number): void;
+
+/**
  * wasm wrapper over [`session::update_display_list`]: apply a page-delta
  * update to a stored display list so an incremental rebuild re-parses only
  * its changed pages. `Err` closes the handle first, so the caller's fallback
@@ -1369,6 +1380,27 @@ export function vertical_move_by_handle(handle: number, position: number, direct
 export function vertical_move_json(display_list: string, position: number, direction: string, goal_x: number): string;
 
 /**
+ * Size of the last allocation that failed, or 0. An allocation fails when the
+ * linear memory cannot grow or the limit is reached, and the module then aborts.
+ */
+export function wasm_failed_allocation_bytes(): number;
+
+/**
+ * Whether the counters below see every allocation of this module.
+ */
+export function wasm_heap_counted(): boolean;
+
+/**
+ * Bytes currently allocated on the Rust heap.
+ */
+export function wasm_live_bytes(): number;
+
+/**
+ * The most bytes allocated at once since the module started or the last reset.
+ */
+export function wasm_peak_bytes(): number;
+
+/**
  * Writes a DOCX from a typed model and original package.
  */
 export function write_docx_s13_wasm(request_json: string, original_docx: Uint8Array): Uint8Array;
@@ -1377,6 +1409,12 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly wasm_failed_allocation_bytes: () => number;
+    readonly wasm_heap_counted: () => number;
+    readonly wasm_live_bytes: () => number;
+    readonly wasm_peak_bytes: () => number;
+    readonly set_wasm_heap_limit: (a: number) => void;
+    readonly reset_wasm_peak_bytes: () => void;
     readonly __wbg_editsession_free: (a: number, b: number) => void;
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
