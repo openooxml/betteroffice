@@ -870,19 +870,20 @@ fn place(
                 0.0,
                 page_content_height,
             )?;
-            let oversized = fresh_page_height > page_content_height;
-            let page_has_content = if oversized {
+            // balancing chose its column depth with the run split in place
+            let oversized = fresh_page_height > page_content_height && !paginator.balances_region();
+            let must_advance = if oversized {
                 paginator.current_column_has_flow_content()
+                    && group_height > paginator.get_available_height()
             } else {
-                paginator.page_fragment_count(state_idx) > 0
+                hooks::keep_with_next_group_must_advance_from(
+                    group_height,
+                    fresh_page_height,
+                    paginator.get_available_height(),
+                    page_content_height,
+                    paginator.page_fragment_count(state_idx) > 0,
+                )?
             };
-            let must_advance = hooks::keep_with_next_group_must_advance_from(
-                group_height,
-                fresh_page_height,
-                paginator.get_available_height(),
-                page_content_height,
-                page_has_content,
-            )?;
             if must_advance {
                 if oversized {
                     paginator.advance_for_overflow();
@@ -1279,7 +1280,8 @@ fn layout_paragraph(
         let page_content_height = state.content_limit - state.content_top;
         let oversized_keep_lines = block.attrs.as_ref().and_then(|attrs| attrs.keep_lines)
             == Some(true)
-            && paragraph_height > page_content_height;
+            && paragraph_height > page_content_height
+            && !paginator.balances_region();
         let capacity = paginator.get_column_capacity();
         if oversized_keep_lines && paginator.current_column_has_flow_content() {
             paginator.advance_for_overflow();
@@ -3033,6 +3035,42 @@ mod pagination_rule_tests {
                 vec![(page, x, 0, 1)],
                 "block {id}"
             );
+        }
+    }
+
+    #[test]
+    fn oversized_keeps_in_balanced_columns_split_in_place() {
+        for keep_next in [true, false] {
+            let mut measured = vec![paragraph(
+                1,
+                30,
+                KEEP_LINE_HEIGHT,
+                json!({"widowControl": false}),
+            )];
+            measured.extend(if keep_next {
+                (100..140)
+                    .map(|id| {
+                        paragraph(
+                            id,
+                            1,
+                            KEEP_LINE_HEIGHT,
+                            json!({"keepNext": id < 139, "widowControl": false}),
+                        )
+                    })
+                    .collect()
+            } else {
+                vec![paragraph(
+                    100,
+                    40,
+                    KEEP_LINE_HEIGHT,
+                    json!({"keepLines": true, "widowControl": false}),
+                )]
+            });
+            let mut value = oversized_input(measured);
+            value.options.columns =
+                Some(serde_json::from_value(json!({"count": 3, "gap": 20})).unwrap());
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 1, "keep_next {keep_next}");
         }
     }
 

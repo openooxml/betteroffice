@@ -44,8 +44,21 @@ pub struct KeepWithNextFit {
     pub page_has_content: bool,
 }
 
-/// Advances a group that cannot finish in the remaining space off an occupied
-/// column. At an empty column, oversized groups split in place.
+/// Whether a keep-with-next group at the cursor must advance to a fresh page
+/// before its head is placed.
+///
+/// Derivation from Word's w:keepNext behavior (§17.3.1.15 states the intent
+/// but not the algorithm): a keepNext paragraph stays on the same page as the
+/// START of its bound follower, so when the group cannot finish where the
+/// cursor stands, the whole group moves to the next page. Each early return
+/// below is a situation where moving is wrong:
+///
+/// - a group taller than an empty page has no intact placement anywhere;
+///   placement moves it off an occupied column once and splits it from there
+/// - a group that finishes in the remaining space is already satisfied
+/// - at the top of an empty page/column the cursor cannot retreat any further;
+///   there is nothing above the group to detach from, and advancing would only
+///   emit a blank page, so Word splits in place
 pub fn keep_with_next_group_must_advance(fit: KeepWithNextFit) -> bool {
     keep_with_next_group_must_advance_from(fit, fit.group_height)
 }
@@ -55,8 +68,13 @@ pub fn keep_with_next_group_must_advance(fit: KeepWithNextFit) -> bool {
 /// the cursor: spacing owed there does not follow it.
 pub fn keep_with_next_group_must_advance_from(
     fit: KeepWithNextFit,
-    _fresh_page_height: f64,
+    fresh_page_height: f64,
 ) -> bool {
+    let intact_placement_exists = fresh_page_height <= fit.page_content_height;
+    if !intact_placement_exists {
+        return false;
+    }
+
     let finishes_at_cursor = fit.group_height <= fit.available_height;
     if finishes_at_cursor {
         return false;
@@ -144,40 +162,18 @@ mod tests {
             page_has_content: true,
         };
         assert!(keep_with_next_group_must_advance_from(fit, 90.0));
-        assert!(keep_with_next_group_must_advance_from(fit, 110.0));
+        assert!(!keep_with_next_group_must_advance_from(fit, 110.0));
     }
 
     #[test]
-    fn advances_an_oversized_group_off_an_occupied_column() {
-        assert!(keep_with_next_group_must_advance(KeepWithNextFit {
+    fn lets_an_oversized_group_split_rather_than_loop_forever() {
+        // taller than a whole page — the fit clause fails, so it is NOT advanced
+        assert!(!keep_with_next_group_must_advance(KeepWithNextFit {
             group_height: 700.0,
             available_height: 200.0,
             page_content_height: 600.0,
             page_has_content: true,
         }));
-    }
-
-    #[test]
-    fn splits_an_oversized_group_in_an_empty_column() {
-        assert!(!keep_with_next_group_must_advance(KeepWithNextFit {
-            group_height: 700.0,
-            available_height: 200.0,
-            page_content_height: 600.0,
-            page_has_content: false,
-        }));
-    }
-
-    #[test]
-    fn stays_when_cursor_height_fits_despite_oversized_fresh_height() {
-        assert!(!keep_with_next_group_must_advance_from(
-            KeepWithNextFit {
-                group_height: 150.0,
-                available_height: 200.0,
-                page_content_height: 600.0,
-                page_has_content: true,
-            },
-            700.0,
-        ));
     }
 
     #[test]
@@ -202,6 +198,7 @@ mod tests {
 
     #[test]
     fn treats_a_group_exactly_the_page_height_as_fitting_boundary() {
+        // group_height == page_content_height satisfies the <= fit clause
         assert!(keep_with_next_group_must_advance(KeepWithNextFit {
             group_height: 600.0,
             available_height: 200.0,
