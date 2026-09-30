@@ -68,6 +68,11 @@ thread_local! {
 /// pointer, so a click in the leading still hits the line.
 const BAND_SLACK: f64 = 4.0;
 
+/// Share of a run's font size its glyphs paint above and below the baseline, about the cap
+/// height and the descender depth: only there does body text take a header or footer click.
+const INK_ASCENT_EM: f64 = 0.7;
+const INK_DESCENT_EM: f64 = 0.2;
+
 /// Width (px) of the selection sliver drawn for a blank line, which has no
 /// glyphs of its own to highlight.
 const BLANK_LINE_SELECTION_WIDTH: f64 = 4.0;
@@ -1221,11 +1226,12 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
                 return false;
             }
         }
+        let em = hit.baseline - hit.top;
         return hit.width > 0.0
             && x >= hit.x
             && x <= hit.x + hit.width
-            && y >= hit.top - BAND_SLACK
-            && y <= hit.bottom + BAND_SLACK;
+            && y >= hit.baseline - em * INK_ASCENT_EM
+            && y <= hit.baseline + em * INK_DESCENT_EM;
     }
     let (left, top, width, height) = match primitive {
         Primitive::Image(img) => {
@@ -2423,6 +2429,38 @@ mod tests {
                 hit_test_regions(&dl, 0, 120.0, 35.0).unwrap().region,
                 HitRegion::Body
             );
+        }
+    }
+
+    #[test]
+    fn a_band_keeps_its_edge_where_body_text_paints_no_glyphs() {
+        // Body lines start where the header ends (flush, then inside a padded band) at a 0.75em ascent.
+        let flush = band_page("header", 0.0, vec![run(100.0, 92.0, 50.0, 1)]);
+        let padded = band_page("header", 0.0, vec![run(100.0, 72.0, 50.0, 1)]);
+        for (dl, y) in [
+            (&flush, 73.0),
+            (&flush, 77.0),
+            (&flush, 80.0),
+            (&padded, 59.0),
+        ] {
+            let hit = hit_test_regions(dl, 0, 120.0, y).unwrap();
+            assert_eq!(hit.region, HitRegion::Header, "y {y}");
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        let straddling = band_page("header", 0.0, vec![run(100.0, 84.0, 50.0, 1)]);
+        for (dl, y) in [(&flush, 85.0), (&padded, 66.0), (&straddling, 76.0)] {
+            assert_eq!(
+                hit_test_regions(dl, 0, 120.0, y).unwrap().region,
+                HitRegion::Body,
+                "y {y}"
+            );
+        }
+        // The body's last line ends where the footer starts.
+        let dl = band_page("footer", 420.0, vec![run(100.0, 416.0, 50.0, 1)]);
+        for y in [420.0, 422.0, 424.0] {
+            let hit = hit_test_regions(&dl, 0, 120.0, y).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer, "y {y}");
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
         }
     }
 
