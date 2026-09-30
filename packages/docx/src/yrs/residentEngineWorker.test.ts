@@ -1051,6 +1051,10 @@ describe('resident worker opening', () => {
         calls.push(`prefix:${input}:${pages}`);
         return provisional;
       },
+      layoutDocumentWithRegionsRetainedJson: (input: string) => {
+        calls.push(`layout:${input}`);
+        return full;
+      },
       beginRegionLayout: (input: string) => {
         calls.push(`begin:${input}`);
         return { measuredBlocks: 0, bodyBlocks: 2 };

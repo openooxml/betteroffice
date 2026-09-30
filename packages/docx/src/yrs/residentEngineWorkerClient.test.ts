@@ -267,13 +267,13 @@ describe('resident worker opening', () => {
 
   test('opens one document per worker and sends only the bytes of the view it gets', async () => {
     const { worker, client } = setup();
-    // A pooled Buffer: its `slice` shares the pool rather than copying.
-    const pooled = Buffer.from([1, 2, 3]);
-    expect(pooled.buffer.byteLength).toBeGreaterThan(3);
-    void client.open(pooled);
+    // A Buffer view into a larger store: its `slice` shares that store rather than copying.
+    const view = Buffer.from(new Uint8Array([0, 1, 2, 3, 4]).buffer, 1, 3);
+    expect(view.buffer.byteLength).toBeGreaterThan(3);
+    void client.open(view);
     const request = worker.posted[0];
     if (request.type !== 'open') throw new Error('open request missing');
-    expect(request.bytes).not.toBe(pooled.buffer);
+    expect(request.bytes).not.toBe(view.buffer);
     expect(request.bytes.byteLength).toBe(3);
     expect(new Uint8Array(request.bytes)).toEqual(new Uint8Array([1, 2, 3]));
     expect(worker.transfers[0]).toEqual([request.bytes]);
