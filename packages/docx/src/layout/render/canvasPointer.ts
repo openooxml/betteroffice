@@ -38,6 +38,32 @@ export interface DisplayPageClientRect {
 }
 
 /**
+ * The CSS `zoom` `element` renders at, its ancestors' included. Client rects
+ * carry it; layout sizes and an element's scroll offsets do not. Where
+ * `currentCSSZoom` is unavailable, zoom set inside a closed shadow tree the
+ * element is slotted through cannot be read and is left out.
+ */
+export function effectiveZoom(element: Element): number {
+  const current = (element as Element & { currentCSSZoom?: unknown }).currentCSSZoom;
+  if (typeof current === 'number') return current > 0 && Number.isFinite(current) ? current : 1;
+  if (typeof getComputedStyle !== 'function') return 1;
+  let zoom = 1;
+  for (let node: Element | null = element; node; node = flatTreeParent(node)) {
+    const value = Number.parseFloat(getComputedStyle(node).zoom);
+    if (value > 0 && Number.isFinite(value)) zoom *= value;
+  }
+  return zoom;
+}
+
+/** Zoom inherits along the flat tree: through assigned slots and shadow hosts. */
+function flatTreeParent(node: Element): Element | null {
+  if (node.assignedSlot) return node.assignedSlot;
+  if (node.parentElement) return node.parentElement;
+  const root = node.getRootNode();
+  return typeof ShadowRoot !== 'undefined' && root instanceof ShadowRoot ? root.host : null;
+}
+
+/**
  * The page canvases a renderer mounts under its pages host, so page lookups
  * read them instead of searching a subtree that also holds every page's
  * accessibility mirror. A renderer adds each `<canvas data-page-index>` it
