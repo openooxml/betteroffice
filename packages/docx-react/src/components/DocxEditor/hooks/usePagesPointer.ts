@@ -655,7 +655,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const queries = displayListQueries;
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
-      if (projection && queries && host && point) {
+      // read-only selection wins over a link: a drag that ends on one, or a double or triple click
+      const current = readOnly ? yrsInputRef.current?.displaySelection() : null;
+      const selecting = readOnly && (e.detail > 1 || (!!current && current.anchor !== current.head));
+      if (projection && queries && host && point && !selecting) {
         // Hyperlink primitives are indexed by band, so an open note — whose
         // area the index does not cover — resolves none and falls through to
         // the multi-click selection below.
@@ -750,6 +753,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       onHyperlinkClick,
       pagesContainerRef,
       partEdit,
+      readOnly,
       resolveCanvasHit,
       resolveTarget,
       scrollToPositionImpl,

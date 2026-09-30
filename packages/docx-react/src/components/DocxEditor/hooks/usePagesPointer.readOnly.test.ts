@@ -34,15 +34,20 @@ function fakeQueries(): DisplayListQueries {
   } as unknown as DisplayListQueries;
 }
 
-function options(overrides: Partial<UsePagesPointerOptions> = {}) {
+function options(
+  overrides: Partial<UsePagesPointerOptions> = {},
+  shown: { anchor: number; head: number } | null = null
+) {
   const selections: Array<[number, number]> = [];
+  const words: number[] = [];
   let focused = 0;
   const input = {
     focus: () => {
       focused += 1;
     },
     setSelectionFromDisplay: (anchor: number, head: number) => selections.push([anchor, head]),
-    displaySelection: () => null,
+    displaySelection: () => shown,
+    selectWordAtDisplay: (position: number) => words.push(position),
   } as unknown as YrsInputRef;
   const projection = {
     size: 100,
@@ -70,7 +75,7 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
     scrollToPositionImpl: () => {},
     ...overrides,
   };
-  return { opts, selections, noteClicks, focused: () => focused };
+  return { opts, selections, noteClicks, words, focused: () => focused };
 }
 
 function mouse(type: string, clientX: number, clientY: number, target: EventTarget): void {
@@ -170,4 +175,49 @@ test('a right-click inside a selected cell range offers Copy only when read-only
     expect(menus.map((menu) => menu.hasSelection)).toEqual([readOnly]);
     view.unmount();
   }
+});
+
+test('read-only selection wins over a link: double-click and a drag ending on it', () => {
+  const linked = fakeQueries();
+  (linked.displayList.pages[0] as { primitives: unknown[] }).primitives = [
+    {
+      kind: 'text',
+      text: 'linked text',
+      x: 0,
+      baselineY: 410,
+      width: 800,
+      font: '400 16px Calibri',
+      color: '#000000',
+      docStart: 1,
+      docEnd: 12,
+      href: 'https://example.com/',
+    },
+  ];
+  const click = (detail: number) =>
+    act(() => {
+      canvasOf().dispatchEvent(
+        new MouseEvent('click', { bubbles: true, clientX: 200, clientY: 405, button: 0, detail })
+      );
+    });
+  const run = (readOnly: boolean, detail: number, shown: { anchor: number; head: number } | null) => {
+    const links: string[] = [];
+    const { opts, words } = options(
+      {
+        readOnly,
+        displayListQueries: linked,
+        canvasOverlayTarget: document.body,
+        onHyperlinkClick: (link) => links.push(link.href),
+      },
+      shown
+    );
+    const view = renderHook(() => usePagesPointer(opts));
+    click(detail);
+    view.unmount();
+    return { links, words };
+  };
+
+  expect(run(true, 1, null)).toEqual({ links: ['https://example.com/'], words: [] });
+  expect(run(true, 2, null)).toEqual({ links: [], words: [20] });
+  expect(run(true, 1, { anchor: 3, head: 9 })).toEqual({ links: [], words: [] });
+  expect(run(false, 2, null).words).toEqual([]);
 });
