@@ -2230,17 +2230,26 @@ impl EditSession {
         self.media_tokens.set(enabled);
     }
 
-    /// The fingerprints mapping the `data:` URLs this replica seeded to
-    /// `media:{n}` tokens, for [`EditSession::load_media_sources`].
+    /// The digests mapping the `data:` URLs this replica seeded to
+    /// `media:{n}` tokens, for [`EditSession::load_media_sources`]; empty
+    /// when it seeded none.
     pub fn media_sources_json(&self) -> String {
-        self.engine.doc().media_sources().to_json()
+        let sources = self.engine.doc().media_sources();
+        if sources.is_empty() {
+            String::new()
+        } else {
+            sources.to_json()
+        }
     }
 
     /// Lays this replica's `data:` image sources out as the `media:{n}` tokens
     /// another replica seeded them from.
     pub fn load_media_sources(&self, json: &str) -> Result<(), JsValue> {
-        let sources =
-            crate::media::MediaSources::from_json(json).map_err(|error| js_err(&error))?;
+        let sources = if json.is_empty() {
+            crate::media::MediaSources::default()
+        } else {
+            crate::media::MediaSources::from_json(json).map_err(|error| js_err(&error))?
+        };
         self.engine.doc().set_media_sources(sources);
         Ok(())
     }
@@ -4741,8 +4750,8 @@ mod tests {
                 .unwrap()
                 .contains(r#""media:0""#)
         );
-        assert_eq!(tokens.media_sources_json(), "[]");
-        assert_ne!(session.media_sources_json(), "[]");
+        assert_eq!(tokens.media_sources_json(), "");
+        assert_ne!(session.media_sources_json(), "");
         let materialized: docx_parse::S9WireEnvelope =
             serde_json::from_str(&session.materialize_docx().unwrap().unwrap()).unwrap();
         assert_eq!(materialized, expected);

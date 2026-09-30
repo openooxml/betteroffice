@@ -1806,7 +1806,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
         ...(partialDocument ? { partialDocument: true } : {}),
-        ...(mediaSources !== '[]' ? { mediaSources } : {}),
+        ...(mediaSources ? { mediaSources } : {}),
       };
     },
     residentWorkerProbe: () => {
