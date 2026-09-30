@@ -635,8 +635,10 @@ export function useRustDisplayList(
       console.error('[CanvasRenderer] Resident engine worker ran out of memory again', failure);
       queryEpochGate.clear();
       setError(failure);
+      setErrorEngine(hostEngine);
       setLoading(false);
-      markSettled(null, failure, true);
+      // A display-only preview's failure fails no wait: the full session replaces it.
+      if (hostEngine.isDisplayOnly?.() !== true) markSettled(null, failure, true);
       return 'failed';
     },
     [markSettled, queryEpochGate, setWorkerPresentationActive]
