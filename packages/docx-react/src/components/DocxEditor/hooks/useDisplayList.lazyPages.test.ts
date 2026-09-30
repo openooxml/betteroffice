@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import { ResidentWorkerOutOfMemoryError, type YrsSession } from '@betteroffice/docx/yrs';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
@@ -71,11 +71,29 @@ class EngineWorker {
   posted: ResidentEngineWorkerRequest[] = [];
   constructor() {
     EngineWorker.last = this;
+    EngineWorker.spawned += 1;
   }
   static failPageBuilds = false;
+  static outOfMemoryPageBuilds = false;
+  static spawned = 0;
+  terminated = false;
   postMessage(request: ResidentEngineWorkerRequest): void {
     this.posted.push(request);
     const engine = EngineWorker.engine!;
+    if (request.type === 'buildPages' && EngineWorker.outOfMemoryPageBuilds) {
+      queueMicrotask(() =>
+        this.onmessage?.({
+          data: {
+            id: request.id,
+            ok: false,
+            error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
+            terminal: true,
+            outOfMemory: true,
+          },
+        } as MessageEvent<ResidentEngineWorkerResponse>)
+      );
+      return;
+    }
     if (request.type === 'buildPages' && EngineWorker.failPageBuilds) {
       queueMicrotask(() =>
         this.onmessage?.({
@@ -110,7 +128,9 @@ class EngineWorker {
       } as MessageEvent<ResidentEngineWorkerResponse>)
     );
   }
-  terminate(): void {}
+  terminate(): void {
+    this.terminated = true;
+  }
 }
 
 const PREVIEW = { r1: 'accepted' } as const;
@@ -158,6 +178,8 @@ function lazyFixture() {
   );
   EngineWorker.engine = engine;
   EngineWorker.failPageBuilds = false;
+  EngineWorker.outOfMemoryPageBuilds = false;
+  EngineWorker.spawned = 0;
   globalThis.Worker = EngineWorker as unknown as typeof Worker;
   const host = {
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
@@ -269,6 +291,53 @@ test('a failed page build hands rendering back to the main thread', async () => 
     expect(result.current.workerSurfacesActive).toBe(false);
     unmount();
   } finally {
+    errors.mockRestore();
+    engine.free();
+  }
+});
+
+test('a page build out of memory restarts the worker once, then reports without a main-thread fallback', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    EngineWorker.outOfMemoryPageBuilds = true;
+    let relayouts = 0;
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) =>
+        useRustDisplayList(layout, overrides, undefined, undefined, host, () => {
+          relayouts += 1;
+        }),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const first = EngineWorker.last!;
+    const last = result.current.frame!.displayList.pages.length - 1;
+    await act(async () => {
+      result.current.setDisplayWindow(last, last + 1);
+    });
+    await waitFor(() => expect(relayouts).toBe(1));
+    expect(first.terminated).toBe(true);
+    expect(result.current.frame).not.toBeNull();
+    expect(result.current.error).toBeNull();
+
+    await act(async () => rerender({ layout: { ...inputs.layout } }));
+    await waitFor(() => expect(EngineWorker.spawned).toBe(2));
+    const second = EngineWorker.last!;
+    expect(second.posted[0]).toMatchObject({ type: 'bootstrap' });
+    await waitFor(() => expect(result.current.workerSurfacesActive).toBe(true));
+    await act(async () => {
+      const middle = Math.floor(last / 2);
+      result.current.setDisplayWindow(middle, middle + 1);
+    });
+    await waitFor(() => expect(result.current.error).toBeInstanceOf(ResidentWorkerOutOfMemoryError));
+    expect(relayouts).toBe(1);
+    expect(EngineWorker.spawned).toBe(2);
+    expect(result.current.frame).not.toBeNull();
+    unmount();
+  } finally {
+    warnings.mockRestore();
     errors.mockRestore();
     engine.free();
   }
