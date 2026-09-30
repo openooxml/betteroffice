@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -12,6 +12,7 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { YrsInput, type YrsInputProps, type YrsInputRef } from './YrsInput';
+import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import { performYrsHistoryAction } from './yrsCommands';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 
@@ -50,7 +51,8 @@ function inputFor(
   session: YrsSession,
   input: React.Ref<YrsInputRef>,
   applyResidentInput?: YrsInputProps['applyResidentInput'],
-  applyResidentDelete?: YrsInputProps['applyResidentDelete']
+  applyResidentDelete?: YrsInputProps['applyResidentDelete'],
+  onPendingInputChange?: YrsInputProps['onPendingInputChange']
 ) {
   const map = () =>
     createYrsInputPositionMap(
@@ -73,6 +75,7 @@ function inputFor(
       onDirectInput={() => {}}
       applyResidentInput={applyResidentInput}
       applyResidentDelete={applyResidentDelete}
+      onPendingInputChange={onPendingInputChange}
     />
   );
 }
@@ -175,6 +178,81 @@ test('flush rejects failed resident input instead of claiming it was committed',
   act(() => input.current!.insertText('lost'));
   await expect(input.current!.flushPendingInput()).rejects.toBe(failure);
   expect(session.paragraphs('body')[0].text).toBe('Seed');
+});
+
+test.each([
+  ['text input', 'unmount'],
+  ['Backspace', 'session replacement'],
+])('resident %s never calls the old session after %s', async (operation, lifecycle) => {
+  const original = await seededSession();
+  let retired = false;
+  const afterRetirement: string[] = [];
+  const session = new Proxy(original, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (retired) {
+          afterRetirement.push(String(key));
+          throw new Error(`Retired session method: ${String(key)}`);
+        }
+        return value.apply(target, args);
+      };
+    },
+  });
+  let release!: (result: ResidentFrameApplyResult) => void;
+  const blocked = new Promise<ResidentFrameApplyResult>((resolve) => {
+    release = resolve;
+  });
+  let started!: () => void;
+  const applying = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const resident = mock(() => {
+    started();
+    return blocked;
+  });
+  let finished!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    finished = resolve;
+  });
+  const onPendingInputChange = (pending: boolean) => {
+    if (!pending) finished();
+  };
+  const input = createRef<YrsInputRef>();
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const view = render(
+      inputFor(
+        session,
+        input,
+        operation === 'text input' ? resident : undefined,
+        operation === 'Backspace' ? resident : undefined,
+        onPendingInputChange
+      )
+    );
+    const textarea = view.getByTestId('yrs-input');
+    await act(async () => {
+      if (operation === 'text input') fireEvent.input(textarea, { target: { value: 'x' } });
+      else fireEvent.keyDown(textarea, { key: 'Backspace' });
+      await applying;
+    });
+    expect(resident.mock.calls).toEqual(operation === 'text input' ? [['x']] : [['backward', 1]]);
+    if (lifecycle === 'unmount') view.unmount();
+    else {
+      const replacement = await seededSession();
+      view.rerender(inputFor(replacement, input, undefined, undefined, onPendingInputChange));
+    }
+    retired = true;
+    await act(async () => {
+      release({ frameEpoch: 1, caretSynchronized: true });
+      await settled;
+    });
+    expect(afterRetirement).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    errors.mockRestore();
+  }
 });
 
 test('undo waits behind pending typing and later typing waits behind undo', async () => {

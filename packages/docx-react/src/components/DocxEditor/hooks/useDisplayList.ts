@@ -657,9 +657,7 @@ export function useRustDisplayList(
         } finally {
           residentPaintInflightRef.current -= 1;
         }
-        if (dropped()) {
-          return { frameEpoch: null, caretSynchronized: false, deletedUnits: result.deletedUnits };
-        }
+        if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         if (!result.applied) return null;
         const delta = workerDelta ?? decodeFrameDelta(result.frame);
         suppressWorkerInvalidationRef.current += 1;
