@@ -33,7 +33,7 @@ use yrs::Subscription;
 
 use crate::EditingDoc;
 use crate::bridge::{
-    BridgeError, LoweringMap, RenderEnv, yrs_doc_to_mapped_layout_blocks_with_suppressed,
+    BridgeError, LoweringMap, RenderEnv, yrs_doc_to_mapped_layout_blocks_with_revealable,
 };
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
@@ -54,8 +54,8 @@ struct LoweredStory {
     blocks: Rc<Vec<LayoutBlock>>,
     /// Where the blocks' positions came from, recorded by the same lowering.
     map: Rc<LoweringMap>,
-    /// Cached field results the lowering suppressed, which a revision preview can reveal.
-    suppressed_field_results: Rc<Vec<LayoutBlock>>,
+    /// Blocks the lowering left out that a revision preview can reveal.
+    revealable_blocks: Rc<Vec<LayoutBlock>>,
     /// Lazily serialized layout blocks.
     serialized_blocks: Option<String>,
 }
@@ -1446,8 +1446,8 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
-        let (blocks, map, suppressed_field_results) =
-            yrs_doc_to_mapped_layout_blocks_with_suppressed(&self.doc, story, env)?;
+        let (blocks, map, revealable_blocks) =
+            yrs_doc_to_mapped_layout_blocks_with_revealable(&self.doc, story, env)?;
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(
@@ -1457,7 +1457,7 @@ impl EngineSession {
                 env: env.clone(),
                 blocks: Rc::new(blocks),
                 map: Rc::new(map),
-                suppressed_field_results: Rc::new(suppressed_field_results),
+                revealable_blocks: Rc::new(revealable_blocks),
                 serialized_blocks: None,
             },
         );
@@ -1711,17 +1711,17 @@ impl EngineSession {
                 })
                 .map_err(|error| error.to_string())?;
                 if cache_key.is_some() {
-                    let suppressed = Rc::clone(
+                    let revealable = Rc::clone(
                         &self
                             .render
                             .borrow()
                             .stories
                             .get(&story)
                             .expect("resident story exists after lowering")
-                            .suppressed_field_results,
+                            .revealable_blocks,
                     );
                     docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                        suppressed.iter(),
+                        revealable.iter(),
                         default_family,
                         &mut requirements,
                     );
@@ -6045,6 +6045,36 @@ mod tests {
         }
     }
 
+    fn insert_tracked_text_shape(engine: &EngineSession, index: u32, revision_id: &str) {
+        let shape = serde_json::json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "textBody": {"content": [{
+                "paraId": "p1",
+                "content": [{"type": "run", "content": [{"type": "text", "text": "hi"}]}]
+            }]}
+        });
+        let revision = serde_json::json!({
+            "id": revision_id, "author": "Ann", "date": "2026-09-29T12:00:00Z"
+        });
+        engine
+            .doc()
+            .apply_raw_ops(
+                "body",
+                vec![crate::RawOp::InsertEmbed {
+                    index,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: Attrs::from([(
+                        "ins".into(),
+                        Any::from_json(&revision.to_string()).unwrap(),
+                    )]),
+                }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+    }
+
     #[test]
     fn preview_font_preflight_covers_segments_a_hidden_drawing_joins() {
         let engine = EngineSession::new(1369);
@@ -6056,33 +6086,7 @@ mod tests {
             ]
         })];
         crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
-        let shape = serde_json::json!({
-            "shapeType": "rect",
-            "size": {"width": 914400, "height": 457200},
-            "textBody": {"content": [{
-                "paraId": "p1",
-                "content": [{"type": "run", "content": [{"type": "text", "text": "hi"}]}]
-            }]}
-        });
-        engine
-            .doc()
-            .apply_raw_ops(
-                "body",
-                vec![crate::RawOp::InsertEmbed {
-                    index: 1,
-                    kind: "shape".to_owned(),
-                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
-                    attrs: Attrs::from([(
-                        "ins".into(),
-                        Any::from_json(
-                            r#"{"id":"7","author":"Ann","date":"2026-09-29T12:00:00Z"}"#,
-                        )
-                        .unwrap(),
-                    )]),
-                }],
-                &crate::EditCtx::local("", ""),
-            )
-            .unwrap();
+        insert_tracked_text_shape(&engine, 1, "7");
         let markup =
             crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &RenderEnv::default())
                 .unwrap();
@@ -6096,6 +6100,39 @@ mod tests {
             requirement.key == "courier new|0|0"
                 && requirement.scripts.contains(&"cjk-sc".to_owned())
         }));
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_a_paragraph_a_hidden_drawing_empties() {
+        let engine = EngineSession::new(1370);
+        let blocks = [serde_json::json!({
+            "type": "paragraph",
+            "formatting": {"numPr": {"numId": 1, "ilvl": 0}},
+            "listRendering": {
+                "marker": "%1.", "markerBold": true, "markerFontFamily": "Preview Marker"
+            },
+            "content": []
+        })];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        insert_tracked_text_shape(&engine, 0, "8");
+        let markup =
+            crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &RenderEnv::default())
+                .unwrap();
+        assert!(
+            !markup
+                .iter()
+                .any(|block| matches!(block, LayoutBlock::Paragraph(_)))
+        );
+        let exact = assert_preview_font_preflight_covers(
+            &engine,
+            "8",
+            crate::bridge::RevisionPreview::Rejected,
+        );
+        assert!(
+            exact
+                .iter()
+                .any(|requirement| requirement.key == "preview marker|1|0")
+        );
     }
 
     #[test]
