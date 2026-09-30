@@ -239,12 +239,8 @@ describe('proposal geometry readers', () => {
       expect(next.proposals).toBe(proposalSetIdentity(proposed));
       expect(next.proposals).not.toBe(first.proposals);
       expect(next.proposals).not.toBe(proposalSetIdentity(withdrawn));
-      expect(next.targets.same).toMatchObject({
-        ok: true,
-        ranges: [],
-        paragraph: expect.any(Number),
-      });
-      expect(next.targets.same).not.toEqual(first.targets.same);
+      expect(first.targets.same).toEqual({ ok: true, ranges: [], paragraph: 71 });
+      expect(next.targets.same).toEqual({ ok: true, ranges: [], paragraph: 17 });
     } finally {
       main.destroy();
     }
