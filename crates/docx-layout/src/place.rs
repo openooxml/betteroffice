@@ -878,19 +878,21 @@ fn place(
                 0.0,
                 page_content_height,
             )?;
-            // a page break within the run or on its follower wins over the keep
-            let breaks_page = group
+            // only paragraph runs and followers, and a page break on any of
+            // them wins over the keep
+            let paragraph_run = group
                 .members
                 .iter()
                 .skip(1)
                 .chain(group.follower.as_ref())
-                .any(|&index| {
-                    let (before, run) = paragraph_breaks_before_run(&measured[index].block);
-                    before || run
+                .all(|&index| {
+                    let block = &measured[index].block;
+                    matches!(block, LayoutBlock::Paragraph(_))
+                        && paragraph_breaks_before_run(block) == (false, false)
                 });
             let oversized = fresh_page_height > page_content_height
-                && !paginator.balanced_limit_in_force(state_idx)
-                && !breaks_page;
+                && paragraph_run
+                && !paginator.balanced_limit_in_force(state_idx);
             let must_advance = if oversized {
                 paginator.current_column_has_flow_content()
                     && group_height > paginator.get_available_height()
@@ -3100,6 +3102,25 @@ mod pagination_rule_tests {
             assert_eq!(result.pages.len(), 3, "{attr}");
             assert_eq!(paragraph_slices(&result, 2.0), vec![(0, 0, 1)], "{attr}");
         }
+    }
+
+    #[test]
+    fn oversized_keep_next_with_an_anchored_follower_keeps_mains_placement() {
+        let mut image = positioned_image();
+        image["block"]["height"] = json!(580.0);
+        image["measure"]["height"] = json!(580.0);
+        let result = layout_document(&mut oversized_input(vec![
+            paragraph(1, 20, KEEP_LINE_HEIGHT, json!({"widowControl": false})),
+            paragraph(
+                2,
+                1,
+                KEEP_LINE_HEIGHT,
+                json!({"keepNext": true, "widowControl": false}),
+            ),
+            image,
+        ]))
+        .unwrap();
+        assert_eq!(paragraph_slices(&result, 2.0), vec![(0, 0, 1)]);
     }
 
     #[test]
