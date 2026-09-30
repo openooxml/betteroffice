@@ -112,6 +112,8 @@ export interface UseRustDisplayListResult {
   layoutInWorker: LayoutInWorker;
   /** The engine whose layout the latest published frame shows. */
   presentedEngine: unknown;
+  /** {@link presentedEngine} as of now, before the render that shows the frame. */
+  shownFrameEngine(): unknown;
   /** Lets go of every engine the pages showed: the resident worker and the presented engine. */
   release(): void;
   /**
@@ -971,6 +973,7 @@ export function useRustDisplayList(
     [adoptHostEngine, setWorkerPresentationActive]
   );
 
+  const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
   const release = useCallback((): void => {
     // A failed load's failure holds for later waits until the next load.
     replacedLayoutRef.current = { layout: null };
@@ -1787,6 +1790,7 @@ export function useRustDisplayList(
     applyDelete,
     layoutInWorker,
     presentedEngine,
+    shownFrameEngine,
     release,
     setDisplayWindow,
     workerMemory,
@@ -1958,6 +1962,11 @@ export interface UseCanvasRendererResult {
   glyphOutlineProvider: GlyphOutlineProvider | null;
   /** The engine whose layout the shown frame is of. */
   presentedEngine: unknown;
+  /**
+   * The image resolver of the frame published last, even before the render that shows it: a
+   * display list read from `settledDisplayList` may belong to a session not shown yet.
+   */
+  imageResolverForShownFrame(): ImageResolver;
   /** One-call ordinary text insertion; false until resident state is ready. */
   applyInput(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-call ordinary deletions/merges; false until resident state is ready. */
@@ -1990,6 +1999,22 @@ export interface UseCanvasRendererResult {
   notifyCaretInputDispatched(): void;
   /** Selection move / blur / IME / mode change: immediate swap to the DOM caret. */
   notifyCaretInterrupt(): void;
+}
+
+/**
+ * Decoded images of one session's document; the next session starts empty. A frame's replay
+ * reads the images of the session that built it, which the renderer holds until another
+ * session's frame replaces it.
+ */
+export function useFrameImageResolver(engine: RustDisplayListEngine | null): ImageResolver {
+  return useMemo(() => frameImageResolver(engine), [engine]);
+}
+
+function frameImageResolver(engine: RustDisplayListEngine | null): ImageResolver {
+  return createCanvasImageResolver({
+    media: (token) => engine?.mediaSource?.(token) ?? null,
+    mediaScope: () => engine?.mediaScope?.() ?? 0,
+  });
 }
 
 // bundles the canvas-renderer host wiring for DocxEditor: collects each
@@ -2041,6 +2066,7 @@ export function useCanvasRenderer(
     applyDelete,
     layoutInWorker,
     presentedEngine,
+    shownFrameEngine,
     release,
     setDisplayWindow,
     workerMemory,
@@ -2067,9 +2093,18 @@ export function useCanvasRenderer(
     setEngine(null);
     release();
   }, [release]);
-  // Decoded images of the session whose pages are shown; the next session starts empty.
-  const imageSession = presentedEngine ?? engine;
-  const resolveImage = useMemo(() => createCanvasImageResolver(), [imageSession]);
+  const imageSession = (presentedEngine ?? engine) as RustDisplayListEngine | null;
+  const resolveImage = useFrameImageResolver(imageSession);
+  const shownImagesRef = useRef({ engine: imageSession, resolveImage });
+  shownImagesRef.current = { engine: imageSession, resolveImage };
+  const imageResolverForShownFrame = useCallback((): ImageResolver => {
+    const shown = (shownFrameEngine() ?? shownImagesRef.current.engine) as
+      | RustDisplayListEngine
+      | null;
+    return shown === shownImagesRef.current.engine
+      ? shownImagesRef.current.resolveImage
+      : frameImageResolver(shown);
+  }, [shownFrameEngine]);
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
     : loading || displayList == null
@@ -2159,6 +2194,7 @@ export function useCanvasRenderer(
       engine?.outlineGlyphJson ??
       null,
     presentedEngine,
+    imageResolverForShownFrame,
     applyInput,
     applyDelete,
     layoutInWorker,

@@ -128,6 +128,10 @@ export type {
 } from './commands/types';
 export type { DocxPointPosition, SelectionState } from './components/DocxEditor/types';
 export type {
+  DocxSearchOptions,
+  DocxSearchState,
+} from './components/DocxEditor/hooks/useHostSearch';
+export type {
   DocxMemoryBudget,
   DocxMemoryPressure,
   DocxMemoryPressureLevel,

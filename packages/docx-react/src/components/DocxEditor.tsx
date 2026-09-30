@@ -58,6 +58,11 @@ import { usePageSetupControls } from './DocxEditor/hooks/usePageSetupControls';
 import { useWatermarkControls } from './DocxEditor/hooks/useWatermarkControls';
 import { useHyperlinkActions } from './DocxEditor/hooks/useHyperlinkActions';
 import { useFindReplaceBridge, type YrsFindMatch } from './DocxEditor/hooks/useFindReplaceBridge';
+import {
+  useHostSearch,
+  type DocxSearchOptions,
+  type DocxSearchState,
+} from './DocxEditor/hooks/useHostSearch';
 import { CanvasFindHighlightOverlay } from './DocxEditor/overlays/CanvasFindHighlightOverlay';
 import {
   CanvasSidebarBrightenOverlay,
@@ -179,6 +184,13 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   downloadOnSave?: boolean;
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
+  /**
+   * Opens images as `media:{n}` tokens read from the document file instead of
+   * `data:` URLs, keeping them out of the document state and its updates.
+   * Every client of a shared room must open the same file on a version that
+   * reads them. Read when a document opens. Off by default.
+   */
+  mediaTokens?: boolean;
   /**
    * Callback when a DOCX file is selected through `File > Open` or Cmd/Ctrl+O.
    * Pass it to route the picked file through your own import pipeline. Omit it
@@ -648,6 +660,29 @@ export interface DocxEditorRef {
   onContentChange: (listener: (document: Document) => void) => () => void;
   /** Subscribe to selection changes (cursor moves / selection changes). Returns unsubscribe. */
   onSelectionChange: (listener: (selection: SelectionState | null) => void) => () => void;
+  /**
+   * Find `query` in the document body, tables included, for a host's own find UI. Flushes
+   * pending input, highlights every match, makes the first match on or after the page in view
+   * current and scrolls it to the middle of the view. Moves neither the selection nor focus and
+   * works read-only. Case-insensitive unless `options.caseSensitive`; an empty query clears.
+   * The search runs again when the document changes, keeping the current match.
+   */
+  search: (query: string, options?: DocxSearchOptions) => Promise<DocxSearchState>;
+  /** Make the next match current, wrapping, and scroll to it. Null without a search. */
+  searchNext: () => DocxSearchState | null;
+  /** Make the previous match current, wrapping, and scroll to it. Null without a search. */
+  searchPrevious: () => DocxSearchState | null;
+  /** Make match `index` (zero-based, wrapping) current and scroll to it. Null without a search. */
+  searchGoTo: (index: number) => DocxSearchState | null;
+  /** Remove the search and its highlights. */
+  clearSearch: () => void;
+  /** The current search, or null. */
+  getSearchState: () => DocxSearchState | null;
+  /**
+   * Subscribe to search changes: a search, a new current match, a re-run after a document change,
+   * and clearing (null). Returns unsubscribe.
+   */
+  onSearchChange: (listener: (state: DocxSearchState | null) => void) => () => void;
 }
 
 /**
@@ -767,6 +802,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onSaveRequest,
     downloadOnSave = true,
     collaboration,
+    mediaTokens,
     onOpen,
     author = 'User',
     onChange,
@@ -1135,6 +1171,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       previewFirstPage,
       heldEngine: canvasRenderer.layoutEngine,
       shownEngine: canvasRenderer.presentedEngine,
+      mediaTokens,
     }
   );
   // Until the full session's pages are shown, the editor takes no input and its
@@ -1204,6 +1241,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useFileIO({
     pagedEditorRef,
     resolveImage: canvasRenderer.resolveImage,
+    shownImageResolver: canvasRenderer.imageResolverForShownFrame,
     fontFamilies: fontAliases,
     comments,
     documentName,
@@ -1721,6 +1759,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges]);
 
   // Expose ref methods
+  const hostSearch = useHostSearch({
+    pagedEditorRef,
+    displayListQueries: canvasRenderer.queries,
+    canvasHostRef: canvasRenderer.canvasHostRef,
+  });
+
   useDocxEditorRefApi({
     ref,
     document: history.state,
@@ -1749,6 +1793,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     workerMemory: canvasRenderer.workerMemory,
     settledDisplayList: canvasRenderer.settledDisplayList,
     awaitingDocument,
+    hostSearch: hostSearch.api,
   });
 
   const initialSectionProperties = useMemo(
@@ -2474,8 +2519,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         and the current match shows as an ordinary selection as before. */}
       {canvasFindOverlayTarget && canvasRenderer.queries ? (
         <CanvasFindHighlightOverlay
-          matches={canvasFindMatches}
-          currentIndex={findReplace.state.currentIndex}
+          matches={hostSearch.highlight?.matches ?? canvasFindMatches}
+          currentIndex={hostSearch.highlight?.current ?? findReplace.state.currentIndex}
           overlayTarget={canvasFindOverlayTarget}
           canvasHostRef={canvasRenderer.canvasHostRef}
           displayListQueries={canvasRenderer.queries}

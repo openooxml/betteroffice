@@ -28,6 +28,7 @@ import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
 import { documentPageCount } from './documentPageCount';
+import type { DocxHostSearch } from './useHostSearch';
 
 const noWorkerMemory = (): null => null;
 
@@ -190,6 +191,7 @@ export function useDocxEditorRefApi({
   workerMemory = noWorkerMemory,
   settledDisplayList,
   awaitingDocument,
+  hostSearch,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -227,6 +229,7 @@ export function useDocxEditorRefApi({
   settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
+  hostSearch: DocxHostSearch;
 }) {
   const opening = (): boolean => openingRef?.current === true;
   const pagedEditorRef = useMemo<React.RefObject<PagedEditorRef | null>>(
@@ -517,6 +520,7 @@ export function useDocxEditorRefApi({
         selectionChangeSubscribersRef.current.add(listener);
         return () => selectionChangeSubscribersRef.current.delete(listener);
       },
+      ...hostSearch,
     }),
     [
       document,
@@ -532,6 +536,7 @@ export function useDocxEditorRefApi({
       workerMemory,
       settledDisplayList,
       awaitingDocument,
+      hostSearch,
     ]
   );
 }
