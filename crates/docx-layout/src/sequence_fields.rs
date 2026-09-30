@@ -22,6 +22,11 @@ use crate::types::{FieldRun, LayoutBlock, ParagraphBlock, Run, ShapeBlock};
 /// with the number.
 const MAX_SPELLED: i64 = 32_767;
 
+/// Bytes of results one numbering pass generates; fields past it keep their
+/// cached results, so spelled numbers cannot grow the document's text without
+/// bound.
+const MAX_GENERATED_BYTES: usize = 1 << 20;
+
 #[derive(Clone, Copy)]
 enum Step {
     Next,
@@ -82,6 +87,7 @@ pub fn number_sequence_fields_with_opaque(
         .collect();
     let mut counters = HashMap::<&str, i64>::new();
     let mut results = Vec::with_capacity(parsed.len());
+    let mut generated = 0_usize;
     for parsed in &parsed {
         let Parsed::Seq(seq) = parsed else {
             results.push(None);
@@ -96,7 +102,10 @@ pub fn number_sequence_fields_with_opaque(
         if opaque.contains(seq.name.as_str()) {
             results.push(None);
         } else {
-            results.push(result_text(seq, *counter));
+            results.push(result_text(seq, *counter).filter(|text| {
+                generated = generated.saturating_add(text.len());
+                generated <= MAX_GENERATED_BYTES
+            }));
         }
     }
     for (field, result) in fields.into_iter().zip(results) {
@@ -334,4 +343,39 @@ fn letters(value: i64) -> String {
     }
     let letter = char::from(b'a' + ((value - 1) % 26) as u8);
     std::iter::repeat_n(letter, ((value - 1) / 26 + 1) as usize).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn spelled_results_stop_at_the_generated_text_budget() {
+        let field = json!({
+            "kind": "field", "fieldType": "other", "rawType": "SEQ",
+            "instruction": " SEQ Figure \\r 32767 \\* alphabetic ", "fallback": "7",
+        });
+        let spelled = "g".repeat(1261);
+        let fit = MAX_GENERATED_BYTES / spelled.len();
+        let mut blocks: Vec<LayoutBlock> = (0..fit + 3)
+            .map(|id| {
+                serde_json::from_value(json!({ "kind": "paragraph", "id": id, "runs": [field] }))
+                    .unwrap()
+            })
+            .collect();
+        number_sequence_fields(&mut blocks);
+        let results: Vec<&str> = blocks
+            .iter()
+            .map(|block| match block {
+                LayoutBlock::Paragraph(ParagraphBlock { runs, .. }) => match &runs[0] {
+                    Run::Field(field) => field.fallback.as_deref().unwrap(),
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(results[..fit].iter().all(|result| *result == spelled));
+        assert!(results[fit..].iter().all(|result| *result == "7"));
+    }
 }
