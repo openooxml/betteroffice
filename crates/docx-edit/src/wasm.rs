@@ -1803,6 +1803,12 @@ impl EditSession {
             .set_display_window(Some(start as usize..(end.max(start)) as usize));
     }
 
+    /// Limit incremental rebuilds to the display window and caret pages. Off by default.
+    pub fn set_windowed_incremental_builds(&self, enabled: bool) {
+        let _fonts = self.fonts.enter();
+        self.engine.set_windowed_incremental_builds(enabled);
+    }
+
     /// Build the listed pages that are still unbuilt and return a FrameDelta
     /// v1 carrying them; `expected_frame_epoch` works as for
     /// [`Self::build_display_list_frame`].
@@ -2644,6 +2650,10 @@ impl EditSession {
             .sticky_index(&txn, head_index, Assoc::After)
             .ok_or_else(|| js_err("selection head could not be made sticky"))?;
         drop(txn);
+        self.engine.set_resident_caret_head(
+            (story == "body" || story.starts_with("body:"))
+                .then(|| (story.to_owned(), head.clone())),
+        );
         *self.selection.borrow_mut() = Some(LocalSelection {
             story: story.to_owned(),
             anchor,

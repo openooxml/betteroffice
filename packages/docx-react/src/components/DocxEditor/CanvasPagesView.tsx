@@ -618,7 +618,7 @@ export function CanvasPagesView({
   const windowStart = effectiveWindow?.start ?? -1;
   const windowEnd = effectiveWindow?.end ?? -1;
   const pageCount = displayList.pages.length;
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (windowPending) return;
     if (windowStart < 0) onPageWindowChange?.(0, pageCount);
     else onPageWindowChange?.(windowStart, windowEnd + 1);

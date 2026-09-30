@@ -3,14 +3,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { ResidentWorkerOutOfMemoryError, type YrsSession } from '@betteroffice/docx/yrs';
-import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
-} from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import { ResidentWorkerOutOfMemoryError } from '@betteroffice/docx/yrs';
 import { revisionPreviewKey, revisionPreviewKeyOf } from '../internals/layoutProvenance';
 import { useRustDisplayList } from './useDisplayList';
+import { EngineWorker, lazyFixture, PREVIEW } from './__fixtures__/lazyPages';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -60,144 +57,6 @@ function runIdleCallbacks(): void {
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
-
-/** A worker that answers from a real engine session. */
-class EngineWorker {
-  static engine: ReturnType<typeof createEditSession> | null = null;
-  static last: EngineWorker | null = null;
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
-  onerror: ((event: ErrorEvent) => void) | null = null;
-  onmessageerror = null;
-  posted: ResidentEngineWorkerRequest[] = [];
-  constructor() {
-    EngineWorker.last = this;
-    EngineWorker.spawned += 1;
-  }
-  static failPageBuilds = false;
-  static outOfMemoryPageBuilds = false;
-  static spawned = 0;
-  terminated = false;
-  postMessage(request: ResidentEngineWorkerRequest): void {
-    this.posted.push(request);
-    const engine = EngineWorker.engine!;
-    if (request.type === 'buildPages' && EngineWorker.outOfMemoryPageBuilds) {
-      queueMicrotask(() =>
-        this.onmessage?.({
-          data: {
-            id: request.id,
-            ok: false,
-            error: 'Resident engine worker ran out of memory allocating 64 bytes: unreachable',
-            terminal: true,
-            outOfMemory: true,
-          },
-        } as MessageEvent<ResidentEngineWorkerResponse>)
-      );
-      return;
-    }
-    if (request.type === 'buildPages' && EngineWorker.failPageBuilds) {
-      queueMicrotask(() =>
-        this.onmessage?.({
-          data: { id: request.id, ok: false, error: 'page build failed' },
-        } as MessageEvent<ResidentEngineWorkerResponse>)
-      );
-      return;
-    }
-    let frame: Uint8Array;
-    if (request.type === 'bootstrap') {
-      if (request.displayWindow) engine.set_display_window(...request.displayWindow);
-      frame = engine.build_display_list_frame(request.extras, 0);
-    } else if (request.type === 'buildPages') {
-      frame = engine.build_display_pages_frame(
-        Uint32Array.from(request.pages),
-        request.expectedFrameEpoch
-      );
-    } else {
-      return;
-    }
-    const caret = JSON.parse(engine.resident_caret_snapshot_json());
-    queueMicrotask(() =>
-      this.onmessage?.({
-        data: {
-          id: request.id,
-          ok: true,
-          frame: frame.slice().buffer,
-          caret,
-          selection: null,
-          layoutRevision: 1,
-        },
-      } as MessageEvent<ResidentEngineWorkerResponse>)
-    );
-  }
-  terminate(): void {
-    this.terminated = true;
-  }
-}
-
-const PREVIEW = { r1: 'accepted' } as const;
-
-function lazyFixture() {
-  const engine = createEditSession(9401);
-  engine.create_story('body', 'Lazy pages. '.repeat(400), 'Normal', 'left');
-  const fontId = engine.register_measure_font(
-    new Uint8Array(
-      readFileSync(
-        resolve(
-          import.meta.dir,
-          '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
-        )
-      )
-    )
-  );
-  const inputs = JSON.parse(
-    engine.layout_document_with_regions_json(
-      JSON.stringify({
-        bodyStory: 'body',
-        regions: {
-          sections: [
-            {
-              sectionId: 'main',
-              properties: {
-                pageWidth: 4320,
-                pageHeight: 2880,
-                marginTop: 300,
-                marginRight: 300,
-                marginBottom: 300,
-                marginLeft: 300,
-              },
-            },
-          ],
-        },
-        measurement: {
-          fontChains: { 'calibri|0|0': [fontId] },
-          defaults: { fontSize: 11, fontFamily: 'Calibri' },
-          authoritativeShaping: true,
-        },
-        renderEnv: {},
-      })
-    )
-  );
-  EngineWorker.engine = engine;
-  EngineWorker.failPageBuilds = false;
-  EngineWorker.outOfMemoryPageBuilds = false;
-  EngineWorker.spawned = 0;
-  globalThis.Worker = EngineWorker as unknown as typeof Worker;
-  const host = {
-    residentWorkerProbe: () => ({ layoutRevision: 1 }),
-    residentWorkerSnapshot: () => ({
-      state: new Uint8Array(),
-      fonts: [],
-      fontsRevision: 0,
-      layoutRevision: 1,
-      layoutInput: JSON.stringify({ renderEnv: { revisionPreview: PREVIEW } }),
-    }),
-    resetFrameBase: () => {},
-    encodeStateVector: () => new Uint8Array(),
-    onUpdate: () => () => {},
-    selection: () => null,
-    applyUpdate: () => null,
-  } as unknown as YrsSession;
-  return { engine, inputs, host };
-}
 
 test('a worker frame builds only the pages near the viewport', async () => {
   const { engine, inputs, host } = lazyFixture();
@@ -263,6 +122,71 @@ test('pages away from the viewport build in batches while the main thread idles'
     for (const batch of batches) {
       if (batch.type === 'buildPages') expect(batch.pages.length).toBeLessThanOrEqual(16);
     }
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('an edit schedules idle rebuilds for formerly built pages away from the viewport', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    await act(async () => {
+      await result.current.settledDisplayList(null);
+    });
+    const pages = () => result.current.frame!.displayList.pages;
+    const pageCount = pages().length;
+    expect(pageCount).toBeGreaterThan(5);
+    expect(pages().every((page) => !page.unbuilt)).toBe(true);
+    const last = pageCount - 1;
+    await act(async () => {
+      result.current.setDisplayWindow(last, last + 1);
+    });
+    const requestsBeforeEdit = EngineWorker.last!.posted.length;
+    const { paraId, text } = JSON.parse(engine.paragraphs('body'))[0] as {
+      paraId: string;
+      text: string;
+    };
+    const offset = text.length - 10;
+    engine.set_selection('body', paraId, offset, paraId, offset);
+
+    await act(async () => {
+      expect(await result.current.applyInput('New ')).not.toBeNull();
+    });
+    expect(result.current.error).toBeNull();
+    expect(pages()).toHaveLength(pageCount);
+    expect(pages()[last]!.unbuilt).toBeFalsy();
+    expect(result.current.caret?.caretRect?.pageIndex).toBe(last);
+    expect(EngineWorker.last!.posted[requestsBeforeEdit]).toMatchObject({
+      type: 'applyInput',
+      displayWindow: [last, last + 1],
+    });
+    expect(
+      pages().slice(0, last).every((page) => page.unbuilt && page.primitives.length === 0)
+    ).toBe(true);
+    const rebuilds = () =>
+      EngineWorker.last!.posted
+        .slice(requestsBeforeEdit)
+        .filter((request) => request.type === 'buildPages');
+    expect(rebuilds()).toEqual([]);
+    for (let round = 0; round < 5 && rebuilds().length === 0; round += 1) {
+      await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+      await act(async () => runIdleCallbacks());
+    }
+    expect(rebuilds()).toHaveLength(1);
+    const rebuilt = rebuilds()[0]!;
+    expect(rebuilt.pages.length).toBeGreaterThan(0);
+    expect(rebuilt.pages.length).toBeLessThanOrEqual(16);
+    expect(rebuilt.pages.every((index) => index < last)).toBe(true);
+    await act(async () => {
+      const settled = await result.current.settledDisplayList(null);
+      expect(settled.pages.some((page) => page.unbuilt)).toBe(false);
+    });
     unmount();
   } finally {
     engine.free();

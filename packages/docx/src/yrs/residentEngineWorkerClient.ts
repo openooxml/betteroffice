@@ -377,10 +377,17 @@ export class ResidentEngineWorkerClient {
   async buildFrame(
     extras: string,
     expectedFrameEpoch: number,
-    paintCaret = false
+    paintCaret = false,
+    displayWindow?: [number, number]
   ): Promise<ResidentEngineWorkerFrame> {
     const result = frameResult(
-      await this.request({ type: 'buildFrame', extras, expectedFrameEpoch, paintCaret })
+      await this.request({
+        type: 'buildFrame',
+        extras,
+        expectedFrameEpoch,
+        paintCaret,
+        ...(displayWindow ? { displayWindow } : {}),
+      })
     );
     return result;
   }
@@ -401,7 +408,8 @@ export class ResidentEngineWorkerClient {
     selection: YrsSelection,
     expectedFrameEpoch: number,
     profile = false,
-    paintCaret = false
+    paintCaret = false,
+    displayWindow?: [number, number]
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
@@ -413,6 +421,7 @@ export class ResidentEngineWorkerClient {
           expectedFrameEpoch,
           profile,
           paintCaret,
+          ...(displayWindow ? { displayWindow } : {}),
         })
       );
       return { applied: true, ...result };
@@ -428,7 +437,8 @@ export class ResidentEngineWorkerClient {
     expectedFrameEpoch: number,
     profile = false,
     paintCaret = false,
-    count = 1
+    count = 1,
+    displayWindow?: [number, number]
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
@@ -441,6 +451,7 @@ export class ResidentEngineWorkerClient {
           expectedFrameEpoch,
           profile,
           paintCaret,
+          ...(displayWindow ? { displayWindow } : {}),
         })
       );
       return { applied: true, ...result };
