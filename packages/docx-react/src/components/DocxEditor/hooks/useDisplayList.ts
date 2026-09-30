@@ -753,6 +753,10 @@ export function useRustDisplayList(
             return null;
           }
           if (!(error instanceof ResidentWorkerFailureError)) throw error;
+          // A worker another document's load replaced rejects the input it held for its own.
+          if (worker.load !== documentLoadsRef.current) {
+            return { frameEpoch: null, caretSynchronized: false };
+          }
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
             error
