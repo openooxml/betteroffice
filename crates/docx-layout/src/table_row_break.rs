@@ -341,7 +341,10 @@ mod tests {
             "kind": "paragraph",
             "id": 0,
             "runs": [],
-            "attrs": { "spacing": { "before": before, "after": after } },
+            "attrs": {
+                "spacing": { "before": before, "after": after },
+                "widowControl": false,
+            },
         })
     }
 
