@@ -450,6 +450,19 @@ fn autofit_content_widths(
     (minimums, maximums)
 }
 
+/// Whether a cell holds content that shrinking would crop instead of rewrap:
+/// an inline image, or any block other than a paragraph (a nested table, an
+/// image, shape, chart or text box).
+fn holds_rigid_content(blocks: &[crate::types::LayoutBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        crate::types::LayoutBlock::Paragraph(paragraph) => paragraph
+            .runs
+            .iter()
+            .any(|run| matches!(run, crate::types::Run::Image(_))),
+        _ => true,
+    })
+}
+
 /// The widest inline image among a cell's paragraphs, which shrinking can't narrow.
 fn widest_inline_image(blocks: &[crate::types::LayoutBlock]) -> f64 {
     blocks
@@ -507,7 +520,19 @@ fn resolve_autofit_column_widths(
                 .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
                     padding.left + padding.right
                 });
-            let floor = padding + widest_inline_image(&cell.blocks).max(1.0);
+            let mut floor = padding + widest_inline_image(&cell.blocks).max(1.0);
+            if holds_rigid_content(&cell.blocks) {
+                floor = floor.max(
+                    cell.min_content_width
+                        .or(content_widths
+                            .and_then(|rows| rows.get(grid_cell.row_index))
+                            .and_then(|cells| cells.get(grid_cell.cell_index))
+                            .copied()
+                            .flatten()
+                            .map(|widths| widths.0))
+                        .unwrap_or(0.0),
+                );
+            }
             let cell_width: f64 = widths
                 .iter()
                 .skip(grid_cell.column_index)
@@ -1208,6 +1233,39 @@ mod tests {
             resolve_table_column_widths(&block, 600.0),
             vec![200.0, 400.0]
         );
+    }
+
+    #[test]
+    fn autofit_keeps_its_grid_when_shrinking_would_crop_an_indented_image_or_nested_table() {
+        let image = json!({"kind": "paragraph", "id": 0,
+            "attrs": {"indent": {"left": 100}},
+            "runs": [{"kind": "image", "src": "", "width": 200, "height": 40}]});
+        let nested = json!({"kind": "table", "id": 1, "layoutMode": "fixed", "columnWidths": [200],
+        "rows": [{"id": 0, "cells": [{"id": 0, "blocks": [
+            {"kind": "paragraph", "id": 2, "runs": [
+                {"kind": "image", "src": "", "width": 200, "height": 40}
+            ]}
+        ]}]}]});
+        for (grid, content, minimum, other) in [
+            ([300.0, 300.0], image, 300.0, 498.35),
+            ([200.0, 400.0], nested, 200.0, 1510.16),
+        ] {
+            let block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "autofit", "gridWidths": grid,
+                "preferredWidth": {"value": 9000, "type": "dxa"},
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [content],
+                     "minContentWidth": minimum, "maxContentWidth": minimum,
+                     "preferredWidth": {"value": 0, "type": "auto"},
+                     "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}},
+                    {"id": 1, "blocks": [], "minContentWidth": other, "maxContentWidth": other,
+                     "preferredWidth": {"value": 0, "type": "auto"},
+                     "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}}
+                ]}]
+            }))
+            .unwrap();
+            assert_eq!(resolve_table_column_widths(&block, 600.0), grid.to_vec());
+        }
     }
 
     #[test]
