@@ -690,7 +690,10 @@ fn resolving_the_last_boundary_revision_clears_a_deferred_plain_join_donor() {
     doc.delete_range(&local(), StoryRange::new("body", 4, 5))
         .unwrap();
     let deletion = doc
-        .delete_range(&suggesting("Dana"), StoryRange::new("body", 0, body_len(&doc)))
+        .delete_range(
+            &suggesting("Dana"),
+            StoryRange::new("body", 0, body_len(&doc)),
+        )
         .unwrap();
     doc.accept_change(
         &local(),
@@ -735,6 +738,30 @@ fn rejecting_a_pending_table_preserves_an_unrelated_plain_split() {
         assert!(!paragraph.properties.contains_key("pPrIns"));
         assert!(!paragraph.properties.contains_key("pPrDel"));
     }
+    assert!(doc.list_revisions().unwrap().is_empty());
+}
+
+#[test]
+fn accepting_a_pending_table_deletion_keeps_a_suggested_split() {
+    let doc = EditingDoc::new(330);
+    let ids = seed_pending_block(&doc, "table", true);
+    doc.reject_change(&local(), &ChangeTarget::Revision(ids[0].clone()))
+        .unwrap();
+    let first = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    plain_join(&doc, &first, "delete");
+    doc.split_paragraph(&suggesting("Cy"), Position::new("body", 1), None)
+        .unwrap();
+    doc.accept_change(&local(), &ChangeTarget::Revision(ids[1].clone()))
+        .unwrap();
+    assert_eq!(body_texts(&doc), ["o", "ldtail"]);
+    let revisions = doc.list_revisions().unwrap();
+    assert_eq!(revisions.len(), 1);
+    doc.reject_change(
+        &local(),
+        &ChangeTarget::Revision(revisions[0].change.revision_id.clone()),
+    )
+    .unwrap();
+    assert_eq!(body_texts(&doc), ["oldtail"]);
     assert!(doc.list_revisions().unwrap().is_empty());
 }
 

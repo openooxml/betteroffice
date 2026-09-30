@@ -403,8 +403,10 @@ impl EditingDoc {
             })?;
         let (first_para_id, props) = capture_pilcrow(&orig_map, &txn);
         let second_half_empty = orig_index == at.index;
-        let deferred_plain_split = !ctx.is_suggesting()
-            && matches!(orig_map.get(&txn, JOIN_DONOR), Some(Out::Any(Any::Bool(true))));
+        let deferred_split = matches!(
+            orig_map.get(&txn, JOIN_DONOR),
+            Some(Out::Any(Any::Bool(true)))
+        );
 
         let ins = revision_id
             .as_ref()
@@ -418,7 +420,7 @@ impl EditingDoc {
         new_pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
         new_pilcrow.insert(&mut txn, PARA_ID, first_para_id.as_str());
         for (key, value) in &props {
-            if deferred_plain_split && matches!(key.as_str(), PPR_INS | PPR_DEL) {
+            if deferred_split && matches!(key.as_str(), PPR_INS | PPR_DEL) {
                 continue;
             }
             new_pilcrow.insert(&mut txn, key.clone(), value.clone());
