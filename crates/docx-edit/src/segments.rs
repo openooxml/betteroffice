@@ -2,7 +2,7 @@
 // native builds; the invalidation and paragraph paths below are live on both.
 #![cfg_attr(not(feature = "wasm"), allow(dead_code))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use yrs::types::text::YChange;
@@ -43,6 +43,8 @@ pub(crate) struct SegmentIndex {
     segs: Vec<Seg>,
     paras: Vec<ParaEntry>,
     by_para: HashMap<Box<str>, u32>,
+    /// Paragraph ids more than one paragraph of the story carries.
+    repeated: HashSet<Box<str>>,
 }
 
 impl SegmentIndex {
@@ -53,6 +55,7 @@ impl SegmentIndex {
         let mut segs = Vec::new();
         let mut paras: Vec<ParaEntry> = Vec::new();
         let mut by_para = HashMap::new();
+        let mut repeated = HashSet::new();
         for diff in story.diff(txn, YChange::identity) {
             let units = out_len(&diff.insert);
             let kind = match diff.insert {
@@ -62,7 +65,11 @@ impl SegmentIndex {
                         .unwrap_or_default()
                         .into_boxed_str();
                     let slot = paras.len() as u32;
-                    by_para.entry(para_id.clone()).or_insert(slot);
+                    if by_para.contains_key(&para_id) {
+                        repeated.insert(para_id.clone());
+                    } else {
+                        by_para.insert(para_id.clone(), slot);
+                    }
                     paras.push(ParaEntry {
                         para_id,
                         start: para_start,
@@ -96,6 +103,7 @@ impl SegmentIndex {
             segs,
             paras,
             by_para,
+            repeated,
         }
     }
 
@@ -103,6 +111,15 @@ impl SegmentIndex {
     pub(crate) fn para_span(&self, para_id: &str) -> Option<(u32, u32)> {
         let para = self.paras.get(*self.by_para.get(para_id)? as usize)?;
         Some((para.start, para.pilcrow))
+    }
+
+    /// How many paragraphs carry `para_id`: 0, 1, or 2 for two or more.
+    pub(crate) fn para_id_count(&self, para_id: &str) -> u32 {
+        if self.repeated.contains(para_id) {
+            2
+        } else {
+            u32::from(self.by_para.contains_key(para_id))
+        }
     }
 
     /// First paragraph whose pilcrow sits at or after `index` — the paragraph `index`
@@ -285,6 +302,26 @@ mod tests {
     fn segment_index_matches_segment_walks() {
         let doc = seeded_doc();
         assert_index_matches_segments(&doc, "body");
+    }
+
+    #[test]
+    fn segment_index_counts_the_paragraphs_carrying_an_id() {
+        let doc = seeded_doc();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 0,
+                kind: "pilcrow".into(),
+                payload: vec![("paraId".into(), Any::from("p-3"))],
+                attrs: Default::default(),
+            }],
+            &EditCtx::local(String::new(), String::new()),
+        )
+        .unwrap();
+        let index = doc.segment_index("body").unwrap();
+        assert_eq!(index.para_id_count("p-2"), 1);
+        assert_eq!(index.para_id_count("p-3"), 2);
+        assert_eq!(index.para_id_count("absent"), 0);
     }
 
     #[test]
