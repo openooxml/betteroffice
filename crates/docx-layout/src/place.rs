@@ -625,15 +625,13 @@ pub fn layout_document_incremental_ranges(
                 resume,
                 dirty_index,
             }) => {
-                checkpoints.extend(
-                    previous_checkpoints
-                        .iter()
-                        .filter(|checkpoint| {
-                            (checkpoint_order(previous)..checkpoint_order(resume))
-                                .contains(&checkpoint_order(checkpoint))
-                        })
-                        .cloned(),
-                );
+                let bound = |checkpoint: &LayoutCheckpoint| {
+                    previous_checkpoints.partition_point(|retained| {
+                        checkpoint_order(retained) < checkpoint_order(checkpoint)
+                    })
+                };
+                checkpoints
+                    .extend_from_slice(&previous_checkpoints[bound(previous)..bound(resume)]);
                 segment_dirty = *dirty_index;
                 Some(resume.clone())
             }
