@@ -996,7 +996,7 @@ describe('YrsSession host proposals', () => {
     expect(withdrawn.proposals).toEqual([]);
     expect(texts(session, 'accepted').at(-1)).toBe('Tail typed');
     expect(session.listRevisions().map((revision) => revision.revisionId)).toEqual([
-      typed.revisionId,
+      typed.revisionId!,
     ]);
   });
 
