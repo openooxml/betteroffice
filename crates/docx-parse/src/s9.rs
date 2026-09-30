@@ -15,7 +15,7 @@ use crate::comments::remove_orphan_comment_ranges;
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body_compact};
 use crate::fonts::{FontTable, parse_font_table};
 use crate::header_footer::{HeaderFooter, parse_related_header_footers};
-use crate::media::{MediaFile, MediaTable, build_media_map_with_warnings};
+use crate::media::{MediaFile, MediaScan, MediaTable, build_media_map_with_warnings};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
@@ -226,17 +226,23 @@ pub fn parse_docx_s9_wire_with_media_table(
 pub fn media_table_parts(
     data: &Arc<[u8]>,
 ) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    media_table_parts_within(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES)
+}
+
+/// Bounded extraction before transcoding, reserving compressed images' sizes.
+#[doc(hidden)]
+pub fn media_table_parts_within(
+    data: &Arc<[u8]>,
+    budget: u64,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
     let package =
         ooxml_opc::RetainedPackage::new(Arc::clone(data)).map_err(ParseError::Container)?;
-    let table = MediaTable::new(package).map_err(ParseError::Container)?;
-    let parts =
-        ooxml_opc::unzip_parts_where(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |path| {
-            !table.keeps_compressed(path)
-        })
-        .map_err(ParseError::Container)?;
-    table
-        .check_budget(parts.iter().map(|(_, bytes)| bytes.len() as u64).sum())
-        .map_err(ParseError::Container)?;
+    let scan = MediaScan::new(package, budget).map_err(ParseError::Container)?;
+    let mut parts = ooxml_opc::unzip_parts_where(data, scan.remaining_budget(), |path| {
+        !scan.keeps_compressed(path)
+    })
+    .map_err(ParseError::Container)?;
+    let table = scan.finish(&mut parts).map_err(ParseError::Container)?;
     Ok((parts, table))
 }
 

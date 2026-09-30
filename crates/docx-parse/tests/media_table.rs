@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use docx_parse::ParseLimits;
 use docx_parse::media::{build_media_map_with_warnings, media_token, media_token_index};
+#[cfg(feature = "tiff")]
+use docx_parse::s9::media_table_parts_within;
 use docx_parse::s9::{
     S9ParseOptions, media_table_parts, parse_docx_s9_preview_from_parts,
     parse_docx_s9_preview_with_media_table, parse_docx_s9_wire_parts_with_limits,
@@ -246,6 +248,60 @@ fn images_declared_past_the_container_budget_refuse_the_package() {
         .check_budget(ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES - 100)
         .unwrap_err();
     assert!(error.contains("inflated size exceeds"), "{error}");
+}
+
+#[cfg(feature = "tiff")]
+#[test]
+fn tiff_and_non_media_parts_share_a_budget_before_transcoding() {
+    let mut image = tiff();
+    image[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    let mut document = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#.to_vec();
+    document.resize(image.len(), b' ');
+    let budget = image.len() as u64;
+    let eager_parts = vec![
+        ("word/media/fallback.tif".to_owned(), image),
+        ("word/document.xml".to_owned(), document),
+    ];
+    for part in &eager_parts {
+        let bytes: Arc<[u8]> = ooxml_opc::rezip_parts(std::slice::from_ref(part))
+            .unwrap()
+            .into();
+        assert!(media_table_parts_within(&bytes, budget).is_ok());
+    }
+    let bytes: Arc<[u8]> = ooxml_opc::rezip_parts(&eager_parts).unwrap().into();
+    let error = media_table_parts_within(&bytes, budget).unwrap_err();
+    assert!(matches!(
+        error,
+        docx_parse::ParseError::Container(message)
+            if message == format!("inflated size exceeds {budget} bytes")
+    ));
+
+    let (parts, table) = media_table_parts_within(&bytes, budget * 2).unwrap();
+    assert_eq!(parts, eager_parts[1..]);
+    assert_eq!(table.bytes(0).unwrap().as_ref(), eager_parts[0].1);
+    let (media, warnings) = build_media_map_with_warnings(&eager_parts);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(table.warnings(), warnings.as_slice());
+    assert_eq!(
+        table.data_url(0).unwrap(),
+        media[table.path(0).unwrap()].data_url
+    );
+    let package = ooxml_opc::RetainedPackage::new(Arc::clone(&bytes)).unwrap();
+    let standalone = docx_parse::media::MediaTable::new(package).unwrap();
+    assert_eq!(standalone.warnings(), table.warnings());
+    assert_eq!(standalone.data_url(0).unwrap(), table.data_url(0).unwrap());
+
+    let limits = ParseLimits::default();
+    let eager = parse_docx_s9_preview_from_parts(&eager_parts, 1, options(), &limits)
+        .unwrap()
+        .unwrap();
+    let tokens = parse_docx_s9_preview_with_media_table(&parts, &table, 1, options(), &limits)
+        .unwrap()
+        .unwrap();
+    assert_eq!(tokens.document.warnings, eager.document.warnings);
+    let mut expected = serde_json::to_value(&eager).unwrap();
+    expected["document"]["package"]["mediaEntries"] = Value::Array(Vec::new());
+    assert_eq!(serde_json::to_value(&tokens).unwrap(), expected);
 }
 
 #[test]
