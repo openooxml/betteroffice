@@ -21,6 +21,10 @@ interface OverlayState {
 
 type OverlayContext = DocxPluginContext<OverlayState>;
 type NavigationResult = Awaited<ReturnType<OverlayContext['navigation']['scrollToParagraph']>>;
+interface ViewState {
+  scrollTop: number;
+  selection: ReturnType<YrsSession['selection']>;
+}
 const options = new URLSearchParams(window.location.search);
 const readOnly = options.get('readOnly') !== 'false';
 const revisions = options.get('revisions') === '1';
@@ -37,6 +41,8 @@ const probe = {
   sidebarOpened: false,
   sidebarOpen: false,
   sidebarOpenChanges: [] as boolean[],
+  beforeSidebarOpen: null as ViewState | null,
+  layoutComplete: null as number | null,
   renderedDomContextCalls: 0,
   contentChanges: [] as { bodyContainsProposedText: boolean }[],
   load: null as { version: string; sessionVersion: string; snapshotVersion: string } | null,
@@ -50,12 +56,18 @@ const probe = {
       hydratedBeforeSidebar: this.hydratedBeforeSidebar,
       sidebarOpen: this.sidebarOpen,
       sidebarOpenChanges: [...this.sidebarOpenChanges],
+      beforeSidebarOpen: this.beforeSidebarOpen,
+      layoutComplete: this.layoutComplete,
       renderedDomContextCalls: this.renderedDomContextCalls,
       contentChanges: [...this.contentChanges],
       load: this.load,
       events: { ...this.events },
       errors: [...this.errors],
     };
+  },
+  view(): ViewState {
+    const scroller = document.querySelector<HTMLElement>('.docx-editor__scroll-container')!;
+    return { scrollTop: scroller.scrollTop, selection: this.session!.selection() };
   },
   async navigate(
     target: { story: string; paraId: string },
@@ -150,6 +162,12 @@ const overlay = defineDocxPlugin<OverlayState>({
     probe.events[event.type] += 1;
     probe.eventSerial += 1;
     if (event.type === 'load') {
+      if (probe.events.load === 1) {
+        void probe.editor!.whenLayoutComplete().then(
+          () => { probe.layoutComplete = performance.now(); },
+          (error: Error) => probe.errors.push(error.message)
+        );
+      }
       const version = await context.read.version();
       if (!version.ok) throw new Error(version.failure.message);
       probe.load = {
@@ -194,7 +212,10 @@ function Harness() {
         onCommentsSidebarOpenChange={(open) => {
           probe.sidebarOpenChanges.push(open);
           if (!keepSidebarClosed) {
-            if (open) probe.sidebarOpened = true;
+            if (open) {
+              probe.beforeSidebarOpen ??= probe.view();
+              probe.sidebarOpened = true;
+            }
             setSidebarOpen(open);
           }
         }}
