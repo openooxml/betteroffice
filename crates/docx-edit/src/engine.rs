@@ -2593,7 +2593,7 @@ impl EngineSession {
                 })
         };
         for story in stories {
-            let ranges: Vec<(u32, u32)> = self
+            let mut ranges: Vec<(u32, u32)> = self
                 .doc
                 .story_changes(&story)
                 .map_err(|error| error.to_string())?
@@ -2601,11 +2601,22 @@ impl EngineSession {
                 .filter(|(change, _)| changed.contains(change.revision_id.as_str()))
                 .map(|(_, range)| range)
                 .collect();
+            let txn = self.doc.yrs_doc().transact();
+            let text = crate::story_ref(&txn, &story).map_err(|error| error.to_string())?;
+            // An inline content control keeps its content's revisions in its payload.
+            ranges.extend(
+                self.doc
+                    .chunk_snapshot(&story, &text, &txn)
+                    .iter()
+                    .filter(|chunk| {
+                        matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
+                            if crate::map_string(map, &txn, crate::KIND_KEY).as_deref() == Some("sdt"))
+                    })
+                    .map(|chunk| (chunk.start, chunk.end())),
+            );
             if ranges.is_empty() {
                 continue;
             }
-            let txn = self.doc.yrs_doc().transact();
-            let text = crate::story_ref(&txn, &story).map_err(|error| error.to_string())?;
             for bounds in crate::op::para_bounds(&text, &txn) {
                 if ranges
                     .iter()
