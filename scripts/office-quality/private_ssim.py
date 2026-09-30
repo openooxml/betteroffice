@@ -1,6 +1,7 @@
 import argparse
-from bisect import bisect_left
-from collections import Counter, defaultdict
+from bisect import bisect_right
+from collections import Counter
+from difflib import SequenceMatcher
 import hashlib
 import json
 import math
@@ -133,22 +134,16 @@ def body_stream(pages):
 def align(reference, actual):
     reference_stream, _, starts = body_stream(reference)
     stream, positions, _ = body_stream(actual)
-    anchors = defaultdict(list)
-    for index in range(len(stream) - 4):
-        anchors[tuple(stream[index:index + 5])].append(index)
-    cursor, start, matches = 0, 0, []
+    blocks = [block for block in SequenceMatcher(None, reference_stream, stream, autojunk=False).get_matching_blocks()
+              if block.size >= 5]
+    heads = [block.a for block in blocks]
+    start, matches = 0, []
     for page in starts:
         match = None
-        for offset in range(min(41, len(page))):
-            anchor = reference_stream[start + offset:start + offset + 5]
-            if len(anchor) < 5:
-                break
-            candidates = anchors.get(tuple(anchor), [])
-            index = bisect_left(candidates, cursor)
-            if index < len(candidates):
-                position = candidates[index]
-                match = positions[position]
-                cursor = position + 1
+        for index in range(start, start + min(41, len(page))):
+            block = bisect_right(heads, index) - 1
+            if block >= 0 and index < blocks[block].a + blocks[block].size:
+                match = positions[blocks[block].b + index - blocks[block].a]
                 break
         matches.append((match[0], match[1] == 0) if match else (None, False))
         start += len(page)

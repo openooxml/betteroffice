@@ -87,6 +87,14 @@ class PrivateSsimTests(unittest.TestCase):
         short = [['alpha beta gamma'], ['delta epsilon zeta eta theta']]
         self.assertEqual(align(short, short), [(1, True), (2, True)])
 
+    def test_alignment_ignores_a_phrase_that_only_matches_much_later(self):
+        title, toc = 'one two three four five', 'six seven eight nine ten'
+        body = [' '.join(f'w{page}x{index}' for index in range(12)) for page in range(3)]
+        reference = [[title], [toc], [body[0]], [body[1]], [body[2]]]
+        actual = [[title], [body[0]], [body[1]], [body[2], toc]]
+        self.assertEqual(align(reference, actual),
+                         [(1, True), (None, False), (2, True), (3, True), (4, True)])
+
     def test_cache_reuse_and_baseline_regression(self):
         lines = [['alpha beta gamma delta epsilon'], ['zeta eta theta iota kappa']]
         reference = self.pages('reference', lines)
