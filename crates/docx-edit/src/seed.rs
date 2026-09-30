@@ -4646,6 +4646,7 @@ pub(crate) fn seed_parsed_docx_with(
 /// for East Asian or complex-script text it does not contain.
 pub(crate) struct SeededFonts {
     pub(crate) referenced: Vec<String>,
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) unused_script: Vec<String>,
 }
 
