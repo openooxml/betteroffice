@@ -869,6 +869,47 @@ fn every_step_targets_the_pre_batch_state() {
 }
 
 #[test]
+fn suggested_replacement_receipts_follow_retained_text_and_other_steps() {
+    for reverse in [false, true] {
+        let doc = basic();
+        let undo = UndoSession::new();
+        let mut steps = vec![
+            suggested(replace(search("gamma", "00000001"), "GAMMA!"), "Ann"),
+            replace(search("Alpha", "00000001"), "A"),
+            suggested(
+                replace(range("00000001", 5, 6, EditTextView::Accepted), "_"),
+                "Ann",
+            ),
+            suggested(replace(search("beta", "00000001"), "BETA"), "Ann"),
+        ];
+        let mut expected = vec![(7, 13), (0, 1), (1, 2), (2, 6)];
+        if reverse {
+            steps.reverse();
+            expected.reverse();
+        }
+        let applied = apply(&doc, &undo, steps);
+        assert_eq!(accepted(&doc)[0], "A_BETA GAMMA!");
+        assert_eq!(
+            doc.paragraphs("body").unwrap()[0].text,
+            "A _betaBETA gammaGAMMA!"
+        );
+        let offsets: Vec<(u32, u32)> = applied
+            .receipts
+            .iter()
+            .map(|receipt| {
+                let range = receipt.range.as_ref().unwrap();
+                assert_eq!(range.view, EditTextView::Accepted);
+                assert_eq!(range.story, "body");
+                assert_eq!(range.start.para_id, "00000001");
+                assert_eq!(range.end.para_id, "00000001");
+                (range.start.offset, range.end.offset)
+            })
+            .collect();
+        assert_eq!(offsets, expected);
+    }
+}
+
+#[test]
 fn conflicting_effects_are_refused() {
     let doc = basic();
     let accepted_range = |start, end| range("00000001", start, end, EditTextView::Accepted);

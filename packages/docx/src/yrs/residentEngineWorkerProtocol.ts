@@ -5,6 +5,7 @@ import type {
   YrsSelection,
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
+import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 
 export type ResidentEngineWorkerRequest =
   | {
@@ -21,6 +22,8 @@ export type ResidentEngineWorkerRequest =
        * marked `layoutProvisional` is finished by `completeLayout`.
        */
       provisionalPages?: number;
+      /** The most the worker's editing core may allocate at once. */
+      heapLimitBytes?: number;
     }
   | {
       id: number;
@@ -49,6 +52,11 @@ export type ResidentEngineWorkerRequest =
       type: 'completeLayout';
       expectedFrameEpoch: number;
       paintCaret: boolean;
+      /**
+       * Measure the rest this many body blocks a step to start with, letting
+       * requests that arrive meanwhile run between steps; absent, in one step.
+       */
+      sliceBlocks?: number;
     }
   | {
       id: number;
@@ -100,7 +108,7 @@ export type ResidentEngineWorkerRequestWithoutId = ResidentEngineWorkerRequest e
     : never
   : never;
 
-export type ResidentEngineWorkerResponse =
+export type ResidentEngineWorkerResponse = (
   | {
       id: number;
       ok: true;
@@ -133,4 +141,10 @@ export type ResidentEngineWorkerResponse =
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;
-    };
+      /** The trap followed an allocation the worker's memory could not satisfy. */
+      outOfMemory?: boolean;
+    }
+) & {
+  /** The worker's wasm memories as the reply left. */
+  memory?: WasmModuleMemory[];
+};

@@ -94,6 +94,11 @@ configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
 For offline assets, import `* as fonts` from `@betteroffice/fonts` and call
 `configureDefaultFonts({ fonts })`; see [font configuration](../fonts/README.md).
 
+Several editors can share one page: each hears only its own font loads through
+`onFontsLoaded` and `onError`, paints a document's embedded faces even when
+another open document embeds different faces under the same family name, and
+releases those faces when it unmounts or loads its next document.
+
 ## Collaboration
 
 The document is a CRDT — pass a `collaboration` prop and wire a transport to
@@ -325,6 +330,11 @@ if (round.ok) {
 }
 ```
 
+The input, result and refusal-code types (`DocxProposalRequest`, `DocxProposalResult`,
+`DocxProposalStateRequest`, `DocxProposalSnapshot`, `DocxProposalFailure`, and related
+types) are re-exported from `@betteroffice/docx-react` -- no need to import
+`@betteroffice/docx/yrs` directly just to type host proposal code.
+
 ## Host plugins
 
 Host-owned tools (review aids, templates, checks) install through the `plugins`
@@ -486,6 +496,32 @@ Geometry is in unzoomed CSS pixels from each page's top-left corner, so zoom and
 scrolling do not change it. With `expectLayoutVersion` the editor never lays out
 again and a newer document is refused as `stale-document`. The promise rejects when
 the document is replaced meanwhile.
+
+## Memory
+
+Each wasm32 memory holds at most 4 GiB. `DocxEditorRef.getMemoryStats()` reports
+the editor's wasm memories on the main thread and in its resident worker: each
+module's memory size, which only grows and so is also its high-water mark, and for
+the editing core the bytes allocated now, the most allocated at once, and the size
+of an allocation that failed. `onMemoryPressure` is called when the fullest memory
+crosses a `memoryBudget` level, 75% and 90% of 4 GiB by default, and when it drops
+back; it stays silent below the warning level. The editing core counts by its
+allocated bytes and the other modules by their memory size.
+
+```tsx
+<DocxEditor
+  documentBuffer={bytes}
+  onMemoryPressure={({ level, stats }) => report(level, stats)}
+/>
+```
+
+`memoryBudget.workerLimitBytes` caps what the resident worker's editing core may
+allocate at once; an allocation past it fails as if the memory were full. A worker
+that runs out of memory is replaced by a fresh one once. If that one runs out too,
+the editor reports `ResidentWorkerOutOfMemoryError` from `@betteroffice/docx/yrs`
+through `onError`, with the worker's memories at that point, and stops rendering
+rather than moving the work to the main thread. Any other worker failure moves the
+work to the main thread.
 
 ## Framework notes
 

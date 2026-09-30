@@ -39,9 +39,8 @@ import {
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import {
   computeAnchorPositionsFromYrs,
-  createYrsSidebarProjection,
   displayPageCanvases,
-  extractTrackedChangesFromYrs,
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type TrackedChangesResult,
   type DisplayList,
@@ -136,6 +135,7 @@ import {
   projectYrsDisplayPosition,
   type YrsPositionProjection,
 } from './internals/yrsPositionProjection';
+import { SidebarRevisionReads } from './internals/sidebarRevisionReads';
 import { YrsStorySegmentCache } from './internals/yrsStorySegmentCache';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions, DocxPointPosition } from './types';
@@ -1114,13 +1114,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               range.start.paraId === range.end.paraId && range.start.offset === range.end.offset;
             if ((collapsed || existing) && command.displayText) {
               const at = { story: range.story, ...range.start };
-              if (existing) session.replaceRange(range, command.displayText, structuralAuthor);
-              else session.insertText(at, command.displayText, structuralAuthor);
-              range = {
+              const insertedRange = {
                 story: at.story,
                 start: { paraId: at.paraId, offset: at.offset },
                 end: { paraId: at.paraId, offset: at.offset + command.displayText.length },
               };
+              if (existing) {
+                const receipt = session.replaceRange(range, command.displayText, structuralAuthor);
+                range = receipt.range ?? insertedRange;
+              } else {
+                session.insertText(at, command.displayText, structuralAuthor);
+                range = insertedRange;
+              }
             }
             if (
               range.start.paraId === range.end.paraId &&
@@ -1606,11 +1611,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const anchorEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastAnchorEmitAtRef = useRef(0);
     const lastAnchorPositionsRef = useRef<Map<string, number> | null>(null);
+    const sidebarReadsRef = useRef<SidebarRevisionReads | null>(null);
+    sidebarReadsRef.current ??= new SidebarRevisionReads();
     useEffect(() => {
       const session = yrsCore.session;
       if (!session || !displayListQueries || !onAnchorPositionsChange) {
         return;
       }
+      const sidebarReads = sidebarReadsRef.current!;
       let cancelled = false;
       let hostRaf: number | null = null;
       const emit = (): void => {
@@ -1623,6 +1631,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         const target = canvasOverlayTarget ?? host?.parentElement ?? null;
         if (!target) return;
         const targetRect = target.getBoundingClientRect();
+        const targetZoom = effectiveZoom(target);
         const canvasByPage = new Map<number, HTMLCanvasElement>();
         for (const canvas of displayPageCanvases(host)) {
           const pageIndex = Number(canvas.dataset.pageIndex);
@@ -1634,19 +1643,27 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             resolveDisplayPageClientRect(host, displayListQueries, rect.pageIndex);
           const pageSize = displayListQueries.pageSize(rect.pageIndex);
           if (!pageRect || !pageSize || pageSize.height <= 0) return null;
-          return pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height);
+          return (
+            (pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height)) /
+            (zoom * targetZoom)
+          );
         };
-        const revisions = session.listRevisions();
+        const { version, revisions } = sidebarReads.revisions(session);
         if (sidebarCommentIds.length === 0 && revisions.length === 0) {
-          onYrsTrackedChangesChange?.(EMPTY_TRACKED_CHANGES_RESULT);
+          sidebarReads.deliver(
+            onYrsTrackedChangesChange,
+            EMPTY_TRACKED_CHANGES_RESULT,
+            session,
+            version
+          );
           if (lastAnchorPositionsRef.current !== EMPTY_ANCHOR_POSITIONS) {
             lastAnchorPositionsRef.current = EMPTY_ANCHOR_POSITIONS;
             onAnchorPositionsChange(EMPTY_ANCHOR_POSITIONS);
           }
           return;
         }
-        const projection = createYrsSidebarProjection(session);
-        onYrsTrackedChangesChange?.(extractTrackedChangesFromYrs(revisions, projection));
+        const { tracked, projection } = sidebarReads.tracked(session);
+        sidebarReads.deliver(onYrsTrackedChangesChange, tracked, session, version);
         const hfRegions = new Map<string, 'header' | 'footer'>();
         for (const rId of document?.package?.headers?.keys() ?? []) {
           hfRegions.set(rId, 'header');
@@ -1705,6 +1722,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       pagesContainerRef,
       sidebarCommentIds,
       yrsCore.session,
+      zoom,
     ]);
 
     // Canvas renderer (H2): re-back the plugin-facing RenderedDomContext with

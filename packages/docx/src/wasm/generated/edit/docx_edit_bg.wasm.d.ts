@@ -1,6 +1,12 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const wasm_failed_allocation_bytes: () => number;
+export const wasm_heap_counted: () => number;
+export const wasm_live_bytes: () => number;
+export const wasm_peak_bytes: () => number;
+export const set_wasm_heap_limit: (a: number) => void;
+export const reset_wasm_peak_bytes: () => void;
 export const __wbg_editsession_free: (a: number, b: number) => void;
 export const editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -18,6 +24,7 @@ export const editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d
 export const editsession_apply_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_begin_opening: (a: number, b: number, c: number) => void;
+export const editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -107,6 +114,7 @@ export const editsession_resolve_comment: (a: number, b: number, c: number) => [
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_resolve_paragraph_anchor: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

@@ -258,6 +258,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
             .unwrap_or_else(default_columns),
         options.footnote_reserved_heights.clone(),
     )?;
+    paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
     if let Some(Some(restart)) = plan.section_page_restarts.first() {
         paginator.restart_page_numbering(restart.start);
     }
@@ -360,6 +361,16 @@ pub fn layout_document_incremental(
         .map(|(&head, _)| head)
         .min()
         .unwrap_or(dirty_index);
+    // Balancing weighs all of a section's content, so an edit anywhere in a
+    // section whose columns balance resumes before the section opens them.
+    let dirty_section = plan
+        .break_indices
+        .partition_point(|&index| index < dirty_index);
+    let restart_index = if section_balances_columns(&plan, dirty_section, &initial_config) {
+        restart_index.min(section_start(&plan, dirty_section))
+    } else {
+        restart_index
+    };
     let resume = previous_checkpoints
         .iter()
         .rev()
@@ -370,12 +381,13 @@ pub fn layout_document_incremental(
         .filter(|checkpoint| checkpoint.page_index < resume.page_index)
         .cloned()
         .collect();
-    let mut paginator = Paginator::resume(
+    let mut paginator = Paginator::resume_in_section(
         &resume.flow,
         resume.page_number,
+        resume.section_index,
         options.footnote_reserved_heights.clone(),
     )?;
-    paginator.set_section_index(resume.section_index);
+    paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
     // move retained pages out; restored on failure so the caller's stays valid
     let mut previous_pages = std::mem::take(&mut previous_layout.pages);
     let convergence = ConvergenceInput {
@@ -472,6 +484,30 @@ fn section_ends_with_next_column(plan: &LayoutPlan, section_index: usize) -> boo
         && break_type_after_section(plan, section_index) == Some(SectionBreakType::NextColumn)
 }
 
+/// Whether placement balances a section's columns where its column region opens.
+fn section_balances_columns(
+    plan: &LayoutPlan,
+    section_index: usize,
+    initial_config: &SectionLayoutConfig,
+) -> bool {
+    plan.section_configs
+        .get(section_index)
+        .unwrap_or(initial_config)
+        .columns
+        .as_ref()
+        .map_or(1.0, |columns| columns.count)
+        > 1.0
+        && !section_ends_with_next_column(plan, section_index)
+}
+
+/// The index of a section's first block.
+fn section_start(plan: &LayoutPlan, section_index: usize) -> usize {
+    section_index
+        .checked_sub(1)
+        .and_then(|previous| plan.break_indices.get(previous))
+        .map_or(0, |section_break| section_break + 1)
+}
+
 /// The block walk itself, per the module's ordering rules. Returns early once
 /// a checkpoint matches the retained layout, which is how incremental placement
 /// detects convergence.
@@ -488,22 +524,25 @@ fn place(
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
 
-    if initial_config
-        .columns
-        .as_ref()
-        .map_or(1.0, |columns| columns.count)
-        > 1.0
-        && !section_ends_with_next_column(plan, section_idx)
-    {
+    // Balancing belongs to the page a section's column region opens on: a
+    // pass from the document start balances the first section, and a resumed
+    // pass rebalances only when its checkpoint's page is that page.
+    let balances = if start_index == 0 {
+        section_balances_columns(plan, 0, initial_config)
+    } else {
+        paginator.balances_region()
+    };
+    if balances {
         hooks::balance_terminal_continuous_text_columns(
             measured,
             paginator,
-            start_index,
+            section_start(plan, section_idx),
             plan.break_indices
-                .first()
+                .get(section_idx)
                 .copied()
                 .unwrap_or(measured.len()),
         )?;
+        paginator.mark_balanced_region();
     }
 
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
@@ -535,7 +574,7 @@ fn place(
             paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
 
-        // at the head of a keep-with-next group, move to a fresh page when the
+        // at the head of a keep-with-next group, move to a fresh column when the
         // whole group would otherwise straddle the boundary
         if let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
             && !plan.keep_with_next.interior_members.contains(&i)
@@ -544,15 +583,37 @@ fn place(
             let page_content_height =
                 paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
             let page_has_content = paginator.page_fragment_count(state_idx) > 0;
-            let group_height = hooks::measure_keep_with_next_group(group, measured)?;
-            let must_advance = hooks::keep_with_next_group_must_advance(
+            let group_height = hooks::measure_keep_with_next_group_at(
+                group,
+                measured,
+                |before| paginator.leading_spacing(before),
+                paginator.state(state_idx).deferred_spacing,
+                page_content_height,
+            )?;
+            let fresh_page_height = hooks::measure_keep_with_next_group_at(
+                group,
+                measured,
+                |_| 0.0,
+                0.0,
+                page_content_height,
+            )?;
+            let must_advance = hooks::keep_with_next_group_must_advance_from(
                 group_height,
+                fresh_page_height,
                 paginator.get_available_height(),
                 page_content_height,
                 page_has_content,
             )?;
             if must_advance {
-                paginator.force_authored_page_break(false);
+                // advance until a column holds the run or a fresh page opens
+                loop {
+                    let idx = paginator.advance_for_overflow();
+                    if paginator.state(idx).column_index == 0
+                        || fresh_page_height <= paginator.get_available_height()
+                    {
+                        break;
+                    }
+                }
             }
         }
 
@@ -679,6 +740,7 @@ fn place(
                         i + 1,
                         next_break_index.unwrap_or(measured.len()),
                     )?;
+                    paginator.mark_balanced_region();
                 }
 
                 section_idx += 1;

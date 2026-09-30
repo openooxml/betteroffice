@@ -14,11 +14,12 @@ import type {
   ResidentFontRequirement,
   ResidentMeasurementConfig,
 } from '@betteroffice/docx/layout';
-import type {
-  YrsLoc,
-  YrsRenderEnv,
-  YrsSession,
-  YrsStickyPosition,
+import {
+  ResidentWorkerOutOfMemoryError,
+  type YrsLoc,
+  type YrsRenderEnv,
+  type YrsSession,
+  type YrsStickyPosition,
 } from '@betteroffice/docx/yrs';
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
@@ -26,7 +27,12 @@ import { documentPageCount } from './documentPageCount';
 import type { LayoutInWorker } from './useDisplayList';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
-import { readSessionVersion, stampSourceVersion } from '../internals/layoutProvenance';
+import {
+  readSessionVersion,
+  revisionPreviewKey,
+  stampRevisionPreviewKey,
+  stampSourceVersion,
+} from '../internals/layoutProvenance';
 import {
   captureDisplayListScrollAnchor,
   captureDisplayListViewportAnchor,
@@ -301,6 +307,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
       const computeInputs = { document, pageGap, session, renderEnv, measurement };
       const sourceVersion = readSessionVersion(session);
+      const previewKey = revisionPreviewKey(renderEnv.revisionPreview);
 
       // Step 4+: paint + scroll/events with the computed values.
       const applyComputation = (
@@ -310,6 +317,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       ) => {
         const { layout: newLayout } = computation;
         stampSourceVersion(newLayout, version);
+        stampRevisionPreviewKey(newLayout, previewKey);
 
         const pagesEl = pagesContainerRef.current;
         const scrollParent =
@@ -416,18 +424,23 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             }
             applyComputation(computation);
             // The first pages paint now; the full layout replaces them.
-            void computation.complete?.then((complete) => {
-              if (pass !== passRef.current || sessionRef.current !== session) return;
-              if (complete && readSessionVersion(session) === sourceVersion) {
-                // Nothing the user did changed: keep their viewport.
-                applyComputation(complete, 'remote');
-              } else {
-                layOutHere();
-              }
-            });
+            void computation.complete?.then(
+              (complete) => {
+                if (pass !== passRef.current || sessionRef.current !== session) return;
+                if (complete && readSessionVersion(session) === sourceVersion) {
+                  // Nothing the user did changed: keep their viewport.
+                  applyComputation(complete, 'remote');
+                } else {
+                  layOutHere();
+                }
+              },
+              () => {}
+            );
           },
           (error: unknown) => {
             if (pass !== passRef.current) return;
+            // The display reports a worker out of memory; nothing lays out here.
+            if (error instanceof ResidentWorkerOutOfMemoryError) return;
             console.error('[PagedEditor] Layout pipeline error:', error);
             onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
           }
@@ -596,9 +609,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     });
   }, [scrollRestoreController]);
 
-  // Clean up pending rAF on unmount
+  // Clean up pending rAF on unmount. A worker pass answering later must not
+  // touch the session, which its owner frees on unmount.
   useEffect(() => {
     return () => {
+      passRef.current += 1;
       if (schedulerRef.current != null) cancelAnimationFrame(schedulerRef.current);
     };
   }, []);

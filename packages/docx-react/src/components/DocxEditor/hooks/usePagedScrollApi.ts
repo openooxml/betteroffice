@@ -13,6 +13,7 @@ import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import { runAfterFrames } from '../internals/scrollUtils';
+import { scrollViewport } from '../internals/viewportBand';
 
 export interface UsePagedScrollApiOptions {
   pagesContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -45,6 +46,7 @@ export interface UsePagedScrollApiReturn {
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
 }
 
+const SMOOTH_SCROLL_VIEWPORTS = 2;
 const REFINE_WINDOW_MS = 3000;
 const USER_SCROLL_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
 
@@ -101,13 +103,17 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const pageSize = queries.pageSize(rect.pageIndex);
       if (!pageRect || !pageSize) return false;
       const scroller = getScrollContainer() ?? findVerticalScrollParentOrRoot(host);
-      const scrollerRect = scroller.getBoundingClientRect();
+      const viewport = scrollViewport(scroller);
       const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
       const clientY = pageRect.top + (rect.y + rect.height / 2) * scaleY;
-      scroller.scrollTo({
-        top: scroller.scrollTop + clientY - scrollerRect.top - scroller.clientHeight / 2,
-        behavior: smooth ? 'smooth' : 'auto',
-      });
+      const top =
+        scroller.scrollTop +
+        clientY / viewport.zoom -
+        viewport.top / viewport.zoom -
+        viewport.height / 2;
+      const near = Math.abs(top - scroller.scrollTop) <= viewport.height * SMOOTH_SCROLL_VIEWPORTS;
+      // 'auto' would follow a CSS `scroll-behavior: smooth` and animate anyway
+      scroller.scrollTo({ top, behavior: smooth ? (near ? 'smooth' : 'instant') : 'auto' });
       return true;
     },
     [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef]

@@ -23,6 +23,7 @@ import {
   type YrsStoryRange,
 } from '@betteroffice/docx/yrs';
 import {
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -34,9 +35,11 @@ import {
   yrsCellLocFromStory,
   yrsCellStory,
   yrsSelectionNearTable,
+  yrsSelectionPlainText,
   yrsTableSelectionRange,
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
+import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
@@ -501,20 +504,29 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           // structural contract by splitting those instead of inserting pilcrows.
           const pieces = inputText.replace(/\r\n?/g, '\n').split('\n');
           let caret = at;
+          const storedKey = (loc: YrsLoc): string => `${loc.story}\u0000${loc.paraId}`;
+          // A suggested replacement's text lands after the struck-out text, possibly
+          // in another paragraph: the head's stored formatting goes with it.
+          const carried = hasSelection && isSuggesting ? stored : undefined;
           for (let i = 0; i < pieces.length; i += 1) {
             const piece = pieces[i];
             if (piece || (i === 0 && hasSelection)) {
-              const insertedAt = caret;
+              let insertedAt = caret;
               if (i === 0 && hasSelection) {
-                session.replaceRange(selectedRange, piece, suggestingAuthor());
+                const receipt = session.replaceRange(selectedRange, piece, suggestingAuthor());
+                if (receipt.range) {
+                  insertedAt = { story: receipt.range.story, ...receipt.range.start };
+                  caret = { story: receipt.range.story, ...receipt.range.end };
+                } else {
+                  caret = { ...caret, offset: caret.offset + piece.length };
+                }
               } else {
                 session.insertText(caret, piece, suggestingAuthor());
+                caret = { ...caret, offset: caret.offset + piece.length };
               }
-              caret = { ...caret, offset: caret.offset + piece.length };
-              const insertedStored = storedFormattingByParagraphRef.current.get(
-                `${insertedAt.story}\u0000${insertedAt.paraId}`
-              );
-              if (insertedStored) {
+              const insertedStored =
+                carried ?? storedFormattingByParagraphRef.current.get(storedKey(insertedAt));
+              if (insertedStored && piece) {
                 const insertedRange: YrsStoryRange = {
                   story: insertedAt.story,
                   start: { paraId: insertedAt.paraId, offset: insertedAt.offset },
@@ -530,6 +542,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               const receipt = session.splitParagraph(caret, suggestingAuthor());
               caret = { story: caret.story, paraId: receipt.secondParaId, offset: 0 };
             }
+          }
+          if (carried && !storedFormattingByParagraphRef.current.has(storedKey(caret))) {
+            storedFormattingByParagraphRef.current.set(storedKey(caret), carried);
           }
           session.setSelection(caret);
           finishMutation();
@@ -894,7 +909,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enqueueInputOperation(() => {
       verticalCaretGoalRef.current.reset();
       const current = ensureSelection();
-      const activeStory = current?.head.story;
+      // read-only select all takes the whole document, not the table cell holding the caret
+      const activeStory = readOnly ? story : current?.head.story;
       const map = activeStory ? inputPositionMap(activeStory) : null;
       if (!session || !activeStory || !map || map.paragraphs.length === 0) return;
       const first = map.paragraphs[0];
@@ -904,7 +920,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         { story: activeStory, paraId: last.paraId, offset: last.length }
       );
     });
-  }, [enqueueInputOperation, ensureSelection, inputPositionMap, session, setSelection]);
+  }, [enqueueInputOperation, ensureSelection, inputPositionMap, readOnly, session, setSelection, story]);
 
   const moveTableCell = useCallback(
     (backward: boolean): boolean => {
@@ -982,6 +998,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [deleteDirection, insertText, splitParagraph]
   );
 
+  // Browsers only run a copy shortcut over a non-empty native selection, so
+  // the textarea holds the selected text until the shortcut has run.
+  const primedCopyRef = useRef<string | null>(null);
+  const primeCopy = useCallback((): void => {
+    const textarea = textareaRef.current;
+    const text = session ? yrsSelectionPlainText(session) : '';
+    if (!textarea || !text || textarea.value) return;
+    primedCopyRef.current = text;
+    textarea.value = text;
+    textarea.select();
+    setTimeout(() => {
+      if (primedCopyRef.current === text) primedCopyRef.current = null;
+      if (textarea.value === text) textarea.value = '';
+    });
+  }, [session]);
+
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
       if (event.nativeEvent.isComposing || composingRef.current) return;
@@ -990,10 +1022,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (mod && key === 'a') {
         event.preventDefault();
         selectAll();
+      } else if (mod && key === 'c' && !event.shiftKey && !event.altKey) {
+        primeCopy();
       } else if (event.key === 'Enter') {
         event.preventDefault();
         splitParagraph();
-      } else if (event.key === 'Tab' && moveTableCell(event.shiftKey)) {
+      } else if (event.key === 'Tab' && !readOnly && moveTableCell(event.shiftKey)) {
         event.preventDefault();
       } else if (event.key === 'Backspace') {
         event.preventDefault();
@@ -1017,7 +1051,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         moveSelection(event.key === 'Home' ? 'home' : 'end', event.shiftKey, mod);
       }
     },
-    [deleteDirection, moveSelection, moveTableCell, selectAll, splitParagraph]
+    [deleteDirection, moveSelection, moveTableCell, primeCopy, readOnly, selectAll, splitParagraph]
   );
 
   const handleCompositionStart = useCallback(
@@ -1076,6 +1110,17 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
     },
     [insertText]
+  );
+
+  const handleCopy = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const text = primedCopyRef.current ?? (session ? yrsSelectionPlainText(session) : '');
+      primedCopyRef.current = null;
+      if (!text) return;
+      event.preventDefault();
+      event.clipboardData.setData('text/plain', text);
+    },
+    [session]
   );
 
   const handlePaste = useCallback(
@@ -1306,10 +1351,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const nextLeft = pageRect.left + caret.x * scaleX;
     const nextTop = pageRect.top + caret.y * scaleY;
     const nextHeight = Math.max(1, caret.height * scaleY);
+    const inputZoom = textareaRef.current ? effectiveZoom(textareaRef.current) : 1;
+    const style = {
+      left: nextLeft / inputZoom,
+      top: nextTop / inputZoom,
+      height: nextHeight / inputZoom,
+    };
     setPositionStyle((current) =>
-      current.left === nextLeft && current.top === nextTop && current.height === nextHeight
+      current.left === style.left && current.top === style.top && current.height === style.height
         ? current
-        : { left: nextLeft, top: nextTop, height: nextHeight }
+        : style
     );
     const stickySelection = session?.selection() ?? null;
     const previousStickySelection = lastCaretScrollSelectionRef.current;
@@ -1319,17 +1370,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       !sameYrsSelection(previousStickySelection, stickySelection);
     if (
       selection.anchor === selection.head &&
-      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged)
+      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged, readOnly)
     ) {
       const scroller = findVerticalScrollParentOrRoot(host);
-      const viewport = scroller.getBoundingClientRect();
-      const margin = 24;
-      const caretBottom = nextTop + nextHeight;
-      if (nextTop < viewport.top + margin) {
-        scroller.scrollTop += nextTop - viewport.top - margin;
-      } else if (caretBottom > viewport.bottom - margin) {
-        scroller.scrollTop += caretBottom - viewport.bottom + margin;
-      }
+      const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
+      if (delta !== 0) scroller.scrollTop += delta;
     }
   }, [
     canvasHostRef,
@@ -1339,6 +1384,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enabled,
     layoutUpdateOrigin,
     onStateChange,
+    readOnly,
     residentCaret,
     residentCaretAuthoritative,
     selectionEpoch,
@@ -1368,6 +1414,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       onCompositionStart={handleCompositionStart}
       onCompositionUpdate={handleCompositionUpdate}
       onCompositionEnd={handleCompositionEnd}
+      onCopy={handleCopy}
       onPaste={handlePaste}
       onFocus={(event) => {
         event.currentTarget.classList.add('ProseMirror-focused');

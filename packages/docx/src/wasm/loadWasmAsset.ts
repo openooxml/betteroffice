@@ -78,15 +78,70 @@ export interface WasmModuleState {
   ensure(): void;
 }
 
+/** A wasm module's Rust heap, from the allocator's counters. */
+export interface WasmHeapStats {
+  /** Bytes allocated now. */
+  liveBytes: number;
+  /** The most bytes allocated at once since the module started. */
+  peakBytes: number;
+  /** Size of the allocation the memory could not satisfy, or 0. */
+  failedAllocationBytes: number;
+}
+
+/** One instantiated wasm module's memory in this thread; heap counters only for modules that keep them. */
+export interface WasmModuleMemory extends Partial<WasmHeapStats> {
+  label: string;
+  /**
+   * Size of its linear memory. It only grows, so it is also the module's
+   * high-water mark.
+   */
+  bufferBytes: number;
+}
+
+/** The address space of a wasm32 memory: 4 GiB. */
+export const WASM32_MEMORY_LIMIT_BYTES = 4 * 1024 * 1024 * 1024;
+
+interface RegisteredModule {
+  label: string;
+  memory: () => WebAssembly.Memory | null;
+  heap?: () => WasmHeapStats | undefined;
+}
+
+const registered: RegisteredModule[] = [];
+
+/** The memory of every wasm module instantiated in this thread, by label. */
+export function wasmModuleMemories(): WasmModuleMemory[] {
+  const out: WasmModuleMemory[] = [];
+  for (const module of registered) {
+    const memory = module.memory();
+    if (!memory) continue;
+    out.push({ label: module.label, bufferBytes: memory.buffer.byteLength, ...module.heap?.() });
+  }
+  return out;
+}
+
+function exportedMemory(output: unknown): WebAssembly.Memory | null {
+  const memory = (output as { memory?: unknown } | null | undefined)?.memory;
+  return typeof WebAssembly !== 'undefined' && memory instanceof WebAssembly.Memory ? memory : null;
+}
+
 export function createWasmModuleState(options: {
   label: string;
   preloadName: string;
   assetUrl: () => URL;
   initAsync: (input: { module_or_path: WasmAsyncInput | Promise<WasmAsyncInput> }) => Promise<unknown>;
   initSync: (input: { module: WasmSyncInput }) => unknown;
+  /** Reads the module's allocator counters, if it counts; called only once initialized. */
+  heap?: () => WasmHeapStats | undefined;
 }): WasmModuleState {
   let initialized = false;
   let pending: Promise<void> | undefined;
+  let memory: WebAssembly.Memory | null = null;
+  registered.push({
+    label: options.label,
+    memory: () => (initialized ? memory : null),
+    ...(options.heap ? { heap: options.heap } : {}),
+  });
 
   return {
     preload(input?: WasmAsyncInput): Promise<void> {
@@ -95,7 +150,8 @@ export function createWasmModuleState(options: {
       pending = options
         .initAsync({ module_or_path: input ?? defaultAsyncInput(options.assetUrl()) })
         .then(
-          () => {
+          (output) => {
+            memory = exportedMemory(output);
             initialized = true;
           },
           (error: unknown) => {
@@ -109,7 +165,7 @@ export function createWasmModuleState(options: {
       if (initialized) return;
       const bytes = readWasmSync(options.assetUrl());
       if (bytes) {
-        options.initSync({ module: bytes });
+        memory = exportedMemory(options.initSync({ module: bytes }));
         initialized = true;
         return;
       }

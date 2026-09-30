@@ -41,6 +41,8 @@ export interface YrsCoreSession {
 
 interface YrsCoreSessionCallbacks {
   isCurrentLoad?: (generation: number) => boolean;
+  /** A session was created for the current load, before it is seeded. */
+  onSession?: (session: YrsSession) => void;
   onHostDocument?: (host: YrsDocxHost, generation: number) => void;
   onError?: (error: Error, generation: number) => void;
 }
@@ -165,6 +167,38 @@ export function dirtyProjectionStory(activeStory: string): string {
     : 'body';
 }
 
+/**
+ * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
+ * still run with the session they rendered, so `retire` keeps that one until they render without
+ * it; any other session is freed at once, and unmounting frees every retired one.
+ */
+function useRetiredSessions(session: YrsSession | null): (replaced: YrsSession | null) => void {
+  const renderedRef = useRef(session);
+  renderedRef.current = session;
+  const retiredRef = useRef(new Set<YrsSession>());
+  const unmountedRef = useRef(false);
+  useEffect(() => {
+    for (const retired of retiredRef.current) {
+      if (retired === session) continue;
+      retiredRef.current.delete(retired);
+      retired.destroy();
+    }
+  }, [session]);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      for (const retired of retiredRef.current) retired.destroy();
+      retiredRef.current.clear();
+    };
+  }, []);
+  return useCallback((replaced: YrsSession | null): void => {
+    if (!replaced) return;
+    if (replaced === renderedRef.current && !unmountedRef.current) retiredRef.current.add(replaced);
+    else replaced.destroy();
+  }, []);
+}
+
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
@@ -192,6 +226,7 @@ export function useYrsCoreSession(
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
+  const retire = useRetiredSessions(session);
 
   useEffect(() => {
     setSession(null);
@@ -214,11 +249,18 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
-        const host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
-          bytes,
-          document: seedDocument,
-          initialUpdate: collaborationInitialUpdate,
-        });
+        callbacksRef.current?.onSession?.(next);
+        let host: YrsDocxHost | null;
+        try {
+          host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
+            bytes,
+            document: seedDocument,
+            initialUpdate: collaborationInitialUpdate,
+          });
+        } catch (error) {
+          next.destroy();
+          throw error;
+        }
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
@@ -242,7 +284,7 @@ export function useYrsCoreSession(
       cancelled = true;
       cancelCompatibilityWarmRef.current?.();
       cancelCompatibilityWarmRef.current = null;
-      sessionRef.current?.destroy();
+      retire(sessionRef.current);
       sessionRef.current = null;
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
@@ -255,6 +297,7 @@ export function useYrsCoreSession(
     seedGeneration,
     collaborationClientId,
     collaborationInitialUpdate,
+    retire,
   ]);
 
   // Save, export and getDocument materialize the base on first use; only a

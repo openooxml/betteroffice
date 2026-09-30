@@ -66,6 +66,12 @@ import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayT
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
+import {
+  useMemoryPressure,
+  type DocxMemoryBudget,
+  type DocxMemoryPressure,
+  type DocxMemoryStats,
+} from './DocxEditor/memoryStats';
 import { commandOutcome, useDocxCommandBinding } from './DocxEditor/hooks/useDocxCommands';
 import type {
   PagedEditorCommandBridge,
@@ -128,7 +134,7 @@ import { useHyperlinkDialog } from './dialogs/HyperlinkDialog';
 import { DefaultLoadingIndicator, DefaultPlaceholder, ParseError } from './DocxEditorHelpers';
 import { type DocxInput } from '@betteroffice/docx/utils';
 import type { FontDefinition, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
-import { useFontLifecycle } from '../hooks/useFontLifecycle';
+import { useFontLifecycle, useFontLoadScope } from '../hooks/useFontLifecycle';
 import { useTableSelection } from '../hooks/useTableSelection';
 import { useDocumentHistory } from '../hooks/useHistory';
 
@@ -177,6 +183,17 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   onSelectionChange?: (state: SelectionState | null) => void;
   /** Callback on error */
   onError?: (error: Error) => void;
+  /**
+   * Called when the fullest wasm memory, on the main thread or in the resident
+   * worker, crosses a `memoryBudget` level or drops back below it. Silent while
+   * memory stays under the warning level.
+   */
+  onMemoryPressure?: (pressure: DocxMemoryPressure) => void;
+  /**
+   * Levels for `onMemoryPressure`, 75% and 90% of 4 GiB by default, and an
+   * optional limit on the resident worker's allocations.
+   */
+  memoryBudget?: DocxMemoryBudget;
   /** Callback when fonts are loaded */
   onFontsLoaded?: () => void;
   /** Color theme mode for UI styling. `'system'` follows the OS preference. */
@@ -450,8 +467,20 @@ export interface DocxEditorRef {
   focus: () => void;
   /** Get current page number */
   getCurrentPage: () => number;
-  /** Get total page count */
+  /**
+   * The document's page count, or 0 until it is laid out in full: a large document paints its
+   * first pages before the rest is laid out. See {@link whenLayoutComplete}.
+   */
   getTotalPages: () => number;
+  /** The editor's wasm memories on the main thread and in its resident worker. */
+  getMemoryStats: () => DocxMemoryStats;
+  /**
+   * Resolves with the page count once the whole document, as it is now, is laid out and its
+   * pages are ready to paint. Waits for the layout the editor runs on its own and never asks for
+   * one. Rejects when rendering fails, or after `options.timeoutMs` when given.
+   * @example const pages = await ref.current?.whenLayoutComplete({ timeoutMs: 60_000 })
+   */
+  whenLayoutComplete: (options?: { timeoutMs?: number }) => Promise<number>;
   /**
    * Scroll the paginated view so the given page is in view.
    * Page numbers are 1-indexed (matches `getCurrentPage` / `getTotalPages`).
@@ -725,6 +754,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onChange,
     onSelectionChange,
     onError,
+    onMemoryPressure,
+    memoryBudget,
     onFontsLoaded: onFontsLoadedCallback,
     colorMode = 'light',
     theme,
@@ -824,6 +855,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // PagedEditor ref declared early so comment management can read the live
   // Yrs session before the tracked-changes effect drives `setComments`.
   const pagedEditorRef = useRef<PagedEditorRef>(null);
+  const fontScope = useFontLoadScope();
 
   const {
     comments,
@@ -867,12 +899,19 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // Canvas renderer plumbing. `resolvedIdsForRender` reaches the Rust
   // display-list build so the canvas drops the comment wash of resolved
   // threads (and re-tints the one whose sidebar card is expanded).
-  const canvasRenderer = useCanvasRenderer(rustFontChainsProviderRef, resolvedIdsForRender, () =>
-    pagedEditorRef.current?.relayout()
+  const canvasRenderer = useCanvasRenderer(
+    rustFontChainsProviderRef,
+    resolvedIdsForRender,
+    () => pagedEditorRef.current?.relayout(),
+    memoryBudget?.workerLimitBytes
   );
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
   }, [canvasRenderer.error, onError]);
+  useMemoryPressure(onMemoryPressure, memoryBudget, canvasRenderer.workerMemory, [
+    canvasRenderer.frame,
+    canvasRenderer.error,
+  ]);
 
   const [yrsTrackedChangesResult, setYrsTrackedChangesResult] = useState<TrackedChangesResult>(
     () => ({
@@ -993,10 +1032,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     clearFindReplaceMatches: useCallback(() => findReplace.setMatches([], 0), [findReplace]),
     cleanOrphanedCommentsTimerRef,
   });
+  const { resetSettled, awaitingDocument } = canvasRenderer;
   const resetForNewDocument = useCallback(() => {
     beginPluginLoadRef.current();
     resetEditorState();
-  }, [resetEditorState]);
+    resetSettled();
+  }, [resetEditorState, resetSettled]);
 
   const {
     loadParsedDocument,
@@ -1007,16 +1048,22 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     isCurrentLoad,
     acceptHostDocument,
     failHostDocument,
-    reportLayoutError,
+    reportLayoutError: reportDocumentLayoutError,
+    fontAliases,
   } = useDocumentLoader({
     documentBuffer,
     initialDocument,
     externalContent: false,
     history,
     pagedEditorRef,
-    setLoadingState: useCallback((s: { isLoading: boolean; parseError: string | null }) => {
-      setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
-    }, []),
+    setLoadingState: useCallback(
+      (s: { isLoading: boolean; parseError: string | null }) => {
+        setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
+        // Each failed load fails the wait, also one repeating the previous message.
+        if (s.parseError !== null) resetSettled(new Error(s.parseError));
+      },
+      [resetSettled]
+    ),
     setComments,
     setShowCommentsSidebar,
     onError,
@@ -1024,8 +1071,19 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentsLoadedRef,
     commentIdAllocator: commentIdAllocatorRef.current,
     setDocumentFonts,
+    fontScope,
   });
 
+  // A layout error of the session a newer load replaced is not the loaded
+  // document's: the old session may already be freed.
+  const sessionGenerationRef = useRef<number | null>(null);
+  const reportLayoutError = useCallback(
+    (error: Error) => {
+      if (sessionGenerationRef.current !== yrsSeedGeneration) return;
+      reportDocumentLayoutError(error, resetSettled);
+    },
+    [reportDocumentLayoutError, resetSettled, yrsSeedGeneration]
+  );
   const yrsCore = useYrsCoreSession(
     true,
     history.state,
@@ -1035,10 +1093,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     collaboration,
     {
       isCurrentLoad,
+      onSession: canvasRenderer.recordSession,
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
     }
   );
+  sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.
   useCompatibilityWarm(
@@ -1062,6 +1122,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useFileIO({
     pagedEditorRef,
     resolveImage: canvasRenderer.resolveImage,
+    fontFamilies: fontAliases,
     comments,
     documentName,
     onSave,
@@ -1144,7 +1205,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     trackedChangesLoadedRef,
   });
 
-  useFontLifecycle(fonts, onFontsLoadedCallback, onError);
+  useFontLifecycle(fonts, onFontsLoadedCallback, onError, fontScope);
 
   const pushDocument = useCallback(
     (document: Document) => {
@@ -1398,15 +1459,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     interactionPageHostRef: canvasRenderer.canvasHostRef,
     i18n,
     partEditOpen: partEditTarget !== null,
+    readOnly,
     onAddComment: useCallback(
       ({ from, to, yPos }: { from: number; to: number; yPos: number | null }) => {
         setCommentSelectionRange({ from, to });
-        setAddCommentYPosition(yPos);
+        setAddCommentYPosition(yPos === null ? null : yPos / state.zoom);
         setShowCommentsSidebar(true);
         setIsAddingComment(true);
         setFloatingCommentBtn(null);
       },
-      []
+      [state.zoom]
     ),
   });
 
@@ -1445,7 +1507,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const dialogApply = useRef({ pageSetup: handlePageSetupApply, watermark: handleWatermarkApply });
   dialogApply.current = { pageSetup: handlePageSetupApply, watermark: handleWatermarkApply };
 
-  const { scrollPageInfo, setScrollPageInfo } = useScrollPageInfo({
+  const { scrollPageInfo, setScrollPageInfo, readCurrentPage } = useScrollPageInfo({
     scrollContainerRef,
     pagedEditorRef,
   });
@@ -1577,6 +1639,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     zoom: state.zoom,
     setZoom: (zoom: number) => setState((prev) => ({ ...prev, zoom })),
     scrollPageInfo,
+    readCurrentPage,
     loadParsedDocument,
     loadBuffer,
     comments,
@@ -1590,6 +1653,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commands: commandController.store,
     modeRef: writeModeRef,
     allowHostProposalsRef,
+    workerMemory: canvasRenderer.workerMemory,
+    settledDisplayList: canvasRenderer.settledDisplayList,
+    awaitingDocument,
   });
 
   const initialSectionProperties = useMemo(
@@ -2102,6 +2168,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             sidebarOpen={sidebarOpen}
             zoom={state.zoom}
             interactive={!readOnly}
+            fontFamilies={fontAliases}
           >
             <DocxEditorPagedArea
               commandBridgeRef={commandBridgeRef}

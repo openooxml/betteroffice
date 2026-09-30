@@ -1,5 +1,6 @@
 import type {
   YrsEngineApplyProfile,
+  YrsRegionLayoutProgress,
   YrsResidentCaretSnapshot,
   YrsSelection,
   YrsSession,
@@ -8,7 +9,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
-import { createEditSession, preloadEditWasm } from './wasm/index';
+import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 
 export type ResidentEngineSession = Pick<
   YrsSession,
@@ -17,6 +18,7 @@ export type ResidentEngineSession = Pick<
   | 'applyInput'
   | 'applyInputProfiled'
   | 'applyUpdate'
+  | 'beginRegionLayout'
   | 'buildDisplayListFrame'
   | 'buildDisplayPagesFrame'
   | 'clearFonts'
@@ -34,6 +36,7 @@ export type ResidentEngineSession = Pick<
   | 'registerSubstituteFont'
   | 'residentCaretSnapshot'
   | 'residentDeletedUnits'
+  | 'resumeRegionLayout'
   | 'selection'
   | 'setDisplayWindow'
   | 'setSelection'
@@ -43,8 +46,11 @@ export type ResidentEngineSession = Pick<
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
 };
 
-export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
+export async function createResidentEngineSession(
+  heapLimitBytes?: number
+): Promise<ResidentEngineSession> {
   await preloadEditWasm();
+  setEditWasmHeapLimit(heapLimitBytes);
   const session = createEditSession(randomClientId());
   const listeners = new Set<
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -81,6 +87,10 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
     layoutDocumentWithRegionsRetainedJson: (input) =>
       session.layout_document_with_regions_retained_json(input),
+    beginRegionLayout: (input) =>
+      JSON.parse(session.begin_region_layout(input)) as YrsRegionLayoutProgress,
+    resumeRegionLayout: (blocks) =>
+      JSON.parse(session.resume_region_layout(blocks)) as YrsRegionLayoutProgress,
     setPartialDocument: (partial) => session.set_partial_document(partial),
     layoutDocumentWithRegionsPrefixRetainedJson: (input, pages) =>
       session.layout_document_with_regions_prefix_retained_json(input, pages),

@@ -953,7 +953,8 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 /// Parses the render bridge's host context from JSON:
 /// `{ "themeColors": {name: hex}, "defaultTabStopTwips": number|null,
 /// "pageContentHeight": number|null, "numericIds": {yrsId: number},
-/// "showHiddenText": bool, "defaultParagraphStyleId": string }`.
+/// "showHiddenText": bool, "defaultParagraphStyleId": string,
+/// "revisionPreview": {revisionId: "accepted"|"rejected"} }`.
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
     let mut env = crate::bridge::RenderEnv::default();
@@ -985,6 +986,9 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
                 env.numeric_ids.insert(key.clone(), id);
             }
         }
+    }
+    if let Some(preview) = value.get("revisionPreview") {
+        env.revision_preview = crate::bridge::RenderEnv::parse_revision_preview(preview);
     }
     Ok(env)
 }
@@ -1667,6 +1671,29 @@ impl EditSession {
         self.engine
             .layout_document_with_regions_prefix_retained_json(input, pages as usize)
             .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Begins `layout_document_with_regions_retained_json` as a pass measured a
+    /// step at a time; see `EngineSession::begin_region_layout`. Returns the
+    /// progress JSON, with `layoutJson` once the pass is complete.
+    pub fn begin_region_layout(&self, input: &str) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        let progress = self
+            .engine
+            .begin_region_layout(input)
+            .map_err(|error| JsValue::from_str(&error))?;
+        serde_json::to_string(&progress).map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    /// Measures up to `blocks` more body blocks of the begun pass; see
+    /// `EngineSession::resume_region_layout`.
+    pub fn resume_region_layout(&self, blocks: u32) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        let progress = self
+            .engine
+            .resume_region_layout(blocks as usize)
+            .map_err(|error| JsValue::from_str(&error))?;
+        serde_json::to_string(&progress).map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
     /// Retained `{ measured, options }` for the main-thread display-list
@@ -3041,7 +3068,7 @@ impl EditSession {
     /// Replaces `[start, end)` with `text` in one transaction. The inserted
     /// text adopts the first replaced unit's formatting; in suggesting mode
     /// the deletion and the insertion share one revision id. Receipt:
-    /// `{"revisionId": string|null}`.
+    /// `{"revisionId": string|null, "range": {"story", "start": {"paraId", "offset"}, "end": {"paraId", "offset"}}}`.
     #[allow(clippy::too_many_arguments)]
     pub fn replace_range(
         &self,
@@ -3062,7 +3089,18 @@ impl EditSession {
             .doc()
             .replace_range(&ctx, StoryRange::new(story, start, end), text)
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        let range = receipt.range.map(|range| {
+            json!({
+                "story": range.start.story,
+                "start": { "paraId": range.start.para, "offset": range.start.offset },
+                "end": { "paraId": range.end.para, "offset": range.end.offset },
+            })
+        });
+        Ok(json!({
+            "revisionId": receipt.revision_ids.into_iter().next(),
+            "range": range,
+        })
+        .to_string())
     }
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
@@ -4176,7 +4214,8 @@ impl EditSession {
     /// `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
     /// "pageContentHeight":number|null,"numericIds":{yrsId: number},
     /// "tocStyleIds":[styleId],"showHiddenText":bool,
-    /// "defaultParagraphStyleId":string}`, all
+    /// "defaultParagraphStyleId":string,
+    /// "revisionPreview":{revisionId: "accepted"|"rejected"}}`, all
     /// optional. Errors when the story does not end in a pilcrow, holds a
     /// malformed table, references itself through a cell story, or contains an
     /// embed lowering does not support.
@@ -5015,6 +5054,12 @@ mod tests {
                     .layout_document_with_regions_prefix_retained_json(&request, 1)
                     .unwrap(),
             ));
+            let mut progress = parse(session.begin_region_layout(&request).unwrap());
+            while progress.get("layoutJson").is_none() {
+                between();
+                progress = parse(session.resume_region_layout(1).unwrap());
+            }
+            record(progress);
             let layout = parse(
                 session
                     .layout_document_with_regions_retained_json(&request)
