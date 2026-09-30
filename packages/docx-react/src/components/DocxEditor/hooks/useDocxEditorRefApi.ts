@@ -26,6 +26,91 @@ import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { documentPageCount } from './documentPageCount';
+import { awaitWorkerOpenReplica, ensureWorkerOpenReplica } from '../internals/workerOpenReplica';
+
+export const DOCX_REF_REPLICA_ACCESS = {
+  commands: 'commands',
+  getDocument: 'sync',
+  getEditorRef: 'sync',
+  flushPendingInput: 'await',
+  save: 'await',
+  setZoom: 'independent',
+  getZoom: 'independent',
+  focus: 'sync',
+  getCurrentPage: 'independent',
+  getTotalPages: 'independent',
+  whenLayoutComplete: 'await',
+  scrollToPage: 'independent',
+  scrollToPosition: 'sync',
+  openPrintPreview: 'sync',
+  print: 'sync',
+  loadDocument: 'independent',
+  loadDocumentBuffer: 'independent',
+  readParagraphs: 'await',
+  listContentControls: 'await',
+  findContentControls: 'await',
+  findText: 'await',
+  validateEdits: 'await',
+  applyEdits: 'await',
+  proposeChanges: 'await',
+  setProposalStates: 'await',
+  getProposals: 'await',
+  exportStructuredWithPages: 'await',
+  getPositionAtPoint: 'sync',
+  addComment: 'sync',
+  replyToComment: 'independent',
+  resolveComment: 'independent',
+  proposeChange: 'sync',
+  applyFormatting: 'sync',
+  setParagraphStyle: 'sync',
+  insertBreak: 'sync',
+  getPageContent: 'sync',
+  scrollToParaId: 'sync',
+  scrollToCommentId: 'sync',
+  scrollToChangeId: 'sync',
+  highlightRange: 'sync',
+  findInDocument: 'sync',
+  getSelectionInfo: 'sync',
+  getComments: 'independent',
+  onContentChange: 'independent',
+  onSelectionChange: 'independent',
+} as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
+
+function gateReplicaAccess(
+  api: DocxEditorRef,
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  enabled: boolean
+): DocxEditorRef {
+  if (!enabled) return api;
+  const gated = { ...api };
+  for (const key of Object.keys(DOCX_REF_REPLICA_ACCESS) as Array<keyof DocxEditorRef>) {
+    const access = DOCX_REF_REPLICA_ACCESS[key];
+    const call = api[key];
+    if ((access !== 'await' && access !== 'sync') || typeof call !== 'function') continue;
+    Object.defineProperty(gated, key, {
+      value: (...args: unknown[]) => {
+        const session = pagedEditorRef.current?.getYrsSession();
+        if (session) {
+          if (access === 'sync') ensureWorkerOpenReplica(session);
+          else {
+            const ready = awaitWorkerOpenReplica(session);
+            if (ready) {
+              return ready.then(() => {
+                if (pagedEditorRef.current?.getYrsSession() !== session) {
+                  throw new Error('The document changed while opening the replica');
+                }
+                return Reflect.apply(call, api, args);
+              });
+            }
+          }
+        }
+        return Reflect.apply(call, api, args);
+      },
+      enumerable: true,
+    });
+  }
+  return gated;
+}
 
 type LocatedParagraph = {
   story: string;
@@ -184,6 +269,7 @@ export function useDocxEditorRefApi({
   allowHostProposalsRef,
   settledDisplayList,
   awaitingDocument,
+  experimentalWorkerOpen = false,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -217,12 +303,13 @@ export function useDocxEditorRefApi({
   settledDisplayList?: (relayout: null, timeoutMs: number | null) => Promise<DisplayList>;
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
+  experimentalWorkerOpen?: boolean;
 }) {
   const hostProposalsAllowed = () =>
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
   useImperativeHandle(
     ref,
-    () => ({
+    () => gateReplicaAccess({
       commands,
       getDocument: () => pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document,
       getEditorRef: () => pagedEditorRef.current,
@@ -493,7 +580,7 @@ export function useDocxEditorRefApi({
         selectionChangeSubscribersRef.current.add(listener);
         return () => selectionChangeSubscribersRef.current.delete(listener);
       },
-    }),
+    }, pagedEditorRef, experimentalWorkerOpen),
     [
       document,
       documentFromYrs,
@@ -507,6 +594,7 @@ export function useDocxEditorRefApi({
       commands,
       settledDisplayList,
       awaitingDocument,
+      experimentalWorkerOpen,
     ]
   );
 }

@@ -134,6 +134,44 @@ test('a worker-run layout arrives with its frame and needs no second worker pass
   }
 });
 
+test('a worker-opened document reuses its worker for the first layout', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, undefined, undefined, undefined, source),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    const opening = result.current.openInWorker(engine, Uint8Array.of(1, 2, 3), 'digest', 7);
+    const worker = FakeWorker.last!;
+    expect(worker.posted[0]).toMatchObject({ type: 'open', digest: 'digest', generation: '7' });
+    worker.reply({ id: worker.posted[0].id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(9).buffer });
+    const opened = await opening;
+    expect(opened?.hostJson).toBe('{}');
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    expect(FakeWorker.last).toBe(worker);
+    expect(worker.posted[1]).toMatchObject({ type: 'bootstrap', opened: true });
+    worker.reply({
+      id: worker.posted[1].id,
+      ok: true,
+      frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson,
+    });
+    const computation = await pending!;
+    await act(async () => { rerender({ layout: computation!.layout, source: engine }); });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    expect(worker.posted.map((request) => request.type)).toEqual(['open', 'bootstrap']);
+    const encoded = opened!.encodeState();
+    worker.reply({ id: worker.posted[2].id, ok: true, state: Uint8Array.of(4, 5).buffer });
+    expect(await encoded).toEqual(Uint8Array.of(4, 5));
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
 test('a failed worker layout hands the pass back to the main thread', async () => {
   const { native, engine } = setup();
   const errors = spyOn(console, 'error').mockImplementation(() => {});

@@ -8,6 +8,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import type { EditorMode } from './internals/editing-modes';
+import { awaitWorkerOpenReplica } from './internals/workerOpenReplica';
 
 export type EditorFlush =
   | { ok: true; editor: PagedEditorRef; session: YrsSession }
@@ -32,6 +33,13 @@ export async function flushEditorInput(
     };
   }
   try {
+    const ready = awaitWorkerOpenReplica(session);
+    if (ready) {
+      await ready;
+      if (pagedEditorRef.current?.getYrsSession() !== session) {
+        throw new Error('The document changed while opening the replica');
+      }
+    }
     await editor.flushPendingInput();
   } catch (error) {
     return {
@@ -107,6 +115,29 @@ export async function applyEditBatch<Refusal = never>(
       },
     };
   }
+  const ready = awaitWorkerOpenReplica(session);
+  if (ready) {
+    try {
+      await ready;
+    } catch (error) {
+      return {
+        flush: {
+          ok: false,
+          code: pagedEditorRef.current?.getYrsSession() === session ? 'input-failed' : 'document-replaced',
+          error: error instanceof Error ? error : new Error(String(error)),
+        },
+      };
+    }
+    if (pagedEditorRef.current?.getYrsSession() !== session) {
+      return {
+        flush: {
+          ok: false,
+          code: 'document-replaced',
+          error: new Error('The document changed while opening the replica'),
+        },
+      };
+    }
+  }
   const early = modeRefusal(session, mode(), request);
   if (early) return { result: early };
   const flushed = await flushEditorInput(pagedEditorRef);
@@ -152,6 +183,13 @@ export async function applyProposalCall(
   });
   const session = pagedEditorRef.current?.getYrsSession();
   if (!session) throw new Error('The editor input is unavailable');
+  const ready = awaitWorkerOpenReplica(session);
+  if (ready) {
+    await ready;
+    if (pagedEditorRef.current?.getYrsSession() !== session) {
+      throw new Error('The document changed while opening the replica');
+    }
+  }
   if (!allowed()) return denied(session);
   const flushed = await flushEditorInput(pagedEditorRef);
   if (!flushed.ok) throw flushed.error;

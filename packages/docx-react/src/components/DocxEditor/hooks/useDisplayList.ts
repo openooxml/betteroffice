@@ -32,6 +32,7 @@ import {
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
   type ResidentEngineWorkerFrame,
+  type ResidentEngineWorkerOpened,
   type YrsResidentCaretSnapshot,
   type YrsRenderEnv,
   type YrsResidentWorkerSnapshot,
@@ -55,6 +56,30 @@ import {
   DisplayListQueryEpochGate,
   type ResolveDisplayListQueries,
 } from './displayListQueryEpochGate';
+import {
+  ensureWorkerOpenReplica,
+  workerOpenReplicaPending,
+  workerOpenSourceVersion,
+} from '../internals/workerOpenReplica';
+
+export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
+  encodeState(): Promise<Uint8Array>;
+  fallback(): void;
+  destroy(): void;
+  replicaReady(): void;
+}
+
+export type OpenInWorker = (
+  session: YrsSession,
+  bytes: Uint8Array,
+  digest?: string,
+  generation?: number
+) => Promise<WorkerOpenedDocument | null>;
+
+export type FontRequirementsInWorker = (
+  session: YrsSession,
+  request: string
+) => Promise<string | null> | null;
 
 // provider for the canvas renderer's display list: returns the injected value
 // when the host supplies one, otherwise the demo fixture. consumers only ever
@@ -103,6 +128,8 @@ export interface UseRustDisplayListResult {
   ): Promise<ResidentFrameApplyResult | null>;
   /** See {@link LayoutInWorker}. */
   layoutInWorker: LayoutInWorker;
+  openInWorker: OpenInWorker;
+  fontRequirementsInWorker: FontRequirementsInWorker;
   /**
    * The pages `[start, end)` near the viewport. Only these are built; every
    * other page arrives as geometry until it comes near.
@@ -291,6 +318,8 @@ export function useRustDisplayList(
   const workerRef = useRef<{
     engine: YrsSession;
     client: ResidentEngineWorkerClient;
+    opened?: boolean;
+    stateVector?: Uint8Array;
   } | null>(null);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
@@ -439,7 +468,7 @@ export function useRustDisplayList(
   useEffect(() => {
     if (!residentEngine) return;
     return residentEngine.onUpdate((update) => {
-      if (suppressWorkerInvalidationRef.current > 0) return;
+      if (suppressWorkerInvalidationRef.current > 0 || workerOpenReplicaPending(residentEngine)) return;
       contentEpochRef.current += 1;
       queryEpochGate.invalidate();
       requestSettleRelayout();
@@ -791,6 +820,7 @@ export function useRustDisplayList(
   // every later layout and frame runs on the main thread.
   const dropWorker = useCallback(
     (hostEngine: YrsSession): void => {
+      if (workerOpenReplicaPending(hostEngine)) ensureWorkerOpenReplica(hostEngine);
       adoptHostEngine(hostEngine);
       if (workerRef.current?.engine === hostEngine) {
         workerRef.current.client.destroy();
@@ -800,6 +830,69 @@ export function useRustDisplayList(
       setWorkerPresentationActive(false);
     },
     [adoptHostEngine, setWorkerPresentationActive]
+  );
+
+  const openInWorker = useCallback<OpenInWorker>(
+    async (hostEngine, bytes, digest, generation) => {
+      if (overrides?.build || !canUseResidentEngineWorker()) return null;
+      workerRef.current?.client.destroy();
+      const record = { engine: hostEngine, client: new ResidentEngineWorkerClient(), opened: true };
+      workerRef.current = record;
+      try {
+        const opened = await record.client.open(bytes, {
+          digest,
+          ...(generation !== undefined ? { generation: String(generation) } : {}),
+        });
+        if (workerRef.current !== record) throw new Error('The document changed while opening');
+        workerRef.current.stateVector = opened.stateVector;
+        return {
+          ...opened,
+          encodeState: () => record.client.encodeState(),
+          fallback: () => {
+            if (workerRef.current === record) dropWorker(hostEngine);
+          },
+          destroy: () => {
+            record.client.destroy();
+            if (workerRef.current === record) workerRef.current = null;
+          },
+          replicaReady: () => {
+            if (workerRef.current !== record) return;
+            const targets = [layoutRef.current, snapshotRef.current.displayList, snapshotRef.current.queries];
+            for (const target of targets) {
+              if (target) {
+                stampSourceVersion(target, workerOpenSourceVersion(hostEngine, sourceVersionOf(target)));
+              }
+            }
+          },
+        };
+      } catch (error) {
+        record.client.destroy();
+        if (workerRef.current === record) workerRef.current = null;
+        throw error;
+      }
+    },
+    [dropWorker, overrides?.build]
+  );
+
+  const fontRequirementsInWorker = useCallback<FontRequirementsInWorker>(
+    (hostEngine, request) => {
+      if (!workerOpenReplicaPending(hostEngine)) return null;
+      const record = workerRef.current;
+      if (record?.engine !== hostEngine || !record.opened) {
+        ensureWorkerOpenReplica(hostEngine);
+        return null;
+      }
+      return record.client.fontRequirements(request)
+        .then((requirements) => {
+          JSON.parse(requirements);
+          return requirements;
+        })
+        .catch(() => {
+          if (workerRef.current === record) dropWorker(hostEngine);
+          return null;
+        });
+    },
+    [dropWorker]
   );
 
   // Build the unbuilt pages of the worker frame: those the viewport shows
@@ -933,6 +1026,7 @@ export function useRustDisplayList(
         !hostEngine.adoptResidentWorkerLayout ||
         workerFallbackEngineRef.current === hostEngine
       ) {
+        ensureWorkerOpenReplica(hostEngine);
         return null;
       }
       if (workerRef.current?.engine !== hostEngine) {
@@ -942,7 +1036,8 @@ export function useRustDisplayList(
           client: new ResidentEngineWorkerClient(),
         };
       }
-      const worker = workerRef.current.client;
+      const record = workerRef.current;
+      const worker = record.client;
       const bootstrapping = !worker.bootstrapSent();
       const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
       hostEngine.adoptResidentWorkerLayout(request);
@@ -954,7 +1049,10 @@ export function useRustDisplayList(
               knownFontsRevision: worker.syncedFontsRevision(),
             }
       );
-      if (!snapshot) return null;
+      if (!snapshot) {
+        ensureWorkerOpenReplica(hostEngine);
+        return null;
+      }
       const previewKey = layoutPreviewKey(request) ?? '';
       rememberWorkerPreview(workerPreviewKeysRef.current, snapshot, previewKey);
       if (layoutPreviewKeyRef.current !== null && previewKey !== layoutPreviewKeyRef.current) {
@@ -965,7 +1063,10 @@ export function useRustDisplayList(
       const contentEpoch = contentEpochRef.current;
       const options = {
         layoutExtras: JSON.stringify(frameExtrasInputs()),
-        stateVector: hostEngine.encodeStateVector(),
+        stateVector: workerOpenReplicaPending(hostEngine)
+          ? record.stateVector
+          : hostEngine.encodeStateVector(),
+        ...(bootstrapping && record.opened ? { opened: true } : {}),
         displayWindow: displayWindowRef.current,
         ...(bootstrapping ? { provisionalPages: PROVISIONAL_LAYOUT_PAGES } : {}),
       };
@@ -977,6 +1078,7 @@ export function useRustDisplayList(
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
       const unavailable = (cause: unknown): null => {
+        if (workerRef.current !== record) return null;
         console.error(
           '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
           cause
@@ -1262,7 +1364,11 @@ export function useRustDisplayList(
             rememberWorkerPreview(workerPreviewKeysRef.current, snapshot);
             return snapshot;
           };
-          const sent = () => ({ stateVector: hostEngine.encodeStateVector() });
+          const sent = () => ({
+            stateVector: workerOpenReplicaPending(hostEngine)
+              ? workerRef.current?.stateVector
+              : hostEngine.encodeStateVector(),
+          });
           // Structural text input reaches the worker as a sync/buildFrame; keep
           // the painted caret glued to those frames while the typing burst lasts.
           const paintCaret =
@@ -1286,6 +1392,7 @@ export function useRustDisplayList(
                 : bootstrapping
                   ? worker.bootstrap(snapshot, extras, {
                       ...sent(),
+                      ...(workerRef.current.opened ? { opened: true } : {}),
                       displayWindow: displayWindowRef.current,
                     })
                   : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
@@ -1337,7 +1444,7 @@ export function useRustDisplayList(
           result.caret,
           result.queryEngine,
           snapshotRef.current,
-          sourceVersion,
+          residentEngine ? workerOpenSourceVersion(residentEngine, sourceVersion) : sourceVersion,
           result.previewKey === undefined ? previewKey : result.previewKey
         );
         snapshotRef.current = nextSnapshot;
@@ -1460,6 +1567,8 @@ export function useRustDisplayList(
     applyInput,
     applyDelete,
     layoutInWorker,
+    openInWorker,
+    fontRequirementsInWorker,
     setDisplayWindow,
     workerSurfacesActive,
     workerPresentationActive,
@@ -1628,6 +1737,8 @@ export interface UseCanvasRendererResult {
   ): Promise<ResidentFrameApplyResult | null>;
   /** Hands a layout pass to the resident worker; see {@link LayoutInWorker}. */
   layoutInWorker: LayoutInWorker;
+  openInWorker: OpenInWorker;
+  fontRequirementsInWorker: FontRequirementsInWorker;
   /** The pages `[start, end)` near the viewport, built before the others. */
   setDisplayWindow(start: number, end: number): void;
   setWorkerPresentationActive(active: boolean): void;
@@ -1693,6 +1804,8 @@ export function useCanvasRenderer(
     applyInput,
     applyDelete,
     layoutInWorker,
+    openInWorker,
+    fontRequirementsInWorker,
     setDisplayWindow,
     workerSurfacesActive,
     workerPresentationActive,
@@ -1794,6 +1907,8 @@ export function useCanvasRenderer(
     applyInput,
     applyDelete,
     layoutInWorker,
+    openInWorker,
+    fontRequirementsInWorker,
     setDisplayWindow,
     setWorkerPresentationActive,
     offscreenReplay,

@@ -15,6 +15,12 @@ import type {
   YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
+import type { OpenInWorker, WorkerOpenedDocument } from './useDisplayList';
+import {
+  deferWorkerOpenReplica,
+  ensureWorkerOpenReplica,
+  workerOpenReplicaPending,
+} from '../internals/workerOpenReplica';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 
@@ -23,6 +29,7 @@ export interface YrsCoreSession {
   session: YrsSession | null;
   /** The seed generation `session` was created for. */
   sessionGeneration: number | null;
+  replicaReady: boolean;
   storyBlocks(storyId: string, env: YrsRenderEnv): LayoutBlock[] | null;
   bodyBlocks(env: YrsRenderEnv): LayoutBlock[] | null;
   inputPositionMap(storyId?: string): YrsInputPositionMap | null;
@@ -43,6 +50,12 @@ interface YrsCoreSessionCallbacks {
   isCurrentLoad?: (generation: number) => boolean;
   onHostDocument?: (host: YrsDocxHost, generation: number) => void;
   onError?: (error: Error, generation: number) => void;
+  onReplicaError?: (error: Error, generation: number) => void;
+}
+
+interface WorkerOpenOptions {
+  openInWorker: OpenInWorker;
+  renderedFrame: object | null;
 }
 
 function mergeHeaderFooterMaps(
@@ -172,7 +185,8 @@ export function useYrsCoreSession(
   seedBytes: Uint8Array | null,
   seedGeneration: number,
   collaboration?: DocxEditorCollaborationOptions,
-  callbacks?: YrsCoreSessionCallbacks
+  callbacks?: YrsCoreSessionCallbacks,
+  workerOpen?: WorkerOpenOptions
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -192,11 +206,20 @@ export function useYrsCoreSession(
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
+  const [replicaReady, setReplicaReady] = useState(true);
+  const openInWorker = workerOpen?.openInWorker;
+  const pendingReplicaRef = useRef<ReturnType<typeof deferWorkerOpenReplica> | null>(null);
+  const inheritedFrameRef = useRef<object | null>(null);
+  const renderedFrameRef = useRef(workerOpen?.renderedFrame ?? null);
+  renderedFrameRef.current = workerOpen?.renderedFrame ?? null;
 
   useEffect(() => {
     setSession(null);
+    setReplicaReady(true);
     if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
+    let openedWorker: WorkerOpenedDocument | null = null;
+    inheritedFrameRef.current = renderedFrameRef.current;
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
@@ -214,13 +237,72 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
-        let host: YrsDocxHost | null;
+        let host: YrsDocxHost | null = null;
         try {
-          host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
-            bytes,
-            document: seedDocument,
-            initialUpdate: collaborationInitialUpdate,
-          });
+          if (openInWorker && bytes && !collaborationInitialUpdate) {
+            try {
+              openedWorker = await openInWorker(
+                next,
+                bytes,
+                yrs.preparedDocxDigest(bytes),
+                seedGeneration
+              );
+              if (cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false) {
+                openedWorker?.destroy();
+                next.destroy();
+                return;
+              }
+              host = openedWorker ? yrs.decodeDocxHostJson(openedWorker.hostJson, bytes) : null;
+            } catch {
+              openedWorker?.destroy();
+              openedWorker = null;
+            }
+          }
+          if (cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false) {
+            openedWorker?.destroy();
+            next.destroy();
+            return;
+          }
+          if (openedWorker && bytes) {
+            const worker = openedWorker;
+            const source = bytes;
+            const pending = deferWorkerOpenReplica(
+              next,
+              async () => {
+                const update = await worker.encodeState();
+                return () => {
+                  next.openDocx(source, false);
+                  next.loadState(update);
+                };
+              },
+              () => {
+                next.openDocx(source, true);
+                worker.fallback();
+              },
+              () => {
+                inputPositionMapsRef.current.clear();
+                worker.replicaReady();
+                setReplicaReady(true);
+              }
+            );
+            pendingReplicaRef.current = pending;
+            setReplicaReady(false);
+            void pending.ready.catch((error: unknown) => {
+              if (!cancelled && callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false) {
+                const onError = callbacksRef.current?.onReplicaError ?? callbacksRef.current?.onError;
+                onError?.(
+                  error instanceof Error ? error : new Error(String(error)),
+                  seedGeneration
+                );
+              }
+            });
+          } else {
+            host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
+              bytes,
+              document: seedDocument,
+              initialUpdate: collaborationInitialUpdate,
+            });
+          }
         } catch (error) {
           next.destroy();
           throw error;
@@ -246,6 +328,9 @@ export function useYrsCoreSession(
 
     return () => {
       cancelled = true;
+      pendingReplicaRef.current?.cancel();
+      pendingReplicaRef.current = null;
+      openedWorker?.destroy();
       cancelCompatibilityWarmRef.current?.();
       cancelCompatibilityWarmRef.current = null;
       sessionRef.current?.destroy();
@@ -261,7 +346,22 @@ export function useYrsCoreSession(
     seedGeneration,
     collaborationClientId,
     collaborationInitialUpdate,
+    openInWorker,
   ]);
+
+  useEffect(() => {
+    const frame = workerOpen?.renderedFrame;
+    const pending = pendingReplicaRef.current;
+    if (!session || !frame || frame === inheritedFrameRef.current || !pending?.pending) return;
+    if (typeof requestAnimationFrame !== 'function') {
+      const timer = setTimeout(() => pending.start(), 0);
+      return () => clearTimeout(timer);
+    }
+    let frameId = requestAnimationFrame(() => {
+      frameId = requestAnimationFrame(() => pending.start());
+    });
+    return () => cancelAnimationFrame(frameId);
+  }, [session, workerOpen?.renderedFrame]);
 
   // Save, export and getDocument materialize the base on first use; only a
   // host projecting every change asks for it ahead of the first edit.
@@ -270,6 +370,7 @@ export function useYrsCoreSession(
     if (
       !enabledRef.current ||
       !live ||
+      workerOpenReplicaPending(live) ||
       !seedBytesRef.current ||
       compatibilityBaseRef.current ||
       cancelCompatibilityWarmRef.current
@@ -296,10 +397,10 @@ export function useYrsCoreSession(
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;
-    if (!onReplica || !session) return;
+    if (!onReplica || !session || !replicaReady) return;
     onReplica(session);
     return () => onReplica(null);
-  }, [collaboration?.onReplica, session]);
+  }, [collaboration?.onReplica, replicaReady, session]);
 
   const storyBlocks = useCallback((storyId: string, env: YrsRenderEnv): LayoutBlock[] | null => {
     if (!enabledRef.current) return null;
@@ -354,6 +455,7 @@ export function useYrsCoreSession(
     let base = host;
     if (!enabledRef.current || !live || !facade || !base) return null;
     try {
+      ensureWorkerOpenReplica(live);
       const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
@@ -389,6 +491,7 @@ export function useYrsCoreSession(
   return {
     session,
     sessionGeneration,
+    replicaReady,
     storyBlocks,
     bodyBlocks,
     inputPositionMap,

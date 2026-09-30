@@ -82,6 +82,7 @@ export {
   canUseResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
+  type ResidentEngineWorkerOpened,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
 export {
