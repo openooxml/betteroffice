@@ -228,6 +228,8 @@ pub struct RegionLayoutProgress {
 struct ResidentLayoutInput {
     input: LayoutInput,
     block_fingerprints: Vec<u64>,
+    /// The doc epoch and lowering map `input` was built from.
+    lowering: Option<(u64, Rc<LoweringMap>)>,
 }
 
 #[derive(Serialize)]
@@ -1092,8 +1094,9 @@ fn resident_paragraph_span(input: &LayoutInput, para_id: &str) -> Option<(f64, f
 }
 
 /// The display position of story index `index` in `paragraph` of `story`, through the lowering
-/// `input` was built from. `None` inside an atom or hidden text, or when the lowering does not
-/// start the paragraph where `input` does.
+/// `input` was built from. `None` inside an atom, expanded inline content or hidden text, at a
+/// boundary its spans disagree on, or when the lowering does not start the paragraph where
+/// `input` does.
 fn lowered_caret_position(
     map: &LoweringMap,
     input: &LayoutInput,
@@ -1127,18 +1130,32 @@ fn lowered_caret_position(
     if spans.peek().is_none() {
         return (index == paragraph.node_start).then_some(start + 1.0);
     }
-    spans.find_map(|span| {
-        if span.atom {
-            return (index == span.raw_start)
-                .then_some(span.pm_start)
-                .or_else(|| (index == span.raw_end).then_some(span.pm_end))
-                .map(|pm| pm as f64);
+    span_position(spans, index).map(|position| position as f64)
+}
+
+/// The display position of story index `index` that every span touching it agrees on.
+fn span_position<'a>(
+    spans: impl Iterator<Item = &'a crate::bridge::SourceSpan>,
+    index: u32,
+) -> Option<u64> {
+    let mut position = None;
+    for span in spans.filter(|span| (span.raw_start..=span.raw_end).contains(&index)) {
+        let units = u64::from(span.raw_end.checked_sub(span.raw_start)?);
+        let candidate = if !span.atom && span.pm_end.checked_sub(span.pm_start) == Some(units) {
+            span.pm_start + u64::from(index - span.raw_start)
+        } else if index == span.raw_start {
+            span.pm_start
+        } else if index == span.raw_end {
+            span.pm_end
+        } else {
+            return None;
+        };
+        if position.is_some_and(|position| position != candidate) {
+            return None;
         }
-        let units = span.raw_end.checked_sub(span.raw_start)?;
-        (span.pm_end.checked_sub(span.pm_start) == Some(u64::from(units))
-            && (span.raw_start..=span.raw_end).contains(&index))
-        .then(|| (span.pm_start + u64::from(index - span.raw_start)) as f64)
-    })
+        position = Some(candidate);
+    }
+    position
 }
 
 fn paragraph_offset_position(start: f64, offset: u32) -> Option<i64> {
@@ -1608,6 +1625,18 @@ impl EngineSession {
         after_lower: &mut dyn FnMut(),
         read: impl FnOnce(&[LayoutBlock]) -> T,
     ) -> Result<T, BridgeError> {
+        self.with_lowered_story_mapped(story, env, after_lower, |blocks, _| read(blocks))
+    }
+
+    /// [`Self::with_lowered_story_observed`], also handing `read` the doc epoch and lowering
+    /// map of the same lowering as the blocks.
+    fn with_lowered_story_mapped<T>(
+        &self,
+        story: &str,
+        env: &RenderEnv,
+        after_lower: &mut dyn FnMut(),
+        read: impl FnOnce(&[LayoutBlock], (u64, Rc<LoweringMap>)) -> T,
+    ) -> Result<T, BridgeError> {
         let epoch = self.doc_epoch();
         if self.story_is_resident(story, epoch, env) {
             let mut render = self.render.borrow_mut();
@@ -1615,17 +1644,16 @@ impl EngineSession {
         } else {
             self.lower_story_into_cache(story, epoch, env)?;
         }
-        let blocks = Rc::clone(
-            &self
-                .render
-                .borrow()
+        let (blocks, map) = {
+            let render = self.render.borrow();
+            let lowered = render
                 .stories
                 .get(story)
-                .expect("resident story exists after lowering")
-                .blocks,
-        );
+                .expect("resident story exists after lowering");
+            (Rc::clone(&lowered.blocks), Rc::clone(&lowered.map))
+        };
         after_lower();
-        Ok(read(&blocks))
+        Ok(read(&blocks, (epoch, map)))
     }
 
     /// Serializes resident lowered blocks.
@@ -2084,38 +2112,46 @@ impl EngineSession {
                 Full(Vec<LayoutBlock>, bool),
             }
             let arena = self
-                .with_lowered_story(story, render_env, |blocks| -> Result<Arena, String> {
-                    apply_section_geometry(&mut input, &regions);
-                    let widths = region_measurement_widths(blocks.iter(), &input, &regions);
-                    let geometry = initial_float_page_geometry(&input, &regions);
-                    measured_widths.clone_from(&widths);
-                    measured_float_geometry = Some(float_geometry_key(&geometry));
-                    let default_width = widths.first().copied().unwrap_or(0.0);
-                    let (floats, margin_floats) = docx_layout::measure_blocks::floating_zone_kinds(
-                        blocks,
-                        default_width,
-                        &measurement,
-                        Some(&geometry),
-                    )?;
-                    has_floats = floats;
-                    // margin-relative zones couple the whole flow; re-measure all
-                    if margin_floats || (floats && has_wrap_stabilized_shapes(blocks)) {
-                        return Ok(Arena::Full(blocks.to_vec(), true));
-                    }
-                    match self.resident_region_measured(
-                        blocks,
-                        &widths,
-                        &regions,
-                        &measurement,
-                        measurement_fingerprint,
-                        floats.then_some(&geometry),
-                    )? {
-                        Some((measured, fingerprints)) => Ok(Arena::Reused(measured, fingerprints)),
-                        None => Ok(Arena::Full(blocks.to_vec(), false)),
-                    }
-                })
+                .with_lowered_story_mapped(
+                    story,
+                    render_env,
+                    &mut || {},
+                    |blocks, lowering| -> Result<Arena, String> {
+                        input_lowering = Some(lowering);
+                        apply_section_geometry(&mut input, &regions);
+                        let widths = region_measurement_widths(blocks.iter(), &input, &regions);
+                        let geometry = initial_float_page_geometry(&input, &regions);
+                        measured_widths.clone_from(&widths);
+                        measured_float_geometry = Some(float_geometry_key(&geometry));
+                        let default_width = widths.first().copied().unwrap_or(0.0);
+                        let (floats, margin_floats) =
+                            docx_layout::measure_blocks::floating_zone_kinds(
+                                blocks,
+                                default_width,
+                                &measurement,
+                                Some(&geometry),
+                            )?;
+                        has_floats = floats;
+                        // margin-relative zones couple the whole flow; re-measure all
+                        if margin_floats || (floats && has_wrap_stabilized_shapes(blocks)) {
+                            return Ok(Arena::Full(blocks.to_vec(), true));
+                        }
+                        match self.resident_region_measured(
+                            blocks,
+                            &widths,
+                            &regions,
+                            &measurement,
+                            measurement_fingerprint,
+                            floats.then_some(&geometry),
+                        )? {
+                            Some((measured, fingerprints)) => {
+                                Ok(Arena::Reused(measured, fingerprints))
+                            }
+                            None => Ok(Arena::Full(blocks.to_vec(), false)),
+                        }
+                    },
+                )
                 .map_err(|error| error.to_string())??;
-            input_lowering = self.cached_lowering(story);
             if has_floats {
                 lowered_from = self
                     .render
@@ -2849,8 +2885,8 @@ impl EngineSession {
             .get(story)
             .map(|story| story.env.clone())
             .ok_or_else(|| format!("resident render environment missing for story {story:?}"))?;
-        self.with_lowered_story_observed(story, &env, after_lower, |blocks| {
-            self.resident_layout_input_from_blocks(
+        self.with_lowered_story_mapped(story, &env, after_lower, |blocks, lowering| {
+            let mut resident = self.resident_layout_input_from_blocks(
                 blocks,
                 false,
                 &mut |_, key, previous_block, next_block| {
@@ -2874,7 +2910,9 @@ impl EngineSession {
                         .map_err(|error| format!("parse resident paragraph extent: {error}"))?;
                     Ok(BlockExtent::Paragraph(extent))
                 },
-            )
+            )?;
+            resident.lowering = Some(lowering);
+            Ok(resident)
         })
         .map_err(|error| error.to_string())?
     }
@@ -3034,6 +3072,7 @@ impl EngineSession {
                 options: previous.options.clone(),
             },
             block_fingerprints,
+            lowering: None,
         })
     }
 
@@ -3305,7 +3344,7 @@ impl EngineSession {
         }
         let resident = self.resident_layout_input(story)?;
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
-        self.pagination.borrow_mut().input_lowering = self.cached_lowering(story);
+        self.pagination.borrow_mut().input_lowering = resident.lowering;
         let extras = self
             .display
             .borrow()
@@ -3378,11 +3417,13 @@ impl EngineSession {
             return Ok(false);
         }
         let outcome = self
-            .with_lowered_story_observed(
+            .with_lowered_story_mapped(
                 story,
                 &env,
                 &mut || phase(RegionResidentPhase::Lowered),
-                |blocks| -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
+                |blocks,
+                 lowering|
+                 -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
                     let (widths, geometry, previous_pages) = {
                         let pagination = self.pagination.borrow();
                         let (Some(input), Some(layout), false) = (
@@ -3430,7 +3471,10 @@ impl EngineSession {
                             )
                         },
                     ) {
-                        Ok(resident) => Ok(Some((resident, previous_pages, widths))),
+                        Ok(mut resident) => {
+                            resident.lowering = Some(lowering);
+                            Ok(Some((resident, previous_pages, widths)))
+                        }
                         Err(_) => Ok(None),
                     }
                 },
@@ -3444,7 +3488,7 @@ impl EngineSession {
         let previous_capture = self.capture.borrow_mut().take();
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
         let mut pagination = self.pagination.borrow_mut();
-        pagination.input_lowering = self.cached_lowering(story);
+        pagination.input_lowering = resident.lowering;
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
         pagination.measured_with = Some(measurement_fingerprint);
@@ -3555,7 +3599,7 @@ impl EngineSession {
                 resident.input,
                 resident.block_fingerprints,
             )?;
-            self.pagination.borrow_mut().input_lowering = self.cached_lowering(story);
+            self.pagination.borrow_mut().input_lowering = resident.lowering;
             let finished = now();
             profile.paginate_ms = finished - started;
             started = finished;
@@ -4319,14 +4363,6 @@ impl EngineSession {
     }
 
     /// The lowering map of `story` for this document epoch and environment.
-    fn cached_lowering(&self, story: &str) -> Option<(u64, Rc<LoweringMap>)> {
-        self.render
-            .borrow()
-            .stories
-            .get(story)
-            .map(|lowered| (lowered.doc_epoch, Rc::clone(&lowered.map)))
-    }
-
     fn lowering_map(&self, story: &str, env: &RenderEnv) -> Result<Rc<LoweringMap>, BridgeError> {
         let epoch = self.doc_epoch();
         if !self.story_is_resident(story, epoch, env) {
@@ -7885,6 +7921,34 @@ mod tests {
             Some(span)
         );
         docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn a_caret_maps_only_where_every_span_agrees() {
+        let span = |pm_start, pm_end, raw_start, raw_end, atom| crate::bridge::SourceSpan {
+            pm_start,
+            pm_end,
+            paragraph: 0,
+            raw_start,
+            raw_end,
+            atom,
+        };
+        let text = [span(1, 5, 0, 4, false), span(5, 8, 4, 7, false)];
+        assert_eq!(span_position(text.iter(), 2), Some(3));
+        assert_eq!(span_position(text.iter(), 4), Some(5));
+        assert_eq!(span_position(text.iter(), 7), Some(8));
+        let chart = [span(1, 2, 0, 1, true), span(2, 6, 1, 5, false)];
+        assert_eq!(span_position(chart.iter(), 0), Some(1));
+        assert_eq!(span_position(chart.iter(), 1), Some(2));
+        let control = [
+            span(5, 7, 4, 5, false),
+            span(7, 9, 4, 5, false),
+            span(10, 12, 5, 7, false),
+        ];
+        assert_eq!(span_position(control.iter(), 5), None);
+        let wide = [span(1, 2, 0, 3, true)];
+        assert_eq!(span_position(wide.iter(), 1), None);
+        assert_eq!(span_position(wide.iter(), 3), Some(2));
     }
 
     #[test]
