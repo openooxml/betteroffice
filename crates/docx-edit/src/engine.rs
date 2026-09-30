@@ -324,9 +324,11 @@ fn region_measurement_frames<'a>(
     let mut placement_page_width = fallback_size.w;
     let mut placement_margins = &fallback_margins;
     let mut deferred_width = false;
+    let negative_flows = docx_layout::measure_blocks::negative_indent_float_flows(&blocks);
     blocks
         .into_iter()
-        .map(|block| {
+        .zip(negative_flows)
+        .map(|(block, negative_flow)| {
             let section = regions
                 .sections
                 .get(section_index)
@@ -407,7 +409,8 @@ fn region_measurement_frames<'a>(
                 && columns.is_none_or(|columns| columns.count == 1.0)
                 && placement_columns.is_none_or(|columns| columns.count == 1.0)
                 && width == placement_page_width - placement_margins.left - placement_margins.right
-                && !deferred_width;
+                && !deferred_width
+                && !negative_flow;
             if matches!(block, LayoutBlock::SectionBreak(_)) {
                 section_index += 1;
             }
@@ -4405,6 +4408,35 @@ mod tests {
             measured_table_wrap_margins("text", "left", json!([section])),
             (0.0, 489.0)
         );
+    }
+
+    #[test]
+    fn negative_indents_clear_the_frame_flags_of_their_whole_float_flow() {
+        let regions: DocumentRegions =
+            serde_json::from_value(json!({"sections": [table_wrap_section(600.0, json!(null))]}))
+                .unwrap();
+        for (break_before, expected) in
+            [(false, [false, false, false]), (true, [true, true, false])]
+        {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {
+                    "kind": "table", "id": "float", "columnWidths": [360], "layoutMode": "fixed",
+                    "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
+                    "floating": {"horzAnchor": "text", "tblpX": 140}
+                },
+                {"kind": "paragraph", "id": "text", "runs": []},
+                {"kind": "paragraph", "id": "later", "runs": [],
+                 "attrs": {"indent": {"right": -100}, "pageBreakBefore": break_before}}
+            ]))
+            .unwrap();
+            let mut input = LayoutInput {
+                measured: Vec::new(),
+                options: Default::default(),
+            };
+            apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
+            let (_, frames) = region_measurement_frames(blocks.iter(), &input, &regions);
+            assert_eq!(frames, expected, "pageBreakBefore={break_before}");
+        }
     }
 
     #[test]

@@ -1359,18 +1359,6 @@ fn extract_floating_zones(
     shape_offsets: &BTreeMap<usize, f64>,
 ) -> Result<Vec<AnchoredFloatingZone>, String> {
     let mut zones = Vec::new();
-    // Painting lets a negative indent run past a wrap margin, so a side that
-    // main didn't choose could put such a line inside the table: a float flow
-    // holding one keeps main's side for its tables.
-    let mut negative_flows = vec![false; blocks.len()];
-    let mut start = 0;
-    for index in 1..=blocks.len() {
-        if index == blocks.len() || resets_float_flow(&blocks[index]) {
-            let negative = blocks[start..index].iter().any(has_negative_side_indent);
-            negative_flows[start..index].fill(negative);
-            start = index;
-        }
-    }
     for (block_index, block) in blocks.iter().enumerate() {
         match block {
             LayoutBlock::Paragraph(paragraph) => {
@@ -1381,10 +1369,10 @@ fn extract_floating_zones(
                     table,
                     block_index,
                     content_width,
-                    widths.get(block_index).copied().filter(|_| {
-                        table_wrap_frames.get(block_index) == Some(&true)
-                            && !negative_flows[block_index]
-                    }),
+                    widths
+                        .get(block_index)
+                        .copied()
+                        .filter(|_| table_wrap_frames.get(block_index) == Some(&true)),
                     config,
                     &mut zones,
                 )?;
@@ -1588,6 +1576,25 @@ fn extract_image_zones(
             margin_relative: is_margin_relative(image.position.as_ref()),
         });
     }
+}
+
+/// Per block, whether its float flow (up to the next [`resets_float_flow`]
+/// block) holds a paragraph with a negative indent. Painting lets such a line
+/// run past a wrap margin, so its tables keep main's wrap side: a frame flag
+/// passed to [`measure_blocks_with_table_wrap_frames`] must be false there.
+pub fn negative_indent_float_flows(blocks: &[&LayoutBlock]) -> Vec<bool> {
+    let mut flows = vec![false; blocks.len()];
+    let mut start = 0;
+    for index in 1..=blocks.len() {
+        if index == blocks.len() || resets_float_flow(blocks[index]) {
+            let negative = blocks[start..index]
+                .iter()
+                .any(|block| has_negative_side_indent(block));
+            flows[start..index].fill(negative);
+            start = index;
+        }
+    }
+    flows
 }
 
 fn has_negative_side_indent(block: &LayoutBlock) -> bool {
@@ -2499,10 +2506,15 @@ mod tests {
                 {"kind": "paragraph", "id": "later", "attrs": {"indent": {"right": -100}}, "runs": []}
             ]))
             .unwrap();
+            let frames: Vec<bool> = negative_indent_float_flows(&blocks.iter().collect::<Vec<_>>())
+                .into_iter()
+                .map(|negative| !negative)
+                .collect();
+            assert_eq!(frames[2..], [false, false]);
             let flow = FloatFlow::with_table_wrap_frames(
                 &blocks,
                 &[600.0; 4],
-                &[true; 4],
+                &frames,
                 &MeasurementConfig::default(),
                 None,
             )
