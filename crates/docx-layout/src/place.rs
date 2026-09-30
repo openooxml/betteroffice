@@ -2562,6 +2562,22 @@ mod pagination_rule_tests {
         let layout = assert_incremental_matches_full(blocks(false), blocks(true), &[2]);
         assert_eq!(layout.layout.pages.len(), 2);
         assert_incremental_matches_full(blocks(true), blocks(false), &[2]);
+
+        let interior = |page_break_before: bool| {
+            vec![
+                paragraph(0, 1, 80.0, json!({})),
+                paragraph(1, 1, 10.0, json!({ "keepNext": true })),
+                paragraph(
+                    2,
+                    1,
+                    10.0,
+                    json!({ "keepNext": true, "pageBreakBefore": page_break_before }),
+                ),
+                paragraph(3, 1, 10.0, json!({})),
+            ]
+        };
+        assert_incremental_matches_full(interior(false), interior(true), &[2]);
+        assert_incremental_matches_full(interior(true), interior(false), &[2]);
     }
 
     fn assert_incremental_matches_full(
