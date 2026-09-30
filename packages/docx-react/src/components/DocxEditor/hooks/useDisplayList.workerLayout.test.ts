@@ -170,6 +170,7 @@ test('a worker-opened document reuses its worker for the first layout', async ()
     await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
     expect(worker.posted.map((request) => request.type)).toEqual(['open', 'bootstrap']);
     const encoded = opened!.encodeState();
+    await waitFor(() => expect(worker.posted[2]?.type).toBe('encodeState'));
     worker.reply({ id: worker.posted[2].id, ok: true, state: Uint8Array.of(4, 5).buffer });
     expect(await encoded).toEqual(Uint8Array.of(4, 5));
     unmount();

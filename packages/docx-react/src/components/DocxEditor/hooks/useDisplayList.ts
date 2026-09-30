@@ -2085,6 +2085,8 @@ export interface UseCanvasRendererResult {
   displayList: DisplayList | null;
   /** Retained binary frame and its damaged page set. */
   frame: RetainedFrame | null;
+  /** True while the worker owns the visible page surfaces. */
+  workerSurfacesActive: boolean;
   /** sole visible renderer lifecycle */
   status: 'loading' | 'ready' | 'error';
   /** fatal display-list error; non-null exactly while status is `error` */
@@ -2310,6 +2312,7 @@ export function useCanvasRenderer(
     setDisplayWindow,
     workerMemory,
     setWorkerPresentationActive,
+    workerSurfacesActive,
     offscreenReplay,
     paintedCaretActive,
     notifyCaretInput,
