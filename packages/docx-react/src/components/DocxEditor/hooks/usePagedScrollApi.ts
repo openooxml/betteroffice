@@ -46,6 +46,7 @@ export interface UsePagedScrollApiReturn {
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
 }
 
+const SMOOTH_SCROLL_VIEWPORTS = 2;
 const REFINE_WINDOW_MS = 3000;
 const USER_SCROLL_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
 
@@ -105,14 +106,14 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const viewport = scrollViewport(scroller);
       const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
       const clientY = pageRect.top + (rect.y + rect.height / 2) * scaleY;
-      scroller.scrollTo({
-        top:
-          scroller.scrollTop +
-          clientY / viewport.zoom -
-          viewport.top / viewport.zoom -
-          viewport.height / 2,
-        behavior: smooth ? 'smooth' : 'auto',
-      });
+      const top =
+        scroller.scrollTop +
+        clientY / viewport.zoom -
+        viewport.top / viewport.zoom -
+        viewport.height / 2;
+      const near = Math.abs(top - scroller.scrollTop) <= viewport.height * SMOOTH_SCROLL_VIEWPORTS;
+      // 'auto' would follow a CSS `scroll-behavior: smooth` and animate anyway
+      scroller.scrollTo({ top, behavior: smooth ? (near ? 'smooth' : 'instant') : 'auto' });
       return true;
     },
     [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef]

@@ -874,7 +874,7 @@ fn cell_structure_rides_on_table_cell_primitives() {
             .primitives
             .iter()
             .filter_map(doc_attrs)
-            .filter_map(|a| a.cell.clone())
+            .filter_map(|a| a.cell.as_deref().cloned())
             .collect()
     };
 
@@ -3053,7 +3053,7 @@ fn modern_text_effects_thread_to_text_primitives() {
             _ => None,
         })
         .expect("text primitive");
-    assert_eq!(text.attrs.modern_effects.as_ref(), Some(&effects));
+    assert_eq!(text.attrs.modern_effects.as_deref(), Some(&effects));
 }
 
 /// Word hangs an `auto` line's first baseline off the box top: raising the

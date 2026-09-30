@@ -450,8 +450,18 @@ export interface DocxEditorRef {
   focus: () => void;
   /** Get current page number */
   getCurrentPage: () => number;
-  /** Get total page count */
+  /**
+   * The document's page count, or 0 until it is laid out in full: a large document paints its
+   * first pages before the rest is laid out. See {@link whenLayoutComplete}.
+   */
   getTotalPages: () => number;
+  /**
+   * Resolves with the page count once the whole document, as it is now, is laid out and its
+   * pages are ready to paint. Waits for the layout the editor runs on its own and never asks for
+   * one. Rejects when rendering fails, or after `options.timeoutMs` when given.
+   * @example const pages = await ref.current?.whenLayoutComplete({ timeoutMs: 60_000 })
+   */
+  whenLayoutComplete: (options?: { timeoutMs?: number }) => Promise<number>;
   /**
    * Scroll the paginated view so the given page is in view.
    * Page numbers are 1-indexed (matches `getCurrentPage` / `getTotalPages`).
@@ -994,10 +1004,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     clearFindReplaceMatches: useCallback(() => findReplace.setMatches([], 0), [findReplace]),
     cleanOrphanedCommentsTimerRef,
   });
+  const { resetSettled, awaitingDocument } = canvasRenderer;
   const resetForNewDocument = useCallback(() => {
     beginPluginLoadRef.current();
     resetEditorState();
-  }, [resetEditorState]);
+    resetSettled();
+  }, [resetEditorState, resetSettled]);
 
   const {
     loadParsedDocument,
@@ -1008,7 +1020,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     isCurrentLoad,
     acceptHostDocument,
     failHostDocument,
-    reportLayoutError,
+    reportLayoutError: reportDocumentLayoutError,
     fontAliases,
   } = useDocumentLoader({
     documentBuffer,
@@ -1016,9 +1028,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     externalContent: false,
     history,
     pagedEditorRef,
-    setLoadingState: useCallback((s: { isLoading: boolean; parseError: string | null }) => {
-      setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
-    }, []),
+    setLoadingState: useCallback(
+      (s: { isLoading: boolean; parseError: string | null }) => {
+        setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
+        // Each failed load fails the wait, also one repeating the previous message.
+        if (s.parseError !== null) resetSettled(new Error(s.parseError));
+      },
+      [resetSettled]
+    ),
     setComments,
     setShowCommentsSidebar,
     onError,
@@ -1029,6 +1046,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     fontScope,
   });
 
+  // A layout error of the session a newer load replaced is not the loaded
+  // document's: the old session may already be freed.
+  const sessionGenerationRef = useRef<number | null>(null);
+  const reportLayoutError = useCallback(
+    (error: Error) => {
+      if (sessionGenerationRef.current !== yrsSeedGeneration) return;
+      reportDocumentLayoutError(error, resetSettled);
+    },
+    [reportDocumentLayoutError, resetSettled, yrsSeedGeneration]
+  );
   const yrsCore = useYrsCoreSession(
     true,
     history.state,
@@ -1042,6 +1069,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onError: failHostDocument,
     }
   );
+  sessionGenerationRef.current = yrsCore.sessionGeneration;
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.
   useCompatibilityWarm(
@@ -1594,6 +1622,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commands: commandController.store,
     modeRef: writeModeRef,
     allowHostProposalsRef,
+    settledDisplayList: canvasRenderer.settledDisplayList,
+    awaitingDocument,
   });
 
   const initialSectionProperties = useMemo(

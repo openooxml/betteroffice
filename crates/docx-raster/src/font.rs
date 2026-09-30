@@ -195,7 +195,7 @@ fn paint_text_core(
     )?;
     let transform = context.base_transform.pre_concat(visual);
     let color = color_with_opacity(&run.color, context.opacity)?;
-    if let Some(leader) = active_leader(&run.attrs.leader_glyphs) {
+    if let Some(leader) = active_leader(run.attrs.leader_glyphs.as_deref()) {
         return paint_leader(context, run, leader, &parsed, color, transform);
     }
     context.budget.charge_glyphs(painted_chars(run))?;
@@ -380,8 +380,8 @@ fn painted_chars(run: &TextRunPrimitive) -> u64 {
     }
 }
 
-fn active_leader(leader: &Option<LeaderGlyphMetadata>) -> Option<&LeaderGlyphMetadata> {
-    leader.as_ref().filter(|leader| {
+fn active_leader(leader: Option<&LeaderGlyphMetadata>) -> Option<&LeaderGlyphMetadata> {
+    leader.filter(|leader| {
         leader
             .glyph
             .as_deref()
