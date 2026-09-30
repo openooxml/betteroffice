@@ -75,6 +75,25 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.open).toBe(1);
   });
 
+  test('a dropped facade whose donor leads back to it is still finalized', async () => {
+    const { engine } = fakeEngine();
+    // Host state keyed by the donor that reaches its successor, as a display window does.
+    const hostState = new WeakMap<object, { latest: DisplayListQueries }>();
+    let dropped!: WeakRef<DisplayListQueries>;
+    (() => {
+      const donor = createDisplayListQueries({ pages: [page(0)] }, engine);
+      donor.prime();
+      const facade = createDisplayListQueries({ pages: [page(0)] }, engine, donor);
+      hostState.set(donor, { latest: facade });
+      dropped = new WeakRef(facade);
+    })();
+    for (let i = 0; i < 20 && dropped.deref(); i++) {
+      Bun.gc(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(dropped.deref()).toBeUndefined();
+  });
+
   test('adoption chains across unqueried generations as one page-delta', () => {
     const { engine, calls } = fakeEngine();
     const shared = page(0);
