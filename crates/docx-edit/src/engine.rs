@@ -6594,7 +6594,10 @@ mod tests {
             .unwrap();
         assert_ne!(superset, markup);
         let before = engine.stats();
-        request.as_object_mut().unwrap().remove("revisionFontSuperset");
+        request
+            .as_object_mut()
+            .unwrap()
+            .remove("revisionFontSuperset");
         request["renderEnv"]["revisionPreview"] = serde_json::json!({id: "accepted"});
         assert_eq!(
             engine
