@@ -70,6 +70,8 @@ export interface WorkerProposalAuthority {
 type Handover = { state: Uint8Array; complete(): void };
 type RegisteredAuthority = WorkerProposalAuthority & {
   beginHandover(): Promise<Handover>;
+  draining(): boolean;
+  fail(error: unknown): void;
   handedOverRequest<T extends { expectVersion: string }>(request: T): T;
 };
 const authorities = new WeakMap<YrsSession, RegisteredAuthority>();
@@ -90,6 +92,15 @@ export function registerWorkerProposalAuthority(
 ): WorkerProposalAuthority {
   let tail: Promise<unknown> = Promise.resolve();
   let initializing: Promise<void> | null = null;
+  let queued = 0;
+  let snapshotPosted = false;
+  let stopWaiting!: () => void;
+  let failWaiting!: (error: unknown) => void;
+  const stopped = new Promise<void>((resolve, reject) => {
+    stopWaiting = resolve;
+    failWaiting = reject;
+  });
+  void stopped.catch(() => {});
   let initialized = false;
   let mirror: ResidentProposalReply['mirror'] | null = null;
   let geometry: ProposalGeometryMirror | null = null;
@@ -103,8 +114,10 @@ export function registerWorkerProposalAuthority(
     if (!hooks.current()) throw new Error('The document changed while applying proposals');
   };
   const enqueue = <T>(call: () => Promise<T>): Promise<T> => {
+    queued += 1;
     const result = tail.then(call);
-    tail = result.then(() => {}, () => {});
+    const finished = () => { queued -= 1; };
+    tail = result.then(finished, finished);
     return result;
   };
   const store = (reply: ResidentProposalReply): void => {
@@ -124,7 +137,7 @@ export function registerWorkerProposalAuthority(
       if (viaWorker) {
         await ready;
         assertCurrent();
-        return call();
+        if (initialized) return call();
       }
       await awaitWorkerOpenReplica(session);
       assertCurrent();
@@ -163,8 +176,10 @@ export function registerWorkerProposalAuthority(
       if (initializing) return initializing;
       if (handingOver) return Promise.resolve(awaitWorkerOpenReplica(session));
       initializing = enqueue(async () => {
-        await hooks.laidOut();
+        await Promise.race([hooks.laidOut(), stopped]);
         assertCurrent();
+        if (handingOver) return;
+        snapshotPosted = true;
         const reply = await worker.proposal({ kind: 'snapshot' });
         assertCurrent();
         initialized = true;
@@ -175,6 +190,8 @@ export function registerWorkerProposalAuthority(
     },
     geometry: () => geometry,
     holdsWorkerState: () => holdsState,
+    draining: () => handingOver && queued > 0,
+    fail: (error) => { failWaiting(error); },
     propose: (request, main) => mutate({ kind: 'propose', request }, () => main(request)),
     setStates: (request, main) => mutate({ kind: 'setStates', request }, () => main(request)),
     withdraw: (request, main) => mutate({ kind: 'withdraw', request }, () => main(request)),
@@ -212,7 +229,8 @@ export function registerWorkerProposalAuthority(
     beginHandover() {
       if (handover) return handover;
       handingOver = true;
-      handover = enqueue(async () => {
+      stopWaiting();
+      const transfer = async (): Promise<Handover> => {
         assertCurrent();
         const handedOver = await worker.handOver();
         assertCurrent();
@@ -233,7 +251,8 @@ export function registerWorkerProposalAuthority(
             notify();
           },
         };
-      });
+      };
+      handover = snapshotPosted ? enqueue(transfer) : transfer();
       return handover;
     },
   };
@@ -243,8 +262,8 @@ export function registerWorkerProposalAuthority(
 
 export function workerProposalAuthority(session: YrsSession): WorkerProposalAuthority | null {
   const authority = authorities.get(session);
-  return authority && workerOpenReplicaPending(session) &&
-    (!workerOpenReplicaStarted(session) || authority.holdsWorkerState())
+  return authority && (authority.draining() || (workerOpenReplicaPending(session) &&
+    (!workerOpenReplicaStarted(session) || authority.holdsWorkerState())))
     ? authority
     : null;
 }
@@ -266,4 +285,8 @@ export function handedOverRequest<T extends { expectVersion: string }>(
 
 export function beginWorkerProposalHandover(session: YrsSession): Promise<Handover> | null {
   return authorities.get(session)?.beginHandover() ?? null;
+}
+
+export function failWorkerProposalAuthority(session: YrsSession, error: unknown): void {
+  authorities.get(session)?.fail(error);
 }

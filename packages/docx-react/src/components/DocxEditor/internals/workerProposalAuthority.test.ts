@@ -1,14 +1,16 @@
 import { expect, mock, test } from 'bun:test';
-import type {
-  DocxProposalRequest,
-  DocxProposalResult,
-  DocxProposalSnapshot,
-  ResidentProposalReply,
-  YrsSession,
+import {
+  proposalSetIdentity,
+  type DocxProposalRequest,
+  type DocxProposalResult,
+  type DocxProposalSnapshot,
+  type ResidentProposalReply,
+  type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
 import {
   beginWorkerProposalHandover,
+  failWorkerProposalAuthority,
   handedOverRequest,
   registerWorkerProposalAuthority,
   workerProposalAuthority,
@@ -27,11 +29,12 @@ function deferred<T>() {
 }
 
 function reply(version = 'worker-1', changedStories: string[] = []): ResidentProposalReply {
+  const snapshot: DocxProposalSnapshot = { version, previewVersion: 0, proposals: [] };
   return {
     mirror: { version, proposals: { previewVersion: 0, entries: [] } },
-    result: { ok: true, snapshot: { version, previewVersion: 0, proposals: [] } },
+    result: { ok: true, snapshot },
     changedStories,
-    geometry: { version, previewVersion: 0, proposals: '[]', targets: {}, hidden: [] },
+    geometry: { version, previewVersion: 0, proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [] },
     updates: [],
     stateVector: new Uint8Array(),
   };
@@ -171,6 +174,43 @@ test('an in-flight document change masks the version without notifying proposal 
   expect(notify).toHaveBeenCalledTimes(2);
   expect(h.authority.holdsWorkerState()).toBe(true);
   expect(h.relayout).toHaveBeenCalledTimes(1);
+});
+
+test('hydration releases reads waiting for the first layout without posting initialization', async () => {
+  const laidOut = deferred<void>();
+  const waiting = deferred<void>();
+  const h = harness(() => { waiting.resolve(); return laidOut.promise; });
+  const main = mock(async () => ({ sessionId: 'session', packageSha256: null, paragraphs: [] }));
+  const read = h.authority.paragraphIdentities(main);
+  await waiting.promise;
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => { h.mainVersion('main-2'); handover.complete(); };
+  }, () => { throw new Error('unexpected fallback'); }, () => {});
+
+  await requestWorkerOpenReplica(h.session);
+  expect(await read).toEqual({ sessionId: 'session', packageSha256: null, paragraphs: [] });
+  expect(h.session.version()).toBe('main-2');
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  expect(h.worker.handOver).toHaveBeenCalledTimes(1);
+  expect(h.authority.initialized).toBe(false);
+  expect(workerProposalAuthority(h.session)).toBeNull();
+});
+
+test('a session failure rejects reads waiting for the first layout', async () => {
+  const waiting = deferred<void>();
+  const laidOut = deferred<void>();
+  const h = harness(() => { waiting.resolve(); return laidOut.promise; });
+  const read = h.authority.paragraphIdentities(unusedMain);
+  const rejected = expect(read).rejects.toThrow('session failed');
+  await waiting.promise;
+  failWorkerProposalAuthority(h.session, new Error('session failed'));
+  await rejected;
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
 });
 
 test('registry changes hold worker state without relayout and setStates never masks the version', async () => {
@@ -338,6 +378,70 @@ test('hand-over waits for the running worker call and routes queued calls to mai
   });
   h.mainVersion('main-3');
   await h.authority.propose({ ...request, expectVersion: 'worker-2' }, staleMain);
+});
+
+test('hydration callbacks read after queued main withdrawals finish', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const applied = reply('worker-2', ['body']);
+  applied.mirror.proposals.entries.push({
+    record: {
+      id: 'held', state: 'proposed', changed: true, revisionIds: [],
+      paragraph: { kind: 'session', sessionId: 'session', story: 'body', paraId: 'first' },
+    },
+    key: 'held', suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+  });
+  applied.result = {
+    ok: true,
+    snapshot: {
+      version: 'worker-2', previewVersion: 0,
+      proposals: applied.mirror.proposals.entries.map((entry) => entry.record),
+    },
+  };
+  applied.geometry.proposals = proposalSetIdentity(applied.result.snapshot);
+  h.worker.handOver.mockResolvedValue({
+    state: Uint8Array.of(1), version: 'worker-2', proposals: applied.mirror.proposals,
+  });
+  const proposed = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementation(async () => { posted.resolve(); return proposed.promise; });
+  const proposal = h.authority.propose(request, unusedMain);
+  await posted.promise;
+  const withdrawn = deferred<void>();
+  const started = deferred<void>();
+  const order: string[] = [];
+  let read!: Promise<DocxProposalSnapshot>;
+  const readMain = mock(async () => { order.push('read'); return h.session.getProposals(); });
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => { h.mainVersion('main-2'); handover.complete(); };
+  }, () => { throw new Error('unexpected fallback'); }, () => {
+    const authority = workerProposalAuthority(h.session);
+    expect(authority).toBe(h.authority);
+    read = authority ? authority.getProposals(readMain) : readMain();
+  });
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const withdrawal = h.authority.withdraw({ expectVersion: 'worker-2', ids: ['held'] }, async () => {
+    started.resolve();
+    await withdrawn.promise;
+    h.mainVersion('main-3');
+    h.session.mirrorWorkerDocument(reply('main-3').mirror);
+    h.session.mirrorWorkerDocument(null);
+    order.push('withdraw');
+    return reply('main-3').result!;
+  });
+  proposed.resolve(applied);
+  await proposal;
+  await ready;
+  await started.promise;
+  expect(h.session.getProposals().proposals.map((proposal) => proposal.id)).toEqual(['held']);
+  expect(readMain).not.toHaveBeenCalled();
+  expect(workerProposalAuthority(h.session)).toBe(h.authority);
+  withdrawn.resolve();
+  await withdrawal;
+  expect(await read).toEqual({ version: 'main-3', previewVersion: 0, proposals: [] });
+  expect(order).toEqual(['withdraw', 'read']);
+  expect(workerProposalAuthority(h.session)).toBeNull();
 });
 
 test('routing stops when the replica starts without worker state or finishes', () => {

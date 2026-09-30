@@ -4,7 +4,13 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, type DocxEditRequest, type YrsSession } from '@betteroffice/docx/yrs';
+import {
+  createYrsSession,
+  proposalSetIdentity,
+  type DocxEditRequest,
+  type ResidentProposalReply,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import type { PluginInvocation } from '../../../../shared/plugin-host/runtime';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../commands/createDocxCommandStore';
 import * as editorBatches from '../components/DocxEditor/editorBatches';
@@ -484,6 +490,71 @@ describe('plugin read and navigation clients', () => {
     expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
     expect(worker.flush).not.toHaveBeenCalled();
   });
+
+  for (const during of ['target read', 'layout wait'] as const) {
+    test(`navigation accepts an equivalent worker version after hand-over during ${during}`, async () => {
+      const env = await setup();
+      env.state.layoutReady = false;
+      const version = 'worker-1';
+      const snapshot: ResidentProposalReply = {
+        mirror: { version, proposals: { previewVersion: 0, entries: [] } },
+        geometry: {
+          version, previewVersion: 0, proposals: proposalSetIdentity(env.session.getProposals()),
+          targets: {}, hidden: [],
+        },
+        changedStories: [], updates: [], stateVector: new Uint8Array(),
+      };
+      let release!: () => void;
+      const transfer = new Promise<void>((resolve) => { release = resolve; });
+      workerOpenReplica.deferWorkerOpenReplica(env.session, async () => {
+        const handover = await workerProposals.beginWorkerProposalHandover(env.session)!;
+        return () => { handover.complete(); };
+      }, () => { throw new Error('unexpected fallback'); }, () => {});
+      const authority = workerProposals.registerWorkerProposalAuthority(env.session, {
+        proposal: async () => snapshot,
+        documentRead: async () => { throw new Error('unexpected worker read'); },
+        handOver: async () => {
+          await transfer;
+          return { version, state: new Uint8Array(), proposals: snapshot.mirror.proposals };
+        },
+      }, {
+        laidOut: () => Promise.resolve(), current: () => true, relayout: () => {}, contentChanged: () => {},
+        adopted: (token) => workerOpenReplica.adoptWorkerOpenMirrorVersion(env.session, token),
+        handedOver: (token) => workerOpenReplica.adoptWorkerOpenHandoverVersion(env.session, token),
+      });
+      await authority.initialize();
+      stampSourceVersion(env.queries, version);
+      const target = { story: 'body', paraId: '00000002' };
+      const navigation = spyOn(authority, 'navigationTarget');
+      restoreWorkers.push(() => navigation.mockRestore());
+      if (during === 'layout wait') {
+        navigation.mockImplementationOnce(async () => ({
+          version, target: resolveParagraph(env.session, target),
+        }));
+      }
+      const ready = during === 'target read'
+        ? workerOpenReplica.requestWorkerOpenReplica(env.session)!
+        : null;
+      const scroll = env.clients.navigation.scrollToParagraph(target, { expectVersion: version });
+      if (during === 'layout wait') await env.waiting;
+      const hydrated = ready ?? workerOpenReplica.requestWorkerOpenReplica(env.session)!;
+      release();
+      await hydrated;
+      await env.waiting;
+      expect(env.session.version()).not.toBe(version);
+      expect(env.events).toEqual([]);
+      env.state.layoutReady = true;
+      env.publishLayout();
+      expect(await scroll).toEqual({ ok: true });
+      expect(env.events.filter((event) => event.startsWith('scroll'))).toHaveLength(1);
+      expect(env.layoutListeners.size).toBe(0);
+
+      env.session.insertText({ story: 'body', paraId: '00000001', offset: 5 }, '!');
+      expect(await env.clients.navigation.scrollToParagraph(target, { expectVersion: version })).toMatchObject({
+        ok: false, failure: { code: 'stale-version' },
+      });
+    });
+  }
 
   test('worker navigation keeps supersession and invocation aborts across awaited resolutions', async () => {
     const env = await setup();

@@ -2,10 +2,11 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import type {
-  DocxProposalSnapshot,
-  ProposalGeometryMirror,
-  YrsSession,
+import {
+  proposalSetIdentity,
+  type DocxProposalSnapshot,
+  type ProposalGeometryMirror,
+  type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { createDocxCommandController } from '../commands/createDocxCommandStore';
 import {
@@ -45,7 +46,7 @@ function stubSession() {
   } as unknown as YrsSession;
 }
 
-function fakeAuthority() {
+function fakeAuthority(session: YrsSession) {
   const listeners = new Set<() => void>();
   let mirror: ProposalGeometryMirror | null = null;
   const authority = {
@@ -65,6 +66,7 @@ function fakeAuthority() {
       mirror = {
         version: 'v1',
         previewVersion: 0,
+        proposals: proposalSetIdentity(session.getProposals()),
         targets: { proposal: { ok: true, ranges: [], paragraph } },
         hidden: [],
       };
@@ -76,8 +78,8 @@ function fakeAuthority() {
 test('worker geometry arriving after a frame re-notifies plugins and subscriptions follow the session', async () => {
   const first = stubSession();
   const second = stubSession();
-  const firstWorker = fakeAuthority();
-  const secondWorker = fakeAuthority();
+  const firstWorker = fakeAuthority(first);
+  const secondWorker = fakeAuthority(second);
   const lookup = workerProposals.workerProposalAuthority;
   const routing = spyOn(workerProposals, 'workerProposalAuthority').mockImplementation((session) =>
     session === first

@@ -14,6 +14,8 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
+import * as workerProposals from '../internals/workerProposalAuthority';
 import { useRustDisplayList } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -132,6 +134,64 @@ function setup() {
     applyUpdate: () => null,
   } as unknown as YrsSession;
   return { native, inputs, frame, engine, mainThreadBuilds, layoutJson };
+}
+
+for (const stage of ['fontRequirements', 'bootstrap'] as const) {
+  test(`worker-held proposals reject ${stage} OOM without reopening or hydrating`, async () => {
+    const { native, engine, mainThreadBuilds } = setup();
+    Object.assign(engine, { version: () => 'worker-1' });
+    const fallback = spyOn(console, 'error').mockImplementation(() => {});
+    const lookup = workerProposals.registeredWorkerProposalAuthority;
+    let held = false;
+    const authority = { holdsWorkerState: () => true } as workerProposals.WorkerProposalAuthority;
+    const registered = spyOn(workerProposals, 'registeredWorkerProposalAuthority').mockImplementation(
+      (session) => session === engine && held ? authority : lookup(session)
+    );
+    let mainOpens = 0;
+    const replica = deferWorkerOpenReplica(engine, () => new Promise(() => {}), () => {
+      mainOpens += 1;
+    }, () => {});
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, engine, undefined, undefined, undefined, true)
+    );
+    try {
+      const opening = result.current.openInWorker(engine, Uint8Array.of(1));
+      const worker = FakeWorker.spawned[0]!;
+      worker.onmessage?.({ data: {
+        id: worker.last().id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0),
+      } } as MessageEvent<ResidentEngineWorkerResponse>);
+      expect(await opening).not.toBeNull();
+      held = true;
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = stage === 'fontRequirements'
+          ? result.current.fontRequirementsInWorker(engine, REQUEST)!
+          : result.current.layoutInWorker(engine, REQUEST)!;
+      });
+      expect(worker.last().type).toBe(stage);
+      const rejected = expect(pending).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+      await act(async () => {
+        worker.outOfMemory();
+        await rejected;
+      });
+      expect(FakeWorker.spawned).toHaveLength(1);
+      expect(worker.posted.filter((request) => request.type === 'open')).toHaveLength(1);
+      expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(mainThreadBuilds).toEqual([]);
+      expect(mainOpens).toBe(0);
+      expect(replica.pending).toBe(true);
+      expect(replica.started).toBe(false);
+      await expect(result.current.fontRequirementsInWorker(engine, REQUEST)!).rejects.toThrow(
+        'The resident worker holding this document is gone'
+      );
+      expect(FakeWorker.spawned).toHaveLength(1);
+    } finally {
+      unmount();
+      registered.mockRestore();
+      fallback.mockRestore();
+      native.free();
+    }
+  });
 }
 
 test('a worker that runs out of memory is replaced once, never by the main thread', async () => {

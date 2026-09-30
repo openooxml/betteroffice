@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
@@ -10,8 +10,14 @@ import type { WorkerLayoutComputation } from './useDisplayList';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, renderHook } = await import('@testing-library/react');
+const { act, cleanup, renderHook } = await import('@testing-library/react');
 const { useLayoutPipeline } = await import('./useLayoutPipeline');
+const restoreFrames: Array<() => void> = [];
+
+afterEach(() => {
+  cleanup();
+  for (const restore of restoreFrames.splice(0)) restore();
+});
 
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -45,6 +51,17 @@ function fakeDocument() {
 
 /** A document whose version each test moves on; worker passes answer when the test says. */
 async function opened({ experimentalWorkerOpen = false, pendingReplica = false } = {}) {
+  let nextFrame = 0;
+  const frames = new Map<number, FrameRequestCallback>();
+  const requestFrame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+    const id = ++nextFrame;
+    frames.set(id, callback);
+    return id;
+  });
+  const cancelFrame = spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id) => {
+    frames.delete(id);
+  });
+  restoreFrames.push(() => { requestFrame.mockRestore(); cancelFrame.mockRestore(); });
   const { doc, session } = fakeDocument();
   const replica = pendingReplica
     ? deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {})
@@ -86,12 +103,15 @@ async function opened({ experimentalWorkerOpen = false, pendingReplica = false }
   );
   const frame = () =>
     act(async () => {
-      await new Promise((done) => setTimeout(done, 40));
+      const pending = [...frames];
+      for (const [id, callback] of pending) {
+        if (!frames.delete(id)) continue;
+        callback(performance.now());
+      }
     });
   const answer = (index: number, computation?: WorkerLayoutComputation) =>
     act(async () => {
       worker[index]!.answer(computation);
-      await new Promise((done) => setTimeout(done, 0));
     });
   const shown = () => sourceVersionOf(hook.result.current.layout);
   act(() => hook.result.current.runLayoutPipeline());
@@ -264,7 +284,6 @@ for (const pendingReplica of [true, false]) {
     const full = { pages: [] } as unknown as Layout;
     await act(async () => {
       finish({ layout: full, notesConverged: true });
-      await new Promise((done) => setTimeout(done, 0));
     });
 
     if (pendingReplica) {
@@ -359,7 +378,6 @@ test('a worker pass that fails with a pass queued behind it leaves the layout to
   await frame();
   await act(async () => {
     worker[1]!.fail();
-    await new Promise((done) => setTimeout(done, 0));
   });
   await frame();
   // Only the queued pass lays out, here: the failed one left it the layout.

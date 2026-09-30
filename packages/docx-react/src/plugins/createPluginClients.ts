@@ -16,8 +16,12 @@ import {
 } from '../components/DocxEditor/editorBatches';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
-import { requestWorkerOpenReplica } from '../components/DocxEditor/internals/workerOpenReplica';
 import {
+  requestWorkerOpenReplica,
+  workerOpenSourceVersion,
+} from '../components/DocxEditor/internals/workerOpenReplica';
+import {
+  handedOverRequest,
   workerProposalAuthority,
   type WorkerProposalAuthority,
 } from '../components/DocxEditor/internals/workerProposalAuthority';
@@ -238,13 +242,16 @@ export function createPluginClients(
     execute: async (id: never, args: never) => refusalOf(invocation) ?? store.execute(id, args),
   } as unknown as DocxPluginCommandClient;
 
+  const navigationVersion = (session: YrsSession, version: string): string =>
+    handedOverRequest(session, { expectVersion: version }).expectVersion;
+
   /** Resolves the target against the current version; the resolution or why it failed. */
   const locate = (
     session: YrsSession,
     target: { story: string; paraId: string },
     version: string
   ) => {
-    if (session.version() !== version) {
+    if (session.version() !== navigationVersion(session, version)) {
       return navigationFailure('stale-version', 'The document changed after that version');
     }
     const resolved = resolveParagraph(session, target);
@@ -261,7 +268,7 @@ export function createPluginClients(
   ) => {
     const before = invalid(session);
     if (before) return before;
-    if (session.version() !== version) {
+    if (session.version() !== navigationVersion(session, version)) {
       return navigationFailure('stale-version', 'The document changed after that version');
     }
     let resolved: Awaited<ReturnType<WorkerProposalAuthority['navigationTarget']>>;
@@ -276,7 +283,8 @@ export function createPluginClients(
     }
     const refused = invalid(session);
     if (refused) return refused;
-    if (session.version() !== version || resolved.version !== version) {
+    const expected = navigationVersion(session, version);
+    if (session.version() !== expected || navigationVersion(session, resolved.version) !== expected) {
       return navigationFailure('stale-version', 'The document changed after that version');
     }
     return typeof resolved.target === 'string'
@@ -305,7 +313,8 @@ export function createPluginClients(
       const cancelled = () => finish(false);
       const check = () => {
         if (done) return;
-        if (signal.aborted || invalid(session) || session.version() !== version) {
+        const expected = navigationVersion(session, version);
+        if (signal.aborted || invalid(session) || session.version() !== expected) {
           finish(false);
           return;
         }
@@ -314,7 +323,7 @@ export function createPluginClients(
           finish(false);
           return;
         }
-        if (queries && sourceVersionOf(queries) === version) {
+        if (queries && workerOpenSourceVersion(session, sourceVersionOf(queries)) === expected) {
           const source = queries.sourceState();
           if (source.status === 'error') {
             finish(false);
@@ -374,7 +383,7 @@ export function createPluginClients(
         if (currentAuthority) {
           const refused = invalid(session);
           if (refused) return refused;
-          if (session.version() !== options.expectVersion) {
+          if (session.version() !== navigationVersion(session, options.expectVersion)) {
             return navigationFailure('stale-version', 'The document changed after that version');
           }
         }

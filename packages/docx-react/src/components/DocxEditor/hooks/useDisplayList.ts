@@ -72,7 +72,10 @@ import {
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
 import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
-import { registeredWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import {
+  failWorkerProposalAuthority,
+  registeredWorkerProposalAuthority,
+} from '../internals/workerProposalAuthority';
 import { nearestPages } from './pageBuildOrder';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
@@ -90,6 +93,13 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
 
 const holdsWorkerProposals = (session: YrsSession): boolean =>
   registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true;
+
+const ensureRebuildableReplica = (session: YrsSession): void => {
+  if (holdsWorkerProposals(session)) {
+    throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+  }
+  ensureWorkerOpenReplica(session);
+};
 
 export type OpenInWorker = (
   session: YrsSession,
@@ -476,6 +486,9 @@ export function useRustDisplayList(
     (hostEngine: YrsSession): NonNullable<typeof workerRef.current> => {
       const current = workerRef.current;
       if (current?.engine === hostEngine) return current;
+      if (holdsWorkerProposals(hostEngine)) {
+        throw new Error('The resident worker holding this document is gone');
+      }
       const load = sessionLoad(hostEngine);
       const replacement = spawnedWorkerEnginesRef.current.has(hostEngine);
       spawnedWorkerEnginesRef.current.add(hostEngine);
@@ -664,6 +677,9 @@ export function useRustDisplayList(
   // base, numbered after the worker's last frame.
   const adoptHostEngine = useCallback(
     (hostEngine: YrsSession): void => {
+      if (holdsWorkerProposals(hostEngine)) {
+        throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+      }
       if (workerFallbackEngineRef.current === hostEngine) return;
       hostEngine.resetFrameBase();
       queryEpochGate.clear();
@@ -801,7 +817,7 @@ export function useRustDisplayList(
       workerRef.current = null;
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
-      if (!previous) {
+      if (!previous && !holdsWorkerProposals(hostEngine)) {
         outOfMemoryRef.current.set(hostEngine, null);
         console.warn(
           '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
@@ -810,11 +826,20 @@ export function useRustDisplayList(
         return 'retry';
       }
       outOfMemoryRef.current.set(hostEngine, failure);
-      if (workerOpenEnabledRef.current && workerOpenSourcesRef.current.has(hostEngine)) {
+      if (
+        workerOpenEnabledRef.current && workerOpenSourcesRef.current.has(hostEngine) &&
+        !holdsWorkerProposals(hostEngine)
+      ) {
+        failWorkerProposalAuthority(hostEngine, failure);
         failWorkerOpenReplica(hostEngine, failure);
         workerOpenSourcesRef.current.delete(hostEngine);
       }
-      console.error('[CanvasRenderer] Resident engine worker ran out of memory again', failure);
+      console.error(
+        previous
+          ? '[CanvasRenderer] Resident engine worker ran out of memory again'
+          : '[CanvasRenderer] Resident engine worker holding proposals ran out of memory',
+        failure
+      );
       queryEpochGate.clear();
       setError(failure);
       setErrorEngine(hostEngine);
@@ -1125,8 +1150,11 @@ export function useRustDisplayList(
   // every later layout and frame runs on the main thread.
   const dropWorker = useCallback(
     (hostEngine: YrsSession): void => {
+      if (holdsWorkerProposals(hostEngine)) {
+        throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+      }
       if (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine)) {
-        ensureWorkerOpenReplica(hostEngine);
+        ensureRebuildableReplica(hostEngine);
       }
       adoptHostEngine(hostEngine);
       if (workerRef.current?.engine === hostEngine) {
@@ -1144,13 +1172,19 @@ export function useRustDisplayList(
       hostEngine: YrsSession,
       request: (owner: NonNullable<typeof workerRef.current>) => Promise<T>,
       onOwner?: (owner: NonNullable<typeof workerRef.current>) => void,
-      // The worker holds changes its source bytes lack: no fresh worker may stand in for it.
-      keepWorker = false
     ): Promise<T> => {
       const source = workerOpenSourcesRef.current.get(hostEngine);
       const load = sessionLoad(hostEngine);
       for (;;) {
         const outOfMemory = outOfMemoryRef.current.get(hostEngine);
+        if (holdsWorkerProposals(hostEngine) && workerRef.current?.engine !== hostEngine) {
+          if (outOfMemory) {
+            throw new ResidentWorkerOutOfMemoryError(
+              'The resident worker holding this document is gone', outOfMemory.memory
+            );
+          }
+          throw new Error('The resident worker holding this document is gone');
+        }
         if (outOfMemory) throw outOfMemory;
         if (
           !source ||
@@ -1162,7 +1196,6 @@ export function useRustDisplayList(
           throw new SupersededPreviewError();
         }
         if (workerRef.current?.engine !== hostEngine) {
-          if (keepWorker) throw new Error('The resident worker holding this document is gone');
           const owner = workerFor(hostEngine);
           owner.opened = true;
           owner.opening = owner.client
@@ -1196,7 +1229,7 @@ export function useRustDisplayList(
           return result;
         } catch (error) {
           if (error instanceof ResidentWorkerOutOfMemoryError) {
-            if (replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry' && !keepWorker) {
+            if (replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry') {
               continue;
             }
           } else {
@@ -1230,26 +1263,11 @@ export function useRustDisplayList(
           encodeState: () => requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState()),
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
           proposal: (op) =>
-            requestOpenedWorker(
-              hostEngine,
-              (owner) => owner.client.proposal(op),
-              undefined,
-              holdsWorkerProposals(hostEngine)
-            ),
+            requestOpenedWorker(hostEngine, (owner) => owner.client.proposal(op)),
           documentRead: (read) =>
-            requestOpenedWorker(
-              hostEngine,
-              (owner) => owner.client.documentRead(read),
-              undefined,
-              holdsWorkerProposals(hostEngine)
-            ),
+            requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
           handOver: () =>
-            requestOpenedWorker(
-              hostEngine,
-              (owner) => owner.client.handOver(),
-              undefined,
-              holdsWorkerProposals(hostEngine)
-            ),
+            requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
           fallback: () => {
             const outOfMemory = outOfMemoryRef.current.get(hostEngine);
             if (outOfMemory) throw outOfMemory;
@@ -1261,6 +1279,7 @@ export function useRustDisplayList(
             needsLayout = true;
           },
           destroy: () => {
+            failWorkerProposalAuthority(hostEngine, new Error('The document changed while opening the replica'));
             workerOpenSourcesRef.current.delete(hostEngine);
             if (workerRef.current?.engine !== hostEngine) return;
             workerRef.current.client.destroy();
@@ -1303,7 +1322,7 @@ export function useRustDisplayList(
     (hostEngine, request) => {
       if (!workerOpenEnabledRef.current || !workerOpenReplicaPending(hostEngine)) return null;
       if (!workerOpenSourcesRef.current.has(hostEngine)) {
-        ensureWorkerOpenReplica(hostEngine);
+        ensureRebuildableReplica(hostEngine);
         return null;
       }
       const owner = { current: workerRef.current };
@@ -1560,7 +1579,7 @@ export function useRustDisplayList(
   const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
       if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) {
-        if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(hostEngine);
+        if (workerOpenEnabledRef.current) ensureRebuildableReplica(hostEngine);
         return null;
       }
       const outOfMemory = outOfMemoryRef.current.get(hostEngine);
@@ -1596,7 +1615,7 @@ export function useRustDisplayList(
             }
       );
       if (!snapshot) {
-        if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(hostEngine);
+        if (workerOpenEnabledRef.current) ensureRebuildableReplica(hostEngine);
         return null;
       }
       const previewKey = layoutPreviewKey(request) ?? '';
@@ -1893,6 +1912,9 @@ export function useRustDisplayList(
     // builds never encode state or copy fonts.
     const probe = workerEligible ? residentEngine.residentWorkerProbe() : null;
     const buildOnMainThread = () => {
+      if (residentEngine && holdsWorkerProposals(residentEngine)) {
+        return Promise.reject(new Error('The resident worker holds proposals the main thread cannot rebuild'));
+      }
       if (residentEngine?.residentLayoutInWorker?.()) {
         return Promise.reject(new MainThreadLayoutPendingError());
       }
@@ -2021,7 +2043,7 @@ export function useRustDisplayList(
         // A successor that failed to construct leaves this build to the host engine.
         if (requested !== workerRef.current) {
           if (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine)) {
-            ensureWorkerOpenReplica(hostEngine);
+            ensureRebuildableReplica(hostEngine);
           }
           return buildOnMainThread();
         }
