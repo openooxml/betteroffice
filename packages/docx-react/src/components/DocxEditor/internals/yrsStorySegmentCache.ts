@@ -30,9 +30,10 @@ export class YrsStorySegmentCache {
    * after that.
    */
   refresh(): void {
+    const { revision, stories } = this.session.storiesChangedSince(this.revision);
+    if (revision === this.revision && stories.length === 0) return;
     for (const replaced of this.stale.values()) this.release(replaced.digests ?? []);
     this.stale.clear();
-    const { revision, stories } = this.session.storiesChangedSince(this.revision);
     this.revision = revision;
     for (const story of stories) {
       const cached = this.stories.get(story);

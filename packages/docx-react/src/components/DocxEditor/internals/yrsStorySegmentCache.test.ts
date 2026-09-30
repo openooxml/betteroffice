@@ -124,3 +124,27 @@ test('a cached projection re-reads only the paragraphs an edit changed', async (
     session.destroy();
   }
 });
+
+test('refreshing an unchanged revision keeps stale paragraphs available for digest reads', async () => {
+  const session = await createYrsSession({ clientId: 77002 });
+  try {
+    session.seedFromDocx(docx());
+    const cache = new YrsStorySegmentCache(session);
+    const { reads, clear, storySegments } = counted(session);
+    cache.refresh();
+    cache.segments('body');
+    cache.completeDigests();
+
+    const [, second] = session.paragraphs('body');
+    session.insertText({ story: 'body', paraId: second!.paraId, offset: 3 }, 'xyz');
+    clear();
+    cache.refresh();
+    cache.refresh();
+    expect(cache.segments('body')).toEqual(storySegments('body'));
+    expect(reads.digests).toEqual(['body']);
+    expect(reads.units).toEqual([[1]]);
+    expect(reads.whole).toEqual([]);
+  } finally {
+    session.destroy();
+  }
+});

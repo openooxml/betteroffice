@@ -14,6 +14,10 @@ export interface YrsSidebarProjection {
   storyOffsetToDisplayPoint(story: string, offset: number): YrsSidebarDisplayPoint | null;
 }
 
+export interface YrsStorySegmentSource {
+  segments(story: string): YrsStorySegment[];
+}
+
 /**
  * Convert a string yrs identity into the numeric id used by the existing
  * layout/sidebar contract. This is the same UTF-8 FNV-1a projection used by
@@ -65,7 +69,8 @@ function childStories(payload: Record<string, unknown>): string[] {
 
 function geometryRoots(
   session: YrsSession,
-  segmentsByStory: Map<string, YrsStorySegment[]>
+  segmentsByStory: Map<string, YrsStorySegment[]>,
+  readSegments: StorySegmentsReader
 ): Map<string, StoryGeometryRoot> {
   const storyIds = session.storyIds();
   const childrenByStory = new Map<string, string[]>();
@@ -73,7 +78,7 @@ function geometryRoots(
   for (const story of storyIds) {
     const children: string[] = [];
     try {
-      const segments = session.storySegments(story);
+      const segments = readSegments(story);
       segmentsByStory.set(story, segments);
       for (const segment of segments) {
         if (segment.kind !== 'embed') continue;
@@ -203,6 +208,7 @@ const projections = new WeakMap<
   YrsSession,
   { version: string; projection: YrsSidebarProjection }
 >();
+const segmentSources = new WeakMap<YrsSession, YrsStorySegmentSource>();
 
 /**
  * Build a lazy projection from live yrs stories to display positions.
@@ -210,27 +216,33 @@ const projections = new WeakMap<
  * and block-SDT stories are recursively sized so container tokens are included.
  * A session gets the same projection back until its document changes.
  */
-export function createYrsSidebarProjection(session: YrsSession): YrsSidebarProjection {
+export function createYrsSidebarProjection(
+  session: YrsSession,
+  source?: YrsStorySegmentSource
+): YrsSidebarProjection {
+  if (source) segmentSources.set(session, source);
   const version = session.version();
   const cached = projections.get(session);
   if (cached?.version === version) return cached.projection;
-  const projection = projectSession(session);
+  const projection = projectSession(session, segmentSources.get(session));
   projections.set(session, { version, projection });
   return projection;
 }
 
-function projectSession(session: YrsSession): YrsSidebarProjection {
+function projectSession(session: YrsSession, source?: YrsStorySegmentSource): YrsSidebarProjection {
   const paragraphMaps = new Map<string, Map<string, ParagraphDisplaySpan> | null>();
   const segmentsByStory = new Map<string, YrsStorySegment[]>();
+  const readSegments: StorySegmentsReader = (story) =>
+    source ? source.segments(story) : session.storySegments(story);
   const segmentsOf: StorySegmentsReader = (story) => {
     const segments = segmentsByStory.get(story);
     if (segments !== undefined) {
       segmentsByStory.delete(story);
       return segments;
     }
-    return session.storySegments(story);
+    return readSegments(story);
   };
-  const roots = geometryRoots(session, segmentsByStory);
+  const roots = geometryRoots(session, segmentsByStory, readSegments);
   // Only the stories a root indexes are read again.
   for (const story of segmentsByStory.keys()) {
     if (!roots.has(story)) segmentsByStory.delete(story);
