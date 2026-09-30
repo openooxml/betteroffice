@@ -584,6 +584,9 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
             .or_else(|| regions.sections.last());
         let section_page_index = page_counts.entry(section_index).or_default();
         page.section_page_index = Some(*section_page_index);
+        page.section_page_number = None;
+        page.page_label = None;
+        page.page_numbering = None;
         *section_page_index += 1;
 
         if let Some(section) = section {
@@ -939,6 +942,49 @@ mod tests {
             assert_eq!(page.section_page_number, None);
             assert_eq!(page.page_label, None);
         }
+    }
+
+    #[test]
+    fn restamping_a_page_back_on_its_physical_number_drops_its_label() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: vec![page(1, 0), page(2, 1)],
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: None,
+            partial: false,
+        };
+        let restarted = DocumentRegions {
+            sections: vec![
+                RegionSection::default(),
+                RegionSection {
+                    page_numbering: Some(PageNumbering {
+                        start: Some(5),
+                        format: None,
+                    }),
+                    ..RegionSection::default()
+                },
+            ],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &restarted);
+        assert_eq!(layout.pages[1].page_label.as_deref(), Some("5"));
+        let plain = DocumentRegions {
+            sections: vec![RegionSection::default(), RegionSection::default()],
+            ..DocumentRegions::default()
+        };
+        apply_document_regions(&mut layout, &plain);
+        let mut fresh = layout.clone();
+        fresh.pages = vec![page(1, 0), page(2, 1)];
+        apply_document_regions(&mut fresh, &plain);
+        assert_eq!(
+            serde_json::to_value(&layout).unwrap(),
+            serde_json::to_value(&fresh).unwrap()
+        );
     }
 
     #[test]
