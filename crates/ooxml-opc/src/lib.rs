@@ -30,6 +30,8 @@ pub const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ENTRY_COUNT: usize = 5000;
 /// The most deflate expands a byte to.
 const MAX_DEFLATE_RATIO: u64 = 1032;
+/// The most a part's buffer reserves up front; larger parts grow as they inflate.
+const MAX_PRESIZE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Reject absolute, drive-letter, and any `..` entry name (checked on both
 /// separators, since producers may emit backslashes).
@@ -118,13 +120,15 @@ pub fn unzip_parts_where(
 
         // read at most (budget - total) + 1 bytes: one over the limit proves a bomb
         let remaining = budget - total;
-        // Sized from the declared size, which a lying header can raise only as far
-        // as deflate expands the entry's compressed bytes.
+        // Presized from the header sizes, which a forged entry controls: capped
+        // regardless of them, and whatever the read leaves unused is released.
         let declared = entry
             .size()
             .min(entry.compressed_size().saturating_mul(MAX_DEFLATE_RATIO))
-            .min(remaining + 1);
-        let mut buf = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+            .min(remaining + 1)
+            .min(MAX_PRESIZE_BYTES);
+        let mut buf = Vec::new();
+        let _ = buf.try_reserve_exact(usize::try_from(declared).unwrap_or(0));
         entry
             .by_ref()
             .take(remaining + 1)
@@ -133,6 +137,7 @@ pub fn unzip_parts_where(
         if buf.len() as u64 > remaining {
             return Err(format!("inflated size exceeds {budget} bytes"));
         }
+        buf.shrink_to_fit();
         total += buf.len() as u64;
         parts.push((name, buf));
     }

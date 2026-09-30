@@ -253,6 +253,19 @@ describe('worker failure', () => {
 });
 
 describe('resident worker opening', () => {
+  test('opens one document per worker and sends only the bytes of the view it gets', async () => {
+    const { worker, client } = setup();
+    const backing = new Uint8Array([9, 1, 2, 3, 9]);
+    void client.open(backing.subarray(1, 4));
+    const request = worker.posted[0];
+    if (request.type !== 'open') throw new Error('open request missing');
+    expect(request.bytes.byteLength).toBe(3);
+    expect(new Uint8Array(request.bytes)).toEqual(new Uint8Array([1, 2, 3]));
+    expect(backing).toEqual(new Uint8Array([9, 1, 2, 3, 9]));
+    await expect(client.open(new Uint8Array([4]))).rejects.toThrow('already holds a document');
+    expect(worker.posted).toHaveLength(1);
+  });
+
   test('open, font requirements, and state handover report memory before an opened bootstrap', async () => {
     const { worker, client } = setup();
     const bytes = new Uint8Array([1, 2, 3]);

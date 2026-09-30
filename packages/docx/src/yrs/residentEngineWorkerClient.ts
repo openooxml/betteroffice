@@ -119,6 +119,7 @@ export class ResidentEngineWorkerClient {
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
   private bootstrapped = false;
+  private openSent = false;
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
@@ -192,7 +193,11 @@ export class ResidentEngineWorkerClient {
     bytes: Uint8Array,
     options: { digest?: string; generation?: string; heapLimitBytes?: number } = {}
   ): Promise<ResidentEngineWorkerOpened> {
-    const copy = bytes.slice();
+    if (this.openSent || this.bootstrapped) {
+      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
+    }
+    this.openSent = true;
+    const copy = new Uint8Array(bytes);
     const response = await this.request(
       {
         type: 'open',

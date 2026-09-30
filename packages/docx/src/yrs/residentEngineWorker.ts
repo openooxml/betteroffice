@@ -33,6 +33,8 @@ import {
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
+/** Set while the session holds the document `open` seeded, with the heap limit it used. */
+let openedDocument: { heapLimitBytes?: number } | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
@@ -147,13 +149,20 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'open') {
-    destroySession();
-    session = await createResidentEngineSession(request.heapLimitBytes);
-    const hostJson = session.openDocx(
-      new Uint8Array(request.bytes),
-      request.digest,
-      request.generation
-    );
+    // One document per worker, so every queued request addresses the one it was sent for.
+    if (session) {
+      throw new Error('Resident engine worker already holds a document');
+    }
+    const opening = await createResidentEngineSession(request.heapLimitBytes);
+    let hostJson: string;
+    try {
+      hostJson = opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation);
+    } catch (error) {
+      if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
+      throw error;
+    }
+    session = opening;
+    openedDocument = { heapLimitBytes: request.heapLimitBytes };
     const stateVector = exactBuffer(session.encodeStateVector());
     reply({ id: request.id, ok: true, hostJson, stateVector }, [stateVector]);
     return;
@@ -166,8 +175,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       // corrupt the update; a fresh id lets yrs merge queued/local operations
       // safely while the main replica applies worker updates with local origin.
       session = await createResidentEngineSession(request.heapLimitBytes);
-    } else if (!session) {
+    } else if (!session || !openedDocument) {
       throw new Error('Resident engine worker has no opened document');
+    } else if (
+      request.heapLimitBytes !== undefined &&
+      request.heapLimitBytes !== openedDocument.heapLimitBytes
+    ) {
+      throw new Error('Resident engine worker opened its document under another heap limit');
     }
     unsubscribe?.();
     unsubscribe = null;
@@ -624,6 +638,7 @@ function destroySession(): void {
   unsubscribe = null;
   session?.destroy();
   session = null;
+  openedDocument = null;
   pendingUpdates = [];
   layoutRevision = 0;
   fontsRevision = -1;
