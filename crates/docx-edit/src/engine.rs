@@ -17,7 +17,6 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
-use docx_layout::measure_blocks::FontRequirement;
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
@@ -1137,66 +1136,30 @@ fn block_key(id: &BlockId) -> Cow<'_, str> {
     }
 }
 
-fn walk_font_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBlock)) {
-    for block in blocks {
-        match block {
-            LayoutBlock::Paragraph(paragraph) => visit(paragraph),
-            LayoutBlock::Table(table) => {
-                for row in &table.rows {
-                    for cell in &row.cells {
-                        walk_font_paragraphs(&cell.blocks, visit);
-                    }
-                }
-            }
-            LayoutBlock::TextBox(textbox) => {
-                for paragraph in &textbox.content {
-                    visit(paragraph);
-                }
-            }
-            LayoutBlock::Shape(shape) => walk_shape_font_paragraphs(shape, visit),
-            _ => {}
-        }
+/// Whether `blocks` hold a field whose cached result lowering suppresses.
+fn holds_numeric_field(blocks: &[LayoutBlock]) -> bool {
+    fn paragraph(block: &ParagraphBlock) -> bool {
+        block.runs.iter().any(|run| {
+            matches!(run, Run::Field(field) if field
+                .instruction
+                .as_deref()
+                .is_some_and(crate::seed::numeric_field_instruction))
+        })
     }
-}
-
-fn walk_shape_font_paragraphs(shape: &ShapeBlock, visit: &mut impl FnMut(&ParagraphBlock)) {
-    if let Some(inner_text) = &shape.inner_text {
-        for paragraph in inner_text {
-            visit(paragraph);
-        }
+    fn shape(block: &ShapeBlock) -> bool {
+        block.inner_text.iter().flatten().any(paragraph) || block.children.iter().any(shape)
     }
-    for child in &shape.children {
-        walk_shape_font_paragraphs(child, visit);
-    }
-}
-
-fn collect_hidden_list_marker_font_requirements<'a>(
-    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
-    default_family: &str,
-    requirements: &mut BTreeMap<String, FontRequirement>,
-) {
-    for block in blocks {
-        walk_font_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
-            let Some(attrs) = &paragraph.attrs else {
-                return;
-            };
-            if attrs.list_marker_hidden != Some(true)
-                || !attrs
-                    .list_marker
-                    .as_deref()
-                    .is_some_and(|marker| !marker.is_empty())
-            {
-                return;
-            }
-            let mut paragraph = paragraph.clone();
-            paragraph.attrs.as_mut().unwrap().list_marker_hidden = None;
-            docx_layout::measure_blocks::collect_font_requirements_into(
-                [&LayoutBlock::Paragraph(paragraph)],
-                default_family,
-                requirements,
-            );
-        });
-    }
+    blocks.iter().any(|block| match block {
+        LayoutBlock::Paragraph(block) => paragraph(block),
+        LayoutBlock::Table(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .any(|cell| holds_numeric_field(&cell.blocks)),
+        LayoutBlock::TextBox(text_box) => text_box.content.iter().any(paragraph),
+        LayoutBlock::Shape(block) => shape(block),
+        _ => false,
+    })
 }
 
 fn paragraph_identity(block: &LayoutBlock) -> Option<(&BlockId, Option<f64>)> {
@@ -1705,13 +1668,14 @@ impl EngineSession {
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
         let mut requirements = BTreeMap::new();
-        docx_layout::measure_blocks::collect_font_requirements_into(
-            input.measured.iter().map(|measured| &measured.block),
-            default_family,
-            &mut requirements,
-        );
         if cache_key.is_some() {
-            collect_hidden_list_marker_font_requirements(
+            docx_layout::measure_blocks::collect_preview_font_requirements_into(
+                input.measured.iter().map(|measured| &measured.block),
+                default_family,
+                &mut requirements,
+            );
+        } else {
+            docx_layout::measure_blocks::collect_font_requirements_into(
                 input.measured.iter().map(|measured| &measured.block),
                 default_family,
                 &mut requirements,
@@ -1750,21 +1714,38 @@ impl EngineSession {
                 format!("{prefix}:{}", content.id)
             }));
             for story in stories {
-                self.with_lowered_story(&story, &render_env, |blocks| {
-                    docx_layout::measure_blocks::collect_font_requirements_into(
-                        blocks,
+                let numeric_fields = self
+                    .with_lowered_story(&story, &render_env, |blocks| {
+                        if cache_key.is_some() {
+                            docx_layout::measure_blocks::collect_preview_font_requirements_into(
+                                blocks,
+                                default_family,
+                                &mut requirements,
+                            );
+                            holds_numeric_field(blocks)
+                        } else {
+                            docx_layout::measure_blocks::collect_font_requirements_into(
+                                blocks,
+                                default_family,
+                                &mut requirements,
+                            );
+                            false
+                        }
+                    })
+                    .map_err(|error| error.to_string())?;
+                if numeric_fields {
+                    let suppressed = crate::bridge::yrs_doc_to_suppressed_field_result_blocks(
+                        self.doc(),
+                        &story,
+                        &render_env,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    docx_layout::measure_blocks::collect_preview_font_requirements_into(
+                        &suppressed,
                         default_family,
                         &mut requirements,
                     );
-                    if cache_key.is_some() {
-                        collect_hidden_list_marker_font_requirements(
-                            blocks,
-                            default_family,
-                            &mut requirements,
-                        );
-                    }
-                })
-                .map_err(|error| error.to_string())?;
+                }
             }
         }
         let json = serde_json::to_string(&requirements.into_values().collect::<Vec<_>>())
@@ -5834,6 +5815,240 @@ mod tests {
         let requirements: Vec<serde_json::Value> = serde_json::from_str(&superset).unwrap();
         for requirement in exact {
             assert!(requirements.contains(&serde_json::to_value(requirement).unwrap()));
+        }
+    }
+
+    fn font_preflight_run(text: &str, family: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "run",
+            "formatting": {"fontFamily": {"ascii": family, "hAnsi": family}},
+            "content": [{"type": "text", "text": text}]
+        })
+    }
+
+    fn assert_preview_font_preflight_covers(
+        engine: &EngineSession,
+        revision_id: &str,
+        decision: crate::bridge::RevisionPreview,
+    ) -> Vec<docx_layout::measure_blocks::FontRequirement> {
+        let env = RenderEnv::default().with_revision_preview(revision_id, decision);
+        let blocks = crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap();
+        let exact = docx_layout::measure_blocks::collect_font_requirements(&blocks, "Calibri");
+        let request = serde_json::json!({"bodyStory": "body", "renderEnv": env});
+        let superset: Vec<serde_json::Value> = serde_json::from_str(
+            &engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        for requirement in &exact {
+            let candidate = superset
+                .iter()
+                .find(|candidate| candidate["key"] == requirement.key)
+                .unwrap_or_else(|| panic!("missing font requirement: {requirement:?}"));
+            assert_eq!(candidate["family"], requirement.family);
+            assert_eq!(candidate["bold"], requirement.bold);
+            assert_eq!(candidate["italic"], requirement.italic);
+            for script in &requirement.scripts {
+                assert!(
+                    candidate["scripts"]
+                        .as_array()
+                        .is_some_and(|scripts| scripts.iter().any(|value| value == script)),
+                    "missing script {script} for {}: {candidate}",
+                    requirement.key
+                );
+            }
+        }
+        exact
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_a_surviving_list_marker_family() {
+        let engine = EngineSession::new(1364);
+        let blocks = [serde_json::json!({
+            "type": "paragraph",
+            "formatting": {"numPr": {"numId": 1, "ilvl": 0}},
+            "listRendering": {"marker": "%1.", "markerBold": true},
+            "content": [
+                font_preflight_run("First", "Courier New"),
+                font_preflight_run("Second", "Times New Roman")
+            ]
+        })];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let deletion = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", 0, 5),
+            )
+            .unwrap();
+        let exact = assert_preview_font_preflight_covers(
+            &engine,
+            &deletion.revision_ids[0],
+            crate::bridge::RevisionPreview::Accepted,
+        );
+        assert!(
+            exact
+                .iter()
+                .any(|requirement| requirement.key == "times new roman|1|0")
+        );
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_an_unrenderable_list_marker_after_renumbering() {
+        let engine = EngineSession::new(1365);
+        let item = |family| {
+            serde_json::json!({
+                "type": "paragraph",
+                "formatting": {"numPr": {"numId": 1, "ilvl": 0}},
+                "listRendering": {
+                    "marker": "%1.", "levelNumFmts": ["upperRoman"],
+                    "startOverride": 3999, "markerBold": true, "markerItalic": true
+                },
+                "content": [font_preflight_run("Item", family)]
+            })
+        };
+        let blocks = [
+            serde_json::json!({
+                "type": "table",
+                "rows": [{"type": "tableRow", "cells": [{
+                    "type": "tableCell", "content": [item("Calibri")]
+                }]}]
+            }),
+            item("Preview Roman"),
+        ];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let markup =
+            crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &RenderEnv::default())
+                .unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &markup[1] else {
+            panic!("expected the second list item");
+        };
+        assert!(paragraph.attrs.as_ref().unwrap().list_marker.is_none());
+        let deletion = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", 0, 1),
+            )
+            .unwrap();
+        let exact = assert_preview_font_preflight_covers(
+            &engine,
+            &deletion.revision_ids[0],
+            crate::bridge::RevisionPreview::Accepted,
+        );
+        assert!(
+            exact
+                .iter()
+                .any(|requirement| requirement.key == "preview roman|1|1")
+        );
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_han_without_an_inserted_kana_run() {
+        let engine = EngineSession::new(1366);
+        let blocks = [serde_json::json!({
+            "type": "paragraph", "content": [font_preflight_run("漢", "Preview Han")]
+        })];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let insertion = engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::Position::new("body", 1),
+                "かな",
+                crate::FormatPolicy::Explicit(BTreeMap::from([(
+                    "fontFamily".to_owned(),
+                    Any::from("Preview Kana"),
+                )])),
+            )
+            .unwrap();
+        let exact = assert_preview_font_preflight_covers(
+            &engine,
+            &insertion.revision_ids[0],
+            crate::bridge::RevisionPreview::Rejected,
+        );
+        assert!(exact.iter().any(|requirement| {
+            requirement.key == "preview han|0|0"
+                && requirement.scripts.contains(&"cjk-sc".to_owned())
+        }));
+    }
+
+    #[test]
+    fn preview_font_preflight_covers_suppressed_numeric_field_results() {
+        let engine = EngineSession::new(1367);
+        let cached = serde_json::json!({
+            "type": "paragraph", "content": [font_preflight_run("漢", "Preview Field")]
+        });
+        let table = serde_json::json!({
+            "type": "table", "rows": [{"type": "tableRow", "cells": [{
+                "type": "tableCell", "content": [{
+                    "type": "paragraph",
+                    "content": [font_preflight_run("Table", "Preview Field Table")]
+                }]
+            }]}]
+        });
+        let sdt = serde_json::json!({
+            "type": "blockSdt", "properties": {}, "content": [{
+                "type": "paragraph",
+                "content": [font_preflight_run("SDT", "Preview Field SDT")]
+            }]
+        });
+        let end = serde_json::json!({"type": "paragraph", "content": []});
+        let field = serde_json::json!({
+            "type": "complexField", "fieldType": "UNKNOWN", "instruction": "0",
+            "fieldCode": [], "fieldResult": [font_preflight_run("First", "Calibri")],
+            "structuredResult": {"blocks": [cached, table, sdt, end]}
+        });
+        let blocks = [
+            serde_json::json!({"type": "paragraph", "content": [field]}),
+            cached,
+            table,
+            sdt,
+            end,
+        ];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        engine
+            .doc()
+            .apply_raw_ops(
+                "body",
+                vec![crate::RawOp::Format {
+                    index: 0,
+                    len: 1,
+                    attrs: Attrs::from([(
+                        "ins".into(),
+                        Any::from_json(
+                            r#"{"id":"9","author":"Ann","date":"2026-09-29T12:00:00Z"}"#,
+                        )
+                        .unwrap(),
+                    )]),
+                }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        let markup: Vec<serde_json::Value> = serde_json::from_str(
+            &engine
+                .layout_font_requirements_json(r#"{"bodyStory":"body","renderEnv":{}}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(markup.iter().all(|requirement| {
+            !requirement["family"]
+                .as_str()
+                .unwrap()
+                .starts_with("Preview")
+        }));
+        let exact = assert_preview_font_preflight_covers(
+            &engine,
+            "9",
+            crate::bridge::RevisionPreview::Rejected,
+        );
+        for key in [
+            "preview field|0|0",
+            "preview field table|0|0",
+            "preview field sdt|0|0",
+        ] {
+            assert!(exact.iter().any(|requirement| requirement.key == key));
         }
     }
 

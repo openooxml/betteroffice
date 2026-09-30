@@ -112,6 +112,69 @@ pub fn collect_font_requirements_into<'a>(
     }
 }
 
+/// Fonts any revision preview of `blocks` may need.
+pub fn collect_preview_font_requirements_into<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    default_family: &str,
+    requirements: &mut BTreeMap<String, FontRequirement>,
+) {
+    for block in blocks {
+        walk_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
+            let scripts = paragraph_scripts_with_han_fallback(paragraph, true);
+            collect_paragraph_font_requirements(paragraph, &scripts, default_family, requirements);
+            let Some(attrs) = &paragraph.attrs else {
+                return;
+            };
+            if attrs.num_pr.is_none()
+                && attrs.list_marker.is_none()
+                && attrs.list_is_bullet.is_none()
+                && attrs.list_marker_hidden.is_none()
+                && attrs.list_marker_font_family.is_none()
+                && attrs.list_marker_font_size.is_none()
+                && attrs.list_marker_bold.is_none()
+                && attrs.list_marker_italic.is_none()
+                && attrs.list_marker_color.is_none()
+                && attrs.list_marker_suffix.is_none()
+                && attrs.list_marker_revision.is_none()
+            {
+                return;
+            }
+            let default_family = attrs
+                .default_font_family
+                .as_deref()
+                .unwrap_or(default_family);
+            let marker_style = (
+                attrs.list_marker_bold.unwrap_or(false),
+                attrs.list_marker_italic.unwrap_or(false),
+            );
+            let styles = if attrs.list_marker.is_none() {
+                &[(false, false), (true, false), (false, true), (true, true)][..]
+            } else {
+                std::slice::from_ref(&marker_style)
+            };
+            for family in paragraph
+                .runs
+                .iter()
+                .filter_map(|run| {
+                    let formatting = match run {
+                        Run::Text(text) => &text.fmt,
+                        Run::Tab(tab) => &tab.fmt,
+                        Run::Field(field) => &field.fmt,
+                        _ => return None,
+                    };
+                    formatting.font_family.as_deref()
+                })
+                .chain(std::iter::once(default_family))
+            {
+                let family = attrs.list_marker_font_family.as_deref().unwrap_or(family);
+                for &(bold, italic) in styles {
+                    add_font_requirement(family, bold, italic, &scripts, requirements);
+                }
+            }
+        });
+    }
+}
+
 /// The family measurement gives text naming none: `defaults.fontFamily`, else Calibri.
 pub fn default_font_family(defaults: &Value) -> &str {
     defaults
@@ -298,6 +361,13 @@ fn collect_paragraph_font_requirements(
 }
 
 fn paragraph_scripts(paragraph: &ParagraphBlock) -> Vec<String> {
+    paragraph_scripts_with_han_fallback(paragraph, false)
+}
+
+fn paragraph_scripts_with_han_fallback(
+    paragraph: &ParagraphBlock,
+    include_han_fallback: bool,
+) -> Vec<String> {
     let mut han = false;
     let mut kana = false;
     let mut hangul = false;
@@ -340,7 +410,7 @@ fn paragraph_scripts(paragraph: &ParagraphBlock) -> Vec<String> {
     if hangul {
         scripts.push("cjk-kr".to_owned());
     }
-    if han && !kana && !hangul {
+    if han && (include_han_fallback || (!kana && !hangul)) {
         scripts.push("cjk-sc".to_owned());
     }
     if arabic {

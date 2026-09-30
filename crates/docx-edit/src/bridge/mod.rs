@@ -320,6 +320,25 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None)
+}
+
+pub(crate) fn yrs_doc_to_suppressed_field_result_blocks(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+) -> Result<Vec<LayoutBlock>, BridgeError> {
+    let mut suppressed = Some(Vec::new());
+    yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut suppressed)?;
+    Ok(suppressed.unwrap())
+}
+
+fn yrs_doc_to_mapped_layout_blocks_inner(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+    suppressed_field_results: &mut Option<Vec<LayoutBlock>>,
+) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
     if doc.yrs_doc().offset_kind() != OffsetKind::Utf16 {
         return Err(BridgeError::WrongOffsetKind);
     }
@@ -337,6 +356,7 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         &mut list_state,
         CellEdges::default(),
         &mut map,
+        suppressed_field_results,
     )?;
     map.finish();
     Ok((blocks, map))
@@ -358,6 +378,7 @@ fn lower_story<T: ReadTxn>(
     list_state: &mut ListState,
     cell_edges: CellEdges,
     map: &mut LoweringMap,
+    suppressed_field_results: &mut Option<Vec<LayoutBlock>>,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
@@ -432,6 +453,8 @@ fn lower_story<T: ReadTxn>(
                         .is_some_and(|id| hidden_field_blocks.contains(&id))
                     {
                         blocks.extend(paragraph_blocks);
+                    } else if let Some(suppressed) = suppressed_field_results {
+                        suppressed.extend(paragraph_blocks);
                     }
                     // The field's own paragraph is the one just closed, so the
                     // range it suppresses opens with the next block.
@@ -480,9 +503,12 @@ fn lower_story<T: ReadTxn>(
                         active_stories,
                         unnumbered.as_mut().unwrap_or(&mut *list_state),
                         map,
+                        suppressed_field_results,
                     )?;
                     if !hidden {
                         blocks.push(LayoutBlock::Table(lowered));
+                    } else if !previewed_out && let Some(suppressed) = suppressed_field_results {
+                        suppressed.push(LayoutBlock::Table(lowered));
                     }
                     story_index += 1;
                     paragraph_start = story_index;
@@ -583,10 +609,13 @@ fn lower_story<T: ReadTxn>(
                             after: cell_edges.after && story_index + 1 == story.len(txn),
                         },
                         map,
+                        suppressed_field_results,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     if !previewed_out && !hidden_field_blocks.contains(&child_story) {
                         blocks.extend(child_blocks);
+                    } else if !previewed_out && let Some(suppressed) = suppressed_field_results {
+                        suppressed.extend(child_blocks);
                     }
                     story_index += 1;
                     paragraph_start = story_index;
@@ -1027,6 +1056,7 @@ fn lower_table<T: ReadTxn>(
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
     map: &mut LoweringMap,
+    suppressed_field_results: &mut Option<Vec<LayoutBlock>>,
 ) -> Result<(TableBlock, u64), BridgeError> {
     let tbl_pr_value = shared_any(table, txn, "tblPr")
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
@@ -1139,6 +1169,7 @@ fn lower_table<T: ReadTxn>(
                     after: true,
                 },
                 map,
+                suppressed_field_results,
             )?;
 
             let width_value = map_number(tc_pr, "width");
