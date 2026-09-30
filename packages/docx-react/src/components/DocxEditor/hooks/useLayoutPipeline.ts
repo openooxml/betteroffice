@@ -133,6 +133,23 @@ function mergeInWorker(current: boolean | null, next: boolean): boolean {
   return (current ?? true) && next;
 }
 
+/**
+ * The font preflight input for `request`. With proposals open it asks for the requirements of
+ * every decision, so the layout before the first decision measures as the decisions' do.
+ */
+function fontRequirementsInput(
+  session: YrsSession,
+  request: ReturnType<typeof buildResidentRegionLayoutRequest>
+): string {
+  let proposals = 0;
+  try {
+    proposals = session.getProposals().proposals.length;
+  } catch {
+    // A session without a proposal registry has no decisions to prepare for.
+  }
+  return JSON.stringify(proposals > 0 ? { ...request, revisionFontSuperset: true } : request);
+}
+
 export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipelineReturn {
   const {
     document,
@@ -355,7 +372,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         let measurement: ResidentMeasurementConfig | null = null;
         try {
           const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
-          const input = JSON.stringify(request);
+          const input = fontRequirementsInput(session, request);
           const pendingRequirements =
             workerOpenEnabledRef.current && workerRequirements === undefined
               ? fontRequirementsInWorkerRef.current?.(session, input)
@@ -789,7 +806,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     if (!session) return null;
     const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
     const requirements = JSON.parse(
-      session.layoutFontRequirementsJson(JSON.stringify(request))
+      session.layoutFontRequirementsJson(fontRequirementsInput(session, request))
     ) as ResidentFontRequirement[];
     const measurement = residentMeasurementConfig(requirements);
     if (!measurement) return null;

@@ -41,6 +41,81 @@ function fakeDocument() {
   return { doc, session };
 }
 
+for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
+  for (const inWorker of [false, true]) {
+    test(`preflight (${proposals}, worker=${inWorker}) keeps the flag out of layout`, async () => {
+      const { session } = fakeDocument();
+      const hostInputs: string[] = [];
+      const workerInputs: string[] = [];
+      const layoutInputs: string[] = [];
+      if (proposals !== 'unavailable') {
+        Object.assign(session, {
+          getProposals: () => {
+            if (proposals === 'throwing') throw new Error('Proposal registry unavailable');
+            return { proposals: proposals === 'present' ? [{ id: 'proposal' }] : [] };
+          },
+        });
+      }
+      Object.assign(session, {
+        layoutFontRequirementsJson: (input: string) => {
+          hostInputs.push(input);
+          return '[]';
+        },
+        layoutDocumentWithRegionsRetainedJson: (input: string) => {
+          layoutInputs.push(input);
+          return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
+        },
+      });
+      const hook = renderHook(() =>
+        useLayoutPipeline({
+          document: null,
+          session,
+          renderEnv: {} as YrsRenderEnv,
+          pageGap: 24,
+          zoom: 1,
+          residentMeasurementConfig: () => ({}) as ResidentMeasurementConfig,
+          deferLayoutPass: () => false,
+          pagesContainerRef: { current: null },
+          viewportLayoutRef: { current: null },
+          syncCoordinator: new LayoutSelectionGate(),
+          getScrollContainer: () => null,
+          experimentalWorkerOpen: inWorker,
+          fontRequirementsInWorker: (_session, input) => {
+            workerInputs.push(input);
+            return Promise.resolve('[]');
+          },
+          layoutInWorker: (_session, input) => {
+            layoutInputs.push(input);
+            return Promise.resolve({
+              layout: { pages: [] } as unknown as Layout,
+              notesConverged: true,
+            });
+          },
+        })
+      );
+      try {
+        await act(async () => hook.result.current.runLayoutPipeline({ onHost: !inWorker }));
+        const request = hook.result.current.getLayoutRequest();
+        expect(request).not.toBeNull();
+        expect(hostInputs).toHaveLength(inWorker ? 1 : 2);
+        expect(workerInputs).toHaveLength(inWorker ? 1 : 0);
+        for (const input of [...hostInputs, ...workerInputs]) {
+          expect(JSON.parse(input).revisionFontSuperset).toBe(
+            proposals === 'present' ? true : undefined
+          );
+        }
+        expect(layoutInputs).toHaveLength(1);
+        for (const input of [...layoutInputs, request!]) {
+          expect(JSON.parse(input)).not.toHaveProperty('revisionFontSuperset');
+          expect(JSON.parse(input).renderEnv).not.toHaveProperty('revisionFontSuperset');
+        }
+      } finally {
+        hook.unmount();
+      }
+    });
+  }
+}
+
 /** A document whose version each test moves on; worker passes answer when the test says. */
 async function opened() {
   const { doc, session } = fakeDocument();

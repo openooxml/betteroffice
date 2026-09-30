@@ -1091,7 +1091,18 @@ fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
     pages::sha256_hex(canonical_json(&request).as_bytes())
 }
 
+/// Whether a font preflight asks for the decision-independent revision superset while no
+/// revision is decided yet, so the layout before the first decision measures as later ones do.
+fn requests_revision_font_superset(input_json: &str) -> bool {
+    input_json.contains("\"revisionFontSuperset\"")
+        && serde_json::from_str::<serde_json::Value>(input_json)
+            .is_ok_and(|request| request["revisionFontSuperset"] == true)
+}
+
 fn font_requirements_fingerprint(mut request: serde_json::Value) -> Result<u64, String> {
+    if let Some(fields) = request.as_object_mut() {
+        fields.remove("revisionFontSuperset");
+    }
     if let Some(env) = request
         .get_mut("renderEnv")
         .and_then(serde_json::Value::as_object_mut)
@@ -2081,7 +2092,8 @@ impl EngineSession {
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (input, regions, notes, measurement, render_env, body_story) = request.split();
         let cache_key = if use_preview_superset
-            && !RenderEnv::parse_revision_preview(&render_env["revisionPreview"]).is_empty()
+            && (!RenderEnv::parse_revision_preview(&render_env["revisionPreview"]).is_empty()
+                || requests_revision_font_superset(input_json))
         {
             let request =
                 serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
@@ -6572,10 +6584,28 @@ mod tests {
         }
 
         let id = &page_break.revision_ids[0];
-        let request = serde_json::json!({
+        let mut request = serde_json::json!({
             "bodyStory": "body",
-            "renderEnv": {"revisionPreview": {id: "rejected"}}
+            "renderEnv": {},
+            "revisionFontSuperset": true
         });
+        let superset = engine
+            .layout_font_requirements_json(&request.to_string())
+            .unwrap();
+        assert_ne!(superset, markup);
+        let before = engine.stats();
+        request.as_object_mut().unwrap().remove("revisionFontSuperset");
+        request["renderEnv"]["revisionPreview"] = serde_json::json!({id: "accepted"});
+        assert_eq!(
+            engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+            superset
+        );
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
+        assert_eq!(engine.stats().lower_cache_hits, before.lower_cache_hits);
+
+        request["renderEnv"]["revisionPreview"] = serde_json::json!({id: "rejected"});
         let env: RenderEnv = serde_json::from_value(request["renderEnv"].clone()).unwrap();
         let blocks = crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap();
         assert!(
@@ -6589,9 +6619,12 @@ mod tests {
                 .iter()
                 .any(|requirement| requirement.key == "courier new|1|0")
         );
-        let superset = engine
-            .layout_font_requirements_json(&request.to_string())
-            .unwrap();
+        assert_eq!(
+            engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+            superset
+        );
         let requirements: Vec<serde_json::Value> = serde_json::from_str(&superset).unwrap();
         for requirement in exact {
             assert!(requirements.contains(&serde_json::to_value(requirement).unwrap()));
@@ -6775,6 +6808,30 @@ mod tests {
                     crate::FormatPolicy::Inherit,
                 )
                 .unwrap();
+            let mut request = serde_json::json!({
+                "bodyStory": "body",
+                "renderEnv": {},
+                "measurement": {"defaults": {"fontFamily": family}}
+            });
+            let exact = engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap();
+            request["revisionFontSuperset"] = true.into();
+            for _ in 0..2 {
+                assert_eq!(
+                    engine
+                        .layout_font_requirements_json(&request.to_string())
+                        .unwrap(),
+                    exact
+                );
+                assert!(
+                    engine
+                        .preview_font_requirements
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|cached| cached.json.is_none())
+                );
+            }
             for (index, decision) in [
                 crate::bridge::RevisionPreview::Rejected,
                 crate::bridge::RevisionPreview::Accepted,
