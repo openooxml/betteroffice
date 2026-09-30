@@ -10,6 +10,7 @@ import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVer
 import type { YrsLoc, YrsSelection, YrsSession } from '@betteroffice/docx/yrs';
 
 import { projectPageLocalRect } from '../internals/canvasProjection';
+import { viewportColumnBand } from '../internals/viewportBand';
 import {
   buildRemotePresencePageMetrics,
   clampRemoteSelectionRange,
@@ -133,14 +134,12 @@ export function RemotePresenceOverlay({
         setGeometry([]);
         return;
       }
-      const viewportTop = usesWindow ? 0 : scrollParent.getBoundingClientRect().top;
-      const viewportBottom =
-        viewportTop + (usesWindow ? window.innerHeight : scrollParent.clientHeight);
+      const band = viewportColumnBand(usesWindow ? null : scrollParent, column);
       const pageWindow = remotePresencePageWindow(
         pageMetrics,
-        column.getBoundingClientRect().top,
-        viewportTop,
-        viewportBottom
+        band.columnTop,
+        band.top,
+        band.top + band.height
       );
       if (!pageWindow) {
         setGeometry([]);

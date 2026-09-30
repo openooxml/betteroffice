@@ -17,6 +17,10 @@ export default defineConfig({
         replacement: resolve(root, 'packages/docx-react/src/index.ts'),
       },
       {
+        find: /^@betteroffice\/docx-react\/styles\.css$/,
+        replacement: resolve(root, 'packages/docx-react/src/styles/editor.css'),
+      },
+      {
         find: /^@betteroffice\/docx-i18n$/,
         replacement: resolve(root, 'packages/docx-i18n/src/index.ts'),
       },
