@@ -1149,6 +1149,21 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
     if attrs.doc_start.is_none() {
         return false;
     }
+    // The canvas multiplies group and primitive opacity: either at zero paints nothing.
+    let transparent =
+        |opacity: Option<&Number>| opacity.and_then(Number::as_f64).is_some_and(|o| o <= 0.0);
+    let own_opacity = match primitive {
+        Primitive::Image(img) => img.opacity.as_ref(),
+        Primitive::Text(text) => text.opacity.as_ref(),
+        Primitive::GlyphRun(run) => run.opacity.as_ref(),
+        _ => None,
+    };
+    if transparent(attrs.clip_group.as_ref().and_then(|group| group.opacity.as_ref()))
+        || transparent(own_opacity)
+        || transparent(attrs.primitive_opacity.as_ref())
+    {
+        return false;
+    }
     if let Some(clip) = attrs
         .clip_group
         .as_ref()
@@ -2098,6 +2113,23 @@ mod tests {
         assert_eq!(inside.r_id, None);
         assert_eq!(inside.pos, Some(10));
         assert_eq!(inside.target, HoverTarget::Image);
+    }
+
+    #[test]
+    fn transparent_body_image_leaves_footer_clicks_to_the_footer() {
+        let visible = band_page("footer", 420.0, vec![image(100.0, 440.0, Some(10))]);
+        assert_eq!(hit_test_regions(&visible, 0, 120.0, 455.0).unwrap().region, HitRegion::Body);
+
+        let mut own = image(100.0, 440.0, Some(10));
+        own["opacity"] = 0.into();
+        let mut group = image(100.0, 440.0, Some(10));
+        group["clipGroup"] = serde_json::json!({"opacity": 0});
+        for image in [own, group] {
+            let dl = band_page("footer", 420.0, vec![image]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
     }
 
     fn note_run(baseline: f64, doc_start: i64, group_id: &str) -> serde_json::Value {
