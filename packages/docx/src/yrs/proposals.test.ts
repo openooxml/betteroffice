@@ -269,9 +269,12 @@ describe('proposal registry', () => {
     registry.mirror(null);
     expect(events).toEqual([]);
     registry.mirror({ version: 'worker', proposals: registry.exportState() });
+    expect(events).toEqual([]);
+    registry.mirror({ version: 'worker', proposals: { previewVersion: 1, entries: [] } });
     expect(events).toHaveLength(1);
     registry.mirror(null);
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(1);
+    expect(registry.snapshot().previewVersion).toBe(1);
     registry.destroy();
   });
 
