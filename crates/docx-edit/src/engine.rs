@@ -995,7 +995,7 @@ fn window_build_pages(
     display: &DisplayState,
     layout: &Layout,
     rebuilt_pages: &HashSet<usize>,
-    caret_position: Option<i64>,
+    caret_span: Option<(f64, f64)>,
 ) -> Vec<bool> {
     if !display.windowed_incremental_builds || display.window.is_none() {
         return full_build_pages(display, layout.pages.len());
@@ -1009,7 +1009,7 @@ fn window_build_pages(
                 .window
                 .as_ref()
                 .is_some_and(|window| window.contains(&index))
-                || caret_position.is_some_and(|position| {
+                || caret_span.is_some_and(|(caret_start, caret_end)| {
                     rebuilt_pages.contains(&index)
                         && page.fragments.iter().any(|fragment| {
                             let (start, end) = match fragment {
@@ -1020,8 +1020,8 @@ fn window_build_pages(
                                 Fragment::Chart(value) => (value.pm_start, value.pm_end),
                                 Fragment::TextBox(value) => (value.pm_start, value.pm_end),
                             };
-                            start.is_some_and(|start| position as f64 >= start)
-                                && end.is_some_and(|end| position as f64 <= end)
+                            start.is_some_and(|start| start <= caret_end)
+                                && end.is_some_and(|end| end >= caret_start)
                         })
                 })
         })
@@ -1036,31 +1036,32 @@ fn resident_paragraph_position(input: &LayoutInput, para_id: &str, offset: u32) 
     paragraph_offset_position(start, offset)
 }
 
-/// [`resident_paragraph_position`], also finding paragraphs in table cells.
-fn resident_nested_paragraph_position(
-    input: &LayoutInput,
-    para_id: &str,
-    offset: u32,
-) -> Option<i64> {
-    fn start(block: &LayoutBlock, para_id: &str) -> Option<f64> {
+/// The display positions every block lowered from the paragraph `para_id` spans,
+/// in table cells too.
+fn resident_paragraph_span(input: &LayoutInput, para_id: &str) -> Option<(f64, f64)> {
+    fn visit(block: &LayoutBlock, para_id: &str, span: &mut Option<(f64, f64)>) {
         match block {
             LayoutBlock::Table(table) => table
                 .rows
                 .iter()
                 .flat_map(|row| &row.cells)
                 .flat_map(|cell| &cell.blocks)
-                .find_map(|nested| start(nested, para_id)),
-            _ => {
-                let (id, start) = paragraph_identity(block)?;
-                (block_key(id) == para_id).then_some(start?)
+                .for_each(|nested| visit(nested, para_id, span)),
+            LayoutBlock::Paragraph(paragraph) if block_key(&paragraph.id) == para_id => {
+                if let (Some(start), Some(end)) = (paragraph.pm_start, paragraph.pm_end) {
+                    let (low, high) = span.get_or_insert((start, end));
+                    *low = low.min(start);
+                    *high = high.max(end);
+                }
             }
+            _ => {}
         }
     }
-    let start = input
-        .measured
-        .iter()
-        .find_map(|measured| start(&measured.block, para_id))?;
-    paragraph_offset_position(start, offset)
+    let mut span = None;
+    for measured in &input.measured {
+        visit(&measured.block, para_id, &mut span);
+    }
+    span
 }
 
 fn paragraph_offset_position(start: f64, offset: u32) -> Option<i64> {
@@ -3539,27 +3540,24 @@ impl EngineSession {
                     ..pagination.rebuilt_page_end)
                     .chain(note_pages.iter().copied())
                     .collect();
-                let caret_position =
-                    if display.windowed_incremental_builds && display.window.is_some() {
-                        self.resident_caret_head
-                            .borrow()
-                            .as_ref()
-                            .and_then(|(story, head)| {
-                                let txn = self.doc.yrs_doc().transact();
-                                let index = head.get_offset(&txn)?.index;
-                                drop(txn);
-                                let segments = self.doc.segment_index(story).ok()?;
-                                let paragraph = segments.para_at(index)?;
-                                resident_nested_paragraph_position(
-                                    input,
-                                    &paragraph.para_id,
-                                    index.saturating_sub(paragraph.node_start),
-                                )
-                            })
-                    } else {
-                        None
-                    };
-                let build = window_build_pages(&display, layout, &rebuilt_pages, caret_position);
+                // The caret's whole paragraph, since its story units and display
+                // positions differ inside inline content.
+                let caret_span = if display.windowed_incremental_builds && display.window.is_some()
+                {
+                    self.resident_caret_head
+                        .borrow()
+                        .as_ref()
+                        .and_then(|(story, head)| {
+                            let txn = self.doc.yrs_doc().transact();
+                            let index = head.get_offset(&txn)?.index;
+                            drop(txn);
+                            let segments = self.doc.segment_index(story).ok()?;
+                            resident_paragraph_span(input, &segments.para_at(index)?.para_id)
+                        })
+                } else {
+                    None
+                };
+                let build = window_build_pages(&display, layout, &rebuilt_pages, caret_span);
                 let incremental = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
@@ -7722,6 +7720,89 @@ mod tests {
         assert_eq!(
             edited.pages[0],
             full_display_build(&engine, &extras).pages[0]
+        );
+
+        // A picture in the caret's paragraph keeps it mapped.
+        let mut input = engine.pagination.borrow().input.clone().unwrap();
+        let LayoutBlock::Table(table) = &mut input.measured[0].block else {
+            panic!("expected the table");
+        };
+        let LayoutBlock::Paragraph(cell) = &mut table.rows[0].cells[0].blocks[0] else {
+            panic!("expected the cell paragraph");
+        };
+        let span = (cell.pm_start.unwrap(), cell.pm_end.unwrap());
+        cell.runs.push(Run::Image(
+            serde_json::from_value(serde_json::json!({"src": "picture", "width": 8, "height": 8}))
+                .unwrap(),
+        ));
+        assert_eq!(
+            resident_paragraph_span(&input, &paragraph.para_id),
+            Some(span)
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_builds_the_caret_page_after_a_long_inline_content_control() {
+        use yrs::{Assoc, IndexedSequence};
+
+        let (engine, extras) = paged_engine(
+            212,
+            &format!(
+                "<w:p><w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>{}</w:t></w:r></w:sdtContent></w:sdt><w:r><w:t>Trailing text</w:t></w:r></w:p>{}",
+                "Content control text that runs over several pages. ".repeat(40),
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(160)
+            ),
+        );
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let txn = engine.doc().yrs_doc().transact();
+        let text = crate::story_ref(&txn, "body").unwrap();
+        let bounds = crate::op::para_bounds(&text, &txn).remove(0);
+        let head = text
+            .sticky_index(&txn, bounds.pilcrow, Assoc::After)
+            .unwrap();
+        drop(txn);
+        let (_, paragraph_end) = resident_paragraph_span(
+            engine.pagination.borrow().input.as_ref().unwrap(),
+            &bounds.para_id,
+        )
+        .unwrap();
+        let last_page = |engine: &EngineSession| {
+            let pagination = engine.pagination.borrow();
+            let pages = &pagination.layout.as_ref().unwrap().pages;
+            pages
+                .iter()
+                .rposition(|page| {
+                    page.fragments.iter().any(|fragment| {
+                        matches!(fragment, Fragment::Paragraph(value)
+                            if value.pm_start.is_some_and(|start| start <= paragraph_end))
+                    })
+                })
+                .unwrap()
+        };
+        let caret_page = last_page(&engine);
+        assert!(caret_page >= 2, "the paragraph must run over several pages");
+        engine.set_resident_caret_head(Some(("body".to_owned(), head)));
+        engine.set_display_window(Some(caret_page + 4..caret_page + 7));
+        engine.set_windowed_incremental_builds(true);
+
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", bounds.pilcrow),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(last_page(&engine), caret_page);
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        assert!(!edited.pages[caret_page].unbuilt);
+        assert_eq!(
+            edited.pages[caret_page],
+            full_display_build(&engine, &extras).pages[caret_page]
         );
         docx_layout::clear_measure_fonts();
     }
