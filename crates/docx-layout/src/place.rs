@@ -2108,7 +2108,7 @@ mod pagination_rule_tests {
         let table = json!({
             "block": {
                 "kind": "table", "id": 90,
-                "rows": [{ "id": 91, "cells": [{ "id": 92, "blocks": [paragraph(93, lines, 20.0, json!({}))["block"]] }] }],
+                "rows": [{ "id": 91, "cells": [{ "id": 92, "blocks": [paragraph(93, lines, 20.0, json!({ "keepLines": true }))["block"]] }] }],
                 "columnWidths": [180],
             },
             "measure": {
@@ -2116,7 +2116,7 @@ mod pagination_rule_tests {
                 "totalWidth": 180, "totalHeight": lines as f64 * 20.0,
                 "rows": [{ "height": lines as f64 * 20.0, "cells": [{
                     "width": 180, "height": lines as f64 * 20.0,
-                    "blocks": [paragraph(93, lines, 20.0, json!({}))["measure"]],
+                    "blocks": [paragraph(93, lines, 20.0, json!({ "keepLines": true }))["measure"]],
                 }] }],
             },
         });
