@@ -1688,6 +1688,26 @@ impl EngineSession {
         self.layout_regions_retained_json(input_json, None)
     }
 
+    /// [`Self::layout_document_with_regions_retained_json`] for a caller that
+    /// reads only the retained state: the layout is not serialized.
+    pub fn layout_document_with_regions_retained(&self, input_json: &str) -> Result<(), String> {
+        self.layout_document_with_regions_value(input_json)
+            .map(|_| ())
+    }
+
+    /// The retained region layout's `headersFooters`, serialized as its
+    /// retained reply carries them.
+    pub fn retained_headers_footers_json(&self) -> Result<Option<String>, String> {
+        self.regions
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.headers_footers.as_ref())
+            .map(|value| {
+                serde_json::to_string(value).map_err(|error| format!("serialize: {error}"))
+            })
+            .transpose()
+    }
+
     /// [`Self::layout_document_with_regions_retained_json`] over only as much
     /// of the body as fills the first `pages` pages. A reply marked
     /// `provisional` holds a layout of that prefix: its page count is the
@@ -4543,6 +4563,19 @@ mod tests {
         assert_eq!(
             value["layout"]["pages"][0]["headerFooterRefs"]["headerFirst"],
             "rId1"
+        );
+
+        let retained = engine.retained_headers_footers_json().unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&retained).unwrap(),
+            value["headersFooters"]
+        );
+        engine
+            .layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        assert_eq!(
+            engine.retained_headers_footers_json().unwrap(),
+            Some(retained)
         );
 
         let display: serde_json::Value =

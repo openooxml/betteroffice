@@ -1,15 +1,19 @@
-import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from '@betteroffice/docx/yrs';
 import type { PluginInvocation } from '../../../../shared/plugin-host/runtime';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
+import { stampSourceVersion } from '../components/DocxEditor/internals/layoutProvenance';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
+import { createDocxPluginHost } from './createDocxPluginHost';
 import { createPluginClients, resolveParagraph } from './createPluginClients';
-import type { DocxPluginGrant, DocxPluginSnapshot } from './types';
+import { defineDocxPlugin } from './defineDocxPlugin';
+import type { DocxPluginContext, DocxPluginGrant, DocxPluginSnapshot } from './types';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -64,9 +68,42 @@ beforeAll(() =>
   )
 );
 const sessions: YrsSession[] = [];
+const restoreClocks: Array<() => void> = [];
 afterEach(() => {
+  for (const restore of restoreClocks.splice(0)) restore();
   for (const session of sessions.splice(0)) session.destroy();
 });
+
+function navigationClock() {
+  let now = 0;
+  let nextTimer = 0;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(
+    ((callback: () => void, delay = 0) => {
+      const id = ++nextTimer;
+      timers.set(id, { at: now + delay, callback });
+      return id;
+    }) as unknown as typeof setTimeout
+  );
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((id) => {
+    timers.delete(id as unknown as number);
+  });
+  restoreClocks.push(() => {
+    timeout.mockRestore();
+    clear.mockRestore();
+  });
+  return {
+    timers,
+    advance(ms: number) {
+      now += ms;
+      for (const [id, timer] of timers) {
+        if (timer.at > now) continue;
+        timers.delete(id);
+        timer.callback();
+      }
+    },
+  };
+}
 
 async function setup(
   options: { grant?: DocxPluginGrant; flush?: () => void | Promise<void> } = {}
@@ -87,7 +124,7 @@ async function setup(
     },
     revealDisplayPosition: (position: number) => {
       events.push(`scroll:${position}`);
-      return state.reveal;
+      return state.anchorReady ? state.reveal : 'unsupported';
     },
     focus: () => events.push('focus'),
   } as unknown as PagedEditorRef;
@@ -96,16 +133,21 @@ async function setup(
     mode: 'editing' as EditorMode,
     grant: options.grant ?? ({ document: 'write', editBatches: true } as DocxPluginGrant),
     layoutReady: true,
+    partial: false,
+    anchorReady: true,
+    layoutFailed: false,
+    queryState: 'ready' as 'loading' | 'ready' | 'error',
     reveal: 'scrolled' as 'scrolled' | 'layout-unavailable' | 'unsupported',
     ended: null as 'plugin-unavailable' | 'document-replaced' | null,
   };
   const controller = new AbortController();
+  const lifetimeController = new AbortController();
   const invocation: PluginInvocation<DocxPluginSnapshot> = {
     pluginId: 'acme.review',
     activation: {},
     snapshot: {} as DocxPluginSnapshot,
     signal: controller.signal,
-    lifetimeSignal: controller.signal,
+    lifetimeSignal: lifetimeController.signal,
     state: () => null,
     setState: () => false,
     onCleanup: () => {},
@@ -113,18 +155,54 @@ async function setup(
     commit: (write) => write(),
     refusal: () => state.ended ?? (controller.signal.aborted ? 'aborted' : null),
   };
-  const clients = createPluginClients(
-    invocation,
-    {
-      pagedEditorRef,
-      writeMode: () => state.mode,
-      commands: () => null,
-      settledLayout: async () => state.layoutReady,
+  const queries = {
+    sourceState: () => ({ status: state.queryState }),
+    anchorRect: () =>
+      state.anchorReady ? { pageIndex: 0, x: 0, y: 0, width: 1, height: 1 } : null,
+  } as unknown as DisplayListQueries;
+  stampSourceVersion(queries, session.version());
+  const layoutListeners = new Set<() => void>();
+  let layoutStarted!: () => void;
+  const waiting = new Promise<void>((resolve) => (layoutStarted = resolve));
+  const access = {
+    pagedEditorRef,
+    writeMode: () => state.mode,
+    commands: () => null,
+    layout: () => ({
+      queries: state.layoutReady ? queries : null,
+      complete: !state.partial,
+      failed: state.layoutFailed,
+    }),
+    subscribeLayout(listener: () => void) {
+      layoutListeners.add(listener);
+      const unsubscribe = session.onUpdate(listener);
+      layoutStarted();
+      return () => {
+        layoutListeners.delete(listener);
+        unsubscribe();
+      };
     },
-    () => state.grant,
-    UNAVAILABLE_DOCX_COMMANDS
-  );
-  return { session, events, pagedEditorRef, editor, state, controller, clients };
+  };
+  const createClients = () =>
+    createPluginClients(invocation, access, () => state.grant, UNAVAILABLE_DOCX_COMMANDS);
+  return {
+    session,
+    events,
+    pagedEditorRef,
+    editor,
+    state,
+    controller,
+    lifetimeController,
+    queries,
+    access,
+    clients: createClients(),
+    createClients,
+    waiting,
+    layoutListeners,
+    publishLayout: () => {
+      for (const listener of layoutListeners) listener();
+    },
+  };
 }
 
 function replace(version: string, paraId: string, text: string, story = 'body'): DocxEditRequest {
@@ -282,6 +360,7 @@ describe('plugin read and navigation clients', () => {
     }
     env.state.reveal = 'scrolled';
     env.state.layoutReady = false;
+    env.state.layoutFailed = true;
     const before = env.events.length;
     expect(
       await env.clients.navigation.scrollToParagraph(target, { expectVersion: version })
@@ -290,6 +369,221 @@ describe('plugin read and navigation clients', () => {
       failure: { code: 'layout-unavailable' },
     });
     expect(env.events.slice(before).some((event) => event.startsWith('scroll'))).toBe(false);
+  });
+
+  test('scrolls when the expected layout arrives after 1.5 seconds', async () => {
+    const env = await setup();
+    const clock = navigationClock();
+    const version = env.session.version();
+    stampSourceVersion(env.queries, 'older');
+    const scroll = env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: '00000002' },
+      { expectVersion: version }
+    );
+    await env.waiting;
+    clock.advance(1500);
+    expect(clock.timers.size).toBe(1);
+    expect(env.events.some((event) => event.startsWith('scroll'))).toBe(false);
+    stampSourceVersion(env.queries, version);
+    env.publishLayout();
+    expect(await scroll).toEqual({ ok: true });
+    expect(env.events.filter((event) => event.startsWith('scroll'))).toHaveLength(1);
+    expect(clock.timers.size).toBe(0);
+    expect(env.layoutListeners.size).toBe(0);
+  });
+
+  test('waits for the target page in a partial layout', async () => {
+    const env = await setup();
+    const clock = navigationClock();
+    env.state.partial = true;
+    env.state.anchorReady = false;
+    const scroll = env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: '00000002' },
+      { expectVersion: env.session.version(), focus: true }
+    );
+    await env.waiting;
+    env.publishLayout();
+    expect(env.events).toEqual(['flush']);
+    expect(clock.timers.size).toBe(1);
+    env.state.anchorReady = true;
+    env.publishLayout();
+    expect(await scroll).toEqual({ ok: true });
+    expect(env.events.filter((event) => event.startsWith('scroll'))).toHaveLength(1);
+    expect(env.events.slice(-2)).toEqual(['sync:false:*', 'focus']);
+    expect(clock.timers.size).toBe(0);
+  });
+
+  test('a complete layout with no target position returns unsupported', async () => {
+    const env = await setup();
+    const clock = navigationClock();
+    env.state.partial = true;
+    env.state.anchorReady = false;
+    const scroll = env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: '00000002' },
+      { expectVersion: env.session.version() }
+    );
+    await env.waiting;
+    env.state.partial = false;
+    env.publishLayout();
+    expect(await scroll).toMatchObject({ ok: false, failure: { code: 'unsupported' } });
+    expect(clock.timers.size).toBe(0);
+  });
+
+  test('a version change during the wait returns stale-version', async () => {
+    const env = await setup();
+    const clock = navigationClock();
+    env.state.layoutReady = false;
+    const scroll = env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: '00000002' },
+      { expectVersion: env.session.version() }
+    );
+    await env.waiting;
+    env.session.insertText({ story: 'body', paraId: '00000001', offset: 5 }, '!');
+    expect(await scroll).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+    expect(clock.timers.size).toBe(0);
+    expect(env.layoutListeners.size).toBe(0);
+    expect(env.events).toEqual(['flush']);
+  });
+
+  test('closing the host aborts a wait through the plugin lifetime', async () => {
+    const env = await setup();
+    const host = createDocxPluginHost({
+      ...env.access,
+      geometry: () => null,
+      translate: (key) => key,
+    });
+    let initialized!: (context: DocxPluginContext<null>) => void;
+    const ready = new Promise<DocxPluginContext<null>>((resolve) => (initialized = resolve));
+    host.setPlugins([
+      defineDocxPlugin({
+        id: 'acme.review',
+        createState: () => null,
+        initialize: (context) => initialized(context),
+      }),
+    ]);
+    host.open(env.session);
+    const context = await ready;
+    const clock = navigationClock();
+    try {
+      env.state.layoutReady = false;
+      const scroll = context.navigation.scrollToParagraph(
+        { story: 'body', paraId: '00000002' },
+        { expectVersion: env.session.version(), focus: true }
+      );
+      await env.waiting;
+      expect(clock.timers.size).toBe(1);
+      host.close('unmounted');
+      expect(clock.timers.size).toBe(0);
+      expect(env.layoutListeners.size).toBe(0);
+      expect(await scroll).toMatchObject({ ok: false, failure: { code: 'plugin-unavailable' } });
+      env.state.layoutReady = true;
+      env.publishLayout();
+      clock.advance(30_000);
+      expect(env.events).toEqual(['flush']);
+    } finally {
+      host.close('unmounted');
+    }
+  });
+
+  test('closing, unmounting and replacement cancel the wait and its timer', async () => {
+    const endings = [
+      ['closed', 'plugin-unavailable'],
+      ['unmounted', 'plugin-unavailable'],
+      ['document-replaced', 'document-replaced'],
+    ] as const;
+    for (const [reason, code] of endings) {
+      const env = await setup();
+      const clock = navigationClock();
+      env.state.layoutReady = false;
+      const scroll = env.clients.navigation.scrollToParagraph(
+        { story: 'body', paraId: '00000002' },
+        { expectVersion: env.session.version(), focus: true }
+      );
+      await env.waiting;
+      expect(clock.timers.size).toBe(1);
+      env.state.ended = code;
+      if (reason === 'unmounted') env.pagedEditorRef.current = null;
+      env.lifetimeController.abort();
+      expect(clock.timers.size).toBe(0);
+      expect(env.layoutListeners.size).toBe(0);
+      expect(await scroll).toMatchObject({ ok: false, failure: { code } });
+      env.state.layoutReady = true;
+      env.publishLayout();
+      clock.advance(30_000);
+      expect(env.events).toEqual(['flush']);
+      for (const restore of restoreClocks.splice(0)) restore();
+    }
+  });
+
+  test('layout and query failures end the wait early', async () => {
+    for (const failure of ['layout', 'queries'] as const) {
+      const env = await setup();
+      const clock = navigationClock();
+      env.state.partial = true;
+      env.state.anchorReady = false;
+      const scroll = env.clients.navigation.scrollToParagraph(
+        { story: 'body', paraId: '00000002' },
+        { expectVersion: env.session.version() }
+      );
+      await env.waiting;
+      if (failure === 'layout') env.state.layoutFailed = true;
+      else env.state.queryState = 'error';
+      env.publishLayout();
+      expect(await scroll).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+      expect(clock.timers.size).toBe(0);
+      expect(env.events).toEqual(['flush']);
+      for (const restore of restoreClocks.splice(0)) restore();
+    }
+  });
+
+  test('an unavailable layout reaches the 30-second safety cap', async () => {
+    const env = await setup();
+    const clock = navigationClock();
+    env.state.layoutReady = false;
+    const scroll = env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: '00000002' },
+      { expectVersion: env.session.version() }
+    );
+    await env.waiting;
+    clock.advance(29_999);
+    expect(clock.timers.size).toBe(1);
+    clock.advance(1);
+    expect(await scroll).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+    expect(clock.timers.size).toBe(0);
+    expect(env.layoutListeners.size).toBe(0);
+    expect(env.events).toEqual(['flush']);
+  });
+
+  test('a newer call from another context supersedes the older wait for the same plugin', async () => {
+    for (const layoutArrived of [false, true]) {
+      const env = await setup();
+      const clock = navigationClock();
+      env.state.layoutReady = false;
+      const version = env.session.version();
+      const older = env.clients.navigation.scrollToParagraph(
+        { story: 'body', paraId: '00000002' },
+        { expectVersion: version, focus: true }
+      );
+      await env.waiting;
+      env.state.layoutReady = true;
+      if (layoutArrived) env.publishLayout();
+      const newer = env.createClients().navigation.scrollToParagraph(
+        { story: 'body', paraId: '00000001' },
+        { expectVersion: version }
+      );
+      expect(await newer).toEqual({ ok: true });
+      expect(await older).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+      env.publishLayout();
+      const located = resolveParagraph(env.session, { story: 'body', paraId: '00000001' });
+      expect(typeof located).not.toBe('string');
+      expect(env.events.filter((event) => event.startsWith('scroll'))).toEqual([
+        `scroll:${typeof located === 'string' ? -1 : located.position}`,
+      ]);
+      expect(env.events).not.toContain('focus');
+      expect(clock.timers.size).toBe(0);
+      expect(env.layoutListeners.size).toBe(0);
+      for (const restore of restoreClocks.splice(0)) restore();
+    }
   });
 
   test('a read never touches the session once the plugin ended, whenever that happens', async () => {
