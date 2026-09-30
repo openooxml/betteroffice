@@ -694,6 +694,11 @@ export class EditSession {
      */
     outline_glyph_json(font_id: number, glyph_id: number): string;
     /**
+     * How many paragraphs of `story` carry `para_id`: 0, 1, or 2 for two or
+     * more. Errors on an unknown story.
+     */
+    paragraph_id_count(story: string, para_id: string): number;
+    /**
      * Every paragraph's identities: `{"sessionId","packageSha256",
      * "paragraphs":[{"session","origin","ooxmlParaId","idOrigin",
      * "persisted","source"}]}`, session paragraphs with stories sorted and
@@ -1581,6 +1586,7 @@ export interface InitOutput {
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
