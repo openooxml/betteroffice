@@ -8,7 +8,7 @@ use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offs
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
 use crate::table_grid::{
     content_sized_columns, count_table_columns, grow_content_sized_columns, preferred_width_px,
-    resolve_cell_grid, resolve_table_column_widths_with_content, resolve_table_intrinsic_widths,
+    resolve_cell_grid, resolve_table_column_widths_with_content,
 };
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
@@ -1937,10 +1937,7 @@ fn cell_content_widths(
             LayoutBlock::Paragraph(paragraph) => {
                 crate::typed_measure::intrinsic_widths(paragraph, content_width, config)?
             }
-            LayoutBlock::Table(table) => {
-                let content_widths = table_content_widths(table, content_width, config);
-                resolve_table_intrinsic_widths(table, content_width, content_widths.as_deref())
-            }
+            LayoutBlock::Table(_) => return None,
             LayoutBlock::Image(image) if image.anchor.is_none() => (image.width, image.width),
             LayoutBlock::Shape(shape) if !anchored_shape(shape) => (shape.width, shape.width),
             LayoutBlock::Chart(chart) => (chart.width, chart.width),
@@ -2984,7 +2981,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_autofit_tables_keep_separate_intrinsic_minimums_and_maximums() {
+    fn nested_autofit_tables_keep_unknown_content_widths_and_the_outer_grid() {
         let child = json!({
             "kind": "table", "id": "child", "layoutMode": "autofit", "gridWidths": [600],
             "preferredWidth": {"value": 9000, "type": "dxa"},
@@ -3004,11 +3001,11 @@ mod tests {
         let config = MeasurementConfig::default();
         assert_eq!(
             cell_content_widths(&outer.rows[0].cells[0], 600.0, &config),
-            Some((20.0, 600.0))
+            None
         );
         assert_eq!(
             measure_table_column_widths(&outer, 600.0, &config),
-            vec![500.0, 100.0]
+            vec![600.0, 100.0]
         );
         outer.rows[0].cells[0].padding = Some(crate::types::BoxEdges {
             left: 5.0,
@@ -3022,11 +3019,11 @@ mod tests {
         child.indent = Some(10.0);
         assert_eq!(
             cell_content_widths(&outer.rows[0].cells[0], 600.0, &config),
-            Some((40.0, 620.0))
+            None
         );
         assert_eq!(
             measure_table_column_widths(&outer, 600.0, &config),
-            vec![500.0, 100.0]
+            vec![600.0, 100.0]
         );
         let cell: crate::types::TableCell = serde_json::from_value(json!({
             "id": "grandparent-cell", "blocks": [LayoutBlock::Table(outer)],
@@ -3035,7 +3032,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cell_content_widths(&cell, 600.0, &config),
-            Some((140.0, 720.0))
+            None
         );
     }
 

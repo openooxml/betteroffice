@@ -626,58 +626,6 @@ fn autofit_column_widths(
     )
 }
 
-pub(crate) fn resolve_table_intrinsic_widths(
-    table_block: &TableBlock,
-    content_width: f64,
-    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
-) -> (f64, f64) {
-    let indent = table_indent(table_block);
-    if table_block
-        .width_algorithm
-        .as_deref()
-        .or(table_block.layout_mode.as_deref())
-        != Some("autofit")
-        || table_block.rows.is_empty()
-    {
-        let width = resolve_table_total_width_px(table_block, content_width) + indent;
-        return (width, width);
-    }
-    let explicit = preferred_width_px(
-        table_block.preferred_width.as_ref(),
-        table_block.width,
-        table_block.width_type.as_deref(),
-        content_width,
-        None,
-    );
-    let col_count = count_table_columns(table_block);
-    if resolve_autofit_column_widths(
-        table_block,
-        content_width,
-        col_count,
-        explicit,
-        content_widths,
-    )
-    .is_none()
-    {
-        let width =
-            resolve_table_column_widths_with_content(table_block, content_width, content_widths)
-                .iter()
-                .sum::<f64>()
-                + indent;
-        return (width, width);
-    }
-    let (minimums, maximums) = autofit_content_widths(
-        table_block,
-        table_width_budget(table_block, content_width),
-        col_count,
-        explicit,
-        content_widths,
-    );
-    let minimum: f64 = minimums.iter().sum();
-    let maximum = minimum.max(explicit.unwrap_or_else(|| maximums.iter().sum()));
-    (minimum + indent, maximum + indent)
-}
-
 fn table_indent(table_block: &TableBlock) -> f64 {
     if matches!(
         table_block.justification.as_deref(),
@@ -1413,9 +1361,12 @@ mod tests {
     }
 
     #[test]
-    fn autofit_nested_intrinsic_widths_use_the_childs_grid_fallback() {
-        let outer: TableBlock = serde_json::from_value(json!({
-            "id": 0, "layoutMode": "autofit", "gridWidths": [300],
+    fn autofit_nested_tables_keep_the_outer_grid_and_child_grid_fallback() {
+        use crate::measure_blocks::{MeasurementConfig, measure_block};
+        use crate::types::{BlockExtent, LayoutBlock};
+
+        let mut outer: LayoutBlock = serde_json::from_value(json!({
+            "kind": "table", "id": 0, "layoutMode": "autofit", "gridWidths": [300],
             "preferredWidth": {"value": 0, "type": "auto"},
             "rows": [{"id": 0, "cells": [
                 {"id": 0, "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
@@ -1433,16 +1384,18 @@ mod tests {
             ]}]
         }))
         .unwrap();
-        let crate::types::LayoutBlock::Table(child) = &outer.rows[0].cells[0].blocks[0] else {
+        let LayoutBlock::Table(table) = &outer else {
             panic!()
         };
-        let crate::types::LayoutBlock::Paragraph(paragraph) = &child.rows[0].cells[0].blocks[0]
-        else {
+        let LayoutBlock::Table(child) = &table.rows[0].cells[0].blocks[0] else {
             panic!()
         };
-        let config = crate::measure_blocks::MeasurementConfig {
+        let LayoutBlock::Paragraph(paragraph) = &child.rows[0].cells[0].blocks[0] else {
+            panic!()
+        };
+        let config = MeasurementConfig {
             defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
-            ..crate::measure_blocks::MeasurementConfig::default()
+            ..MeasurementConfig::default()
         };
         let content = vec![vec![crate::typed_measure::intrinsic_widths(
             paragraph, 600.0, &config,
@@ -1452,13 +1405,17 @@ mod tests {
             resolve_table_column_widths_with_content(child, 600.0, Some(&content)),
             vec![300.0]
         );
-        let intrinsic = resolve_table_intrinsic_widths(child, 600.0, Some(&content));
-        assert_eq!(intrinsic, (300.0, 300.0));
-        let content = vec![vec![Some(intrinsic)]];
-        assert_eq!(
-            resolve_table_column_widths_with_content(&outer, 600.0, Some(&content)),
-            vec![300.0]
-        );
+        let BlockExtent::Table(measured) = measure_block(&mut outer, 600.0, &config).unwrap() else {
+            panic!()
+        };
+        assert_eq!(measured.column_widths, vec![300.0]);
+        let cell = &measured.rows[0].cells[0];
+        assert_eq!(cell.width, 300.0);
+        let BlockExtent::Table(child) = &cell.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(child.column_widths.iter().sum::<f64>(), 300.0);
+        assert!(child.column_widths.iter().sum::<f64>() <= cell.width);
     }
 
     #[test]
@@ -1519,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn table_width_budget_and_intrinsic_widths_match_placement_alignment() {
+    fn table_width_budget_matches_placement_alignment() {
         for justification in [
             None,
             Some("left"),
@@ -1555,16 +1512,7 @@ mod tests {
                         vec![(600.0 - indent) / 2.0; 2],
                         "{justification:?}, bidi={bidi}, legacy={legacy}"
                     );
-                    assert_eq!(
-                        resolve_table_intrinsic_widths(&block, 600.0, None),
-                        (80.0 + indent, 600.0 + indent)
-                    );
                 }
-                block.layout_mode = Some("fixed".to_owned());
-                assert_eq!(
-                    resolve_table_intrinsic_widths(&block, 600.0, None),
-                    (600.0 + indent, 600.0 + indent)
-                );
             }
         }
     }
@@ -1595,10 +1543,6 @@ mod tests {
             for width in widths {
                 assert_close_to(width, 36.0, 6);
             }
-            let (minimum, maximum) =
-                resolve_table_intrinsic_widths(&block, 601.333_333, Some(&content));
-            assert_close_to(minimum, 72.0, 6);
-            assert_close_to(maximum, 72.0, 6);
         }
         block.width = Some(9000.0);
         block.width_type = Some("dxa".to_owned());
@@ -1660,10 +1604,6 @@ mod tests {
             for width in widths {
                 assert_close_to(width, 145.87, 6);
             }
-            let (minimum, maximum) =
-                resolve_table_intrinsic_widths(&block, 601.333_333, Some(&content));
-            assert_close_to(minimum, 109.4025, 6);
-            assert_close_to(maximum, 291.74, 6);
         }
     }
 
@@ -1696,10 +1636,6 @@ mod tests {
             }
             assert_close_to(widths[1] / widths[0], 2.0, 6);
             assert_close_to(widths.iter().sum(), 145.87, 6);
-            let (minimum, maximum) =
-                resolve_table_intrinsic_widths(&block, 601.333_333, Some(&content));
-            assert_close_to(minimum, 109.4025, 6);
-            assert_close_to(maximum, 145.87, 6);
         }
     }
 
