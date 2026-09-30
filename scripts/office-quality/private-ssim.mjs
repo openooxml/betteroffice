@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process';
 import { open, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { killGroup, spawnGroup } from './process-group.mjs';
 import { MAX_LOCAL_REFERENCE_PAGES } from './reference.mjs';
 
 const { values } = parseArgs({ options: Object.fromEntries([
@@ -31,7 +31,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function start(command, args, name, env = {}, capture = false, timeout = null) {
   const log = await open(resolve(out, `${name}.log`), 'w');
-  const child = spawn(command, args, {
+  const child = spawnGroup(command, args, {
     cwd: repo,
     env: { ...process.env, ...env },
     stdio: ['ignore', capture ? 'pipe' : log.fd, log.fd],
@@ -49,8 +49,8 @@ async function start(command, args, name, env = {}, capture = false, timeout = n
   let forced;
   const timer = timeout === null ? null : setTimeout(() => {
     timedOut = true;
-    child.kill('SIGTERM');
-    forced = setTimeout(() => child.kill('SIGKILL'), 2000);
+    killGroup(child, 'SIGTERM');
+    forced = setTimeout(() => killGroup(child, 'SIGKILL'), 2000);
   }, timeout * 1000);
   const done = new Promise((resolve) => child.on('close', async (code, signal) => {
     clearTimeout(timer);
@@ -98,14 +98,14 @@ async function ready(task, url) {
 }
 
 async function stop(task) {
-  task.child.kill('SIGTERM');
-  const forced = setTimeout(() => task.child.kill('SIGKILL'), 2000);
+  killGroup(task.child, 'SIGTERM');
+  const forced = setTimeout(() => killGroup(task.child, 'SIGKILL'), 2000);
   await task.done;
   clearTimeout(forced);
 }
 
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
-  for (const child of children) child.kill(signal);
+  for (const child of children) killGroup(child, signal);
   process.exitCode = signal === 'SIGINT' ? 130 : 143;
 });
 
