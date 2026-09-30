@@ -169,6 +169,42 @@ test('a tab that draws no frames still opens the full document', async () => {
   }
 });
 
+test('the full open waits two frames past the painted preview', async () => {
+  const requestFrame = globalThis.requestAnimationFrame;
+  const frames: FrameRequestCallback[] = [];
+  globalThis.requestAnimationFrame = (callback) => frames.push(callback);
+  const runFrame = () => frames.shift()!(performance.now());
+  try {
+    const { result, unmount } = renderHook(() =>
+      useYrsCoreSession(
+        true,
+        null,
+        null,
+        PAGES,
+        1,
+        undefined,
+        { isCurrentLoad: () => true },
+        { previewFirstPage: true }
+      )
+    );
+    await waitFor(() => expect(result.current.previewing).toBe(true));
+    const preview = result.current.session!;
+    await act(async () => {
+      result.current.notifyFramePresented(preview);
+    });
+    await waitFor(() => expect(frames).toHaveLength(1));
+    runFrame();
+    expect(frames).toHaveLength(1);
+    expect(result.current.session).toBe(preview);
+    runFrame();
+    await waitFor(() => expect(result.current.previewing).toBe(false));
+    expect(result.current.session).not.toBe(preview);
+    unmount();
+  } finally {
+    globalThis.requestAnimationFrame = requestFrame;
+  }
+});
+
 test('without the option the document opens in full at once', async () => {
   const hosts: Array<boolean> = [];
   const { result, unmount } = renderHook(() =>

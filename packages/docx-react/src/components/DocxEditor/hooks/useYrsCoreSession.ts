@@ -421,13 +421,17 @@ export function useYrsCoreSession(
           callbacksRef.current?.onHostDocument?.(opened.host, seedGeneration, { preview: true });
           await painted;
           if (paintWaitRef.current?.session === opened.session) paintWaitRef.current = null;
+          // Two frames: a worker canvas's commit can reach the screen a frame
+          // after the presentation, and the full open blocks this thread.
           await new Promise<void>((resolve) => {
             const bound = setTimeout(resolve, PREVIEW_FRAME_WAIT_MS);
             requestAnimationFrame(() =>
-              setTimeout(() => {
-                clearTimeout(bound);
-                resolve();
-              }, 0)
+              requestAnimationFrame(() =>
+                setTimeout(() => {
+                  clearTimeout(bound);
+                  resolve();
+                }, 0)
+              )
             );
           });
           if (stale()) return;
