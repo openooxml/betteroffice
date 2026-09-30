@@ -2156,7 +2156,7 @@ impl EngineSession {
             self.layout_document_value_with_fingerprints(
                 input,
                 block_fingerprints.clone(),
-                Some((revision_preview_key, &revision_preview)),
+                Some((revision_preview_key, &revision_preview, resident_body)),
             )?;
             let layout = self
                 .pagination
@@ -2229,7 +2229,7 @@ impl EngineSession {
             self.layout_document_value_with_fingerprints(
                 final_input,
                 fingerprints,
-                Some((revision_preview_key, &revision_preview)),
+                Some((revision_preview_key, &revision_preview, resident_body)),
             )?;
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
@@ -2633,7 +2633,7 @@ impl EngineSession {
         &self,
         mut input: LayoutInput,
         mut block_fingerprints: Vec<u64>,
-        revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>)>,
+        revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
@@ -2648,12 +2648,12 @@ impl EngineSession {
             // A preview shows the document at its source positions, so a block whose
             // content is unchanged but whose positions moved shows other source: it is
             // placed afresh rather than shifted.
-            // Over an unchanged document, only a block holding a revision whose
-            // decision changed can show other source.
-            if let Some((key, preview)) = revision_preview
+            // Over an unchanged document lowered from its body story, only a block
+            // holding a revision whose decision changed can show other source.
+            if let Some((key, preview, resident)) = revision_preview
                 && key != previous.revision_preview_key
                 && incremental_eligible(&previous, &input, input_options_fingerprint)
-                && let moved = (previous.doc_epoch == self.doc_epoch())
+                && let moved = (resident && previous.doc_epoch == self.doc_epoch())
                     .then(|| self.preview_changed_paragraphs(&previous.revision_preview, preview))
                     .transpose()?
                 && moved.as_ref().is_none_or(|moved| !moved.is_empty())
@@ -2747,7 +2747,7 @@ impl EngineSession {
         pagination.block_fingerprints = block_fingerprints;
         pagination.options_fingerprint = input_options_fingerprint;
         pagination.doc_epoch = self.doc_epoch();
-        if let Some((key, preview)) = revision_preview {
+        if let Some((key, preview, _)) = revision_preview {
             pagination.revision_preview_key = key;
             pagination.revision_preview = preview.clone();
         }
