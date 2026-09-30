@@ -227,7 +227,7 @@ fn is_image(prefix: &[u8]) -> bool {
             Some(b"II\x2a\x00" | b"MM\x00\x2a")
         )
         || prefix.starts_with(b"II\xbc")
-        || prefix.get(40..44) == Some(b" EMF")
+        || (prefix.starts_with(&[1, 0, 0, 0]) && prefix.get(40..44) == Some(b" EMF"))
         || prefix.starts_with(&[0xd7, 0xcd, 0xc6, 0x9a])
 }
 
