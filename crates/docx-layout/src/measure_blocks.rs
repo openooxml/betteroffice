@@ -2951,9 +2951,9 @@ mod tests {
                 authoritative_shaping: true,
                 ..MeasurementConfig::default()
             };
-            for (text, preferred, expected, laid_out) in [
-                ("W".repeat(100), None, 100.0, 600.0),
-                ("hello world ".repeat(3), Some(1500), 100.0, 100.0),
+            for (text, preferred, expected, grows) in [
+                ("W".repeat(100), None, 100.0, true),
+                ("hello world ".repeat(3), Some(1500), 100.0, false),
             ] {
                 let mut table: TableBlock = serde_json::from_value(json!({
                     "id": "table", "layoutMode": "autofit", "gridWidths": [100],
@@ -2979,8 +2979,14 @@ mod tests {
                     measure_table_column_widths(&table, 600.0, &config),
                     vec![expected]
                 );
+                let mut legacy = vec![expected];
+                if grows {
+                    let maximums = column_content_maximums(&table, &[0], 600.0, &config).unwrap();
+                    grow_content_sized_columns(&table, 600.0, &maximums, &mut legacy);
+                    assert!(legacy[0] > expected && legacy[0] <= 600.0);
+                }
                 let measured = measure_table(&mut table, 600.0, &config).unwrap();
-                assert!((measured.rows[0].cells[0].width - laid_out).abs() < 1e-6);
+                assert!((measured.rows[0].cells[0].width - legacy[0]).abs() < 1e-9);
                 let BlockExtent::Paragraph(paragraph) = &measured.rows[0].cells[0].blocks[0] else {
                     panic!()
                 };
