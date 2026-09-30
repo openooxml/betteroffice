@@ -253,7 +253,7 @@ fn the_other_parts_inflate_within_what_compressed_images_leave_of_the_budget() {
     let image = png(4, 4, 1);
     let mut document = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#.to_vec();
     document.resize(document.len() + 64, b' ');
-    let budget = document.len() as u64 + 8;
+    let budget = (image.len() + document.len()) as u64 - 1;
     let bytes: Arc<[u8]> = ooxml_opc::rezip_parts(&[
         ("word/media/image1.png".to_owned(), image.clone()),
         ("word/document.xml".to_owned(), document),
@@ -267,7 +267,7 @@ fn the_other_parts_inflate_within_what_compressed_images_leave_of_the_budget() {
         docx_parse::ParseError::Container(message)
             if message == format!("inflated size exceeds {remaining} bytes")
     ));
-    assert!(media_table_parts_within(&bytes, budget + image.len() as u64).is_ok());
+    assert!(media_table_parts_within(&bytes, budget + 1).is_ok());
 }
 
 #[cfg(feature = "tiff")]
