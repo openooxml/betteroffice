@@ -6,7 +6,12 @@ import {
   type ResidentEngineSession,
 } from './residentEngineSession';
 import { preloadEditWasm } from './wasm/index';
-import { executeProposalRound, executeProposalWithdrawal } from './proposals';
+import {
+  createProposalRegistry,
+  type DocxProposalRegistry,
+  type DocxProposalResult,
+} from './proposals';
+import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
@@ -27,7 +32,6 @@ import {
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
-  ResidentProposalOutcome,
 } from './residentEngineWorkerProtocol';
 import {
   residentCaretDeviceRect,
@@ -37,6 +41,7 @@ import {
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
+let proposals: DocxProposalRegistry | null = null;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
 let unsubscribe: (() => void) | null = null;
@@ -181,6 +186,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
       throw error;
     }
+    proposals?.destroy();
+    proposals = null;
     session = opening;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
     const stateVector = exactBuffer(session.encodeStateVector());
@@ -251,7 +258,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'encodeState') {
     if (!session) throw new Error('Resident engine worker is not initialized');
     const state = exactBuffer(session.encodeState());
-    reply({ id: request.id, ok: true, state }, [state]);
+    reply(
+      {
+        id: request.id,
+        ok: true,
+        state,
+        version: session.proposalEngine.version(),
+        proposals: proposals?.exportState() ?? { previewVersion: 0, entries: [] },
+      },
+      [state]
+    );
     return;
   }
   if (request.type === 'revisionCount') {
@@ -266,31 +282,28 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (!session) throw new Error('Resident engine worker is not initialized');
-  if (request.type === 'executeProposal') {
+  if (request.type === 'proposal') {
     if (!unsubscribe) throw new Error('Resident engine worker has not laid out its document');
-    // The edit must not land between a provisional layout and the completion that finishes it.
     await completeProvisionalLayout();
     pendingUpdates = [];
+    let committed = false;
     try {
-      const replica = session;
-      const engine = replica.proposalEngine;
-      const since = replica.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
-      let changedStories: string[] = [];
-      const execute = (): ResidentProposalOutcome => {
-        if (request.operation.kind === 'propose') {
-          const outcome = executeProposalRound(
-            engine,
-            request.operation.proposals,
-            request.operation.expectVersion
-          );
-          if (outcome.ok) changedStories = outcome.changedStories;
-          return outcome;
-        }
-        const outcome = executeProposalWithdrawal(engine, request.operation);
-        if (outcome.ok) changedStories = replica.storiesChangedSince(since).stories;
-        return outcome;
-      };
-      const outcome = engine.sharedReads ? engine.sharedReads(execute) : execute();
+      const registry = proposals ??= createProposalRegistry(session.proposalEngine);
+      const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      let result: DocxProposalResult | undefined;
+      switch (request.operation.kind) {
+        case 'propose':
+          result = registry.propose(request.operation.request);
+          break;
+        case 'setStates':
+          result = registry.setStates(request.operation.request);
+          break;
+        case 'withdraw':
+          result = registry.withdraw(request.operation.request);
+          break;
+      }
+      committed = request.operation.kind !== 'snapshot';
+      const changedStories = session.storiesChangedSince(since).stories;
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
       const stateVector = exactBuffer(session.encodeStateVector());
@@ -298,17 +311,56 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         {
           id: request.id,
           ok: true,
-          outcome,
-          version: engine.version(),
-          updates,
-          changedStories,
-          stateVector,
+          proposal: {
+            ...(result === undefined ? {} : { result }),
+            mirror: { version: session.proposalEngine.version(), proposals: registry.exportState() },
+            changedStories,
+            updates,
+            stateVector,
+            geometry: computeProposalGeometryMirror(session.geometryReader, registry.snapshot()),
+          },
         },
         [...updates, stateVector]
       );
+    } catch (error) {
+      if (trap) throw trap;
+      if (error instanceof WebAssembly.RuntimeError) throw error;
+      reply({
+        id: request.id,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        ...(committed || pendingUpdates.length > 0 ? { terminal: true } : {}),
+      });
     } finally {
       pendingUpdates = [];
     }
+    return;
+  }
+  if (request.type === 'documentRead') {
+    await completeProvisionalLayout();
+    const engine = session.proposalEngine;
+    let value: unknown;
+    switch (request.read.kind) {
+      case 'paragraphIdentities':
+        value = session.paragraphIdentities();
+        break;
+      case 'resolveParagraphAnchors':
+        value = {
+          results: request.read.anchors.map((anchor) => engine.resolveParagraphAnchor(anchor)),
+        };
+        break;
+      case 'readParagraphs':
+        value = engine.readParagraphs(request.read.request);
+        break;
+      case 'navigationTarget':
+        value = resolveNavigationTarget(
+          session.geometryReader,
+          request.read.story,
+          request.read.paraId
+        );
+        break;
+    }
+    reply({ id: request.id, ok: true, read: { version: engine.version(), value } });
     return;
   }
   if (request.type === 'sync') {
@@ -503,9 +555,9 @@ function hydrate(
   supersedeSlicedCompletion();
   incompleteLayout = null;
   completedLayout = null;
-  if (loadState) session.loadState(snapshot.state);
+  if (loadState && !snapshot.workerAuthoritative) session.loadState(snapshot.state);
   session.setPartialDocument(snapshot.partialDocument === true);
-  session.loadMediaSources(snapshot.mediaSources ?? '');
+  if (!snapshot.workerAuthoritative) session.loadMediaSources(snapshot.mediaSources ?? '');
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
     // omits fonts when it knows this session's applied revision matches).
@@ -534,7 +586,9 @@ function hydrate(
   } else {
     session.layoutDocumentJson(snapshot.layoutInput);
   }
-  if (snapshot.selection) session.setSelection(snapshot.selection.anchor, snapshot.selection.head);
+  if (!snapshot.workerAuthoritative && snapshot.selection) {
+    session.setSelection(snapshot.selection.anchor, snapshot.selection.head);
+  }
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
   return { layoutJson, provisional };
@@ -746,6 +800,8 @@ function subscribe(): void {
 function destroySession(keepSurfaces = false): void {
   unsubscribe?.();
   unsubscribe = null;
+  proposals?.destroy();
+  proposals = null;
   session?.destroy();
   session = null;
   openedDocument = null;

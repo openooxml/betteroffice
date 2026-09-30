@@ -7,6 +7,7 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
+  ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 
 let startWorker: (scope: unknown, canvas: unknown, harness: unknown) => void;
@@ -846,6 +847,128 @@ describe('resident worker layout ownership', () => {
   });
 });
 
+describe('resident worker proposal failures', () => {
+  const operations: ResidentProposalOperation[] = [
+    { kind: 'propose', request: { expectVersion: 'proposal', proposals: [] } },
+    {
+      kind: 'setStates',
+      request: { expectVersion: 'proposal', expectPreviewVersion: 0, changes: [] },
+    },
+    { kind: 'withdraw', request: { expectVersion: 'proposal', ids: [] } },
+  ];
+
+  function proposalWorker() {
+    const w = worker();
+    const engine = { version: () => 'proposal' };
+    Object.assign(w.harness.session, {
+      proposalEngine: engine,
+      geometryReader: engine,
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
+    });
+    return { w, engine };
+  }
+
+  for (const operation of operations) {
+    test(
+      `a reply failure after ${operation.kind} returns is terminal without document updates`,
+      async () => {
+        const { w } = proposalWorker();
+        expect((await w.bootstrap()).ok).toBe(true);
+        w.harness.session.encodeStateVector = () => {
+          throw new Error('state vector failed');
+        };
+        const failed = await w.send({ type: 'proposal', operation });
+        expect(failed).toMatchObject({
+          ok: false,
+          terminal: true,
+          error: 'state vector failed',
+        });
+        expect(w.answered.filter((id) => id === failed.id)).toHaveLength(1);
+      }
+    );
+  }
+
+  test('a reply failure after a proposal snapshot is not terminal', async () => {
+    const { w } = proposalWorker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    const encodeStateVector = w.harness.session.encodeStateVector;
+    w.harness.session.encodeStateVector = () => {
+      throw new Error('state vector failed');
+    };
+    const failed = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    expect(failed).toMatchObject({ ok: false, error: 'state vector failed' });
+    expect(!failed.ok && failed.terminal).toBeUndefined();
+    w.harness.session.encodeStateVector = encodeStateVector;
+    const snapshot = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    expect(snapshot.ok && snapshot.proposal?.mirror.proposals).toEqual({
+      previewVersion: 0,
+      entries: [],
+    });
+  });
+
+  test('a proposal failure before the registry operation commits is not terminal', async () => {
+    const { w } = proposalWorker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    const failed = await w.send({
+      type: 'proposal',
+      operation: {
+        kind: 'propose',
+        request: { expectVersion: 'proposal', proposals: null },
+      } as never,
+    });
+    expect(failed).toMatchObject({
+      ok: false,
+      error: 'a proposal request needs a proposals array',
+    });
+    expect(!failed.ok && failed.terminal).toBeUndefined();
+    const snapshot = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    expect(snapshot.ok && snapshot.proposal?.mirror.proposals.entries).toEqual([]);
+  });
+
+  test('a proposal failure with updates is terminal before the registry returns', async () => {
+    const { w, engine } = proposalWorker();
+    let onUpdate: ((update: Uint8Array) => void) | undefined;
+    Object.assign(w.harness.session, {
+      onUpdate: (listener: (update: Uint8Array) => void) => {
+        onUpdate = listener;
+        return () => {
+          onUpdate = undefined;
+        };
+      },
+    });
+    expect((await w.bootstrap()).ok).toBe(true);
+    engine.version = () => {
+      onUpdate!(new Uint8Array([1]));
+      throw new Error('registry failed after update');
+    };
+    const failed = await w.send({ type: 'proposal', operation: operations[0]! });
+    expect(failed).toMatchObject({
+      ok: false,
+      terminal: true,
+      error: 'registry failed after update',
+    });
+    expect(w.answered.filter((id) => id === failed.id)).toHaveLength(1);
+  });
+
+  test('a proposal trap after the registry returns refuses queued requests', async () => {
+    const { w } = proposalWorker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    w.harness.session.encodeStateVector = () => {
+      throw new WebAssembly.RuntimeError('unreachable');
+    };
+    const failed = w.send({ type: 'proposal', operation: operations[0]! });
+    const queued = w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    for (const reply of await Promise.all([failed, queued])) {
+      expect(reply).toMatchObject({
+        ok: false,
+        terminal: true,
+        error: 'Resident engine worker trapped: unreachable',
+      });
+      expect(w.answered.filter((id) => id === reply.id)).toHaveLength(1);
+    }
+  });
+});
+
 describe('resident worker memory', () => {
   test('a bootstrap starts the session under its heap limit', async () => {
     const w = worker();
@@ -1348,6 +1471,7 @@ describe('resident worker opening', () => {
         calls.push('state');
         return new Uint8Array([7, 8]);
       },
+      proposalEngine: { version: () => 'opened' },
     });
     return { w, calls };
   }
@@ -1390,6 +1514,8 @@ describe('resident worker opening', () => {
 
     const state = await w.send({ type: 'encodeState' });
     expect(state.ok && [...new Uint8Array(state.state!)]).toEqual([7, 8]);
+    expect(state.ok && state.version).toBe('opened');
+    expect(state.ok && state.proposals).toEqual({ previewVersion: 0, entries: [] });
     expect(state.memory).toEqual(w.harness.memories);
     expect(calls[calls.length - 1]).toBe('state');
 
@@ -1402,6 +1528,55 @@ describe('resident worker opening', () => {
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(completed.ok && completed.layoutProvisional).toBeUndefined();
     expect(calls.slice(-3)).toEqual(['begin:{"request":1}', 'resume:2', 'frame:1']);
+  });
+
+  test('proposal requests between open and bootstrap leave the worker registry empty', async () => {
+    const { w } = openingWorker();
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer })).ok).toBe(true);
+    const operations: ResidentProposalOperation[] = [
+      {
+        kind: 'propose',
+        request: {
+          expectVersion: 'opened',
+          proposals: [
+            {
+              id: 'too-early',
+              paragraph: { kind: 'session', sessionId: 'opened', story: 'body', paraId: 'p1' },
+              suggest: { author: 'Host', date: '2026-09-30T00:00:00Z' },
+              op: 'insertText',
+              at: 'end',
+              text: '!',
+            },
+          ],
+        },
+      },
+      { kind: 'snapshot' },
+    ];
+    for (const operation of operations) {
+      const refused = await w.send({ type: 'proposal', operation });
+      expect(refused).toMatchObject({
+        ok: false,
+        error: 'Resident engine worker has not laid out its document',
+      });
+      expect(!refused.ok && refused.terminal).toBeUndefined();
+    }
+    Object.assign(w.harness.session, {
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
+      geometryReader: { version: () => 'opened' },
+    });
+    const bootstrapped = await w.send({
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      expectedFrameEpoch: 0,
+    });
+    expect(bootstrapped.ok).toBe(true);
+    const empty = await w.send({ type: 'proposal', operation: { kind: 'snapshot' } });
+    expect(empty.ok && empty.proposal?.mirror).toEqual({
+      version: 'opened',
+      proposals: { previewVersion: 0, entries: [] },
+    });
   });
 
   test('a snapshot bootstrap lays out the same provisional prefix after loading state', async () => {

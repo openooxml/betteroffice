@@ -1,16 +1,25 @@
 import type {
   YrsEngineApplyProfile,
+  YrsParagraph,
+  YrsParagraphLength,
+  YrsParagraphSpan,
   YrsRegionLayoutProgress,
   YrsResidentCaretSnapshot,
+  YrsRevisionInfo,
   YrsSelection,
   YrsSession,
+  YrsStorySegment,
 } from './index';
 import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
 import type { DocxEditResult, DocxFindTextResult, DocxReadParagraphsResult } from './edits';
-import type { DocxParagraphAnchorResult } from './paragraphIdentity';
+import type {
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentitySnapshot,
+} from './paragraphIdentity';
+import type { ProposalGeometryReader } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -51,6 +60,10 @@ export type ResidentEngineSession = Pick<
 > & {
   /** @internal */
   proposalEngine: DocxProposalSession;
+  /** @internal */
+  geometryReader: ProposalGeometryReader;
+  /** @internal */
+  paragraphIdentities(): DocxParagraphIdentitySnapshot;
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
@@ -132,8 +145,26 @@ export async function createResidentEngineSession(
       : {}),
   };
 
+  const geometryReader: ProposalGeometryReader = {
+    version: () => session.version(),
+    hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
+    storyIds: () => session.story_ids(),
+    paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
+    paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
+    paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
+    storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+    locateParagraph: (story, paraId) =>
+      JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
+    listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
+    resolveParagraphAnchor: proposalEngine.resolveParagraphAnchor,
+    findText: proposalEngine.findText,
+  };
+
   return {
     proposalEngine,
+    geometryReader,
+    paragraphIdentities: () =>
+      JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
     storiesChangedSince: (since) =>
       JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
     openDocx: (bytes, digest, generation) =>
@@ -221,6 +252,8 @@ export async function createResidentEngineSession(
     },
   };
 }
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 function randomClientId(): number {
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {

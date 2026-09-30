@@ -1,8 +1,5 @@
-import {
-  createYrsSidebarProjection,
-  type DisplayListQueries,
-} from '@betteroffice/docx/layout/render';
-import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { resolveNavigationTarget, type YrsLoc, type YrsSession } from '@betteroffice/docx/yrs';
 import { grantsCommand, grantsEditBatch, grantsWrite } from '../../../../shared/plugin-host/grants';
 import type { InvocationRefusal, PluginInvocation } from '../../../../shared/plugin-host/runtime';
 import {
@@ -102,15 +99,7 @@ export function resolveParagraph(
   target: { story: string; paraId: string }
 ): { loc: YrsLoc; position: number } | DocxPluginNavigationFailureCode {
   const { story, paraId } = target ?? {};
-  if (typeof story !== 'string' || typeof paraId !== 'string') return 'missing-target';
-  if (!session.hasStory(story)) return 'missing-target';
-  const count = session.paragraphIdCount(story, paraId);
-  if (count === 0) return 'missing-target';
-  if (count > 1) return 'ambiguous-target';
-  const loc = { story, paraId, offset: 0 };
-  const point = createYrsSidebarProjection(session).locToDisplayPoint(loc);
-  if (!point || point.hfRid) return 'unsupported';
-  return { loc, position: point.position };
+  return resolveNavigationTarget(session, story, paraId);
 }
 
 export interface DocxPluginClients {

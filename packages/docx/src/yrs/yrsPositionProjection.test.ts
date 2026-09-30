@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import type { PointPosition } from '@betteroffice/docx/plugin-api';
+import type { PointPosition } from '../plugin-api';
 import {
   createYrsInputPositionMap,
   displayPositionToYrsLoc,
   type YrsSession,
   type YrsStorySegment,
-} from '@betteroffice/docx/yrs';
+} from './index';
 import {
   createYrsPositionProjection,
   projectYrsDisplayPosition,

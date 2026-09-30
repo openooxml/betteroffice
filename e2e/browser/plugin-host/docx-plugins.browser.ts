@@ -222,15 +222,74 @@ interface LooseProbe {
         view: 'accepted';
       }): Promise<{ version: string; paragraphs: { paraId: string; text: string }[] }>;
       applyEdits(request: { expectVersion: string; steps: unknown[] }): Promise<unknown>;
+      whenLayoutComplete(options?: { timeoutMs?: number }): Promise<number>;
       getPositionAtPoint(clientX: number, clientY: number): PointHit | null;
       getEditorRef(): {
         getYrsSession(): { selection(): { head: unknown } | null };
         displayPositionToYrsLoc(hit: PointHit): unknown;
       };
     };
-    geometry: { getPositionAtPoint(clientX: number, clientY: number): PointHit | null };
+    geometry: {
+      layout: { version: string };
+      getPositionAtPoint(clientX: number, clientY: number): PointHit | null;
+    };
   };
 }
+
+test('page overlays stay on the previous layout while an edit lays out, then follow the new one', async ({
+  page,
+}) => {
+  await open(page);
+  await expect(page.locator('[data-probe-page="1"]')).not.toBeAttached();
+  const version = await page.evaluate(async () => {
+    const { editor } = (window as unknown as LooseProbe).__probe;
+    const read = await editor.readParagraphs({ view: 'accepted' });
+    const gaps = { count: 0 };
+    const observer = new MutationObserver(() => {
+      if (!document.querySelector('[data-probe-page="0"]')) gaps.count += 1;
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    Object.assign(window, {
+      __gaps: gaps,
+      __gapObserver: observer,
+      __probePage: document.querySelector('[data-probe-page="0"]'),
+    });
+    const paragraphs = Array.from({ length: 80 }, (_, index) => ({
+      text: `Filler paragraph ${index + 1} moves the document onto a second page.`,
+    }));
+    const applied = (await editor.applyEdits({
+      expectVersion: read.version,
+      steps: [
+        {
+          op: 'insertParagraphs',
+          target: { story: 'body', paraId: read.paragraphs.at(-1)!.paraId },
+          at: 'end',
+          paragraphs,
+        },
+      ],
+    })) as { version: string };
+    await editor.whenLayoutComplete({ timeoutMs: 60_000 });
+    return applied.version;
+  });
+  await expect(page.locator('[data-probe-page="1"]')).toBeAttached({ timeout: 60_000 });
+  const after = await page.evaluate(() => {
+    const { __gaps, __gapObserver, __probe, __probePage } = window as unknown as LooseProbe & {
+      __gaps: { count: number };
+      __gapObserver: MutationObserver;
+      __probePage: Element | null;
+    };
+    __gapObserver.disconnect();
+    return {
+      gaps: __gaps.count,
+      same: document.querySelector('[data-probe-page="0"]') === __probePage,
+      version: __probe.geometry.layout.version,
+    };
+  });
+  expect(after).toEqual({ gaps: 0, same: true, version });
+  await expect
+    .poll(async () => Math.max(...(await offsets(page))), { timeout: 30_000 })
+    .toBeLessThan(1.5);
+});
 
 test('a drop point on page 2 resolves like a caret click and inserts there at every zoom', async ({
   page,
