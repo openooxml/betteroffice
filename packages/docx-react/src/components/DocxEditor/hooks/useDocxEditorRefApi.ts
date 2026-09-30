@@ -523,7 +523,9 @@ export function useDocxEditorRefApi({
           steps: [step],
         });
         if (!result.ok) return false;
-        if (result.applied) editor.syncYrsInputState(true, result.changedStories);
+        if (result.applied) {
+          editor.syncYrsInputState(true, result.changedStories, { inWorker: true });
+        }
         setShowCommentsSidebar(true);
         return true;
       },

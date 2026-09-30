@@ -4502,6 +4502,17 @@ impl EditSession {
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
     }
 
+    /// How many paragraphs of `story` carry `para_id`: 0, 1, or 2 for two or
+    /// more. Errors on an unknown story.
+    pub fn paragraph_id_count(&self, story: &str, para_id: &str) -> Result<u32, JsValue> {
+        Ok(self
+            .engine
+            .doc()
+            .segment_index(story)
+            .map_err(js_err)?
+            .para_id_count(para_id))
+    }
+
     /// Every comment the session holds, sorted by id:
     /// `[{"id","author","date","done","parentId","body"}, …]`, `parentId`
     /// null for a top-level comment and `body` the JSON value it was given.

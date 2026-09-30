@@ -39,6 +39,7 @@ import { getPrimaryFontFamily } from '../../ui/fontPickerValue';
 import { normalizeFontFamilies } from '../../ui/normalizeFontFamilies';
 import { DEFAULT_STYLES } from '../../ui/StylePicker';
 import type { EditorMode } from '../internals/editing-modes';
+import { readSessionVersion } from '../internals/layoutProvenance';
 import type { PagedEditorRef } from '../PagedEditor';
 import {
   yrsHyperlinkAtSelection,
@@ -244,13 +245,13 @@ function fontOptions(
 
 interface RevisionIndex {
   session: YrsSession;
-  version: number;
+  version: string;
   ids: ReadonlySet<string>;
   navigation: DocxRevisionEnvironment[];
   spans: { revisionId: string; story: string; start: number; end: number }[];
 }
 
-function revisionIndex(session: YrsSession, version: number): RevisionIndex {
+function revisionIndex(session: YrsSession, version: string): RevisionIndex {
   const revisions = session.listRevisions();
   const projection = createYrsSidebarProjection(session);
   const ids = new Set(revisions.map((revision) => revision.revisionId));
@@ -382,10 +383,13 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
       const index = () => {
         if (!session) return null;
         const cached = revisions.current;
-        if (cached && cached.session === session && cached.version === documentVersion.current) {
+        // The session's own version has moved by the time any update listener
+        // runs, including one that refreshes before ours counts the update.
+        const version = `${documentVersion.current}:${readSessionVersion(session) ?? ''}`;
+        if (cached && cached.session === session && cached.version === version) {
           return cached;
         }
-        revisions.current = revisionIndex(session, documentVersion.current);
+        revisions.current = revisionIndex(session, version);
         return revisions.current;
       };
       return {

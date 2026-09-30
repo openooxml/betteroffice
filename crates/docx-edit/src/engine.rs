@@ -2106,20 +2106,16 @@ impl EngineSession {
         };
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
-        let mut requirements = BTreeMap::new();
-        let mut preview_superset_safe = true;
+        let mut collector = docx_layout::measure_blocks::FontRequirementCollector::default();
         if cache_key.is_some() {
-            preview_superset_safe &=
-                docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                    input.measured.iter().map(|measured| &measured.block),
-                    default_family,
-                    &mut requirements,
-                );
-        } else {
-            docx_layout::measure_blocks::collect_font_requirements_into(
+            collector.collect_preview(
                 input.measured.iter().map(|measured| &measured.block),
                 default_family,
-                &mut requirements,
+            );
+        } else {
+            collector.collect(
+                input.measured.iter().map(|measured| &measured.block),
+                default_family,
             );
         }
         if let Some(body_story) = body_story {
@@ -2147,28 +2143,35 @@ impl EngineSession {
                     .map(|r_id| format!("hf:{r_id}")),
                 );
             }
-            stories.extend(notes.contents.into_iter().map(|content| {
-                let prefix = match content.note_kind {
-                    docx_layout::footnotes::NoteKind::Footnote => "fn",
-                    docx_layout::footnotes::NoteKind::Endnote => "en",
-                };
-                format!("{prefix}:{}", content.id)
-            }));
+            let note_stories: BTreeMap<_, _> = notes
+                .contents
+                .into_iter()
+                .map(|content| {
+                    let prefix = match content.note_kind {
+                        docx_layout::footnotes::NoteKind::Footnote => "fn",
+                        docx_layout::footnotes::NoteKind::Endnote => "en",
+                    };
+                    (format!("{prefix}:{}", content.id), content)
+                })
+                .collect();
+            stories.extend(note_stories.keys().cloned());
             for story in stories {
                 self.with_lowered_story(&story, &render_env, |blocks| {
-                    if cache_key.is_some() {
-                        preview_superset_safe &=
-                            docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                                blocks,
-                                default_family,
-                                &mut requirements,
-                            );
-                    } else {
-                        docx_layout::measure_blocks::collect_font_requirements_into(
-                            blocks,
-                            default_family,
-                            &mut requirements,
+                    let blocks = if let Some(content) = note_stories.get(&story) {
+                        let mut blocks = blocks.to_vec();
+                        apply_note_presentation(
+                            &mut blocks,
+                            content.display_number.unwrap_or(1),
+                            content.display_label.as_deref().unwrap_or("1"),
                         );
+                        Cow::Owned(blocks)
+                    } else {
+                        Cow::Borrowed(blocks)
+                    };
+                    if cache_key.is_some() {
+                        collector.collect_preview(blocks.iter(), default_family);
+                    } else {
+                        collector.collect(blocks.iter(), default_family);
                     }
                 })
                 .map_err(|error| error.to_string())?;
@@ -2182,15 +2185,14 @@ impl EngineSession {
                             .expect("resident story exists after lowering")
                             .revealable_blocks,
                     );
-                    preview_superset_safe &=
-                        docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                            revealable.iter(),
-                            default_family,
-                            &mut requirements,
-                        );
+                    collector.collect_preview(revealable.iter(), default_family);
                 }
             }
         }
+        let requirements = collector.finish();
+        let preview_superset_safe = requirements
+            .values()
+            .all(|requirement| requirement.scripts.is_empty());
         if let Some((doc_epoch, request_fingerprint)) = cache_key
             && !preview_superset_safe
         {
@@ -6405,6 +6407,56 @@ mod tests {
         assert!(requirements[0].get("blocks").is_none());
         assert_eq!(engine.stats().layout_epoch, 0);
         assert_eq!(engine.stats().retained_measured_blocks, 0);
+    }
+
+    #[test]
+    fn region_font_preflight_covers_generated_note_labels() {
+        for (prefix, note_kind) in [("fn", "footnote"), ("en", "endnote")] {
+            let engine = EngineSession::new(1371);
+            let body = [serde_json::json!({
+                "type": "paragraph",
+                "formatting": {"runProperties": {"fontFamily": {"ascii": "Arial"}}},
+                "content": [{
+                    "type": "run",
+                    "formatting": {"fontFamily": {
+                        "ascii": "Arial", "hAnsi": "Arial", "cs": "Calibri"
+                    }},
+                    "content": [{"type": "text", "text": "Body"}]
+                }]
+            })];
+            let note = [serde_json::json!({
+                "type": "paragraph",
+                "formatting": {"runProperties": {"fontFamily": {"ascii": "Arial"}}},
+                "content": []
+            })];
+            crate::seed::seed_blocks(
+                engine.doc(),
+                None,
+                &[("body".to_owned(), &body), (format!("{prefix}:5"), &note)],
+            )
+            .unwrap();
+            for preview in [serde_json::json!({}), serde_json::json!({"9": "accepted"})] {
+                let request = serde_json::json!({
+                    "bodyStory": "body",
+                    "notes": {"contents": [{"id": 5, "noteKind": note_kind, "height": 0}]},
+                    "measurement": {"defaults": {"fontFamily": "Calibri"}},
+                    "renderEnv": {"revisionPreview": preview}
+                });
+                let requirements: Vec<serde_json::Value> = serde_json::from_str(
+                    &engine
+                        .layout_font_requirements_json(&request.to_string())
+                        .unwrap(),
+                )
+                .unwrap();
+
+                assert!(
+                    requirements
+                        .iter()
+                        .any(|requirement| requirement["key"] == "calibri|0|0"),
+                    "{note_kind}: {requirements:?}"
+                );
+            }
+        }
     }
 
     #[test]
