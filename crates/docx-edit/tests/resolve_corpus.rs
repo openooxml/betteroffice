@@ -469,6 +469,90 @@ fn deferred_plain_joins_preserve_the_first_paragraph_in_either_order() {
 }
 
 #[test]
+fn mark_only_rejection_preserves_a_deferred_plain_join_donor() {
+    let mut outcomes = Vec::new();
+    for mark_first in [false, true] {
+        let doc = EditingDoc::new(325);
+        let ids = seed_pending_block(&doc, "table", false);
+        doc.accept_change(&local(), &ChangeTarget::Revision(ids[0].clone()))
+            .unwrap();
+        let first = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.set_paragraph_attr(&first, "alignment", Any::from("right"))
+            .unwrap();
+        plain_join(&doc, &first, "delete");
+        if mark_first {
+            doc.reject_change(
+                &local(),
+                &ChangeTarget::Range(StoryRange::new("body", 3, 4)),
+            )
+            .unwrap();
+            assert_eq!(join_donor(&doc), Some(Any::Bool(true)));
+            assert_inherited_block_revision(&doc, &ids[1], true);
+        }
+        doc.reject_change(&local(), &ChangeTarget::Revision(ids[1].clone()))
+            .unwrap();
+        assert_joined_body(&doc, "oldtail");
+        let paragraph = doc.paragraphs("body").unwrap().remove(0);
+        assert_eq!(paragraph.para_id, first);
+        assert_eq!(
+            paragraph.properties.get("alignment"),
+            Some(&Any::from("right"))
+        );
+        outcomes.push(paragraph);
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
+#[test]
+fn deferred_plain_joins_preserve_the_first_paragraph_across_multiple_tables() {
+    let mut outcomes = Vec::new();
+    for second_first in [false, true] {
+        let doc = EditingDoc::new(326);
+        let ids = seed_pending_block(&doc, "table", false);
+        doc.accept_change(&local(), &ChangeTarget::Revision(ids[0].clone()))
+            .unwrap();
+        let first = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.set_paragraph_attr(&first, "alignment", Any::from("right"))
+            .unwrap();
+        doc.insert_text(
+            &local(),
+            Position::new("body", 5),
+            "mid",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        doc.split_paragraph(&local(), Position::new("body", 8), None)
+            .unwrap();
+        let second = doc
+            .insert_table(&suggesting("Carol"), Position::new("body", 9), 1, 1)
+            .unwrap()
+            .revision_ids[0]
+            .clone();
+        assert_ne!(ids[1], second);
+        plain_join(&doc, &first, "delete");
+        doc.delete_range(&local(), StoryRange::new("body", 8, 9))
+            .unwrap();
+        let mut blocks = [ids[1].clone(), second];
+        if second_first {
+            blocks.reverse();
+        }
+        for id in blocks {
+            doc.reject_change(&local(), &ChangeTarget::Revision(id))
+                .unwrap();
+        }
+        assert_joined_body(&doc, "oldmidtail");
+        let paragraph = doc.paragraphs("body").unwrap().remove(0);
+        assert_eq!(paragraph.para_id, first);
+        assert_eq!(
+            paragraph.properties.get("alignment"),
+            Some(&Any::from("right"))
+        );
+        outcomes.push(paragraph);
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
+#[test]
 fn deferred_resolution_joins_keep_the_surviving_paragraph_properties() {
     for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
         let doc = EditingDoc::new(321);

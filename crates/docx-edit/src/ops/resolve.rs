@@ -288,13 +288,21 @@ fn resolve_story(
                         donor_props.retain(|(key, _)| {
                             !matches!(key.as_str(), PPR_INS | PPR_DEL | JOIN_DONOR)
                         });
+                        // The survivor keeps its own pending revisions and deferred join.
+                        donor_props.extend([PPR_INS, PPR_DEL, JOIN_DONOR].into_iter().filter_map(
+                            |key| {
+                                map_stamp(&survivor, txn, key).map(|value| (key.to_owned(), value))
+                            },
+                        ));
                         adopt_pilcrow(txn, &survivor, &donor_id, &donor_props);
                     }
                     story.remove_range(txn, chunk.start, 1);
                     removed += 1;
                     continue;
                 }
-                if ins_hit || del_hit {
+                let deferred =
+                    join && Some(chunk.start) != final_pilcrow && boundary_revisions.is_some();
+                if (ins_hit || del_hit) && !deferred {
                     map.remove(txn, JOIN_DONOR);
                 }
                 for (ppr_key, attr_key, ppr_stamp, attr_stamp) in [
