@@ -2487,6 +2487,19 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// Applies an update another replica of this document committed for a host batch.
+    /// It commits outside undo history and notifies as a local change.
+    pub fn apply_host_update(&self, update: &[u8]) -> Result<(), JsValue> {
+        self.undo.add_undo_barrier();
+        let result = self
+            .engine
+            .doc()
+            .apply_host_update_v1(update)
+            .map_err(js_err);
+        self.undo.add_undo_barrier();
+        result
+    }
+
     /// Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
     /// committed transaction. `update` is v1-encoded — feed it straight to
     /// [`EditSession::apply_update`] on a peer — and is copied out of wasm

@@ -5,7 +5,11 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
-import { createProposalRegistry, type DocxProposalSession } from './proposals';
+import {
+  createProposalRegistry,
+  executeProposalRound,
+  type DocxProposalSession,
+} from './proposals';
 import {
   createYrsSession,
   proposalRevisionPreview,
@@ -1086,4 +1090,90 @@ describe('YrsSession host proposals', () => {
     snapshotOf(propose(session, replace('a', '00000006', 'Tail', 'End')));
     expect(session.getProposals().proposals.map((record) => record.id)).toEqual(['a']);
   });
+});
+
+function roundEngine(session: YrsSession): DocxProposalSession {
+  return {
+    ...session,
+    settleRevisions: () => {
+      throw new Error('unexpected settlement');
+    },
+  };
+}
+
+it('adopts a replica proposal round with the same text and revisions as a direct round', async () => {
+  const main = await open(fixture(paragraph('00000001', run('Hello world'))));
+  const state = main.encodeState();
+  const executionClientId = nextClientId++;
+  const peer = await createYrsSession({ clientId: executionClientId });
+  const direct = await createYrsSession({ clientId: executionClientId });
+  sessions.push(peer, direct);
+  peer.applyUpdate(state);
+  direct.applyUpdate(state);
+  const resolved = main.resolveParagraphAnchor(at('00000001'));
+  if (resolved.status !== 'found') throw new Error('expected a resolved paragraph');
+  const proposal: DocxProposalInput = {
+    ...replace('replica', '00000001', 'world', 'earth'),
+    paragraph: resolved.anchor,
+  };
+  const updates: Uint8Array[] = [];
+  peer.onUpdate((update) => updates.push(update));
+  const outcome = executeProposalRound(roundEngine(peer), [proposal], peer.version());
+  if (!outcome.ok) throw new Error(outcome.failure.message);
+  expect(updates.length).toBeGreaterThan(0);
+  for (const update of updates) main.applyHostUpdate(update);
+  const snapshot = snapshotOf(propose(direct, proposal));
+
+  for (const view of ['accepted', 'original'] as const) {
+    expect(texts(main, view)).toEqual(texts(peer, view));
+    expect(texts(main, view)).toEqual(texts(direct, view));
+  }
+  expect(texts(main, 'accepted')).toEqual(['Hello earth']);
+  expect(texts(main, 'original')).toEqual(['Hello world']);
+  const revisions = (session: YrsSession) =>
+    session.listRevisions().map((revision) => revision.revisionId).sort();
+  expect(revisions(main)).toEqual(revisions(peer));
+  expect(revisions(main)).toEqual(revisions(direct));
+  expect(outcome.receipts.flatMap((receipt) => receipt.revisionIds)).toEqual([
+    ...snapshot.proposals[0]!.revisionIds,
+  ]);
+  expect(main.getProposals().proposals).toEqual([]);
+  expect(peer.getProposals().proposals).toEqual([]);
+});
+
+it('notifies adopted host updates as local and keeps earlier edits undoable', async () => {
+  const main = await open(
+    fixture(
+      paragraph('00000003', run('Keep this sentence.')) + paragraph('00000006', run('Tail'))
+    )
+  );
+  main.beginUndoCapture();
+  main.insertText({ story: 'body', paraId: '00000006', offset: 4 }, '.');
+  main.addUndoBoundary();
+  const peer = await createYrsSession({ clientId: nextClientId++ });
+  sessions.push(peer);
+  peer.applyUpdate(main.encodeState());
+  const resolved = main.resolveParagraphAnchor(at('00000003'));
+  if (resolved.status !== 'found') throw new Error('expected a resolved paragraph');
+  const updates: Uint8Array[] = [];
+  peer.onUpdate((update) => updates.push(update));
+  const outcome = executeProposalRound(
+    roundEngine(peer),
+    [{ ...replace('replica', '00000003', 'Keep', 'Hold'), paragraph: resolved.anchor }],
+    peer.version()
+  );
+  if (!outcome.ok) throw new Error(outcome.failure.message);
+  const origins: string[] = [];
+  const detach = main.onUpdate((_, origin) => origins.push(origin));
+  for (const update of updates) main.applyHostUpdate(update);
+  detach();
+
+  expect(origins.length).toBeGreaterThan(0);
+  expect(origins.every((origin) => origin === 'local')).toBe(true);
+  expect(main.undo()).toBe(true);
+  expect(texts(main, 'accepted')[0]).toBe('Hold this sentence.');
+  expect(texts(main, 'original')[0]).toBe('Keep this sentence.');
+  expect(texts(main, 'accepted').at(-1)).toBe('Tail');
+  expect(main.canUndo()).toBe(false);
+  expect(main.undo()).toBe(false);
 });

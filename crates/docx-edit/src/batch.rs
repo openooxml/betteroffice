@@ -41,7 +41,7 @@ const MAX_INSERTED_UNITS: usize = 1_048_576;
 const MAX_INSERTED_PARAGRAPHS: usize = 1_024;
 const MAX_STAGING_BYTES: usize = 256 * 1024 * 1024;
 /// Transaction origin of batches that stay out of local undo history.
-const HOST_ORIGIN: &str = "host";
+pub(crate) const HOST_ORIGIN: &str = "host";
 
 /// An opaque, session-scoped optimistic-concurrency token. Compare for equality only.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
