@@ -72,6 +72,7 @@ import {
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
 import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
+import { registeredWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { nearestPages } from './pageBuildOrder';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
@@ -86,6 +87,9 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   /** Restamps the shown layout after the session started mirroring the worker's version. */
   mirrorReady(): void;
 }
+
+const holdsWorkerProposals = (session: YrsSession): boolean =>
+  registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true;
 
 export type OpenInWorker = (
   session: YrsSession,
@@ -1136,7 +1140,9 @@ export function useRustDisplayList(
     async <T,>(
       hostEngine: YrsSession,
       request: (owner: NonNullable<typeof workerRef.current>) => Promise<T>,
-      onOwner?: (owner: NonNullable<typeof workerRef.current>) => void
+      onOwner?: (owner: NonNullable<typeof workerRef.current>) => void,
+      // The worker holds changes its source bytes lack: no fresh worker may stand in for it.
+      keepWorker = false
     ): Promise<T> => {
       const source = workerOpenSourcesRef.current.get(hostEngine);
       const load = sessionLoad(hostEngine);
@@ -1153,6 +1159,7 @@ export function useRustDisplayList(
           throw new SupersededPreviewError();
         }
         if (workerRef.current?.engine !== hostEngine) {
+          if (keepWorker) throw new Error('The resident worker holding this document is gone');
           const owner = workerFor(hostEngine);
           owner.opened = true;
           owner.opening = owner.client
@@ -1186,7 +1193,9 @@ export function useRustDisplayList(
           return result;
         } catch (error) {
           if (error instanceof ResidentWorkerOutOfMemoryError) {
-            if (replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry') continue;
+            if (replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry' && !keepWorker) {
+              continue;
+            }
           } else {
             if (!isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
           }
@@ -1217,9 +1226,27 @@ export function useRustDisplayList(
           ...opened,
           encodeState: () => requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState()),
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
-          proposal: (op) => requestOpenedWorker(hostEngine, (owner) => owner.client.proposal(op)),
-          documentRead: (read) => requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
-          handOver: () => requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
+          proposal: (op) =>
+            requestOpenedWorker(
+              hostEngine,
+              (owner) => owner.client.proposal(op),
+              undefined,
+              holdsWorkerProposals(hostEngine)
+            ),
+          documentRead: (read) =>
+            requestOpenedWorker(
+              hostEngine,
+              (owner) => owner.client.documentRead(read),
+              undefined,
+              holdsWorkerProposals(hostEngine)
+            ),
+          handOver: () =>
+            requestOpenedWorker(
+              hostEngine,
+              (owner) => owner.client.handOver(),
+              undefined,
+              holdsWorkerProposals(hostEngine)
+            ),
           fallback: () => {
             const outOfMemory = outOfMemoryRef.current.get(hostEngine);
             if (outOfMemory) throw outOfMemory;

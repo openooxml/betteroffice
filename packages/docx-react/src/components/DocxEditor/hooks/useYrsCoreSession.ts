@@ -101,6 +101,10 @@ interface WorkerOpenOptions {
   pendingCompletion?: unknown;
   /** Leaves the replica unhydrated until a caller needs it; see requestReplica. */
   hydrateOnDemand?: boolean;
+  /** A worker-held proposal changed document content. */
+  onWorkerContentChange?: () => void;
+  /** The worker found tracked changes of its own in the opened document. */
+  onWorkerRevisions?: () => void;
 }
 
 export interface YrsCoreSessionOptions {
@@ -365,6 +369,7 @@ export function useYrsCoreSession(
   const startReplicaRef = useRef<(() => void) | null>(null);
   // Asks the worker whether the document has tracked changes, once per session.
   const revisionQueryRef = useRef<(() => void) | null>(null);
+  const workerLaidOutRef = useRef<(() => void) | null>(null);
   const replicaWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inheritedFrameRef = useRef<object | null>(null);
   const renderedFrameRef = useRef(workerOpen?.renderedFrame ?? null);
@@ -636,9 +641,14 @@ export function useYrsCoreSession(
               () => hydrateOnDemandRef.current
             );
             if (workerOpenRef.current?.workerProposals) {
+              const laidOut = new Promise<void>((resolve) => {
+                workerLaidOutRef.current = resolve;
+              });
               const authority = registerWorkerProposalAuthority(next, worker, {
                 relayout: () => workerOpenRef.current?.refreshWorkerLayout?.(),
                 current: () => !stale(),
+                laidOut: () => laidOut,
+                contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
                 adopted: (version) => {
                   adoptWorkerOpenMirrorVersion(next, version);
                   worker.mirrorReady();
@@ -657,7 +667,11 @@ export function useYrsCoreSession(
               // Tracked changes show cards that read the replica.
               void worker.revisionCount().then(
                 (count) => {
-                  if (!stale() && sessionRef.current === next && count > 0) {
+                  if (stale() || sessionRef.current !== next || count === 0) return;
+                  // Cards for them open the sidebar, whose trigger loads the replica.
+                  if (workerOpenRef.current?.onWorkerRevisions) {
+                    workerOpenRef.current.onWorkerRevisions();
+                  } else {
                     startReplicaRef.current?.();
                   }
                 },
@@ -738,6 +752,8 @@ export function useYrsCoreSession(
       pendingReplicaRef.current = null;
       startReplicaRef.current = null;
       revisionQueryRef.current = null;
+      workerLaidOutRef.current?.();
+      workerLaidOutRef.current = null;
       if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
       replicaWaitTimerRef.current = null;
       openedWorker?.destroy();
@@ -781,14 +797,15 @@ export function useYrsCoreSession(
       !start
     ) return;
     if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
-    // The replica blocks this thread: it loads once the worker is laying out the rest.
-    if (workerOpen?.pendingCompletion === session) return;
+    workerLaidOutRef.current?.();
     const authority = registeredWorkerProposalAuthority(session);
     if (authority) {
       void authority.initialize().catch((error) => {
         console.error('[yrs] failed to initialize worker proposals', error);
       });
     }
+    // The replica blocks this thread: it loads once the worker is laying out the rest.
+    if (workerOpen?.pendingCompletion === session) return;
     // Asked after the first frame and the layout's completion, so it delays neither.
     if (workerOpen?.hydrateOnDemand) {
       revisionQueryRef.current?.();

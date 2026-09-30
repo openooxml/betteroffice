@@ -80,8 +80,12 @@ export function registerWorkerProposalAuthority(
   hooks: {
     relayout(): void;
     current(): boolean;
+    /** Settles once the worker has laid the document out; proposal requests wait for it. */
+    laidOut(): Promise<void>;
     adopted(version: string): void;
     handedOver(version: string): void;
+    /** A worker proposal changed document content. */
+    contentChanged(): void;
   }
 ): WorkerProposalAuthority {
   let tail: Promise<unknown> = Promise.resolve();
@@ -109,16 +113,16 @@ export function registerWorkerProposalAuthority(
     geometry = reply.geometry;
     notify();
   };
+  // Calls answer in order, whichever side takes them.
   const route = <T>(call: () => Promise<T>, main: () => T | Promise<T>): Promise<T> => {
     const ready = authority.initialize();
     void ready.catch(() => {});
-    return enqueue(async (): Promise<{ main: true } | { main: false; value: T }> => {
-      if (handingOver) return { main: true };
-      await ready;
-      assertCurrent();
-      return { main: false, value: await call() };
-    }).then(async (result) => {
-      if (!result.main) return result.value;
+    return enqueue(async () => {
+      if (!handingOver) {
+        await ready;
+        assertCurrent();
+        return call();
+      }
       await awaitWorkerOpenReplica(session);
       assertCurrent();
       return main();
@@ -146,6 +150,7 @@ export function registerWorkerProposalAuthority(
     ) holdsState = true;
     store(reply);
     if (pending && reply.changedStories.length > 0) hooks.relayout();
+    if (reply.changedStories.length > 0) hooks.contentChanged();
     if (!reply.result) throw new Error('The resident worker did not return a proposal result');
     return reply.result;
   }, main);
@@ -155,6 +160,7 @@ export function registerWorkerProposalAuthority(
       if (initializing) return initializing;
       if (handingOver) return Promise.resolve(awaitWorkerOpenReplica(session));
       initializing = enqueue(async () => {
+        await hooks.laidOut();
         assertCurrent();
         const reply = await worker.proposal({ kind: 'snapshot' });
         assertCurrent();

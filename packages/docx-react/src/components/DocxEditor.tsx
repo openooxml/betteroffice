@@ -74,6 +74,7 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
+import { requestWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import {
@@ -1217,6 +1218,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     [reportDocumentLayoutError, resetSettled, yrsSeedGeneration]
   );
   useDocxEnginePrewarmOnBytes(experimentalPrewarm, yrsSeedBytes);
+  // A read-only worker-open document keeps host proposals in the worker until the replica loads.
+  const workerProposals = modeReadOnly && !collaboration;
+  const workerContentChangeRef = useRef<() => void>(() => {});
+  const workerRevisionsRef = useRef<() => void>(() => {});
   const yrsCore = useYrsCoreSession(
     true,
     history.state,
@@ -1240,11 +1245,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       workerOpen: experimentalWorkerOpen
         ? {
             openInWorker: canvasRenderer.openInWorker,
-            workerProposals: modeReadOnly && !collaboration,
+            workerProposals,
             refreshWorkerLayout: () => pagedEditorRef.current?.refreshWorkerLayout(),
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
             pendingCompletion: canvasRenderer.pendingCompletion,
-            hydrateOnDemand: modeReadOnly && !collaboration,
+            hydrateOnDemand: workerProposals,
+            onWorkerContentChange: () => workerContentChangeRef.current(),
+            onWorkerRevisions: () => workerRevisionsRef.current(),
           }
         : undefined,
       mediaTokens,
@@ -1535,6 +1542,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pushDocument,
     yrsCore.documentFromYrs,
   ]);
+  // A worker-held change reaches document listeners once the replica holds it; without them,
+  // nothing needs the replica.
+  workerContentChangeRef.current = () => {
+    const session = yrsCore.session;
+    if (!session || (!onChange && contentChangeSubscribersRef.current.size === 0)) return;
+    void requestWorkerOpenReplica(session)?.then(
+      () => {
+        if (coreSessionRef.current === session) handleYrsContentChange();
+      },
+      () => {}
+    );
+  };
 
   // Recompute the floating "add comment" button position from the current Yrs
   // selection + page/container geometry. Called from handleSelectionChange and
@@ -2163,13 +2182,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   const requestReplica = yrsCore.requestReplica;
   const replicaPending = Boolean(experimentalWorkerOpen && yrsCore.session && !yrsCore.replicaReady);
-  // Plugins, sidebars, the outline and geometry callbacks read the replica.
+  // Sidebars and the outline read the replica; so do plugins and geometry callbacks, unless the
+  // worker serves them proposals.
   const replicaWanted =
-    (plugins?.length ?? 0) > 0 ||
+    (!(experimentalWorkerOpen && workerProposals) &&
+      ((plugins?.length ?? 0) > 0 || Boolean(onRenderedDomContextReady))) ||
     showCommentsSidebar ||
     sidebarOpen ||
-    showOutline ||
-    Boolean(onRenderedDomContextReady);
+    showOutline;
   useEffect(() => {
     if (replicaPending && replicaWanted) requestReplica();
   }, [replicaPending, replicaWanted, requestReplica, yrsCore.session]);
@@ -2313,6 +2333,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     sidebarAutoOpenedRef.current = true;
     setShowCommentsSidebar(true);
   }, [commentSidebarItems, getProposalAnchorKeys, setShowCommentsSidebar]);
+  // A document whose worker found tracked changes asks for the sidebar, as a loaded one does; a
+  // host that keeps the sidebar closed keeps the replica unloaded.
+  workerRevisionsRef.current = () => setShowCommentsSidebar(true);
 
   const editorContainerStyle: CSSProperties = {
     flex: 1,

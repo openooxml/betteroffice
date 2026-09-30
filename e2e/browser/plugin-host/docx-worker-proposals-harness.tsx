@@ -67,9 +67,8 @@ export type WorkerProposalProbe = typeof probe;
 
 (window as unknown as { __workerProposalProbe: WorkerProposalProbe }).__workerProposalProbe = probe;
 (globalThis as unknown as {
-  __workerProposalTest: { suppressAutomaticReplica: boolean; captureSession(session: YrsSession): void };
+  __workerProposalTest: { captureSession(session: YrsSession): void };
 }).__workerProposalTest = {
-  suppressAutomaticReplica: readOnly,
   captureSession(session) {
     probe.session = session;
     probe.captures += 1;

@@ -272,7 +272,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'revisionCount') {
     if (!session) throw new Error('Resident engine worker is not initialized');
-    reply({ id: request.id, ok: true, revisionCount: session.revisionCount() });
+    // Host proposals' revisions are not the document's own.
+    const proposed = new Set(proposals?.snapshot().proposals.flatMap((p) => p.revisionIds));
+    reply({ id: request.id, ok: true, revisionCount: session.revisionCount(proposed) });
     return;
   }
   if (request.type === 'eraseCaret') {

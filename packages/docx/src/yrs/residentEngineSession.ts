@@ -72,7 +72,8 @@ export type ResidentEngineSession = Pick<
   openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
   /** The whole document state as one yrs v1 update. */
   encodeState(): Uint8Array;
-  revisionCount(): number;
+  /** Tracked changes in the document, leaving out the revisions in `excluding`. */
+  revisionCount(excluding?: ReadonlySet<string>): number;
   /** The retained region layout pass without serializing its reply. */
   layoutDocumentWithRegionsRetained(input: string): void;
   /** The retained region layout's `headersFooters` JSON, when it has any. */
@@ -173,7 +174,10 @@ export async function createResidentEngineSession(
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       ),
     encodeState: () => session.encode_state(),
-    revisionCount: () => JSON.parse(session.list_revisions()).length,
+    revisionCount: (excluding) =>
+      (JSON.parse(session.list_revisions()) as { revisionId: string }[]).filter(
+        (revision) => !excluding?.has(revision.revisionId)
+      ).length,
     registerFont: (bytes) => session.register_measure_font(bytes),
     registerSubstituteFont: (base, family) =>
       session.register_substitute_measure_font(base, family),

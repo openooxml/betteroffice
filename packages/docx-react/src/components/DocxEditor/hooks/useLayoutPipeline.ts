@@ -25,7 +25,11 @@ import {
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
 import { documentPageCount } from './documentPageCount';
 import type { FontRequirementsInWorker, LayoutInWorker } from './useDisplayList';
-import { ensureWorkerOpenReplica, workerOpenSourceVersion } from '../internals/workerOpenReplica';
+import {
+  ensureWorkerOpenReplica,
+  workerOpenReplicaPending,
+  workerOpenSourceVersion,
+} from '../internals/workerOpenReplica';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
@@ -313,6 +317,21 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Layout Pipeline
   // =========================================================================
 
+  const workerHeld = useCallback(
+    (owner: YrsSession): boolean =>
+      workerOpenEnabledRef.current && workerOpenReplicaPending(owner),
+    []
+  );
+  const queueWorkerPass = useCallback((owner: YrsSession): void => {
+    queuedBehindWorkerRef.current = true;
+    markLayoutQueued(owner, true);
+    pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, true);
+    pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
+      pendingLayoutOriginRef.current,
+      'remote'
+    );
+  }, []);
+
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
       const onHost = options?.onHost === true || pendingOnHostRef.current;
@@ -560,12 +579,16 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               // the newest layout there is, so it paints but settles no wait.
               // A queued pass supersedes it even at the same version, such as a
               // revision preview change, and lays out in its place when it failed.
-              const queued = queuedBehindWorkerRef.current;
               const stale =
                 readSessionVersion(session) !==
                 (workerOpenEnabledRef.current
                   ? workerOpenSourceVersion(session, sourceVersion)
                   : sourceVersion);
+              // A document only the worker holds lays out its newer state there, not here.
+              if (stale && !queuedBehindWorkerRef.current && workerHeld(session)) {
+                queueWorkerPass(session);
+              }
+              const queued = queuedBehindWorkerRef.current;
               if (!computation || (stale && !queued)) {
                 if (!queued) layOutHere();
                 return;
@@ -586,7 +609,12 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                     if (queuedBehindWorkerRef.current) markSupersededLayout(complete.layout);
                     // Nothing the user did changed: keep their viewport.
                     applyComputation(complete, 'remote');
-                  } else if (!queuedBehindWorkerRef.current) {
+                  } else if (queuedBehindWorkerRef.current) {
+                    return;
+                  } else if (complete && workerHeld(session)) {
+                    queueWorkerPass(session);
+                    requestPass();
+                  } else {
                     layOutHere();
                   }
                 },
@@ -628,6 +656,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       scrollRestoreController,
       requestPass,
       releaseWorkerPrewarm,
+      workerHeld,
+      queueWorkerPass,
     ]
   );
 

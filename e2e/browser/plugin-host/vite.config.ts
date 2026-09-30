@@ -25,16 +25,6 @@ export default defineConfig({
             'replicas.set(session, replica); globalThis.__workerProposalTest?.captureSession(session);'
           );
         }
-        if (file.endsWith('/DocxEditor/hooks/useYrsCoreSession.ts')) {
-          // TODO(#1052): remove this automatic-start stub once worker replicas hydrate on demand.
-          if (!source.includes('requestWorkerOpenReplica(next);')) {
-            this.error('Update the worker-proposal automatic-start stub after #1052');
-          }
-          return source.replace(
-            'requestWorkerOpenReplica(next);',
-            'if (!globalThis.__workerProposalTest?.suppressAutomaticReplica) requestWorkerOpenReplica(next);'
-          );
-        }
       },
     },
   ],
