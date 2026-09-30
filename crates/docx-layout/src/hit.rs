@@ -1182,7 +1182,10 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
         _ => return false,
     };
     let (left, top) = (left.as_f64().unwrap_or(0.0), top.as_f64().unwrap_or(0.0));
-    let (width, height) = (width.as_f64().unwrap_or(0.0), height.as_f64().unwrap_or(0.0));
+    let (width, height) = (
+        width.as_f64().unwrap_or(0.0),
+        height.as_f64().unwrap_or(0.0),
+    );
     x >= left && x <= left + width && y >= top && y <= top + height
 }
 
