@@ -77,7 +77,8 @@ export interface UseLayoutPipelineOptions {
   pageGap: number;
   zoom: number;
   residentMeasurementConfig: (
-    requirements: ResidentFontRequirement[]
+    requirements: ResidentFontRequirement[],
+    warm?: ResidentFontRequirement[]
   ) => ResidentMeasurementConfig | null;
   /**
    * Rust measurement readiness gate (`useRustMeasurement.deferLayoutPass`).
@@ -133,21 +134,18 @@ function mergeInWorker(current: boolean | null, next: boolean): boolean {
   return (current ?? true) && next;
 }
 
-/**
- * The font preflight input for `request`. With proposals open it asks for the requirements of
- * every decision, so the layout before the first decision measures as the decisions' do.
- */
-function fontRequirementsInput(
+/** Preflight for warming every proposal decision's fonts. */
+function supersetPreflightInput(
   session: YrsSession,
   request: ReturnType<typeof buildResidentRegionLayoutRequest>
-): string {
-  let proposals = 0;
+): string | null {
   try {
-    proposals = session.getProposals().proposals.length;
+    return session.getProposals().proposals.length > 0
+      ? JSON.stringify({ ...request, revisionFontSuperset: true })
+      : null;
   } catch {
-    // A session without a proposal registry has no decisions to prepare for.
+    return null;
   }
-  return JSON.stringify(proposals > 0 ? { ...request, revisionFontSuperset: true } : request);
 }
 
 export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipelineReturn {
@@ -368,19 +366,27 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         return;
       }
 
-      const run = (workerRequirements?: string | null): void => {
+      const run = (workerRequirements?: string | null, workerWarm?: string | null): void => {
         let measurement: ResidentMeasurementConfig | null = null;
         try {
           const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
-          const input = fontRequirementsInput(session, request);
+          const input = JSON.stringify(request);
+          const warmInput = supersetPreflightInput(session, request);
           const pendingRequirements =
             workerOpenEnabledRef.current && workerRequirements === undefined
               ? fontRequirementsInWorkerRef.current?.(session, input)
               : null;
           if (pendingRequirements) {
-            void pendingRequirements.then(
-              (requirements) => {
-                if (pass === passRef.current && sessionRef.current === session) run(requirements);
+            const pendingWarm = warmInput
+              ? Promise.resolve().then(
+                  () => fontRequirementsInWorkerRef.current?.(session, warmInput) ?? null
+                )
+              : null;
+            void Promise.all([pendingRequirements, pendingWarm]).then(
+              ([requirements, warm]) => {
+                if (pass === passRef.current && sessionRef.current === session) {
+                  run(requirements, warm);
+                }
               },
               (error: unknown) => {
                 if (pass !== passRef.current || sessionRef.current !== session) return;
@@ -397,7 +403,12 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           const requirements = JSON.parse(
             workerRequirements ?? session.layoutFontRequirementsJson(input)
           ) as ResidentFontRequirement[];
-          measurement = residentMeasurementConfig(requirements);
+          const warm = warmInput
+            ? (JSON.parse(
+                workerWarm ?? session.layoutFontRequirementsJson(warmInput)
+              ) as ResidentFontRequirement[])
+            : undefined;
+          measurement = residentMeasurementConfig(requirements, warm);
         } catch (error) {
           console.error('[PagedEditor] Resident font preflight error:', error);
           markLayoutQueued(session, false);
@@ -806,7 +817,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     if (!session) return null;
     const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
     const requirements = JSON.parse(
-      session.layoutFontRequirementsJson(fontRequirementsInput(session, request))
+      session.layoutFontRequirementsJson(JSON.stringify(request))
     ) as ResidentFontRequirement[];
     const measurement = residentMeasurementConfig(requirements);
     if (!measurement) return null;

@@ -26,9 +26,11 @@ export interface UseRustMeasurementOptions {
 export interface UseRustMeasurementReturn {
   deferLayoutPass: () => boolean;
   residentMeasurementConfig: (
-    requirements: ResidentFontRequirement[]
+    requirements: ResidentFontRequirement[],
+    warm?: ResidentFontRequirement[]
   ) => ResidentMeasurementConfig | null;
   runLayoutPipelineRef: React.RefObject<(() => void) | null>;
+  scheduleWarmLayoutRef: React.RefObject<(() => void) | null>;
 }
 
 /** `engine` until `release()`: fonts that finish loading after it register nothing. */
@@ -61,6 +63,7 @@ export function useRustMeasurement(
   const onErrorRef = useRef(options.onError);
   onErrorRef.current = options.onError;
   const runLayoutPipelineRef = useRef<(() => void) | null>(null);
+  const scheduleWarmLayoutRef = useRef<(() => void) | null>(null);
   const sourceRef = useRef<RustMeasureSource | null>(null);
   const sourceEngineRef = useRef<RustTextEngine | null>(null);
   const releaseSourceRef = useRef<(() => void) | null>(null);
@@ -116,6 +119,7 @@ export function useRustMeasurement(
           fedFontSourceRef.current = { buffer, fontTable };
           latestFontChainsRef.current = {};
           requiredRef.current = new Map();
+          requirementWarmupsRef.current.clear();
         }
         if (firstLoad) runLayoutPipelineRef.current?.();
       } catch (error) {
@@ -146,12 +150,16 @@ export function useRustMeasurement(
   const deferLayoutPass = useCallback((): boolean => sourceRef.current === null, []);
 
   const residentMeasurementConfig = useCallback(
-    (requirements: ResidentFontRequirement[]): ResidentMeasurementConfig | null => {
+    (
+      requirements: ResidentFontRequirement[],
+      warm?: ResidentFontRequirement[]
+    ): ResidentMeasurementConfig | null => {
       const source = sourceRef.current;
       if (!source) return null;
       const required = requiredRef.current;
       for (const requirement of requirements) required.set(requirement.key, requirement);
       const current = source.measurementConfigForRequirements(requirements);
+      let ready = current;
       if (current) {
         const wanted = new Set(requirements.map((requirement) => requirement.key));
         const kept = [...required.values()].filter(
@@ -159,13 +167,42 @@ export function useRustMeasurement(
             !wanted.has(requirement.key) &&
             source.measurementConfigForRequirements([requirement]) !== undefined
         );
-        const ready =
+        ready =
           source.measurementConfigForRequirements(
             [...requirements, ...kept].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
           ) ?? current;
         latestFontChainsRef.current = ready.fontChains;
-        return ready;
       }
+      const warmNotReady = (warm ?? []).filter((requirement) => {
+        if (
+          required.has(requirement.key) ||
+          source.measurementConfigForRequirements([requirement]) !== undefined
+        ) {
+          return false;
+        }
+        required.set(requirement.key, requirement);
+        return true;
+      });
+      if (warmNotReady.length > 0) {
+        const key = `warm:${JSON.stringify(warmNotReady.map(({ key }) => key).sort())}`;
+        if (!requirementWarmupsRef.current.has(key)) {
+          // A warm font that fails settles as absent, as a required one does; one that never
+          // settles stays out of every config.
+          const settled = source
+            .prepareFontRequirements(warmNotReady)
+            .then(
+              () => undefined,
+              () => undefined
+            )
+            .finally(() => {
+              if (sourceRef.current !== source || requiredRef.current !== required) return;
+              requirementWarmupsRef.current.delete(key);
+              scheduleWarmLayoutRef.current?.();
+            });
+          requirementWarmupsRef.current.set(key, settled);
+        }
+      }
+      if (ready) return ready;
       const key = JSON.stringify(requirements);
       if (!requirementWarmupsRef.current.has(key)) {
         const settled = source
@@ -201,5 +238,10 @@ export function useRustMeasurement(
     };
   }, [fontChainsProviderRef, getDocumentFontChains]);
 
-  return { deferLayoutPass, residentMeasurementConfig, runLayoutPipelineRef };
+  return {
+    deferLayoutPass,
+    residentMeasurementConfig,
+    runLayoutPipelineRef,
+    scheduleWarmLayoutRef,
+  };
 }

@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-The first accept or reject after proposing changes no longer freezes long documents: the layout after a proposal already prepares the fonts every decision needs.
+The first accept or reject after proposing changes no longer freezes long documents: once a document has proposals, the fonts every decision needs load in the background.

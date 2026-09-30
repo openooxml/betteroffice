@@ -696,6 +696,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       deferLayoutPass,
       residentMeasurementConfig,
       runLayoutPipelineRef,
+      scheduleWarmLayoutRef,
     } = useRustMeasurement({
       onError,
       document,
@@ -744,6 +745,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;
+    scheduleWarmLayoutRef.current = yrsCore.session
+      ? () => scheduleLayout('remote', true)
+      : null;
     const handleLocalCaretInterrupt = useCallback(() => {
       cancelPendingScrollRestore();
       onCaretInterrupt?.();

@@ -1,7 +1,11 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
-import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
+import {
+  LayoutSelectionGate,
+  type ResidentFontRequirement,
+  type ResidentMeasurementConfig,
+} from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { YrsRenderEnv, YrsSession } from '@betteroffice/docx/yrs';
 import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
@@ -48,6 +52,17 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
       const hostInputs: string[] = [];
       const workerInputs: string[] = [];
       const layoutInputs: string[] = [];
+      const requirements: ResidentFontRequirement[] = [
+        { key: 'regular', family: 'Calibri', bold: false, italic: false },
+      ];
+      const warm: ResidentFontRequirement[] = [
+        ...requirements,
+        { key: 'decision', family: 'Symbol', bold: false, italic: false },
+      ];
+      const measurementInputs: [
+        ResidentFontRequirement[],
+        ResidentFontRequirement[] | undefined,
+      ][] = [];
       if (proposals !== 'unavailable') {
         Object.assign(session, {
           getProposals: () => {
@@ -59,7 +74,7 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
       Object.assign(session, {
         layoutFontRequirementsJson: (input: string) => {
           hostInputs.push(input);
-          return '[]';
+          return JSON.stringify(JSON.parse(input).revisionFontSuperset ? warm : requirements);
         },
         layoutDocumentWithRegionsRetainedJson: (input: string) => {
           layoutInputs.push(input);
@@ -73,7 +88,10 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
           renderEnv: {} as YrsRenderEnv,
           pageGap: 24,
           zoom: 1,
-          residentMeasurementConfig: () => ({}) as ResidentMeasurementConfig,
+          residentMeasurementConfig: (required, warming) => {
+            measurementInputs.push([required, warming]);
+            return {} as ResidentMeasurementConfig;
+          },
           deferLayoutPass: () => false,
           pagesContainerRef: { current: null },
           viewportLayoutRef: { current: null },
@@ -82,7 +100,9 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
           experimentalWorkerOpen: inWorker,
           fontRequirementsInWorker: (_session, input) => {
             workerInputs.push(input);
-            return Promise.resolve('[]');
+            return Promise.resolve(
+              JSON.stringify(JSON.parse(input).revisionFontSuperset ? warm : requirements)
+            );
           },
           layoutInWorker: (_session, input) => {
             layoutInputs.push(input);
@@ -97,13 +117,19 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
         await act(async () => hook.result.current.runLayoutPipeline({ onHost: !inWorker }));
         const request = hook.result.current.getLayoutRequest();
         expect(request).not.toBeNull();
-        expect(hostInputs).toHaveLength(inWorker ? 1 : 2);
-        expect(workerInputs).toHaveLength(inWorker ? 1 : 0);
-        for (const input of [...hostInputs, ...workerInputs]) {
-          expect(JSON.parse(input).revisionFontSuperset).toBe(
-            proposals === 'present' ? true : undefined
-          );
+        const passInputs = inWorker ? workerInputs : hostInputs.slice(0, -1);
+        expect(passInputs).toHaveLength(proposals === 'present' ? 2 : 1);
+        expect(JSON.parse(passInputs[0]!)).not.toHaveProperty('revisionFontSuperset');
+        if (proposals === 'present') {
+          expect(JSON.parse(passInputs[1]!).revisionFontSuperset).toBe(true);
         }
+        expect(hostInputs).toHaveLength(inWorker ? 1 : passInputs.length + 1);
+        expect(workerInputs).toHaveLength(inWorker ? passInputs.length : 0);
+        expect(JSON.parse(hostInputs.at(-1)!)).not.toHaveProperty('revisionFontSuperset');
+        expect(measurementInputs).toEqual([
+          [requirements, proposals === 'present' ? warm : undefined],
+          [requirements, undefined],
+        ]);
         expect(layoutInputs).toHaveLength(1);
         for (const input of [...layoutInputs, request!]) {
           expect(JSON.parse(input)).not.toHaveProperty('revisionFontSuperset');
