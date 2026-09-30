@@ -1281,6 +1281,8 @@ export interface YrsSession extends CollaborationReplica {
   tablePayload(story: string, tableIndex: number): Record<string, unknown> | null;
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
+  /** How many paragraphs of `story` carry `paraId`: 0, 1, or 2 for two or more. */
+  paragraphIdCount(story: string, paraId: string): number;
 
   // -- paragraph identity --
 
@@ -1732,6 +1734,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     readParagraphs: (request) => facade.readParagraphs(request),
     applyEdits: (request) => facade.applyEdits(request),
     listRevisions: () => facade.listRevisions(),
+    revisionStamps: (ids) => JSON.parse(session.revision_stamps_json(JSON.stringify(ids))),
     settleRevisions: (accept, reject) => {
       const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       session.settle_revisions_json(JSON.stringify({ accept, reject }));
@@ -2562,6 +2565,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
+    paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
 
     paragraphIdentities: () =>
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,

@@ -4303,6 +4303,23 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
+    /// Author and date stamps for the requested revision ids.
+    pub fn revision_stamps_json(&self, ids_json: &str) -> Result<String, JsValue> {
+        let ids: Vec<String> = serde_json::from_str(ids_json).map_err(js_err)?;
+        let stamps = self.engine.doc().revision_stamps(&ids).map_err(js_err)?;
+        let items: serde_json::Map<String, Value> = stamps
+            .into_iter()
+            .map(|(id, stamps)| {
+                let stamps: Vec<Value> = stamps
+                    .into_iter()
+                    .map(|(author, date)| json!({ "author": author, "date": date }))
+                    .collect();
+                (id, Value::Array(stamps))
+            })
+            .collect();
+        serde_json::to_string(&items).map_err(js_err)
+    }
+
     pub fn search_text(
         &self,
         query: &str,
@@ -4500,6 +4517,17 @@ impl EditSession {
     pub fn locate_paragraph(&self, story: &str, para_id: &str) -> Result<String, JsValue> {
         let span = find_para_span(self.engine.doc(), story, para_id)?;
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
+    }
+
+    /// How many paragraphs of `story` carry `para_id`: 0, 1, or 2 for two or
+    /// more. Errors on an unknown story.
+    pub fn paragraph_id_count(&self, story: &str, para_id: &str) -> Result<u32, JsValue> {
+        Ok(self
+            .engine
+            .doc()
+            .segment_index(story)
+            .map_err(js_err)?
+            .para_id_count(para_id))
     }
 
     /// Every comment the session holds, sorted by id:

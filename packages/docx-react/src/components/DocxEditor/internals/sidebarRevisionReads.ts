@@ -3,6 +3,7 @@ import {
   extractTrackedChangesFromYrs,
   type TrackedChangesResult,
   type YrsSidebarProjection,
+  type YrsStorySegmentSource,
 } from '@betteroffice/docx/layout/render';
 import type { YrsRevisionInfo, YrsSession } from '@betteroffice/docx/yrs';
 
@@ -36,9 +37,12 @@ export class SidebarRevisionReads {
   }
 
   /** The tracked-change entries of the revisions last read, and the projection they used. */
-  tracked(session: YrsSession): { tracked: TrackedChangesResult; projection: YrsSidebarProjection } {
+  tracked(
+    session: YrsSession,
+    source?: YrsStorySegmentSource
+  ): { tracked: TrackedChangesResult; projection: YrsSidebarProjection } {
     const { revisions } = this.revisions(session);
-    const projection = createYrsSidebarProjection(session);
+    const projection = createYrsSidebarProjection(session, source);
     const reads = this.reads!;
     reads.tracked ??= extractTrackedChangesFromYrs(revisions, projection);
     return { tracked: reads.tracked, projection };

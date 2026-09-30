@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsSession,
+  preloadResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   type YrsDocxHost,
   type YrsSession,
@@ -132,6 +133,8 @@ interface HarnessProps {
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
+  /** Holds the replica as while the shown engine's completion is still to be asked of the worker. */
+  holdReplica?: boolean;
 }
 
 function useHarness(props: HarnessProps) {
@@ -178,6 +181,7 @@ function useHarness(props: HarnessProps) {
       workerOpen: props.experimentalWorkerOpen ? {
         openInWorker,
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
+        ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
       } : undefined,
     }
   );
@@ -332,16 +336,15 @@ test('a painted main preview hands off to the worker before hydrating the full r
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
     expect(result.current.renderer.status).toBe('ready');
-    expect(workers).toHaveLength(0);
-    expect(posted).toEqual([]);
+    // The worker opens the full document while the preview opens and paints.
+    await waitFor(() => expect(posted.map((request) => request.type)).toEqual(['open']));
+    expect(workers).toHaveLength(1);
     expect(result.current.mainOpens).toEqual([]);
 
     act(() => result.current.presentFrame());
-    expect(posted).toEqual([]);
     act(() => frames.run());
-    expect(posted).toEqual([]);
     act(() => frames.run());
-    await waitFor(() => expect(posted.map((request) => request.type)).toEqual(['open']));
+    expect(posted.map((request) => request.type)).toEqual(['open']);
     expect(result.current.core.session).toBe(preview);
     expect(destroyed).not.toHaveBeenCalled();
     const firstPreviewFrame = result.current.renderer.displayList;
@@ -434,7 +437,8 @@ test.each(['null', 'throw'] as const)(
       const destroyed = spyOn(preview, 'destroy');
       act(() => result.current.pipeline.runLayoutPipeline());
       await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
-      expect(calls).toBe(0);
+      await waitFor(() => expect(calls).toBe(1));
+      expect(result.current.core.session).toBe(preview);
       act(() => result.current.presentFrame());
       act(() => frames.run());
       act(() => frames.run());
@@ -530,6 +534,66 @@ test('failure of the accepted full session before its frame cancels deferred hyd
     expect(result.current.errors).toEqual([failure]);
     expect(result.current.core.failOpening(new Error('later'), full)).toBe(false);
     expect(result.current.errors).toHaveLength(1);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('a preloaded spare worker takes the open that starts alongside the preview', async () => {
+  const { workers, posted } = installWorker();
+  await preloadResidentEngineWorker();
+  expect(workers).toHaveLength(1);
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, previewFirstPage: true, source: longBytes },
+    });
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    await waitFor(() => expect(posted.some((request) => request.type === 'open')).toBe(true));
+    const preview = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.previewing).toBe(false));
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(result.current.core.session));
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('the replica waits while the shown engine is still to ask the worker for the rest of its layout', async () => {
+  const { posted } = installWorker();
+  const frames = holdFrames();
+  try {
+    const props = { ...initialProps, source: longBytes, holdReplica: true };
+    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const full = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await act(async () => {});
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    rerender({ ...props, holdReplica: false });
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
     unmount();
   } finally {
     cleanup();
@@ -877,11 +941,11 @@ test('disabled worker open preserves main-thread open, projection and flush with
     const session = result.current.core.session!;
     expect(result.current.mainOpens).toEqual([true]);
     expect(replicas).toEqual([session]);
-    expect(result.current.loadChecks).toEqual([1, 1]);
+    expect(result.current.loadChecks).toEqual([1, 1, 1]);
     act(() => rerender({ ...props }));
     await act(async () => {});
     expect(replicas).toEqual([session]);
-    expect(result.current.loadChecks).toEqual([1, 1]);
+    expect(result.current.loadChecks).toEqual([1, 1, 1]);
     expect(result.current.core.documentFromYrs()).not.toBeNull();
     act(() => result.current.core.scheduleCompatibilityWarm());
     result.current.core.cancelCompatibilityWarm();

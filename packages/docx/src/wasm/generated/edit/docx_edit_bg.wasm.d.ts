@@ -103,6 +103,7 @@ export const editsession_new: (a: number) => [number, number, number];
 export const editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const editsession_paragraph_identities: (a: number) => [number, number, number, number];
 export const editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
 export const editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
@@ -125,6 +126,7 @@ export const editsession_resolve_sticky_position: (a: number, b: number, c: numb
 export const editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
 export const editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
+export const editsession_revision_stamps_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
