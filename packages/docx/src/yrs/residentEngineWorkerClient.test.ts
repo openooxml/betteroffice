@@ -353,6 +353,54 @@ describe('resident worker opening', () => {
     await expect(client.open(new Uint8Array([3]))).rejects.toThrow('already holds a document');
   });
 
+  test('an opened bootstrap queued behind a failed open leaves the client able to open again', async () => {
+    const { worker, client } = setup();
+    const failed = client.open(new Uint8Array([1]));
+    const bootstrap = client.bootstrap(snapshot, '', { opened: true });
+    expect(worker.posted).toHaveLength(2);
+    worker.reply({ id: worker.posted[0].id, ok: false, error: 'not a package' });
+    await expect(failed).rejects.toThrow('not a package');
+    worker.reply({
+      id: worker.posted[1].id,
+      ok: false,
+      error: 'Resident engine worker has no opened document',
+    });
+    await expect(bootstrap).rejects.toThrow('no opened document');
+    expect(client.bootstrapSent()).toBe(false);
+    expect(client.remoteStateVector()).toBeNull();
+    const opened = client.open(new Uint8Array([2]));
+    expect(worker.posted).toHaveLength(3);
+    worker.reply({
+      id: worker.lastId(),
+      ok: true,
+      hostJson: '{}',
+      stateVector: new Uint8Array([5]).buffer,
+    });
+    expect((await opened).hostJson).toBe('{}');
+  });
+
+  test('an opened bootstrap without an open fails before touching its bookkeeping', async () => {
+    const { worker, client } = setup();
+    await expect(client.bootstrap(snapshot, '', { opened: true })).rejects.toThrow(
+      'no opened document'
+    );
+    expect(client.bootstrapSent()).toBe(false);
+    expect(worker.posted).toHaveLength(0);
+  });
+
+  test('bytes that cannot be copied leave the client able to open another', async () => {
+    const { worker, client } = setup();
+    const unreadable = {
+      get length(): number {
+        throw new TypeError('detached');
+      },
+    } as unknown as Uint8Array;
+    await expect(client.open(unreadable)).rejects.toThrow('detached');
+    expect(worker.posted).toHaveLength(0);
+    void client.open(new Uint8Array([2]));
+    expect(worker.posted).toHaveLength(1);
+  });
+
   for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
     test(`${type} propagates the worker's OOM error and memory`, async () => {
       const { worker, client } = setup();
