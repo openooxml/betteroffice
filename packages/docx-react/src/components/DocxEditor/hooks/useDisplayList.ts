@@ -317,9 +317,19 @@ export function useRustDisplayList(
   const workerRef = useRef<{
     engine: YrsSession;
     client: ResidentEngineWorkerClient;
-    /** The document load the worker started in. */
+    /** The document load its session belongs to. */
     load: number;
   } | null>(null);
+  // The document load each session was first laid out or displayed in.
+  const sessionLoadsRef = useRef(new WeakMap<YrsSession, number>());
+  const sessionLoad = useCallback((session: YrsSession): number => {
+    let load = sessionLoadsRef.current.get(session);
+    if (load === undefined) {
+      load = documentLoadsRef.current;
+      sessionLoadsRef.current.set(session, load);
+    }
+    return load;
+  }, []);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   // No worker starts once the hook is gone, whatever failure arrives late.
   const unmountedRef = useRef(false);
@@ -1038,7 +1048,7 @@ export function useRustDisplayList(
         workerRef.current = {
           engine: hostEngine,
           client: new ResidentEngineWorkerClient(),
-          load: documentLoadsRef.current,
+          load: sessionLoad(hostEngine),
         };
       }
       const owner = workerRef.current;
@@ -1160,6 +1170,7 @@ export function useRustDisplayList(
       paintedCaretMachine,
       queryEpochGate,
       replaceOutOfMemoryWorker,
+      sessionLoad,
     ]
   );
   const layoutInWorkerRef = useRef(layoutInWorker);
@@ -1330,6 +1341,9 @@ export function useRustDisplayList(
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
           // A newer build recovers the worker it asks, and another load's build nothing.
           if (!latest || documentLoad !== documentLoadsRef.current) return Promise.reject(cause);
+          if (owner && owner.load !== documentLoadsRef.current) {
+            return Promise.reject(new SupersededPreviewError());
+          }
           // So does a layout adopted since this build began, such as a worker
           // pass running again, whose frame this build's snapshot would erase.
           if (hostEngine.residentWorkerProbe()?.layoutRevision !== probe.layoutRevision) {
@@ -1367,7 +1381,7 @@ export function useRustDisplayList(
           workerRef.current = {
             engine: hostEngine,
             client: new ResidentEngineWorkerClient(),
-            load: documentLoadsRef.current,
+            load: sessionLoad(hostEngine),
           };
         }
         const owner = workerRef.current;
@@ -1558,6 +1572,7 @@ export function useRustDisplayList(
     markSettled,
     replaceOutOfMemoryWorker,
     requestSettleRelayout,
+    sessionLoad,
   ]);
 
   const resetSettled = useCallback(
