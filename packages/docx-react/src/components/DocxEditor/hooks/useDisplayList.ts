@@ -77,9 +77,14 @@ import { nearestPages } from './pageBuildOrder';
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   encodeState(): Promise<Uint8Array>;
   revisionCount(): Promise<number>;
+  proposal: ResidentEngineWorkerClient['proposal'];
+  documentRead: ResidentEngineWorkerClient['documentRead'];
+  handOver: ResidentEngineWorkerClient['handOver'];
   fallback(): void;
   destroy(): void;
   replicaReady(): void;
+  /** Restamps the shown layout after the session started mirroring the worker's version. */
+  mirrorReady(): void;
 }
 
 export type OpenInWorker = (
@@ -1197,12 +1202,24 @@ export function useRustDisplayList(
       if (overrides?.build || !canUseResidentEngineWorker()) return null;
       workerOpenSourcesRef.current.set(hostEngine, { bytes, digest, generation });
       let needsLayout = false;
+      const restamp = (): void => {
+        if (workerRef.current?.engine !== hostEngine) return;
+        const targets = [layoutRef.current, snapshotRef.current.displayList, snapshotRef.current.queries];
+        for (const target of targets) {
+          if (target) {
+            stampSourceVersion(target, workerOpenSourceVersion(hostEngine, sourceVersionOf(target)));
+          }
+        }
+      };
       try {
         const opened = await requestOpenedWorker(hostEngine, (owner) => owner.opening!);
         return {
           ...opened,
           encodeState: () => requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState()),
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
+          proposal: (op) => requestOpenedWorker(hostEngine, (owner) => owner.client.proposal(op)),
+          documentRead: (read) => requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
+          handOver: () => requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
           fallback: () => {
             const outOfMemory = outOfMemoryRef.current.get(hostEngine);
             if (outOfMemory) throw outOfMemory;
@@ -1232,20 +1249,11 @@ export function useRustDisplayList(
                 }
               }, 0);
             }
-            if (workerRef.current?.engine !== hostEngine) return;
-            const targets = [
-              layoutRef.current,
-              snapshotRef.current.displayList,
-              snapshotRef.current.queries,
-            ];
-            for (const target of targets) {
-              if (target) {
-                stampSourceVersion(
-                  target,
-                  workerOpenSourceVersion(hostEngine, sourceVersionOf(target))
-                );
-              }
-            }
+            restamp();
+          },
+          mirrorReady: () => {
+            if (unmountedRef.current || sessionLoad(hostEngine) !== documentLoadsRef.current) return;
+            restamp();
           },
         };
       } catch (error) {

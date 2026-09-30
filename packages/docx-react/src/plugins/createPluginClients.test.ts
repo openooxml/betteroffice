@@ -7,8 +7,11 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type DocxEditRequest, type YrsSession } from '@betteroffice/docx/yrs';
 import type { PluginInvocation } from '../../../../shared/plugin-host/runtime';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../commands/createDocxCommandStore';
+import * as editorBatches from '../components/DocxEditor/editorBatches';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { stampSourceVersion } from '../components/DocxEditor/internals/layoutProvenance';
+import * as workerOpenReplica from '../components/DocxEditor/internals/workerOpenReplica';
+import * as workerProposals from '../components/DocxEditor/internals/workerProposalAuthority';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import { createDocxPluginHost } from './createDocxPluginHost';
 import { createPluginClients, resolveParagraph } from './createPluginClients';
@@ -69,7 +72,9 @@ beforeAll(() =>
 );
 const sessions: YrsSession[] = [];
 const restoreClocks: Array<() => void> = [];
+const restoreWorkers: Array<() => void> = [];
 afterEach(() => {
+  for (const restore of restoreWorkers.splice(0)) restore();
   for (const restore of restoreClocks.splice(0)) restore();
   for (const session of sessions.splice(0)) session.destroy();
 });
@@ -216,6 +221,47 @@ function texts(session: YrsSession): string[] {
   return session.paragraphs('body').map((candidate) => candidate.text);
 }
 
+function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
+  const authority: Pick<
+    workerProposals.WorkerProposalAuthority,
+    'initialized' | 'navigationTarget' | 'readParagraphs'
+  > = {
+    initialized: true,
+    async navigationTarget(story: string, paraId: string) {
+      return {
+        version: env.session.version(),
+        target: { loc: { story, paraId, offset: 0 }, position: 42 },
+      };
+    },
+    async readParagraphs(request) {
+      return {
+        ok: true as const,
+        version: env.session.version(),
+        view: request.view,
+        paragraphs: [{ story: 'body', paraId: 'worker', text: 'Worker text', atoms: [] }],
+      };
+    },
+  };
+  const lookup = workerProposals.workerProposalAuthority;
+  const routing = spyOn(workerProposals, 'workerProposalAuthority').mockImplementation((session) =>
+    session === env.session
+      ? (authority as workerProposals.WorkerProposalAuthority)
+      : lookup(session)
+  );
+  const navigation = spyOn(authority, 'navigationTarget');
+  const read = spyOn(authority, 'readParagraphs');
+  const flush = spyOn(editorBatches, 'flushEditorInput');
+  const replica = spyOn(workerOpenReplica, 'requestWorkerOpenReplica');
+  restoreWorkers.push(() => {
+    replica.mockRestore();
+    flush.mockRestore();
+    read.mockRestore();
+    navigation.mockRestore();
+    routing.mockRestore();
+  });
+  return { authority, navigation, read, flush, replica };
+}
+
 describe('plugin edit client', () => {
   test('applies with the expected version and refuses one that flushed typing made stale', async () => {
     let session!: YrsSession;
@@ -300,6 +346,284 @@ describe('plugin edit client', () => {
 });
 
 describe('plugin read and navigation clients', () => {
+  test('worker navigation resolves twice and reveals without flushing or requesting the replica', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    const target = { story: 'body', paraId: '00000002' };
+    const selection = JSON.stringify(env.session.selection());
+    expect(
+      await env.clients.navigation.scrollToParagraph(target, {
+        expectVersion: env.session.version(),
+      })
+    ).toEqual({ ok: true });
+    expect(worker.navigation).toHaveBeenCalledTimes(2);
+    expect(worker.navigation.mock.calls[0]?.slice(0, 2)).toEqual(['body', '00000002']);
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(env.events).toEqual(['scroll:42']);
+    expect(JSON.stringify(env.session.selection())).toBe(selection);
+  });
+
+  test('worker navigation checks the session and reply versions around each resolution', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    const target = { story: 'body', paraId: '00000002' };
+    const version = env.session.version();
+    const stale = {
+      ok: false,
+      failure: { code: 'stale-version', message: 'The document changed after that version' },
+    };
+    expect(
+      await env.clients.navigation.scrollToParagraph(target, { expectVersion: 'older' })
+    ).toEqual(stale);
+    expect(worker.navigation).not.toHaveBeenCalled();
+    worker.navigation.mockResolvedValueOnce({
+      version: 'older',
+      target: { loc: { ...target, offset: 0 }, position: 42 },
+    });
+    expect(
+      await env.clients.navigation.scrollToParagraph(target, { expectVersion: version })
+    ).toEqual(stale);
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => (release = resolve));
+    worker.navigation.mockImplementationOnce(async () => {
+      await waiting;
+      return { version, target: { loc: { ...target, offset: 0 }, position: 42 } };
+    });
+    const scroll = env.clients.navigation.scrollToParagraph(target, { expectVersion: version });
+    env.session.insertText({ story: 'body', paraId: '00000001', offset: 5 }, '!');
+    release();
+    expect(await scroll).toEqual(stale);
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(env.events).toEqual([]);
+  });
+
+  test('worker navigation rechecks the version after its second resolution', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    const target = { story: 'body', paraId: '00000002' };
+    const version = env.session.version();
+    worker.navigation.mockImplementation(async () => {
+      if (worker.navigation.mock.calls.length === 2) {
+        await Promise.resolve();
+        env.session.insertText({ story: 'body', paraId: '00000001', offset: 5 }, '!');
+      }
+      return { version, target: { loc: { ...target, offset: 0 }, position: 42 } };
+    });
+    expect(
+      await env.clients.navigation.scrollToParagraph(target, { expectVersion: version })
+    ).toMatchObject({
+      ok: false,
+      failure: { code: 'stale-version' },
+    });
+    expect(worker.navigation).toHaveBeenCalledTimes(2);
+    expect(env.events).toEqual([]);
+  });
+
+  test('worker navigation preserves target failures and waits for the rendered layout', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    const version = env.session.version();
+    const target = { story: 'body', paraId: '00000002' };
+    worker.navigation.mockResolvedValueOnce({ version, target: 'missing-target' });
+    expect(
+      await env.clients.navigation.scrollToParagraph(target, { expectVersion: version })
+    ).toEqual({
+      ok: false,
+      failure: { code: 'missing-target', message: 'The paragraph cannot be shown (missing-target)' },
+    });
+    env.state.layoutReady = false;
+    const scroll = env.clients.navigation.scrollToParagraph(target, { expectVersion: version });
+    await env.waiting;
+    expect(env.events).toEqual([]);
+    env.state.layoutReady = true;
+    env.publishLayout();
+    expect(await scroll).toEqual({ ok: true });
+    expect(env.events).toEqual(['scroll:42']);
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+  });
+
+  test('worker navigation with focus waits for the replica and checks replacement', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    const target = { story: 'body', paraId: '00000002' };
+    const version = env.session.version();
+    let release!: () => void;
+    let requested!: () => void;
+    const ready = new Promise<void>((resolve) => (release = resolve));
+    const waiting = new Promise<void>((resolve) => (requested = resolve));
+    worker.replica.mockImplementation(() => {
+      requested();
+      return ready;
+    });
+    const scroll = env.clients.navigation.scrollToParagraph(target, {
+      expectVersion: version,
+      focus: true,
+    });
+    await waiting;
+    expect(worker.replica).toHaveBeenCalledWith(env.session);
+    expect(env.events).toEqual([]);
+    release();
+    expect(await scroll).toEqual({ ok: true });
+    expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
+    expect(env.session.selection()?.head).toMatchObject({ ...target, offset: 0 });
+    worker.replica.mockImplementation(async () => {
+      env.pagedEditorRef.current = null;
+    });
+    expect(
+      await env.clients.navigation.scrollToParagraph(target, {
+        expectVersion: version,
+        focus: true,
+      })
+    ).toMatchObject({
+      ok: false,
+      failure: { code: 'document-replaced' },
+    });
+    expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
+    expect(worker.flush).not.toHaveBeenCalled();
+  });
+
+  test('worker navigation keeps supersession and invocation aborts across awaited resolutions', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    const version = env.session.version();
+    const target = { story: 'body', paraId: '00000002' };
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => (release = resolve));
+    worker.navigation.mockImplementationOnce(async () => {
+      await waiting;
+      return { version, target: { loc: { ...target, offset: 0 }, position: 99 } };
+    });
+    const older = env.clients.navigation.scrollToParagraph(target, { expectVersion: version });
+    expect(
+      await env.createClients().navigation.scrollToParagraph(target, { expectVersion: version })
+    ).toEqual({ ok: true });
+    release();
+    expect(await older).toEqual({
+      ok: false,
+      failure: {
+        code: 'layout-unavailable',
+        message: 'A newer paragraph navigation superseded this request',
+      },
+    });
+    expect(env.events).toEqual(['scroll:42']);
+    worker.navigation.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      env.controller.abort();
+      return { version, target: { loc: { ...target, offset: 0 }, position: 99 } };
+    });
+    expect(
+      await env.clients.navigation.scrollToParagraph(target, { expectVersion: version })
+    ).toMatchObject({ ok: false, failure: { code: 'aborted' } });
+    expect(env.events).toEqual(['scroll:42']);
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+  });
+
+  test('worker reads and versions skip flushing, while text searches request the replica', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    expect(await env.clients.read.version()).toEqual({ ok: true, version: env.session.version() });
+    const read = await env.clients.read.readParagraphs({ view: 'accepted' });
+    expect(read.ok && read.paragraphs.map((paragraph) => paragraph.text)).toEqual(['Worker text']);
+    expect(worker.read).toHaveBeenCalledTimes(1);
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(
+      await env.clients.read.findText({
+        text: 'Tail',
+        within: { kind: 'story', story: 'body' },
+        view: 'accepted',
+      })
+    ).toMatchObject({ ok: true });
+    expect(worker.replica).toHaveBeenCalledWith(env.session);
+    expect(worker.flush).toHaveBeenCalledTimes(1);
+    expect(env.events).toEqual(['flush']);
+  });
+
+  test('worker reads use the flushed fallback and keep plugin refusals during hand-over', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    worker.read.mockImplementation((request, main) => main(request));
+    const read = await env.clients.read.readParagraphs({ view: 'accepted' });
+    expect(read.ok && read.paragraphs[0]?.text).toBe('Alpha');
+    expect(env.events).toEqual(['flush']);
+    const pending = spyOn(env.editor, 'flushPendingInput').mockImplementationOnce(async () => {
+      env.state.ended = 'document-replaced';
+    });
+    restoreWorkers.push(() => pending.mockRestore());
+    expect(await env.clients.read.readParagraphs({ view: 'accepted' })).toMatchObject({
+      ok: false,
+      failure: { code: 'document-replaced' },
+    });
+  });
+
+  test('worker reads refuse if the invocation ends during the read and never flush', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    worker.read.mockImplementationOnce(async (request) => {
+      await Promise.resolve();
+      env.state.ended = 'document-replaced';
+      return { ok: true, version: env.session.version(), view: request.view, paragraphs: [] };
+    });
+    expect(await env.clients.read.readParagraphs({ view: 'accepted' })).toMatchObject({
+      ok: false,
+      failure: { code: 'document-replaced' },
+    });
+    expect(await env.clients.read.version()).toMatchObject({
+      ok: false,
+      failure: { code: 'document-replaced' },
+    });
+    expect(await env.clients.read.readParagraphs({ view: 'accepted' })).toMatchObject({
+      ok: false,
+      failure: { code: 'document-replaced' },
+    });
+    expect(worker.read).toHaveBeenCalledTimes(1);
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+  });
+
+  test('text searches wait for hydration and return a refusal if the document is replaced', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => (release = resolve));
+    worker.replica.mockImplementation(() => waiting);
+    const found = env.clients.read.findText({
+      text: 'Tail',
+      within: { kind: 'story', story: 'body' },
+      view: 'accepted',
+    });
+    expect(worker.replica).toHaveBeenCalledWith(env.session);
+    expect(worker.flush).not.toHaveBeenCalled();
+    env.pagedEditorRef.current = null;
+    release();
+    expect(await found).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+    expect(worker.flush).not.toHaveBeenCalled();
+  });
+
+  test('without a worker authority reads and focus navigation still flush and never request a replica', async () => {
+    const env = await setup();
+    const replica = spyOn(workerOpenReplica, 'requestWorkerOpenReplica');
+    restoreWorkers.push(() => replica.mockRestore());
+    await env.clients.read.version();
+    await env.clients.read.readParagraphs({ view: 'accepted' });
+    await env.clients.read.findText({
+      text: 'Tail',
+      within: { kind: 'story', story: 'body' },
+      view: 'accepted',
+    });
+    await env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: '00000002' },
+      { expectVersion: env.session.version(), focus: true }
+    );
+    expect(env.events.filter((event) => event === 'flush')).toHaveLength(4);
+    expect(env.events.slice(-2)).toEqual(['sync:false:*', 'focus']);
+    expect(replica).not.toHaveBeenCalled();
+  });
+
   test('reads after a flush and refuses once the invocation ends', async () => {
     const env = await setup();
     expect(await env.clients.read.version()).toEqual({ ok: true, version: env.session.version() });

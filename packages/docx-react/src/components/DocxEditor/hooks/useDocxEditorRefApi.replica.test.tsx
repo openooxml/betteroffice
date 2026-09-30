@@ -178,11 +178,11 @@ test('every public ref API is classified for replica access', async () => {
   expect(Object.keys(DOCX_REF_REPLICA_ACCESS).sort()).toEqual([
     'addComment', 'applyEdits', 'applyFormatting', 'clearSearch', 'commands', 'exportStructuredWithPages',
     'findContentControls', 'findInDocument', 'findText', 'flushPendingInput', 'focus',
-    'getComments', 'getCurrentPage', 'getDocument', 'getEditorRef', 'getMemoryStats', 'getPageContent',
+    'getComments', 'getCurrentPage', 'getDocument', 'getEditorRef', 'getMemoryStats', 'getPageContent', 'getParagraphIdentities',
     'getPositionAtPoint', 'getProposals', 'getSearchState', 'getSelectionInfo', 'getTotalPages', 'getZoom',
     'highlightRange', 'insertBreak', 'listContentControls', 'loadDocument', 'loadDocumentBuffer',
     'onContentChange', 'onSearchChange', 'onSelectionChange', 'openPrintPreview', 'print', 'proposeChange',
-    'proposeChanges', 'readParagraphs', 'replyToComment', 'resolveComment', 'save',
+    'proposeChanges', 'readParagraphs', 'replyToComment', 'resolveComment', 'resolveParagraphAnchors', 'save',
     'search', 'searchGoTo', 'searchNext', 'searchPrevious',
     'scrollToChangeId', 'scrollToCommentId', 'scrollToPage', 'scrollToParaId', 'scrollToPosition',
     'setParagraphStyle', 'setProposalStates', 'setZoom', 'validateEdits', 'whenLayoutComplete',

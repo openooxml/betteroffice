@@ -1,0 +1,197 @@
+import { createRoot } from 'react-dom/client';
+import { useEffect, useRef, useState } from 'react';
+import {
+  DocxEditor,
+  defineDocxPlugin,
+  type DocxEditorRef,
+  type DocxPluginContext,
+  type DocxPluginGeometry,
+} from '@betteroffice/docx-react';
+import type { DocxProposalSnapshot, YrsSession } from '@betteroffice/docx/yrs';
+import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
+import { pagedDocx } from '../../../packages/docx-react/src/components/DocxEditor/__fixtures__/pagedDocx';
+import { workerOpenReplicaPending } from '../../../packages/docx-react/src/components/DocxEditor/internals/workerOpenReplica';
+import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
+import '../../../packages/docx-react/src/styles/editor.css';
+
+interface OverlayState {
+  snapshot: DocxProposalSnapshot | null;
+  eventSerial: number;
+}
+
+type OverlayContext = DocxPluginContext<OverlayState>;
+type NavigationResult = Awaited<ReturnType<OverlayContext['navigation']['scrollToParagraph']>>;
+const readOnly = new URLSearchParams(window.location.search).get('readOnly') !== 'false';
+setGoogleFontsEnabled(false);
+
+const probe = {
+  editor: null as DocxEditorRef | null,
+  session: null as YrsSession | null,
+  context: null as OverlayContext | null,
+  captures: 0,
+  hydratedBeforeSidebar: false,
+  sidebarOpened: false,
+  sidebarOpen: false,
+  load: null as { version: string; sessionVersion: string; snapshotVersion: string } | null,
+  events: { load: 0, 'proposal-change': 0, 'layout-change': 0 },
+  eventSerial: 0,
+  errors: [] as string[],
+  status() {
+    return {
+      pending: this.session ? workerOpenReplicaPending(this.session) : null,
+      captures: this.captures,
+      hydratedBeforeSidebar: this.hydratedBeforeSidebar,
+      sidebarOpen: this.sidebarOpen,
+      load: this.load,
+      events: { ...this.events },
+      errors: [...this.errors],
+    };
+  },
+  async navigate(
+    target: { story: string; paraId: string },
+    expectVersion: string
+  ): Promise<NavigationResult | null> {
+    let result: NavigationResult | null = null;
+    await this.context!.run(async (context) => {
+      result = await context.navigation.scrollToParagraph(target, { expectVersion });
+    });
+    return result;
+  },
+  async toggleSidebar() {
+    this.sidebarOpened = true;
+    return this.editor!.commands.execute('commentsSidebar', null);
+  },
+};
+
+export type WorkerProposalProbe = typeof probe;
+
+(window as unknown as { __workerProposalProbe: WorkerProposalProbe }).__workerProposalProbe = probe;
+(globalThis as unknown as {
+  __workerProposalTest: { suppressAutomaticReplica: boolean; captureSession(session: YrsSession): void };
+}).__workerProposalTest = {
+  suppressAutomaticReplica: readOnly,
+  captureSession(session) {
+    probe.session = session;
+    probe.captures += 1;
+    const sample = () => {
+      if (!probe.sidebarOpened && !workerOpenReplicaPending(session)) {
+        probe.hydratedBeforeSidebar = true;
+      }
+      if (probe.session === session) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  },
+};
+
+function ProposalOverlay({
+  context,
+  geometry,
+}: {
+  context: OverlayContext;
+  geometry: DocxPluginGeometry;
+}) {
+  useEffect(() => {
+    probe.context = context;
+  }, [context]);
+  const snapshot = context.state.snapshot;
+  return (
+    <div
+      data-testid="proposal-overlay"
+      data-version={snapshot?.version}
+      data-preview-version={snapshot?.previewVersion}
+      data-event-serial={context.state.eventSerial}
+      data-layout-version={geometry.layout.version}
+      data-layout-preview-version={geometry.layout.previewVersion}
+    >
+      {snapshot?.proposals.map((proposal) => {
+        const result = context.geometry!.getAnchorGeometry({ kind: 'proposal', id: proposal.id });
+        return (
+          <div
+            key={proposal.id}
+            data-proposal-id={proposal.id}
+            data-state={proposal.state}
+            data-ok={String(result.ok)}
+            data-failure={result.ok ? '' : result.failure.code}
+            style={
+              result.ok
+                ? {
+                    position: 'absolute',
+                    left: result.anchor.x,
+                    top: result.anchor.y,
+                    width: 2,
+                    height: Math.max(2, result.anchor.height),
+                    background: 'purple',
+                  }
+                : undefined
+            }
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+const overlay = defineDocxPlugin<OverlayState>({
+  id: 'probe.worker-proposals',
+  createState: () => ({ snapshot: null, eventSerial: 0 }),
+  async onEvent(context, event) {
+    if (event.type !== 'load' && event.type !== 'proposal-change' && event.type !== 'layout-change') {
+      return;
+    }
+    probe.events[event.type] += 1;
+    probe.eventSerial += 1;
+    if (event.type === 'load') {
+      const version = await context.read.version();
+      if (!version.ok) throw new Error(version.failure.message);
+      probe.load = {
+        version: version.version,
+        sessionVersion: probe.session!.version(),
+        snapshotVersion: context.snapshot.version,
+      };
+    }
+    const snapshot = probe.session!.getProposals();
+    context.setState({ snapshot, eventSerial: probe.eventSerial }, snapshot.version);
+  },
+  overlay: ProposalOverlay,
+});
+
+const PLUGINS = [overlay];
+const fonts = {
+  resolve: () => async () => (await fetch(fontUrl)).arrayBuffer(),
+};
+const faces = [{ family: 'Liberation Sans', src: fontUrl }];
+
+function Harness() {
+  const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const editor = useRef<DocxEditorRef>(null);
+  useEffect(() => {
+    void pagedDocx(6, 12).then(setBuffer);
+  }, []);
+  useEffect(() => {
+    probe.editor = editor.current;
+    probe.sidebarOpen = sidebarOpen;
+  });
+  if (!buffer) return null;
+  return (
+    <div style={{ height: '100%' }}>
+      <DocxEditor
+        ref={editor}
+        documentBuffer={buffer}
+        experimentalWorkerOpen
+        readOnly={readOnly}
+        allowHostProposals
+        commentsSidebarOpen={sidebarOpen}
+        onCommentsSidebarOpenChange={setSidebarOpen}
+        showHostProposalsInSidebar={sidebarOpen}
+        plugins={PLUGINS}
+        fonts={faces}
+        measurementFontProvider={fonts}
+        onError={(error) => probe.errors.push(error.message)}
+        onPluginError={(error) => probe.errors.push(String(error.error))}
+      />
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root')!).render(<Harness />);

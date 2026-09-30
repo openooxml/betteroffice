@@ -17,11 +17,18 @@ import type {
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, WorkerOpenedDocument } from './useDisplayList';
 import {
+  adoptWorkerOpenHandoverVersion,
+  adoptWorkerOpenMirrorVersion,
   deferWorkerOpenReplica,
   ensureWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
+import {
+  beginWorkerProposalHandover,
+  registerWorkerProposalAuthority,
+  registeredWorkerProposalAuthority,
+} from '../internals/workerProposalAuthority';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 
@@ -34,6 +41,7 @@ export interface YrsCoreSession {
   hydrateOnDemand: boolean;
   /** Starts loading the main-thread replica when needed. */
   requestReplica(): void;
+  workerProposalsReady: boolean;
   replicaReadyRef?: React.RefObject<boolean>;
   experimentalWorkerOpen?: boolean;
   storyBlocks(storyId: string, env: YrsRenderEnv): LayoutBlock[] | null;
@@ -87,6 +95,8 @@ interface YrsCoreSessionCallbacks {
 interface WorkerOpenOptions {
   openInWorker: OpenInWorker;
   renderedFrame: object | null;
+  workerProposals?: boolean;
+  refreshWorkerLayout?: () => void;
   /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
   pendingCompletion?: unknown;
   /** Leaves the replica unhydrated until a caller needs it; see requestReplica. */
@@ -344,6 +354,9 @@ export function useYrsCoreSession(
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
   const [replicaReady, setReplicaReady] = useState(true);
+  const [workerProposalsReady, setWorkerProposalsReady] = useState(false);
+  const workerOpenRef = useRef(workerOpen);
+  workerOpenRef.current = workerOpen;
   const replicaReadyRef = useRef(true);
   const openInWorker = workerOpen?.openInWorker;
   const workerOpenEnabledRef = useRef(Boolean(openInWorker));
@@ -389,6 +402,7 @@ export function useYrsCoreSession(
 
   useEffect(() => {
     setSession(null);
+    setWorkerProposalsReady(false);
     setPreviewing(false);
     setHandoffFrom(null);
     if (openInWorker) {
@@ -595,15 +609,22 @@ export function useYrsCoreSession(
             const pending = deferWorkerOpenReplica(
               next,
               async () => {
-                const update = await worker.encodeState();
+                const handover = beginWorkerProposalHandover(next);
+                const handedOver = handover ? await handover : null;
+                const update = handedOver ? handedOver.state : await worker.encodeState();
                 return () => {
                   next.openDocx(source, false);
                   next.loadState(update);
+                  handedOver?.complete();
                 };
               },
               () => {
+                if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
+                  throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+                }
                 worker.fallback();
                 next.openDocx(source, true);
+                if (registeredWorkerProposalAuthority(next)) next.mirrorWorkerDocument(null);
               },
               () => {
                 if (stale()) return;
@@ -614,6 +635,20 @@ export function useYrsCoreSession(
               },
               () => hydrateOnDemandRef.current
             );
+            if (workerOpenRef.current?.workerProposals) {
+              const authority = registerWorkerProposalAuthority(next, worker, {
+                relayout: () => workerOpenRef.current?.refreshWorkerLayout?.(),
+                current: () => !stale(),
+                adopted: (version) => {
+                  adoptWorkerOpenMirrorVersion(next, version);
+                  worker.mirrorReady();
+                },
+                handedOver: (version) => adoptWorkerOpenHandoverVersion(next, version),
+              });
+              authority.subscribe(() => {
+                if (!stale()) setWorkerProposalsReady(authority.initialized);
+              });
+            }
             pendingReplicaRef.current = pending;
             let revisionsQueried = false;
             revisionQueryRef.current = () => {
@@ -748,6 +783,12 @@ export function useYrsCoreSession(
     if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
     // The replica blocks this thread: it loads once the worker is laying out the rest.
     if (workerOpen?.pendingCompletion === session) return;
+    const authority = registeredWorkerProposalAuthority(session);
+    if (authority) {
+      void authority.initialize().catch((error) => {
+        console.error('[yrs] failed to initialize worker proposals', error);
+      });
+    }
     // Asked after the first frame and the layout's completion, so it delays neither.
     if (workerOpen?.hydrateOnDemand) {
       revisionQueryRef.current?.();
@@ -960,6 +1001,7 @@ export function useYrsCoreSession(
     replicaReady: !openInWorker || replicaReady,
     hydrateOnDemand,
     requestReplica,
+    workerProposalsReady,
     replicaReadyRef: openInWorker ? replicaReadyRef : undefined,
     experimentalWorkerOpen: Boolean(openInWorker),
     previewing,

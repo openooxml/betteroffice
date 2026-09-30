@@ -23,6 +23,9 @@ import type {
   DocxFindTextResult,
   DocxLayoutMap,
   DocxPageExportOptions,
+  DocxParagraphAnchor,
+  DocxParagraphAnchorResult,
+  DocxParagraphIdentitySnapshot,
   DocxPagedStructuredContent,
   DocxProposalRequest,
   DocxProposalResult,
@@ -444,6 +447,13 @@ export interface DocxEditorRef {
    * edit targets and `expectVersion` from this result.
    */
   readParagraphs: (request: DocxReadParagraphsRequest) => Promise<DocxReadParagraphsResult>;
+  /** Reads paragraph identities from the current document. */
+  getParagraphIdentities: () => Promise<DocxParagraphIdentitySnapshot>;
+  /** Resolves paragraph anchors in input order at the current version. */
+  resolveParagraphAnchors: (anchors: readonly DocxParagraphAnchor[]) => Promise<{
+    version: string;
+    results: DocxParagraphAnchorResult[];
+  }>;
   /** Flushes pending input, then searches exactly and case-sensitively within one scope. */
   findText: (request: DocxFindTextRequest) => Promise<DocxFindTextResult>;
   /** Flushes pending input, then checks an edit batch without changing anything. */
@@ -1230,6 +1240,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       workerOpen: experimentalWorkerOpen
         ? {
             openInWorker: canvasRenderer.openInWorker,
+            workerProposals: readOnly && !collaboration,
+            refreshWorkerLayout: () => pagedEditorRef.current?.refreshWorkerLayout(),
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
             pendingCompletion: canvasRenderer.pendingCompletion,
             hydrateOnDemand: modeReadOnly && !collaboration,
@@ -1758,7 +1770,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     session:
       yrsCore.session &&
       !opening &&
-      yrsCore.replicaReady &&
+      (yrsCore.replicaReady || yrsCore.workerProposalsReady) &&
       yrsCore.sessionGeneration === yrsSeedGeneration &&
       history.state &&
       !state.isLoading &&

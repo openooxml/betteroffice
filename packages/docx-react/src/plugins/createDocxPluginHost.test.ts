@@ -102,17 +102,51 @@ describe('plugin host proposal previews', () => {
     host.layoutChanged(layout(3));
     await settle();
     events.length = 0;
-    registry.change({ version: 'snapshot-version' });
+    registry.change({
+      proposals: [
+        {
+          id: 'proposal',
+          state: 'accepted',
+          paragraph: { kind: 'session', sessionId: 'session', story: 'body', paraId: 'paragraph' },
+          revisionIds: [],
+          changed: false,
+        },
+      ],
+    });
     expect(host.layoutId()).toBe('layout');
     await settle();
     expect(events).toEqual([
       {
         type: 'proposal-change',
         generation: host.generation()!,
-        version: 'snapshot-version',
+        version: 'v1',
         previewVersion: 3,
       },
     ]);
+    host.close('unmounted');
+  });
+
+  test('a worker proposal version change publishes document-change before proposal-change without an update', async () => {
+    const { host, plugin, events } = setup();
+    const registry = stubSession();
+    host.setPlugins([plugin]);
+    host.open(registry.session);
+    host.layoutChanged(layout(0));
+    await settle();
+    events.length = 0;
+    registry.change({ version: 'v2', previewVersion: 1 });
+    expect(host.version()).toBe('v2');
+    expect(host.previewVersion()).toBe(1);
+    expect(host.layoutId()).toBeNull();
+    await settle();
+    expect(events).toEqual([
+      { type: 'document-change', generation: host.generation()!, version: 'v2' },
+      { type: 'layout-change', generation: host.generation()!, layout: null },
+      { type: 'proposal-change', generation: host.generation()!, version: 'v2', previewVersion: 1 },
+    ]);
+    for (const listener of registry.updates) listener();
+    await settle();
+    expect(events.filter((event) => event.type === 'document-change')).toHaveLength(1);
     host.close('unmounted');
   });
 
