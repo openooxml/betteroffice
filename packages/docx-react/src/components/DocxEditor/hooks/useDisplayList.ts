@@ -1015,6 +1015,8 @@ export function useRustDisplayList(
       line: replacedLayoutRef.current?.line ?? documentLineRef.current,
     };
     documentLineRef.current = {};
+    // A build still running publishes nothing, so no line of the released session comes back.
+    generationRef.current += 1;
     cancelPageBuilds(pageBuildTimerRef);
     endOpenLines();
     workerRef.current?.client.destroy();
