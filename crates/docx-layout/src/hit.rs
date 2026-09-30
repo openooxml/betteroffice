@@ -1168,9 +1168,9 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
         return false;
     }
     let paints = match primitive {
-        Primitive::Text(text) => !text.text.trim().is_empty() && !text_fill_none(attrs),
+        Primitive::Text(text) => !js_blank(&text.text) && !text_fill_none(attrs),
         Primitive::GlyphRun(run) => {
-            !run.glyphs.is_empty() && !run.text.trim().is_empty() && !text_fill_none(attrs)
+            !run.glyphs.is_empty() && !js_blank(&run.text) && !text_fill_none(attrs)
         }
         Primitive::Shape(shape) => shape_fill_paints(shape),
         _ => true,
@@ -1226,6 +1226,12 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
     width > 0.0 && height > 0.0 && x >= left && x <= left + width && y >= top && y <= top + height
 }
 
+/// Whether JavaScript's `trim()` leaves nothing, as the overlay tests a run's text.
+fn js_blank(text: &str) -> bool {
+    text.chars()
+        .all(|c| c == '\u{feff}' || (c.is_whitespace() && c != '\u{85}'))
+}
+
 /// A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing.
 fn text_fill_none(attrs: &DocAttrs) -> bool {
     attrs
@@ -1257,7 +1263,9 @@ fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
                 .and_then(Value::as_f64)
                 .is_none_or(|opacity| opacity > 0.0)
         }
-        _ => field("color")
+        _ => paint
+            .and_then(|paint| paint.get("color"))
+            .and_then(Value::as_str)
             .or(shape.fill.as_deref())
             .is_some_and(|fill| !matches!(fill, "" | "transparent" | "none")),
     }
@@ -2211,11 +2219,15 @@ mod tests {
         blank_run["text"] = "  \t".into();
         let mut no_glyphs = glyph_run("hello");
         no_glyphs["glyphs"] = serde_json::json!([]);
+        let mut bom_run = run(100.0, 40.0, 50.0, 1);
+        bom_run["text"] = "\u{feff} ".into();
         for text in [
             unfilled_run,
             unfilled_glyphs,
             blank_run,
+            bom_run,
             glyph_run(" "),
+            glyph_run("\u{feff}"),
             no_glyphs,
         ] {
             let dl = band_page("header", 0.0, vec![text]);
@@ -2223,7 +2235,9 @@ mod tests {
             assert_eq!(hit.region, HitRegion::Header);
             assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
         }
-        for text in [run(100.0, 40.0, 50.0, 1), glyph_run("hello")] {
+        let mut nel_run = run(100.0, 40.0, 50.0, 1);
+        nel_run["text"] = "\u{85}".into();
+        for text in [run(100.0, 40.0, 50.0, 1), glyph_run("hello"), nel_run] {
             let dl = band_page("header", 0.0, vec![text]);
             assert_eq!(
                 hit_test_regions(&dl, 0, 120.0, 35.0).unwrap().region,
@@ -2259,6 +2273,13 @@ mod tests {
             ),
             (120.0, shape(None, None)),
             (120.0, shape(None, Some("transparent"))),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({"kind": "solid", "color": ""})),
+                    Some("#ff0000"),
+                ),
+            ),
             (
                 120.0,
                 shape(Some(serde_json::json!({"kind": "picture"})), None),
