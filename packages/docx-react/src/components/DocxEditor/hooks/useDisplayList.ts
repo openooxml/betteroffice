@@ -299,7 +299,7 @@ export function useRustDisplayList(
   layoutRef.current = layout;
   // The layout shown when another document started loading. What becomes of
   // it settles no wait: waits are for the document being loaded.
-  const replacedLayoutRef = useRef<{ layout: Layout | null } | null>(null);
+  const replacedLayoutRef = useRef<{ layout: Layout | null; line: object } | null>(null);
   const documentLoadsRef = useRef(0);
   // The document load a layout belongs to: a facade forwards only within its load.
   const documentLineRef = useRef<object>({});
@@ -626,7 +626,7 @@ export function useRustDisplayList(
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
       const documentLoad = documentLoadsRef.current;
-      const line = documentLineRef.current;
+      const line = replacedLayoutRef.current?.line ?? documentLineRef.current;
       const replayInputOnMainThread = async (
         pending: ResidentInputOperation,
         hostEngine: YrsSession,
@@ -939,7 +939,7 @@ export function useRustDisplayList(
       }
       pageBuildInFlightRef.current = true;
       const dispatchedEpoch = contentEpochRef.current;
-      const line = documentLineRef.current;
+      const line = replacedLayoutRef.current?.line ?? documentLineRef.current;
       const paintToken = paintedCaretMachine.token();
       const paintCaret =
         workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
@@ -1267,7 +1267,7 @@ export function useRustDisplayList(
     }
     if (previewKey !== null) layoutPreviewKeyRef.current = previewKey;
     const contentEpoch = contentEpochRef.current;
-    const line = documentLineRef.current;
+    const line = replacedLayoutRef.current?.line ?? documentLineRef.current;
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
@@ -1602,8 +1602,12 @@ export function useRustDisplayList(
       if (!failure) {
         contentEpochRef.current += 1;
         documentLoadsRef.current += 1;
+        // Until the next document's layout arrives, what is built is the shown document's.
+        replacedLayoutRef.current = {
+          layout: layoutRef.current,
+          line: replacedLayoutRef.current?.line ?? documentLineRef.current,
+        };
         documentLineRef.current = {};
-        replacedLayoutRef.current = { layout: layoutRef.current };
       }
       markSettled(null, failure, true);
     },
