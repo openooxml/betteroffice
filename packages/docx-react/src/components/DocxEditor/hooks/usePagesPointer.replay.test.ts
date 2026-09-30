@@ -1,8 +1,8 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { createRef } from 'react';
 import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/docx/layout/render';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { YrsCellLoc, YrsSession } from '@betteroffice/docx/yrs';
 import type { YrsInputRef } from '../YrsInput';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
@@ -40,6 +40,7 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
     focus: () => {
       focused += 1;
     },
+    isFocused: () => false,
     setSelectionFromDisplay: (anchor: number, head: number, story: string) =>
       selections.push([anchor, head, story]),
     displaySelection: () => null,
@@ -96,6 +97,7 @@ beforeEach(() => {
   host = document.createElement('div');
   host.className = 'canvas-pages';
   const canvas = document.createElement('canvas');
+  canvas.className = 'canvas-page';
   canvas.dataset.pageIndex = '0';
   canvas.getBoundingClientRect = () =>
     ({ left: 0, top: 0, right: PAGE.width, bottom: PAGE.height, ...PAGE }) as DOMRect;
@@ -184,6 +186,169 @@ test('a pending drag captures its final mouseup position', () => {
   opts.replicaReady = true;
   view.rerender();
   expect(selections).toEqual([[45, 20, 'body']]);
+});
+
+test('a pending drag across cells in one table replays a cell selection', () => {
+  const anchor: YrsCellLoc = { story: 'body', tableIndex: 0, row: 0, column: 0 };
+  const head: YrsCellLoc = { ...anchor, column: 1 };
+  const setCellSelection = mock(() => {});
+  const syncYrsInputState = mock(() => false);
+  const setSelectionRects = mock(() => {});
+  const setCaretPosition = mock(() => {});
+  const { opts, projection, selections } = options({
+    yrsSession: { cellSelection: () => null, setCellSelection } as unknown as YrsSession,
+    syncYrsInputState,
+    setSelectionRects,
+    setCaretPosition,
+  });
+  projection.targetAt = (position) => ({
+    story: position === 20 ? 'body:t0:r0c0' : 'body:t0:r0c1',
+    displayPosition: 1,
+    cell: position === 20 ? anchor : head,
+  });
+  const view = renderHook(() => usePagesPointer(opts));
+
+  mouse('mousedown', 200);
+  mouse('mousemove', 450);
+  mouse('mouseup', 450);
+  expect(setCellSelection).not.toHaveBeenCalled();
+
+  opts.replicaReady = true;
+  view.rerender();
+  expect(setCellSelection).toHaveBeenCalledTimes(1);
+  expect(setCellSelection).toHaveBeenCalledWith({ anchor, head });
+  expect(syncYrsInputState).toHaveBeenCalledTimes(1);
+  expect(syncYrsInputState).toHaveBeenCalledWith(false);
+  expect(setSelectionRects).toHaveBeenCalledTimes(1);
+  expect(setSelectionRects).toHaveBeenCalledWith([]);
+  expect(setCaretPosition).toHaveBeenCalledTimes(1);
+  expect(setCaretPosition).toHaveBeenCalledWith(null);
+  expect(selections).toEqual([]);
+});
+
+test.each([70, null])('a pending bookmark link replays with bookmark position %s', (bookmark) => {
+  const queries = fakeQueries();
+  queries.displayList.pages[0]!.primitives = [{
+    kind: 'text', text: 'link', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 5,
+    href: '#bookmark',
+  }];
+  const scrollToPositionImpl = mock(() => {});
+  const { opts, projection, selections } = options({
+    displayListQueries: queries,
+    scrollToPositionImpl,
+  });
+  projection.bookmarkPosition = mock((name: string) => name === 'bookmark' ? bookmark : null);
+  const view = renderHook(() => usePagesPointer(opts));
+
+  click(1, 200, 405);
+  expect(selections).toEqual([]);
+  expect(scrollToPositionImpl).not.toHaveBeenCalled();
+  expect(projection.bookmarkPosition).not.toHaveBeenCalled();
+
+  opts.replicaReady = true;
+  view.rerender();
+  expect(projection.bookmarkPosition).toHaveBeenCalledTimes(1);
+  expect(projection.bookmarkPosition).toHaveBeenCalledWith('bookmark');
+  if (bookmark === null) {
+    expect(scrollToPositionImpl).not.toHaveBeenCalled();
+    expect(selections).toEqual([[20, 20, 'body']]);
+  } else {
+    expect(scrollToPositionImpl).toHaveBeenCalledTimes(1);
+    expect(scrollToPositionImpl).toHaveBeenCalledWith(bookmark);
+    expect(selections).toEqual([[bookmark + 1, bookmark + 1, 'body']]);
+  }
+});
+
+test.each(['pointerdown', 'keydown'])('outside %s drops a pending gesture', (type) => {
+  const { opts, selections, words, focused } = options();
+  const view = renderHook(() => usePagesPointer(opts));
+  const outside = document.createElement('button');
+  document.body.append(outside);
+  try {
+    click(2);
+    act(() => outside.dispatchEvent(new Event(type, { bubbles: true })));
+    const beforeReplay = focused();
+
+    opts.replicaReady = true;
+    view.rerender();
+    expect(selections).toEqual([]);
+    expect(words).toEqual([]);
+    expect(focused()).toBe(beforeReplay);
+  } finally {
+    outside.remove();
+  }
+});
+
+test('input on the pages or the focused hidden input keeps a pending gesture', () => {
+  const { opts, selections, focused } = options();
+  const hiddenInput = document.createElement('textarea');
+  hiddenInput.className = 'paged-editor__yrs-input';
+  document.body.append(hiddenInput);
+  opts.yrsInputRef.current!.isFocused = () => document.activeElement === hiddenInput;
+  const view = renderHook(() => usePagesPointer(opts));
+  try {
+    click(1);
+    act(() => {
+      host.firstElementChild!.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      hiddenInput.focus();
+      hiddenInput.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      hiddenInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Shift' }));
+    });
+    const beforeReplay = focused();
+
+    opts.replicaReady = true;
+    view.rerender();
+    expect(selections).toEqual([[20, 20, 'body']]);
+    expect(focused()).toBe(beforeReplay + 1);
+  } finally {
+    hiddenInput.remove();
+  }
+});
+
+test('replaying a gesture preserves focus in another input', () => {
+  const { opts, selections, focused } = options();
+  const view = renderHook(() => usePagesPointer(opts));
+  const outside = document.createElement('input');
+  document.body.append(outside);
+  try {
+    click(1);
+    act(() => outside.focus());
+    const beforeReplay = focused();
+
+    opts.replicaReady = true;
+    view.rerender();
+    expect(selections).toEqual([[20, 20, 'body']]);
+    expect(document.activeElement).toBe(outside);
+    expect(focused()).toBe(beforeReplay);
+  } finally {
+    outside.remove();
+  }
+});
+
+test.each(['replay', 'outside input', 'unmount'])('pending input listeners are removed on %s', (end) => {
+  const { opts } = options();
+  const view = renderHook(() => usePagesPointer(opts));
+  const add = spyOn(document, 'addEventListener');
+  const remove = spyOn(document, 'removeEventListener');
+  try {
+    click(1);
+    const pointerListener = add.mock.calls.find(([type]) => type === 'pointerdown')![1];
+    const keyListener = add.mock.calls.find(([type]) => type === 'keydown')![1];
+    if (end === 'replay') {
+      opts.replicaReady = true;
+      view.rerender();
+    } else if (end === 'outside input') {
+      act(() => document.body.dispatchEvent(new Event('pointerdown', { bubbles: true })));
+    } else {
+      view.unmount();
+    }
+    expect(remove).toHaveBeenCalledWith('pointerdown', pointerListener, true);
+    expect(remove).toHaveBeenCalledWith('keydown', keyListener, true);
+  } finally {
+    add.mockRestore();
+    remove.mockRestore();
+  }
 });
 
 test('newer keyboard input drops the pending gesture without refocusing', () => {

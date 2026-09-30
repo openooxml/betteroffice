@@ -32,11 +32,11 @@ import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandSt
 import { createCommentIdAllocator } from '../commentFactories';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
-import type { YrsInputRef } from '../YrsInput';
+import { YrsInput, type YrsInputRef } from '../YrsInput';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import('@testing-library/react');
 const originalWorker = globalThis.Worker;
 const bytes = new Uint8Array(readFileSync(resolve(
   import.meta.dir,
@@ -94,6 +94,7 @@ function installWorker(options: {
   oomStage?: 'open' | 'fontRequirements' | 'bootstrap' | 'encodeState';
   holdRetryOpen?: boolean;
   revisionCount?: number;
+  failRevisionCount?: boolean;
 } = {}) {
   const workers: InProcessResidentWorker[] = [];
   const posted: ResidentEngineWorkerRequest[] = [];
@@ -118,7 +119,9 @@ function installWorker(options: {
           } as MessageEvent));
         } else if (request.type === 'revisionCount') {
           queueMicrotask(() => worker.onmessage?.({
-            data: { id: request.id, ok: true, revisionCount: options.revisionCount ?? 0 },
+            data: options.failRevisionCount
+              ? { id: request.id, ok: false, error: 'revision count failed' }
+              : { id: request.id, ok: true, revisionCount: options.revisionCount ?? 0 },
           } as MessageEvent));
         } else send(request, transfer);
       };
@@ -328,6 +331,68 @@ function holdFrames() {
   };
 }
 
+test.each([false, true])('textarea focus requests a replica only with hydrateOnDemand=%s', async (hydrateOnDemand) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, hydrateOnDemand },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const core = result.current.core;
+    expect(core.hydrateOnDemand).toBe(hydrateOnDemand);
+    const view = render(
+      <YrsInput
+        enabled
+        readOnly={hydrateOnDemand}
+        session={core.session}
+        replicaReadyRef={core.replicaReadyRef}
+        requestReplica={core.hydrateOnDemand ? core.requestReplica : undefined}
+        inputPositionMap={core.inputPositionMap}
+        displayPositionToLoc={() => null}
+        locToDisplayPosition={() => null}
+        onStateChange={() => {}}
+        onDirectInput={() => {}}
+      />
+    );
+    const textarea = view.getByTestId('yrs-input');
+    act(() => {
+      requestAnimationFrame(() => textarea.focus());
+      frames.run();
+      fireEvent.keyDown(textarea, { key: 'ArrowRight' });
+    });
+    await act(async () => { await Promise.resolve(); });
+    if (hydrateOnDemand) {
+      await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+      await act(async () => {
+        workers[0].release();
+        await awaitWorkerOpenReplica(core.session!);
+      });
+      await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    } else {
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(result.current.core.replicaReady).toBe(false);
+    }
+  } finally {
+    unmount();
+    cleanup();
+    frames.restore();
+  }
+});
+
+test('on-demand hydration is inactive without worker opening', async () => {
+  installWorker();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, experimentalWorkerOpen: false, hydrateOnDemand: true },
+  });
+  try {
+    await waitFor(() => expect(result.current.core.session).not.toBeNull());
+    expect(result.current.core.hydrateOnDemand).toBe(false);
+  } finally {
+    unmount();
+  }
+});
+
 test('an on-demand replica stays empty after frames and the open wait until requested', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();
@@ -401,6 +466,38 @@ test('tracked changes start an on-demand replica without a replica request', asy
   }
 });
 
+test('a failed revision count starts the on-demand replica', async () => {
+  const { workers, posted } = installWorker({ holdState: true, failRevisionCount: true });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, hydrateOnDemand: true },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+    expect(result.current.core.replicaReady).toBe(false);
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    cleanup();
+    frames.restore();
+  }
+});
+
 test('turning off on-demand hydration starts a pending replica after two frames', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();
@@ -419,6 +516,7 @@ test('turning off on-demand hydration starts a pending replica after two frames'
     act(() => rerender({ ...props, hydrateOnDemand: false }));
     expect(result.current.core.session).toBe(session);
     expect(result.current.core.requestReplica).toBe(requestReplica);
+    expect(result.current.core.hydrateOnDemand).toBe(false);
     expect(replicaHelpers.workerOpenReplicaOnDemand(session)).toBe(false);
     expect(result.current.core.replicaReady).toBe(false);
     act(() => frames.run());

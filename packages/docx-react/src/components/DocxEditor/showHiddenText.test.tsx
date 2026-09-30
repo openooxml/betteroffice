@@ -53,6 +53,7 @@ function yrsCore(): YrsCoreSession {
     sessionGeneration: 0,
     replicaReady: true,
     requestReplica: () => {},
+    hydrateOnDemand: false,
     storyBlocks: () => null,
     bodyBlocks: () => null,
     inputPositionMap: () => null,

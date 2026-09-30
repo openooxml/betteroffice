@@ -31,6 +31,7 @@ export interface YrsCoreSession {
   /** The seed generation `session` was created for. */
   sessionGeneration: number | null;
   replicaReady: boolean;
+  hydrateOnDemand: boolean;
   /** Starts loading the main-thread replica when needed. */
   requestReplica(): void;
   replicaReadyRef?: React.RefObject<boolean>;
@@ -621,9 +622,13 @@ export function useYrsCoreSession(
               // Tracked changes show cards that read the replica.
               void worker.revisionCount().then(
                 (count) => {
-                  if (count > 0) startReplicaRef.current?.();
+                  if (!stale() && sessionRef.current === next && count > 0) {
+                    startReplicaRef.current?.();
+                  }
                 },
-                () => {}
+                () => {
+                  if (!stale() && sessionRef.current === next) startReplicaRef.current?.();
+                }
               );
             };
             startReplicaRef.current = () => {
@@ -772,7 +777,7 @@ export function useYrsCoreSession(
   ]);
 
   // Turning on-demand hydration off restores the bounded start a frame may never trigger.
-  const hydrateOnDemand = workerOpen?.hydrateOnDemand === true;
+  const hydrateOnDemand = workerOpen?.hydrateOnDemand === true && Boolean(openInWorker);
   const wasOnDemandRef = useRef(hydrateOnDemand);
   useEffect(() => {
     const was = wasOnDemandRef.current;
@@ -953,6 +958,7 @@ export function useYrsCoreSession(
     session,
     sessionGeneration,
     replicaReady: !openInWorker || replicaReady,
+    hydrateOnDemand,
     requestReplica,
     replicaReadyRef: openInWorker ? replicaReadyRef : undefined,
     experimentalWorkerOpen: Boolean(openInWorker),
