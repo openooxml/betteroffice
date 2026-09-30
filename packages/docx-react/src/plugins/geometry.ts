@@ -5,7 +5,11 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import type { ProposalGeometryMirror, YrsSession } from '@betteroffice/docx/yrs';
+import {
+  proposalSetIdentity,
+  type ProposalGeometryMirror,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
@@ -245,8 +249,9 @@ export function createPluginGeometry(
       if (session.version() !== layout.version) {
         return anchorFailure('stale-version', 'The document changed after that version');
       }
+      const snapshot = proposalSnapshot(session);
       if (
-        (proposalSnapshot(session)?.previewVersion ?? 0) !== layout.previewVersion ||
+        (snapshot?.previewVersion ?? 0) !== layout.previewVersion ||
         currentPreviewKey(session) !== renderedPreviewKey(queries)
       )
         return unavailable();
@@ -255,7 +260,9 @@ export function createPluginGeometry(
         mirror &&
         (target.kind !== 'proposal' ||
           mirror.version !== layout.version ||
-          mirror.previewVersion !== layout.previewVersion)
+          mirror.previewVersion !== layout.previewVersion ||
+          !snapshot ||
+          mirror.proposals !== proposalSetIdentity(snapshot))
       )
         return unavailable();
       const mirrored =

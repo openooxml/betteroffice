@@ -417,8 +417,23 @@ export type ProposalGeometryTarget = ({ ok: true } & ProposalDisplayTarget) | An
 export interface ProposalGeometryMirror {
   version: string;
   previewVersion: number;
+  proposals: string;
   targets: Record<string, ProposalGeometryTarget>;
   hidden: { from: number; to: number }[];
+}
+
+const proposalSetIdentities = new WeakMap<DocxProposalSnapshot, string>();
+
+/** @internal */
+export function proposalSetIdentity(snapshot: DocxProposalSnapshot): string {
+  let identity = proposalSetIdentities.get(snapshot);
+  if (identity === undefined) {
+    identity = JSON.stringify(
+      snapshot.proposals.map(({ id, revisionIds, paragraph }) => [id, revisionIds, paragraph])
+    );
+    proposalSetIdentities.set(snapshot, identity);
+  }
+  return identity;
 }
 
 /** @internal */
@@ -470,6 +485,7 @@ export function computeProposalGeometryMirror(
   return {
     version,
     previewVersion: snapshot.previewVersion,
+    proposals: proposalSetIdentity(snapshot),
     targets,
     hidden: hiddenRanges(reader, version, snapshot)
       .map(display)

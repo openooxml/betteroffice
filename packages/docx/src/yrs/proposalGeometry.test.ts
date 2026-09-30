@@ -7,6 +7,7 @@ import { createYrsSession, type YrsSession } from './index';
 import type { DocxProposalInput, DocxProposalResult } from './proposals';
 import {
   computeProposalGeometryMirror,
+  proposalSetIdentity,
   resolveNavigationTarget,
   type ProposalGeometryReader,
 } from './proposalGeometry';
@@ -131,6 +132,7 @@ describe('proposal geometry readers', () => {
       expect(actual.version).toBe(resident.geometryReader.version());
       expect({ ...actual, version: expected.version }).toEqual(expected);
       expect(actual.previewVersion).toBe(snapshot.previewVersion);
+      expect(actual.proposals).toBe(proposalSetIdentity(snapshot));
       expect(Object.keys(actual.targets)).toEqual(snapshot.proposals.map(({ id }) => id));
       expect(actual.hidden).toHaveLength(2);
       expect(actual.hidden.every(({ from, to }) => from < to)).toBe(true);
@@ -185,6 +187,65 @@ describe('proposal geometry readers', () => {
       expect(resolveNavigationTarget(duplicatedResident, 'body', '00000007')).toBe('ambiguous-target');
     } finally {
       resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('gives equal proposal snapshots the same identity', async () => {
+    const main = await proposedDocument();
+    try {
+      const first = main.getProposals();
+      const equal = main.getProposals();
+      expect(equal).not.toBe(first);
+      expect(equal).toEqual(first);
+      expect(proposalSetIdentity(equal)).toBe(proposalSetIdentity(first));
+    } finally {
+      main.destroy();
+    }
+  });
+
+  test('changes identity on withdrawal and re-proposal at another paragraph', async () => {
+    const main = await createYrsSession({ clientId: 79102 });
+    try {
+      main.openDocx(fixture(), true);
+      const snapshot = snapshotOf(
+        main.proposeChanges({
+          expectVersion: main.version(),
+          proposals: [replace('same', '00000007', 'Unchanged', 'Unchanged')],
+        })
+      );
+      expect(snapshot.proposals.find(({ id }) => id === 'same')).toMatchObject({
+        changed: false,
+        revisionIds: [],
+      });
+      const first = computeProposalGeometryMirror(main, snapshot);
+      const withdrawn = snapshotOf(
+        main.withdrawProposals({ expectVersion: main.version(), ids: ['same'] })
+      );
+      expect(withdrawn.version).toBe(first.version);
+      expect(withdrawn.previewVersion).toBe(first.previewVersion);
+      expect(withdrawn.proposals.some(({ id }) => id === 'same')).toBe(false);
+      expect(proposalSetIdentity(withdrawn)).not.toBe(first.proposals);
+
+      const proposed = snapshotOf(
+        main.proposeChanges({
+          expectVersion: main.version(),
+          proposals: [replace('same', '00000002', 'Insert here', 'Insert here')],
+        })
+      );
+      const next = computeProposalGeometryMirror(main, proposed);
+      expect(next.version).toBe(first.version);
+      expect(next.previewVersion).toBe(first.previewVersion);
+      expect(next.proposals).toBe(proposalSetIdentity(proposed));
+      expect(next.proposals).not.toBe(first.proposals);
+      expect(next.proposals).not.toBe(proposalSetIdentity(withdrawn));
+      expect(next.targets.same).toMatchObject({
+        ok: true,
+        ranges: [],
+        paragraph: expect.any(Number),
+      });
+      expect(next.targets.same).not.toEqual(first.targets.same);
+    } finally {
       main.destroy();
     }
   });
