@@ -1359,6 +1359,13 @@ fn extract_floating_zones(
     shape_offsets: &BTreeMap<usize, f64>,
 ) -> Result<Vec<AnchoredFloatingZone>, String> {
     let mut zones = Vec::new();
+    // Painting lets a negative indent run past a wrap margin, so a side that
+    // main didn't choose could put such a line inside the table.
+    let table_wrap_frames = if blocks.iter().any(has_negative_side_indent) {
+        &[]
+    } else {
+        table_wrap_frames
+    };
     for (block_index, block) in blocks.iter().enumerate() {
         match block {
             LayoutBlock::Paragraph(paragraph) => {
@@ -1576,6 +1583,22 @@ fn extract_image_zones(
             margin_relative: is_margin_relative(image.position.as_ref()),
         });
     }
+}
+
+fn has_negative_side_indent(block: &LayoutBlock) -> bool {
+    let LayoutBlock::Paragraph(paragraph) = block else {
+        return false;
+    };
+    let Some(indent) = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.indent.as_ref())
+    else {
+        return false;
+    };
+    let left = indent.left.unwrap_or(0.0);
+    let first = left + indent.first_line.unwrap_or(0.0) - indent.hanging.unwrap_or(0.0);
+    left < 0.0 || first < 0.0 || indent.right.unwrap_or(0.0) < 0.0
 }
 
 fn extract_table_zone(
@@ -2449,6 +2472,37 @@ mod tests {
         let flow = FloatFlow::new(&blocks, &[600.0], &MeasurementConfig::default(), None).unwrap();
         let zone = &flow.paragraph_zones[&0][0];
         assert_eq!((zone.left_margin, zone.right_margin), (493.0, 0.0));
+    }
+
+    #[test]
+    fn wide_floating_tables_beside_negative_indents_keep_main_margins() {
+        for (indent, expected) in [
+            (json!({}), (0.0, 469.0)),
+            (json!({"right": -100}), (513.0, 0.0)),
+            (json!({"left": 20, "hanging": 40}), (513.0, 0.0)),
+        ] {
+            let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {
+                    "kind": "table", "id": "float", "columnWidths": [360], "layoutMode": "fixed",
+                    "rows": [{"id": "row", "height": 100, "heightRule": "exact", "cells": []}],
+                    "floating": {
+                        "horzAnchor": "text", "tblpX": 140, "leftFromText": 9, "rightFromText": 13
+                    }
+                },
+                {"kind": "paragraph", "id": "text", "attrs": {"indent": indent}, "runs": []}
+            ]))
+            .unwrap();
+            let flow = FloatFlow::with_table_wrap_frames(
+                &blocks,
+                &[600.0, 600.0],
+                &[true, true],
+                &MeasurementConfig::default(),
+                None,
+            )
+            .unwrap();
+            let zone = &flow.paragraph_zones[&0][0];
+            assert_eq!((zone.left_margin, zone.right_margin), expected);
+        }
     }
 
     #[test]
