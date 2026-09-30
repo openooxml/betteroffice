@@ -1938,6 +1938,7 @@ impl EngineSession {
 
     /// Serializes resident lowered blocks.
     pub fn lower_story_json(&self, story: &str, env: &RenderEnv) -> Result<String, BridgeError> {
+        self.doc.materialize_pending_seed();
         self.with_lowered_story(story, env, |_| ())?;
         let mut render = self.render.borrow_mut();
         let lowered = render
@@ -2077,6 +2078,7 @@ impl EngineSession {
         input_json: &str,
         use_preview_superset: bool,
     ) -> Result<String, String> {
+        self.doc.materialize_pending_seed();
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (input, regions, notes, measurement, render_env, body_story) = request.split();
@@ -2430,6 +2432,9 @@ impl EngineSession {
         input_json: &str,
         prefix_pages: Option<usize>,
     ) -> Result<PreparedRegionLayout, String> {
+        if prefix_pages.is_none() {
+            self.doc.materialize_pending_seed();
+        }
         let request_fingerprint = layout_options_fingerprint(
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?,
         );
@@ -4503,6 +4508,7 @@ impl EngineSession {
         scope: AnchorScope,
         current: Option<&str>,
     ) -> Result<ExportRead<DocxPagedStructuredContent<DocxLayoutMap>>, ExportRefusal> {
+        self.doc.materialize_pending_seed();
         let version = self.doc.version();
         let refuse = |code, message: &str| ExportRefusal {
             version: version.clone(),

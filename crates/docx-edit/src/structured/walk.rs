@@ -1182,7 +1182,9 @@ impl<'a> Exporter<'a> {
                         warning.clone(),
                     );
                 }
-                if !read.pinned && !read.provenance.inline.is_empty() {
+                if !read.pinned.load(std::sync::atomic::Ordering::Relaxed)
+                    && !read.provenance.inline.is_empty()
+                {
                     self.note(
                         DiagnosticCode::ProvenanceUnavailable,
                         Severity::Info,
@@ -1667,7 +1669,10 @@ impl<'a> Exporter<'a> {
         let read = self.read();
         let (provenance, pinned) = match prov {
             Prov::Main => match read {
-                Some(read) => (&read.provenance, read.pinned),
+                Some(read) => (
+                    &read.provenance,
+                    read.pinned.load(std::sync::atomic::Ordering::Relaxed),
+                ),
                 None => return placements,
             },
             Prov::Scratch(scratch) => (&scratch.provenance, true),

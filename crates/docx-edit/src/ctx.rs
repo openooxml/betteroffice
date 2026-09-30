@@ -76,6 +76,9 @@ impl crate::EditingDoc {
     /// undo stack.
     pub(crate) fn transact_for(&self, ctx: &EditCtx) -> yrs::TransactionMut<'_> {
         use yrs::Transact;
+        if ctx.origin != EditOrigin::System {
+            self.materialize_pending_seed();
+        }
         match ctx.origin {
             EditOrigin::Local => self.yrs_doc().transact_mut_with(self.client_id()),
             EditOrigin::Agent => self.yrs_doc().transact_mut_with("agent"),

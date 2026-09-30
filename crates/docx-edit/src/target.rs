@@ -1087,6 +1087,7 @@ impl EditingDoc {
         &self,
         read: impl FnOnce(&mut Views<'_, yrs::Transaction<'_>>) -> Result<R, EditFailure>,
     ) -> Result<(DocumentVersion, R), EditRefusal> {
+        self.materialize_pending_seed();
         let version = self.version();
         let txn = self.yrs_doc().transact();
         let mut views = Views::committed(self, &txn);
@@ -1307,6 +1308,7 @@ impl EditingDoc {
     /// Projected texts around a paragraph-keyed selection: the start paragraph's text, the text
     /// before and after the selection, and the selection itself with `\n` between paragraphs.
     pub fn selection_text(&self, range: &LocRange, view: EditTextView) -> OpResult<SelectionInfo> {
+        self.materialize_pending_seed();
         let txn = self.yrs_doc().transact();
         let story_id = &range.start.story;
         story_ref(&txn, story_id)?;

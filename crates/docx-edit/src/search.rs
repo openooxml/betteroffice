@@ -169,6 +169,7 @@ impl EditingDoc {
         case_sensitive: bool,
         limit: Option<usize>,
     ) -> Result<Vec<TextSearchMatch>, TextSearchError> {
+        self.materialize_pending_seed();
         let limit = limit.unwrap_or(usize::MAX);
         if query.is_empty() || limit == 0 {
             return Ok(Vec::new());

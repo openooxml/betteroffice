@@ -20,7 +20,7 @@ use crate::structured::source::{
     story_root,
 };
 use crate::structured::{BreakType, Revision, RevisionKind, StoryKind};
-use crate::{EditCtx, EditingDoc, RawOp};
+use crate::{EditCtx, EditingDoc, PILCROW_KIND, RawOp};
 
 type JsonObject = BTreeMap<String, Value>;
 
@@ -5020,7 +5020,7 @@ pub(crate) fn seed_parsed_docx_with(
 ) -> Result<Vec<String>, String> {
     let mut lowered = lower_docx(envelope, parts)?;
     lowered.script_fonts = None;
-    seed_lowered(document, lowered, None, SeedMedia::AsParsed).map(|fonts| fonts.referenced)
+    seed_lowered(document, lowered, None, SeedMedia::AsParsed, None).map(|fonts| fonts.referenced)
 }
 
 /// The fonts a seeded document references, and those of them it names only
@@ -5046,11 +5046,56 @@ pub(crate) enum SeedMedia<'a> {
 
 /// Seeds every lowered story into `document` and retains the package context, with the identity
 /// index when there is one.
+/// The seed batches a deferred open holds back until materialization, plus the opaque
+/// sequence names, whose marker the open can only write once every story is applied.
+pub(crate) struct PendingSeed {
+    pub batches: Vec<(String, Vec<RawOp>)>,
+    pub opaque_sequences: Vec<String>,
+}
+
+/// The body batch cut after the op that closes its `head`-th paragraph, when it has one. The
+/// tail keeps its absolute story indexes, so it applies later in one transaction unchanged.
+fn split_body_seed(batches: &mut [(String, Vec<RawOp>)], head: usize) -> Option<Vec<RawOp>> {
+    let (_, ops) = batches
+        .iter_mut()
+        .find(|(story_id, _)| story_id == "body")?;
+    let mut paragraphs = 0;
+    let mut end = None;
+    for (at, op) in ops.iter().enumerate() {
+        if matches!(op, RawOp::InsertEmbed { kind, .. } if kind == PILCROW_KIND) {
+            paragraphs += 1;
+            if paragraphs == head {
+                end = Some(at + 1);
+                break;
+            }
+        }
+    }
+    let end = end?;
+    (end < ops.len()).then(|| ops.split_off(end))
+}
+
+/// The control-safety inventory for the installed source, once the document holds every seeded
+/// embed — a deferred seed runs it at materialization.
+pub(crate) fn embed_safety_inventory(document: &EditingDoc) {
+    if let Some(source) = document.source_metadata()
+        && !source.read().ambiguous_safety.is_empty()
+    {
+        let txn = document.yrs_doc().transact();
+        if let Ok(inventory) = crate::content_controls::Inventory::build(document, &txn) {
+            let _ = source
+                .read()
+                .embed_safety
+                .set(inventory.occurrence_safety(source.read()));
+        }
+    }
+}
+
 fn seed_lowered(
     document: &EditingDoc,
     lowered: LoweredDocx,
     index: Option<SourceIndex>,
     media: SeedMedia<'_>,
+    head: Option<usize>,
 ) -> Result<SeededFonts, String> {
     let LoweredDocx {
         context,
@@ -5085,13 +5130,25 @@ fn seed_lowered(
             layout_tokens,
         )?,
     };
+    let tail = head
+        .filter(|head| *head > 0)
+        .and_then(|head| split_body_seed(&mut batches, head));
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
-    seed_opaque_sequences(document, &context.opaque_sequences);
+    if tail.is_none() {
+        seed_opaque_sequences(document, &context.opaque_sequences);
+    }
     document.set_media_sources(sources);
-    read.pin(document);
-    read.comment_writes = CommentWrites::watch(document);
+    read.provenance.index();
+    read.comment_writes = if tail.is_some() {
+        CommentWrites::watch_paused(document)
+    } else {
+        CommentWrites::watch(document)
+    };
+    if tail.is_none() {
+        read.pin(document);
+    }
     if let Some(index) = index {
         document.retain_source(SourcePackage::Ready(Arc::new(index)));
     }
@@ -5103,16 +5160,13 @@ fn seed_lowered(
         },
         0,
     );
-    if let Some(source) = document.source_metadata()
-        && !source.read().ambiguous_safety.is_empty()
-    {
-        let txn = document.yrs_doc().transact();
-        if let Ok(inventory) = crate::content_controls::Inventory::build(document, &txn) {
-            let _ = source
-                .read()
-                .embed_safety
-                .set(inventory.occurrence_safety(source.read()));
-        }
+    if let Some(batches) = tail {
+        document.stash_pending_seed(PendingSeed {
+            batches: vec![("body".to_owned(), batches)],
+            opaque_sequences: context.opaque_sequences,
+        });
+    } else {
+        embed_safety_inventory(document);
     }
     Ok(SeededFonts {
         unused_script: script_fonts
@@ -5515,6 +5569,7 @@ pub(crate) fn seed_parsed_docx(
     bytes: Arc<[u8]>,
     digest: String,
     media: SeedMedia<'_>,
+    head: Option<usize>,
 ) -> Result<SeededFonts, String> {
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
@@ -5528,7 +5583,7 @@ pub(crate) fn seed_parsed_docx(
         &lowered.relationships,
         std::mem::take(&mut lowered.context.paragraphs),
     );
-    seed_lowered(document, lowered, Some(index), media)
+    seed_lowered(document, lowered, Some(index), media, head)
 }
 
 /// Opens a DOCX: seeds every story and starts a new opening with a fresh
@@ -5552,7 +5607,20 @@ pub fn seed_from_docx_with_generation(
     Ok(())
 }
 
-/// Seeds every story of a DOCX without starting an opening.
+/// [`seed_from_docx`] that returns after the body's first `head_paragraphs` paragraphs: the
+/// rest of the seed waits in the document's pending seed and applies when it materializes
+/// ([`EditingDoc::materialize_pending_seed`], or the first read or edit that needs the whole
+/// document), after which it is identical to a full seed. `0` seeds in full.
+pub fn seed_docx_open(
+    document: &EditingDoc,
+    bytes: &[u8],
+    head_paragraphs: usize,
+) -> Result<(), String> {
+    seed_stories_with(document, bytes, Some(head_paragraphs))?;
+    document.begin_opening(None);
+    Ok(())
+}
+
 /// Seeds `bytes` with only the body's first `blocks` blocks, parsed and
 /// lowered, and the other stories they or the pages need, to paint the first
 /// pages before the document is seeded in full. The result is for display
@@ -5606,7 +5674,7 @@ pub(crate) fn seed_preview_envelope(
 ) -> Result<SeededFonts, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
-    let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed)?;
+    let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed, None)?;
     document.install_media(media);
     Ok(fonts)
 }
@@ -5679,6 +5747,7 @@ pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Re
             table: &media,
             layout_tokens: true,
         },
+        None,
     )?;
     document.install_media(media);
     document.begin_opening(None);
@@ -5686,6 +5755,14 @@ pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Re
 }
 
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    seed_stories_with(document, bytes, None)
+}
+
+fn seed_stories_with(
+    document: &EditingDoc,
+    bytes: &[u8],
+    head: Option<usize>,
+) -> Result<(), String> {
     let digest = package_digest(bytes);
     let bytes: Arc<[u8]> = Arc::from(bytes);
     let (envelope, parts, media) =
@@ -5700,6 +5777,7 @@ pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), St
             table: &media,
             layout_tokens: false,
         },
+        head,
     )?;
     document.install_media(media);
     Ok(())

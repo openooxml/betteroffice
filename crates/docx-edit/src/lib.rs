@@ -133,7 +133,7 @@ pub use queries::{
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
-pub use seed::{seed_docx_preview, seed_from_docx, seed_from_docx_with_generation};
+pub use seed::{seed_docx_open, seed_docx_preview, seed_from_docx, seed_from_docx_with_generation};
 use segments::SegmentIndex;
 pub use target::{
     AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphTarget, ParagraphText,
@@ -530,6 +530,9 @@ pub struct EditingDoc {
     /// Story projections held only inside a shared-read scope.
     story_views: Mutex<EpochCache<target::StoryView>>,
     source: Mutex<Option<identity::SourcePackage>>,
+    /// The rest of a deferred seed (see [`seed::seed_docx_open`]), applied at
+    /// [`Self::materialize_pending_seed`].
+    pending_seed: Mutex<Option<seed::PendingSeed>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
     seen: identity::SeenCell,
@@ -583,6 +586,7 @@ impl EditingDoc {
             shared_read_depth: AtomicU32::new(0),
             story_views: Mutex::default(),
             source: Mutex::new(None),
+            pending_seed: Mutex::new(None),
             media: Mutex::new(None),
             media_sources: Mutex::default(),
             seen,
@@ -628,6 +632,7 @@ impl EditingDoc {
 
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
     pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
+        self.materialize_pending_seed();
         // Sampling before the read txn lets a racing commit tag the fresh index
         // stale rather than serve a pre-commit snapshot as current.
         let epoch = self.epoch.load(Ordering::Relaxed);
@@ -692,6 +697,40 @@ impl EditingDoc {
             *self.source.lock().unwrap(),
             Some(identity::SourcePackage::Ready(_))
         )
+    }
+
+    /// Whether [`Self::materialize_pending_seed`] still has seed batches to apply.
+    pub fn has_pending_seed(&self) -> bool {
+        self.pending_seed.lock().unwrap().is_some()
+    }
+
+    /// Holds the rest of a seed [`seed::seed_docx_open`] deferred until materialization.
+    pub(crate) fn stash_pending_seed(&self, pending: seed::PendingSeed) {
+        *self.pending_seed.lock().unwrap() = Some(pending);
+    }
+
+    /// Applies the rest of a deferred seed (see [`seed::seed_docx_open`]), so the document
+    /// reads and edits as fully seeded from then on. Runs at the first operation that needs
+    /// the whole document and is a no-op once it has run.
+    pub fn materialize_pending_seed(&self) -> bool {
+        let Some(pending) = self.pending_seed.lock().unwrap().take() else {
+            return false;
+        };
+        let applied = self
+            .apply_raw_story_batches(
+                pending.batches,
+                &EditCtx::local(String::new(), String::new()),
+            )
+            .is_ok();
+        if applied {
+            seed::seed_opaque_sequences(self, &pending.opaque_sequences);
+            if let Some(source) = self.source_metadata() {
+                source.read().pin(self);
+                source.read().comment_writes.arm();
+            }
+            seed::embed_safety_inventory(self);
+        }
+        applied
     }
 
     /// Retains the package the stories were, or will be, seeded from.
@@ -832,6 +871,7 @@ impl EditingDoc {
     ) -> EditResult<ParagraphId> {
         let story_id = story_id.into();
         let para_id = para_id.into();
+        self.materialize_pending_seed();
         let mut txn = self.doc.transact_mut_with(self.client_id);
         let stories = txn
             .get_map(STORIES)
@@ -867,6 +907,7 @@ impl EditingDoc {
             ops::text::validate_text(&paragraph.text)?;
         }
         let story_id = story_id.into();
+        self.materialize_pending_seed();
         let mut txn = self.doc.transact_mut_with(self.client_id);
         let stories = txn
             .get_map(STORIES)
@@ -906,6 +947,7 @@ impl EditingDoc {
 
     /// Removes one complete story from the document map.
     pub fn delete_story(&self, story_id: &str) -> EditResult<()> {
+        self.materialize_pending_seed();
         let mut txn = self.doc.transact_mut_with(self.client_id);
         let stories = txn
             .get_map(STORIES)
@@ -937,6 +979,7 @@ impl EditingDoc {
         if is_identity_key(&key) {
             return Err(EditError::ReservedParagraphKey(key));
         }
+        self.materialize_pending_seed();
         let mut txn = self.doc.transact_mut_with(self.client_id);
         let stories = txn
             .get_map(STORIES)
@@ -970,6 +1013,7 @@ impl EditingDoc {
             ));
         }
         let comment_id = self.next_id();
+        self.materialize_pending_seed();
         let mut txn = self.doc.transact_mut_with(self.client_id);
         let mut anchors = Vec::with_capacity(ranges.len());
         for range in ranges {
@@ -1001,6 +1045,7 @@ impl EditingDoc {
 
     /// Replaces an existing comment's non-empty ranges, preserving all metadata.
     pub fn set_comment_ranges(&self, comment_id: &str, ranges: &[StoryRange]) -> EditResult<()> {
+        self.materialize_pending_seed();
         if ranges.is_empty() {
             return Err(EditError::InvalidComment(
                 "at least one anchored range is required".into(),
@@ -1038,6 +1083,7 @@ impl EditingDoc {
     }
 
     pub fn comment_anchors(&self, comment_id: &str) -> EditResult<Vec<CommentAnchor>> {
+        self.materialize_pending_seed();
         let txn = self.doc.transact();
         let comments = txn
             .get_map(COMMENTS)
@@ -1084,6 +1130,7 @@ impl EditingDoc {
     }
 
     pub fn story_len(&self, story_id: &str) -> EditResult<u32> {
+        self.materialize_pending_seed();
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         Ok(story.len(&txn))
@@ -1092,6 +1139,7 @@ impl EditingDoc {
     /// The current story revision, and the stories that changed after `since`
     /// (created, edited, or deleted), sorted.
     pub fn stories_changed_since(&self, since: u64) -> (u64, Vec<String>) {
+        self.materialize_pending_seed();
         let revisions = self.story_revisions.lock().unwrap();
         let mut stories: Vec<String> = revisions
             .stamped
@@ -1109,6 +1157,7 @@ impl EditingDoc {
     }
 
     pub fn story_segments(&self, story_id: &str) -> EditResult<Vec<StorySegment>> {
+        self.materialize_pending_seed();
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         Ok(story
@@ -1141,6 +1190,7 @@ impl EditingDoc {
     }
 
     pub fn paragraph_mark_position(&self, para_id: &str) -> EditResult<Position> {
+        self.materialize_pending_seed();
         let txn = self.doc.transact();
         let stories = txn
             .get_map(STORIES)
@@ -1159,14 +1209,17 @@ impl EditingDoc {
     }
 
     pub fn encode_state_as_update_v1(&self) -> Vec<u8> {
+        self.materialize_pending_seed();
         deterministic::encode_state_as_update_v1(&self.doc.transact(), &StateVector::default())
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {
+        self.materialize_pending_seed();
         self.doc.transact().state_vector().encode_v1()
     }
 
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> EditResult<Vec<u8>> {
+        self.materialize_pending_seed();
         let state_vector = StateVector::decode_v1(remote_state_vector)
             .map_err(|error| EditError::InvalidStateVector(error.to_string()))?;
         Ok(deterministic::encode_diff_v1(
@@ -1183,6 +1236,7 @@ impl EditingDoc {
 
     /// Applies an update, then repairs any paragraph identities it duplicated.
     pub(crate) fn integrate_update(&self, update: Update, local: bool) -> EditResult<()> {
+        self.materialize_pending_seed();
         let watch = identity::IdentityWatch::new(self);
         let reanchored = comment_references::CommentWatch::new(self);
         let result = if local {
@@ -1207,6 +1261,7 @@ impl EditingDoc {
 
     /// Applies an update as it is, without the identity repair [`Self::apply_update_v1`] runs.
     pub(crate) fn apply_verbatim_v1(&self, bytes: &[u8]) -> EditResult<()> {
+        self.materialize_pending_seed();
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         self.doc
@@ -1220,6 +1275,7 @@ impl EditingDoc {
     /// and every key and Word paragraph ID this replica has seen, deleted ones included. What
     /// the fork allocates stays its own until its update is adopted.
     pub(crate) fn fork(&self, state: &[u8]) -> EditResult<Self> {
+        self.materialize_pending_seed();
         let fork = Self::new(self.client_id);
         fork.apply_verbatim_v1(state)?;
         fork.id_counter

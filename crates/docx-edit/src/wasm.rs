@@ -1346,6 +1346,7 @@ impl EditSession {
                 Arc::clone(&source),
                 digest.clone(),
                 seed_media,
+                None,
             )
             .map_err(|error| error.to_string())?;
             self.engine.doc().begin_opening(generation);
