@@ -97,19 +97,19 @@ test('each decision renders its outcome at the source positions and reverts clea
   const native = lower(session);
   expect(runs(native[0])).toEqual([
     ['Alpha ', 1, 7, ''],
-    ['BETA', 7, 11, 'ins'],
-    ['beta', 11, 15, 'del'],
+    ['beta', 7, 11, 'del'],
+    ['BETA', 11, 15, 'ins'],
     [' gamma', 15, 21, ''],
   ]);
   const expected = {
     proposed: runs(native[0]),
     accepted: [
-      ['Alpha BETA', 1, 11, ''],
-      [' gamma', 15, 21, ''],
+      ['Alpha ', 1, 7, ''],
+      ['BETA gamma', 11, 21, ''],
     ],
     rejected: [
-      ['Alpha ', 1, 7, ''],
-      ['beta gamma', 11, 21, ''],
+      ['Alpha beta', 1, 11, ''],
+      [' gamma', 15, 21, ''],
     ],
   };
   for (const state of ['accepted', 'rejected', 'proposed', 'rejected', 'accepted', 'proposed'] as const) {
@@ -129,8 +129,8 @@ test('two proposals decide independently', async () => {
   const native = lower(session);
   const mixed = lower(session, { [replace]: 'rejected', [insert]: 'accepted' });
   expect(runs(mixed[0])).toEqual([
-    ['Alpha ', 1, 7, ''],
-    ['beta gamma', 11, 21, ''],
+    ['Alpha beta', 1, 11, ''],
+    [' gamma', 15, 21, ''],
   ]);
   expect(runs(mixed[1])).toEqual([['Title!', 23, 29, '']]);
   const second = lower(session, { [insert]: 'rejected' });
@@ -165,14 +165,14 @@ test('a decided run keeps its own formatting and only loses its markup', async (
   const bolded = (blocks: LoweredParagraph[]) =>
     blocks[0].runs.filter((run) => run.bold).map((run) => [run.text, !!run.isInsertion, !!run.isDeletion]);
   expect(bolded(lower(session))).toEqual([
-    ['BOLD', true, false],
     ['bold', false, true],
+    ['BOLD', true, false],
   ]);
   expect(bolded(lower(session, { [revision]: 'accepted' }))).toEqual([['BOLD', false, false]]);
   expect(bolded(lower(session, { [revision]: 'rejected' }))).toEqual([['bold', false, false]]);
   expect(bolded(lower(session))).toEqual([
-    ['BOLD', true, false],
     ['bold', false, true],
+    ['BOLD', true, false],
   ]);
 });
 
