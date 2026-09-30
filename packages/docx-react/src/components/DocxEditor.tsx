@@ -1117,7 +1117,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const { resetForNewDocument: resetEditorState } = useResetEditorState({
     commentsLoadedRef,
     trackedChangesLoadedRef,
+    sidebarAutoOpenedRef,
     setComments,
+    setYrsTrackedChangesResult,
     setHeadingInfos,
     setShowCommentsSidebar,
     setIsAddingComment,
@@ -1402,12 +1404,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     []
   );
 
+  const getProposalAnchorKeys = useCallback(
+    () => proposalAnchorKeys(pagedEditorRef.current?.getYrsSession() ?? null),
+    []
+  );
+
   // Auto-open the sidebar once if the loaded document already has tracked changes.
   useCommentLifecycle({
     commentToRevision,
     setComments,
     isLoading: state.isLoading || opening,
-    trackedChangesCount: trackedChanges.length,
+    trackedChanges,
+    getProposalAnchorKeys,
     setShowCommentsSidebar,
     trackedChangesLoadedRef,
   });
@@ -2226,11 +2234,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // manual close stays closed.
   useEffect(() => {
     if (sidebarAutoOpenedRef.current || commentSidebarItems.length === 0) return;
-    const proposed = proposalAnchorKeys(pagedEditorRef.current?.getYrsSession() ?? null);
+    const proposed = getProposalAnchorKeys();
     if (commentSidebarItems.every((item) => proposed.has(item.anchorKey ?? ''))) return;
     sidebarAutoOpenedRef.current = true;
     setShowCommentsSidebar(true);
-  }, [commentSidebarItems]);
+  }, [commentSidebarItems, getProposalAnchorKeys, setShowCommentsSidebar]);
 
   const editorContainerStyle: CSSProperties = {
     flex: 1,

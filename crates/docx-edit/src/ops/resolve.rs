@@ -335,12 +335,10 @@ fn resolve_story(
                         _ => {}
                     }
                     next_block_revisions = chunk.block_revisions(txn).map(|mut revisions| {
-                        let cleared = match mode {
-                            ResolveMode::Accept => 0,
-                            ResolveMode::Reject => 1,
-                        };
-                        if active_stamp(revisions[cleared].clone(), filter).is_some() {
-                            revisions[cleared] = None;
+                        for stamp in &mut revisions {
+                            if active_stamp(stamp.clone(), filter).is_some() {
+                                *stamp = None;
+                            }
                         }
                         revisions
                     });
