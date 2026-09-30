@@ -271,6 +271,24 @@ test('a picture cropped past its source hides no header control', () => {
   expectHidden(headerWidget([image({ crop: crop(0.25, 0.25) })]));
 });
 
+test('a body image hides header controls only inside the rectangle it paints', () => {
+  for (const extra of [
+    { shapeType: 'ellipse' },
+    { rotationDeg: 45 },
+    { rotationDeg: 90 },
+    { contentFrame: { x: 130, y: 20, w: 30, h: 40 } },
+  ] as Partial<ImagePrimitive>[]) {
+    expectActive(headerWidget([image(extra)]));
+  }
+  for (const extra of [
+    { shapeType: 'rect' },
+    { rotationDeg: 180 },
+    { contentFrame: { x: 100, y: 20, w: 30, h: 40 } },
+  ] as Partial<ImagePrimitive>[]) {
+    expectHidden(headerWidget([image(extra)]));
+  }
+});
+
 test('body picture fills with zero opacity do not hide header controls', () => {
   const shape: ShapePrimitive = {
     kind: 'shape', x: 100, y: 20, w: 20, h: 20,

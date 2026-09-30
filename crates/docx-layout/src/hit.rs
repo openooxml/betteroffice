@@ -48,8 +48,8 @@
 //! image, then a run's own box, then `in_typeable_area`.
 
 use crate::display_list::{
-    DisplayBounds, DisplayList, DisplayPage, DocAttrs, HfRegion, NoteRegion, Primitive,
-    ShapePathCommand, ShapePrimitive, TableCellRef, doc_attrs, note_group_id,
+    DisplayBounds, DisplayList, DisplayPage, DocAttrs, HfRegion, ImagePrimitive, NoteRegion,
+    Primitive, ShapePathCommand, ShapePrimitive, TableCellRef, doc_attrs, note_group_id,
 };
 use serde::Serialize;
 use serde_json::{Number, Value};
@@ -1173,14 +1173,6 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
             !run.glyphs.is_empty() && !js_blank(&run.text) && !text_fill_none(attrs)
         }
         Primitive::Shape(shape) => shape_fill_paints(shape),
-        Primitive::Image(img) => img.crop.as_ref().is_none_or(|crop| {
-            crop_fills_frame(
-                crop.left.as_f64(),
-                crop.top.as_f64(),
-                crop.right.as_f64(),
-                crop.bottom.as_f64(),
-            )
-        }),
         _ => true,
     };
     if !paints {
@@ -1221,7 +1213,12 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
     }
     let px = |value: &Number| value.as_f64().unwrap_or(0.0);
     let (left, top, width, height) = match primitive {
-        Primitive::Image(img) => (px(&img.x), px(&img.y), px(&img.w), px(&img.h)),
+        Primitive::Image(img) => {
+            let Some(rect) = image_paint_rect(img) else {
+                return false;
+            };
+            rect
+        }
         Primitive::Shape(shape) if attrs.inline_shape_atom == Some(true) => {
             let Some(rect) = shape_fill_rect(shape) else {
                 return false;
@@ -1310,6 +1307,37 @@ fn shape_fill_rect(shape: &ShapePrimitive) -> Option<(f64, f64, f64, f64)> {
         top = 2.0 * px(&shape.y) + px(&shape.h) - top - height;
     }
     Some((left, top, width, height))
+}
+
+/// The frame an image paints over whole, as the canvas draws it: none for a non-rectangular
+/// image, a turn other than a half-turn, or a crop that leaves part of the frame bare.
+fn image_paint_rect(img: &ImagePrimitive) -> Option<(f64, f64, f64, f64)> {
+    let num = |value: Option<&Number>| value.and_then(Number::as_f64).filter(|v| v.is_finite());
+    let shaped = img
+        .attrs
+        .image_shape_type
+        .as_deref()
+        .is_some_and(|shape| shape != "rect");
+    let turned = num(img.rotation_deg.as_ref()).unwrap_or(0.0) % 180.0 != 0.0;
+    let bare = img.crop.as_ref().is_some_and(|crop| {
+        !crop_fills_frame(
+            crop.left.as_f64(),
+            crop.top.as_f64(),
+            crop.right.as_f64(),
+            crop.bottom.as_f64(),
+        )
+    });
+    if shaped || turned || bare {
+        return None;
+    }
+    let frame = img.attrs.content_frame.as_deref();
+    let side = |own: Option<&Number>, outer: &Number| num(own).or(outer.as_f64()).unwrap_or(0.0);
+    Some((
+        side(frame.and_then(|frame| frame.x.as_ref()), &img.x),
+        side(frame.and_then(|frame| frame.y.as_ref()), &img.y),
+        side(frame.and_then(|frame| frame.w.as_ref()), &img.w),
+        side(frame.and_then(|frame| frame.h.as_ref()), &img.h),
+    ))
 }
 
 /// Whether a source crop draws over its whole frame: an outset side leaves a gutter.
@@ -2289,6 +2317,39 @@ mod tests {
             hit_test_regions(&dl, 0, 120.0, 455.0).unwrap().region,
             HitRegion::Body
         );
+    }
+
+    #[test]
+    fn body_image_takes_footer_clicks_only_inside_the_rectangle_it_paints() {
+        let with = |extra: serde_json::Value| {
+            let mut image = image(100.0, 440.0, Some(10));
+            for (key, value) in extra.as_object().unwrap() {
+                image[key] = value.clone();
+            }
+            image
+        };
+        for extra in [
+            serde_json::json!({"shapeType": "ellipse"}),
+            serde_json::json!({"rotationDeg": 45}),
+            serde_json::json!({"rotationDeg": 90}),
+            serde_json::json!({"contentFrame": {"x": 130, "y": 440, "w": 30, "h": 40}}),
+        ] {
+            let dl = band_page("footer", 420.0, vec![with(extra)]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        for extra in [
+            serde_json::json!({"shapeType": "rect"}),
+            serde_json::json!({"rotationDeg": 180}),
+            serde_json::json!({"contentFrame": {"x": 100, "y": 440, "w": 30, "h": 40}}),
+        ] {
+            let dl = band_page("footer", 420.0, vec![with(extra)]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 120.0, 455.0).unwrap().region,
+                HitRegion::Body
+            );
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ import type {
   DisplayPage,
   DisplayPrimitive,
   GlyphRunPrimitive,
+  ImagePrimitive,
   InlineSdtWidgetAttrs,
   SdtAttrs,
   ShapePrimitive,
@@ -230,15 +231,17 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
         break;
       }
       case 'image':
-        if (!cropFillsFrame(primitive.crop)) return false;
-        break;
       case 'decoration':
         break;
       default:
         return false;
     }
     const painted =
-      primitive.kind === 'shape' ? shapeFillRect(primitive) : displayPrimitiveRect(primitive);
+      primitive.kind === 'shape'
+        ? shapeFillRect(primitive)
+        : primitive.kind === 'image'
+          ? imagePaintRect(primitive)
+          : displayPrimitiveRect(primitive);
     return (
       painted !== null &&
       Number.isFinite(painted.w) &&
@@ -258,6 +261,23 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
  * The rectangle a shape's fill paints, when its path is exactly an axis-aligned
  * rectangle turned by a multiple of 180 degrees; any other path covers nothing.
  */
+/**
+ * The frame an image paints over whole, as the canvas draws it: none for a non-rectangular image,
+ * a turn other than a half-turn, or a crop that leaves part of the frame bare.
+ */
+function imagePaintRect(image: ImagePrimitive): GeoRect | null {
+  const finite = (value: number | undefined, fallback: number) =>
+    value !== undefined && Number.isFinite(value) ? value : fallback;
+  if (image.shapeType !== undefined && image.shapeType !== 'rect') return null;
+  if (finite(image.rotationDeg, 0) % 180 !== 0 || !cropFillsFrame(image.crop)) return null;
+  return {
+    x: finite(image.contentFrame?.x, image.x),
+    y: finite(image.contentFrame?.y, image.y),
+    w: finite(image.contentFrame?.w, image.w),
+    h: finite(image.contentFrame?.h, image.h),
+  };
+}
+
 /** Whether a source crop draws over its whole frame: an outset side leaves a gutter. */
 function cropFillsFrame(
   crop: { left?: number; top?: number; right?: number; bottom?: number } | undefined
