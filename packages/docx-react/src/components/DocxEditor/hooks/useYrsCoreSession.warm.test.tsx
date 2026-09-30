@@ -170,11 +170,11 @@ describe('useCompatibilityWarm', () => {
 test('a new session is reported before it is seeded', async () => {
   const bytes = fixture();
   const events: string[] = [];
-  let reported: YrsSession | null = null;
+  const reported: YrsSession[] = [];
   const hook = renderHook(() =>
     useYrsCoreSession(true, null, null, bytes, 1, undefined, {
       onSession: (session) => {
-        reported = session;
+        reported.push(session);
         events.push('session');
       },
       onHostDocument: () => events.push('host'),
@@ -182,6 +182,6 @@ test('a new session is reported before it is seeded', async () => {
   );
   await waitFor(() => expect(hook.result.current.session).not.toBeNull());
   expect(events).toEqual(['session', 'host']);
-  expect(reported).toBe(hook.result.current.session);
+  expect(reported).toEqual([hook.result.current.session!]);
   hook.unmount();
 });
