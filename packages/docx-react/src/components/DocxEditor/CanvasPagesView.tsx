@@ -83,6 +83,7 @@ export function CanvasPagedArea({
           offscreenReplay={renderer.offscreenReplay}
           onWorkerPresentationChange={renderer.setWorkerPresentationActive}
           onPageWindowChange={renderer.setDisplayWindow}
+          onRetainBuiltPagesChange={renderer.setRetainBuiltPages}
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
@@ -230,6 +231,7 @@ export function CanvasPagesView({
   offscreenReplay,
   onWorkerPresentationChange,
   onPageWindowChange,
+  onRetainBuiltPagesChange,
 }: {
   displayList: DisplayList;
   /** Binary retained-frame metadata used to scope page replay. */
@@ -262,6 +264,7 @@ export function CanvasPagesView({
   onWorkerPresentationChange?: (active: boolean) => void;
   /** The pages `[start, end)` that hold bitmaps, reported as the viewport moves. */
   onPageWindowChange?: (start: number, end: number) => void;
+  onRetainBuiltPagesChange?: (retain: boolean) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
   // Page lookups (pointer, overlays, caret) read this instead of searching
@@ -474,6 +477,14 @@ export function CanvasPagesView({
   );
   const pageKeysRef = useRef(pageKeys);
   pageKeysRef.current = pageKeys;
+  const reportedRetainBuiltPagesRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (!onRetainBuiltPagesChange) return;
+    const retain = focusedPageKey !== null;
+    if (reportedRetainBuiltPagesRef.current === retain) return;
+    reportedRetainBuiltPagesRef.current = retain;
+    onRetainBuiltPagesChange(retain);
+  }, [focusedPageKey, onRetainBuiltPagesChange]);
   const displayListRef = useRef(displayList);
   displayListRef.current = displayList;
   const chromeHandlesRef = useRef(new Map<string, ChromeHandles>());
@@ -618,7 +629,7 @@ export function CanvasPagesView({
   const windowStart = effectiveWindow?.start ?? -1;
   const windowEnd = effectiveWindow?.end ?? -1;
   const pageCount = displayList.pages.length;
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (windowPending) return;
     if (windowStart < 0) onPageWindowChange?.(0, pageCount);
     else onPageWindowChange?.(windowStart, windowEnd + 1);

@@ -845,6 +845,10 @@ export class EditSession {
      */
     seed_from_docx(bytes: Uint8Array, generation?: string | null): string;
     /**
+     * Unions seeded opaque sequence names into document state.
+     */
+    seed_opaque_sequences(names_json: string): void;
+    /**
      * Selects a story, closing capture unless manual grouping is selected.
      */
     select_story(story: string): void;
@@ -942,6 +946,10 @@ export class EditSession {
      */
     set_content_control_value_at(story: string, para_id: string, offset: number, value_json: string): void;
     /**
+     * Keep every previously built page while windowed builds are on.
+     */
+    set_display_retain_built_pages(retain: boolean): void;
+    /**
      * Limit full display builds to pages `start..end` plus the pages already
      * built; the others stay unbuilt placeholders carrying their geometry
      * until [`Self::build_display_pages_frame`] builds them.
@@ -1034,6 +1042,10 @@ export class EditSession {
      * a second call replaces the first, and a throwing callback is ignored.
      */
     set_update_observer(callback: Function): void;
+    /**
+     * Limit incremental rebuilds to the display window and caret pages. Off by default.
+     */
+    set_windowed_incremental_builds(enabled: boolean): void;
     /**
      * Resolves tracked changes by revision id outside undo history:
      * `{"accept":[string, …],"reject":[string, …]}` -> `{"revisionIds":[string, …]}`, the ids
@@ -1467,6 +1479,12 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly wasm_failed_allocation_bytes: () => number;
+    readonly wasm_heap_counted: () => number;
+    readonly wasm_live_bytes: () => number;
+    readonly wasm_peak_bytes: () => number;
+    readonly set_wasm_heap_limit: (a: number) => void;
+    readonly reset_wasm_peak_bytes: () => void;
     readonly __wbg_editsession_free: (a: number, b: number) => void;
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -1587,6 +1605,7 @@ export interface InitOutput {
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
     readonly editsession_select_story: (a: number, b: number, c: number) => void;
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -1599,6 +1618,7 @@ export interface InitOutput {
     readonly editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly editsession_set_display_retain_built_pages: (a: number, b: number) => void;
     readonly editsession_set_display_window: (a: number, b: number, c: number) => void;
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -1611,6 +1631,7 @@ export interface InitOutput {
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];
+    readonly editsession_set_windowed_incremental_builds: (a: number, b: number) => void;
     readonly editsession_settle_revisions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
@@ -1638,14 +1659,8 @@ export interface InitOutput {
     readonly list_docx_content_controls_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly wasm_failed_allocation_bytes: () => number;
-    readonly wasm_heap_counted: () => number;
-    readonly wasm_live_bytes: () => number;
-    readonly wasm_peak_bytes: () => number;
-    readonly set_wasm_heap_limit: (a: number) => void;
-    readonly reset_wasm_peak_bytes: () => void;
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
-    readonly clear_measure_fonts: () => void;
+    readonly clear_measure_fonts: () => [number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

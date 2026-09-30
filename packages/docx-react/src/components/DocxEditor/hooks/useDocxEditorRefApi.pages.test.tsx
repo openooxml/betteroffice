@@ -103,8 +103,9 @@ async function setup(options: {
       events.push('flush');
       options.flush?.();
     },
-    relayout: () => {
-      events.push('relayout');
+    relayout: (relayoutOptions?: { onHost?: boolean }) => {
+      // An export lays out on this thread: a worker pass would leave the session's layout as it is.
+      events.push(relayoutOptions?.onHost ? 'relayout' : 'relayout in the worker');
       options.relayout?.();
     },
   } as unknown as PagedEditorRef;
@@ -265,6 +266,21 @@ test('a layout from other inputs is laid out again with the current ones', async
     request: () => hidden,
     relayout: () => layout(hidden),
   });
+  const result = await api().exportStructuredWithPages(MARKUP);
+  if (!result.ok) throw new Error(result.failure.message);
+  expect(events).toEqual(['flush', 'relayout']);
+});
+
+test('a layout that previews decisions the editor no longer shows is laid out again', async () => {
+  const { session, request, layout } = await openSession();
+  const previewing = JSON.parse(request) as { renderEnv: Record<string, unknown> };
+  previewing.renderEnv = { ...previewing.renderEnv, revisionPreview: { '1': 'accepted' } };
+  layout(JSON.stringify(previewing));
+  expect(session.exportStructuredWithPagesFor(MARKUP, request)).toMatchObject({
+    ok: false,
+    failure: { code: 'unsupported-revision-layout' },
+  });
+  const { events, api } = await setup({ session, request: () => request, relayout: layout });
   const result = await api().exportStructuredWithPages(MARKUP);
   if (!result.ok) throw new Error(result.failure.message);
   expect(events).toEqual(['flush', 'relayout']);

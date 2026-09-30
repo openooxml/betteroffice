@@ -62,8 +62,8 @@
 //! [`MeasureFonts::enter`] around every call that registers fonts, measures,
 //! lays out, builds a display list or reads glyph outlines. Callers that never
 //! create one use the module's own store. Once any [`MeasureFonts`] is alive,
-//! using fonts with none entered panics, so a missed `enter` fails loudly
-//! instead of reading another document's fonts.
+//! using fonts with none entered returns an error from module-level wasm
+//! exports and panics for internal callers that miss `enter`.
 
 mod anchor;
 pub mod canonical;
@@ -90,6 +90,7 @@ pub mod hit;
 pub mod keep_together;
 pub mod measure_blocks;
 pub mod section_breaks;
+pub mod sequence_fields;
 pub mod session;
 pub mod table_grid;
 pub mod table_row_break;
@@ -413,7 +414,7 @@ pub fn update_resident_display_list_incremental_observed(
 }
 
 /// [`update_resident_display_list_incremental_observed`] that builds only the
-/// rebuilt pages `build` selects and leaves the others unbuilt.
+/// rebuilt pages `build` selects, replacing the others with unbuilt placeholders.
 #[allow(clippy::too_many_arguments)]
 pub fn update_resident_display_list_incremental_partial_observed(
     pagination: &types::Input,
@@ -448,6 +449,7 @@ pub fn update_resident_display_list_incremental_partial_observed(
 /// [`build_display_list_value`] and keep the typed result.
 #[wasm_bindgen]
 pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
     build_display_list_value(input)
         .and_then(|display_list| {
             serde_json::to_string(&display_list).map_err(|e| format!("serialize: {e}"))
@@ -619,6 +621,18 @@ thread_local! {
     static SESSION_FONTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+fn module_fonts_usable() -> Result<(), String> {
+    if ENTERED_FONTS.with(|entered| entered.borrow().is_none())
+        && SESSION_FONTS.with(std::cell::Cell::get) > 0
+    {
+        return Err(
+            "measurement fonts belong to an open editing session; use the session's font methods"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Runs `read` against the entered measurement font store, else the module's
 /// own. Panics when a [`MeasureFonts`] is alive but none is entered: a caller
 /// forgot [`MeasureFonts::enter`] and would otherwise read the wrong store.
@@ -650,7 +664,12 @@ impl Default for MeasureFonts {
 
 impl Drop for MeasureFonts {
     fn drop(&mut self) {
-        let _ = SESSION_FONTS.try_with(|count| count.set(count.get() - 1));
+        let _ = SESSION_FONTS.try_with(|count| {
+            count.set(count.get() - 1);
+            if count.get() == 0 {
+                measure_blocks::clear_extent_cache();
+            }
+        });
     }
 }
 
@@ -682,6 +701,7 @@ impl Drop for MeasureFontsScope {
 /// error at this boundary, mirroring `FontStore::register`.
 #[wasm_bindgen]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
     register_measure_font_bytes(bytes).map_err(|e| JsValue::from_str(&e))
 }
 
@@ -693,6 +713,7 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
 /// this one store, so a widened view measures and paints at one pitch.
 #[wasm_bindgen]
 pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
     let Some(requested) = ooxml_text::word_fonts::requested_line_metrics(requested_family) else {
         return Ok(base);
     };
@@ -707,12 +728,20 @@ pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Re
 
 /// Drop every registered measurement font (ids restart at 0). Callers must
 /// re-register before the next `measure_paragraph_json`.
-#[wasm_bindgen]
 pub fn clear_measure_fonts() {
     with_measure_fonts(|store| {
         *store.borrow_mut() = ooxml_text::FontStore::new();
     });
     measure_blocks::clear_extent_cache();
+}
+
+/// Drop every registered measurement font (ids restart at 0). Callers must
+/// re-register before the next `measure_paragraph_json`.
+#[wasm_bindgen(js_name = clear_measure_fonts)]
+pub fn clear_measure_fonts_wasm() -> Result<(), JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
+    clear_measure_fonts();
+    Ok(())
 }
 
 /// Unique id of the current measurement font store, for caches keyed by store
@@ -766,6 +795,7 @@ pub fn with_measure_face<T>(id: u32, read: impl FnOnce(&[u8], &str) -> T) -> Opt
 /// must fall back to browser measurement for that block.
 #[wasm_bindgen]
 pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
     measure_paragraph_json_resident(input).map_err(|e| JsValue::from_str(&e))
 }
 
@@ -793,6 +823,7 @@ pub(crate) fn measure_paragraph_typed_resident(
 /// flipping y at draw time. `cmds` is empty for a blank glyph (space).
 #[wasm_bindgen]
 pub fn outline_glyph_json(font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
     // Glyph ids are u16 in the sfnt spec; a value past that is out of range for
     // any font, so reject at the boundary rather than truncating.
     let glyph_id = u16::try_from(glyph_id).map_err(|_| {
@@ -861,6 +892,24 @@ mod tests {
         assert!(std::panic::catch_unwind(|| holds(1)).is_err());
         drop(unentered);
         assert!(holds(1));
+    }
+
+    #[test]
+    fn module_fonts_usable_requires_enter_while_a_session_owns_fonts() {
+        assert_eq!(module_fonts_usable(), Ok(()));
+        let fonts = MeasureFonts::default();
+        let expected = Err(
+            "measurement fonts belong to an open editing session; use the session's font methods"
+                .to_string(),
+        );
+        assert_eq!(module_fonts_usable(), expected);
+        {
+            let _fonts = fonts.enter();
+            assert_eq!(module_fonts_usable(), Ok(()));
+        }
+        assert_eq!(module_fonts_usable(), expected);
+        drop(fonts);
+        assert_eq!(module_fonts_usable(), Ok(()));
     }
 
     fn options_json() -> serde_json::Value {

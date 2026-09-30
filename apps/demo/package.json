@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/demo",
   "private": true,
-  "version": "0.0.11",
+  "version": "0.0.12",
   "scripts": {
     "build:deck": "bun ../../scripts/create-demo-deck.ts",
     "build:diagram": "bun ../../scripts/create-demo-diagram.ts",
@@ -31,7 +31,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.23.0",
-    "next": "16.3.4",
+    "next": "16.3.6",
     "radix-ui": "^1.6.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

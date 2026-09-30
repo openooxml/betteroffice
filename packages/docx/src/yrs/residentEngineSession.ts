@@ -40,12 +40,15 @@ export type ResidentEngineSession = Pick<
   | 'residentDeletedUnits'
   | 'resumeRegionLayout'
   | 'selection'
+  | 'setDisplayRetainBuiltPages'
   | 'setDisplayWindow'
   | 'setSelection'
   | 'yrsBlocksForStory'
 > & {
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+  /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
+  setWindowedIncrementalBuilds(enabled: boolean): void;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
   /** The whole document state as one yrs v1 update. */
@@ -116,6 +119,8 @@ export async function createResidentEngineSession(
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
+    setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
+    setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
     buildDisplayPagesFrame: (pages, expectedFrameEpoch) =>
       session.build_display_pages_frame(Uint32Array.from(pages), expectedFrameEpoch),
     residentCaretSnapshot: () =>

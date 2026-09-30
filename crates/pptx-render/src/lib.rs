@@ -6,13 +6,12 @@ mod family_metrics;
 mod geometry;
 mod image_effects;
 mod layout;
-mod metafile;
 
 /// Entry points for the fuzz targets in `fuzz/`; not a stable API.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing {
-    pub use crate::metafile::decode;
+    pub use ooxml_metafile::decode;
 }
 
 pub use display_list::*;

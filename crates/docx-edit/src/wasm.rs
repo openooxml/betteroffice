@@ -1352,21 +1352,17 @@ impl EditSession {
             self.engine.doc().install_media(media);
             fonts
         } else {
-            let fonts =
-                crate::seed::referenced_fonts(&envelope).map_err(|error| error.to_string())?;
-            let parts = crate::structured::source::SourceParts::new(parts);
-            let mut metadata = crate::seed::source_metadata(&envelope, Some(&parts))
-                .map_err(|error| error.to_string())?;
+            let (mut metadata, index, fonts) =
+                crate::seed::replica_source(envelope, parts, Arc::clone(&source), digest.clone())?;
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
             self.engine
                 .doc()
-                .retain_source_docx_with_digest(Arc::clone(&source), digest.clone());
+                .retain_source(crate::identity::SourcePackage::Ready(Arc::new(index)));
             self.engine.doc().install_media(media);
             self.engine
                 .doc()
                 .set_media_sources(crate::media::MediaSources::default());
-            drop(envelope);
             crate::seed::SeededFonts {
                 referenced: fonts,
                 unused_script: Vec::new(),
@@ -1803,6 +1799,18 @@ impl EditSession {
             .set_display_window(Some(start as usize..(end.max(start)) as usize));
     }
 
+    /// Keep every previously built page while windowed builds are on.
+    pub fn set_display_retain_built_pages(&self, retain: bool) {
+        let _fonts = self.fonts.enter();
+        self.engine.set_display_retain_built_pages(retain);
+    }
+
+    /// Limit incremental rebuilds to the display window and caret pages. Off by default.
+    pub fn set_windowed_incremental_builds(&self, enabled: bool) {
+        let _fonts = self.fonts.enter();
+        self.engine.set_windowed_incremental_builds(enabled);
+    }
+
     /// Build the listed pages that are still unbuilt and return a FrameDelta
     /// v1 carrying them; `expected_frame_epoch` works as for
     /// [`Self::build_display_list_frame`].
@@ -2233,6 +2241,13 @@ impl EditSession {
         self.engine.doc().begin_opening(generation.as_deref());
     }
 
+    /// Unions seeded opaque sequence names into document state.
+    pub fn seed_opaque_sequences(&self, names_json: &str) -> Result<(), JsValue> {
+        let names: Vec<String> = serde_json::from_str(names_json).map_err(js_err)?;
+        crate::seed::seed_opaque_sequences(self.engine.doc(), &names);
+        Ok(())
+    }
+
     /// Parses a DOCX package, optionally seeds its editable stories into this
     /// replica, and retains the source bytes for
     /// [`EditSession::materialize_docx`] and paragraph identity reads.
@@ -2644,6 +2659,10 @@ impl EditSession {
             .sticky_index(&txn, head_index, Assoc::After)
             .ok_or_else(|| js_err("selection head could not be made sticky"))?;
         drop(txn);
+        self.engine.set_resident_caret_head(
+            (story == "body" || story.starts_with("body:"))
+                .then(|| (story.to_owned(), head.clone())),
+        );
         *self.selection.borrow_mut() = Some(LocalSelection {
             story: story.to_owned(),
             anchor,
@@ -5671,6 +5690,27 @@ mod tests {
         let preview = EditSession::new(79.0).unwrap();
         preview.open_preview(&bytes, 1).unwrap().unwrap();
         assert!(preview.materialize_docx().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_replica_indexes_its_package_as_it_opens() {
+        let bytes = batch_docx();
+        let origin = EditSession::new(83.0).unwrap();
+        origin.open_docx(&bytes, true, None, None).unwrap();
+        let replica = EditSession::new(84.0).unwrap();
+        replica.open_docx(&bytes, false, None, None).unwrap();
+        assert!(replica.engine.doc().source_indexed());
+        replica.load(&origin.encode_state()).unwrap();
+        let paragraphs = |session: &EditSession| {
+            envelope(
+                &session
+                    .read_paragraphs_json(r#"{"story":"body","view":"accepted"}"#)
+                    .unwrap(),
+            )["paragraphs"]
+                .clone()
+        };
+        assert_eq!(paragraphs(&replica), paragraphs(&origin));
+        assert!(replica.materialize_docx().unwrap().is_some());
     }
 
     #[test]

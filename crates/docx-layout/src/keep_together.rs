@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
-use crate::table_row_break::{build_table_row_break_info, first_table_fragment_height};
+use crate::table_row_break::{RowBreaks, first_table_fragment_height};
 use crate::types::{
     BlockExtent, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent, TableBlock,
     TableExtent,
@@ -245,21 +245,51 @@ pub fn measure_keep_with_next_group_at(
 }
 
 /// Height (px) of the shortest first fragment placement gives a table: its
-/// header band and first body slice, extended to the end of any
-/// keep-with-next row chain starting in them that fits `capacity` along with
-/// the rows above it. A floating table keeps its flow slice, as it is not
-/// placed in the flow.
+/// header band and first body slice (its first line when the paragraph rules
+/// leave that row no break in the room under the band), or a headerless
+/// table's first row (its smallest slice when the row is taller than
+/// `capacity`), extended to the end of any keep-with-next row chain starting
+/// in them that fits `capacity` along with the rows above it. A floating
+/// table keeps its line slice, as it is not placed in the flow.
 fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64) -> f64 {
-    let first =
-        first_table_fragment_height(block, measure, &build_table_row_break_info(block, measure));
+    let breaks = RowBreaks::new(block, measure);
     if block.floating.is_some() {
-        return first;
+        return first_table_fragment_height(block, measure, breaks.lines());
     }
+    let mut first = first_table_fragment_height(block, measure, &breaks.kept);
     let headers = block
         .rows
         .iter()
         .take_while(|row| row.is_header.unwrap_or(false))
         .count();
+    if headers == 0
+        && measure
+            .rows
+            .first()
+            .is_some_and(|row| row.height > capacity)
+        && !block
+            .rows
+            .first()
+            .is_some_and(|row| row.cant_split.unwrap_or(false) || row.is_exact_height())
+    {
+        first = breaks.fresh_slice(0, 0.0, capacity);
+    } else if headers > 0
+        && headers < measure.rows.len()
+        && !block
+            .rows
+            .get(headers)
+            .is_some_and(|row| row.cant_split.unwrap_or(false))
+    {
+        let band: f64 = measure.rows[..headers].iter().map(|row| row.height).sum();
+        let body = if band <= capacity {
+            capacity - band
+        } else {
+            capacity
+        };
+        if breaks.kept_oversized(headers, 0.0, body) {
+            first = band + breaks.fresh_slice(headers, 0.0, body);
+        }
+    }
     let mut top = 0.0;
     let mut slice = first;
     for (row, keep) in measure

@@ -10,6 +10,7 @@ import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
   rasterizeDisplayPageToBackBuffer,
+  releaseOffscreenPageCanvas,
 } from '../layout/render/canvasBackend';
 import {
   applyFrameDeltaOwned,
@@ -202,7 +203,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     unsubscribe?.();
     unsubscribe = null;
-    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
+    setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
@@ -261,7 +262,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
-    if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
+    setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
     subscribe();
     const started = performance.now();
@@ -283,6 +284,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'buildPages') {
+    setFrameDisplayWindow(session);
     // Pages of the provisional frame build between steps, as before a completion.
     pendingUpdates = [];
     const started = performance.now();
@@ -300,6 +302,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'completeLayout') {
+    setFrameDisplayWindow(session);
     if (incompleteLayout && request.sliceBlocks) {
       supersedeSlicedCompletion();
       slicedCompletion = {
@@ -319,6 +322,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'buildFrame') {
     await completeProvisionalLayout();
+    setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     pendingUpdates = [];
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
@@ -360,8 +364,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         // out of the page window: release the bitmap but KEEP the canvas —
         // a transferred surface can never be re-transferred, so the element
         // must stay usable for re-entry
-        canvas.width = 0;
-        canvas.height = 0;
+        releaseOffscreenPageCanvas(canvas);
         offscreenBackBuffers.delete(pageId);
         forgetOffscreenPagePixels(pageId);
       }
@@ -375,6 +378,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   await completeProvisionalLayout();
   // The edit replaces the pagination a cached completion's frame would paint.
   completedLayout = null;
+  setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
@@ -484,6 +488,18 @@ function hydrate(
   return { layoutJson, provisional };
 }
 
+function setFrameDisplayWindow(
+  engine: ResidentEngineSession,
+  window?: [number, number],
+  retainBuiltPages?: boolean
+): void {
+  if (window) {
+    engine.setDisplayWindow(...window);
+    engine.setDisplayRetainBuiltPages(retainBuiltPages === true);
+  }
+  engine.setWindowedIncrementalBuilds(window !== undefined);
+}
+
 /**
  * Replaces a provisional layout with the full one before anything reads it,
  * finishing a sliced completion at once and answering its request first.
@@ -530,6 +546,7 @@ async function replyCompletedLayout(
     reply({ id, ok: true });
     return;
   }
+  setFrameDisplayWindow(session);
   pendingUpdates = [];
   const started = performance.now();
   const frame = session.buildDisplayListFrame(
