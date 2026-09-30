@@ -175,12 +175,13 @@ export function useDocumentLoader({
       // A preview's font loads stop once the full document is accepted.
       const isCurrent = () =>
         loadGeneration.isCurrent(generation) && hostDocumentsRef.current === accepted;
+      // A preview never changes, so what its first pages skip stays skipped.
       const skipped = new Set(
-        session && !options?.preview ? host.unusedScriptFonts?.map(fontKey) : undefined
+        session || options?.preview ? host.unusedScriptFonts?.map(fontKey) : undefined
       );
       const isSkipped = (family: string) => skipped.has(fontKey(family));
       const skippedFonts =
-        session && skipped.size > 0
+        session && !options?.preview && skipped.size > 0
           ? skipUntilChanged(session, () => {
               if (!isCurrent()) return;
               fontScope
