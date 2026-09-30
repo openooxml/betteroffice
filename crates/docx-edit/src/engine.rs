@@ -7528,7 +7528,10 @@ mod tests {
                 .to_string(),
             )
             .unwrap();
-        (engine, extras)
+        (
+            engine,
+            serde_json::json!({ "fontChains": font_chains }).to_string(),
+        )
     }
 
     /// [`paged_engine`] with its region state kept, so an edit in a table cell
@@ -7567,9 +7570,13 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let extras =
-            serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
-        (engine, extras, output)
+        // As the host's extras carry the pass's headers/footers, so region
+        // edits keep building on the shown frame.
+        let mut extras = serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } });
+        if let Some(headers_footers) = output.get("headersFooters") {
+            extras["headersFooters"] = headers_footers.clone();
+        }
+        (engine, extras.to_string(), output)
     }
 
     fn full_display_build(
