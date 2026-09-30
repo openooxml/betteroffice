@@ -1385,16 +1385,13 @@ fn mix(state: u64, word: u64) -> u64 {
 
 fn string_hash(value: &str) -> u64 {
     let bytes = value.as_bytes();
-    let mut chunks = bytes.chunks_exact(8);
+    let (chunks, remainder) = bytes.as_chunks::<8>();
     let mut hash = mix(FNV_OFFSET, bytes.len() as u64);
-    for chunk in &mut chunks {
-        hash = mix(
-            hash,
-            u64::from_le_bytes(chunk.try_into().expect("8-byte chunk")),
-        );
+    for chunk in chunks {
+        hash = mix(hash, u64::from_le_bytes(*chunk));
     }
     let mut tail = [0; 8];
-    tail[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
+    tail[..remainder.len()].copy_from_slice(remainder);
     mix(hash, u64::from_le_bytes(tail))
 }
 
