@@ -520,7 +520,21 @@ fn collect_paragraph_font_requirements(
             attrs.list_marker_bold.unwrap_or(false),
             attrs.list_marker_italic.unwrap_or(false),
             scripts,
-            true,
+            false,
+        );
+        let first_text_run = paragraph.runs.iter().find_map(|run| match run {
+            Run::Text(text) => Some(text),
+            _ => None,
+        });
+        collector.reach(
+            attrs
+                .list_marker_font_family
+                .as_deref()
+                .or_else(|| first_text_run.and_then(|text| text.fmt.font_family.as_deref()))
+                .unwrap_or(default_family),
+            attrs.list_marker_bold.unwrap_or(false),
+            attrs.list_marker_italic.unwrap_or(false),
+            scripts,
         );
     }
 }
@@ -3937,6 +3951,38 @@ mod tests {
             .into_iter()
             .map(|requirement| requirement.key)
             .collect()
+    }
+
+    #[test]
+    fn collects_list_marker_face_from_the_first_unnamed_text_run() {
+        let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {
+                "kind": "paragraph", "id": "list", "attrs": {
+                    "listMarker": "1.", "listMarkerBold": true, "indent": {"hanging": 0}
+                },
+                "runs": [
+                    {"kind": "text", "text": "First"},
+                    {"kind": "text", "text": "Later", "fontFamily": "Aptos"}
+                ]
+            },
+            {
+                "kind": "paragraph", "id": "unused", "runs": [{
+                    "kind": "text", "text": "Latin", "fontFamily": "Arial",
+                    "boldCs": true, "fontSlots": {"cs": "Calibri"}
+                }]
+            }
+        ]))
+        .unwrap();
+        let requirements = collect_font_requirements(&blocks, "Calibri");
+
+        assert!(
+            requirements
+                .iter()
+                .any(|requirement| requirement.key == "calibri|1|0")
+        );
+        let mut named = BTreeMap::new();
+        collect_font_requirements_into(&blocks, "Calibri", &mut named);
+        assert!(named.contains_key("aptos|1|0"));
     }
 
     #[test]
