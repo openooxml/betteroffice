@@ -24,6 +24,7 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { isPresented, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
@@ -330,6 +331,14 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     host.layoutChanged(currentLayout);
     publishSelection();
   }, [host, currentLayout, publishSelection]);
+
+  useLayoutEffect(() => {
+    if (!managed) return;
+    return displayWindowOf(options.queries)?.subscribe(() => {
+      host.geometryChanged();
+      if (layoutRef.current) host.layoutPresented(layoutRef.current);
+    });
+  }, [host, managed, options.queries]);
 
   useEffect(() => {
     host.geometryChanged();

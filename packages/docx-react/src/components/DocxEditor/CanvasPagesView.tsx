@@ -618,7 +618,7 @@ export function CanvasPagesView({
   const windowStart = effectiveWindow?.start ?? -1;
   const windowEnd = effectiveWindow?.end ?? -1;
   const pageCount = displayList.pages.length;
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (windowPending) return;
     if (windowStart < 0) onPageWindowChange?.(0, pageCount);
     else onPageWindowChange?.(windowStart, windowEnd + 1);
@@ -689,7 +689,7 @@ export function CanvasPagesView({
           pendingAttachRef.current = null;
           const current = pendingAttach.generation === replayGenerationRef.current;
           if (attached && current && innerHostRef.current) {
-            markPresented(innerHostRef.current, pendingAttach.displayList);
+            markPresented(innerHostRef.current, pendingAttach.displayList, { worker: true });
           }
         }, () => {
           if (pendingAttachRef.current === pendingAttach) pendingAttachRef.current = null;
@@ -705,7 +705,7 @@ export function CanvasPagesView({
           pendingAttach.displayList = displayList;
         } else if (offscreenAttachedRef.current && host) {
           // The worker presents a frame before it replies with it, so these pages show no other.
-          markPresented(host, displayList);
+          markPresented(host, displayList, { worker: true });
         }
         // Heal any publish lost to ordering (StrictMode remount, late
         // resolution): the worker is attached and this pass kept it active.

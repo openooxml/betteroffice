@@ -413,7 +413,7 @@ pub fn update_resident_display_list_incremental_observed(
 }
 
 /// [`update_resident_display_list_incremental_observed`] that builds only the
-/// rebuilt pages `build` selects and leaves the others unbuilt.
+/// rebuilt pages `build` selects, replacing the others with unbuilt placeholders.
 #[allow(clippy::too_many_arguments)]
 pub fn update_resident_display_list_incremental_partial_observed(
     pagination: &types::Input,

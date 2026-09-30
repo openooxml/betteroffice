@@ -122,6 +122,28 @@ function setup() {
   return { worker, client };
 }
 
+test('frame and edit requests carry the current display window', async () => {
+  const { worker, client } = setup();
+  const bootstrap = client.bootstrap(snapshot, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrap;
+
+  const frame = client.buildFrame('', 0, false, [8, 11]);
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'buildFrame', displayWindow: [8, 11] });
+  worker.reply(frameReply(worker.lastId()));
+  await frame;
+
+  const input = client.applyInput('a', selection, 0, false, false, [9, 12]);
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'applyInput', displayWindow: [9, 12] });
+  worker.reply(frameReply(worker.lastId()));
+  expect(await input).toMatchObject({ applied: true });
+
+  const deletion = client.applyDelete('backward', selection, 0, false, false, 1, [10, 13]);
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'applyDelete', displayWindow: [10, 13] });
+  worker.reply(frameReply(worker.lastId()));
+  expect(await deletion).toMatchObject({ applied: true });
+});
+
 describe('warmup', () => {
   test('waits for warm without marking a session ready or bootstrapped', async () => {
     const { worker, client } = setup();
