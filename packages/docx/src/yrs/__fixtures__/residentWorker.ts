@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { createResidentEngineSession } from '../residentEngineSession';
+import { preloadEditWasm } from '../wasm/index';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
   ResidentEngineWorkerRequest,
@@ -18,6 +19,7 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
 const STUBS: Record<string, string> = {
   './residentEngineSession':
     'export const createResidentEngineSession = () => testHarness.createSession();',
+  './wasm/index': 'export const preloadEditWasm = () => testHarness.preload();',
   '../layout/render/glyphCache': 'export class GlyphCache {}',
   '../layout/render/canvasBackend': `
     export const rasterizeDisplayPageToBackBuffer = async () => {};
@@ -94,7 +96,10 @@ export async function residentWorkerFactory(): Promise<() => InProcessResidentWo
         for (const reply of replies) deliver(reply);
       },
     };
-    start(scope, class {}, { createSession: createResidentEngineSession });
+    start(scope, class {}, {
+      createSession: createResidentEngineSession,
+      preload: preloadEditWasm,
+    });
     return worker;
   };
 }

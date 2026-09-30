@@ -579,27 +579,46 @@ pub(crate) fn metadata_mismatch(
             )
         });
     }
-    let settings = |value: Option<&serde_json::Value>| {
-        serde_json::to_value(
-            value
-                .cloned()
-                .and_then(|value| {
-                    serde_json::from_value::<docx_layout::regions::AuthoredRegionSettings>(value)
-                        .ok()
-                })
-                .unwrap_or_default(),
-        )
-        .ok()
-    };
+    let requested = request.pointer("/regions/settings");
+    let compare_flags = requested
+        .and_then(|settings| settings.get("compatibilityFlags"))
+        .is_some_and(|flags| !flags.is_null());
     if !editor_owned
-        && settings(request.pointer("/regions/settings"))
-            != settings(read.and_then(|read| read.settings.as_ref()))
+        && normalized_region_settings(requested, compare_flags)
+            != normalized_region_settings(
+                read.and_then(|read| read.settings.as_ref()),
+                compare_flags,
+            )
     {
         return Some(
             "The layout's note and header settings differ from the document's; lay it out with its current settings.".to_owned(),
         );
     }
     None
+}
+
+fn normalized_region_settings(
+    value: Option<&serde_json::Value>,
+    compare_flags: bool,
+) -> Option<serde_json::Value> {
+    let mut settings = value
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<docx_layout::regions::AuthoredRegionSettings>(value).ok()
+        })
+        .unwrap_or_default();
+    if !compare_flags {
+        settings.compatibility_flags = None;
+    } else if let Some(flags) = settings.compatibility_flags.as_ref().and_then(|value| {
+        serde_json::from_value::<docx_parse::CompatibilityFlags>(value.clone()).ok()
+    }) {
+        settings.compatibility_flags = if flags == docx_parse::CompatibilityFlags::default() {
+            None
+        } else {
+            serde_json::to_value(flags).ok()
+        };
+    }
+    serde_json::to_value(settings).ok()
 }
 
 /// Whether any story that contributes to layout carries a pending revision, which would make
@@ -2168,4 +2187,63 @@ fn assemble(
         map.diagnostics.push(stop(page_index));
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn region_settings_compare_compatibility_flags_with_defaults() {
+        let defaults = normalized_region_settings(None, true);
+        for settings in [
+            json!({}),
+            json!({"compatibilityFlags": null}),
+            json!({"compatibilityFlags": {}}),
+            json!({"compatibilityFlags": {
+                "compatibilityMode": 12,
+                "suppressSpBfAfterPgBrk": false
+            }}),
+            json!({"compatibilityFlags": docx_parse::CompatibilityFlags::default()}),
+        ] {
+            assert_eq!(normalized_region_settings(Some(&settings), true), defaults);
+        }
+        for (flag, value) in [
+            ("compatibilityMode", json!(15)),
+            ("noLeading", json!(true)),
+            ("doNotExpandShiftReturn", json!(true)),
+            ("useWord97LineBreakRules", json!(true)),
+            ("balanceSingleByteDoubleByteWidth", json!(true)),
+            ("doNotUseHTMLParagraphAutoSpacing", json!(true)),
+            ("suppressSpBfAfterPgBrk", json!(true)),
+            ("allowSpaceOfSameStyleInTable", json!(true)),
+        ] {
+            let mut full = json!({"compatibilityFlags": docx_parse::CompatibilityFlags::default()});
+            full["compatibilityFlags"][flag] = value.clone();
+            let mut partial = json!({"compatibilityFlags": {}});
+            partial["compatibilityFlags"][flag] = value;
+            assert_eq!(
+                normalized_region_settings(Some(&partial), true),
+                normalized_region_settings(Some(&full), true),
+                "{flag}"
+            );
+            assert_ne!(
+                normalized_region_settings(Some(&partial), true),
+                defaults,
+                "{flag}"
+            );
+        }
+        for settings in [
+            json!({"compatibilityFlags": {"suppressSpBfAfterPgBrk": "true"}}),
+            json!({"evenAndOddHeaders": true}),
+        ] {
+            assert_ne!(normalized_region_settings(Some(&settings), true), defaults);
+        }
+        let authored = json!({"compatibilityFlags": {"compatibilityMode": 15}});
+        assert_eq!(
+            normalized_region_settings(Some(&authored), false),
+            normalized_region_settings(None, false)
+        );
+    }
 }

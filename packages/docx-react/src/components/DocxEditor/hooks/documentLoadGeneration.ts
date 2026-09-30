@@ -6,11 +6,13 @@ interface PendingDocumentLoad {
 export class DocumentLoadGeneration {
   private generation = 0;
   private completedGeneration: number | null = null;
+  private failedGeneration: number | null = null;
   private pending: PendingDocumentLoad | null = null;
 
   begin(): number {
     this.generation += 1;
     this.completedGeneration = null;
+    this.failedGeneration = null;
     this.resolvePending();
     return this.generation;
   }
@@ -20,7 +22,12 @@ export class DocumentLoadGeneration {
   }
 
   reportError(generation: number, error: Error, onError?: (error: Error) => void): void {
-    if (this.isCurrent(generation)) onError?.(error);
+    if (this.isCurrent(generation) && this.failedGeneration !== generation) onError?.(error);
+  }
+
+  /** A failed load reports no further errors. */
+  fail(generation: number): void {
+    if (this.isCurrent(generation)) this.failedGeneration = generation;
   }
 
   waitForCompletion(generation: number): Promise<void> {
@@ -46,6 +53,7 @@ export class DocumentLoadGeneration {
   invalidate(): void {
     this.generation += 1;
     this.completedGeneration = null;
+    this.failedGeneration = null;
     this.resolvePending();
   }
 

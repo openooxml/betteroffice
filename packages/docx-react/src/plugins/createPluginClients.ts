@@ -1,4 +1,7 @@
-import { createYrsSidebarProjection } from '@betteroffice/docx/layout/render';
+import {
+  createYrsSidebarProjection,
+  type DisplayListQueries,
+} from '@betteroffice/docx/layout/render';
 import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
 import { grantsCommand, grantsEditBatch, grantsWrite } from '../../../../shared/plugin-host/grants';
 import type { InvocationRefusal, PluginInvocation } from '../../../../shared/plugin-host/runtime';
@@ -15,6 +18,7 @@ import {
   modeRefusal,
 } from '../components/DocxEditor/editorBatches';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
+import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type {
   DocxPluginCommandClient,
@@ -34,9 +38,12 @@ export interface DocxPluginEditorAccess {
   /** The editor mode writes are checked against; `viewing` also while `readOnly`. */
   writeMode(): EditorMode;
   commands(): DocxCommandController | null;
-  /** Resolves true once a rendered layout shows `version`, false if none does soon. */
-  settledLayout(version: string): Promise<boolean>;
+  layout(): { queries: DisplayListQueries | null; complete: boolean; failed: boolean };
+  subscribeLayout(listener: () => void): () => void;
 }
+
+const LAYOUT_WAIT_MS = 30_000;
+const navigationRequests = new WeakMap<object, AbortController>();
 
 const MESSAGES: Record<DocxPluginFailureCode, string> = {
   'plugin-unavailable': 'The plugin is no longer active',
@@ -205,39 +212,114 @@ export function createPluginClients(
       : resolved;
   };
 
+  const settledLayout = (
+    session: YrsSession,
+    position: number,
+    version: string,
+    signal: AbortSignal
+  ): Promise<boolean> =>
+    new Promise((resolve) => {
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let unsubscribe = () => {};
+      const finish = (ready: boolean) => {
+        if (done) return;
+        done = true;
+        if (timer !== undefined) clearTimeout(timer);
+        unsubscribe();
+        signal.removeEventListener('abort', cancelled);
+        resolve(ready);
+      };
+      const cancelled = () => finish(false);
+      const check = () => {
+        if (done) return;
+        if (signal.aborted || invalid(session) || session.version() !== version) {
+          finish(false);
+          return;
+        }
+        const { queries, complete, failed } = access.layout();
+        if (failed) {
+          finish(false);
+          return;
+        }
+        if (queries && sourceVersionOf(queries) === version) {
+          const source = queries.sourceState();
+          if (source.status === 'error') {
+            finish(false);
+            return;
+          }
+          if (source.status === 'ready' && (queries.anchorRect(position) || complete)) {
+            finish(true);
+            return;
+          }
+        }
+      };
+      signal.addEventListener('abort', cancelled, { once: true });
+      unsubscribe = access.subscribeLayout(check);
+      if (done) unsubscribe();
+      check();
+      if (!done) timer = setTimeout(cancelled, LAYOUT_WAIT_MS);
+    });
+
   const navigation: DocxPluginNavigation = {
     async scrollToParagraph(target, options) {
-      const first = await whenFlushed((session) => ({
-        session,
-        located: locate(session, target, options.expectVersion),
-      }));
-      if (!('session' in first)) return first;
-      if ('ok' in first.located) return first.located;
-      const settled = await access.settledLayout(options.expectVersion);
-      const session = first.session;
-      const refused = invalid(session);
-      if (refused) return refused;
-      const located = locate(session, target, options.expectVersion);
-      if ('ok' in located) return located;
-      if (!settled) {
-        return navigationFailure('layout-unavailable', 'No rendered layout shows this version yet');
-      }
-      const editor = access.pagedEditorRef.current!;
-      const outcome = editor.revealDisplayPosition(located.position);
-      if (outcome !== 'scrolled') {
-        return navigationFailure(
-          outcome,
-          outcome === 'unsupported'
-            ? 'The paragraph has no rendered position'
-            : 'The layout cannot show this paragraph yet'
+      const previous = navigationRequests.get(invocation.activation);
+      const request = new AbortController();
+      navigationRequests.set(invocation.activation, request);
+      previous?.abort();
+      const abort = () => request.abort();
+      invocation.signal.addEventListener('abort', abort, { once: true });
+      invocation.lifetimeSignal.addEventListener('abort', abort, { once: true });
+      if (invocation.signal.aborted || invocation.lifetimeSignal.aborted) abort();
+      try {
+        const first = await whenFlushed((session) => ({
+          session,
+          located: locate(session, target, options.expectVersion),
+        }));
+        if (!('session' in first)) return first;
+        if ('ok' in first.located) return first.located;
+        const session = first.session;
+        const settled = await settledLayout(
+          session,
+          first.located.position,
+          options.expectVersion,
+          request.signal
         );
+        const refused = invalid(session);
+        if (refused) return refused;
+        const located = locate(session, target, options.expectVersion);
+        if ('ok' in located) return located;
+        if (!settled || request.signal.aborted) {
+          return navigationFailure(
+            'layout-unavailable',
+            request.signal.aborted
+              ? 'A newer paragraph navigation superseded this request'
+              : 'No rendered layout shows this version yet'
+          );
+        }
+        const editor = access.pagedEditorRef.current!;
+        const outcome = editor.revealDisplayPosition(located.position);
+        if (outcome !== 'scrolled') {
+          return navigationFailure(
+            outcome,
+            outcome === 'unsupported'
+              ? 'The paragraph has no rendered position'
+              : 'The layout cannot show this paragraph yet'
+          );
+        }
+        if (options.focus) {
+          session.setSelection(located.loc);
+          editor.syncYrsInputState(false);
+          editor.focus();
+        }
+        return { ok: true };
+      } finally {
+        invocation.signal.removeEventListener('abort', abort);
+        invocation.lifetimeSignal.removeEventListener('abort', abort);
+        if (navigationRequests.get(invocation.activation) === request) {
+          navigationRequests.delete(invocation.activation);
+        }
       }
-      if (options.focus) {
-        session.setSelection(located.loc);
-        editor.syncYrsInputState(false);
-        editor.focus();
-      }
-      return { ok: true };
     },
   };
 
