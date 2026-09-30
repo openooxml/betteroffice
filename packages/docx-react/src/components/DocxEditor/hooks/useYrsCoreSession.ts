@@ -31,6 +31,8 @@ export interface YrsCoreSession {
   /** The seed generation `session` was created for. */
   sessionGeneration: number | null;
   replicaReady: boolean;
+  /** Starts loading the main-thread replica when needed. */
+  requestReplica(): void;
   replicaReadyRef?: React.RefObject<boolean>;
   experimentalWorkerOpen?: boolean;
   storyBlocks(storyId: string, env: YrsRenderEnv): LayoutBlock[] | null;
@@ -86,6 +88,8 @@ interface WorkerOpenOptions {
   renderedFrame: object | null;
   /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
   pendingCompletion?: unknown;
+  /** Leaves the replica unhydrated until a caller needs it; see requestReplica. */
+  hydrateOnDemand?: boolean;
 }
 
 export interface YrsCoreSessionOptions {
@@ -316,6 +320,8 @@ export function useYrsCoreSession(
   options?: YrsCoreSessionOptions
 ): YrsCoreSession {
   const workerOpen = options?.workerOpen;
+  const hydrateOnDemandRef = useRef(workerOpen?.hydrateOnDemand === true);
+  hydrateOnDemandRef.current = workerOpen?.hydrateOnDemand === true;
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
   const sessionRef = useRef<YrsSession | null>(null);
@@ -602,7 +608,8 @@ export function useYrsCoreSession(
                 replicaReadyRef.current = true;
                 worker.replicaReady();
                 setReplicaReady(true);
-              }
+              },
+              () => hydrateOnDemandRef.current
             );
             pendingReplicaRef.current = pending;
             startReplicaRef.current = () => {
@@ -659,7 +666,7 @@ export function useYrsCoreSession(
         setSession(next);
         setPreviewing(false);
         setSessionGeneration(seedGeneration);
-        if (openedWorker && startReplicaRef.current) {
+        if (openedWorker && startReplicaRef.current && !hydrateOnDemandRef.current) {
           replicaWaitTimerRef.current = setTimeout(startReplicaRef.current, REPLICA_OPEN_WAIT_MS);
         }
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
@@ -706,7 +713,7 @@ export function useYrsCoreSession(
   ]);
 
   useEffect(() => {
-    if (!openInWorker) return;
+    if (!openInWorker || workerOpen?.hydrateOnDemand) return;
     const frame = workerOpen?.renderedFrame;
     const pending = pendingReplicaRef.current;
     const start = startReplicaRef.current;
@@ -738,10 +745,33 @@ export function useYrsCoreSession(
     session,
     workerOpen?.renderedFrame,
     workerOpen?.pendingCompletion,
+    workerOpen?.hydrateOnDemand,
     previewing,
     handoffFrom,
     options?.shownEngine,
   ]);
+
+  // Turning on-demand hydration off restores the bounded start a frame may never trigger.
+  const hydrateOnDemand = workerOpen?.hydrateOnDemand === true;
+  const wasOnDemandRef = useRef(hydrateOnDemand);
+  useEffect(() => {
+    const was = wasOnDemandRef.current;
+    wasOnDemandRef.current = hydrateOnDemand;
+    const start = startReplicaRef.current;
+    if (
+      !was ||
+      hydrateOnDemand ||
+      !openInWorker ||
+      !start ||
+      !pendingReplicaRef.current?.pending ||
+      replicaWaitTimerRef.current !== null
+    ) return;
+    replicaWaitTimerRef.current = setTimeout(start, REPLICA_OPEN_WAIT_MS);
+  }, [hydrateOnDemand, openInWorker]);
+
+  const requestReplica = useCallback((): void => {
+    startReplicaRef.current?.();
+  }, []);
 
   const notifyFramePresented = useCallback((engine: unknown): void => {
     const waiting = paintWaitRef.current;
@@ -903,6 +933,7 @@ export function useYrsCoreSession(
     session,
     sessionGeneration,
     replicaReady: !openInWorker || replicaReady,
+    requestReplica,
     replicaReadyRef: openInWorker ? replicaReadyRef : undefined,
     experimentalWorkerOpen: Boolean(openInWorker),
     previewing,

@@ -19,7 +19,7 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
-import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
+import { deferWorkerOpenReplica, workerOpenReplicaOnDemand } from '../internals/workerOpenReplica';
 import type { EditorMode } from '../internals/editing-modes';
 import { DOCX_REF_REPLICA_ACCESS, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
@@ -141,7 +141,7 @@ function apiFor(
   return { api, events, pagedEditorRef };
 }
 
-async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false) {
+async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, hydrateOnDemand = false) {
   const worker = await createYrsSession();
   const session = await createYrsSession();
   sessions.push(worker, session);
@@ -165,7 +165,8 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false) 
       opens.push(true);
       session.openDocx(bytes, true);
     },
-    () => { readiness.current = true; }
+    () => { readiness.current = true; },
+    () => hydrateOnDemand
   );
   const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
   return { ...mounted, session, worker, replica, release, opens };
@@ -305,6 +306,20 @@ test('a layout deadline covers the wait for the main replica', async () => {
   const error = await api.whenLayoutComplete({ timeoutMs: 20 }).then(() => null, (failure: unknown) => failure);
   expect(error).toMatchObject({ message: 'The document did not finish rendering' });
   expect(opens).toEqual([]);
+});
+
+test('layout completion leaves an on-demand replica pending while async reads start it', async () => {
+  const { api, opens, replica, session, release } = await pendingReplica('viewing', false, true);
+  expect(await api.whenLayoutComplete({ timeoutMs: 20 })).toBe(0);
+  expect(workerOpenReplicaOnDemand(session)).toBe(true);
+  expect(opens).toEqual([]);
+  const read = api.readParagraphs({ view: 'accepted' });
+  await act(async () => {
+    release();
+    expect(await read).toMatchObject({ ok: true });
+  });
+  expect(opens).toEqual([false]);
+  expect(replica.pending).toBe(false);
 });
 
 test('independent APIs do not start a replica open', async () => {

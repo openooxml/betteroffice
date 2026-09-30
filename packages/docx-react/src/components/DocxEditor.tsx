@@ -1231,6 +1231,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             openInWorker: canvasRenderer.openInWorker,
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
             pendingCompletion: canvasRenderer.pendingCompletion,
+            hydrateOnDemand: modeReadOnly && !collaboration,
           }
         : undefined,
       mediaTokens,
@@ -2146,6 +2147,45 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // An opening document's comment cards arrive with the full document: keep their space meanwhile.
   const sidebarOpen =
     allSidebarItems.some((item) => !item.hidden) || (opening && showCommentsSidebar);
+
+  const requestReplica = yrsCore.requestReplica;
+  const replicaPending = Boolean(experimentalWorkerOpen && yrsCore.session && !yrsCore.replicaReady);
+  // Plugins, sidebars, the outline and geometry callbacks read the replica.
+  const replicaWanted =
+    (plugins?.length ?? 0) > 0 ||
+    showCommentsSidebar ||
+    sidebarOpen ||
+    showOutline ||
+    Boolean(onRenderedDomContextReady);
+  useEffect(() => {
+    if (replicaPending && replicaWanted) requestReplica();
+  }, [replicaPending, replicaWanted, requestReplica, yrsCore.session]);
+  // An outline opened before the replica loaded reads its headings once it has.
+  const replicaReady = yrsCore.replicaReady;
+  useEffect(() => {
+    if (experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
+  }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef]);
+  // Input on a page or in the editor's own input needs the replica; plugin overlays do not.
+  useEffect(() => {
+    const content = editorContentRef.current;
+    if (!replicaPending || !content) return;
+    const onInput = (event: Event) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLCanvasElement ||
+        (target instanceof Element && target.closest('.paged-editor__yrs-input') !== null)
+      ) {
+        requestReplica();
+      }
+    };
+    content.addEventListener('pointerdown', onInput, true);
+    content.addEventListener('keydown', onInput, true);
+    return () => {
+      content.removeEventListener('pointerdown', onInput, true);
+      content.removeEventListener('keydown', onInput, true);
+    };
+  }, [replicaPending, requestReplica]);
+
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.
   const outlineLeftAllowance =

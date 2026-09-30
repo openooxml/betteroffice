@@ -29,7 +29,11 @@ import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
 import { documentPageCount } from './documentPageCount';
 import type { DocxHostSearch } from './useHostSearch';
-import { awaitWorkerOpenReplica, ensureWorkerOpenReplica } from '../internals/workerOpenReplica';
+import {
+  awaitWorkerOpenReplica,
+  ensureWorkerOpenReplica,
+  workerOpenReplicaOnDemand,
+} from '../internals/workerOpenReplica';
 
 export const DOCX_REF_REPLICA_ACCESS = {
   commands: 'commands',
@@ -125,6 +129,9 @@ function gateReplicaAccess(
         if (session) {
           if (access === 'sync') ensureWorkerOpenReplica(session);
           else {
+            if (key === 'whenLayoutComplete' && workerOpenReplicaOnDemand(session)) {
+              return Reflect.apply(call, api, args);
+            }
             const ready = awaitWorkerOpenReplica(session);
             if (ready) {
               const timeoutMs =

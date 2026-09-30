@@ -7,6 +7,7 @@ interface PendingReplica {
   fail(error: unknown): void;
   cancel(): void;
   pending: boolean;
+  onDemand?: () => boolean;
   initialVersion: string;
   readyVersion?: string;
 }
@@ -17,7 +18,8 @@ export function deferWorkerOpenReplica(
   session: YrsSession,
   hydrate: () => Promise<() => void>,
   fallback: () => void,
-  onReady: () => void
+  onReady: () => void,
+  onDemand?: () => boolean
 ): PendingReplica {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
@@ -54,6 +56,7 @@ export function deferWorkerOpenReplica(
   const replica: PendingReplica = {
     ready,
     pending: true,
+    onDemand,
     initialVersion: session.version(),
     start() {
       if (started || !replica.pending) return;
@@ -96,7 +99,14 @@ export function requestWorkerOpenReplica(session: YrsSession): Promise<void> | u
 }
 
 export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
-  return replicas.get(session)?.ready;
+  const replica = replicas.get(session);
+  if (replica?.pending && replica.onDemand?.() === true) replica.start();
+  return replica?.ready;
+}
+
+export function workerOpenReplicaOnDemand(session: YrsSession): boolean {
+  const replica = replicas.get(session);
+  return replica?.pending === true && replica.onDemand?.() === true;
 }
 
 export function ensureWorkerOpenReplica(session: YrsSession): void {

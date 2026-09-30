@@ -126,6 +126,7 @@ function installWorker(options: {
 
 interface HarnessProps {
   experimentalWorkerOpen: boolean;
+  hydrateOnDemand?: boolean;
   previewFirstPage?: boolean;
   openInWorker?: OpenInWorker;
   source: Uint8Array;
@@ -182,6 +183,7 @@ function useHarness(props: HarnessProps) {
         openInWorker,
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
         ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
+        hydrateOnDemand: props.hydrateOnDemand,
       } : undefined,
     }
   );
@@ -320,6 +322,84 @@ function holdFrames() {
     },
   };
 }
+
+test('an on-demand replica stays empty after frames and the open wait until requested', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, hydrateOnDemand: true },
+    });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5100));
+    });
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    expect(session.storyIds()).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+    act(() => result.current.core.requestReplica());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+}, 15_000);
+
+test('turning off on-demand hydration starts a pending replica after two frames', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  try {
+    const props = { ...initialProps, hydrateOnDemand: true };
+    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const requestReplica = result.current.core.requestReplica;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => rerender({ ...props, hydrateOnDemand: false }));
+    expect(result.current.core.session).toBe(session);
+    expect(result.current.core.requestReplica).toBe(requestReplica);
+    expect(replicaHelpers.workerOpenReplicaOnDemand(session)).toBe(false);
+    expect(result.current.core.replicaReady).toBe(false);
+    act(() => frames.run());
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => frames.run());
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
 
 test('a painted main preview hands off to the worker before hydrating the full replica', async () => {
   const { workers, posted } = installWorker({ holdOpen: true, holdState: true });
