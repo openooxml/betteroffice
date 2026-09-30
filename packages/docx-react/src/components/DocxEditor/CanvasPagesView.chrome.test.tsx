@@ -306,7 +306,9 @@ test('a page leaving the window keeps the links it built', async () => {
   rerender(<CanvasPageMirror page={page} active={false} />);
   await act(async () => {});
   expect(container.querySelector('a[href="#kept"]')).toBe(built);
-  expect(container.textContent).not.toContain('plain words');
+  expect(container.textContent).toContain('plain words');
+  const root = container.firstElementChild!.firstElementChild as HTMLElement;
+  expect(root.style.contentVisibility).toBe('auto');
 });
 
 test('a rebuild keeps focus on the same link when links before it change', async () => {
