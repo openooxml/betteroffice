@@ -27,7 +27,9 @@ mod test_records;
 pub use drawing::{Drawing, Omission, Refusal};
 pub use shapes::{MetafileDrawing, MetafileOp, MetafileStroke, decode};
 #[cfg(feature = "svg")]
-pub use svg::{MAX_SVG_BYTES, Svg, placeholder_svg, to_svg, to_svg_with_budget};
+pub use svg::{
+    MAX_SVG_BYTES, Svg, placeholder_svg, to_svg, to_svg_with_budget, to_svg_with_limits,
+};
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -84,6 +86,15 @@ pub fn replay(bytes: &[u8]) -> Result<Drawing, Refusal> {
 
 /// Replays with cumulative allowances, spending them even on refusal.
 pub fn replay_with_budget(bytes: &[u8], budget: &mut ReplayBudget) -> Result<Drawing, Refusal> {
+    with_budget(budget, |shared| {
+        play_nested(bytes, 0, shared).map_err(Refusal)
+    })
+}
+
+fn with_budget<T>(
+    budget: &mut ReplayBudget,
+    replay: impl FnOnce(Rc<SharedBudget>) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
     let limits = ReplayBudget::default();
     let allowance = ReplayBudget {
         work: budget.work.min(limits.work),
@@ -93,7 +104,7 @@ pub fn replay_with_budget(bytes: &[u8], budget: &mut ReplayBudget) -> Result<Dra
         remaining: Cell::new(allowance),
         exceeded: Cell::new(false),
     });
-    let result = play_nested(bytes, 0, Rc::clone(&shared));
+    let result = replay(Rc::clone(&shared));
     let remaining = shared.remaining.get();
     budget.work -= allowance.work - remaining.work;
     budget.pixels -= allowance.pixels - remaining.pixels;
@@ -102,7 +113,7 @@ pub fn replay_with_budget(bytes: &[u8], budget: &mut ReplayBudget) -> Result<Dra
             "the metafile draws more than the replay limits".to_owned(),
         ));
     }
-    result.map_err(Refusal)
+    result
 }
 
 pub(crate) fn play_nested(

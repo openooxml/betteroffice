@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -32,14 +33,33 @@ pub fn to_svg(bytes: &[u8]) -> Result<Svg, Refusal> {
 
 /// Writes SVG while spending cumulative replay allowances.
 pub fn to_svg_with_budget(bytes: &[u8], budget: &mut crate::ReplayBudget) -> Result<Svg, Refusal> {
-    let drawing = crate::replay_with_budget(bytes, budget)?;
-    let markup = write(&drawing)?;
-    Ok(Svg {
-        markup,
-        width: drawing.width,
-        height: drawing.height,
-        omissions: drawing.omissions,
+    let mut output_bytes = MAX_SVG_BYTES;
+    to_svg_with_limits(bytes, budget, &mut output_bytes)
+}
+
+/// Spends replay work and output bytes, including writes before refusal.
+pub fn to_svg_with_limits(
+    bytes: &[u8],
+    budget: &mut crate::ReplayBudget,
+    output_bytes: &mut usize,
+) -> Result<Svg, Refusal> {
+    if *output_bytes == 0 {
+        return Err(output_refusal());
+    }
+    crate::with_budget(budget, |shared| {
+        let drawing = crate::play_nested(bytes, 0, Rc::clone(&shared)).map_err(Refusal)?;
+        let markup = write_with_limits(&drawing, shared, output_bytes)?;
+        Ok(Svg {
+            markup,
+            width: drawing.width,
+            height: drawing.height,
+            omissions: drawing.omissions,
+        })
     })
+}
+
+fn output_refusal() -> Refusal {
+    Refusal("the metafile's SVG would exceed the display size limit".to_owned())
 }
 
 /// A neutral box with a picture glyph, standing in for a picture that could
@@ -81,27 +101,73 @@ struct GradientKey {
 }
 
 struct Writer {
-    out: String,
+    out: Output,
     clips: HashMap<*const ClipChain, usize>,
     paints: HashMap<String, usize>,
     gradients: HashMap<GradientKey, usize>,
     /// Each bitmap's `data:` URL, encoded once however often it is drawn.
     bitmaps: HashMap<*const Bitmap, Result<Arc<str>, Oversize>>,
-    /// Set when a write stopped at the size limit.
-    full: bool,
     next: usize,
     width: f64,
     height: f64,
 }
 
-pub(crate) fn write(drawing: &Drawing) -> Result<String, Refusal> {
+struct Output {
+    markup: String,
+    limit: usize,
+    full: bool,
+    budget: Rc<crate::player::SharedBudget>,
+}
+
+impl std::fmt::Write for Output {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if self.failed() {
+            return Err(std::fmt::Error);
+        }
+        let end = self.markup.len().saturating_add(text.len());
+        if end > self.limit {
+            self.full = true;
+            return Err(std::fmt::Error);
+        }
+        let work = end.div_ceil(64) - self.markup.len().div_ceil(64);
+        if !self.budget.spend(work as u64, 0) {
+            return Err(std::fmt::Error);
+        }
+        self.markup.push_str(text);
+        Ok(())
+    }
+}
+
+impl Output {
+    fn failed(&self) -> bool {
+        self.full || self.budget.exceeded.get()
+    }
+
+    fn push_str(&mut self, text: &str) {
+        let _ = self.write_str(text);
+    }
+
+    fn push(&mut self, c: char) {
+        let _ = self.write_char(c);
+    }
+}
+
+fn write_with_limits(
+    drawing: &Drawing,
+    budget: Rc<crate::player::SharedBudget>,
+    output_bytes: &mut usize,
+) -> Result<String, Refusal> {
     let mut writer = Writer {
-        out: String::new(),
+        out: Output {
+            markup: String::new(),
+            limit: (*output_bytes).min(MAX_SVG_BYTES),
+            full: false,
+            budget,
+        },
         clips: HashMap::new(),
         paints: HashMap::new(),
         gradients: HashMap::new(),
         bitmaps: HashMap::new(),
-        full: false,
         next: 0,
         width: drawing.width,
         height: drawing.height,
@@ -113,6 +179,9 @@ pub(crate) fn write(drawing: &Drawing) -> Result<String, Refusal> {
     );
     let mut open: Option<*const ClipChain> = None;
     for op in &drawing.ops {
+        if writer.out.failed() || !writer.out.budget.spend(1, 0) {
+            break;
+        }
         let clip = match op {
             Op::Shape(shape) => &shape.clip,
             Op::Text(text) => &text.clip,
@@ -129,27 +198,28 @@ pub(crate) fn write(drawing: &Drawing) -> Result<String, Refusal> {
             }
             open = key;
         }
+        if writer.out.failed() {
+            break;
+        }
         match op {
             Op::Shape(shape) => writer.shape(shape),
             Op::Text(text) => writer.text(text),
             Op::Image(image) => writer.image(image),
-        }
-        if writer.full || writer.out.len() > MAX_SVG_BYTES {
-            return Err(Refusal(
-                "the metafile's SVG would exceed the display size limit".to_owned(),
-            ));
         }
     }
     if open.is_some() {
         writer.out.push_str("</g>");
     }
     writer.out.push_str("</svg>");
-    if writer.full || writer.out.len() > MAX_SVG_BYTES {
-        return Err(Refusal(
-            "the metafile's SVG would exceed the display size limit".to_owned(),
-        ));
+    if writer.out.full && *output_bytes <= MAX_SVG_BYTES {
+        *output_bytes = 0;
+    } else {
+        *output_bytes -= writer.out.markup.len();
     }
-    Ok(writer.out)
+    if writer.out.failed() {
+        return Err(output_refusal());
+    }
+    Ok(writer.out.markup)
 }
 
 impl Writer {
@@ -160,6 +230,9 @@ impl Writer {
 
     /// Defines `chain` and its ancestors once each, returning its id.
     fn clip(&mut self, chain: &Arc<ClipChain>) -> usize {
+        if self.out.failed() || !self.out.budget.spend(1, 0) {
+            return 0;
+        }
         if let Some(id) = self.clips.get(&Arc::as_ptr(chain)) {
             return *id;
         }
@@ -189,6 +262,9 @@ impl Writer {
 
     /// The SVG paint for `paint`, defining a pattern or gradient when it needs one.
     fn paint(&mut self, paint: &Paint) -> (String, Option<f64>) {
+        if self.out.failed() {
+            return (String::new(), None);
+        }
         match paint {
             Paint::Solid(color) => (color.hex(), opacity(*color)),
             Paint::Hatch {
@@ -257,6 +333,9 @@ impl Writer {
                 if let Some(id) = self.gradients.get(&key) {
                     return (format!("url(#p{id})"), None);
                 }
+                if !self.out.budget.spend(gradient.stops.len() as u64, 0) {
+                    return (String::new(), None);
+                }
                 let id = self.define(format!("g{gradient:?}"), |writer, id| {
                     let spread = match gradient.spread {
                         Spread::Pad => "pad",
@@ -272,6 +351,9 @@ impl Writer {
                         num(gradient.end.1)
                     );
                     for (offset, color) in gradient.stops.iter() {
+                        if writer.out.failed() {
+                            break;
+                        }
                         let _ = write!(
                             writer.out,
                             r#"<stop offset="{}" stop-color="{}""#,
@@ -364,6 +446,9 @@ impl Writer {
         }) {
             self.out.push_str(r#" stroke-dasharray=""#);
             for (index, length) in dash.iter().enumerate() {
+                if self.out.failed() {
+                    break;
+                }
                 if index > 0 {
                     self.out.push(' ');
                 }
@@ -460,20 +545,33 @@ impl Writer {
     /// `bitmap` as a `data:` URL, encoded on first use; `None` when it
     /// cannot be encoded or would not fit the size limit.
     fn bitmap_url(&mut self, bitmap: &Arc<Bitmap>) -> Option<Arc<str>> {
+        if self.out.failed() {
+            return None;
+        }
+        if !self.bitmaps.contains_key(&Arc::as_ptr(bitmap)) {
+            let bytes = match &bitmap.pixels {
+                Pixels::Encoded { bytes, .. } => bytes.len(),
+                Pixels::Rgba(rgba) => rgba.len(),
+            };
+            if !self.out.budget.spend(bytes.div_ceil(64) as u64, 0) {
+                return None;
+            }
+        }
+        let limit = self.out.limit.saturating_sub(self.out.markup.len());
         let href = match self
             .bitmaps
             .entry(Arc::as_ptr(bitmap))
-            .or_insert_with(|| data_url(bitmap).map(Arc::from))
+            .or_insert_with(|| data_url(bitmap, limit).map(Arc::from))
             .clone()
         {
             Ok(href) => href,
             Err(Oversize(oversize)) => {
-                self.full |= oversize;
+                self.out.full |= oversize;
                 return None;
             }
         };
-        if self.out.len().saturating_add(href.len()) > MAX_SVG_BYTES {
-            self.full = true;
+        if self.out.markup.len().saturating_add(href.len()) > self.out.limit {
+            self.out.full = true;
             return None;
         }
         Some(href)
@@ -516,9 +614,20 @@ fn opacity(color: Rgba) -> Option<f64> {
 #[derive(Clone, Copy)]
 struct Oversize(bool);
 
-fn data_url(bitmap: &Bitmap) -> Result<String, Oversize> {
+fn data_url(bitmap: &Bitmap, limit: usize) -> Result<String, Oversize> {
     let (mime, bytes) = match &bitmap.pixels {
-        Pixels::Encoded { mime, bytes } => (*mime, bytes.clone()),
+        Pixels::Encoded { mime, bytes } => {
+            if bytes
+                .len()
+                .div_ceil(3)
+                .saturating_mul(4)
+                .saturating_add(mime.len() + 13)
+                > limit
+            {
+                return Err(Oversize(true));
+            }
+            (*mime, bytes.clone())
+        }
         Pixels::Rgba(rgba) => {
             let pixels = rgba.as_chunks::<4>().0;
             let opaque = pixels.iter().all(|pixel| pixel[3] == 255);
@@ -534,7 +643,13 @@ fn data_url(bitmap: &Bitmap) -> Result<String, Oversize> {
             ("image/png", encoded.map_err(|_| Oversize(false))?)
         }
     };
-    if bytes.len() / 3 * 4 > MAX_SVG_BYTES {
+    if bytes
+        .len()
+        .div_ceil(3)
+        .saturating_mul(4)
+        .saturating_add(mime.len() + 13)
+        > limit
+    {
         return Err(Oversize(true));
     }
     Ok(format!(
@@ -543,10 +658,10 @@ fn data_url(bitmap: &Bitmap) -> Result<String, Oversize> {
     ))
 }
 
-/// Writes `path`, stopping once `out` passes the size limit.
-fn path_data(out: &mut String, path: &[PathCommand]) {
+/// Writes `path` within the output allowance.
+fn path_data(out: &mut Output, path: &[PathCommand]) {
     for command in path {
-        if out.len() > MAX_SVG_BYTES {
+        if out.failed() {
             return;
         }
         match command {
@@ -583,9 +698,9 @@ fn path_data(out: &mut String, path: &[PathCommand]) {
     }
 }
 
-fn list(out: &mut String, values: impl Iterator<Item = f64>) {
+fn list(out: &mut Output, values: impl Iterator<Item = f64>) {
     for (index, value) in values.enumerate() {
-        if out.len() > MAX_SVG_BYTES {
+        if out.failed() {
             return;
         }
         if index > 0 {
@@ -627,8 +742,11 @@ fn xml_char(c: char) -> bool {
     matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..)
 }
 
-fn escape(out: &mut String, text: &str) {
+fn escape(out: &mut Output, text: &str) {
     for c in text.chars() {
+        if out.failed() {
+            break;
+        }
         match c {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
@@ -707,8 +825,14 @@ mod tests {
     use crate::drawing::LinearGradient;
     use crate::test_records::*;
 
-    #[test]
-    fn repeated_linear_fills_define_one_gradient() {
+    fn write(drawing: &Drawing) -> Result<String, Refusal> {
+        crate::with_budget(&mut crate::ReplayBudget::default(), |shared| {
+            let mut output_bytes = MAX_SVG_BYTES;
+            write_with_limits(drawing, shared, &mut output_bytes)
+        })
+    }
+
+    fn gradient_fills(count: usize, translated: bool) -> Vec<u8> {
         let mut brush = plus_linear_brush(1, [0.0, 0.0, 10.0, 10.0], 0xff00_0000, 0xffff_ffff);
         brush.2[8..12].copy_from_slice(&4u32.to_le_bytes());
         brush.2.extend(u32s(&[256]));
@@ -717,7 +841,10 @@ mod tests {
             .extend((0..256).flat_map(|index| (index as f32 / 255.0).to_le_bytes()));
         brush.2.extend(u32s(&[0xff00_0000; 256]));
         let mut records = vec![plus_header(false), brush];
-        for _ in 0..32 {
+        for index in 0..count {
+            if translated {
+                records.push(plus_world([1.0, 0.0, 0.0, 1.0, index as f32, 0.0]));
+            }
             records.push((
                 0x400A,
                 0,
@@ -726,12 +853,125 @@ mod tests {
         }
         records.push(plus_eof());
         let (kind, body) = plus(&records);
-        let drawing = crate::replay(&Emf::new(100, 100).rec(kind, &body).bytes()).unwrap();
+        Emf::new(100, 100).rec(kind, &body).bytes()
+    }
+
+    #[test]
+    fn repeated_linear_fills_define_one_gradient() {
+        let drawing = crate::replay(&gradient_fills(32, false)).unwrap();
         assert_eq!(drawing.ops.len(), 32);
         let svg = write(&drawing).unwrap();
         assert_eq!(svg.matches("<linearGradient").count(), 1);
         assert_eq!(svg.matches("<stop ").count(), 256);
         assert_eq!(svg.matches("fill=\"url(#p1)\"").count(), 32);
+    }
+
+    #[test]
+    fn translated_linear_fills_charge_stops_on_every_cache_miss() {
+        for translated in [false, true] {
+            let bytes = gradient_fills(8, translated);
+            let mut replay_budget = crate::ReplayBudget::default();
+            crate::replay_with_budget(&bytes, &mut replay_budget).unwrap();
+            let mut budget = crate::ReplayBudget::default();
+            let svg = to_svg_with_budget(&bytes, &mut budget).unwrap();
+            let misses = if translated { 8 } else { 1 };
+            assert_eq!(svg.markup.matches("<stop ").count(), misses * 256);
+            assert_eq!(
+                replay_budget.work - budget.work,
+                (misses * 256 + 8 + svg.markup.len().div_ceil(64)) as u64
+            );
+            let mut budget = crate::ReplayBudget {
+                work: crate::ReplayBudget::default().work - replay_budget.work + 256,
+                pixels: 0,
+            };
+            assert!(to_svg_with_budget(&bytes, &mut budget).is_err());
+            assert_eq!(budget.work, 0);
+        }
+    }
+
+    #[test]
+    fn svg_writes_stop_at_the_remaining_output_allowance() {
+        let bytes = gradient_fills(8, true);
+        let svg = to_svg(&bytes).unwrap();
+        let mut budget = crate::ReplayBudget::default();
+        let mut remaining = svg.markup.len();
+        assert_eq!(
+            to_svg_with_limits(&bytes, &mut budget, &mut remaining).unwrap(),
+            svg
+        );
+        assert_eq!(remaining, 0);
+        let before = budget;
+        assert!(to_svg_with_limits(&bytes, &mut budget, &mut remaining).is_err());
+        assert_eq!(budget, before);
+
+        let mut budget = crate::ReplayBudget::default();
+        let mut replay_budget = budget;
+        crate::replay_with_budget(&bytes, &mut replay_budget).unwrap();
+        let mut remaining = 512;
+        assert!(to_svg_with_limits(&bytes, &mut budget, &mut remaining).is_err());
+        assert_eq!(remaining, 0);
+        assert!(replay_budget.work - budget.work <= 256 + 1 + 512u64.div_ceil(64));
+    }
+
+    #[test]
+    fn output_appends_never_exceed_the_byte_or_work_allowance() {
+        let budget = Rc::new(crate::player::SharedBudget {
+            remaining: std::cell::Cell::new(crate::ReplayBudget { work: 2, pixels: 0 }),
+            exceeded: std::cell::Cell::new(false),
+        });
+        let mut out = Output {
+            markup: String::new(),
+            limit: 80,
+            full: false,
+            budget: Rc::clone(&budget),
+        };
+        out.push_str(&"x".repeat(79));
+        assert_eq!(out.markup.len(), 79);
+        assert_eq!(budget.remaining.get().work, 0);
+        out.push('é');
+        assert!(out.full);
+        assert_eq!(out.markup.len(), 79);
+        out.push_str("discarded");
+        assert_eq!(out.markup.len(), 79);
+
+        out.full = false;
+        out.limit = 1_000;
+        out.push_str(&"x".repeat(50));
+        assert!(budget.exceeded.get());
+        assert_eq!(out.markup.len(), 79);
+    }
+
+    #[test]
+    fn bitmap_encoding_charges_bytes_before_allocating_the_url() {
+        let bitmap = Arc::new(Bitmap {
+            width: 1,
+            height: 1,
+            pixels: Pixels::Encoded {
+                mime: "image/png",
+                bytes: vec![0; 1_024],
+            },
+        });
+        let drawing = Drawing {
+            width: 10.0,
+            height: 10.0,
+            ops: vec![Op::Image(Image {
+                transform: crate::player::IDENTITY,
+                bitmap,
+                opacity: 1.0,
+                clip: None,
+            })],
+            omissions: Vec::new(),
+        };
+        let mut budget = crate::ReplayBudget { work: 4, pixels: 0 };
+        let mut remaining = MAX_SVG_BYTES;
+        assert!(
+            crate::with_budget(&mut budget, |shared| {
+                write_with_limits(&drawing, shared, &mut remaining)
+            })
+            .is_err()
+        );
+        assert_eq!(budget.work, 0);
+        assert!(MAX_SVG_BYTES - remaining < 256);
     }
 
     #[test]

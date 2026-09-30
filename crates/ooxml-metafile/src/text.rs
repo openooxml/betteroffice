@@ -393,6 +393,7 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, mut run: Run) -> Option<()>
         _ => 12.0,
     };
     let saved_clip = player.dc.clip.clone();
+    let saved_clip_rect = player.dc.clip_rect;
     if let Some(rect) = run.rect {
         let path = player.logical_rect_path(rect);
         if run.options & ETO_OPAQUE != 0 {
@@ -527,5 +528,6 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, mut run: Run) -> Option<()>
         }));
     }
     player.dc.clip = saved_clip;
+    player.dc.clip_rect = saved_clip_rect;
     Some(())
 }

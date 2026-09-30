@@ -571,13 +571,15 @@ fn metafile_display_form<'a>(
     if data.len() > budget.metafile_bytes {
         return placeholder("the document's pictures exceed the display size limit".to_owned());
     }
+    if budget.svg_bytes == 0 {
+        return placeholder("the document's pictures exceed the display size limit".to_owned());
+    }
     if budget.replay.work == 0 {
         return placeholder("the document's pictures exceed the replay limits".to_owned());
     }
     budget.metafile_bytes -= data.len();
-    match ooxml_metafile::to_svg_with_budget(data, &mut budget.replay) {
-        Ok(svg) if svg.markup.len() <= budget.svg_bytes => {
-            budget.svg_bytes -= svg.markup.len();
+    match ooxml_metafile::to_svg_with_limits(data, &mut budget.replay, &mut budget.svg_bytes) {
+        Ok(svg) => {
             let warning = (!svg.omissions.is_empty()).then(|| {
                 let omitted: Vec<String> = svg
                     .omissions
@@ -595,7 +597,6 @@ fn metafile_display_form<'a>(
                 warning,
             )
         }
-        Ok(_) => placeholder("the document's pictures exceed the display size limit".to_owned()),
         Err(refusal) => placeholder(refusal.to_string()),
     }
 }
@@ -799,6 +800,70 @@ mod tests {
             let package = RetainedPackage::new(Arc::clone(&bytes)).unwrap();
             assert!(MediaTable::new(package).is_err());
             assert!(crate::s9::media_table_parts(&bytes).is_err());
+        }
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn metafile_output_exhaustion_skips_later_pictures() {
+        let mut data = vec![0u8; 88];
+        for (at, value) in [
+            (0, 1u32),
+            (4, 88),
+            (16, 100),
+            (20, 100),
+            (32, 2540),
+            (36, 2540),
+            (40, 0x464D_4520),
+            (44, 0x0001_0000),
+            (48, 132),
+            (52, 3),
+            (56, 1),
+            (72, 96),
+            (76, 96),
+            (80, 25),
+            (84, 25),
+        ] {
+            data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        data.extend(
+            [43u32, 24, 0, 0, 100, 100, 14, 20, 0, 16, 20]
+                .into_iter()
+                .flat_map(u32::to_le_bytes),
+        );
+        let expected = ooxml_metafile::to_svg(&data).unwrap();
+        let mut budget = DisplayBudget {
+            svg_bytes: expected.markup.len() + expected.markup.len() / 2,
+            ..DisplayBudget::default()
+        };
+        let (display, mime, warning) =
+            display_form(&data, "image/x-emf", "word/media/first.emf", &mut budget);
+        assert_eq!(mime, "image/svg+xml");
+        assert_eq!(std::str::from_utf8(&display).unwrap(), expected.markup);
+        assert!(warning.is_none());
+        assert_eq!(budget.svg_bytes, expected.markup.len() / 2);
+        let before = budget.replay;
+        let (display, _, warning) =
+            display_form(&data, "image/x-emf", "word/media/second.emf", &mut budget);
+        assert!(warning.unwrap().contains("display size limit"));
+        assert!(
+            std::str::from_utf8(&display)
+                .unwrap()
+                .contains(r##"fill="#f1f3f4""##)
+        );
+        assert!(budget.replay.work < before.work);
+        assert_eq!(budget.svg_bytes, 0);
+        let before = (budget.replay, budget.metafile_bytes);
+        for _ in 0..4 {
+            let (display, _, warning) =
+                display_form(&data, "image/x-emf", "word/media/later.emf", &mut budget);
+            assert!(warning.unwrap().contains("document's pictures"));
+            assert!(
+                std::str::from_utf8(&display)
+                    .unwrap()
+                    .contains(r##"fill="#f1f3f4""##)
+            );
+            assert_eq!((budget.replay, budget.metafile_bytes), before);
         }
     }
 

@@ -52,47 +52,6 @@ pub(crate) fn store_object<const FULL: bool>(player: &mut Player<FULL>, object: 
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::player::Brush;
-
-    #[test]
-    fn object_churn_reuses_the_lowest_free_slot() {
-        for handles in [0, MAX_HANDLES] {
-            let mut player = Player::<true>::new((0.0, 0.0, 10.0, 10.0), handles, (10.0, 10.0));
-            for index in 0..MAX_HANDLES {
-                store_object(
-                    &mut player,
-                    GdiObject::Brush(Brush::solid(index as u32, true)),
-                );
-                let Some(GdiObject::Brush(brush)) = &player.objects[index] else {
-                    panic!("a brush in the next free slot");
-                };
-                assert_eq!(brush.color, index as u32);
-            }
-            store_object(&mut player, GdiObject::Opaque);
-            assert_eq!(player.objects.len(), MAX_HANDLES);
-            assert_eq!(player.free_objects.groups, 0);
-            for index in [4095u16, 64, 0, 63] {
-                wmf_record(&mut player, &index.to_le_bytes(), 0x01F0, 0).unwrap();
-            }
-            for index in [0, 63, 64, 4095] {
-                store_object(&mut player, GdiObject::Opaque);
-                assert!(matches!(player.objects[index], Some(GdiObject::Opaque)));
-            }
-            for _ in 0..32 {
-                wmf_record(&mut player, &0u16.to_le_bytes(), 0x01F0, 0).unwrap();
-                assert_eq!(player.free_objects.groups, 1);
-                assert_eq!(player.free_objects.slots[0], 1);
-                store_object(&mut player, GdiObject::Opaque);
-                assert!(matches!(player.objects[0], Some(GdiObject::Opaque)));
-                assert_eq!(player.free_objects.groups, 0);
-            }
-        }
-    }
-}
-
 /// The records of a WMF, located and bounded, with the frame they draw in.
 pub(crate) struct WmfRecords {
     pub records: Vec<(usize, usize, usize)>,
@@ -659,4 +618,45 @@ pub(crate) fn embedded_emf(bytes: &[u8], records: &[(usize, usize, usize)]) -> O
         emf.extend_from_slice(record.get(44..44usize.checked_add(size)?)?);
     }
     (expected == Some(emf.len()) && crate::emf::is_emf(&emf)).then_some(emf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::Brush;
+
+    #[test]
+    fn object_churn_reuses_the_lowest_free_slot() {
+        for handles in [0, MAX_HANDLES] {
+            let mut player = Player::<true>::new((0.0, 0.0, 10.0, 10.0), handles, (10.0, 10.0));
+            for index in 0..MAX_HANDLES {
+                store_object(
+                    &mut player,
+                    GdiObject::Brush(Brush::solid(index as u32, true)),
+                );
+                let Some(GdiObject::Brush(brush)) = &player.objects[index] else {
+                    panic!("a brush in the next free slot");
+                };
+                assert_eq!(brush.color, index as u32);
+            }
+            store_object(&mut player, GdiObject::Opaque);
+            assert_eq!(player.objects.len(), MAX_HANDLES);
+            assert_eq!(player.free_objects.groups, 0);
+            for index in [4095u16, 64, 0, 63] {
+                wmf_record(&mut player, &index.to_le_bytes(), 0x01F0, 0).unwrap();
+            }
+            for index in [0, 63, 64, 4095] {
+                store_object(&mut player, GdiObject::Opaque);
+                assert!(matches!(player.objects[index], Some(GdiObject::Opaque)));
+            }
+            for _ in 0..32 {
+                wmf_record(&mut player, &0u16.to_le_bytes(), 0x01F0, 0).unwrap();
+                assert_eq!(player.free_objects.groups, 1);
+                assert_eq!(player.free_objects.slots[0], 1);
+                store_object(&mut player, GdiObject::Opaque);
+                assert!(matches!(player.objects[0], Some(GdiObject::Opaque)));
+                assert_eq!(player.free_objects.groups, 0);
+            }
+        }
+    }
 }

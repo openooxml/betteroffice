@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::drawing::{
-    Bitmap, Clip, ClipChain, ClipRegion, Drawing, Font, Image, LineCap, LineJoin, LinearGradient,
-    Op, Paint, PathCommand, Pixels, Rgba, Shape, Spread, Stroke, Text, TextAnchor,
+    Bitmap, Clip, ClipRegion, Drawing, Font, Image, LineCap, LineJoin, LinearGradient, Op, Paint,
+    PathCommand, Pixels, Rgba, Shape, Spread, Stroke, Text, TextAnchor,
 };
 use crate::player::{ARC_SEGMENTS, IDENTITY, Player, Xform, apply, chain, concat, rect_path};
 use crate::read::{finite_at, i16_at, i32_at, u8_at, u16_at, u32_at};
@@ -571,13 +571,11 @@ fn play<const FULL: bool>(
             let (dx, dy) = (finite_at(data, 0)?, finite_at(data, 4)?);
             let m = concat(state.to_device(), player.device_to_output());
             let (ox, oy) = (dx * m[0] + dy * m[2], dx * m[1] + dy * m[3]);
-            let mut copied = 0;
             let mut at = state.graphics.clip.as_deref();
             while let Some(link) = at {
-                copied += link.region.path.len();
+                player.charge(link.region.path.len().saturating_add(1), 0)?;
                 at = link.parent.as_deref();
             }
-            player.charge(copied, 0)?;
             state.graphics.clip = offset_chain(&state.graphics.clip, ox, oy);
         }
         0x4037 => player.omit("EMF+ stroke-and-fill paths")?,
@@ -1491,7 +1489,7 @@ fn set_clip<const FULL: bool>(
     let mut exact = region_clips(state, player, region, &mut clips, &mut spent)?;
     player.charge(spent, 0)?;
     let kept = if mode == 1 || mode == 4 {
-        ClipChain::depth(&state.graphics.clip)
+        player.clip_depth(&state.graphics.clip)?
     } else {
         0
     };
@@ -1560,7 +1558,7 @@ fn set_clip<const FULL: bool>(
 }
 
 fn check_depth<const FULL: bool>(player: &mut Player<FULL>, state: &State) -> Option<()> {
-    if ClipChain::depth(&state.graphics.clip) > player.limits.clip_depth {
+    if player.clip_depth(&state.graphics.clip)? > player.limits.clip_depth {
         return player.refuse("clip regions nest past the depth limit");
     }
     Some(())
@@ -1676,7 +1674,7 @@ fn nested<const FULL: bool>(player: &mut Player<FULL>, bytes: &[u8]) -> Option<N
         while let Some(link) = at
             && clips.insert(std::ptr::from_ref(link))
         {
-            commands += link.region.path.len();
+            commands += link.region.path.len().saturating_add(1);
             at = link.parent.as_deref();
         }
     }
@@ -2128,6 +2126,46 @@ mod tests {
 
     use super::*;
     use crate::player::SharedBudget;
+    use crate::test_records::*;
+
+    #[test]
+    fn empty_clip_offsets_charge_every_link_before_copying() {
+        let bytes = |offsets| {
+            let mut records = vec![plus_header(false), plus_path(1, &[])];
+            for _ in 0..128 {
+                records.push((0x4033, 0x0101, Vec::new()));
+            }
+            for _ in 0..offsets {
+                records.push((0x4035, 0, f32s(&[1.0, 1.0])));
+            }
+            records.push(plus_eof());
+            let (kind, body) = plus(&records);
+            Emf::new(100, 100).rec(kind, &body).bytes()
+        };
+        let replay = |offsets, work| {
+            let budget = Rc::new(SharedBudget {
+                remaining: Cell::new(crate::ReplayBudget { work, pixels: 0 }),
+                exceeded: Cell::new(false),
+            });
+            let result =
+                crate::play_emf::<true>(&bytes(offsets), 0, true, Some(Rc::clone(&budget)));
+            (result, budget)
+        };
+        let (base, budget) = replay(0, 100_000);
+        let base = base.unwrap();
+        assert_eq!(
+            crate::drawing::ClipChain::depth(&base.plus.as_ref().unwrap().graphics.clip),
+            128
+        );
+        let spent = 100_000 - budget.remaining.get().work;
+        let (offset, budget) = replay(2, 100_000);
+        assert_eq!(offset.unwrap().commands - base.commands, 2 * 128);
+        assert_eq!(100_000 - budget.remaining.get().work - spent, 2 * 129);
+        let (result, budget) = replay(8, spent + 2 * 129);
+        assert!(result.is_err());
+        assert!(budget.exceeded.get());
+        assert_eq!(budget.remaining.get().work, 0);
+    }
 
     #[test]
     fn restore_charges_scans_and_uses_the_latest_matching_state() {
