@@ -181,7 +181,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
   // The last layout this pipeline applied: its session, document version, and
-  // request without the revision preview and measurement fonts.
+  // request without the revision preview.
   const laidOutRef = useRef<{
     session: YrsSession;
     version: string | null;
@@ -380,7 +380,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           measurement,
         };
         const requestWithoutPreview = JSON.stringify(request, (key, value: unknown) =>
-          key === 'revisionPreview' || key === 'measurement' ? undefined : value
+          key === 'revisionPreview' ? undefined : value
         );
 
         // Step 4+: paint + scroll/events with the computed values.
@@ -465,8 +465,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         // The document as opened is laid out by the resident worker alone: that
         // pass also builds its first frame, so the main thread runs no layout
         // before the first paint. So is a pass that changes only the revision
-        // preview or the measurement fonts of the layout last applied. Once the
-        // document changes, passes run here.
+        // preview of the layout last applied. Once the document changes, passes
+        // run here.
         if (openedVersionRef.current?.session !== session) {
           openedVersionRef.current = { session, version: sourceVersion };
         }
