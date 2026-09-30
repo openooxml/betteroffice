@@ -298,6 +298,74 @@ test('an untaken worker session whose render and open fail reports the error onc
   }
 }, 30_000);
 
+test('a stale worker open failure keeps the replacement preview read-only', async () => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  const failure = new ResidentWorkerOutOfMemoryError('worker open ran out of memory', []);
+  let releaseA = () => {};
+  let releaseB = () => {};
+  const openingA = new Promise<void>((done) => (releaseA = done));
+  const openingB = new Promise<void>((done) => (releaseB = done));
+  let opens = 0;
+  const openInWorker = mock(async (_session: YrsSession) => {
+    const first = ++opens === 1;
+    await (first ? openingA : openingB);
+    if (first) throw failure;
+    return null;
+  });
+  workerOpen = openInWorker;
+  const ref = createRef<Editor>();
+  const errors: Error[] = [];
+  const buffer = documentBuffer();
+  const onError = (error: Error) => errors.push(error);
+  const view = render(load(buffer, onError, ref, true));
+  try {
+    await waitFor(() => expect(openInWorker).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    const previousPreview = renderer!.layoutEngine;
+
+    created = 0;
+    fullSession = null;
+    shownPages = false;
+    await act(async () => view.rerender(load(buffer.slice(0), onError, ref, true)));
+    await waitFor(
+      () => {
+        expect(openInWorker).toHaveBeenCalledTimes(2);
+        expect(renderer!.layoutEngine).not.toBeNull();
+        expect(renderer!.layoutEngine).not.toBe(previousPreview);
+        expect(renderer!.presentedEngine).toBe(renderer!.layoutEngine);
+        expect(renderer!.displayList).not.toBeNull();
+        expect(isPresented(renderer!.canvasHostRef.current, renderer!.displayList!)).toBe(true);
+      },
+      { timeout: 10_000 }
+    );
+    const preview = renderer!.layoutEngine as YrsSession;
+    expect(created).toBe(2);
+    expect(openInWorker.mock.calls[1][0] as unknown).toBe(fullSession);
+    expect(preview).not.toBe(fullSession);
+    expect(preview.isDisplayOnly()).toBe(true);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(ref.current!.getDocument()).toBeNull();
+
+    await act(async () => {
+      releaseA();
+      await new Promise((done) => setTimeout(done, 200));
+    });
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(ref.current!.getDocument()).toBeNull();
+    expect(errors).toEqual([]);
+    expect(renderer!.layoutEngine).toBe(preview);
+    expect(renderer!.presentedEngine).toBe(preview);
+    expect(openInWorker).toHaveBeenCalledTimes(2);
+  } finally {
+    view.unmount();
+    releaseA();
+    releaseB();
+  }
+}, 30_000);
+
 test('a load whose full session fails to render fails, and leaves no session behind', async () => {
   created = 0;
   fullOpen = 'open';
