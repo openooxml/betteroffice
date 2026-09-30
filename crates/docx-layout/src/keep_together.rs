@@ -453,8 +453,16 @@ mod tests {
                 make_paragraph_block("Body", false),
                 make_paragraph_block("Heading", true),
                 page_break_before("Chapter", false),
+                make_paragraph_block("Heading", true),
+                paragraph(
+                    vec![text_run("Chapter")],
+                    Some(ParagraphAttrs {
+                        page_break_before_run: Some(true),
+                        ..Default::default()
+                    }),
+                ),
             ],
-            vec![line(), line(), line(), line(), line()],
+            vec![line(), line(), line(), line(), line(), line(), line()],
         );
 
         let scan = analyze_keep_with_next(&measured);
@@ -465,7 +473,12 @@ mod tests {
             .collect();
         assert_eq!(
             groups,
-            vec![(vec![0], None), (vec![1], Some(2)), (vec![3], None)]
+            vec![
+                (vec![0], None),
+                (vec![1], Some(2)),
+                (vec![3], None),
+                (vec![5], None)
+            ]
         );
     }
 

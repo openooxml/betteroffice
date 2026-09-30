@@ -228,6 +228,8 @@ fn checkpoint_order(checkpoint: &LayoutCheckpoint) -> (usize, usize) {
 /// block that opened a page may now start on the one before it (a removed page
 /// break, a paragraph that now fits), and one inside or right after a
 /// keep-with-next run can move that run's head, so resume strictly before either.
+/// Right after a run counts even when the dirty block is no longer its
+/// follower: a page break it gained releases the run from it.
 fn restart_index(
     keep_with_next: &crate::keep_together::KeepWithNextScan,
     dirty_index: usize,
@@ -238,7 +240,7 @@ fn restart_index(
         .rev()
         .take(2)
         .filter(|(_, group)| {
-            group.members.contains(&dirty_index) || group.follower == Some(dirty_index)
+            group.members.contains(&dirty_index) || group.tail_index + 1 == dirty_index
         })
         .map(|(&head, _)| head)
         .min()
@@ -2548,6 +2550,20 @@ mod pagination_rule_tests {
 
     /// Lays `previous` out in full, then `next` incrementally with the blocks
     /// `dirty` changed, and checks it against a full pass over `next`.
+    #[test]
+    fn a_page_break_a_keep_with_next_follower_gains_relays_out_the_run_head() {
+        let blocks = |page_break_before: bool| {
+            vec![
+                paragraph(0, 1, 90.0, json!({})),
+                paragraph(1, 1, 10.0, json!({ "keepNext": true })),
+                paragraph(2, 1, 10.0, json!({ "pageBreakBefore": page_break_before })),
+            ]
+        };
+        let layout = assert_incremental_matches_full(blocks(false), blocks(true), &[2]);
+        assert_eq!(layout.layout.pages.len(), 2);
+        assert_incremental_matches_full(blocks(true), blocks(false), &[2]);
+    }
+
     fn assert_incremental_matches_full(
         previous: Vec<serde_json::Value>,
         next: Vec<serde_json::Value>,
