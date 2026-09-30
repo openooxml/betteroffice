@@ -298,14 +298,11 @@ export function useRustDisplayList(
     client: ResidentEngineWorkerClient;
   } | null>(null);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
-  // The engine whose worker ran out of memory, and the failure once its
-  // replacement did too.
   // No worker starts once the hook is gone, whatever failure arrives late.
   const unmountedRef = useRef(false);
-  const outOfMemoryRef = useRef<{
-    engine: YrsSession;
-    failure: ResidentWorkerOutOfMemoryError | null;
-  } | null>(null);
+  // The engines whose worker ran out of memory, each with the failure once its
+  // replacement did too. Weak, so a replaced document's session is not kept.
+  const outOfMemoryRef = useRef(new WeakMap<YrsSession, ResidentWorkerOutOfMemoryError | null>());
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
   const pageBuildInFlightRef = useRef(false);
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
@@ -551,8 +548,8 @@ export function useRustDisplayList(
       client: ResidentEngineWorkerClient | null,
       failure: ResidentWorkerOutOfMemoryError
     ): 'retry' | 'stale' | 'failed' => {
-      const previous = outOfMemoryRef.current?.engine === hostEngine ? outOfMemoryRef.current : null;
-      if (previous?.failure) return 'failed';
+      const previous = outOfMemoryRef.current.has(hostEngine);
+      if (outOfMemoryRef.current.get(hostEngine)) return 'failed';
       if (unmountedRef.current || workerFallbackEngineRef.current === hostEngine) return 'stale';
       const current = workerRef.current;
       if (current && current.engine !== hostEngine) return 'stale';
@@ -563,14 +560,14 @@ export function useRustDisplayList(
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
       if (!previous) {
-        outOfMemoryRef.current = { engine: hostEngine, failure: null };
+        outOfMemoryRef.current.set(hostEngine, null);
         console.warn(
           '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
           failure
         );
         return 'retry';
       }
-      outOfMemoryRef.current = { engine: hostEngine, failure };
+      outOfMemoryRef.current.set(hostEngine, failure);
       console.error('[CanvasRenderer] Resident engine worker ran out of memory again', failure);
       queryEpochGate.clear();
       setError(failure);
@@ -1003,9 +1000,8 @@ export function useRustDisplayList(
       ) {
         return null;
       }
-      if (outOfMemoryRef.current?.engine === hostEngine && outOfMemoryRef.current.failure) {
-        return Promise.reject(outOfMemoryRef.current.failure);
-      }
+      const outOfMemory = outOfMemoryRef.current.get(hostEngine);
+      if (outOfMemory) return Promise.reject(outOfMemory);
       if (workerRef.current?.engine !== hostEngine) {
         workerRef.current?.client.destroy();
         workerRef.current = {
@@ -1275,10 +1271,7 @@ export function useRustDisplayList(
     };
     const paintToken = paintedCaretMachine.token();
     let pending: Promise<BuiltDisplay>;
-    const outOfMemory =
-      residentEngine && outOfMemoryRef.current?.engine === residentEngine
-        ? outOfMemoryRef.current.failure
-        : null;
+    const outOfMemory = residentEngine ? outOfMemoryRef.current.get(residentEngine) : null;
     if (outOfMemory) {
       pending = Promise.reject(outOfMemory);
     } else if (!overrides?.build && probe && canUseResidentEngineWorker()) {
