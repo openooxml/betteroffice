@@ -1,12 +1,12 @@
 //! Read queries over transaction snapshots.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use unicode_segmentation::UnicodeSegmentation;
 use yrs::{Any, Map, Out, ReadTxn, Transact};
 
 use crate::op::{Loc, LocRange, OpError, OpResult, global_of_loc, loc_of_global};
-use crate::ops::table::{TableRowChangeKind, table_row_changes};
+use crate::ops::table::{TableRowChangeKind, table_revision_stamps, table_row_changes};
 use crate::ops::{Chunk, ChunkKind};
 use crate::{
     BREAK_KIND, COMMENTS, DEL, EditingDoc, INS, KIND_KEY, PARA_ID, ParagraphId, RevisionId,
@@ -293,6 +293,38 @@ pub(crate) fn revision_parts(value: &Any) -> Option<(String, String, String)> {
         get_string("author").unwrap_or_default(),
         get_string("date").unwrap_or_default(),
     ))
+}
+
+fn visit_chunk_revisions<T: ReadTxn>(
+    chunk: &Chunk,
+    txn: &T,
+    mut visit: impl FnMut(ChangeKind, (String, String, String)),
+) {
+    if let ChunkKind::Pilcrow(map) = &chunk.kind {
+        for (key, kind) in [
+            (crate::PPR_INS, ChangeKind::ParagraphMarkInsertion),
+            (crate::PPR_DEL, ChangeKind::ParagraphMarkDeletion),
+        ] {
+            if let Some(Out::Any(value)) = map.get(txn, key)
+                && let Some(stamp) = revision_parts(&value)
+            {
+                visit(kind, stamp);
+            }
+        }
+        if let Some(Out::Any(Any::Array(changes))) = map.get(txn, crate::PPR_CHANGE) {
+            for change in changes.iter() {
+                if let Some(stamp) = revision_parts(change) {
+                    visit(ChangeKind::ParagraphPropertiesChanged, stamp);
+                }
+            }
+        }
+    } else {
+        for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
+            if let Some(stamp) = chunk.attrs.get(key).and_then(revision_parts) {
+                visit(kind, stamp);
+            }
+        }
+    }
 }
 
 impl EditingDoc {
@@ -588,6 +620,41 @@ impl EditingDoc {
             .collect())
     }
 
+    /// Distinct author and date pairs for requested revisions across all stories.
+    pub fn revision_stamps(
+        &self,
+        ids: &[String],
+    ) -> OpResult<BTreeMap<String, BTreeSet<(String, String)>>> {
+        let requested: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut result: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+        if requested.is_empty() {
+            return Ok(result);
+        }
+        let txn = self.yrs_doc().transact();
+        let Some(stories) = txn.get_map(crate::STORIES) else {
+            return Ok(result);
+        };
+        let mut collect = |(id, author, date): (String, String, String)| {
+            if requested.contains(id.as_str()) {
+                result.entry(id).or_default().insert((author, date));
+            }
+        };
+        for (story_id, value) in stories.iter(&txn) {
+            let Out::YText(story) = value else {
+                continue;
+            };
+            for chunk in self.chunk_snapshot(story_id, &story, &txn).iter() {
+                visit_chunk_revisions(chunk, &txn, |_, stamp| collect(stamp));
+                if let ChunkKind::Embed(Some(map)) = &chunk.kind {
+                    for stamp in table_revision_stamps(map, &txn) {
+                        collect(stamp);
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// [`Self::list_changes`] with each change's story-global `[start, end)`.
     pub(crate) fn story_changes(&self, story_id: &str) -> OpResult<Vec<(ChangeInfo, (u32, u32))>> {
         let txn = self.yrs_doc().transact();
@@ -603,52 +670,14 @@ impl EditingDoc {
         }
         let mut raw: Vec<RawChange> = Vec::new();
         for chunk in chunks.iter() {
-            if let ChunkKind::Pilcrow(map) = &chunk.kind {
-                for (key, kind) in [
-                    (crate::PPR_INS, ChangeKind::ParagraphMarkInsertion),
-                    (crate::PPR_DEL, ChangeKind::ParagraphMarkDeletion),
-                ] {
-                    if let Some(Out::Any(value)) = map.get(&txn, key)
-                        && let Some((id, author, date)) = revision_parts(&value)
-                    {
-                        raw.push(RawChange {
-                            id,
-                            kind,
-                            author,
-                            date,
-                            start: chunk.start,
-                            end: chunk.start + 1,
-                        });
-                    }
-                }
-                if let Some(Out::Any(Any::Array(changes))) = map.get(&txn, crate::PPR_CHANGE) {
-                    for change in changes.iter() {
-                        if let Some((id, author, date)) = revision_parts(change) {
-                            raw.push(RawChange {
-                                id,
-                                kind: ChangeKind::ParagraphPropertiesChanged,
-                                author,
-                                date,
-                                start: chunk.start,
-                                end: chunk.start + 1,
-                            });
-                        }
-                    }
-                }
-                continue;
-            }
-            for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
-                let Some(value) = chunk.attrs.get(key) else {
-                    continue;
-                };
-                let Some((id, author, date)) = revision_parts(value) else {
-                    continue;
-                };
-                if let Some(last) = raw
-                    .iter_mut()
-                    .rev()
-                    .find(|change| change.kind == kind)
-                    .filter(|change| change.id == id && change.end == chunk.start)
+            visit_chunk_revisions(chunk, &txn, |kind, (id, author, date)| {
+                let pilcrow = matches!(&chunk.kind, ChunkKind::Pilcrow(_));
+                if !pilcrow
+                    && let Some(last) = raw
+                        .iter_mut()
+                        .rev()
+                        .find(|change| change.kind == kind)
+                        .filter(|change| change.id == id && change.end == chunk.start)
                 {
                     last.end = chunk.end();
                 } else {
@@ -658,10 +687,14 @@ impl EditingDoc {
                         author,
                         date,
                         start: chunk.start,
-                        end: chunk.end(),
+                        end: if pilcrow {
+                            chunk.start + 1
+                        } else {
+                            chunk.end()
+                        },
                     });
                 }
-            }
+            });
         }
         raw.extend(
             table_row_changes(&story, &txn)

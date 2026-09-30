@@ -1568,6 +1568,57 @@ test('a provisional layout paints first and settles only once the full layout fo
   }
 });
 
+test('with worker open, a provisional layout names its engine until the rest is asked of the worker', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) =>
+        useRustDisplayList(
+          layout,
+          undefined,
+          undefined,
+          undefined,
+          source,
+          undefined,
+          undefined,
+          undefined,
+          true
+        ),
+      { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+    );
+    expect(result.current.pendingCompletion).toBeNull();
+    const pending = result.current.layoutInWorker(engine, REQUEST);
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.posted[0].id,
+      ok: true,
+      frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null },
+      selection: null,
+      layoutRevision: 1,
+      layoutJson,
+      layoutProvisional: true,
+    });
+    const provisional = await act(() => pending!);
+    await act(async () => {
+      rerender({ layout: provisional!.layout, source: engine });
+    });
+    await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
+    expect(result.current.pendingCompletion).toBe(engine);
+    expect(worker.posted).toHaveLength(1);
+    await act(async () => {
+      void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+    });
+    worker.reply({ id: worker.posted[1].id, ok: true });
+    await waitFor(() => expect(worker.posted).toHaveLength(3));
+    expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' });
+    expect(result.current.pendingCompletion).toBeNull();
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
 function settleHarness() {
   const displayList = { pages: [] };
   const overrides = {
@@ -1703,7 +1754,7 @@ test('a rejected completion after reload preserves the new session frame, querie
       layoutJson,
       layoutProvisional: true,
     });
-    const provisional = (await layout)!;
+    const provisional = (await act(() => layout))!;
     await act(async () => { rerender({ layout: provisional.layout, source: engine }); });
     await waitFor(() => expect(result.current.frame).not.toBeNull());
     await act(async () => {

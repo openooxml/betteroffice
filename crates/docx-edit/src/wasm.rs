@@ -4303,6 +4303,23 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
+    /// Author and date stamps for the requested revision ids.
+    pub fn revision_stamps_json(&self, ids_json: &str) -> Result<String, JsValue> {
+        let ids: Vec<String> = serde_json::from_str(ids_json).map_err(js_err)?;
+        let stamps = self.engine.doc().revision_stamps(&ids).map_err(js_err)?;
+        let items: serde_json::Map<String, Value> = stamps
+            .into_iter()
+            .map(|(id, stamps)| {
+                let stamps: Vec<Value> = stamps
+                    .into_iter()
+                    .map(|(author, date)| json!({ "author": author, "date": date }))
+                    .collect();
+                (id, Value::Array(stamps))
+            })
+            .collect();
+        serde_json::to_string(&items).map_err(js_err)
+    }
+
     pub fn search_text(
         &self,
         query: &str,

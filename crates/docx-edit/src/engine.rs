@@ -1016,8 +1016,8 @@ enum RegionResidentPhase {
 /// Long-lived owner of the authoritative editing document and its retained
 /// render projections.
 ///
-/// The yrs update observer advances `doc_epoch` for every committed local or
-/// remote transaction. Render caches are generation-tagged instead of being
+/// The yrs transaction observer advances `doc_epoch` for every store-changing
+/// local or remote commit. Render caches are generation-tagged instead of being
 /// eagerly cleared, so an in-flight read can never publish blocks from a
 /// different document generation.
 pub struct EngineSession {
@@ -1807,10 +1807,12 @@ impl EngineSession {
         let observer_epoch = Rc::clone(&doc_epoch);
         let observer = doc
             .yrs_doc()
-            .observe_update_v1(move |_txn, _event| {
-                observer_epoch.set(observer_epoch.get().wrapping_add(1));
+            .observe_after_transaction(move |txn| {
+                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                    observer_epoch.set(observer_epoch.get().wrapping_add(1));
+                }
             })
-            .expect("EngineSession document update observer registers");
+            .expect("EngineSession document transaction observer registers");
         Self {
             doc,
             doc_epoch,
@@ -5021,6 +5023,80 @@ mod tests {
             measured_table_wrap_margins("text", "left", json!([first, second, third])),
             (0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn seeded_session_epochs_advance_before_local_and_remote_update_listeners() {
+        let engine = EngineSession::new(7);
+        crate::seed::seed_from_docx(
+            engine.doc(),
+            &docx_bytes("", "<w:p><w:r><w:t>hello</w:t></w:r></w:p>"),
+        )
+        .unwrap();
+        let peer = EditingDoc::new(8);
+        peer.apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&events);
+        let epoch = Rc::clone(&engine.doc_epoch);
+        let _listener = engine
+            .doc()
+            .yrs_doc()
+            .observe_update_v1(move |txn, event| {
+                observed.borrow_mut().push((
+                    epoch.get(),
+                    txn.origin().is_none(),
+                    event.update.clone(),
+                ));
+            })
+            .unwrap();
+        let seeded_epoch = engine.doc_epoch();
+        let seeded_version = engine.doc().version();
+        drop(engine.doc().yrs_doc().transact_mut());
+        assert_eq!(engine.doc_epoch(), seeded_epoch);
+        assert_eq!(engine.doc().version(), seeded_version);
+        assert!(events.borrow().is_empty());
+
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 5),
+                "!",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let edited_epoch = engine.doc_epoch();
+        let edited_version = engine.doc().version();
+        assert_eq!(edited_epoch, seeded_epoch + 1);
+        assert_ne!(edited_version, seeded_version);
+        assert_eq!(events.borrow().len(), 1);
+        assert_eq!(events.borrow()[0].0, edited_epoch);
+        assert!(!events.borrow()[0].1);
+        peer.apply_update_v1(&events.borrow()[0].2).unwrap();
+
+        let vector = engine.doc().encode_state_vector_v1();
+        peer.apply_raw_ops(
+            "body",
+            vec![crate::RawOp::Delete { index: 0, len: 1 }],
+            &crate::EditCtx::local("", ""),
+        )
+        .unwrap();
+        let update = peer.encode_diff_v1(&vector).unwrap();
+        engine.doc().apply_update_v1(&update).unwrap();
+        assert_eq!(engine.doc().encode_state_vector_v1(), vector);
+        assert_eq!(engine.doc_epoch(), edited_epoch + 1);
+        assert_ne!(engine.doc().version(), edited_version);
+        assert_eq!(events.borrow().len(), 2);
+        assert_eq!(events.borrow()[1].0, engine.doc_epoch());
+        assert!(events.borrow()[1].1);
+        assert!(!events.borrow()[1].2.is_empty());
+
+        let merged_version = engine.doc().version();
+        engine.doc().apply_update_v1(&update).unwrap();
+        assert_eq!(engine.doc_epoch(), edited_epoch + 1);
+        assert_eq!(engine.doc().version(), merged_version);
+        assert_eq!(events.borrow().len(), 2);
     }
 
     #[test]

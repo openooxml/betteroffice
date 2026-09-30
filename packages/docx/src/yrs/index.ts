@@ -1734,6 +1734,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     readParagraphs: (request) => facade.readParagraphs(request),
     applyEdits: (request) => facade.applyEdits(request),
     listRevisions: () => facade.listRevisions(),
+    revisionStamps: (ids) => JSON.parse(session.revision_stamps_json(JSON.stringify(ids))),
     settleRevisions: (accept, reject) => {
       const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       session.settle_revisions_json(JSON.stringify({ accept, reject }));

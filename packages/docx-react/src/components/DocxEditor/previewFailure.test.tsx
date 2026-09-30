@@ -271,7 +271,7 @@ test('an untaken worker session whose render and open fail reports the error onc
     const view = render(load(buffer, onError, ref, true));
     await waitFor(() => expect(openInWorker).toHaveBeenCalledTimes(1), { timeout: 10_000 });
     const pendingSession = openInWorker.mock.calls[0][0];
-    expect(shownPages).toBe(true);
+    await waitFor(() => expect(shownPages).toBe(true), { timeout: 10_000 });
     expect(pendingSession as unknown).toBe(fullSession);
     expect(pendingSession.isDisplayOnly()).toBe(false);
     expect(renderer!.layoutEngine).not.toBe(pendingSession);
@@ -603,6 +603,7 @@ test.each([false, true])(
     const buffer = documentBuffer();
     const view = render(load(buffer, (error) => errors.push(error.message), ref, workerOpen));
     await waitFor(() => expect(created).toBe(2), { timeout: 10_000 });
+    await waitFor(() => expect(errors).toEqual(['preview render failed']), { timeout: 10_000 });
     // A host passing a new callback while the full session opens.
     view.rerender(load(buffer, (error) => errors.push(`again: ${error.message}`), ref, workerOpen));
     await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), { timeout: 10_000 });
