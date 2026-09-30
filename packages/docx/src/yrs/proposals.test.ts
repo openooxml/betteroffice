@@ -810,6 +810,29 @@ describe('YrsSession host proposals', () => {
     expect(() => session.withdrawProposals({ expectVersion: before } as never)).toThrow(TypeError);
   });
 
+  it('refuses to withdraw a proposal whose revision also marks a paragraph change', async () => {
+    const session = await open();
+    const [record] = snapshotOf(
+      propose(session, replace('styled', '00000003', 'this', 'that'))
+    ).proposals;
+    const mark = { paraId: '00000003', offset: 0 };
+    session.setParagraphAttrs(
+      { story: 'body', start: mark, end: mark },
+      { alignment: 'right' },
+      { name: SUGGEST.author, date: SUGGEST.date }
+    );
+    const changed = session.listRevisions().find((revision) => revision.kind === 'pPrChange');
+    expect(record!.revisionIds).toContain(changed!.revisionId);
+    const unchanged = state(session);
+    expect(
+      session.withdrawProposals({ expectVersion: session.version(), ids: ['styled'] })
+    ).toMatchObject({
+      ok: false,
+      failure: { code: 'tracked-revision-conflict', proposalId: 'styled' },
+    });
+    expect(state(session)).toEqual(unchanged);
+  });
+
   it('forgets proposals when the session opens another document', async () => {
     const session = await open();
     snapshotOf(propose(session, replace('a', '00000003', 'this', 'that')));

@@ -105,6 +105,7 @@ export interface DocxProposalSession {
   findText(request: DocxFindTextRequest): DocxFindTextResult;
   readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
   applyEdits(request: DocxEditRequest): DocxEditResult;
+  listRevisions(): readonly { revisionId: string; kind: string }[];
   /** Accepts and rejects revisions for good, outside undo history; unknown ids are skipped. */
   settleRevisions(accept: readonly string[], reject: readonly string[]): void;
 }
@@ -639,6 +640,7 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
     }
     const accept: string[] = [];
     const reject: string[] = [];
+    const owners = new Map<string, string>();
     for (const id of withdrawn) {
       const { record } = records.get(id)!;
       for (const revisionId of record.revisionIds) {
@@ -650,8 +652,23 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
             proposalId: id,
           });
         }
+        owners.set(revisionId, id);
         (record.state === 'accepted' ? accept : reject).push(revisionId);
       }
+    }
+    const foreign = session
+      .listRevisions()
+      .find(
+        ({ revisionId, kind }) =>
+          owners.has(revisionId) && kind !== 'insertion' && kind !== 'deletion'
+      );
+    if (foreign) {
+      const id = owners.get(foreign.revisionId)!;
+      return refuse({
+        code: 'tracked-revision-conflict',
+        message: `proposal ${id} shares revision ${foreign.revisionId} with a ${foreign.kind} change made outside the proposals`,
+        proposalId: id,
+      });
     }
     if (accept.length > 0 || reject.length > 0) session.settleRevisions(accept, reject);
     let decided = false;
