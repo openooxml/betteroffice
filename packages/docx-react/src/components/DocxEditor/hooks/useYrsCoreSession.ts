@@ -72,6 +72,8 @@ export interface YrsCoreSessionOptions {
   previewFirstPage?: boolean;
   /** How long a preview waits for the full document to open; see {@link FULL_OPEN_TIMEOUT_MS}. */
   fullOpenTimeoutMs?: number;
+  /** Engines the renderer still builds with; a replaced session among them lives on. */
+  heldEngines?: readonly unknown[];
 }
 
 /** Body blocks a first-page preview parses. */
@@ -226,23 +228,31 @@ export function dirtyProjectionStory(activeStory: string): string {
     : 'body';
 }
 
+const NO_HELD_ENGINES: readonly unknown[] = [];
+
 /**
  * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
- * still run with the session they rendered, so `retire` keeps that one until they render without
- * it; any other session is freed at once, and unmounting frees every retired one.
+ * still run with the session they rendered, and the renderer keeps the engines in `held` (its
+ * layout's) until the next document's layout replaces them, so `retire` keeps such a session
+ * until neither renders with it; any other session is freed at once, and unmounting frees every
+ * retired one.
  */
-function useRetiredSessions(session: YrsSession | null): (replaced: YrsSession | null) => void {
-  const renderedRef = useRef(session);
-  renderedRef.current = session;
+function useRetiredSessions(
+  session: YrsSession | null,
+  held: readonly unknown[]
+): (replaced: YrsSession | null) => void {
+  const renderedRef = useRef({ session, held });
+  renderedRef.current = { session, held };
   const retiredRef = useRef(new Set<YrsSession>());
   const unmountedRef = useRef(false);
   useEffect(() => {
     for (const retired of retiredRef.current) {
-      if (retired === session) continue;
+      if (retired === session || held.includes(retired)) continue;
       retiredRef.current.delete(retired);
       retired.destroy();
     }
-  }, [session]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, ...held]);
   useEffect(() => {
     unmountedRef.current = false;
     return () => {
@@ -253,8 +263,15 @@ function useRetiredSessions(session: YrsSession | null): (replaced: YrsSession |
   }, []);
   return useCallback((replaced: YrsSession | null): void => {
     if (!replaced) return;
-    if (replaced === renderedRef.current && !unmountedRef.current) retiredRef.current.add(replaced);
-    else replaced.destroy();
+    const rendered = renderedRef.current;
+    if (
+      !unmountedRef.current &&
+      (replaced === rendered.session || rendered.held.includes(replaced))
+    ) {
+      retiredRef.current.add(replaced);
+    } else {
+      replaced.destroy();
+    }
   }, []);
 }
 
@@ -300,7 +317,7 @@ export function useYrsCoreSession(
     options?.previewFirstPage === true && !collaboration && !collaborationInitialUpdate;
   const fullOpenTimeoutRef = useRef(FULL_OPEN_TIMEOUT_MS);
   fullOpenTimeoutRef.current = options?.fullOpenTimeoutMs ?? FULL_OPEN_TIMEOUT_MS;
-  const retire = useRetiredSessions(session);
+  const retire = useRetiredSessions(session, options?.heldEngines ?? NO_HELD_ENGINES);
   // The preview leaves once components have let go of it, on the next commit.
   const retirePreview = useCallback((retiring: YrsSession): void => {
     if (retiringRef.current === retiring) {

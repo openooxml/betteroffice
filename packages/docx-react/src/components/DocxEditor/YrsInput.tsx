@@ -249,6 +249,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const inputLifetimeRef = useRef({ session, enabled, mounted: true });
   inputLifetimeRef.current.session = session;
   inputLifetimeRef.current.enabled = enabled;
+  // A resident edit that answers after the input unmounted or its document was replaced
+  // finishes nothing: the session it started on may be freed.
+  const isCurrentInput = useCallback(
+    (started: YrsSession | null): boolean =>
+      inputLifetimeRef.current.mounted && inputLifetimeRef.current.session === started,
+    []
+  );
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const onPendingInputChangeRef = useRef(onPendingInputChange);
   onPendingInputChangeRef.current = onPendingInputChange;
@@ -560,6 +567,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           applyResidentInput
         ) {
           const applied = await applyResidentInput(inputText);
+          if (!isCurrentInput(session)) return;
           if (applied) finishResidentMutation(applied);
           else commitCompatibilityInput();
           return;
@@ -599,6 +607,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       finishMutation,
       finishResidentMutation,
       inputPositionMap,
+      isCurrentInput,
       isSuggesting,
       readOnly,
       session,
@@ -631,6 +640,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
         if (hasTarget && isBodyFlowStory(activeStory) && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction, remaining);
+          if (!isCurrentInput(session)) return;
           if (applied) {
             finishResidentMutation(applied);
             remaining -= Math.max(1, applied.deletedUnits ?? remaining);
@@ -694,6 +704,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       finishMutation,
       finishResidentMutation,
       inputPositionMap,
+      isCurrentInput,
       isSuggesting,
       readOnly,
       session,

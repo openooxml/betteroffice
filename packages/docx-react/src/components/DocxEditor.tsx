@@ -1092,7 +1092,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
     },
-    { previewFirstPage }
+    { previewFirstPage, heldEngines: [canvasRenderer.layoutEngine] }
   );
   // Until the full session's pages are shown, the editor takes no input and its
   // API and commands see a document that is still loading.

@@ -480,6 +480,9 @@ export function useRustDisplayList(
       if (dispatchHoldTimerRef.current !== null) {
         clearTimeout(dispatchHoldTimerRef.current);
       }
+      // A build or input the worker leaves unanswered must not fall back on the freed session.
+      generationRef.current += 1;
+      documentLoadsRef.current += 1;
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
@@ -616,7 +619,10 @@ export function useRustDisplayList(
         setTimeout(() => requestLayoutRef.current?.(), 0);
         return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false, deletedUnits };
       };
+      // An input to a document another load replaced, or an unmount freed, applies to nothing.
+      const dropped = (): boolean => documentLoadsRef.current !== documentLoad;
       const run = async (): Promise<ResidentFrameApplyResult | null> => {
+        if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         const worker = workerRef.current;
         const currentFrame = snapshotRef.current.frame;
         // A worker still on the session being replaced does not take the new one's input.
@@ -666,6 +672,7 @@ export function useRustDisplayList(
           }
         } catch (error) {
           if (!(error instanceof ResidentWorkerFailureError)) throw error;
+          if (dropped()) return { frameEpoch: null, caretSynchronized: false };
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
             error
@@ -679,6 +686,7 @@ export function useRustDisplayList(
         } finally {
           residentPaintInflightRef.current -= 1;
         }
+        if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         if (!result.applied) return null;
         const delta = workerDelta ?? decodeFrameDelta(result.frame);
         suppressWorkerInvalidationRef.current += 1;
@@ -765,7 +773,7 @@ export function useRustDisplayList(
         if (nextError.message.includes('resident input state is not ready')) return null;
         console.error('[CanvasRenderer] Resident input failed', nextError);
         // An input to a document another load replaced fails nothing of the new one.
-        if (documentLoadsRef.current === documentLoad) {
+        if (!dropped()) {
           queryEpochGate.clear();
           setError(nextError);
           setErrorEngine(residentEngineRef.current);
@@ -1158,6 +1166,11 @@ export function useRustDisplayList(
       settledEpochRef.current = null;
       // A failure of the document being loaded holds until its layout or the next load.
       if (!replacedLayoutRef.current) settleErrorRef.current = null;
+      // The worker of a session the renderer let go of never builds again.
+      if (workerRef.current && workerRef.current.engine !== residentEngine) {
+        workerRef.current.client.destroy();
+        workerRef.current = null;
+      }
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
       notifyCaretInterrupt();
@@ -1272,11 +1285,9 @@ export function useRustDisplayList(
       // (a StrictMode remount's destroyed worker) must not tear down its successor.
       let requested = workerRef.current;
       const fallback = (cause: unknown) => {
-        if (requested !== workerRef.current) {
-          return generation === generationRef.current
-            ? buildOnMainThread()
-            : Promise.reject(cause);
-        }
+        // A replaced build falls back on nothing: its engine may be gone by now.
+        if (generation !== generationRef.current) return Promise.reject(cause);
+        if (requested !== workerRef.current) return buildOnMainThread();
         const nextError =
           cause instanceof Error
             ? cause
@@ -1376,12 +1387,16 @@ export function useRustDisplayList(
               return {
                 displayList: nextFrame.displayList,
                 frame: nextFrame,
-                caret: residentCaretForSelection(
-                  result.caret,
-                  result.selection,
-                  hostEngine.selection(),
-                  nextFrame
-                ),
+                // A replaced build is dropped below; its engine may be gone by now.
+                caret:
+                  generation === generationRef.current
+                    ? residentCaretForSelection(
+                        result.caret,
+                        result.selection,
+                        hostEngine.selection(),
+                        nextFrame
+                      )
+                    : null,
                 queryEngine: null,
                 workerProduced: true,
                 caretPainted: result.caretPainted,
@@ -1679,6 +1694,8 @@ export interface UseCanvasRendererResult {
   error: Error | null;
   /** See {@link UseRustDisplayListResult.errorEngine}. */
   errorEngine: unknown;
+  /** The engine of the layout the display list is built from; it lags a replaced session. */
+  layoutEngine: unknown;
   /** feed PagedEditor's per-pass Layout into the interaction query source */
   onLayoutComputed: (
     layout: Layout | null,
@@ -1882,6 +1899,7 @@ export function useCanvasRenderer(
     status,
     error,
     errorEngine,
+    layoutEngine: engine,
     onLayoutComputed,
     reset,
     resolveImage,

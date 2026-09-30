@@ -622,6 +622,197 @@ test('a StrictMode remount keeps the worker its second mount started', async () 
   }
 });
 
+test('unmounting while the worker builds never builds on the host engine', async () => {
+  const native = createEditSession(9103);
+  native.create_story('body', 'Unmounted text', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  let posted = 0;
+  class FakeWorker {
+    onmessage = null;
+    onerror = null;
+    onmessageerror = null;
+    postMessage(): void {
+      posted += 1;
+    }
+    terminate(): void {}
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const builds: string[] = [];
+  const engine = {
+    buildDisplayListJson: (input: string) => {
+      builds.push('json');
+      return native.build_display_list_json(input);
+    },
+    resetFrameBase: () => native.reset_frame_base(),
+    buildDisplayListFrame: (input: string, epoch: number) => {
+      builds.push('frame');
+      return native.build_display_list_frame(input, epoch);
+    },
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, { getInputs: () => inputs }, undefined, undefined, engine)
+    );
+    expect(posted).toBe(1);
+    unmount();
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(builds).toEqual([]);
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
+
+test('a load that fails while the worker builds drops the worker, never the released engine', async () => {
+  const native = createEditSession(9104);
+  native.create_story('body', 'Released text', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  let worker: InputFakeWorker | null = null;
+  class FakeWorker extends InputFakeWorker {
+    constructor() {
+      super(new Uint8Array());
+      worker = this;
+    }
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const hostCalls: string[] = [];
+  const engine = {
+    buildDisplayListJson: (input: string) => {
+      hostCalls.push('json');
+      return native.build_display_list_json(input);
+    },
+    resetFrameBase: () => {
+      hostCalls.push('resetFrameBase');
+      return native.reset_frame_base();
+    },
+    buildDisplayListFrame: (input: string, epoch: number) => {
+      hostCalls.push('frame');
+      return native.build_display_list_frame(input, epoch);
+    },
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { rerender } = renderHook(
+      ({ layout, session }) =>
+        useRustDisplayList(layout, { getInputs: () => inputs }, undefined, undefined, session),
+      {
+        initialProps: {
+          layout: inputs.layout as Layout | null,
+          session: engine as YrsSession | null,
+        },
+      }
+    );
+    expect(worker!.posted.map((request) => request.type)).toEqual(['bootstrap']);
+    rerender({ layout: null, session: null });
+    expect(worker!.terminated).toBe(true);
+    await act(async () => {
+      worker!.crash();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(hostCalls).toEqual([]);
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
+
+test('unmounting while the worker applies input never replays it on the host engine', async () => {
+  const native = createEditSession(9204);
+  native.create_story('body', 'Unmounted input', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  const frame = native.build_display_list_frame(JSON.stringify(inputs), 0);
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setBigUint64(32, 100n, true);
+  const paragraphs = JSON.parse(native.paragraphs('body')) as Array<{ paraId: string; text: string }>;
+  const para = paragraphs[0]!;
+  native.set_selection('body', para.paraId, para.text.length, para.paraId, para.text.length);
+  let worker: InputFakeWorker | null = null;
+  class FakeWorker extends InputFakeWorker {
+    constructor() {
+      super(frame);
+      worker = this;
+    }
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const hostCalls: string[] = [];
+  const engine = {
+    buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    resetFrameBase: () => {
+      hostCalls.push('resetFrameBase');
+      return native.reset_frame_base();
+    },
+    buildDisplayListFrame: (input: string, epoch: number) =>
+      native.build_display_list_frame(input, epoch),
+    applyInput: (text: string, epoch: number) => {
+      hostCalls.push('applyInput');
+      return native.apply_input(text, epoch);
+    },
+    residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
+    onUpdate: () => () => {},
+    selection: () => JSON.parse(native.selection()) as YrsSelection,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, { getInputs: () => inputs }, undefined, undefined, engine)
+    );
+    await act(async () => {
+      worker!.replyBootstrap();
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(100);
+    });
+    let pending!: Promise<ResidentFrameApplyResult | null>;
+    await act(async () => {
+      pending = result.current.applyInput('QUACK');
+      await flushInputRequest(worker!);
+    });
+    unmount();
+    expect(worker!.terminated).toBe(true);
+    const outcome = await pending;
+    expect(outcome?.frameEpoch).toBeNull();
+    expect(hostCalls).toEqual([]);
+    expect(native.paragraphs('body')).not.toContain('QUACK');
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
+
 test('each session decodes its images into a cache of its own', () => {
   const { result } = renderHook(() => useCanvasRenderer());
   const first = { name: 'first' } as unknown as YrsSession;
