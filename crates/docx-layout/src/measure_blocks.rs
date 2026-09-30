@@ -18,7 +18,7 @@ use crate::types::{
 };
 use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
-const DEFAULT_CELL_PADDING_X: f64 = 7.0;
+pub(crate) const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
 /// Zones one anchor frame may accumulate, matching the measurement layer's cap.
 const MAX_ACTIVE_ZONES: usize = 200;
