@@ -301,10 +301,9 @@ fn resolve_story(
                     continue;
                 }
                 let deferred = Some(chunk.start) != final_pilcrow
-                    && boundary_revisions.is_some_and(|revisions| {
-                        join || revisions.iter().any(Option::is_some)
-                    });
-                if (ins_hit || del_hit) && !deferred {
+                    && boundary_revisions
+                        .is_some_and(|revisions| revisions.iter().any(Option::is_some));
+                if !deferred {
                     map.remove(txn, JOIN_DONOR);
                 }
                 for (ppr_key, attr_key, ppr_stamp, attr_stamp) in [
