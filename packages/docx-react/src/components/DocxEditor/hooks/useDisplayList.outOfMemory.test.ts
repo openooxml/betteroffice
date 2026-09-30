@@ -416,6 +416,36 @@ test('a worker that runs out of memory attaching canvases is replaced and lays o
   }
 });
 
+test("a loading document's worker that runs out of memory twice fails the wait for its layout", async () => {
+  const { native, engine } = setup();
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(null, undefined, undefined, undefined, engine)
+    );
+    act(() => result.current.resetSettled());
+    let waited: unknown = 'pending';
+    void result.current.settledDisplayList(null, null).then(
+      () => (waited = 'settled'),
+      (error: unknown) => (waited = error)
+    );
+    await act(async () => {
+      const pending = result.current.layoutInWorker(engine, REQUEST)!;
+      FakeWorker.spawned[0]!.outOfMemory();
+      await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+      FakeWorker.spawned[1]!.outOfMemory();
+      await pending.catch(() => {});
+    });
+    expect(waited).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    unmount();
+  } finally {
+    warnings.mockRestore();
+    errors.mockRestore();
+    native.free();
+  }
+});
+
 test("an out-of-memory failure from a replaced document's worker leaves the new worker alone", async () => {
   const { native, inputs, frame, engine } = setup();
   const other = { ...engine } as YrsSession;

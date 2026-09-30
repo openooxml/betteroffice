@@ -450,6 +450,8 @@ export function useRustDisplayList(
   );
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
+  const residentEngineRef = useRef(residentEngine);
+  residentEngineRef.current = residentEngine;
 
   // Rendering moves to the host engine for good: its frames start from a fresh
   // base, numbered after the worker's last frame.
@@ -570,6 +572,9 @@ export function useRustDisplayList(
       client: ResidentEngineWorkerClient | null,
       failure: ResidentWorkerOutOfMemoryError
     ): 'retry' | 'stale' | 'failed' => {
+      // The worker of a document another load replaced fails nothing of the one shown now.
+      const shown = residentEngineRef.current;
+      if (shown && shown !== hostEngine) return 'stale';
       const previous = outOfMemoryRef.current.has(hostEngine);
       if (outOfMemoryRef.current.get(hostEngine)) return 'failed';
       if (unmountedRef.current || workerFallbackEngineRef.current === hostEngine) return 'stale';
@@ -594,7 +599,7 @@ export function useRustDisplayList(
       queryEpochGate.clear();
       setError(failure);
       setLoading(false);
-      markSettled(null, failure);
+      markSettled(null, failure, hostEngine === shown);
       return 'failed';
     },
     [markSettled, queryEpochGate, setWorkerPresentationActive]
