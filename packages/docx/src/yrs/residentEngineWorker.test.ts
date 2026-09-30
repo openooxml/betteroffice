@@ -1190,6 +1190,60 @@ describe('resident worker opening', () => {
     });
   }
 
+  test('a second open fails and keeps the document the first one opened', async () => {
+    const { w, calls } = openingWorker();
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
+    const second = await w.send({ type: 'open', bytes: new Uint8Array([2]).buffer });
+    expect(!second.ok && second.error).toBe('Resident engine worker already holds a document');
+    expect(!second.ok && second.terminal).toBeFalsy();
+    const framed = await w.send({
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      expectedFrameEpoch: 0,
+    });
+    expect(framed.ok).toBe(true);
+    expect(calls.filter((call) => call.startsWith('open:'))).toEqual(['open:1:undefined:undefined']);
+    expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toHaveLength(1);
+  });
+
+  test('an opened bootstrap refuses a heap limit other than the one it opened under', async () => {
+    const { w } = openingWorker();
+    await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer, heapLimitBytes: 1024 });
+    const bootstrap = (heapLimitBytes?: number) =>
+      w.send({
+        type: 'bootstrap',
+        opened: true,
+        snapshot,
+        extras: '',
+        expectedFrameEpoch: 0,
+        ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
+      });
+    const refused = await bootstrap(2048);
+    expect(!refused.ok && refused.error).toBe(
+      'Resident engine worker opened its document under another heap limit'
+    );
+    expect((await bootstrap(1024)).ok).toBe(true);
+  });
+
+  test('a package that fails to open frees its session and leaves the worker able to open', async () => {
+    const { w, calls } = openingWorker();
+    const { openDocx } = w.harness.session as { openDocx?: unknown };
+    Object.assign(w.harness.session, {
+      openDocx: () => {
+        throw new Error('not a package');
+      },
+      destroy: () => calls.push('destroy'),
+    });
+    const failed = await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer });
+    expect(!failed.ok && failed.error).toBe('not a package');
+    expect(!failed.ok && failed.terminal).toBeFalsy();
+    expect(calls).toEqual(['destroy']);
+    Object.assign(w.harness.session, { openDocx });
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([2]).buffer })).ok).toBe(true);
+  });
+
   test('a bootstrap of an opened document fails, and keeps the worker, when nothing was opened', async () => {
     const { w, calls } = openingWorker();
     const refused = await w.send({
