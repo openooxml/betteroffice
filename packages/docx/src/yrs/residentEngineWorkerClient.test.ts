@@ -379,6 +379,25 @@ describe('resident worker opening', () => {
     expect((await opened).hostJson).toBe('{}');
   });
 
+  test('a failed opened bootstrap leaves a later bootstrap in place', async () => {
+    const { worker, client } = setup();
+    const failed = client.open(new Uint8Array([1]));
+    const opened = client.bootstrap(snapshot, '', { opened: true });
+    worker.reply({ id: worker.posted[0].id, ok: false, error: 'not a package' });
+    await expect(failed).rejects.toThrow('not a package');
+    const recovery = client.bootstrap(snapshot, '');
+    worker.reply({
+      id: worker.posted[1].id,
+      ok: false,
+      error: 'Resident engine worker has no opened document',
+    });
+    await expect(opened).rejects.toThrow('no opened document');
+    worker.reply(frameReply(worker.posted[2].id));
+    await recovery;
+    expect(client.bootstrapSent()).toBe(true);
+    await expect(client.open(new Uint8Array([2]))).rejects.toThrow('already holds a document');
+  });
+
   test('an opened bootstrap without an open fails before touching its bookkeeping', async () => {
     const { worker, client } = setup();
     await expect(client.bootstrap(snapshot, '', { opened: true })).rejects.toThrow(
