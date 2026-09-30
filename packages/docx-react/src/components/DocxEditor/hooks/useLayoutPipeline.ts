@@ -25,7 +25,11 @@ import {
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
 import { documentPageCount } from './documentPageCount';
 import type { FontRequirementsInWorker, LayoutInWorker } from './useDisplayList';
-import { ensureWorkerOpenReplica, workerOpenSourceVersion } from '../internals/workerOpenReplica';
+import {
+  ensureWorkerOpenReplica,
+  workerOpenReplicaPending,
+  workerOpenSourceVersion,
+} from '../internals/workerOpenReplica';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
@@ -144,7 +148,9 @@ function mergeInWorker(current: boolean | null, next: boolean): boolean {
 function proposalSetKey(session: YrsSession): string | null {
   try {
     const { proposals } = session.getProposals();
-    return proposals.length > 0 ? proposals.map((proposal) => proposal.id).join('\u0000') : null;
+    return proposals.length > 0
+      ? JSON.stringify(proposals.map((proposal) => [proposal.id, proposal.revisionIds]))
+      : null;
   } catch {
     return null;
   }
@@ -346,8 +352,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Layout Pipeline
   // =========================================================================
 
-  // Once per proposal set, after the pass's layout request; never fatal, and with worker open
-  // never swept on this thread.
+  // Once per proposal set, after the pass's layout request; never fatal, and never swept on this
+  // thread while a worker-open replica is unhydrated.
   const warmedProposalsRef = useRef<{ session: YrsSession; key: string } | null>(null);
   const warmDecisionFonts = useCallback((owner: YrsSession, request: object): void => {
     const key = warmFontRequirementsRef.current ? proposalSetKey(owner) : null;
@@ -363,9 +369,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     const failed = (): void => {
       if (warmedProposalsRef.current === claim) warmedProposalsRef.current = null;
     };
-    if (workerOpenEnabledRef.current && fontRequirementsInWorkerRef.current) {
+    if (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)) {
       try {
-        const pending = fontRequirementsInWorkerRef.current(owner, warmInput);
+        const pending = fontRequirementsInWorkerRef.current?.(owner, warmInput);
         if (pending) void pending.then(adopt).catch(failed);
         else failed();
       } catch {

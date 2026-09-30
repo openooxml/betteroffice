@@ -9,6 +9,7 @@ import {
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { YrsRenderEnv, YrsSession } from '@betteroffice/docx/yrs';
 import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
+import { deferWorkerOpenReplica } from '../internals/workerOpenReplica';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -74,9 +75,14 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
         Object.assign(session, {
           getProposals: () => {
             if (proposals === 'throwing') throw new Error('Proposal registry unavailable');
-            return { proposals: proposals === 'present' ? [{ id: 'proposal' }] : [] };
+            return {
+              proposals: proposals === 'present' ? [{ id: 'proposal', revisionIds: ['r1'] }] : [],
+            };
           },
         });
+      }
+      if (inWorker) {
+        deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
       }
       Object.assign(session, {
         layoutFontRequirementsJson: (input: string) => preflight('host', input),
@@ -146,10 +152,20 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
           await pass();
           expect(supersets()).toBe(1);
           Object.assign(session, {
-            getProposals: () => ({ proposals: [{ id: 'proposal' }, { id: 'another' }] }),
+            getProposals: () => ({
+              proposals: [
+                { id: 'proposal', revisionIds: ['r1'] },
+                { id: 'another', revisionIds: ['r2'] },
+              ],
+            }),
           });
           await pass();
           expect(supersets()).toBe(2);
+          Object.assign(session, {
+            getProposals: () => ({ proposals: [{ id: 'proposal', revisionIds: ['r3'] }] }),
+          });
+          await pass();
+          expect(supersets()).toBe(3);
         }
       } finally {
         hook.unmount();
@@ -164,8 +180,9 @@ for (const answer of ['rejects', 'null'] as const) {
     const hostInputs: string[] = [];
     const errors: Error[] = [];
     const warmed: ResidentFontRequirement[][] = [];
+    deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
     Object.assign(session, {
-      getProposals: () => ({ proposals: [{ id: 'proposal' }] }),
+      getProposals: () => ({ proposals: [{ id: 'proposal', revisionIds: ['r1'] }] }),
       layoutFontRequirementsJson: (input: string) => {
         hostInputs.push(input);
         return '[]';
@@ -682,4 +699,56 @@ test('without the warm-up the failed real pass lays out here', async () => {
   expect(errors).toEqual([]);
   expect(doc.laidOutHere).toEqual([2]);
   expect(shown()).toBe('2');
+});
+
+test('a hydrated worker-open session warms decision fonts here, after the pass', async () => {
+  const { session } = fakeDocument();
+  const order: string[] = [];
+  const warmed: ResidentFontRequirement[][] = [];
+  const decision: ResidentFontRequirement = {
+    key: 'decision',
+    family: 'Symbol',
+    bold: false,
+    italic: false,
+  };
+  Object.assign(session, {
+    getProposals: () => ({ proposals: [{ id: 'proposal', revisionIds: ['r1'] }] }),
+    layoutFontRequirementsJson: (input: string) => {
+      const superset = JSON.parse(input).revisionFontSuperset === true;
+      order.push(superset ? 'host:superset' : 'host:exact');
+      return JSON.stringify(superset ? [decision] : []);
+    },
+  });
+  const hook = renderHook(() =>
+    useLayoutPipeline({
+      document: null,
+      session,
+      renderEnv: {} as YrsRenderEnv,
+      pageGap: 24,
+      zoom: 1,
+      residentMeasurementConfig: () => ({}) as ResidentMeasurementConfig,
+      warmFontRequirements: (fonts) => warmed.push(fonts),
+      deferLayoutPass: () => false,
+      pagesContainerRef: { current: null },
+      viewportLayoutRef: { current: null },
+      syncCoordinator: new LayoutSelectionGate(),
+      getScrollContainer: () => null,
+      experimentalWorkerOpen: true,
+      fontRequirementsInWorker: () => null,
+      layoutInWorker: () => {
+        order.push('layout');
+        return Promise.resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true });
+      },
+    })
+  );
+  try {
+    await act(async () => {
+      hook.result.current.runLayoutPipeline();
+      await new Promise((done) => setTimeout(done, 5));
+    });
+    expect(order).toEqual(['host:exact', 'layout', 'host:superset']);
+    expect(warmed).toEqual([[decision]]);
+  } finally {
+    hook.unmount();
+  }
 });
