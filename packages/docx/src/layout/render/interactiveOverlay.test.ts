@@ -237,7 +237,7 @@ test('a stretched picture fill inset from a side hides no header control', () =>
   expectHidden(headerWidget([
     picture({ kind: 'picture', pictureRelId: 'rId9', pictureStretchRect: { left: -0.1, top: 0 } }),
   ]));
-  expectHidden(headerWidget([
+  expectActive(headerWidget([
     picture({
       kind: 'picture', pictureRelId: 'rId9', pictureFillMode: 'tile',
       pictureStretchRect: { left: 0.75 },
@@ -262,7 +262,7 @@ test('a picture cropped past its source hides no header control', () => {
   expectHidden(headerWidget([
     picture({ kind: 'picture', pictureRelId: 'rId9', pictureSrcRect: { left: 0.25, right: 0.25 } }),
   ]));
-  expectHidden(headerWidget([
+  expectActive(headerWidget([
     picture({
       kind: 'picture', pictureRelId: 'rId9', pictureFillMode: 'tile',
       pictureSrcRect: { left: -1 },

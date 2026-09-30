@@ -1346,7 +1346,8 @@ fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
                 .and_then(|paint| paint.get("pictureOpacity"))
                 .and_then(Value::as_f64)
                 .is_none_or(|opacity| opacity > 0.0);
-            // A stretched picture inset from a side paints only part of the shape.
+            // An inset or a crop past the source paints only part of the shape, tiled fills
+            // included: past the tile cap the canvas stretches them.
             let inset = paint
                 .and_then(|paint| paint.get("pictureStretchRect"))
                 .is_some_and(|rect| {
@@ -1358,8 +1359,9 @@ fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
                 });
             let crop = paint.and_then(|paint| paint.get("pictureSrcRect"));
             let side = |key: &str| crop.and_then(|rect| rect.get(key)).and_then(Value::as_f64);
-            let fills = crop_fills_frame(side("left"), side("top"), side("right"), side("bottom"));
-            opaque && (field("pictureFillMode") == Some("tile") || (!inset && fills))
+            opaque
+                && !inset
+                && crop_fills_frame(side("left"), side("top"), side("right"), side("bottom"))
         }
         _ => paint
             .and_then(|paint| paint.get("color"))
@@ -2484,6 +2486,26 @@ mod tests {
                     None,
                 ),
             ),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({
+                        "kind": "picture", "pictureRelId": "rId9", "pictureFillMode": "tile",
+                        "pictureStretchRect": {"left": 0.75}
+                    })),
+                    None,
+                ),
+            ),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({
+                        "kind": "picture", "pictureRelId": "rId9", "pictureFillMode": "tile",
+                        "pictureSrcRect": {"left": -1}
+                    })),
+                    None,
+                ),
+            ),
             (100.002, skewed),
             (120.0, half(Some(serde_json::json!({"flipH": true})))),
             (120.0, half(Some(serde_json::json!({"rotation": 180})))),
@@ -2507,22 +2529,8 @@ mod tests {
             ),
             shape(
                 Some(serde_json::json!({
-                    "kind": "picture", "pictureRelId": "rId9", "pictureFillMode": "tile",
-                    "pictureStretchRect": {"left": 0.75}
-                })),
-                None,
-            ),
-            shape(
-                Some(serde_json::json!({
                     "kind": "picture", "pictureRelId": "rId9",
                     "pictureSrcRect": {"left": 0.25, "right": 0.25}
-                })),
-                None,
-            ),
-            shape(
-                Some(serde_json::json!({
-                    "kind": "picture", "pictureRelId": "rId9", "pictureFillMode": "tile",
-                    "pictureSrcRect": {"left": -1}
                 })),
                 None,
             ),

@@ -217,13 +217,11 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
         if (paint?.kind === 'gradient' || paint?.kind === 'pattern') break;
         if (paint?.kind === 'picture' && (paint.pictureSrc || paint.pictureRelId)) {
           if ((paint.pictureOpacity ?? 1) <= 0) return false;
-          // A stretched picture inset from a side paints only part of the shape.
+          // An inset or a crop past the source paints only part of the shape, tiled fills
+          // included: past the tile cap the canvas stretches them.
           const inset = paint.pictureStretchRect;
           const sides = [inset?.left, inset?.top, inset?.right, inset?.bottom];
-          if (
-            paint.pictureFillMode !== 'tile' &&
-            (sides.some((side) => (side ?? 0) > 0) || !cropFillsFrame(paint.pictureSrcRect))
-          ) {
+          if (sides.some((side) => (side ?? 0) > 0) || !cropFillsFrame(paint.pictureSrcRect)) {
             return false;
           }
           break;
