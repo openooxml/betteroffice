@@ -320,6 +320,8 @@ interface FacadeDeltaSeed {
   supersede(): void;
   /** The newest facade of this facade's line of successive layouts. */
   lineage: FacadeLineage;
+  /** The document the line lays out, as the caller named it. */
+  line: object | null;
   disposed(): boolean;
 }
 
@@ -563,11 +565,16 @@ function pagesTouchingPositions(
  * facade takes over the previous parsed list and patches only the pages that
  * changed. The donor facade's remaining queries degrade to its own JSON-arg
  * path (same stale-list semantics it always had after replacement).
+ *
+ * `line` names the document the list lays out (its engine). A facade of another
+ * document starts a new line and ends the previous one, so a facade of the
+ * replaced document never answers from the new one.
  */
 export function createDisplayListQueries(
   list: DisplayList,
   engine?: RustDisplayListQueryEngine | ResidentDisplayListQueryEngine,
-  previous?: DisplayListQueries | null
+  previous?: DisplayListQueries | null,
+  line?: object | null
 ): DisplayListQueries {
   let json: string | null = null;
   const getJson = (): string => {
@@ -617,7 +624,9 @@ export function createDisplayListQueries(
     donorFacade = previousSeed.hasHandle() ? previous! : previousSeed.donor();
     previousSeed.supersede();
   }
-  const lineage: FacadeLineage = previousSeed?.lineage ?? { newest: null };
+  const sameLine = previousSeed !== undefined && previousSeed.line === (line ?? null);
+  if (previousSeed && !sameLine) previousSeed.lineage.newest = null;
+  const lineage: FacadeLineage = sameLine ? previousSeed.lineage : { newest: null };
 
   const source = (): DisplayListQuerySource | null => resident ?? eng;
 
@@ -1366,25 +1375,28 @@ export function createDisplayListQueries(
           ? { status: 'ready' }
           : { status: 'loading' },
     whenReady: () => readyPromise,
-    pageCount: viaLive(
-      () => list.pages.length,
-      (live) => live.pageCount()
-    ),
-    pageSize: viaLive(
-      (pageIndex: number) => {
-        const page = list.pages[pageIndex];
-        return page ? { width: page.width, height: page.height } : null;
-      },
-      (live, pageIndex) => live.pageSize(pageIndex)
-    ),
-    pageBounds: viaLive(pageBounds, (live, pageIndex) => live.pageBounds(pageIndex)),
+    pageCount: () => {
+      const live = handedOff();
+      return live ? live.pageCount() : list.pages.length;
+    },
+    pageSize: (pageIndex: number) => {
+      const live = handedOff();
+      if (live) return live.pageSize(pageIndex);
+      const page = list.pages[pageIndex];
+      return page ? { width: page.width, height: page.height } : null;
+    },
+    pageBounds: (pageIndex: number) => {
+      const live = handedOff();
+      return live ? live.pageBounds(pageIndex) : pageBounds(pageIndex);
+    },
     contentBounds: viaLive(contentBounds, (live, pageIndex) => live.contentBounds(pageIndex)),
     columnBounds: viaLive(columnBounds, (live, pageIndex) => live.columnBounds(pageIndex)),
     paragraphRects: viaLive(paragraphRects, (live, pos) => live.paragraphRects(pos)),
     visualLines: viaLive(visualLines, (live) => live.visualLines()),
-    visualLinesOnPage: viaLive(visualLinesOnPage, (live, pageIndex) =>
-      live.visualLinesOnPage(pageIndex)
-    ),
+    visualLinesOnPage: (pageIndex: number) => {
+      const live = handedOff();
+      return live ? live.visualLinesOnPage(pageIndex) : visualLinesOnPage(pageIndex);
+    },
     visualLineExtent: viaLive(
       (pageIndex: number) => {
         const page = list.pages[pageIndex];
@@ -1427,6 +1439,7 @@ export function createDisplayListQueries(
       superseded = true;
     },
     lineage,
+    line: line ?? null,
     disposed: () => disposed,
     takeHandle: () => {
       const transferred = handle;

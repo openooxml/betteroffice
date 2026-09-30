@@ -1517,7 +1517,12 @@ function createRustDisplayListSnapshot(
   previewKey: string | null
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
-  const queries = createDisplayListQueries(displayList, residentQueries, previous.queries);
+  const queries = createDisplayListQueries(
+    displayList,
+    residentQueries,
+    previous.queries,
+    engine ?? null
+  );
   stampSourceVersion(queries, sourceVersion);
   if (previewKey !== null) stampRevisionPreviewKey(queries, previewKey);
   return { displayList, frame, queries, caret };

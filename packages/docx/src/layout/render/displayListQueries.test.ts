@@ -3,6 +3,7 @@ import {
   createDisplayListQueries,
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
+  type DisplayListQueries,
 } from './displayListQueries';
 import type { DisplayPage } from './displayList';
 import type { RustDisplayListQueryEngine } from './rustDisplayList';
@@ -109,6 +110,120 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.open).toBe(1);
     expect(calls.rangeJson).toBe(0);
   });
+
+  const rect = (x: number) => ({ pageIndex: 1, x, y: 0, width: 1, height: 1 });
+  const hit = (pos: number) => ({ region: 'body', pos, target: 'text' });
+  const lineQueries = [
+    {
+      name: 'rangeRects',
+      read: (queries: DisplayListQueries) => queries.rangeRects(0, 1),
+      a: [rect(200)],
+      b: [rect(300)],
+      empty: [],
+    },
+    {
+      name: 'anchorRect',
+      read: (queries: DisplayListQueries) => queries.anchorRect(0),
+      a: rect(200),
+      b: rect(300),
+      empty: null,
+    },
+    {
+      name: 'hitTestRegions',
+      read: (queries: DisplayListQueries) => queries.hitTestRegions(1, 1, 1),
+      a: hit(200),
+      b: hit(300),
+      empty: null,
+    },
+  ];
+
+  for (const query of lineQueries) {
+    test(`a document line split ends ${query.name} forwarding for every superseded generation`, () => {
+      const { engine, calls } = fakeEngine();
+      const queriedHandles: number[] = [];
+      const adoptedHandles: number[] = [];
+      const jsonQueries: string[] = [];
+      let storedWidth = 100;
+      engine.updateDisplayList = (handle, json) => {
+        calls.update += 1;
+        const update = JSON.parse(json) as {
+          reuse?: Array<[number, number]>;
+          replace: Array<[number, DisplayPage]>;
+        };
+        if (update.reuse) adoptedHandles.push(handle);
+        const changed = update.replace.find(([index]) => index === 1);
+        if (changed) storedWidth = changed[1].width;
+      };
+      engine.rangeRectsByHandle = (handle) => {
+        calls.rangeByHandle += 1;
+        queriedHandles.push(handle);
+        return JSON.stringify([rect(storedWidth)]);
+      };
+      engine.hitTestRegionsByHandle = (handle) => {
+        queriedHandles.push(handle);
+        return JSON.stringify(hit(storedWidth));
+      };
+      engine.rangeRectsJson = () => {
+        calls.rangeJson += 1;
+        jsonQueries.push('rangeRects');
+        return '[]';
+      };
+      engine.hitTestRegionsJson = () => {
+        jsonQueries.push('hitTestRegions');
+        return 'null';
+      };
+      const read = (queries: DisplayListQueries) => {
+        const handleStart = queriedHandles.length;
+        const jsonStart = jsonQueries.length;
+        const answer = query.read(queries);
+        return {
+          answer,
+          handles: queriedHandles.slice(handleStart),
+          json: jsonQueries.slice(jsonStart),
+        };
+      };
+      const shared = page(0);
+      const lineA = {};
+      const lineB = {};
+      const first = createDisplayListQueries({ pages: [shared, page(1)] }, engine, null, lineA);
+      first.prime();
+      const second = createDisplayListQueries(
+        { pages: [shared, { ...page(1), width: 200 }] },
+        engine,
+        first,
+        lineA
+      );
+      const currentA = read(second);
+      const forwardedA = read(first);
+      const replacement = createDisplayListQueries(
+        { pages: [shared, { ...page(1), width: 300 }] },
+        engine,
+        second,
+        lineB
+      );
+      const currentB = read(replacement);
+      const staleA1 = read(second);
+      const staleA0 = read(first);
+
+      expect({
+        currentA,
+        forwardedA,
+        currentB,
+        staleA1,
+        staleA0,
+        opens: calls.open,
+        adoptedHandles,
+      }).toEqual({
+        currentA: { answer: query.a, handles: [1], json: [] },
+        forwardedA: { answer: query.a, handles: [1], json: [] },
+        currentB: { answer: query.b, handles: [1], json: [] },
+        staleA1: { answer: query.empty, handles: [], json: [] },
+        staleA0: { answer: query.empty, handles: [], json: [] },
+        opens: 1,
+        adoptedHandles: [1, 1],
+      });
+    });
+  }
 
   test('a superseded generation reads page metadata from the live layout too', () => {
     const { engine, calls } = fakeEngine();
