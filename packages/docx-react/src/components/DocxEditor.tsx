@@ -1244,11 +1244,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         shown.displayList?.pages.length
       ) {
         firstPagePendingRef.current = false;
+        // The callback of the document whose pages presented, not of one committed since.
+        const callback = onFirstPagePaintedRef.current;
         const generation = firstPageGenerationRef.current;
         const fire = () => {
           if (generation !== firstPageGenerationRef.current) return;
           try {
-            onFirstPagePaintedRef.current?.();
+            callback?.();
           } catch (error) {
             console.error('[DocxEditor] onFirstPagePainted threw', error);
           }
