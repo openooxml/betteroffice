@@ -216,6 +216,7 @@ pub(crate) fn emf_text<const FULL: bool>(
         _ => {
             let (x, y) = (i32_at(bytes, body)?, i32_at(bytes, body + 4)?);
             let count = u32_at(bytes, body + 8)? as usize;
+            charge_text(player, count)?;
             let options = u32_at(bytes, body + 12)?;
             let (rect, text) = if options & ETO_NO_RECT == 0 {
                 (Some(rect_at(bytes, body + 28)?), body + 44)
@@ -280,9 +281,7 @@ fn emr_text<const FULL: bool>(
     } else {
         (None, u32_at(bytes, at + 20)?)
     };
-    if count > player.limits.text_chars {
-        return player.refuse("a text record holds more characters than the limit");
-    }
+    charge_text(player, count)?;
     let pairs = options & ETO_PDY != 0;
     if dx != 0 && count > 0 {
         crate::read::record_span(bytes, dx as usize, count << usize::from(pairs), 4)?;
@@ -320,6 +319,7 @@ pub(crate) fn wmf_text<const FULL: bool>(
     let charset = player.dc.font.as_ref().map_or(0, |font| font.charset);
     let run = if function == 0x0521 {
         let length = u16_at(bytes, body)? as usize;
+        charge_text(player, length)?;
         let raw = crate::read::span(bytes, body + 2, length, 1)?;
         let at = body + 2 + length.div_ceil(2) * 2;
         let (y, x) = (i16_at(bytes, at)?, i16_at(bytes, at + 2)?);
@@ -336,6 +336,7 @@ pub(crate) fn wmf_text<const FULL: bool>(
     } else {
         let (y, x) = (i16_at(bytes, body)?, i16_at(bytes, body + 2)?);
         let length = i16_at(bytes, body + 4)?.max(0) as usize;
+        charge_text(player, length)?;
         let options = u32::from(u16_at(bytes, body + 6)?);
         let (rect, text) = if options & (ETO_OPAQUE | ETO_CLIPPED) != 0 {
             let side = |at| i16_at(bytes, body + at).map(f64::from);
@@ -360,14 +361,19 @@ pub(crate) fn wmf_text<const FULL: bool>(
     draw(player, run)
 }
 
+/// Spends `count` characters of the text budget before they are decoded.
+fn charge_text<const FULL: bool>(player: &mut Player<FULL>, count: usize) -> Option<()> {
+    player.text_chars = player.text_chars.saturating_add(count);
+    if player.text_chars > player.limits.text_chars {
+        return player.refuse("the metafile holds more text than the limit");
+    }
+    Some(())
+}
+
 /// Lays one run out in the current font and pushes it.
 fn draw<const FULL: bool>(player: &mut Player<FULL>, mut run: Run) -> Option<()> {
     if run.options & ETO_GLYPH_INDEX != 0 {
         return player.omit("text given as glyph indexes");
-    }
-    player.text_chars = player.text_chars.saturating_add(run.chars.len());
-    if player.text_chars > player.limits.text_chars {
-        return player.refuse("the metafile holds more text than the limit");
     }
     let font = player
         .dc

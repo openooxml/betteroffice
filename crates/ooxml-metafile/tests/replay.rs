@@ -590,20 +590,46 @@ fn an_emf_plus_object_split_across_records_draws_like_a_whole_one() {
     .unwrap();
     assert_eq!(shapes(&whole.ops).len(), 1);
     assert_eq!(shapes(&whole.ops)[0].path, shapes(&split.ops)[0].path);
+    let brush = u32s(&[0xDBC0_1002, 0, 0xff00_0000]);
+    let mut short = u32s(&[8]);
+    short.extend(&brush);
+    let past = replay(&plus_only(vec![(0x4008, 0x8100, short)])).unwrap();
+    assert_eq!(
+        past.omissions[0].what,
+        "EMF+ objects that could not be decoded"
+    );
+}
+
+#[test]
+fn an_emf_plus_gradient_follows_the_transform_it_is_filled_under() {
+    let drawing = replay(&plus_only(vec![
+        plus_path(1, &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]),
+        plus_linear_brush(2, [0.0, 0.0, 10.0, 10.0], 0xff00_0000, 0xffff_ffff),
+        plus_world([1.0, 0.0, 0.0, 1.0, 50.0, 0.0]),
+        plus_fill_path(1, 2),
+    ]))
+    .unwrap();
+    let shape = shapes(&drawing.ops)[0];
+    let Some(Paint::Linear(gradient)) = &shape.fill else {
+        panic!("a gradient fill");
+    };
+    assert!(at(&shape.path[0], gradient.start.0, gradient.start.1));
 }
 
 #[test]
 fn relative_emf_plus_path_points_accumulate() {
-    let mut body = u32s(&[0xDBC0_1002, 3, 0x0800]);
-    body.extend([10, 10, 20, 0, 0, 20]);
-    body.extend([1, 0x00, 2, 0x81]);
-    let drawing = replay(&plus_only(vec![
-        (0x4008, 0x0301, body),
-        plus_fill_path(1, 2),
-    ]))
-    .unwrap();
-    let path = &shapes(&drawing.ops)[0].path;
-    assert!(at(&path[0], 10.0, 10.0) && at(&path[1], 30.0, 10.0) && at(&path[2], 30.0, 30.0));
+    for flags in [0x0800, 0x4800] {
+        let mut body = u32s(&[0xDBC0_1002, 3, flags]);
+        body.extend([10, 10, 20, 0, 0, 20]);
+        body.extend([0x41, 0x00, 0x42, 0x81]);
+        let drawing = replay(&plus_only(vec![
+            (0x4008, 0x0301, body),
+            plus_fill_path(1, 2),
+        ]))
+        .unwrap();
+        let path = &shapes(&drawing.ops)[0].path;
+        assert!(at(&path[0], 10.0, 10.0) && at(&path[1], 30.0, 10.0) && at(&path[2], 30.0, 30.0));
+    }
 }
 
 fn plus_string(font: u8, text: &str, rect: [f32; 4]) -> (u16, u16, Vec<u8>) {
@@ -662,18 +688,26 @@ fn physical_emf_plus_units_follow_each_axis_dpi() {
 
 #[test]
 fn excluding_an_infinite_emf_plus_region_clips_everything() {
-    let drawing = replay(&plus_only(vec![
-        (0x4008, 0x0402, u32s(&[0xDBC0_1002, 0, 0x1000_0003])),
-        (0x4034, (4 << 8) | 2, Vec::new()),
-        plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 50.0, 50.0]]),
-    ]))
-    .unwrap();
-    let clip = shapes(&drawing.ops)[0].clip.as_deref().unwrap();
-    assert!(!clip.region.exclude);
-    assert!(clip.region.path.iter().all(|command| match command {
-        PathCommand::Close => true,
-        command => at(command, 0.0, 0.0),
-    }));
+    let mut rect_minus_infinite = u32s(&[0xDBC0_1002, 2, 4, 0x1000_0000]);
+    rect_minus_infinite.extend(f32s(&[0.0, 0.0, 50.0, 50.0]));
+    rect_minus_infinite.extend(u32s(&[0x1000_0003]));
+    for (region, mode) in [
+        (u32s(&[0xDBC0_1002, 0, 0x1000_0003]), 4),
+        (rect_minus_infinite, 0),
+    ] {
+        let drawing = replay(&plus_only(vec![
+            (0x4008, 0x0402, region),
+            (0x4034, (mode << 8) | 2, Vec::new()),
+            plus_fill_rects(0xff00_0000, &[[0.0, 0.0, 50.0, 50.0]]),
+        ]))
+        .unwrap();
+        let clip = shapes(&drawing.ops)[0].clip.as_deref().unwrap();
+        assert!(!clip.region.exclude);
+        assert!(clip.region.path.iter().all(|command| match command {
+            PathCommand::Close => true,
+            command => at(command, 0.0, 0.0),
+        }));
+    }
 }
 
 #[test]

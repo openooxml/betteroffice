@@ -63,7 +63,9 @@ enum Region {
     Infinite,
     Empty,
     Path(Arc<Path>),
-    Combine(u32, Box<Region>, Box<Region>),
+    /// A boolean combination, with its extent when its Infinite and Empty
+    /// operands decide it (see [`extent`]).
+    Combine(u32, Box<Region>, Box<Region>, Option<bool>),
 }
 
 enum PlusImage {
@@ -253,7 +255,7 @@ fn play<const FULL: bool>(
         }
         0x400A | 0x400B => {
             let (paint, at) = if kind == 0x400A {
-                (Some(brush(state, solid, u32_at(data, 0)?)?), 4)
+                (Some(brush(player, state, solid, u32_at(data, 0)?)?), 4)
             } else {
                 (None, 0)
             };
@@ -279,7 +281,7 @@ fn play<const FULL: bool>(
         }
         0x400C | 0x400D => {
             let (paint, at) = if kind == 0x400C {
-                (Some(brush(state, solid, u32_at(data, 0)?)?), 4)
+                (Some(brush(player, state, solid, u32_at(data, 0)?)?), 4)
             } else {
                 (None, 0)
             };
@@ -306,7 +308,7 @@ fn play<const FULL: bool>(
         }
         0x400E..=0x4012 => {
             let (paint, mut at) = match kind {
-                0x400E | 0x4010 => (Some(brush(state, solid, u32_at(data, 0)?)?), 4),
+                0x400E | 0x4010 => (Some(brush(player, state, solid, u32_at(data, 0)?)?), 4),
                 _ => (None, 0),
             };
             let (start, sweep) = if kind >= 0x4010 {
@@ -331,7 +333,7 @@ fn play<const FULL: bool>(
             push_shape(player, path, paint, stroke, false, clip);
         }
         0x4013 => {
-            let paint = brush(state, solid, u32_at(data, 0)?)?;
+            let paint = brush(player, state, solid, u32_at(data, 0)?)?;
             let Some(Some(Object::Region(region))) = state.objects.get(id).cloned() else {
                 return Some(true);
             };
@@ -352,7 +354,7 @@ fn play<const FULL: bool>(
             }
             let clip = state.graphics.clip.clone();
             if kind == 0x4014 {
-                let paint = brush(state, solid, u32_at(data, 0)?)?;
+                let paint = brush(player, state, solid, u32_at(data, 0)?)?;
                 push_shape(player, path, Some(paint), None, true, clip);
             } else {
                 let pen_id = u32_at(data, 0)? as usize;
@@ -364,7 +366,7 @@ fn play<const FULL: bool>(
         }
         0x4016..=0x4018 => {
             let (paint, at) = if kind == 0x4016 {
-                (Some(brush(state, solid, u32_at(data, 0)?)?), 4)
+                (Some(brush(player, state, solid, u32_at(data, 0)?)?), 4)
             } else {
                 (None, 0)
             };
@@ -614,17 +616,35 @@ fn push_shape<const FULL: bool>(
 }
 
 /// A brush object, or an ARGB colour when `solid`.
-fn brush(state: &State, solid: bool, value: u32) -> Option<Paint> {
+fn brush<const FULL: bool>(
+    player: &Player<FULL>,
+    state: &State,
+    solid: bool,
+    value: u32,
+) -> Option<Paint> {
     if solid {
         return Some(Paint::Solid(Rgba::from_argb(value)));
     }
     Some(match state.objects.get(value as usize).cloned().flatten() {
-        Some(Object::Brush(paint)) => paint,
+        Some(Object::Brush(paint)) => placed(player, state, paint),
         _ => Paint::Solid(Rgba {
             a: 0,
             ..Rgba::BLACK
         }),
     })
+}
+
+/// A brush's gradient, kept in world units, at the current graphics transform.
+fn placed<const FULL: bool>(player: &Player<FULL>, state: &State, paint: Paint) -> Paint {
+    let Paint::Linear(gradient) = &paint else {
+        return paint;
+    };
+    let m = concat(state.to_device(), player.device_to_output());
+    Paint::Linear(Arc::new(LinearGradient {
+        start: apply(m, gradient.start),
+        end: apply(m, gradient.end),
+        ..(**gradient).clone()
+    }))
 }
 
 /// The pen object `id`, or `Some(None)` when the slot holds none.
@@ -646,7 +666,7 @@ fn stroke<const FULL: bool>(state: &State, player: &Player<FULL>, pen: &Pen) -> 
     let pixel = player.device_pixel();
     let width = (pixels * pixel).max(pixel);
     Stroke {
-        paint: pen.paint.clone(),
+        paint: placed(player, state, pen.paint.clone()),
         width,
         dash: pen
             .dash
@@ -888,32 +908,29 @@ fn object<const FULL: bool>(
             return player.refuse("an EMF+ object exceeds the size limit");
         }
         let chunk = data.get(4..)?;
-        let buffer = match state.continued.take() {
-            Some((pending, expected, mut buffer)) if pending == flags && expected == total => {
-                buffer.extend_from_slice(chunk);
-                buffer
-            }
-            _ => chunk.to_vec(),
+        let mut buffer = match state.continued.take() {
+            Some((pending, expected, buffer)) if pending == flags && expected == total => buffer,
+            _ => Vec::new(),
         };
+        buffer.extend_from_slice(&chunk[..chunk.len().min(total - buffer.len())]);
         if buffer.len() < total {
             state.continued = Some((flags, total, buffer));
             return Some(());
         }
         owned = buffer;
-        &owned[..]
+        Some(&owned[..])
     } else {
         match state.continued.take() {
             Some((pending, total, mut buffer)) if pending & 0x7fff == flags => {
-                buffer.extend_from_slice(data);
-                buffer.truncate(total);
+                buffer.extend_from_slice(&data[..data.len().min(total - buffer.len())]);
                 owned = buffer;
-                &owned[..]
+                (owned.len() == total).then_some(&owned[..])
             }
-            _ => data,
+            _ => Some(data),
         }
     };
-    let parsed = match kind {
-        1 => parse_brush(player, state, data).map(Object::Brush),
+    let parsed = data.and_then(|data| match kind {
+        1 => parse_brush(player, data).map(Object::Brush),
         2 => parse_pen(player, state, data).map(Object::Pen),
         3 => parse_path(data, player.limits.points_per_record)
             .map(|(path, _)| Object::Path(Arc::new(path))),
@@ -930,7 +947,7 @@ fn object<const FULL: bool>(
             line_align: u32_at(data, 16).unwrap_or(0),
         })),
         _ => Some(Object::Other),
-    };
+    });
     let object = match parsed {
         Some(object) => object,
         None if player.refusal.is_some() => return None,
@@ -945,11 +962,7 @@ fn object<const FULL: bool>(
     Some(())
 }
 
-fn parse_brush<const FULL: bool>(
-    player: &mut Player<FULL>,
-    state: &State,
-    data: &[u8],
-) -> Option<Paint> {
+fn parse_brush<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Option<Paint> {
     let kind = u32_at(data, 4)?;
     let body = 8;
     Some(match kind {
@@ -1042,13 +1055,9 @@ fn parse_brush<const FULL: bool>(
                 }
             }
             stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let m = concat(
-                concat(transform, state.to_device()),
-                player.device_to_output(),
-            );
             Paint::Linear(Arc::new(LinearGradient {
-                start: apply(m, (rect.0, rect.1)),
-                end: apply(m, (rect.0 + rect.2, rect.1)),
+                start: apply(transform, (rect.0, rect.1)),
+                end: apply(transform, (rect.0 + rect.2, rect.1)),
                 stops,
                 spread: match wrap {
                     4 => Spread::Pad,
@@ -1148,7 +1157,7 @@ fn parse_pen<const FULL: bool>(
             at = skip_counted(data, at, 1)?;
         }
     }
-    let paint = parse_brush(player, state, data.get(at..)?)?;
+    let paint = parse_brush(player, data.get(at..)?)?;
     let dash = custom
         .filter(|dash| dash.iter().any(|length| *length > 0.0))
         .or(match style {
@@ -1280,7 +1289,7 @@ fn parse_region(
             let (left, after) = parse_region(data, at.checked_add(4)?, nodes, depth + 1, limit)?;
             let (right, after) = parse_region(data, after, nodes, depth + 1, limit)?;
             (
-                Region::Combine(kind, Box::new(left), Box::new(right)),
+                Region::Combine(kind, Box::new(left), Box::new(right), None).settled(),
                 after,
             )
         }
@@ -1306,6 +1315,39 @@ fn parse_region(
     })
 }
 
+impl Region {
+    /// The combination with its extent filled in from its operands'.
+    fn settled(self) -> Self {
+        let Region::Combine(mode, left, right, _) = self else {
+            return self;
+        };
+        let known = match (mode, extent(&left), extent(&right)) {
+            (1, Some(false), _) | (1, _, Some(false)) => Some(false),
+            (1, Some(true), Some(true)) => Some(true),
+            (2, Some(true), _) | (2, _, Some(true)) => Some(true),
+            (2, Some(false), Some(false)) => Some(false),
+            (3, Some(a), Some(b)) => Some(a != b),
+            (4, Some(false), _) | (4, _, Some(true)) => Some(false),
+            (4, Some(true), Some(false)) => Some(true),
+            (5, _, Some(false)) | (5, Some(true), _) => Some(false),
+            (5, Some(false), Some(true)) => Some(true),
+            _ => None,
+        };
+        Region::Combine(mode, left, right, known)
+    }
+}
+
+/// Whether `region` is everything (`Some(true)`) or nothing (`Some(false)`)
+/// whatever its paths.
+fn extent(region: &Region) -> Option<bool> {
+    match region {
+        Region::Infinite => Some(true),
+        Region::Empty => Some(false),
+        Region::Path(_) => None,
+        Region::Combine(.., known) => *known,
+    }
+}
+
 /// A region as clip regions to intersect; `false` when it had to be approximated.
 fn region_clips<const FULL: bool>(
     state: &State,
@@ -1313,14 +1355,25 @@ fn region_clips<const FULL: bool>(
     region: &Region,
     out: &mut Vec<ClipRegion>,
 ) -> bool {
+    let empty = || ClipRegion {
+        path: rect_path([0.0; 4]),
+        even_odd: false,
+        exclude: false,
+    };
+    if let Region::Combine(..) = region {
+        match extent(region) {
+            Some(true) => return true,
+            Some(false) => {
+                out.push(empty());
+                return true;
+            }
+            None => {}
+        }
+    }
     match region {
         Region::Infinite => true,
         Region::Empty => {
-            out.push(ClipRegion {
-                path: rect_path([0.0; 4]),
-                even_odd: false,
-                exclude: false,
-            });
+            out.push(empty());
             true
         }
         Region::Path(path) => {
@@ -1335,15 +1388,24 @@ fn region_clips<const FULL: bool>(
             });
             true
         }
-        Region::Combine(1, left, right) => {
+        Region::Combine(1, left, right, _) => {
             let a = region_clips(state, player, left, out);
             region_clips(state, player, right, out) && a
         }
-        Region::Combine(mode @ (4 | 5), left, right) => {
-            let (keep, cut) = if *mode == 4 {
-                (left, right)
-            } else {
-                (right, left)
+        Region::Combine(2 | 3, left, right, _) if extent(left) == Some(false) => {
+            region_clips(state, player, right, out)
+        }
+        Region::Combine(2 | 3, left, right, _) if extent(right) == Some(false) => {
+            region_clips(state, player, left, out)
+        }
+        Region::Combine(mode @ 3..=5, left, right, _)
+            if *mode != 3 || extent(left) == Some(true) || extent(right) == Some(true) =>
+        {
+            let (keep, cut) = match mode {
+                4 => (left, right),
+                5 => (right, left),
+                _ if extent(left) == Some(true) => (left, right),
+                _ => (right, left),
             };
             let exact = region_clips(state, player, keep, out);
             let mut cuts = Vec::new();
@@ -1354,7 +1416,7 @@ fn region_clips<const FULL: bool>(
             }
             exact && simple
         }
-        Region::Combine(mode, left, right) => {
+        Region::Combine(mode, left, right, _) => {
             let (mut a, mut b) = (Vec::new(), Vec::new());
             region_clips(state, player, left, &mut a);
             region_clips(state, player, right, &mut b);
@@ -1845,10 +1907,6 @@ fn world_font(state: &State, font: &PlusFont) -> Font {
     }
 }
 
-fn text_fill(state: &State, solid: bool, value: u32) -> Option<Paint> {
-    brush(state, solid, value)
-}
-
 fn draw_string<const FULL: bool>(
     player: &mut Player<FULL>,
     state: &State,
@@ -1859,7 +1917,7 @@ fn draw_string<const FULL: bool>(
     let Some(Some(Object::Font(font))) = state.objects.get(id).cloned() else {
         return Some(());
     };
-    let fill = text_fill(state, solid, u32_at(data, 0)?)?;
+    let fill = brush(player, state, solid, u32_at(data, 0)?)?;
     let format = match state
         .objects
         .get(u32_at(data, 4)? as usize)
@@ -1952,23 +2010,27 @@ fn layout_lines(text: &str, font: &Font, width: Option<f64>) -> (Vec<String>, bo
     } else {
         0.5
     } * font.size;
-    let estimate = |line: &str| line.chars().count() as f64 * per_char;
+    let fits = |chars: usize| width.is_none_or(|width| chars as f64 * per_char <= width);
     let mut lines = Vec::new();
     let mut estimated = false;
     for paragraph in text.replace("\r\n", "\n").split(['\n', '\r']) {
-        let Some(width) = width.filter(|width| estimate(paragraph) > *width) else {
+        if fits(paragraph.chars().count()) {
             lines.push(paragraph.to_owned());
             continue;
-        };
+        }
         estimated = true;
-        let mut line = String::new();
+        let (mut line, mut chars) = (String::new(), 0);
         for word in paragraph.split(' ') {
-            if !line.is_empty() && estimate(&line) + per_char + estimate(word) > width {
+            let length = word.chars().count();
+            if chars > 0 && !fits(chars + 1 + length) {
                 lines.push(std::mem::take(&mut line));
-            } else if !line.is_empty() {
+                chars = 0;
+            } else if chars > 0 {
                 line.push(' ');
+                chars += 1;
             }
             line.push_str(word);
+            chars += length;
         }
         lines.push(line);
     }
@@ -1985,7 +2047,7 @@ fn draw_driver_string<const FULL: bool>(
     let Some(Some(Object::Font(font))) = state.objects.get(id).cloned() else {
         return Some(());
     };
-    let fill = text_fill(state, solid, u32_at(data, 0)?)?;
+    let fill = brush(player, state, solid, u32_at(data, 0)?)?;
     let options = u32_at(data, 4)?;
     let has_matrix = u32_at(data, 8)? != 0;
     let count = u32_at(data, 12)? as usize;

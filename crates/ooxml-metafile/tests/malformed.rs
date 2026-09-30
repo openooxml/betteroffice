@@ -118,6 +118,28 @@ fn data_a_record_addresses_past_its_bounds_refuses() {
     ] {
         assert!(to_svg(&bytes).is_err(), "{name}");
     }
+    let (kind, mut empty) = text_out(0, 0, "", None, 0x2, [0, 0, 5, 5]);
+    empty[64..68].copy_from_slice(&76u32.to_le_bytes());
+    assert!(to_svg(&Emf::new(10, 10).rec(kind, &empty).bytes()).is_ok());
+}
+
+#[test]
+fn a_string_drawn_many_times_spends_the_text_budget_once_per_draw() {
+    let units = vec![b'a' as u16; 100_000];
+    let count = 20u32;
+    let string_at = 8 + 32 + count * 40;
+    let mut body = i32s(&[0, 0, -1, -1]);
+    body.extend(u32s(&[1]));
+    body.extend(f32s(&[1.0, 1.0]));
+    body.extend(u32s(&[count]));
+    for _ in 0..count {
+        body.extend(i32s(&[0, 0]));
+        body.extend(u32s(&[units.len() as u32, string_at, 0x10]));
+        body.extend(i32s(&[0, 0, -1, -1]));
+        body.extend(u32s(&[0]));
+    }
+    body.extend(u16s(&units));
+    assert!(to_svg(&Emf::new(10, 10).rec(97, &body).bytes()).is_err());
 }
 
 #[test]
@@ -313,7 +335,8 @@ fn repainting_one_wmf_region_spends_the_budget() {
 fn a_wide_emf_plus_region_tree_refuses_before_chaining_its_clips() {
     fn tree(depth: u32, out: &mut Vec<u8>) {
         if depth == 0 {
-            out.extend(u32s(&[0x1000_0002]));
+            out.extend(u32s(&[0x1000_0000]));
+            out.extend(f32s(&[0.0, 0.0, 5.0, 5.0]));
             return;
         }
         out.extend(u32s(&[1]));

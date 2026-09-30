@@ -377,7 +377,11 @@ pub(crate) fn emf_record<const FULL: bool>(
             player.store(handle as usize, GdiObject::Brush(brush));
         }
         40 => {
-            if let Some(handle) = u32_at(bytes, body)
+            let handle = u32_at(bytes, body);
+            if FULL && handle.is_none() {
+                return None;
+            }
+            if let Some(handle) = handle
                 && let Some(slot) = player.objects.get_mut(handle as usize)
             {
                 *slot = None;
@@ -704,9 +708,7 @@ fn full_record<const FULL: bool>(
             player.store(handle as usize, GdiObject::Opaque);
         }
         101 => {
-            if let Some(handle) = u32_at(bytes, body)
-                && let Some(slot) = player.objects.get_mut(handle as usize)
-            {
+            if let Some(slot) = player.objects.get_mut(u32_at(bytes, body)? as usize) {
                 *slot = None;
             }
         }
