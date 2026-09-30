@@ -33,6 +33,7 @@ beforeAll(async () => {
       export const rasterizeDisplayPageToBackBuffer = (...args) => testHarness.rasterize(...args);
       export const presentOffscreenPageBackBuffer = (...args) => testHarness.present(...args);
       export const presentOffscreenPageBackBufferWithCaret = (...args) => testHarness.presentCaret(...args);
+      export const releaseOffscreenPageCanvas = (...args) => testHarness.release(...args);
     `,
   };
   const result = await Bun.build({
@@ -189,6 +190,11 @@ function worker() {
       canvas.width = buffer.width;
       canvas.height = buffer.height;
       buffer.pixels = null;
+    },
+    release(canvas: Surface) {
+      canvas.width = 1;
+      canvas.height = 1;
+      canvas.pixels = null;
     },
     presentCaret(canvas: Surface, buffer: Surface, _stage: Surface, caret: { color: string }) {
       if (!buffer.pixels) throw new Error('caret used a detached buffer');
@@ -446,7 +452,7 @@ describe('resident worker page damage', () => {
     w.resetCalls();
     expect((await w.attach([2, 3])).ok).toBe(true);
     expect(w.harness.rasterized).toEqual([3]);
-    expect(w.surfaces.get('1')!.width).toBe(0);
+    expect(w.surfaces.get('1')!.pixels).toBeNull();
     w.resetCalls();
     await w.attach([2, 3]);
     expect(w.harness.rasterized).toEqual([]);

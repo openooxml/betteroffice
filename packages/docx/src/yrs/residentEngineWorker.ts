@@ -10,6 +10,7 @@ import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
   rasterizeDisplayPageToBackBuffer,
+  releaseOffscreenPageCanvas,
 } from '../layout/render/canvasBackend';
 import {
   applyFrameDeltaOwned,
@@ -363,8 +364,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         // out of the page window: release the bitmap but KEEP the canvas —
         // a transferred surface can never be re-transferred, so the element
         // must stay usable for re-entry
-        canvas.width = 0;
-        canvas.height = 0;
+        releaseOffscreenPageCanvas(canvas);
         offscreenBackBuffers.delete(pageId);
         forgetOffscreenPagePixels(pageId);
       }
