@@ -236,6 +236,15 @@ fn layout_table_with_position(
             .rows
             .get(row_index)
             .is_some_and(|row| row.is_exact_height());
+        if (row_cant_split || row_is_exact)
+            && consumed == 0.0
+            && row_remaining_at_start > paginator.get_available_height()
+            && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+        {
+            paginator.ensure_fits(row_remaining_at_start);
+            continue;
+        }
+
         // Only the first fragment consumes deferred spacing.
         let pending_spacing = if is_first_fragment {
             paginator.state(state_idx).deferred_spacing
@@ -247,22 +256,17 @@ fn layout_table_with_position(
         let first_body_kept_oversized = is_first_fragment
             && header_row_count > 0
             && header_row_count < rows.len()
-            && breaks.kept_oversized(header_row_count, 0.0, body_capacity);
-        let first_body_unavoidable_cant_split = is_first_fragment
-            && header_row_count > 0
-            && header_row_count < rows.len()
-            && block
+            && !block
                 .rows
                 .get(header_row_count)
                 .is_some_and(|row| row.cant_split.unwrap_or(false))
-            && rows[header_row_count].height > body_capacity;
-        let header_start_height = if first_body_unavoidable_cant_split {
-            header_rows_height + breaks.fresh_slice(header_row_count, 0.0, body_capacity)
-        } else if first_fragment_height <= column_capacity || first_body_kept_oversized {
-            first_fragment_height
-        } else {
-            header_rows_height
-        };
+            && breaks.kept_oversized(header_row_count, 0.0, body_capacity);
+        let header_start_height =
+            if first_fragment_height <= column_capacity || first_body_kept_oversized {
+                first_fragment_height
+            } else {
+                header_rows_height
+            };
         if is_first_fragment
             && header_row_count > 0
             && (header_start_height <= column_capacity || first_body_kept_oversized)
@@ -282,14 +286,6 @@ fn layout_table_with_position(
         } else {
             0.0
         };
-        if (row_is_exact || row_cant_split)
-            && consumed == 0.0
-            && row_remaining_at_start + header_overhead > paginator.get_available_height()
-            && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
-        {
-            paginator.ensure_fits(row_remaining_at_start + header_overhead);
-            continue;
-        }
         let available_height = paginator.get_available_height() - pending_spacing - header_overhead;
 
         let start_row = row_index;
@@ -352,11 +348,17 @@ fn layout_table_with_position(
             } else {
                 column_capacity - header_overhead
             };
-            let unavoidable_cant_split = cant_split && remaining > row_capacity;
+            let unavoidable_cant_split =
+                cant_split && remaining > column_capacity - header_overhead;
+            let row_breaks = if cant_split {
+                breaks.lines()
+            } else {
+                &breaks.kept
+            };
             let placeable = if cant_split && !unavoidable_cant_split {
                 0.0
             } else {
-                snap_row_break(&breaks.kept, cur, start_off, budget)
+                snap_row_break(row_breaks, cur, start_off, budget)
             };
             if placeable > 0.0 {
                 // Break this row mid-content at a whole-line boundary.
@@ -368,18 +370,17 @@ fn layout_table_with_position(
                 && !(start_row == 0
                     && clip_top == 0.0
                     && cur == header_row_count
-                    && (unavoidable_cant_split
-                        || (paginator.state(state_idx).pen_y
-                            == paginator.state(state_idx).content_top
-                            && breaks.kept_oversized(cur, 0.0, row_capacity))))
+                    && !cant_split
+                    && paginator.state(state_idx).pen_y == paginator.state(state_idx).content_top
+                    && breaks.kept_oversized(cur, 0.0, row_capacity))
             {
                 // Nothing of this row fits, but earlier rows did — end before it,
                 // unless they are the header band above an unavoidable split.
-            } else if snap_row_break(&breaks.kept, cur, start_off, row_capacity) > 0.0
-                || (paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
-                    && moved_row != Some(cur)
-                    && !(unavoidable_cant_split
-                        && breaks.kept_oversized(cur, start_off, row_capacity)))
+            } else if !cant_split
+                && !block.rows.get(cur).is_some_and(|row| row.is_exact_height())
+                && (snap_row_break(&breaks.kept, cur, start_off, row_capacity) > 0.0
+                    || (paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+                        && moved_row != Some(cur)))
             {
                 // Nothing fits below content already in this column: start the
                 // fragment in the next one.
@@ -472,7 +473,16 @@ fn layout_table_with_position(
         // If content remains, advance to the next column/page so the next
         // iteration sees fresh space (the current page is exhausted).
         if row_index < rows.len() {
-            let next_slice = minimum_row_slice(block, measure, &breaks.kept, row_index, consumed);
+            let next_breaks = if block
+                .rows
+                .get(row_index)
+                .is_some_and(|row| row.cant_split.unwrap_or(false))
+            {
+                breaks.lines()
+            } else {
+                &breaks.kept
+            };
+            let next_slice = minimum_row_slice(block, measure, next_breaks, row_index, consumed);
             let next_needed = if row_index >= header_row_count
                 && header_row_count > 0
                 && header_rows_height + next_slice <= column_capacity

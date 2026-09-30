@@ -146,16 +146,13 @@ impl<'a> RowBreaks<'a> {
     /// The smallest slice of `row` from `consumed` on that a fresh column
     /// `capacity` tall places.
     pub(crate) fn fresh_slice(&self, row: usize, consumed: f64, capacity: f64) -> f64 {
-        let remaining = self.measure.rows[row].height - consumed;
-        if consumed == 0.0
-            && remaining <= capacity
-            && self
-                .block
-                .rows
-                .get(row)
-                .is_some_and(|row| row.cant_split.unwrap_or(false))
+        if self
+            .block
+            .rows
+            .get(row)
+            .is_some_and(|row| row.cant_split.unwrap_or(false))
         {
-            return remaining;
+            return minimum_row_slice(self.block, self.measure, self.lines(), row, consumed);
         }
         let info = if self.kept_oversized(row, consumed, capacity) {
             self.lines()

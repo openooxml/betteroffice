@@ -156,6 +156,21 @@ fn a_cant_split_row_taller_than_a_page_still_splits_through_a_kept_paragraph() {
 }
 
 #[test]
+fn a_cant_split_row_that_fits_a_bare_page_omits_its_repeated_header() {
+    assert_eq!(
+        fragments(vec![table_rows(&[
+            (1, json!({}), json!({"isHeader": true})),
+            (
+                5,
+                json!({"widowControl": false}),
+                json!({"cantSplit": true})
+            )
+        ])]),
+        [(0, 20.0), (1, 100.0)]
+    );
+}
+
+#[test]
 fn a_kept_paragraph_taller_than_a_page_splits_below_its_repeated_header() {
     let header = (1, json!({}), json!({"isHeader": true}));
     let kept = (10, json!({"keepLines": true}), json!({}));
