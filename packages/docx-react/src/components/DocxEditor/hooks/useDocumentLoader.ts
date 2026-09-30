@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
@@ -82,6 +82,7 @@ export function useDocumentLoader({
   // Embedded families registered under an alias because another live document
   // registered different faces under the same name.
   const [fontAliases, setFontAliases] = useState<ReadonlyMap<string, string>>(NO_FONT_ALIASES);
+  const skippedFontsRef = useRef<SkippedFonts | null>(null);
 
   const loadParsedDocument = useCallback(
     (doc: Document, seedBytes?: Uint8Array) => {
@@ -139,7 +140,11 @@ export function useDocumentLoader({
 
   const acceptHostDocument = useCallback(
     (host: YrsDocxHost, generation: number, session?: Pick<YrsSession, 'onUpdate'>) => {
-      if (!loadGeneration.complete(generation)) return;
+      if (!loadGeneration.complete(generation)) {
+        // A session replaced within this load may hold another document.
+        if (session && loadGeneration.isCurrent(generation)) skippedFontsRef.current?.changed();
+        return;
+      }
       const doc = host.document;
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
@@ -154,9 +159,9 @@ export function useDocumentLoader({
       const isCurrent = () => loadGeneration.isCurrent(generation);
       const skipped = new Set(session ? host.unusedScriptFonts?.map(fontKey) : undefined);
       const isSkipped = (family: string) => skipped.has(fontKey(family));
-      const loadSkipped =
+      const skippedFonts =
         session && skipped.size > 0
-          ? afterFirstUpdate(session, () => {
+          ? skipUntilChanged(session, () => {
               if (!isCurrent()) return;
               fontScope
                 .loadFontsWithMapping(
@@ -164,7 +169,8 @@ export function useDocumentLoader({
                 )
                 .catch((error) => console.warn('Failed to load document fonts:', error));
             })
-          : undefined;
+          : null;
+      skippedFontsRef.current = skippedFonts;
       loadDocumentFontsInOrder(
         loadEmbeddedFontFamilies(
           doc.package.fontTable,
@@ -175,12 +181,13 @@ export function useDocumentLoader({
         isCurrent,
         setFontAliases,
         () => {
-          loadSkipped?.();
           const used = (family: string) => !isSkipped(family);
-          return Promise.all([
+          const loaded = Promise.all([
             fontScope.loadFontsWithMapping(host.referencedFonts.filter(used)),
             fontScope.loadFontsWithMapping([...extractFontsFromDocument(doc)].filter(used)),
           ]);
+          skippedFonts?.start();
+          return loaded;
         }
       );
     },
@@ -282,25 +289,41 @@ const NO_FONT_ALIASES: ReadonlyMap<string, string> = new Map();
 
 const fontKey = (family: string): string => family.trim().toLowerCase();
 
+interface SkippedFonts {
+  /** The fonts loaded at open have started loading. */
+  start(): void;
+  /** The document changed outside `session`'s updates. */
+  changed(): void;
+}
+
 /**
- * Runs `load` once `session`'s document has changed, locally or remotely,
- * and the returned callback has been called: an edit can give a font skipped
- * at open text to draw.
+ * Runs `load` once, after `start` and the first change to the document,
+ * local or remote: an edit can give a font skipped at open text to draw.
  */
-function afterFirstUpdate(
+function skipUntilChanged(
   session: Pick<YrsSession, 'onUpdate'>,
   load: () => void
-): () => void {
-  let updated = false;
-  let ready = false;
-  const unsubscribe = session.onUpdate(() => {
+): SkippedFonts {
+  let started = false;
+  let changed = false;
+  let loaded = false;
+  const run = () => {
+    if (!started || !changed || loaded) return;
+    loaded = true;
+    load();
+  };
+  const onChange = () => {
     unsubscribe();
-    updated = true;
-    if (ready) load();
-  });
-  return () => {
-    ready = true;
-    if (updated) load();
+    changed = true;
+    run();
+  };
+  const unsubscribe = session.onUpdate(onChange);
+  return {
+    start: () => {
+      started = true;
+      run();
+    },
+    changed: onChange,
   };
 }
 

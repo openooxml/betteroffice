@@ -49,14 +49,31 @@ test("a parsed document's fonts load after the previous document's faces are rel
   fontScope.dispose();
 });
 
+function updateSource() {
+  const listeners = new Set<() => void>();
+  return {
+    onUpdate: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    update: () => {
+      for (const listener of [...listeners]) listener();
+    },
+  };
+}
+
+/** Every family the loader asks for, in order, after `act` on an accepted seeded document. */
 async function fontsLoadedFor(
-  unusedScriptFonts?: string[],
-  { updates = 0, session = true }: { updates?: number; session?: boolean } = {}
-): Promise<Set<string>> {
+  unusedScriptFonts: string[] | undefined,
+  act_: (
+    accept: (session?: ReturnType<typeof updateSource>) => void,
+    asked: string[]
+  ) => void | Promise<void> = (accept) => accept(updateSource())
+): Promise<string[]> {
   const fontScope = createFontLoadScope();
-  const asked = new Set<string>();
+  const asked: string[] = [];
   fontScope.loadFontsWithMapping = async (families) => {
-    for (const family of families) asked.add(family);
+    asked.push(...families);
   };
   const options = loaderOptions(fontScope);
   const { result } = renderHook(() => useDocumentLoader(options));
@@ -80,38 +97,57 @@ async function fontsLoadedFor(
     embeddedFonts: new Map(),
     ...(unusedScriptFonts ? { unusedScriptFonts } : {}),
   };
-  const listeners = new Set<() => void>();
-  const updateSource = {
-    onUpdate: (listener: () => void) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-  };
-  act(() =>
-    result.current.acceptHostDocument(
-      host as never,
-      result.current.yrsSeedGeneration,
-      session ? (updateSource as never) : undefined
-    )
+  const generation = result.current.yrsSeedGeneration;
+  await act_(
+    (session) =>
+      act(() => result.current.acceptHostDocument(host as never, generation, session as never)),
+    asked
   );
-  await waitFor(() => expect(asked.has('Calibri')).toBe(true));
-  for (let update = 0; update < updates; update++) {
-    for (const listener of [...listeners]) listener();
-  }
+  await waitFor(() => expect(asked).toContain('Calibri'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
   fontScope.dispose();
   return asked;
 }
 
+const loadCount = (asked: string[], family: string) =>
+  asked.filter((name) => name === family).length;
+
 test('a seeded document loads none of the fonts it names only for script text it lacks', async () => {
-  expect(await fontsLoadedFor(['Batang', '바탕'])).toEqual(new Set(['Calibri']));
-  expect(await fontsLoadedFor()).toEqual(new Set(['Batang', 'Calibri', '바탕']));
-  expect(await fontsLoadedFor(['Batang', '바탕'], { session: false })).toEqual(
+  const skipped = ['Batang', '바탕'];
+  expect(new Set(await fontsLoadedFor(skipped))).toEqual(new Set(['Calibri']));
+  expect(new Set(await fontsLoadedFor(undefined))).toEqual(new Set(['Batang', 'Calibri', '바탕']));
+  expect(new Set(await fontsLoadedFor(skipped, (accept) => accept()))).toEqual(
     new Set(['Batang', 'Calibri', '바탕'])
   );
 });
 
-test('the fonts skipped at open load once the document first changes', async () => {
-  expect(await fontsLoadedFor(['Batang', '바탕'], { updates: 2 })).toEqual(
-    new Set(['Batang', 'Calibri', '바탕'])
+test('the fonts skipped at open load once, after the document first changes', async () => {
+  const skipped = ['Batang', '바탕'];
+  const afterEdits = await fontsLoadedFor(skipped, async (accept, asked) => {
+    const session = updateSource();
+    accept(session);
+    await waitFor(() => expect(asked).toContain('Calibri'));
+    expect(asked).not.toContain('Batang');
+    session.update();
+    session.update();
+  });
+  expect(loadCount(afterEdits, 'Batang')).toBe(1);
+  expect(loadCount(afterEdits, '바탕')).toBe(1);
+
+  const editedBeforeOpenLoads = await fontsLoadedFor(skipped, (accept, asked) => {
+    const session = updateSource();
+    accept(session);
+    session.update();
+    expect(asked).toEqual([]);
+  });
+  expect(loadCount(editedBeforeOpenLoads, 'Batang')).toBe(1);
+  expect(editedBeforeOpenLoads.indexOf('Batang')).toBeGreaterThan(
+    editedBeforeOpenLoads.indexOf('Calibri')
   );
+
+  const replaced = await fontsLoadedFor(skipped, (accept) => {
+    accept(updateSource());
+    accept(updateSource());
+  });
+  expect(loadCount(replaced, 'Batang')).toBe(1);
 });
