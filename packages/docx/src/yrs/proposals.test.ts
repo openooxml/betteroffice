@@ -213,6 +213,9 @@ describe('proposal registry', () => {
             truncated: false,
           };
         },
+        readParagraphs: () => {
+          throw new Error('unexpected readParagraphs');
+        },
         applyEdits: (request) => {
           expect(active).toBe(shared);
           events.push('apply');
@@ -232,6 +235,10 @@ describe('proposal registry', () => {
               revisionIds: [`revision-${stepIndex}`],
             })),
           };
+        },
+        listRevisions: () => [],
+        settleRevisions: () => {
+          throw new Error('unexpected settleRevisions');
         },
       };
       if (shared) {
