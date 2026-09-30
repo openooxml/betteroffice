@@ -213,7 +213,6 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
       case 'shape': {
         const paint = primitive.fillPaint;
         const fill = paint?.color ?? primitive.fill;
-        if (!shapeFillsItsBox(primitive)) return false;
         if (paint?.kind === 'none') return false;
         if (paint?.kind === 'gradient' || paint?.kind === 'pattern') break;
         if (paint?.kind === 'picture' && (paint.pictureSrc || paint.pictureRelId)) {
@@ -229,8 +228,10 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
       default:
         return false;
     }
-    const painted = displayPrimitiveRect(primitive);
+    const painted =
+      primitive.kind === 'shape' ? shapeFillRect(primitive) : displayPrimitiveRect(primitive);
     return (
+      painted !== null &&
       Number.isFinite(painted.w) &&
       Number.isFinite(painted.h) &&
       painted.w > 0 &&
@@ -244,42 +245,46 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
   });
 }
 
-/** Whether a shape's path is its own box, so that its fill covers every point of the box. */
-function shapeFillsItsBox(shape: ShapePrimitive): boolean {
-  if ((shape.transform?.rotation ?? 0) % 180 !== 0) return false;
+/**
+ * The rectangle a shape's fill paints, when its path is exactly an axis-aligned
+ * rectangle turned by a multiple of 180 degrees; any other path covers nothing.
+ */
+function shapeFillRect(shape: ShapePrimitive): GeoRect | null {
+  const rotation = shape.transform?.rotation ?? 0;
+  if (!Number.isFinite(rotation) || rotation % 180 !== 0) return null;
   const commands = shape.geometryPath;
   const end = commands.at(-1)?.type === 'close' ? commands.length - 1 : commands.length;
-  const corners: Array<{ x: number; y: number }> = [];
+  const corners: Array<[number, number]> = [];
   for (let index = 0; index < end; index++) {
     const command = commands[index]!;
-    if (command.type !== 'move' && command.type !== 'line') return false;
-    if ((command.type === 'move') !== (index === 0)) return false;
-    corners.push({ x: command.x, y: command.y });
+    if (command.type !== 'move' && command.type !== 'line') return null;
+    if ((command.type === 'move') !== (index === 0)) return null;
+    corners.push([command.x, command.y]);
   }
-  const near = (a: number, b: number) => Math.abs(a - b) <= 0.01;
   const first = corners[0];
   const last = corners.at(-1);
-  if (corners.length === 5 && first && last && near(first.x, last.x) && near(first.y, last.y)) {
+  if (corners.length === 5 && first && last && first[0] === last[0] && first[1] === last[1]) {
     corners.pop();
   }
-  if (corners.length !== 4) return false;
-  const xs = [shape.x, shape.x + shape.w];
-  const ys = [shape.y, shape.y + shape.h];
-  const cells: Array<[number, number]> = [];
-  for (const corner of corners) {
-    const column = xs.findIndex((x) => near(x, corner.x));
-    const row = ys.findIndex((y) => near(y, corner.y));
-    if (column < 0 || row < 0) return false;
-    cells.push([column, row]);
-  }
-  // Four distinct corners, each edge moving along one side of the box.
-  return (
-    new Set(cells.map(([column, row]) => column * 2 + row)).size === 4 &&
-    cells.every(([column, row], index) => {
-      const [nextColumn, nextRow] = cells[(index + 1) % 4]!;
-      return (column === nextColumn) !== (row === nextRow);
-    })
-  );
+  if (corners.length !== 4) return null;
+  const xs = [...new Set(corners.map(([x]) => x))];
+  const ys = [...new Set(corners.map(([, y]) => y))];
+  if (xs.length !== 2 || ys.length !== 2) return null;
+  if (new Set(corners.map(([x, y]) => `${x},${y}`)).size !== 4) return null;
+  const sides = corners.every(([x, y], index) => {
+    const [nextX, nextY] = corners[(index + 1) % 4]!;
+    return (x === nextX) !== (y === nextY);
+  });
+  if (!sides) return null;
+  let left = Math.min(...xs);
+  let top = Math.min(...ys);
+  const width = Math.abs(xs[0]! - xs[1]!);
+  const height = Math.abs(ys[0]! - ys[1]!);
+  // The canvas turns and flips a shape about its box's center.
+  const halfTurn = Math.abs(rotation % 360) === 180;
+  if (Boolean(shape.transform?.flipH) !== halfTurn) left = 2 * shape.x + shape.w - left - width;
+  if (Boolean(shape.transform?.flipV) !== halfTurn) top = 2 * shape.y + shape.h - top - height;
+  return { x: left, y: top, w: width, h: height };
 }
 
 /** A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing. */

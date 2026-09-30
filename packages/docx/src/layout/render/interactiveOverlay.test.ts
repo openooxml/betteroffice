@@ -191,7 +191,34 @@ test('a filled body shape hides header controls only where its path is its own b
       { type: 'line', x: 110.006, y: 20 }, { type: 'line', x: 109.997, y: 40 }, { type: 'close' },
     ],
   });
-  for (const shape of [triangle, bowtie, narrowBowtie, box({ transform: { rotation: 45 } })]) {
+  // Its left side leans by a hundredth of a pixel, past the control's center.
+  const skewed = box({
+    x: 109.998, w: 0.004,
+    geometryPath: [
+      { type: 'move', x: 109.995, y: 20 }, { type: 'line', x: 110.011, y: 20 },
+      { type: 'line', x: 110.011, y: 40 }, { type: 'line', x: 110.007, y: 40 }, { type: 'close' },
+    ],
+  });
+  // A rectangle filling the left half of its box, over the control's center until flipped.
+  const half = (transform?: ShapePrimitive['transform']) =>
+    box({
+      x: 105, w: 20, transform,
+      geometryPath: [
+        { type: 'move', x: 105, y: 20 }, { type: 'line', x: 115, y: 20 },
+        { type: 'line', x: 115, y: 40 }, { type: 'line', x: 105, y: 40 }, { type: 'close' },
+      ],
+    });
+  expectHidden(headerWidget([half()]));
+  expectHidden(headerWidget([half({ flipH: true, rotation: 180 })]));
+  for (const shape of [
+    triangle,
+    bowtie,
+    narrowBowtie,
+    skewed,
+    box({ transform: { rotation: 45 } }),
+    half({ flipH: true }),
+    half({ rotation: 180 }),
+  ]) {
     expectActive(headerWidget([shape]));
   }
 });

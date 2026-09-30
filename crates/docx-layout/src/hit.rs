@@ -1211,18 +1211,17 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
             && y >= hit.top - BAND_SLACK
             && y <= hit.bottom + BAND_SLACK;
     }
+    let px = |value: &Number| value.as_f64().unwrap_or(0.0);
     let (left, top, width, height) = match primitive {
-        Primitive::Image(img) => (&img.x, &img.y, &img.w, &img.h),
+        Primitive::Image(img) => (px(&img.x), px(&img.y), px(&img.w), px(&img.h)),
         Primitive::Shape(shape) if attrs.inline_shape_atom == Some(true) => {
-            (&shape.x, &shape.y, &shape.w, &shape.h)
+            let Some(rect) = shape_fill_rect(shape) else {
+                return false;
+            };
+            rect
         }
         _ => return false,
     };
-    let (left, top) = (left.as_f64().unwrap_or(0.0), top.as_f64().unwrap_or(0.0));
-    let (width, height) = (
-        width.as_f64().unwrap_or(0.0),
-        height.as_f64().unwrap_or(0.0),
-    );
     width > 0.0 && height > 0.0 && x >= left && x <= left + width && y >= top && y <= top + height
 }
 
@@ -1232,16 +1231,17 @@ fn js_blank(text: &str) -> bool {
         .all(|c| c == '\u{feff}' || (c.is_whitespace() && c != '\u{85}'))
 }
 
-/// Whether a shape's path is its own box, so that its fill covers every point of the box.
-fn shape_fills_its_box(shape: &ShapePrimitive) -> bool {
-    let rotation = shape
-        .transform
-        .as_ref()
+/// The rectangle (left, top, width, height) a shape's fill paints, when its path is
+/// exactly an axis-aligned rectangle turned by a multiple of 180 degrees; any other
+/// path covers nothing.
+fn shape_fill_rect(shape: &ShapePrimitive) -> Option<(f64, f64, f64, f64)> {
+    let transform = shape.transform.as_ref();
+    let rotation = transform
         .and_then(|transform| transform.rotation.as_ref())
         .and_then(Number::as_f64)
         .unwrap_or(0.0);
     if rotation % 180.0 != 0.0 {
-        return false;
+        return None;
     }
     let commands = &shape.geometry_path;
     let end = match commands.last() {
@@ -1254,60 +1254,48 @@ fn shape_fills_its_box(shape: &ShapePrimitive) -> bool {
         match command {
             ShapePathCommand::Move { x, y } if index == 0 => corners.push((px(x), px(y))),
             ShapePathCommand::Line { x, y } if index > 0 => corners.push((px(x), px(y))),
-            _ => return false,
+            _ => return None,
         }
     }
-    let near = |a: f64, b: f64| (a - b).abs() <= 0.01;
-    if let [first, .., last] = corners.as_slice()
-        && corners.len() == 5
-        && near(first.0, last.0)
-        && near(first.1, last.1)
-    {
+    if corners.len() == 5 && corners.first() == corners.last() {
         corners.pop();
     }
     if corners.len() != 4 {
-        return false;
+        return None;
     }
-    let (left, top) = (px(&shape.x), px(&shape.y));
-    let xs = [left, left + px(&shape.w)];
-    let ys = [top, top + px(&shape.h)];
-    let mut cells = Vec::with_capacity(4);
-    for &(x, y) in &corners {
-        let (Some(column), Some(row)) = (
-            xs.iter().position(|&edge| near(edge, x)),
-            ys.iter().position(|&edge| near(edge, y)),
-        ) else {
-            return false;
-        };
-        cells.push((column, row));
+    let mut xs: Vec<f64> = corners.iter().map(|corner| corner.0).collect();
+    let mut ys: Vec<f64> = corners.iter().map(|corner| corner.1).collect();
+    for values in [&mut xs, &mut ys] {
+        values.sort_by(f64::total_cmp);
+        values.dedup();
     }
-    // Four distinct corners, each edge moving along one side of the box.
-    let mut seen = [false; 4];
-    for &(column, row) in &cells {
-        seen[column * 2 + row] = true;
+    let distinct = (0..4).all(|a| (a + 1..4).all(|b| corners[a] != corners[b]));
+    let sides = (0..4).all(|index| {
+        let ((x, y), (next_x, next_y)) = (corners[index], corners[(index + 1) % 4]);
+        (x == next_x) != (y == next_y)
+    });
+    let ([x0, x1], [y0, y1]) = (xs.as_slice(), ys.as_slice()) else {
+        return None;
+    };
+    if !distinct || !sides {
+        return None;
     }
-    seen.iter().all(|&corner| corner)
-        && (0..4).all(|index| {
-            let ((column, row), (next_column, next_row)) = (cells[index], cells[(index + 1) % 4]);
-            (column == next_column) != (row == next_row)
-        })
-}
-
-/// A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing.
-fn text_fill_none(attrs: &DocAttrs) -> bool {
-    attrs
-        .modern_effects
-        .as_deref()
-        .and_then(|effects| effects.pointer("/textFill/kind"))
-        .and_then(Value::as_str)
-        == Some("none")
+    let (mut left, mut top, width, height) = (*x0, *y0, x1 - x0, y1 - y0);
+    // The canvas turns and flips a shape about its box's center.
+    let half_turn = (rotation % 360.0).abs() == 180.0;
+    let flip_h = transform.is_some_and(|transform| transform.flip_h);
+    let flip_v = transform.is_some_and(|transform| transform.flip_v);
+    if flip_h != half_turn {
+        left = 2.0 * px(&shape.x) + px(&shape.w) - left - width;
+    }
+    if flip_v != half_turn {
+        top = 2.0 * px(&shape.y) + px(&shape.h) - top - height;
+    }
+    Some((left, top, width, height))
 }
 
 /// Whether a shape's fill paints its interior, as the overlay's occlusion check decides it.
 fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
-    if !shape_fills_its_box(shape) {
-        return false;
-    }
     let paint = shape.attrs.fill_paint.as_deref();
     let field = |key: &str| {
         paint
@@ -2349,6 +2337,26 @@ mod tests {
             {"type": "line", "x": 100.011, "y": 440}, {"type": "line", "x": 100.002, "y": 480},
             {"type": "close"}
         ]);
+        let mut skewed = shape(None, Some("#ff0000"));
+        skewed["w"] = serde_json::json!(0.004);
+        skewed["geometryPath"] = serde_json::json!([
+            {"type": "move", "x": 99.997, "y": 440}, {"type": "line", "x": 100.013, "y": 440},
+            {"type": "line", "x": 100.013, "y": 480}, {"type": "line", "x": 100.009, "y": 480},
+            {"type": "close"}
+        ]);
+        // A rectangle filling the left half of its box, over the click until flipped.
+        let half = |transform: Option<serde_json::Value>| {
+            let mut shape = shape(None, Some("#ff0000"));
+            shape["geometryPath"] = serde_json::json!([
+                {"type": "move", "x": 100, "y": 440}, {"type": "line", "x": 130, "y": 440},
+                {"type": "line", "x": 130, "y": 480}, {"type": "line", "x": 100, "y": 480},
+                {"type": "close"}
+            ]);
+            if let Some(transform) = transform {
+                shape["transform"] = transform;
+            }
+            shape
+        };
         let mut rotated = shape(None, Some("#ff0000"));
         rotated["transform"] = serde_json::json!({"rotation": 45});
         let mut turned = shape(None, Some("#ff0000"));
@@ -2386,6 +2394,9 @@ mod tests {
             (140.0, triangle),
             (140.0, bowtie),
             (100.0055, narrow_bowtie),
+            (100.002, skewed),
+            (120.0, half(Some(serde_json::json!({"flipH": true})))),
+            (120.0, half(Some(serde_json::json!({"rotation": 180})))),
             (120.0, rotated),
         ] {
             let dl = band_page("footer", 420.0, vec![primitive]);
@@ -2396,6 +2407,8 @@ mod tests {
         for primitive in [
             shape(None, Some("#ff0000")),
             turned,
+            half(None),
+            half(Some(serde_json::json!({"flipH": true, "rotation": 180}))),
             shape(
                 Some(serde_json::json!({"kind": "solid", "color": "#00ff00"})),
                 None,
