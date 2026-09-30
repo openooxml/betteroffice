@@ -482,7 +482,8 @@ fn widest_inline_image(blocks: &[crate::types::LayoutBlock]) -> f64 {
 }
 
 /// A cell's narrowest width before shrinking crops or hides its content, and
-/// whether that content is rigid (it can't rewrap at all).
+/// whether that content is rigid (it can't rewrap at all). A rigid cell whose
+/// minimum content width is unknown can't be narrowed safely at all.
 fn cell_shrink_floor(
     table_block: &TableBlock,
     grid_cell: &ResolvedGridCell,
@@ -508,7 +509,7 @@ fn cell_shrink_floor(
             .copied()
             .flatten()
             .map(|widths| widths.0))
-        .unwrap_or(0.0);
+        .unwrap_or(f64::INFINITY);
     (floor.max(minimum), true)
 }
 
@@ -1313,25 +1314,30 @@ mod tests {
 
     #[test]
     fn autofit_keeps_its_grid_when_a_preferred_width_would_crop_an_unmeasured_image() {
-        let block: TableBlock = serde_json::from_value(json!({
-            "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
-            "rows": [{"id": 0, "cells": [
-                {"id": 0, "blocks": [{"kind": "paragraph", "id": 0, "runs": [
-                    {"kind": "image", "src": "", "width": 200, "height": 40},
-                    {"kind": "text", "text": "x"}
-                ]}],
-                 "preferredWidth": {"value": 1500, "type": "dxa"},
-                 "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}},
-                {"id": 1, "blocks": [],
-                 "preferredWidth": {"value": 0, "type": "auto"},
-                 "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}}
-            ]}]
-        }))
-        .unwrap();
-        assert_eq!(
-            resolve_table_column_widths(&block, 600.0),
-            vec![300.0, 300.0]
-        );
+        for (indent, preferred) in [(0, 1500), (100, 3750)] {
+            let block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [{"kind": "paragraph", "id": 0,
+                        "attrs": {"indent": {"left": indent}},
+                        "runs": [
+                            {"kind": "image", "src": "", "width": 200, "height": 40},
+                            {"kind": "text", "text": "x"}
+                        ]}],
+                     "preferredWidth": {"value": preferred, "type": "dxa"},
+                     "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}},
+                    {"id": 1, "blocks": [],
+                     "preferredWidth": {"value": 0, "type": "auto"},
+                     "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0}}
+                ]}]
+            }))
+            .unwrap();
+            assert_eq!(
+                resolve_table_column_widths(&block, 600.0),
+                vec![300.0, 300.0],
+                "indent {indent}"
+            );
+        }
     }
 
     #[test]
