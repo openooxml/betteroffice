@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
@@ -525,5 +525,33 @@ test("a worker handed to another session builds no pages of the old session's fr
   } finally {
     preview.native.free();
     full.native.free();
+  }
+});
+
+test("a display-only preview's failed build fails no wait for the document", async () => {
+  const failure = new Error('preview build failed');
+  const overrides = {
+    build: async () => {
+      throw failure;
+    },
+    getInputs: () => ({ measured: [], options: {} }) as never,
+  };
+  const layout = { pageSize: { w: 816, h: 1056 }, pages: [] } as unknown as Layout;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    for (const displayOnly of [true, false]) {
+      const engine = { isDisplayOnly: () => displayOnly } as unknown as YrsSession;
+      const { result, unmount } = renderHook(() =>
+        useRustDisplayList(layout, overrides, undefined, undefined, engine)
+      );
+      let failed = false;
+      void result.current.settledDisplayList(null, null).catch(() => (failed = true));
+      await waitFor(() => expect(result.current.error).toBe(failure));
+      await act(async () => {});
+      expect(failed).toBe(!displayOnly);
+      unmount();
+    }
+  } finally {
+    errors.mockRestore();
   }
 });

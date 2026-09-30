@@ -20,6 +20,7 @@ let fullSession: unknown = null;
 let shownPages = false;
 let fullOpen: 'fail' | 'open' | 'layout-fail' = 'fail';
 let holdFullOpen: Promise<void> | null = null;
+let failPreviewLayout = false;
 mock.module('@betteroffice/docx/yrs', () => ({
   ...real,
   createYrsSession: async (options: Parameters<typeof createYrsSession>[0]) => {
@@ -33,6 +34,11 @@ mock.module('@betteroffice/docx/yrs', () => ({
       throw new Error('full open failed');
     }
     const session = await createYrsSession(options);
+    if (created === 1 && failPreviewLayout) {
+      session.layoutFontRequirementsJson = () => {
+        throw new Error('preview layout failed');
+      };
+    }
     if (created === 2) fullSession = session;
     if (created === 2 && fullOpen === 'layout-fail') {
       session.layoutFontRequirementsJson = () => {
@@ -222,5 +228,31 @@ test('while its preview shows, a load has no page count and its layout is not co
   } finally {
     release();
     holdFullOpen = null;
+  }
+}, 30_000);
+
+test("a preview's layout error is reported and fails no wait for the document", async () => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  failPreviewLayout = true;
+  try {
+    const ref = createRef<Editor>();
+    const errors: string[] = [];
+    render(load(documentBuffer(), (error) => errors.push(error.message), ref));
+    await waitFor(() => expect(ref.current).not.toBeNull());
+    let outcome = null as number | Error | null;
+    ref.current!.whenLayoutComplete().then(
+      (pages) => (outcome = pages),
+      (error: Error) => (outcome = error)
+    );
+    await waitFor(() => expect(errors).toContain('preview layout failed'), { timeout: 10_000 });
+    await waitFor(() => expect(outcome).not.toBeNull(), { timeout: 20_000 });
+    expect(renderer!.presentedEngine).toBe(fullSession);
+    expect(outcome).toBe(renderer!.displayList!.pages.length);
+  } finally {
+    failPreviewLayout = false;
   }
 }, 30_000);

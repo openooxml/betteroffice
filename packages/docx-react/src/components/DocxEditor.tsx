@@ -1071,9 +1071,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // document's: the old session may already be freed.
   const sessionGenerationRef = useRef<number | null>(null);
   const reportLayoutError = useCallback(
-    (error: Error) => {
+    (error: Error, session?: unknown) => {
       if (sessionGenerationRef.current !== yrsSeedGeneration) return;
-      reportDocumentLayoutError(error, resetSettled);
+      // A display-only preview's error fails no wait: the full session replaces it.
+      const preview = (session as YrsSession | undefined)?.isDisplayOnly?.() === true;
+      reportDocumentLayoutError(error, preview ? undefined : resetSettled);
     },
     [reportDocumentLayoutError, resetSettled, yrsSeedGeneration]
   );
@@ -1097,7 +1099,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   failOpeningRef.current = yrsCore.failOpening;
   const reportPagedError = useCallback(
     (error: Error, session?: unknown) => {
-      if (!failOpeningRef.current(error, session)) reportLayoutError(error);
+      if (!failOpeningRef.current(error, session)) reportLayoutError(error, session);
     },
     [reportLayoutError]
   );

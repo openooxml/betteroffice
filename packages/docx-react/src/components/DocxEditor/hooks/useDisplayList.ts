@@ -1170,12 +1170,17 @@ export function useRustDisplayList(
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
+    // A display-only preview's failure fails no wait: the full session replaces it.
+    const settleFailure = (failure: Error): void => {
+      const preview = engine as { isDisplayOnly?: () => boolean } | null | undefined;
+      if (preview?.isDisplayOnly?.() !== true) markSettled(null, failure);
+    };
     if (!inputs) {
       const failure = new Error('No display-list inputs were recorded for the current layout.');
       queryEpochGate.clear();
       setError(failure);
       setLoading(false);
-      markSettled(null, failure);
+      settleFailure(failure);
       return;
     }
     const build = overrides?.build ?? buildRustDisplayList;
@@ -1437,7 +1442,7 @@ export function useRustDisplayList(
         queryEpochGate.clear();
         setError(nextError);
         setLoading(false);
-        markSettled(null, nextError);
+        settleFailure(nextError);
       });
   }, [
     adoptHostEngine,
