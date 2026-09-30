@@ -1195,7 +1195,7 @@ export function useRustDisplayList(
 
   const layoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
-      if (!canLayoutInWorker(hostEngine)) return null;
+      if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) return null;
       const outOfMemory = outOfMemoryRef.current.get(hostEngine);
       if (outOfMemory) return Promise.reject(outOfMemory);
       const owner = workerFor(hostEngine);
