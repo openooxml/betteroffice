@@ -3,6 +3,7 @@
 //! structure seeding does not keep in the stream, and an inventory of the content it leaves out.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -46,7 +47,7 @@ pub(crate) enum RelationshipTarget {
 pub(crate) struct Pin {
     pub story: String,
     pub unit: u32,
-    pub position: Option<StickyIndex>,
+    pub position: std::sync::OnceLock<Option<StickyIndex>>,
 }
 
 impl Pin {
@@ -54,7 +55,7 @@ impl Pin {
         Self {
             story: story.to_owned(),
             unit,
-            position: None,
+            position: std::sync::OnceLock::new(),
         }
     }
 
@@ -71,7 +72,7 @@ impl Pin {
         txn: &T,
         resolved: &mut HashMap<StickyIndex, Option<u32>>,
     ) -> Option<u32> {
-        let position = self.position.as_ref()?;
+        let position = self.position.get()?.as_ref()?;
         *resolved
             .entry(position.clone())
             .or_insert_with(|| position.get_offset(txn).map(|offset| offset.index))
@@ -189,22 +190,8 @@ pub(crate) struct Provenance {
 }
 
 impl Provenance {
-    /// Pins every recorded position to `doc`, which seeding just filled, each distinct one once,
-    /// and indexes the records by story.
-    pub(crate) fn pin(&mut self, doc: &EditingDoc) {
-        let txn = doc.yrs_doc().transact();
-        let mut pinned: HashMap<(String, u32), Option<StickyIndex>> = HashMap::new();
-        let pins = self.inline.iter_mut().map(|record| &mut record.pin).chain(
-            self.relocated
-                .iter_mut()
-                .map(|relocated| &mut relocated.pin),
-        );
-        for pin in pins {
-            pin.position = pinned
-                .entry((pin.story.clone(), pin.unit))
-                .or_insert_with(|| Pin::sticky(&txn, &pin.story, pin.unit))
-                .clone();
-        }
+    /// Indexes the records by story: `by_story` and `witnessed`, which the pinned reads use.
+    pub(crate) fn index(&mut self) {
         self.by_story.clear();
         for (index, record) in self.inline.iter().enumerate() {
             let entry = self.by_story.entry(record.pin.story.clone()).or_default();
@@ -225,6 +212,32 @@ impl Provenance {
                 _ => None,
             })
             .collect();
+    }
+
+    /// Pins every recorded position to `doc`, which seeding just filled, each distinct one once.
+    /// Idempotent, so a deferred seed may call it after the source is already installed.
+    pub(crate) fn pin_positions(&self, doc: &EditingDoc) {
+        let txn = doc.yrs_doc().transact();
+        let mut pinned: HashMap<(String, u32), Option<StickyIndex>> = HashMap::new();
+        let pins = self
+            .inline
+            .iter()
+            .map(|record| &record.pin)
+            .chain(self.relocated.iter().map(|relocated| &relocated.pin));
+        for pin in pins {
+            pin.position.get_or_init(|| {
+                pinned
+                    .entry((pin.story.clone(), pin.unit))
+                    .or_insert_with(|| Pin::sticky(&txn, &pin.story, pin.unit))
+                    .clone()
+            });
+        }
+    }
+
+    /// Indexes the records by story and pins every recorded position to `doc`.
+    pub(crate) fn pin(&mut self, doc: &EditingDoc) {
+        self.index();
+        self.pin_positions(doc);
     }
 }
 
@@ -338,15 +351,36 @@ const COMMENT_WRITES: &str = "structured-export-comment-writes";
 #[derive(Default)]
 pub(crate) struct CommentWrites {
     written: Arc<Mutex<HashSet<(String, Option<String>)>>>,
+    armed: Arc<AtomicBool>,
 }
 
 impl CommentWrites {
     /// Starts recording the comment writes committed to `doc` from now on.
     pub(crate) fn watch(doc: &EditingDoc) -> Self {
+        Self::watching(doc, true)
+    }
+
+    /// `watch` that ignores writes until [`Self::arm`], for a watch installed before the rest of
+    /// a deferred seed applies.
+    pub(crate) fn watch_paused(doc: &EditingDoc) -> Self {
+        Self::watching(doc, false)
+    }
+
+    /// Starts recording the writes a paused watch already observes.
+    pub(crate) fn arm(&self) {
+        self.armed.store(true, Ordering::Relaxed);
+    }
+
+    fn watching(doc: &EditingDoc, armed: bool) -> Self {
         let written: Arc<Mutex<HashSet<(String, Option<String>)>>> = Arc::default();
         let recorded = Arc::clone(&written);
+        let armed = Arc::new(AtomicBool::new(armed));
+        let recording = Arc::clone(&armed);
         if let Some(comments) = doc.yrs_doc().transact().get_map(COMMENTS) {
             comments.observe_deep_with(COMMENT_WRITES, move |txn, events| {
+                if !recording.load(Ordering::Relaxed) {
+                    return;
+                }
                 let mut written = recorded.lock().unwrap_or_else(|error| error.into_inner());
                 for event in events.iter() {
                     let Event::Map(event) = event else {
@@ -370,7 +404,7 @@ impl CommentWrites {
                 }
             });
         }
-        Self { written }
+        Self { written, armed }
     }
 
     /// Whether `key` of comment `id` was written since the source was retained.
@@ -409,7 +443,7 @@ pub(crate) struct ReadSource {
     pub provenance: Provenance,
     pub warnings: Vec<String>,
     /// This replica's stories were seeded from the package, so recorded positions are pinned.
-    pub pinned: bool,
+    pub pinned: AtomicBool,
     pub comment_writes: CommentWrites,
     /// Content-control safety by story part and [`safety_key`]; `None` when the package parts
     /// were not available to read it from.
@@ -589,7 +623,7 @@ impl ReadSource {
             numbering: Arc::new(numbering),
             provenance: Provenance::default(),
             warnings,
-            pinned: false,
+            pinned: AtomicBool::new(false),
             comment_writes: CommentWrites::default(),
             control_safety: None,
             source_controls: Vec::new(),
@@ -601,10 +635,11 @@ impl ReadSource {
         }
     }
 
-    /// Pins every recorded position to `doc`, which seeding just filled.
-    pub(crate) fn pin(&mut self, doc: &EditingDoc) {
-        self.provenance.pin(doc);
-        self.pinned = true;
+    /// Pins every recorded position to `doc`, which seeding just filled. `provenance.index`
+    /// must already have run, which seeding does when it builds the source.
+    pub(crate) fn pin(&self, doc: &EditingDoc) {
+        self.provenance.pin_positions(doc);
+        self.pinned.store(true, Ordering::Relaxed);
     }
 
     pub(crate) fn raw_block_anchor(&self, story: &str, index: usize) -> Option<Anchor> {

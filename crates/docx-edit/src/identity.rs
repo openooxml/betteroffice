@@ -1571,6 +1571,7 @@ impl EditingDoc {
     /// claims are left for an explicit persistence. Writes nothing when
     /// nothing collides. Returns the `(previous, new)` session keys.
     pub(crate) fn repair_paragraph_identities(&self) -> Vec<(ParagraphId, ParagraphId)> {
+        self.materialize_pending_seed();
         let (_, plan) = self.plan_repairs(&self.yrs_doc().transact(), false, &|_| false);
         if plan.is_empty() {
             return Vec::new();
@@ -1771,6 +1772,7 @@ impl EditingDoc {
     /// document unchanged. The change is replicated, system-origin and
     /// outside undo, and later saves keep it.
     pub fn persist_paragraph_ids(&self) -> Result<PersistedParagraphIds, ParagraphIdRefusal> {
+        self.materialize_pending_seed();
         let source = self.source_index();
         let mut txn = self.transact_for(&EditCtx::system(""));
         let (scan, plan) = self.plan_repairs(&txn, true, &|_| false);
@@ -1917,6 +1919,7 @@ impl EditingDoc {
     /// The rest are marked published, so they keep their IDs against unsaved
     /// claims from other replicas. Writes nothing when nothing changes.
     pub fn record_saved_paragraph_ids(&self, saved: &[(String, String)]) -> Vec<(String, String)> {
+        self.materialize_pending_seed();
         let source = self.source_index();
         let (stale, unpublished) = {
             let txn = self.yrs_doc().transact();
@@ -1988,6 +1991,7 @@ impl EditingDoc {
     /// The Word paragraph ID each paragraph of `story_id` saves with, in
     /// document order.
     pub fn story_paragraph_ids(&self, story_id: &str) -> EditResult<Vec<Option<String>>> {
+        self.materialize_pending_seed();
         let source = self.source_index();
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, story_id)?;
@@ -2003,6 +2007,7 @@ impl EditingDoc {
 
     /// Every paragraph's session key, Word paragraph ID and anchors. Reads only.
     pub fn paragraph_identities(&self) -> ParagraphIdentities {
+        self.materialize_pending_seed();
         let source = self.source_index();
         let txn = self.yrs_doc().transact();
         let claims = claims(&txn);

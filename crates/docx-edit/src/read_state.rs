@@ -206,6 +206,7 @@ fn collect_table_cell_stories<T: ReadTxn>(
 impl EditingDoc {
     /// Aggregates text-unit marks and start-paragraph state over a story range.
     pub fn selection_context(&self, range: &StoryRange) -> OpResult<SelectionContextInfo> {
+        self.materialize_pending_seed();
         if range.end < range.start {
             return Err(OpError::InvalidRange {
                 start: range.start,
@@ -388,6 +389,7 @@ impl EditingDoc {
     /// Enumerates every tracked-change revision in the document, across all
     /// stories in sorted story-id order (see [`RevisionInfo`]).
     pub fn list_revisions(&self) -> OpResult<Vec<RevisionInfo>> {
+        self.materialize_pending_seed();
         let story_ids: Vec<String> = {
             let txn = self.yrs_doc().transact();
             let Some(stories) = txn.get_map(crate::STORIES) else {

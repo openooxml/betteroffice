@@ -2529,6 +2529,7 @@ impl EditingDoc {
         capture: bool,
         staging_limit: usize,
     ) -> Result<(Plan, Option<Base>), EditRefusal> {
+        self.materialize_pending_seed();
         let nonce = self.version_nonce.load(Ordering::Relaxed);
         let epoch = self.epoch.load(Ordering::Relaxed);
         let version = version_token(nonce, epoch);
@@ -2698,6 +2699,7 @@ impl EditingDoc {
         history: &UndoSession,
         staging_limit: usize,
     ) -> EditResult<Result<EditApplication, EditRefusal>> {
+        self.materialize_pending_seed();
         if !history.belongs_to(self) {
             return Err(EditError::InvalidUpdate(
                 "the undo history belongs to another document".to_owned(),
@@ -2818,6 +2820,7 @@ impl EditingDoc {
         reject: &[crate::RevisionId],
         history: &UndoSession,
     ) -> crate::OpResult<Vec<crate::RevisionId>> {
+        self.materialize_pending_seed();
         if !history.belongs_to(self) {
             return Err(EditError::InvalidUpdate(
                 "the undo history belongs to another document".to_owned(),
@@ -2906,6 +2909,7 @@ impl EditingDoc {
     }
 
     fn check_commit(&self, plan: &Plan) -> Result<(), EditRefusal> {
+        self.materialize_pending_seed();
         let txn = self.yrs_doc().transact();
         let current = self.version();
         if self.version_nonce.load(Ordering::Relaxed) != plan.nonce
