@@ -288,6 +288,12 @@ function followedFrameEpoch(frame: RetainedFrame | null): { frameEpoch?: number 
   return frame?.frameEpoch ? { frameEpoch: frame.frameEpoch } : {};
 }
 
+function rejectedWorkerLayout(error: unknown): Promise<never> {
+  const pending = Promise.reject<never>(error);
+  void pending.catch(() => {});
+  return pending;
+}
+
 // rebuilds the display list through the rust wasm engine after every layout
 // pass. dumb replay glue: the `{ measured, options, layout }` triple (plus the
 // kernel-recorded `headersFooters` payload when the document has HF parts) is
@@ -1367,7 +1373,7 @@ export function useRustDisplayList(
         return null;
       }
       const outOfMemory = outOfMemoryRef.current.get(hostEngine);
-      if (outOfMemory) return Promise.reject(outOfMemory);
+      if (outOfMemory) return rejectedWorkerLayout(outOfMemory);
       if (
         workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine) &&
         workerRef.current?.engine !== hostEngine &&
@@ -1447,7 +1453,7 @@ export function useRustDisplayList(
         }
         // A session whose replacement worker ran out of memory too lays out nowhere.
         const outOfMemory = cause instanceof ResidentWorkerOutOfMemoryError;
-        if (outOfMemory && outOfMemoryRef.current.get(hostEngine)) return Promise.reject(cause);
+        if (outOfMemory && outOfMemoryRef.current.get(hostEngine)) return rejectedWorkerLayout(cause);
         // A pass of a session no worker serves any more starts no worker.
         if (!current) return null;
         if (outOfMemory) {
@@ -1455,7 +1461,7 @@ export function useRustDisplayList(
           // drops it, and a newer worker request recovers the worker it asks.
           if (hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision) return null;
           const outcome = replaceOutOfMemoryWorker(hostEngine, owner, cause);
-          if (outcome === 'failed') return Promise.reject(cause);
+          if (outcome === 'failed') return rejectedWorkerLayout(cause);
           if (outcome === 'stale') return null;
           return layoutInWorkerRef.current?.(hostEngine, request) ?? null;
         }

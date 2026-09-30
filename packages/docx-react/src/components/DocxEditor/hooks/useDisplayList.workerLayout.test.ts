@@ -566,6 +566,8 @@ test('a rejected completion after reload preserves the new session frame, querie
       await attaching;
     });
     await waitFor(() => expect(deferred.reject).not.toBeNull());
+    const previousFrame = result.current.frame;
+    const previousQueries = result.current.queries;
     act(() => {
       result.current.resetSettled();
       opened.destroy();
@@ -584,7 +586,12 @@ test('a rejected completion after reload preserves the new session frame, querie
     });
     const computation = (await replacement)!;
     await act(async () => { rerender({ layout: computation.layout, source: next }); });
-    await waitFor(() => expect(result.current.queries?.isReady()).toBe(true));
+    await waitFor(() => {
+      expect(result.current.presentedEngine).toBe(next);
+      expect(result.current.frame).not.toBe(previousFrame);
+      expect(result.current.queries).not.toBe(previousQueries);
+      expect(result.current.queries?.isReady()).toBe(true);
+    });
     const currentFrame = result.current.frame;
     const currentQueries = result.current.queries;
     expect(result.current.workerSurfacesActive).toBe(true);

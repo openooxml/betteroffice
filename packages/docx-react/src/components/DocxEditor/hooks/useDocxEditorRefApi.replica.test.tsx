@@ -273,10 +273,18 @@ test('a synchronous write during an in-flight handoff is not overwritten by its 
 test('replacing the document while a ref waits rejects the pending call', async () => {
   const { api, replica, release, pagedEditorRef } = await pendingReplica();
   const read = api.readParagraphs({ view: 'accepted' });
-  const rejected = expect(read).rejects.toThrow('document changed');
+  const rejected = read.then(
+    () => { throw new Error('The pending read should reject'); },
+    (error: unknown) => error
+  );
   replica.start();
   pagedEditorRef.current = null;
-  await act(async () => { release(); await rejected; });
+  await act(async () => {
+    release();
+    const error = await rejected;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({ message: expect.stringContaining('document changed') });
+  });
 });
 
 test('independent APIs do not start a replica open', async () => {
