@@ -13,6 +13,7 @@ import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import { runAfterFrames } from '../internals/scrollUtils';
+import { scrollViewport } from '../internals/viewportBand';
 
 export interface UsePagedScrollApiOptions {
   pagesContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -101,11 +102,15 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const pageSize = queries.pageSize(rect.pageIndex);
       if (!pageRect || !pageSize) return false;
       const scroller = getScrollContainer() ?? findVerticalScrollParentOrRoot(host);
-      const scrollerRect = scroller.getBoundingClientRect();
+      const viewport = scrollViewport(scroller);
       const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
       const clientY = pageRect.top + (rect.y + rect.height / 2) * scaleY;
       scroller.scrollTo({
-        top: scroller.scrollTop + clientY - scrollerRect.top - scroller.clientHeight / 2,
+        top:
+          scroller.scrollTop +
+          clientY / viewport.zoom -
+          viewport.top / viewport.zoom -
+          viewport.height / 2,
         behavior: smooth ? 'smooth' : 'auto',
       });
       return true;

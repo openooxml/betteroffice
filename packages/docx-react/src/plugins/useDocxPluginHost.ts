@@ -15,6 +15,7 @@ import {
   type Translations,
 } from '@betteroffice/docx-i18n';
 import {
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -334,7 +335,8 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         pageRect.top -
         overlayTarget.getBoundingClientRect().top +
         rect.y * (pageRect.height / pageSize.height);
-      return { position: resolved.position, y: y / (zoom > 0 ? zoom : 1) };
+      const scale = (zoom > 0 ? zoom : 1) * effectiveZoom(overlayTarget);
+      return { position: resolved.position, y: y / scale };
     },
     [host]
   );
