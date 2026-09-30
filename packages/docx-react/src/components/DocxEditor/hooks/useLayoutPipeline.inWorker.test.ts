@@ -86,7 +86,7 @@ async function opened() {
             })
           : null,
     }),
-    { initialProps: { session } }
+    { initialProps: { session } as HookProps }
   );
   const frame = () =>
     act(async () => {
