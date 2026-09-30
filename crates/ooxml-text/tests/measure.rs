@@ -3027,6 +3027,35 @@ fn east_asia_hint_moves_only_ambiguous_characters() {
     );
 }
 
+/// A script slot whose family has no chain, because its text arrived after
+/// the fonts were collected, measures with the run's own family.
+#[test]
+fn script_slot_without_a_chain_measures_with_the_run_family() {
+    let mut store = FontStore::new();
+    store.register(FIXTURE.to_vec()).expect("base registers");
+    let measure = |text: &str, slots: Value, complex_script: bool| {
+        let input = json!({
+            "block": { "kind": "paragraph", "runs": [{
+                "kind": "text", "text": text, "fontSlots": slots,
+                "complexScript": complex_script, "bold": true, "boldCs": false
+            }] },
+            "maxWidth": 500.0,
+            "fontChains": { "base|0|0": [0], "base|1|0": [0] },
+            "defaults": { "fontSize": 12.0, "fontFamily": "base" }
+        });
+        measure_paragraph_json(&store, &input.to_string()).expect("measures")
+    };
+    let named = json!({ "hAnsi": "base", "eastAsia": "SimSun", "cs": "Traditional Arabic" });
+    let plain = json!({ "hAnsi": "base" });
+    for (text, complex_script) in [("日", false), ("א", false), ("A", true)] {
+        assert_eq!(
+            measure(text, named.clone(), complex_script),
+            measure(text, plain.clone(), complex_script),
+            "{text:?}"
+        );
+    }
+}
+
 /// A chain longer than a run keeps resolved is rebuilt per character; it must
 /// still measure exactly as the short chain it resolves to.
 #[test]
