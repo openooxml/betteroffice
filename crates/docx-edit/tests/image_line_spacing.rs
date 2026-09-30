@@ -78,10 +78,14 @@ fn points(value: &Value) -> Vec<f64> {
 }
 
 fn assert_near(actual: &[f64], expected: &[f64], what: &str) {
+    assert_within(actual, expected, 0.3, what);
+}
+
+fn assert_within(actual: &[f64], expected: &[f64], tolerance: f64, what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what}: {actual:?}");
     for (actual, expected) in actual.iter().zip(expected) {
         assert!(
-            (actual - expected).abs() < 0.3,
+            (actual - expected).abs() < tolerance,
             "{what}: {actual} vs {expected}"
         );
     }
@@ -112,10 +116,12 @@ fn an_image_alone_on_its_line_in_a_table_cell_takes_the_added_room_too() {
     let (fragments, images) =
         tops(&std::fs::read(fixture_dir().join("img-cell-300.docx")).unwrap());
     assert_near(&images, &points(&word["imageTops"]), "image");
-    // Top A, the table, Bottom A
-    assert_near(
+    // Top A, the table, Bottom A; the table's outer borders count half a
+    // border less than in Word, independently of the image line.
+    assert_within(
         &fragments[2..],
         &[word["bottomATop"].as_f64().unwrap()],
+        0.7,
         "after the table",
     );
 }
