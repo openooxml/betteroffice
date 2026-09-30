@@ -67,7 +67,7 @@ function harness(laidOut = () => Promise.resolve()) {
     }),
     documentRead: mock(async (read: { kind: string }) => {
       events.push(read.kind);
-      return { version: 'worker-1', value: { version: 'worker-1', paragraphs: [] } };
+      return { version: 'worker-1', value: { ok: true, version: 'worker-1', view: 'accepted', paragraphs: [] } };
     }),
     handOver: mock(async () => {
       events.push('handOver');
@@ -143,7 +143,7 @@ test('routed reads wait for layout and the initialization snapshot before postin
   expect(h.events).toEqual(['snapshot']);
   expect(h.worker.documentRead).not.toHaveBeenCalled();
   snapshot.resolve(reply());
-  expect(await read).toEqual({ version: 'worker-1', paragraphs: [] });
+  expect(await read).toEqual({ ok: true, version: 'worker-1', view: 'accepted', paragraphs: [] });
   expect(h.events).toEqual(['snapshot', 'readParagraphs']);
   expect(h.worker.proposal).toHaveBeenCalledTimes(1);
   expect(h.authority.initialized).toBe(true);
@@ -228,6 +228,59 @@ test('registry changes hold worker state without relayout and setStates never ma
   await call;
   expect(h.authority.holdsWorkerState()).toBe(true);
   expect(h.relayout).not.toHaveBeenCalled();
+});
+
+test('a failed initialized authority rejects running and queued calls and hand-over with the same failure', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  h.worker.proposal.mockResolvedValue(reply('worker-2', ['body']));
+  await h.authority.propose(request, unusedMain);
+  expect(h.authority.holdsWorkerState()).toBe(true);
+  const pending = deferred<never>();
+  const posted = deferred<void>();
+  h.worker.documentRead.mockImplementation(async () => {
+    posted.resolve();
+    return pending.promise;
+  });
+  const failure = new Error('worker lost');
+  const read = h.authority.paragraphIdentities(unusedMain);
+  const rejectedRead = expect(read).rejects.toBe(failure);
+  await posted.promise;
+  const snapshot = h.authority.getProposals(unusedMain);
+  const rejectedSnapshot = expect(snapshot).rejects.toBe(failure);
+  const handover = beginWorkerProposalHandover(h.session)!;
+  const rejectedHandover = expect(handover).rejects.toBe(failure);
+  failWorkerProposalAuthority(h.session, failure);
+  await Promise.all([rejectedRead, rejectedSnapshot, rejectedHandover]);
+  failWorkerProposalAuthority(h.session, new Error('later failure'));
+  await expect(h.authority.initialize()).rejects.toBe(failure);
+  await expect(h.authority.getProposals(unusedMain)).rejects.toBe(failure);
+  await expect(beginWorkerProposalHandover(h.session)!).rejects.toBe(failure);
+  expect(h.worker.handOver).not.toHaveBeenCalled();
+  expect(h.worker.proposal).toHaveBeenCalledTimes(2);
+});
+
+test('a completed hand-over releases exclusive worker state and keeps routing reads to main', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  h.worker.proposal.mockResolvedValue(reply('worker-2', ['body']));
+  await h.authority.propose(request, unusedMain);
+  const handover = await beginWorkerProposalHandover(h.session)!;
+  expect(h.authority.holdsWorkerState()).toBe(true);
+  deferWorkerOpenReplica(h.session, async () => () => {
+    h.mainVersion('main-2');
+    handover.complete();
+  }, () => { throw new Error('unexpected fallback'); }, () => {});
+  await requestWorkerOpenReplica(h.session);
+  expect(h.authority.holdsWorkerState()).toBe(false);
+  expect(workerProposalAuthority(h.session)).toBeNull();
+  const main = mock(async () => h.session.getProposals());
+  expect((await h.authority.getProposals(main)).version).toBe('main-2');
+  handover.complete();
+  expect(h.authority.holdsWorkerState()).toBe(false);
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(h.worker.proposal).toHaveBeenCalledTimes(2);
+  expect(h.worker.handOver).toHaveBeenCalledTimes(1);
 });
 
 test('propose and withdraw relayout only when stories change', async () => {

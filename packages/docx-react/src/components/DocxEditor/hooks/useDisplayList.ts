@@ -94,13 +94,6 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
 const holdsWorkerProposals = (session: YrsSession): boolean =>
   registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true;
 
-const ensureRebuildableReplica = (session: YrsSession): void => {
-  if (holdsWorkerProposals(session)) {
-    throw new Error('The resident worker holds proposals the main thread cannot rebuild');
-  }
-  ensureWorkerOpenReplica(session);
-};
-
 export type OpenInWorker = (
   session: YrsSession,
   bytes: Uint8Array,
@@ -478,38 +471,6 @@ export function useRustDisplayList(
   const spawnedWorkerEnginesRef = useRef(new WeakSet<YrsSession>());
   // Sessions whose worker and page surfaces a successor took over: they never take one back.
   const handedOverEnginesRef = useRef(new WeakSet<YrsSession>());
-  // The worker for `hostEngine`: its own, the one of the session it
-  // takes over from, a spare, or a new one.
-  const workerFor = useCallback(
-    (hostEngine: YrsSession): NonNullable<typeof workerRef.current> => {
-      const current = workerRef.current;
-      if (current?.engine === hostEngine) return current;
-      if (holdsWorkerProposals(hostEngine)) {
-        throw new Error('The resident worker holding this document is gone');
-      }
-      const load = sessionLoad(hostEngine);
-      const replacement = spawnedWorkerEnginesRef.current.has(hostEngine);
-      spawnedWorkerEnginesRef.current.add(hostEngine);
-      if (current && handoffFromRef?.current === current.engine) {
-        handedOverEnginesRef.current.add(current.engine);
-        current.client.rebootstrap();
-        workerRef.current = { engine: hostEngine, client: current.client, load };
-        return workerRef.current;
-      }
-      current?.client.destroy();
-      // A successor that fails to construct leaves no destroyed client current.
-      workerRef.current = null;
-      const spare = replacement ? null : takePreloadedResidentEngineWorker();
-      workerRef.current = {
-        engine: hostEngine,
-        client: spare ?? new ResidentEngineWorkerClient(),
-        load,
-      };
-      workerRef.current.client.setRetainBuiltPages(retainBuiltPagesRef.current);
-      return workerRef.current;
-    },
-    [handoffFromRef, sessionLoad]
-  );
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   // No worker starts once the hook is gone, whatever failure arrives late.
   const unmountedRef = useRef(false);
@@ -524,6 +485,7 @@ export function useRustDisplayList(
   // The engines whose worker ran out of memory, each with the failure once its
   // replacement did too. Weak, so a replaced document's session is not kept.
   const outOfMemoryRef = useRef(new WeakMap<YrsSession, ResidentWorkerOutOfMemoryError | null>());
+  const workerFailureRef = useRef(new WeakMap<YrsSession, Error>());
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
   const displayWindowListenersRef = useRef(new Set<() => void>());
   const displayWindow = useMemo<DisplayWindow>(
@@ -670,12 +632,99 @@ export function useRustDisplayList(
   const residentEngineRef = useRef(residentEngine);
   residentEngineRef.current = residentEngine;
 
+  const failWorkerDocument = useCallback(
+    (
+      hostEngine: YrsSession,
+      cause: unknown,
+      message = '[CanvasRenderer] Resident worker holding proposals failed'
+    ): Error => {
+      const previous = workerFailureRef.current.get(hostEngine);
+      if (previous) return previous;
+      const failure = cause instanceof Error
+        ? cause
+        : new Error(`Resident engine worker failed: ${String(cause)}`);
+      if (unmountedRef.current || sessionLoad(hostEngine) !== documentLoadsRef.current) return failure;
+      workerFailureRef.current.set(hostEngine, failure);
+      failWorkerProposalAuthority(hostEngine, failure);
+      failWorkerOpenReplica(hostEngine, failure);
+      workerOpenSourcesRef.current.delete(hostEngine);
+      if (workerRef.current?.engine === hostEngine) {
+        workerRef.current.client.destroy();
+        workerRef.current = null;
+      }
+      setWorkerSurfacesActive(false);
+      setWorkerPresentationActive(false);
+      console.error(message, failure);
+      queryEpochGate.clear();
+      setError(failure);
+      setErrorEngine(hostEngine);
+      setLoading(false);
+      // A display-only preview's failure fails no wait: the full session replaces it.
+      if (hostEngine.isDisplayOnly?.() !== true) markSettled(null, failure, true);
+      return failure;
+    },
+    [markSettled, queryEpochGate, sessionLoad, setWorkerPresentationActive]
+  );
+
+  const ensureRebuildableReplica = useCallback(
+    (hostEngine: YrsSession): void => {
+      const failure = workerFailureRef.current.get(hostEngine);
+      if (failure) throw failure;
+      if (holdsWorkerProposals(hostEngine)) {
+        throw failWorkerDocument(
+          hostEngine, new Error('The resident worker holds proposals the main thread cannot rebuild')
+        );
+      }
+      ensureWorkerOpenReplica(hostEngine);
+    },
+    [failWorkerDocument]
+  );
+
+  // The worker for `hostEngine`: its own, the one of the session it
+  // takes over from, a spare, or a new one.
+  const workerFor = useCallback(
+    (hostEngine: YrsSession): NonNullable<typeof workerRef.current> => {
+      const current = workerRef.current;
+      if (current?.engine === hostEngine) return current;
+      const failure = workerFailureRef.current.get(hostEngine);
+      if (failure) throw failure;
+      if (holdsWorkerProposals(hostEngine)) {
+        throw failWorkerDocument(
+          hostEngine, new Error('The resident worker holding this document is gone')
+        );
+      }
+      const load = sessionLoad(hostEngine);
+      const replacement = spawnedWorkerEnginesRef.current.has(hostEngine);
+      spawnedWorkerEnginesRef.current.add(hostEngine);
+      if (current && handoffFromRef?.current === current.engine) {
+        handedOverEnginesRef.current.add(current.engine);
+        current.client.rebootstrap();
+        workerRef.current = { engine: hostEngine, client: current.client, load };
+        return workerRef.current;
+      }
+      current?.client.destroy();
+      // A successor that fails to construct leaves no destroyed client current.
+      workerRef.current = null;
+      const spare = replacement ? null : takePreloadedResidentEngineWorker();
+      workerRef.current = {
+        engine: hostEngine,
+        client: spare ?? new ResidentEngineWorkerClient(),
+        load,
+      };
+      workerRef.current.client.setRetainBuiltPages(retainBuiltPagesRef.current);
+      return workerRef.current;
+    },
+    [failWorkerDocument, handoffFromRef, sessionLoad]
+  );
+
   // Rendering moves to the host engine for good: its frames start from a fresh
   // base, numbered after the worker's last frame.
   const adoptHostEngine = useCallback(
     (hostEngine: YrsSession): void => {
       if (holdsWorkerProposals(hostEngine)) {
-        throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+        throw failWorkerDocument(
+          hostEngine, new Error('The resident worker holds proposals the main thread cannot rebuild')
+        );
       }
       if (workerFallbackEngineRef.current === hostEngine) return;
       hostEngine.resetFrameBase();
@@ -687,7 +736,7 @@ export function useRustDisplayList(
       endOpenLines(false);
       workerFallbackEngineRef.current = hostEngine;
     },
-    [endOpenLines, queryEpochGate]
+    [endOpenLines, failWorkerDocument, queryEpochGate]
   );
 
   useEffect(() => {
@@ -823,29 +872,16 @@ export function useRustDisplayList(
         return 'retry';
       }
       outOfMemoryRef.current.set(hostEngine, failure);
-      if (
-        workerOpenEnabledRef.current && workerOpenSourcesRef.current.has(hostEngine) &&
-        !holdsWorkerProposals(hostEngine)
-      ) {
-        failWorkerProposalAuthority(hostEngine, failure);
-        failWorkerOpenReplica(hostEngine, failure);
-        workerOpenSourcesRef.current.delete(hostEngine);
-      }
-      console.error(
+      failWorkerDocument(
+        hostEngine,
+        failure,
         previous
           ? '[CanvasRenderer] Resident engine worker ran out of memory again'
-          : '[CanvasRenderer] Resident engine worker holding proposals ran out of memory',
-        failure
+          : '[CanvasRenderer] Resident engine worker holding proposals ran out of memory'
       );
-      queryEpochGate.clear();
-      setError(failure);
-      setErrorEngine(hostEngine);
-      setLoading(false);
-      // A display-only preview's failure fails no wait: the full session replaces it.
-      if (hostEngine.isDisplayOnly?.() !== true) markSettled(null, failure, true);
       return 'failed';
     },
-    [markSettled, queryEpochGate, setWorkerPresentationActive]
+    [failWorkerDocument, setWorkerPresentationActive]
   );
 
   const applyResidentInput = useCallback(
@@ -1146,9 +1182,13 @@ export function useRustDisplayList(
   // Stop using the worker for `hostEngine`: its frames and queries go, and
   // every later layout and frame runs on the main thread.
   const dropWorker = useCallback(
-    (hostEngine: YrsSession): void => {
+    (hostEngine: YrsSession, cause?: unknown): boolean => {
+      if (workerFailureRef.current.has(hostEngine)) return false;
       if (holdsWorkerProposals(hostEngine)) {
-        throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+        failWorkerDocument(
+          hostEngine, cause ?? new Error('The resident worker holds proposals the main thread cannot rebuild')
+        );
+        return false;
       }
       if (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine)) {
         ensureRebuildableReplica(hostEngine);
@@ -1160,8 +1200,9 @@ export function useRustDisplayList(
       }
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
+      return true;
     },
-    [adoptHostEngine, setWorkerPresentationActive]
+    [adoptHostEngine, ensureRebuildableReplica, failWorkerDocument, setWorkerPresentationActive]
   );
 
   const requestOpenedWorker = useCallback(
@@ -1174,13 +1215,12 @@ export function useRustDisplayList(
       const load = sessionLoad(hostEngine);
       for (;;) {
         const outOfMemory = outOfMemoryRef.current.get(hostEngine);
+        const failure = workerFailureRef.current.get(hostEngine);
+        if (failure) throw failure;
         if (holdsWorkerProposals(hostEngine) && workerRef.current?.engine !== hostEngine) {
-          if (outOfMemory) {
-            throw new ResidentWorkerOutOfMemoryError(
-              'The resident worker holding this document is gone', outOfMemory.memory
-            );
-          }
-          throw new Error('The resident worker holding this document is gone');
+          throw failWorkerDocument(
+            hostEngine, outOfMemory ?? new Error('The resident worker holding this document is gone')
+          );
         }
         if (outOfMemory) throw outOfMemory;
         if (
@@ -1236,7 +1276,7 @@ export function useRustDisplayList(
         }
       }
     },
-    [isCurrentWorker, replaceOutOfMemoryWorker, sessionLoad, workerFor]
+    [failWorkerDocument, isCurrentWorker, replaceOutOfMemoryWorker, sessionLoad, workerFor]
   );
 
   const openInWorker = useCallback<OpenInWorker>(
@@ -1272,7 +1312,7 @@ export function useRustDisplayList(
             if (!owner || !isCurrentWorker(hostEngine, owner)) {
               throw new SupersededPreviewError();
             }
-            dropWorker(hostEngine);
+            if (!dropWorker(hostEngine)) throw workerFailureRef.current.get(hostEngine);
             needsLayout = true;
           },
           destroy: () => {
@@ -1338,11 +1378,13 @@ export function useRustDisplayList(
             if (workerFallbackEngineRef.current === hostEngine) return null;
             throw error;
           }
-          if (owner.current && isCurrentWorker(hostEngine, owner.current)) dropWorker(hostEngine);
+          if (owner.current && isCurrentWorker(hostEngine, owner.current) && !dropWorker(hostEngine, error)) {
+            throw workerFailureRef.current.get(hostEngine);
+          }
           return null;
         });
     },
-    [dropWorker, isCurrentWorker, requestOpenedWorker]
+    [dropWorker, ensureRebuildableReplica, isCurrentWorker, requestOpenedWorker]
   );
 
   const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
@@ -1435,11 +1477,11 @@ export function useRustDisplayList(
           }
           return;
         }
+        if (!dropWorker(worker.engine, cause)) return;
         console.error(
           '[CanvasRenderer] Building display pages failed; falling back to the main-thread engine',
           cause
         );
-        dropWorker(worker.engine);
         requestLayoutRef.current?.();
       };
       void worker.client.buildPages(batch, frame.frameEpoch, paintCaret).then(
@@ -1594,7 +1636,9 @@ export function useRustDisplayList(
           .catch((error: unknown) => {
             if (error instanceof ResidentWorkerOutOfMemoryError) throw error;
             if (error instanceof SupersededPreviewError) return null;
-            if (owner.current && isCurrentWorker(hostEngine, owner.current)) dropWorker(hostEngine);
+            if (owner.current && isCurrentWorker(hostEngine, owner.current) && !dropWorker(hostEngine, error)) {
+              throw workerFailureRef.current.get(hostEngine);
+            }
             return null;
           });
       }
@@ -1673,11 +1717,13 @@ export function useRustDisplayList(
           return layoutInWorkerRef.current?.(hostEngine, request) ?? null;
         }
         if (!isCurrentWorker(hostEngine, owner)) return null;
+        if (!dropWorker(hostEngine, cause)) {
+          return rejectedWorkerLayout(workerFailureRef.current.get(hostEngine)!);
+        }
         console.error(
           '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
           cause
         );
-        dropWorker(hostEngine);
         return null;
       };
       // `base` is the frame the reply's frame applies to; without one the
@@ -1743,6 +1789,7 @@ export function useRustDisplayList(
     [
       canLayoutInWorker,
       dropWorker,
+      ensureRebuildableReplica,
       frameBase,
       frameExtrasInputs,
       isCurrentWorker,
@@ -1905,7 +1952,9 @@ export function useRustDisplayList(
     const probe = workerEligible ? residentEngine.residentWorkerProbe() : null;
     const buildOnMainThread = () => {
       if (residentEngine && holdsWorkerProposals(residentEngine)) {
-        return Promise.reject(new Error('The resident worker holds proposals the main thread cannot rebuild'));
+        return Promise.reject(failWorkerDocument(
+          residentEngine, new Error('The resident worker holds proposals the main thread cannot rebuild')
+        ));
       }
       if (residentEngine?.residentLayoutInWorker?.()) {
         return Promise.reject(new MainThreadLayoutPendingError());
@@ -2043,11 +2092,13 @@ export function useRustDisplayList(
           cause instanceof Error
             ? cause
             : new Error(`Resident engine worker failed: ${String(cause)}`);
+        if (!dropWorker(hostEngine, nextError)) {
+          return Promise.reject(workerFailureRef.current.get(hostEngine));
+        }
         console.error(
           '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
           nextError
         );
-        dropWorker(hostEngine);
         return buildOnMainThread();
       };
       const requestWorkerFrame = (): Promise<BuiltDisplay> => {
@@ -2272,6 +2323,8 @@ export function useRustDisplayList(
       });
   }, [
     adoptHostEngine,
+    ensureRebuildableReplica,
+    failWorkerDocument,
     layout,
     sessionLayoutRetry,
     overrides,
