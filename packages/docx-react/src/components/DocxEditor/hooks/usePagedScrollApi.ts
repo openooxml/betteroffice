@@ -58,6 +58,8 @@ interface PendingRefine {
   pageIndex: number;
   until: number;
   stop: AbortController;
+  /** The document version `position` belongs to, when a reveal set it. */
+  version?: string;
 }
 
 function isUnbuiltPage(queries: DisplayListQueries, pageIndex: number): boolean {
@@ -144,6 +146,11 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   useEffect(() => {
     const pending = pendingRefineRef.current;
     if (!pending || !displayListQueries) return;
+    // an edit moved the positions: the old one now names other text
+    if (pending.version !== undefined && pending.version !== yrsSession?.version()) {
+      clearPendingRefine();
+      return;
+    }
     const rect =
       performance.now() <= pending.until ? displayListQueries.anchorRect(pending.position) : null;
     if (!rect) {
@@ -157,7 +164,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       clearPendingRefine();
     }
     scrollRectIntoView(rect, false);
-  }, [clearPendingRefine, displayListQueries, scrollRectIntoView]);
+  }, [clearPendingRefine, displayListQueries, scrollRectIntoView, yrsSession]);
 
   const scrollToPositionImpl = useCallback(
     (pmPos: number, forParaIdScroll = false) => {
@@ -184,6 +191,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       scrollAbortRef.current = new AbortController();
       const scrolled = scrollAnchorIntoView(displayListQueries, rect, position, true);
       const pending = pendingRefineRef.current;
+      if (pending) pending.version = yrsSession?.version();
       if (pending && signal) {
         const stop = () => {
           if (pendingRefineRef.current === pending) clearPendingRefine();
@@ -193,7 +201,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       }
       return scrolled ? 'scrolled' : 'layout-unavailable';
     },
-    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView]
+    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView, yrsSession]
   );
 
   const pendingPageRef = useRef<{

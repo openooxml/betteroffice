@@ -121,6 +121,14 @@ function firstInView(
     first = Math.min(first, ...matchesInRange(matches, order, from, to).slice(0, 1));
   }
   if (Number.isFinite(first)) return first;
+  // the next painted pages, until one holds a match
+  const pages = queries.displayList.pages.length;
+  for (let index = pageIndex + 1; index < Math.min(pages, pageIndex + 32); index += 1) {
+    for (const { from, to } of pagePositionIntervals(queries.displayList, { start: index, end: index })) {
+      first = Math.min(first, ...matchesInRange(matches, order, from, to).slice(0, 1));
+    }
+    if (Number.isFinite(first)) return first;
+  }
   let low = 0;
   let high = matches.length;
   while (low < high) {
@@ -299,9 +307,13 @@ export function useHostSearch({
       const normalized = { caseSensitive: options.caseSensitive === true };
       const generation = (generationRef.current += 1);
       const empty = { query, options: normalized, total: 0, current: -1 };
-      const editor = pagedEditorRef.current;
-      if (editor?.hasPendingInput()) await editor.flushPendingInput();
+      const pending = pagedEditorRef.current;
+      if (pending?.hasPendingInput()) {
+        // a document replaced mid-flush leaves nothing to search in; the checks below see that
+        await pending.flushPendingInput().catch(() => undefined);
+      }
       if (generation !== generationRef.current) return stateOf(runRef.current) ?? empty;
+      const editor = pagedEditorRef.current;
       const session = editor?.getYrsSession();
       stopRevealing();
       if (!editor || !session || query === '') {
