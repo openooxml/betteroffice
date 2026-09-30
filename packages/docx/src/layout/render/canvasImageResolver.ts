@@ -49,11 +49,15 @@ export function createCanvasImageResolver(
 ): ImageResolver {
   const cache = new Map<string, Promise<CanvasImageSource | null>>();
   const { media, mediaScope } = options;
+  let scope = mediaScope?.();
   return (relId: string) => {
     const token = media && MEDIA_TOKEN.test(relId);
     if (!token && !relId.startsWith('blob:') && !relId.startsWith('data:')) return null;
-    const key = token ? `${mediaScope?.() ?? 0} ${relId}` : relId;
-    let pending = cache.get(key);
+    if (token && mediaScope && mediaScope() !== scope) {
+      scope = mediaScope();
+      cache.clear();
+    }
+    let pending = cache.get(relId);
     if (!pending) {
       pending = new Promise<CanvasImageSource | null>((resolve) => {
         let url = relId;
@@ -76,7 +80,7 @@ export function createCanvasImageResolver(
         img.onerror = () => settle(null);
         img.src = url;
       });
-      cache.set(key, pending);
+      cache.set(relId, pending);
     }
     return pending;
   };

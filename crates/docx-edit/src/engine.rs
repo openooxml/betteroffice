@@ -47,6 +47,8 @@ use crate::structured::{
 struct LoweredStory {
     doc_epoch: u64,
     env: RenderEnv,
+    /// The document's media sources the lowering read.
+    media: crate::media::MediaSources,
     /// Shared so a reader can hold the lowering it asked for without the cache
     /// borrow, and without copying the story.
     blocks: Rc<Vec<LayoutBlock>>,
@@ -1312,7 +1314,11 @@ impl EngineSession {
             .borrow()
             .stories
             .get(story)
-            .is_some_and(|cached| cached.doc_epoch == epoch && cached.env == *env)
+            .is_some_and(|cached| {
+                cached.doc_epoch == epoch
+                    && cached.env == *env
+                    && cached.media == self.doc.media_sources()
+            })
     }
 
     fn lower_story_into_cache(
@@ -1329,6 +1335,7 @@ impl EngineSession {
             LoweredStory {
                 doc_epoch: epoch,
                 env: env.clone(),
+                media: self.doc.media_sources(),
                 blocks: Rc::new(blocks),
                 map: Rc::new(map),
                 serialized_blocks: None,
@@ -6436,7 +6443,7 @@ mod tests {
                 "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
                 "authoritativeShaping": true
             },
-            "renderEnv": {}
+            "renderEnv": { "mediaTokens": true }
         })
         .to_string();
         let extras =

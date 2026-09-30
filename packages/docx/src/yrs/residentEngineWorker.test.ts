@@ -479,6 +479,18 @@ describe('resident worker layout ownership', () => {
     };
     await w.send({ type: 'bootstrap', expectedFrameEpoch: 0, extras: '{}', snapshot });
     expect(calls).toEqual(['load', 'partial:false', 'layout']);
+    calls.length = 0;
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '{}',
+      snapshot: { ...snapshot, partialDocument: true },
+    });
+    expect(calls).toEqual(['load', 'partial:true', 'layout']);
+    calls.length = 0;
+    // A complete document synced into the same session is no longer a preview's.
+    await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
+    expect(calls).toEqual(['load', 'partial:false', 'layout']);
   });
 
   test('lays out the media sources a snapshot carries, and clears them when it carries none', async () => {
@@ -509,18 +521,6 @@ describe('resident worker layout ownership', () => {
     });
     await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
     expect(loaded).toEqual(['{"sources":1}', '']);
-    calls.length = 0;
-    await w.send({
-      type: 'bootstrap',
-      expectedFrameEpoch: 0,
-      extras: '{}',
-      snapshot: { ...snapshot, partialDocument: true },
-    });
-    expect(calls).toEqual(['load', 'partial:true', 'layout']);
-    calls.length = 0;
-    // A complete document synced into the same session is no longer a preview's.
-    await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
-    expect(calls).toEqual(['load', 'partial:false', 'layout']);
   });
 
   test('finishes a provisional layout on request and before other work', async () => {

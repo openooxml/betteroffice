@@ -25,9 +25,9 @@ pub struct MediaSources(Arc<Sources>);
 struct Sources {
     key: (u64, u64),
     parts: HashMap<u64, u32>,
-    /// Sources already looked up, by address. Holding each keeps its address
-    /// from naming another string.
-    seen: Mutex<HashMap<usize, (Arc<str>, Option<u32>)>>,
+    /// Sources found to match, by address. Holding each keeps its address from
+    /// naming another string; only the package's own images are held.
+    seen: Mutex<HashMap<usize, (Arc<str>, u32)>>,
 }
 
 impl PartialEq for MediaSources {
@@ -52,12 +52,12 @@ impl MediaSources {
         let index = match seen.get(&address) {
             Some((_, index)) => *index,
             None => {
-                let index = self.0.parts.get(&self.digest(src)).copied();
+                let index = *self.0.parts.get(&self.digest(src))?;
                 seen.insert(address, (Arc::clone(src), index));
                 index
             }
         };
-        index.map(|index| media_token(index as usize))
+        Some(media_token(index as usize))
     }
 
     /// [`Self::token`] for a source read out of JSON.
@@ -160,10 +160,7 @@ pub(crate) fn write_data_urls<'a>(
     for (index, url) in writer.urls {
         if let Some(url) = url {
             parts.insert(digest(key, &url), index as u32);
-            seen.insert(
-                Arc::as_ptr(&url) as *const u8 as usize,
-                (url, Some(index as u32)),
-            );
+            seen.insert(Arc::as_ptr(&url) as *const u8 as usize, (url, index as u32));
         }
     }
     MediaSources(Arc::new(Sources {

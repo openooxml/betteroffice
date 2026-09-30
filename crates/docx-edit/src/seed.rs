@@ -5929,7 +5929,10 @@ mod tests {
             let blocks = crate::bridge::yrs_doc_to_layout_blocks(
                 doc,
                 "body",
-                &crate::bridge::RenderEnv::default(),
+                &crate::bridge::RenderEnv {
+                    media_tokens: true,
+                    ..Default::default()
+                },
             )
             .unwrap();
             let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {

@@ -101,8 +101,12 @@ pub struct RenderEnv {
     pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
-    /// The seeded media whose `data:` image sources lower as their
-    /// `media:{n}` tokens; lowering reads the document's when empty.
+    /// Lower the `data:` image sources seeding wrote as the `media:{n}`
+    /// tokens of their parts, which the host then resolves.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub media_tokens: bool,
+    /// The seeded media [`Self::media_tokens`] reads; lowering takes the
+    /// document's when empty.
     #[serde(skip)]
     pub media: crate::media::MediaSources,
 }
@@ -330,7 +334,7 @@ pub fn yrs_doc_to_mapped_layout_blocks(
 
     let with_media;
     let env = match doc.media_sources() {
-        media if env.media.is_empty() && !media.is_empty() => {
+        media if env.media_tokens && env.media.is_empty() && !media.is_empty() => {
             with_media = RenderEnv {
                 media,
                 ..env.clone()

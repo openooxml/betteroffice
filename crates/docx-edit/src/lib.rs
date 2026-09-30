@@ -674,12 +674,12 @@ impl EditingDoc {
         self.media_sources.lock().unwrap().clone()
     }
 
-    /// Replaces the media sources, invalidating what was lowered with others.
+    /// Replaces the media sources, keeping the current ones when equal so
+    /// what was lowered with them stays valid.
     pub(crate) fn set_media_sources(&self, sources: media::MediaSources) {
         let mut current = self.media_sources.lock().unwrap();
         if *current != sources {
             *current = sources;
-            self.epoch.fetch_add(1, Ordering::Relaxed);
         }
     }
 

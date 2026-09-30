@@ -4715,12 +4715,17 @@ mod tests {
             session.docx_source.borrow().as_deref(),
             Some(source.as_slice())
         );
-        let blocks = session
-            .engine
-            .lower_story_json("body", &crate::bridge::RenderEnv::default())
-            .unwrap();
-        assert!(blocks.contains(r#""media:0""#));
-        assert!(!blocks.contains("data:"));
+        let blocks =
+            |env: &crate::bridge::RenderEnv| session.engine.lower_story_json("body", env).unwrap();
+        let tokens_env = crate::bridge::RenderEnv {
+            media_tokens: true,
+            ..Default::default()
+        };
+        assert!(blocks(&tokens_env).contains(r#""media:0""#));
+        assert!(!blocks(&tokens_env).contains("data:"));
+        assert!(
+            blocks(&crate::bridge::RenderEnv::default()).contains("data:image/png;base64,AQIDBA==")
+        );
         assert_eq!(session.media_bytes("media:0"), Some(image_bytes.clone()));
         assert_eq!(session.media_type("media:0").as_deref(), Some("image/png"));
         assert_eq!(

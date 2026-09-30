@@ -508,6 +508,11 @@ export interface YrsRenderEnv {
   showHiddenText?: boolean;
   /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
   revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
+  /**
+   * Lay the opened package's images out as `media:{n}` tokens, which a
+   * resolver given the session's `mediaSource` reads. @internal
+   */
+  mediaTokens?: boolean;
 }
 
 /** Receipt of {@link YrsSession.addComment}. */

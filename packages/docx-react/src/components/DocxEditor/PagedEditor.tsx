@@ -575,6 +575,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
         numericIds: {},
         showHiddenText,
+        mediaTokens: true,
         ...(proposalPreview.revisionPreview
           ? { revisionPreview: proposalPreview.revisionPreview }
           : {}),
