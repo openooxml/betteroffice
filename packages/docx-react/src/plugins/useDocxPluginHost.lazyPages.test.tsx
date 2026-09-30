@@ -141,6 +141,7 @@ async function visibleProposal(editDuringScroll: boolean): Promise<void> {
       commands: createDocxCommandController(),
       session: host,
       loadGeneration: 0,
+      layoutError: null,
       zoom: 1,
       canvasHostRef: { current: pages },
       overlayTarget: layer,
@@ -201,11 +202,12 @@ async function visibleProposal(editDuringScroll: boolean): Promise<void> {
     const last = result.current.display.frame!.pages.length - 1;
     expect(last).toBeGreaterThan(5);
     expect(result.current.display.frame!.displayList.pages[last]!.unbuilt).toBe(true);
-    expect(geometry()!.getAnchorGeometry(target)).toMatchObject({
-      ok: true,
-      rects: [],
-      anchor: { pageIndex: last, width: 0, height: 0 },
-    });
+    // A paragraph spanning pages falls back to its built first page.
+    expect(geometry()!.getAnchorGeometry(target)).toMatchObject(
+      editDuringScroll
+        ? { ok: true, rects: [] }
+        : { ok: true, rects: [], anchor: { pageIndex: last, width: 0, height: 0 } }
+    );
 
     const eventsBeforeWindow = events.length;
     const worker = EngineWorker.last!;
