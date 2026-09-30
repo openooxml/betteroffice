@@ -436,7 +436,11 @@ fn autofit_content_widths(
                 .zip(&percentages)
                 .all(|(minimum, percentage)| *minimum / *percentage <= table_width)
         {
-            maximums = distribute_to_target(maximums, table_width);
+            let total: f64 = maximums.iter().sum();
+            let share = (table_width - total).max(0.0) / percentage_total;
+            for (width, percentage) in maximums.iter_mut().zip(&percentages) {
+                *width += share * percentage;
+            }
         }
     }
     (minimums, maximums)
@@ -1071,6 +1075,42 @@ mod tests {
                 resolve_table_intrinsic_widths(&block, 601.333_333, Some(&content));
             assert_close_to(minimum, 109.4025, 6);
             assert_close_to(maximum, 291.74, 6);
+        }
+    }
+
+    #[test]
+    fn autofit_preserves_unequal_ratios_when_all_percentages_total_less_than_100() {
+        let mut block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "preferredWidth": {"value": 1250, "type": "pct"},
+                 "blocks": [{"kind": "paragraph", "id": 0, "runs": [{"kind": "text", "text": "Hello"}]}]},
+                {"id": 1, "preferredWidth": {"value": 2500, "type": "pct"},
+                 "blocks": [{"kind": "paragraph", "id": 1, "runs": [{"kind": "text", "text": "HelloHello"}]}]}
+            ]}]
+        }))
+        .unwrap();
+        let content = vec![vec![Some((36.4675, 36.4675)), Some((72.935, 72.935))]];
+        for legacy in [false, true] {
+            if legacy {
+                for cell in &mut block.rows[0].cells {
+                    let preferred = cell.preferred_width.take().unwrap();
+                    cell.width_value = preferred.value;
+                    cell.width_type = preferred.r#type;
+                }
+            }
+            let widths =
+                resolve_table_column_widths_with_content(&block, 601.333_333, Some(&content));
+            assert_eq!(widths.len(), 2);
+            for (actual, expected) in widths.iter().zip([48.60, 97.27]) {
+                assert_close_to(*actual, expected, 1);
+            }
+            assert_close_to(widths[1] / widths[0], 2.0, 6);
+            assert_close_to(widths.iter().sum(), 145.87, 6);
+            let (minimum, maximum) =
+                resolve_table_intrinsic_widths(&block, 601.333_333, Some(&content));
+            assert_close_to(minimum, 109.4025, 6);
+            assert_close_to(maximum, 145.87, 6);
         }
     }
 
