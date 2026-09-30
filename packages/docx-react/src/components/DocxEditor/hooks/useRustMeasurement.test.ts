@@ -83,6 +83,47 @@ describe('useRustMeasurement default fonts', () => {
     }
   });
 
+  test('a requirement a later pass no longer asks for stays in the measurement config', async () => {
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: (family: string) => () => Promise.resolve(bytesOf(family)),
+          }),
+        }),
+    });
+    let registered = 0;
+    const engine: RustTextEngine = {
+      registerFont() {
+        registered += 1;
+        return registered;
+      },
+      clearFonts() {},
+    };
+    const regular: ResidentFontRequirement = {
+      key: 'regular',
+      family: 'Calibri',
+      bold: false,
+      italic: false,
+    };
+    const symbol: ResidentFontRequirement = {
+      key: 'symbol',
+      family: 'Symbol',
+      bold: false,
+      italic: false,
+    };
+    const { result } = renderHook(() =>
+      useRustMeasurement({ document: null, textEngine: engine })
+    );
+    await waitFor(() => expect(result.current.deferLayoutPass()).toBe(false));
+    let both: ResidentMeasurementConfig | null = null;
+    await waitFor(() => {
+      both = result.current.residentMeasurementConfig([regular, symbol]);
+      expect(Object.keys(both?.fontChains ?? {})).toEqual(['regular', 'symbol']);
+    });
+    expect(result.current.residentMeasurementConfig([regular])).toEqual(both);
+  });
+
   test('a font that loads after the editor let go of its engine registers nothing on it', async () => {
     let finishLoad: (() => void) | undefined;
     configureDefaultFonts({
