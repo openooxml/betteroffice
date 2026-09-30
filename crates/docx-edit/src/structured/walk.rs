@@ -442,9 +442,9 @@ struct StoryCtx {
     /// The package part the story belongs to.
     part: Option<String>,
     prov: Prov,
-    accepted: Rc<StoryView>,
+    accepted: Arc<StoryView>,
     /// The original-view projection; the accepted view, which never reads it, reuses `accepted`.
-    original: Rc<StoryView>,
+    original: Arc<StoryView>,
     chunks: Arc<Vec<Chunk>>,
     /// The anchor every node uses instead of its own, for content without a session location.
     owner: Option<Anchor>,
@@ -1564,7 +1564,7 @@ impl<'a> Exporter<'a> {
     ) -> Option<StoryCtx> {
         let (accepted, complete) = views.story_within(story, EditTextView::Accepted, limit)?;
         let original = match self.view() {
-            RevisionView::Accepted => Rc::clone(&accepted),
+            RevisionView::Accepted => Arc::clone(&accepted),
             _ => {
                 let limit = if complete { u32::MAX } else { limit };
                 views.story_within(story, EditTextView::Original, limit)?.0
@@ -1877,7 +1877,7 @@ impl<'a> Exporter<'a> {
             return output;
         };
         let chunks = Arc::clone(&ctx.chunks);
-        let accepted = Rc::clone(&ctx.accepted);
+        let accepted = Arc::clone(&ctx.accepted);
         let mut output: Vec<Built> = Vec::new();
         let mut held: Option<Held> = None;
         let mut cursor = 0usize;
@@ -2818,7 +2818,7 @@ impl<'a> Exporter<'a> {
         depth: usize,
         list: &mut ListState,
     ) -> Block {
-        let accepted = Rc::clone(&ctx.accepted);
+        let accepted = Arc::clone(&ctx.accepted);
         let paragraph = &accepted.paragraphs[index];
         if !self.grow(1, 0) {
             return Block {
@@ -3120,8 +3120,8 @@ impl<'a> Exporter<'a> {
         chunks: &[Chunk],
         depth: usize,
     ) -> Vec<Inline> {
-        let accepted = Rc::clone(&ctx.accepted);
-        let original = Rc::clone(&ctx.original);
+        let accepted = Arc::clone(&ctx.accepted);
+        let original = Arc::clone(&ctx.original);
         let paragraph = &accepted.paragraphs[index];
         let paragraph_anchor = ctx.paragraph_anchor(&paragraph.para_id);
         let mut records = ctx

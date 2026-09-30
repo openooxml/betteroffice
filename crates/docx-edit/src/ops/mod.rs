@@ -13,7 +13,9 @@ use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
-use crate::{KIND_KEY, PARA_ID, PPR_CHANGE, is_pilcrow, map_string, out_len};
+use crate::{
+    DEL, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, is_pilcrow, map_string, out_len,
+};
 
 /// One formatting-run chunk of a story, snapshotted for index-stable reverse walks.
 pub(crate) struct Chunk {
@@ -38,6 +40,32 @@ impl Chunk {
         matches!(self.attrs.get(key), Some(value) if *value != Any::Null)
     }
 
+    pub fn is_block_embed<T: ReadTxn>(&self, txn: &T) -> bool {
+        matches!(&self.kind, ChunkKind::Embed(Some(map)) if map_string(map, txn, KIND_KEY)
+            .is_some_and(|kind| crate::segments::is_block_embed(&kind)))
+    }
+
+    pub fn block_revisions<T: ReadTxn>(&self, txn: &T) -> Option<[Option<Any>; 2]> {
+        if !self.is_block_embed(txn) {
+            return None;
+        }
+        let table = match &self.kind {
+            ChunkKind::Embed(Some(map))
+                if map_string(map, txn, KIND_KEY).as_deref() == Some("table") =>
+            {
+                table::table_revisions(map, txn)
+            }
+            _ => [None, None],
+        };
+        Some([INS, DEL].map(|key| {
+            self.attrs
+                .get(key)
+                .filter(|stamp| **stamp != Any::Null)
+                .cloned()
+                .or_else(|| table[usize::from(key == DEL)].clone())
+        }))
+    }
+
     /// The `author` of an `ins`/`del` revision value on this chunk, if any.
     pub fn revision_author(&self, key: &str) -> Option<String> {
         let Some(Any::Map(revision)) = self.attrs.get(key) else {
@@ -50,7 +78,7 @@ impl Chunk {
     }
 }
 
-fn revision_id_for_author(value: &Any, author: &str) -> Option<String> {
+pub(crate) fn revision_id_for_author(value: &Any, author: &str) -> Option<String> {
     let Any::Map(revision) = value else {
         return None;
     };
@@ -193,6 +221,42 @@ pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: 
         offset += len;
     }
     chunks
+}
+
+pub(crate) fn block_embed_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
+    snapshot_range(story, txn, index, index.saturating_add(1))
+        .first()
+        .is_some_and(|chunk| chunk.is_block_embed(txn))
+}
+
+pub(crate) fn inherit_block_revisions(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    index: u32,
+    map: &MapRef,
+    revisions: &[Option<Any>; 2],
+) {
+    for ((attr_key, ppr_key), stamp) in [(INS, PPR_INS), (DEL, PPR_DEL)].into_iter().zip(revisions)
+    {
+        if let Some(stamp) = stamp {
+            map.insert(txn, ppr_key, stamp.clone());
+            story.format(
+                txn,
+                index,
+                1,
+                Attrs::from([(attr_key.into(), stamp.clone())]),
+            );
+        }
+    }
+}
+
+pub(crate) fn paragraph_content_before<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
+    index > 0
+        && snapshot_range(story, txn, index - 1, index)
+            .last()
+            .is_some_and(|chunk| {
+                !matches!(chunk.kind, ChunkKind::Pilcrow(_)) && !chunk.is_block_embed(txn)
+            })
 }
 
 /// The story's last pilcrow as `(index, map)`.

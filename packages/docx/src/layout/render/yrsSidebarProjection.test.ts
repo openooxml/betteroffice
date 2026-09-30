@@ -37,3 +37,36 @@ test('a session reuses its projection until the document changes', async () => {
     session.destroy();
   }
 });
+
+test('a projection reads body segments once for multiple paragraphs', async () => {
+  const session = await createYrsSession({ clientId: 80012 });
+  try {
+    const firstText = 'alpha beta';
+    const secondText = 'gamma';
+    const [first, second] = session.loadStories([
+      { storyId: 'body', paragraphs: [{ text: firstText }, { text: secondText }] },
+    ]).body;
+    const read = session.storySegments.bind(session);
+    const calls: string[] = [];
+    session.storySegments = (story) => {
+      calls.push(story);
+      return read(story);
+    };
+    const projection = createYrsSidebarProjection(session);
+    expect(
+      projection.locToDisplayPoint({ story: 'body', paraId: first!, offset: firstText.length })
+    ).toEqual({
+      story: 'body',
+      position: 1 + firstText.length,
+    });
+    expect(
+      projection.locToDisplayPoint({ story: 'body', paraId: second!, offset: secondText.length })
+    ).toEqual({
+      story: 'body',
+      position: firstText.length + 2 + 1 + secondText.length,
+    });
+    expect(calls.filter((story) => story === 'body')).toHaveLength(1);
+  } finally {
+    session.destroy();
+  }
+});

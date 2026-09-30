@@ -13,6 +13,7 @@ import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import { runAfterFrames } from '../internals/scrollUtils';
+import { scrollViewport } from '../internals/viewportBand';
 
 export interface UsePagedScrollApiOptions {
   pagesContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -39,12 +40,16 @@ export type RevealPositionOutcome = 'scrolled' | 'layout-unavailable' | 'unsuppo
 
 export interface UsePagedScrollApiReturn {
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
-  /** Scrolls a position into view without touching focus or selection. */
-  revealPositionImpl: (position: number) => RevealPositionOutcome;
+  /**
+   * Scrolls a position into view without touching focus or selection. Aborting `signal` stops
+   * following the position while its page is still being built.
+   */
+  revealPositionImpl: (position: number, signal?: AbortSignal) => RevealPositionOutcome;
   scrollToPageImpl: (pageNumber: number) => void;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
 }
 
+const SMOOTH_SCROLL_VIEWPORTS = 2;
 const REFINE_WINDOW_MS = 3000;
 const USER_SCROLL_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
 
@@ -53,6 +58,8 @@ interface PendingRefine {
   pageIndex: number;
   until: number;
   stop: AbortController;
+  /** The document version `position` belongs to, when a reveal set it. */
+  version?: string;
 }
 
 function isUnbuiltPage(queries: DisplayListQueries, pageIndex: number): boolean {
@@ -101,13 +108,17 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const pageSize = queries.pageSize(rect.pageIndex);
       if (!pageRect || !pageSize) return false;
       const scroller = getScrollContainer() ?? findVerticalScrollParentOrRoot(host);
-      const scrollerRect = scroller.getBoundingClientRect();
+      const viewport = scrollViewport(scroller);
       const scaleY = pageSize.height > 0 ? pageRect.height / pageSize.height : 1;
       const clientY = pageRect.top + (rect.y + rect.height / 2) * scaleY;
-      scroller.scrollTo({
-        top: scroller.scrollTop + clientY - scrollerRect.top - scroller.clientHeight / 2,
-        behavior: smooth ? 'smooth' : 'auto',
-      });
+      const top =
+        scroller.scrollTop +
+        clientY / viewport.zoom -
+        viewport.top / viewport.zoom -
+        viewport.height / 2;
+      const near = Math.abs(top - scroller.scrollTop) <= viewport.height * SMOOTH_SCROLL_VIEWPORTS;
+      // 'auto' would follow a CSS `scroll-behavior: smooth` and animate anyway
+      scroller.scrollTo({ top, behavior: smooth ? (near ? 'smooth' : 'instant') : 'auto' });
       return true;
     },
     [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef]
@@ -135,6 +146,11 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   useEffect(() => {
     const pending = pendingRefineRef.current;
     if (!pending || !displayListQueries) return;
+    // an edit moved the positions: the old one now names other text
+    if (pending.version !== undefined && pending.version !== yrsSession?.version()) {
+      clearPendingRefine();
+      return;
+    }
     const rect =
       performance.now() <= pending.until ? displayListQueries.anchorRect(pending.position) : null;
     if (!rect) {
@@ -148,7 +164,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       clearPendingRefine();
     }
     scrollRectIntoView(rect, false);
-  }, [clearPendingRefine, displayListQueries, scrollRectIntoView]);
+  }, [clearPendingRefine, displayListQueries, scrollRectIntoView, yrsSession]);
 
   const scrollToPositionImpl = useCallback(
     (pmPos: number, forParaIdScroll = false) => {
@@ -164,7 +180,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   );
 
   const revealPositionImpl = useCallback(
-    (position: number): RevealPositionOutcome => {
+    (position: number, signal?: AbortSignal): RevealPositionOutcome => {
       if (!Number.isInteger(position) || position < 0) return 'unsupported';
       if (!displayListQueries) return 'layout-unavailable';
       clearPendingRefine();
@@ -173,11 +189,21 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       onNavigationIntent?.();
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = new AbortController();
-      return scrollAnchorIntoView(displayListQueries, rect, position, true)
-        ? 'scrolled'
-        : 'layout-unavailable';
+      const scrolled = scrollAnchorIntoView(displayListQueries, rect, position, true);
+      const pending = pendingRefineRef.current;
+      if (pending) pending.version = yrsSession?.version();
+      if (pending && signal) {
+        // The caller ends the follow through `signal`, however long the page takes to build.
+        pending.until = Number.POSITIVE_INFINITY;
+        const stop = () => {
+          if (pendingRefineRef.current === pending) clearPendingRefine();
+        };
+        if (signal.aborted) stop();
+        else signal.addEventListener('abort', stop, { once: true, signal: pending.stop.signal });
+      }
+      return scrolled ? 'scrolled' : 'layout-unavailable';
     },
-    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView]
+    [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView, yrsSession]
   );
 
   const pendingPageRef = useRef<{

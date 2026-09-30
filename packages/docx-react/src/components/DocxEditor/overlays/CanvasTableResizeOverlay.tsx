@@ -33,11 +33,10 @@ import {
   deriveDisplayListTableFragmentsOnPages,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
-import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { projectPageLocalRect } from '../internals/canvasProjection';
+import { observePageWindow } from './pageWindowObserver';
 import {
   buildRemotePresencePageMetrics,
-  remotePresencePageWindow,
   type RemotePresencePageWindow,
 } from './remotePresenceGeometry';
 import type { YrsEditorCommand } from '../yrsCommands';
@@ -72,6 +71,7 @@ interface ProjectedHandle {
   width: number;
   height: number;
   scaleX: number;
+  targetZoom: number;
 }
 
 const HANDLE_CLASS: Record<HandleSpec['type'], string> = {
@@ -110,85 +110,13 @@ export function CanvasTableResizeOverlay({
       return;
     }
     const metrics = buildRemotePresencePageMetrics(displayListQueries.displayList, zoom);
-    const scrollsWindow = (element: HTMLElement) =>
-      element === document.scrollingElement || element === document.documentElement;
-    let frame: number | null = null;
-    const schedule = () => {
-      if (frame !== null) return;
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        update();
-      });
-    };
-    // The scroller is looked up again on every update: an editor shown after
-    // mounting, or an ancestor that starts scrolling, changes it without any
-    // event on the old one.
-    let scrollParent: HTMLElement | null = null;
-    let scrollerResized: ResizeObserver | null = null;
-    const update = () => {
-      const next = findVerticalScrollParentOrRoot(host);
-      if (next !== scrollParent) {
-        scrollerResized?.disconnect();
-        scrollParent = next;
-        scrollerResized = scrollsWindow(next) ? null : new ResizeObserver(schedule);
-        scrollerResized?.observe(next);
-      }
-      const usesWindow = scrollsWindow(next);
-      const column = host.firstElementChild as HTMLElement | null;
-      const viewportTop = usesWindow ? 0 : next.getBoundingClientRect().top;
-      const viewportBottom = viewportTop + (usesWindow ? window.innerHeight : next.clientHeight);
-      const nextWindow = column
-        ? remotePresencePageWindow(
-            metrics,
-            column.getBoundingClientRect().top,
-            viewportTop,
-            viewportBottom,
-            Infinity
-          )
-        : null;
+    return observePageWindow(host, metrics, (nextWindow) =>
       setPageWindow((previous) =>
         previous?.start === nextWindow?.start && previous?.end === nextWindow?.end
           ? previous
           : nextWindow
-      );
-    };
-    // Scroll events do not bubble; capturing them on the document sees every
-    // scroller, the window's included.
-    document.addEventListener('scroll', schedule, { capture: true, passive: true });
-    const hostResized = new ResizeObserver(schedule);
-    hostResized.observe(host);
-    // Layout elsewhere can move pages into view without scrolling or resizing.
-    const pagesShown =
-      typeof IntersectionObserver === 'function' ? new IntersectionObserver(schedule) : null;
-    const observePages = () => {
-      pagesShown?.disconnect();
-      host.querySelectorAll('.canvas-page').forEach((page) => pagesShown?.observe(page));
-    };
-    observePages();
-    // The page surfaces are replaced without a display-list change when the
-    // canvas falls back from worker rendering.
-    const pagesReplaced =
-      typeof MutationObserver === 'function'
-        ? new MutationObserver(() => {
-            const column = host.firstElementChild;
-            if (column) pagesReplaced?.observe(column, { childList: true });
-            observePages();
-            schedule();
-          })
-        : null;
-    pagesReplaced?.observe(host, { childList: true });
-    if (host.firstElementChild) pagesReplaced?.observe(host.firstElementChild, { childList: true });
-    window.addEventListener('resize', schedule);
-    update();
-    return () => {
-      document.removeEventListener('scroll', schedule, { capture: true });
-      scrollerResized?.disconnect();
-      hostResized.disconnect();
-      pagesShown?.disconnect();
-      pagesReplaced?.disconnect();
-      window.removeEventListener('resize', schedule);
-      if (frame !== null) cancelAnimationFrame(frame);
-    };
+      )
+    );
   }, [canvasHostRef, displayListQueries, sidebarOpen, zoom]);
 
   // Page-local handle specs + commit params, rebuilt whenever the display list
@@ -306,6 +234,7 @@ export function CanvasTableResizeOverlay({
           width: p.width,
           height: p.height,
           scaleX: p.scaleX,
+          targetZoom: p.targetZoom,
         });
       }
       setProjected(next);
@@ -327,7 +256,7 @@ export function CanvasTableResizeOverlay({
     if (readOnly) return;
     e.preventDefault();
     e.stopPropagation();
-    const { spec, scaleX } = ph;
+    const { spec, scaleX, targetZoom } = ph;
     const handleEl = e.currentTarget as HTMLElement;
     handleEl.classList.add('dragging');
     const startClientX = e.clientX;
@@ -339,7 +268,8 @@ export function CanvasTableResizeOverlay({
     let width = spec.widthTwips ?? 0;
 
     const onMove = (me: MouseEvent) => {
-      const deltaPx = scaleX > 0 ? (me.clientX - startClientX) / scaleX : 0;
+      const deltaTarget = (me.clientX - startClientX) / targetZoom;
+      const deltaPx = scaleX > 0 ? deltaTarget / scaleX : 0;
       const deltaTwips = Math.round(deltaPx * TWIPS_PER_PIXEL);
       if (spec.type === 'col') {
         const nl = (spec.leftTwips ?? 0) + deltaTwips;
@@ -352,7 +282,7 @@ export function CanvasTableResizeOverlay({
         const nextWidth = (spec.widthTwips ?? 0) + deltaTwips;
         if (nextWidth >= MIN_CELL_WIDTH_TWIPS) width = nextWidth;
       }
-      handleEl.style.left = `${origLeft + (me.clientX - startClientX)}px`;
+      handleEl.style.left = `${origLeft + deltaTarget}px`;
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);

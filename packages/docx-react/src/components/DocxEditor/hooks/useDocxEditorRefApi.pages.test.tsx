@@ -13,6 +13,8 @@ import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
 import type { EditorMode } from '../internals/editing-modes';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
+import type { DocxHostSearch } from './useHostSearch';
+import type { Comment } from '@betteroffice/docx/types/content';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -87,6 +89,11 @@ async function setup(options: {
   request: () => string | null;
   flush?: () => void;
   relayout?: () => void;
+  opening?: { current: boolean };
+  comments?: Comment[];
+  setComments?: () => void;
+  save?: () => Promise<ArrayBuffer | null>;
+  awaitingDocument?: () => boolean;
 }) {
   const events: string[] = [];
   const editor = {
@@ -105,19 +112,20 @@ async function setup(options: {
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
+      hostSearch: {} as DocxHostSearch,
       ref,
       document: null,
       documentFromYrs: () => null,
       historyStateRef: { current: null },
       pagedEditorRef,
-      handleSave: async () => null,
+      handleSave: options.save ?? (async () => null),
       zoom: 1,
       setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
       loadParsedDocument: () => {},
       loadBuffer: async () => {},
-      comments: [],
-      setComments: () => {},
+      comments: options.comments ?? [],
+      setComments: options.setComments ?? (() => {}),
       setShowCommentsSidebar: () => {},
       contentChangeSubscribersRef: { current: new Set() },
       selectionChangeSubscribersRef: { current: new Set() },
@@ -127,7 +135,9 @@ async function setup(options: {
       commentIdAllocator: createCommentIdAllocator(),
       commands: UNAVAILABLE_DOCX_COMMANDS,
       modeRef: { current: 'editing' as EditorMode },
+      openingRef: options.opening,
       allowHostProposalsRef: { current: false },
+      awaitingDocument: options.awaitingDocument,
     });
     return ref;
   });
@@ -149,6 +159,26 @@ test('a partial layout has no page contents yet', async () => {
   expect(api().getPageContent(1)).toBeNull();
 });
 
+test('the page count is 0 until the loaded document is laid out in full', async () => {
+  const { session, request } = await openSession();
+  const { layout } = JSON.parse(session.layoutDocumentWithRegionsRetainedJson(request)) as {
+    layout: Layout;
+  };
+  let awaiting = false;
+  let current: Layout = { ...layout, partial: true };
+  const { pagedEditorRef, api } = await setup({
+    session,
+    request: () => request,
+    awaitingDocument: () => awaiting,
+  });
+  Object.assign(pagedEditorRef.current!, { getLayout: () => current });
+  expect(api().getTotalPages()).toBe(0);
+  current = layout;
+  expect(api().getTotalPages()).toBe(layout.pages.length);
+  awaiting = true;
+  expect(api().getTotalPages()).toBe(0);
+});
+
 test('flushed input is laid out before its pages are exported', async () => {
   const { session, request, layout } = await openSession();
   layout();
@@ -168,6 +198,39 @@ test('flushed input is laid out before its pages are exported', async () => {
     kind: 'text',
     text: 'Typed before the export',
   });
+});
+
+test('while the document opens, the API reads, exports and changes nothing', async () => {
+  const { session, request, layout } = await openSession();
+  layout();
+  const opening = { current: true };
+  const commentChanges: string[] = [];
+  const { events, api } = await setup({
+    session,
+    request: () => request,
+    opening,
+    comments: [{ id: 1, content: [], author: 'A' } as unknown as Comment],
+    setComments: () => commentChanges.push('changed'),
+    save: async () => {
+      commentChanges.push('saved');
+      return new ArrayBuffer(0);
+    },
+  });
+  expect(api().getDocument()).toBeNull();
+  expect(api().getComments()).toEqual([]);
+  await expect(api().exportStructuredWithPages(MARKUP)).rejects.toThrow();
+  await expect(api().readParagraphs({ story: 'body' } as never)).rejects.toThrow();
+  expect(api().findInDocument('a')).toEqual([]);
+  expect(api().replyToComment(1, 'reply', 'B')).toBeNull();
+  api().resolveComment(1);
+  expect(await api().save()).toBeNull();
+  expect(commentChanges).toEqual([]);
+  expect(events).toEqual([]);
+
+  opening.current = false;
+  expect((await api().exportStructuredWithPages(MARKUP)).ok).toBe(true);
+  api().resolveComment(1);
+  expect(commentChanges).toEqual(['changed']);
 });
 
 test('a current layout is exported without laying out again', async () => {

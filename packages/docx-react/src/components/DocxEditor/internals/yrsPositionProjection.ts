@@ -103,6 +103,7 @@ export class YrsPositionProjection {
   private readonly nodes = new Map<number, YrsProjectedNode>();
   private readonly tables: YrsProjectedTable[] = [];
   private readonly source: YrsStorySegmentSource;
+  private readonly paragraphsById = new Map<StoryProjection, Map<string, StoryProjection['paragraphs'][number]>>();
 
   constructor(
     session: YrsSession,
@@ -175,7 +176,7 @@ export class YrsPositionProjection {
 
   positionForLoc(loc: YrsLoc): number | null {
     const story = this.stories.get(loc.story);
-    const paragraph = story?.paragraphs.find((candidate) => candidate.paraId === loc.paraId);
+    const paragraph = story ? this.paragraphIndex(story).get(loc.paraId) : undefined;
     if (!story || !paragraph) return null;
     return (
       story.contentStart +
@@ -183,6 +184,19 @@ export class YrsPositionProjection {
       1 +
       Math.min(Math.max(0, loc.offset - paragraph.leading), paragraph.length)
     );
+  }
+
+  /** Each paraId's first paragraph in `story`, indexed on first use. */
+  private paragraphIndex(story: StoryProjection): Map<string, StoryProjection['paragraphs'][number]> {
+    let index = this.paragraphsById.get(story);
+    if (!index) {
+      index = new Map();
+      for (const paragraph of story.paragraphs) {
+        if (!index.has(paragraph.paraId)) index.set(paragraph.paraId, paragraph);
+      }
+      this.paragraphsById.set(story, index);
+    }
+    return index;
   }
 
   bookmarkPosition(name: string): number | null {

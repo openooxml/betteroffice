@@ -618,6 +618,12 @@ enum Shape {
         start: u32,
         len: u32,
     },
+    /// `len` final units a replacement at captured index `start` inserted,
+    /// after whatever struck-out text it kept ahead of them.
+    Replacement {
+        start: u32,
+        len: u32,
+    },
     Paragraph(String),
     NewParagraphs,
     /// Every paragraph of the step's story.
@@ -1065,7 +1071,7 @@ fn plan_selection<T: ReadTxn>(
             (
                 vec![claim],
                 effect,
-                Shape::Raw {
+                Shape::Replacement {
                     start: raw_start,
                     len,
                 },
@@ -1093,7 +1099,7 @@ fn plan_selection<T: ReadTxn>(
             (
                 vec![claim],
                 effect,
-                Shape::Raw {
+                Shape::Replacement {
                     start: raw_start,
                     len,
                 },
@@ -2277,6 +2283,8 @@ struct Executed {
     delta: i64,
     new_ids: Vec<String>,
     revision_ids: Vec<String>,
+    /// Units between a replacement's start and the text it inserted.
+    inserted_offset: u32,
 }
 
 fn staging_error(index: u32, error: impl fmt::Display) -> EditError {
@@ -2340,10 +2348,11 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                 text,
                 ctx,
             }) => {
-                let receipt = stage
-                    .replace_range(ctx, StoryRange::new(story, *start, *end), text)
+                let (receipt, at) = stage
+                    .replace_range_placed(ctx, StoryRange::new(story, *start, *end), text)
                     .map_err(fail)?;
                 outcome.revision_ids = receipt.revision_ids;
+                outcome.inserted_offset = at - start;
             }
             Some(Effect::Delete { start, end, ctx }) => {
                 let receipt = stage
@@ -2357,10 +2366,11 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                 runs,
                 ctx,
             }) => {
-                let receipt = stage
-                    .replace_range_rich(ctx, StoryRange::new(story, *start, *end), runs)
+                let (receipt, at) = stage
+                    .replace_range_rich_placed(ctx, StoryRange::new(story, *start, *end), runs)
                     .map_err(fail)?;
                 outcome.revision_ids = receipt.revision_ids;
+                outcome.inserted_offset = at - start;
             }
             Some(Effect::Paragraphs { at, records }) => {
                 outcome.new_ids = stage
@@ -2420,6 +2430,13 @@ fn receipts<T: ReadTxn>(
             let range = story.as_deref().and_then(|story| match &planned.shape {
                 Shape::Raw { start, len } => {
                     let start = shifted(steps, executed, &planned.story, *start);
+                    story.range_of_raw(start, start + len)
+                }
+                Shape::Replacement { start, len } => {
+                    let offset = outcome
+                        .as_ref()
+                        .map_or(0, |outcome| outcome.inserted_offset);
+                    let start = shifted(steps, executed, &planned.story, *start) + offset;
                     story.range_of_raw(start, start + len)
                 }
                 Shape::Paragraph(para_id) => {
@@ -2538,7 +2555,7 @@ impl EditingDoc {
             ));
         }
         let source = self.source_metadata();
-        let mut views = Views::new(self, &txn);
+        let mut views = Views::committed(self, &txn);
         let mut planned_steps = Vec::with_capacity(steps.len());
         for (index, step) in steps.iter().enumerate() {
             let index = index as u32;
@@ -2693,7 +2710,7 @@ impl EditingDoc {
             };
         let Some(base) = base else {
             let txn = self.yrs_doc().transact();
-            let mut views = Views::new(self, &txn);
+            let mut views = Views::committed(self, &txn);
             let executed: Vec<Option<Executed>> = plan.steps.iter().map(|_| None).collect();
             return Ok(Ok(EditApplication {
                 version: plan.base_version.clone(),
@@ -2788,6 +2805,90 @@ impl EditingDoc {
             changed_stories,
             update,
         }))
+    }
+
+    /// Resolves tracked changes by revision id in one transaction outside undo history, as a host
+    /// batch commits: the `accept` ids apply and the `reject` ids roll back, as
+    /// [`EditingDoc::accept_change`] and [`EditingDoc::reject_change`] resolve them. An id that
+    /// matches nothing is skipped; any other failure leaves the document unchanged. Returns the
+    /// ids resolved.
+    pub fn settle_revisions(
+        &self,
+        accept: &[crate::RevisionId],
+        reject: &[crate::RevisionId],
+        history: &UndoSession,
+    ) -> crate::OpResult<Vec<crate::RevisionId>> {
+        if !history.belongs_to(self) {
+            return Err(EditError::InvalidUpdate(
+                "the undo history belongs to another document".to_owned(),
+            )
+            .into());
+        }
+        let (nonce, epoch) = (
+            self.version_nonce.load(Ordering::Relaxed),
+            self.epoch.load(Ordering::Relaxed),
+        );
+        let (state, state_vector) = {
+            let txn = self.yrs_doc().transact();
+            if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
+                return Err(EditError::InvalidUpdate(
+                    "the document holds updates that are not integrated yet".to_owned(),
+                )
+                .into());
+            }
+            (
+                deterministic::encode_state_as_update_v1(&txn, &StateVector::default()),
+                txn.state_vector(),
+            )
+        };
+        let stage = self.fork(&state)?;
+        let ctx = EditCtx::system("");
+        let mut resolved = Vec::new();
+        for (ids, accepting) in [(accept, true), (reject, false)] {
+            for id in ids {
+                let target = crate::ChangeTarget::Revision(id.clone());
+                let outcome = if accepting {
+                    stage.accept_change(&ctx, &target)
+                } else {
+                    stage.reject_change(&ctx, &target)
+                };
+                match outcome {
+                    Ok(receipt) => resolved.extend(receipt.revision_ids),
+                    Err(crate::OpError::UnknownChange(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        if resolved.is_empty() {
+            return Ok(resolved);
+        }
+        let update = deterministic::encode_diff_v1(&stage.yrs_doc().transact(), &state_vector);
+        let adoption = Update::decode_v1(&update)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        history.add_undo_barrier();
+        {
+            let mut txn = self.yrs_doc().transact_mut_with(HOST_ORIGIN);
+            if self.version_nonce.load(Ordering::Relaxed) != nonce
+                || self.epoch.load(Ordering::Relaxed) != epoch
+            {
+                return Err(EditError::InvalidUpdate(
+                    "the document changed while its revisions were settling".to_owned(),
+                )
+                .into());
+            }
+            if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
+                return Err(EditError::InvalidUpdate(
+                    "the document holds updates that are not integrated yet".to_owned(),
+                )
+                .into());
+            }
+            txn.apply_update(adoption)
+                .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        }
+        history.add_undo_barrier();
+        self.id_counter
+            .store(stage.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
+        Ok(resolved)
     }
 
     /// Drops the authored values of the text controls a committed batch filled, in a transaction

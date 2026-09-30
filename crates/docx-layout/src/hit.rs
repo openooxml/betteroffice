@@ -31,8 +31,8 @@
 //! adjacency of document positions decides.
 //!
 //! Region scoping matters because a page carries several independent
-//! documents. [`hit_test_regions`] tests the page's header and footer bands
-//! first (simple vertical containment against the band box) and then its note
+//! documents. [`hit_test_regions`] lets direct body hits override header and
+//! footer bands, then tests their vertical bounds and the page's note
 //! areas, resolving inside the winning one and returning the region kind with
 //! the part that owns it — an `rId` for a band, a note id for a note, whose
 //! story is `fn:{id}` / `en:{id}`. The position then addresses THAT document,
@@ -48,11 +48,11 @@
 //! image, then a run's own box, then `in_typeable_area`.
 
 use crate::display_list::{
-    DisplayBounds, DisplayList, DisplayPage, DocAttrs, HfRegion, NoteRegion, Primitive,
-    TableCellRef, doc_attrs, note_group_id,
+    DisplayBounds, DisplayList, DisplayPage, DocAttrs, HfRegion, ImagePrimitive, NoteRegion,
+    Primitive, ShapePathCommand, ShapePrimitive, TableCellRef, doc_attrs, note_group_id,
 };
 use serde::Serialize;
-use serde_json::Number;
+use serde_json::{Number, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -67,6 +67,11 @@ thread_local! {
 /// Vertical slack (px) added on each side of a run's band when testing a
 /// pointer, so a click in the leading still hits the line.
 const BAND_SLACK: f64 = 4.0;
+
+/// Share of a run's font size its glyphs paint above and below the baseline, about the cap
+/// height and the descender depth: only there does body text take a header or footer click.
+const INK_ASCENT_EM: f64 = 0.7;
+const INK_DESCENT_EM: f64 = 0.2;
 
 /// Width (px) of the selection sliver drawn for a blank line, which has no
 /// glyphs of its own to highlight.
@@ -765,6 +770,7 @@ pub fn hit_test(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<i
 struct PointResolution {
     pos: Option<i64>,
     target: HoverTarget,
+    direct: bool,
 }
 
 /// What sits under a point, for pointer-cursor feedback.
@@ -891,6 +897,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
                 } else {
                     HoverTarget::Text
                 },
+                direct: true,
             };
         }
     }
@@ -910,6 +917,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
                     return PointResolution {
                         pos: Some(ds),
                         target,
+                        direct: true,
                     };
                 }
             }
@@ -932,6 +940,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
                     return PointResolution {
                         pos: Some(ds),
                         target,
+                        direct: true,
                     };
                 }
             }
@@ -940,7 +949,11 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
     }
 
     if hits.is_empty() {
-        return PointResolution { pos: None, target };
+        return PointResolution {
+            pos: None,
+            target,
+            direct: false,
+        };
     }
 
     // 3. nearest line by vertical center distance (blank-line markers included)
@@ -966,6 +979,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
     PointResolution {
         pos: position_for_hits(line.iter().copied(), x),
         target,
+        direct: false,
     }
 }
 
@@ -1131,18 +1145,283 @@ fn text_box_distance_squared(prims: &[Primitive], x: f64, y: f64) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-/// Resolves a point against the page's header and footer bands, then its note
-/// areas, before falling through to the body.
-///
-/// Band membership is the vertical `[y, y + height]` test on the region's box.
-/// A point inside a band always identifies that region even when `pos` is
-/// `None` — an empty band still owns the click, and the region alone is what
-/// routes editing into that header or footer.
-///
-/// A note area stacks several independent documents, so it resolves against
-/// the story nearest the point rather than the area as a whole: a click cannot
-/// borrow a position from another note. Like a band it carries no content box,
-/// so only its runs read as typeable text.
+/// Whether `primitive` carries a document position and paints its hit box at
+/// the point, inside its clip as the canvas and raster painters draw it.
+fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
+    let Some(attrs) = doc_attrs(primitive) else {
+        return false;
+    };
+    if attrs.doc_start.is_none() {
+        return false;
+    }
+    // The canvas multiplies the primitive's opacity with its group's, which it applies only
+    // inside a clip: either at zero paints nothing.
+    let transparent =
+        |opacity: Option<&Number>| opacity.and_then(Number::as_f64).is_some_and(|o| o <= 0.0);
+    let own_opacity = match primitive {
+        Primitive::Image(img) => img.opacity.as_ref(),
+        Primitive::Text(text) => text.opacity.as_ref(),
+        Primitive::GlyphRun(run) => run.opacity.as_ref(),
+        _ => None,
+    };
+    let group = attrs.clip_group.as_ref();
+    let group_clip = group.and_then(|group| group.clip.as_ref());
+    if (group_clip.is_some() && transparent(group.and_then(|group| group.opacity.as_ref())))
+        || transparent(own_opacity)
+        || transparent(attrs.primitive_opacity.as_ref())
+    {
+        return false;
+    }
+    let paints = match primitive {
+        Primitive::Text(text) => !js_blank(&text.text) && !text_fill_none(attrs),
+        Primitive::GlyphRun(run) => {
+            !run.glyphs.is_empty() && !js_blank(&run.text) && !text_fill_none(attrs)
+        }
+        Primitive::Shape(shape) => shape_fill_paints(shape),
+        _ => true,
+    };
+    if !paints {
+        return false;
+    }
+    if let Some(clip) = group_clip {
+        let px = |value: &Option<Number>| value.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+        let (left, top) = (px(&clip.x), px(&clip.y));
+        let (width, height) = (px(&clip.w).max(0.0), px(&clip.h).max(0.0));
+        if width <= 0.0
+            || height <= 0.0
+            || x < left
+            || x > left + width
+            || y < top
+            || y > top + height
+        {
+            return false;
+        }
+    }
+    if let Some(hit) = text_hit(primitive) {
+        let (paint_clip, rotation, scale) = match primitive {
+            Primitive::Text(text) => (
+                text.paint_clip.as_ref(),
+                text.rotation_deg.as_ref(),
+                text.horizontal_scale.as_ref(),
+            ),
+            Primitive::GlyphRun(run) => (
+                run.paint_clip.as_ref(),
+                run.rotation_deg.as_ref(),
+                run.horizontal_scale.as_ref(),
+            ),
+            _ => (None, None, None),
+        };
+        // A turned or compressed run paints outside or short of its box.
+        if rotation.and_then(Number::as_f64).unwrap_or(0.0) % 360.0 != 0.0
+            || scale
+                .and_then(Number::as_f64)
+                .is_some_and(|scale| scale < 100.0)
+        {
+            return false;
+        }
+        if let Some(clip) = paint_clip {
+            let left = clip.x.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+            let width = clip.w.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+            if width <= 0.0 || x < left || x > left + width {
+                return false;
+            }
+        }
+        let em = hit.baseline - hit.top;
+        return hit.width > 0.0
+            && x >= hit.x
+            && x <= hit.x + hit.width
+            && y >= hit.baseline - em * INK_ASCENT_EM
+            && y <= hit.baseline + em * INK_DESCENT_EM;
+    }
+    let (left, top, width, height) = match primitive {
+        Primitive::Image(img) => {
+            let Some(rect) = image_paint_rect(img) else {
+                return false;
+            };
+            rect
+        }
+        Primitive::Shape(shape) if attrs.inline_shape_atom == Some(true) => {
+            let Some(rect) = shape_fill_rect(shape) else {
+                return false;
+            };
+            rect
+        }
+        _ => return false,
+    };
+    width > 0.0 && height > 0.0 && x >= left && x <= left + width && y >= top && y <= top + height
+}
+
+/// Whether JavaScript's `trim()` leaves nothing, as the overlay tests a run's text.
+fn js_blank(text: &str) -> bool {
+    text.chars()
+        .all(|c| c == '\u{feff}' || (c.is_whitespace() && c != '\u{85}'))
+}
+
+/// A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing.
+fn text_fill_none(attrs: &DocAttrs) -> bool {
+    attrs
+        .modern_effects
+        .as_deref()
+        .and_then(|effects| effects.pointer("/textFill/kind"))
+        .and_then(Value::as_str)
+        == Some("none")
+}
+
+/// The rectangle (left, top, width, height) a shape's fill paints, when its path is
+/// exactly an axis-aligned rectangle turned by a multiple of 180 degrees; any other
+/// path covers nothing.
+fn shape_fill_rect(shape: &ShapePrimitive) -> Option<(f64, f64, f64, f64)> {
+    let transform = shape.transform.as_ref();
+    let rotation = transform
+        .and_then(|transform| transform.rotation.as_ref())
+        .and_then(Number::as_f64)
+        .unwrap_or(0.0);
+    if rotation % 180.0 != 0.0 {
+        return None;
+    }
+    let commands = &shape.geometry_path;
+    let end = match commands.last() {
+        Some(ShapePathCommand::Close) => commands.len() - 1,
+        _ => commands.len(),
+    };
+    let px = |value: &Number| value.as_f64().unwrap_or(0.0);
+    let mut corners = Vec::with_capacity(end);
+    for (index, command) in commands[..end].iter().enumerate() {
+        match command {
+            ShapePathCommand::Move { x, y } if index == 0 => corners.push((px(x), px(y))),
+            ShapePathCommand::Line { x, y } if index > 0 => corners.push((px(x), px(y))),
+            _ => return None,
+        }
+    }
+    if corners.len() == 5 && corners.first() == corners.last() {
+        corners.pop();
+    }
+    if corners.len() != 4 {
+        return None;
+    }
+    let mut xs: Vec<f64> = corners.iter().map(|corner| corner.0).collect();
+    let mut ys: Vec<f64> = corners.iter().map(|corner| corner.1).collect();
+    for values in [&mut xs, &mut ys] {
+        values.sort_by(f64::total_cmp);
+        values.dedup();
+    }
+    let distinct = (0..4).all(|a| (a + 1..4).all(|b| corners[a] != corners[b]));
+    let sides = (0..4).all(|index| {
+        let ((x, y), (next_x, next_y)) = (corners[index], corners[(index + 1) % 4]);
+        (x == next_x) != (y == next_y)
+    });
+    let ([x0, x1], [y0, y1]) = (xs.as_slice(), ys.as_slice()) else {
+        return None;
+    };
+    if !distinct || !sides {
+        return None;
+    }
+    let (mut left, mut top, width, height) = (*x0, *y0, x1 - x0, y1 - y0);
+    // The canvas turns and flips a shape about its box's center.
+    let half_turn = (rotation % 360.0).abs() == 180.0;
+    let flip_h = transform.is_some_and(|transform| transform.flip_h);
+    let flip_v = transform.is_some_and(|transform| transform.flip_v);
+    if flip_h != half_turn {
+        left = 2.0 * px(&shape.x) + px(&shape.w) - left - width;
+    }
+    if flip_v != half_turn {
+        top = 2.0 * px(&shape.y) + px(&shape.h) - top - height;
+    }
+    Some((left, top, width, height))
+}
+
+/// The frame an image paints over whole, as the canvas draws it: none for a non-rectangular
+/// image, a turn other than a half-turn, or a crop that leaves part of the frame bare.
+fn image_paint_rect(img: &ImagePrimitive) -> Option<(f64, f64, f64, f64)> {
+    let num = |value: Option<&Number>| value.and_then(Number::as_f64).filter(|v| v.is_finite());
+    let shaped = img
+        .attrs
+        .image_shape_type
+        .as_deref()
+        .is_some_and(|shape| shape != "rect");
+    let turned = num(img.rotation_deg.as_ref()).unwrap_or(0.0) % 180.0 != 0.0;
+    let bare = img.crop.as_ref().is_some_and(|crop| {
+        !crop_fills_frame(
+            crop.left.as_f64(),
+            crop.top.as_f64(),
+            crop.right.as_f64(),
+            crop.bottom.as_f64(),
+        )
+    });
+    if shaped || turned || bare {
+        return None;
+    }
+    let frame = img.attrs.content_frame.as_deref();
+    let side = |own: Option<&Number>, outer: &Number| num(own).or(outer.as_f64()).unwrap_or(0.0);
+    Some((
+        side(frame.and_then(|frame| frame.x.as_ref()), &img.x),
+        side(frame.and_then(|frame| frame.y.as_ref()), &img.y),
+        side(frame.and_then(|frame| frame.w.as_ref()), &img.w),
+        side(frame.and_then(|frame| frame.h.as_ref()), &img.h),
+    ))
+}
+
+/// Whether a source crop draws over its whole frame: an outset side leaves a gutter.
+fn crop_fills_frame(
+    left: Option<f64>,
+    top: Option<f64>,
+    right: Option<f64>,
+    bottom: Option<f64>,
+) -> bool {
+    let side = |value: Option<f64>| value.filter(|v| v.is_finite()).unwrap_or(0.0);
+    let (left, top, right, bottom) = (side(left), side(top), side(right), side(bottom));
+    left >= 0.0
+        && top >= 0.0
+        && right >= 0.0
+        && bottom >= 0.0
+        && left + right < 1.0
+        && top + bottom < 1.0
+}
+
+/// Whether a shape's fill paints its interior, as the overlay's occlusion check decides it.
+fn shape_fill_paints(shape: &ShapePrimitive) -> bool {
+    let paint = shape.attrs.fill_paint.as_deref();
+    let field = |key: &str| {
+        paint
+            .and_then(|paint| paint.get(key))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    match field("kind") {
+        Some("none") => false,
+        Some("gradient" | "pattern") => true,
+        Some("picture") if field("pictureSrc").is_some() || field("pictureRelId").is_some() => {
+            let opaque = paint
+                .and_then(|paint| paint.get("pictureOpacity"))
+                .and_then(Value::as_f64)
+                .is_none_or(|opacity| opacity > 0.0);
+            // An inset or a crop past the source paints only part of the shape, tiled fills
+            // included: past the tile cap the canvas stretches them.
+            let inset = paint
+                .and_then(|paint| paint.get("pictureStretchRect"))
+                .is_some_and(|rect| {
+                    ["left", "top", "right", "bottom"].iter().any(|side| {
+                        rect.get(side)
+                            .and_then(Value::as_f64)
+                            .is_some_and(|v| v > 0.0)
+                    })
+                });
+            let crop = paint.and_then(|paint| paint.get("pictureSrcRect"));
+            let side = |key: &str| crop.and_then(|rect| rect.get(key)).and_then(Value::as_f64);
+            opaque
+                && !inset
+                && crop_fills_frame(side("left"), side("top"), side("right"), side("bottom"))
+        }
+        _ => paint
+            .and_then(|paint| paint.get("color"))
+            .and_then(Value::as_str)
+            .or(shape.fill.as_deref())
+            .is_some_and(|fill| !matches!(fill, "" | "transparent" | "none")),
+    }
+}
+
+/// Direct body hits override header/footer bands; empty band spots activate
+/// that part. Note areas resolve against the nearest note story.
 pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<RegionHit> {
     let page = dl.pages.get(page_index)?;
 
@@ -1152,29 +1431,39 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
         y >= top && y <= bottom
     };
 
-    if let Some(h) = &page.header
-        && in_band(h)
-    {
-        let resolved = resolve_point(&h.primitives, false, x, y);
-        return Some(RegionHit {
-            region: HitRegion::Header,
-            r_id: Some(h.r_id.clone()),
-            note_id: None,
-            pos: resolved.pos,
-            target: resolved.target,
-        });
-    }
-    if let Some(f) = &page.footer
-        && in_band(f)
-    {
-        let resolved = resolve_point(&f.primitives, false, x, y);
-        return Some(RegionHit {
-            region: HitRegion::Footer,
-            r_id: Some(f.r_id.clone()),
-            note_id: None,
-            pos: resolved.pos,
-            target: resolved.target,
-        });
+    for (region, band) in [
+        (HitRegion::Header, &page.header),
+        (HitRegion::Footer, &page.footer),
+    ] {
+        if let Some(band) = band
+            && in_band(band)
+        {
+            // Only body content painted at the point takes it, and its own position answers.
+            let painted: Vec<Primitive> = page
+                .primitives
+                .iter()
+                .filter(|primitive| painted_body_hit_at(primitive, x, y))
+                .cloned()
+                .collect();
+            let body = resolve_point(&painted, false, x, y);
+            if body.direct {
+                return Some(RegionHit {
+                    region: HitRegion::Body,
+                    r_id: None,
+                    note_id: None,
+                    pos: body.pos,
+                    target: body.target,
+                });
+            }
+            let resolved = resolve_point(&band.primitives, false, x, y);
+            return Some(RegionHit {
+                region,
+                r_id: Some(band.r_id.clone()),
+                note_id: None,
+                pos: resolved.pos,
+                target: resolved.target,
+            });
+        }
     }
     if let Some(area) = page.note_areas.iter().find(|area| in_note_area(area, y)) {
         let story = note_stories(area)
@@ -1820,6 +2109,589 @@ mod tests {
             serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
             vec![run(100.0, 100.0, 50.0, 1), image(100.0, 200.0, Some(10))],
         )
+    }
+
+    #[test]
+    fn body_content_in_header_footer_bands_wins_but_empty_spots_activate_the_band() {
+        for (kind, top, region) in [
+            ("header", 0.0, HitRegion::Header),
+            ("footer", 420.0, HitRegion::Footer),
+        ] {
+            let mut text_box = run(300.0, top + 40.0, 50.0, 20);
+            text_box["blockKey"] = "text-box-paragraph".into();
+            let mut watermark = image(0.0, top, None);
+            watermark["w"] = 500.into();
+            watermark["h"] = 80.into();
+            let mut dl = page(
+                serde_json::json!({"x": 0, "y": 0, "width": 500, "height": 500}),
+                vec![
+                    watermark,
+                    run(100.0, top + 40.0, 50.0, 1),
+                    image(200.0, top + 20.0, Some(10)),
+                    text_box,
+                ],
+            );
+            dl.pages[0].watermark_primitive_count = Some(1);
+            let band = serde_json::from_value(serde_json::json!({
+                "rId": "rIdBand", "kind": kind, "y": top, "height": 80,
+                "primitives": [run(100.0, top + 40.0, 250.0, 50)]
+            }))
+            .unwrap();
+            if kind == "header" {
+                dl.pages[0].header = Some(band);
+            } else {
+                dl.pages[0].footer = Some(band);
+            }
+
+            for (x, start, end, target) in [
+                (120.0, 1, 6, HoverTarget::Text),
+                (220.0, 10, 10, HoverTarget::Image),
+                (320.0, 20, 25, HoverTarget::Text),
+            ] {
+                let hit = hit_test_regions(&dl, 0, x, top + 35.0).unwrap();
+                assert_eq!(hit.region, HitRegion::Body);
+                assert_eq!(hit.r_id, None);
+                assert_eq!(hit.target, target);
+                assert!(hit.pos.is_some_and(|pos| (start..=end).contains(&pos)));
+            }
+
+            let empty = hit_test_regions(&dl, 0, 400.0, top + 35.0).unwrap();
+            assert_eq!(empty.region, region);
+            assert_eq!(empty.r_id.as_deref(), Some("rIdBand"));
+            let page = &mut dl.pages[0];
+            if let Some(band) = page.header.as_mut().or(page.footer.as_mut()) {
+                band.primitives.clear();
+            }
+            let empty = hit_test_regions(&dl, 0, 400.0, top + 35.0).unwrap();
+            assert_eq!(empty.region, region);
+            assert_eq!(empty.pos, None);
+            assert_eq!(empty.target, HoverTarget::None);
+        }
+    }
+
+    fn band_page(kind: &str, top: f64, primitives: Vec<serde_json::Value>) -> DisplayList {
+        let mut dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            primitives,
+        );
+        let band = serde_json::from_value(serde_json::json!({
+            "rId": "rIdBand", "kind": kind, "y": top, "height": 80,
+            "primitives": [run(100.0, top + 40.0, 50.0, 50)]
+        }))
+        .unwrap();
+        if kind == "header" {
+            dl.pages[0].header = Some(band);
+        } else {
+            dl.pages[0].footer = Some(band);
+        }
+        dl
+    }
+
+    #[test]
+    fn clipped_body_text_does_not_override_header() {
+        for clip in [
+            serde_json::json!({"x": 100, "y": 50, "w": 50, "h": 30}),
+            serde_json::json!({"x": 130, "y": 0, "w": 20, "h": 80}),
+            serde_json::json!({"x": 120, "y": 0, "w": 0, "h": 80}),
+            serde_json::json!({"x": 100, "y": 35, "w": 50, "h": 0}),
+            serde_json::json!({"x": 100, "y": 0, "w": -50, "h": 80}),
+            serde_json::json!({"x": 100, "y": 35, "w": 50, "h": -10}),
+            serde_json::json!({"x": 100, "y": 0, "h": 80}),
+            serde_json::json!({"x": 100, "w": 50}),
+        ] {
+            let mut text = run(100.0, 40.0, 50.0, 1);
+            text["clipGroup"] = serde_json::json!({"clip": clip});
+            let dl = band_page("header", 0.0, vec![text]);
+
+            let hit = hit_test_regions(&dl, 0, 120.0, 35.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Header);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+            assert_eq!(hit.pos, Some(52));
+            assert_eq!(hit.target, HoverTarget::Text);
+            assert_eq!(hit_test(&dl, 0, 120.0, 35.0), Some(3));
+
+            let outside = hit_test_regions(&dl, 0, 120.0, 100.0).unwrap();
+            assert_eq!(outside.region, HitRegion::Body);
+            assert_eq!(outside.pos, Some(3));
+        }
+    }
+
+    #[test]
+    fn a_band_click_takes_the_position_of_the_body_run_painted_there() {
+        let mut hidden = run(100.0, 40.0, 50.0, 1);
+        hidden["clipGroup"] = serde_json::json!({
+            "clip": {"x": 100, "y": 50, "w": 50, "h": 30}
+        });
+        let visible = run(100.0, 40.0, 50.0, 20);
+        let dl = band_page("header", 0.0, vec![hidden, visible]);
+
+        let hit = hit_test_regions(&dl, 0, 120.0, 35.0).unwrap();
+        assert_eq!(hit.region, HitRegion::Body);
+        assert_eq!(hit.pos, Some(22));
+    }
+
+    #[test]
+    fn body_text_overrides_header_only_inside_clip() {
+        let mut text = run(100.0, 40.0, 50.0, 1);
+        text["clipGroup"] = serde_json::json!({
+            "clip": {"x": 125, "y": 25, "w": 25, "h": 25}
+        });
+        let dl = band_page("header", 0.0, vec![text]);
+
+        let excluded = hit_test_regions(&dl, 0, 110.0, 35.0).unwrap();
+        assert_eq!(excluded.region, HitRegion::Header);
+        assert_eq!(excluded.pos, Some(51));
+
+        let inside = hit_test_regions(&dl, 0, 140.0, 35.0).unwrap();
+        assert_eq!(inside.region, HitRegion::Body);
+        assert_eq!(inside.r_id, None);
+        assert_eq!(inside.pos, Some(5));
+        assert_eq!(inside.target, HoverTarget::Text);
+    }
+
+    #[test]
+    fn synthetic_fallback_paint_clip_limits_body_hits_in_header() {
+        let glyph_run = serde_json::json!({
+            "kind": "glyphRun", "fontId": 1, "size": 16, "color": "#000000",
+            "text": "hello", "docStart": 1, "docEnd": 6,
+            "glyphs": [{"id": 1, "x": 100, "y": 40, "cluster": 0, "advance": 50}]
+        });
+        for mut text in [run(100.0, 40.0, 50.0, 1), glyph_run] {
+            text["paintClip"] = serde_json::json!({"x": 100, "w": 25});
+            let dl = band_page("header", 0.0, vec![text.clone()]);
+
+            let excluded = hit_test_regions(&dl, 0, 140.0, 35.0).unwrap();
+            assert_eq!(excluded.region, HitRegion::Header);
+            assert_eq!(excluded.r_id.as_deref(), Some("rIdBand"));
+            assert_eq!(excluded.pos, Some(54));
+            assert_eq!(excluded.target, HoverTarget::Text);
+
+            let inside = hit_test_regions(&dl, 0, 110.0, 35.0).unwrap();
+            assert_eq!(inside.region, HitRegion::Body);
+            assert_eq!(inside.r_id, None);
+            assert!(inside.pos.is_some_and(|pos| (1..=6).contains(&pos)));
+            assert_eq!(inside.target, HoverTarget::Text);
+
+            text["paintClip"] = serde_json::json!({"w": 125});
+            let dl = band_page("header", 0.0, vec![text.clone()]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 110.0, 35.0).unwrap().region,
+                HitRegion::Body
+            );
+            assert_eq!(
+                hit_test_regions(&dl, 0, 140.0, 35.0).unwrap().region,
+                HitRegion::Header
+            );
+
+            for clip in [
+                serde_json::json!({"x": 100}),
+                serde_json::json!({"x": 100, "w": 0}),
+                serde_json::json!({"x": 100, "w": -25}),
+            ] {
+                text["paintClip"] = clip;
+                let dl = band_page("header", 0.0, vec![text.clone()]);
+                assert_eq!(
+                    hit_test_regions(&dl, 0, 110.0, 35.0).unwrap().region,
+                    HitRegion::Header
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn body_image_overrides_footer_only_inside_clip() {
+        let mut image = image(100.0, 440.0, Some(10));
+        image["clipGroup"] = serde_json::json!({
+            "clip": {"x": 100, "y": 460, "w": 60, "h": 20}
+        });
+        let dl = band_page("footer", 420.0, vec![image]);
+
+        let excluded = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+        assert_eq!(excluded.region, HitRegion::Footer);
+        assert_eq!(excluded.r_id.as_deref(), Some("rIdBand"));
+        assert_eq!(excluded.pos, Some(52));
+        assert_eq!(excluded.target, HoverTarget::Text);
+
+        let inside = hit_test_regions(&dl, 0, 120.0, 465.0).unwrap();
+        assert_eq!(inside.region, HitRegion::Body);
+        assert_eq!(inside.r_id, None);
+        assert_eq!(inside.pos, Some(10));
+        assert_eq!(inside.target, HoverTarget::Image);
+    }
+
+    #[test]
+    fn body_image_cropped_past_its_source_leaves_footer_clicks_to_the_footer() {
+        let cropped = |left: f64, right: f64| {
+            let mut image = image(100.0, 440.0, Some(10));
+            let crop = serde_json::json!({"top": 0, "right": right, "bottom": 0, "left": left});
+            image["crop"] = crop;
+            image
+        };
+        for image in [cropped(-0.5, 0.0), cropped(0.0, -0.1), cropped(0.6, 0.4)] {
+            let dl = band_page("footer", 420.0, vec![image]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        let dl = band_page("footer", 420.0, vec![cropped(0.25, 0.25)]);
+        assert_eq!(
+            hit_test_regions(&dl, 0, 120.0, 455.0).unwrap().region,
+            HitRegion::Body
+        );
+    }
+
+    #[test]
+    fn body_image_takes_footer_clicks_only_inside_the_rectangle_it_paints() {
+        let with = |extra: serde_json::Value| {
+            let mut image = image(100.0, 440.0, Some(10));
+            for (key, value) in extra.as_object().unwrap() {
+                image[key] = value.clone();
+            }
+            image
+        };
+        for extra in [
+            serde_json::json!({"shapeType": "ellipse"}),
+            serde_json::json!({"rotationDeg": 45}),
+            serde_json::json!({"rotationDeg": 90}),
+            serde_json::json!({"contentFrame": {"x": 130, "y": 440, "w": 30, "h": 40}}),
+        ] {
+            let dl = band_page("footer", 420.0, vec![with(extra)]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        for extra in [
+            serde_json::json!({"shapeType": "rect"}),
+            serde_json::json!({"rotationDeg": 180}),
+            serde_json::json!({"contentFrame": {"x": 100, "y": 440, "w": 30, "h": 40}}),
+        ] {
+            let dl = band_page("footer", 420.0, vec![with(extra)]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 120.0, 455.0).unwrap().region,
+                HitRegion::Body
+            );
+        }
+    }
+
+    #[test]
+    fn transparent_body_image_leaves_footer_clicks_to_the_footer() {
+        let visible = band_page("footer", 420.0, vec![image(100.0, 440.0, Some(10))]);
+        assert_eq!(
+            hit_test_regions(&visible, 0, 120.0, 455.0).unwrap().region,
+            HitRegion::Body
+        );
+
+        let mut own = image(100.0, 440.0, Some(10));
+        own["opacity"] = 0.into();
+        let mut group = image(100.0, 440.0, Some(10));
+        group["clipGroup"] = serde_json::json!({
+            "clip": {"x": 0, "y": 0, "w": 500, "h": 500}, "opacity": 0
+        });
+        for image in [own, group] {
+            let dl = band_page("footer", 420.0, vec![image]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+
+        // The canvas applies group opacity only inside a clip.
+        let mut unclipped = image(100.0, 440.0, Some(10));
+        unclipped["clipGroup"] = serde_json::json!({"opacity": 0});
+        let dl = band_page("footer", 420.0, vec![unclipped]);
+        assert_eq!(
+            hit_test_regions(&dl, 0, 120.0, 455.0).unwrap().region,
+            HitRegion::Body
+        );
+    }
+
+    #[test]
+    fn turned_or_compressed_body_text_leaves_header_clicks_to_the_header() {
+        let mut turned = run(100.0, 40.0, 50.0, 1);
+        turned["rotationDeg"] = 90.into();
+        let dl = band_page("header", 0.0, vec![turned]);
+        let hit = hit_test_regions(&dl, 0, 120.0, 35.0).unwrap();
+        assert_eq!(hit.region, HitRegion::Header);
+        assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        let mut compressed = run(100.0, 40.0, 50.0, 1);
+        compressed["horizontalScale"] = 25.into();
+        let dl = band_page("header", 0.0, vec![compressed]);
+        assert_eq!(
+            hit_test_regions(&dl, 0, 120.0, 35.0).unwrap().region,
+            HitRegion::Header
+        );
+        let mut full_turn = run(100.0, 40.0, 50.0, 1);
+        full_turn["rotationDeg"] = 360.into();
+        let mut expanded = run(100.0, 40.0, 50.0, 1);
+        expanded["horizontalScale"] = 150.into();
+        for text in [full_turn, expanded] {
+            let dl = band_page("header", 0.0, vec![text]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 120.0, 35.0).unwrap().region,
+                HitRegion::Body
+            );
+        }
+    }
+
+    #[test]
+    fn a_band_keeps_its_edge_where_body_text_paints_no_glyphs() {
+        // Body lines start where the header ends (flush, then inside a padded band) at a 0.75em ascent.
+        let flush = band_page("header", 0.0, vec![run(100.0, 92.0, 50.0, 1)]);
+        let padded = band_page("header", 0.0, vec![run(100.0, 72.0, 50.0, 1)]);
+        for (dl, y) in [
+            (&flush, 73.0),
+            (&flush, 77.0),
+            (&flush, 80.0),
+            (&padded, 59.0),
+        ] {
+            let hit = hit_test_regions(dl, 0, 120.0, y).unwrap();
+            assert_eq!(hit.region, HitRegion::Header, "y {y}");
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        let straddling = band_page("header", 0.0, vec![run(100.0, 84.0, 50.0, 1)]);
+        for (dl, y) in [(&flush, 85.0), (&padded, 66.0), (&straddling, 76.0)] {
+            assert_eq!(
+                hit_test_regions(dl, 0, 120.0, y).unwrap().region,
+                HitRegion::Body,
+                "y {y}"
+            );
+        }
+        // The body's last line ends where the footer starts.
+        let dl = band_page("footer", 420.0, vec![run(100.0, 416.0, 50.0, 1)]);
+        for y in [420.0, 422.0, 424.0] {
+            let hit = hit_test_regions(&dl, 0, 120.0, y).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer, "y {y}");
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+    }
+
+    #[test]
+    fn body_text_that_paints_no_glyphs_leaves_header_clicks_to_the_header() {
+        let glyph_run = |text: &str| {
+            serde_json::json!({
+                "kind": "glyphRun", "fontId": 1, "size": 16, "color": "#000000",
+                "text": text, "docStart": 1, "docEnd": 6,
+                "glyphs": [{"id": 1, "x": 100, "y": 40, "cluster": 0, "advance": 50}]
+            })
+        };
+        let no_fill = serde_json::json!({"textFill": {"kind": "none"}});
+        let mut unfilled_run = run(100.0, 40.0, 50.0, 1);
+        unfilled_run["modernEffects"] = no_fill.clone();
+        let mut unfilled_glyphs = glyph_run("hello");
+        unfilled_glyphs["modernEffects"] = no_fill;
+        let mut blank_run = run(100.0, 40.0, 50.0, 1);
+        blank_run["text"] = "  \t".into();
+        let mut no_glyphs = glyph_run("hello");
+        no_glyphs["glyphs"] = serde_json::json!([]);
+        let mut bom_run = run(100.0, 40.0, 50.0, 1);
+        bom_run["text"] = "\u{feff} ".into();
+        for text in [
+            unfilled_run,
+            unfilled_glyphs,
+            blank_run,
+            bom_run,
+            glyph_run(" "),
+            glyph_run("\u{feff}"),
+            no_glyphs,
+        ] {
+            let dl = band_page("header", 0.0, vec![text]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 35.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Header);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        let mut nel_run = run(100.0, 40.0, 50.0, 1);
+        nel_run["text"] = "\u{85}".into();
+        for text in [run(100.0, 40.0, 50.0, 1), glyph_run("hello"), nel_run] {
+            let dl = band_page("header", 0.0, vec![text]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 120.0, 35.0).unwrap().region,
+                HitRegion::Body
+            );
+        }
+    }
+
+    #[test]
+    fn body_images_and_shapes_that_paint_nothing_leave_footer_clicks_to_the_footer() {
+        let mut no_width = image(100.0, 440.0, Some(10));
+        no_width["w"] = 0.into();
+        let mut no_height = image(100.0, 455.0, Some(10));
+        no_height["h"] = 0.into();
+        let shape = |paint: Option<serde_json::Value>, fill: Option<&str>| {
+            let mut shape = inline_shape_primitive(100.0, 440.0, 60.0, 40.0, 10, "shape:band");
+            shape["geometryPath"] = serde_json::json!([
+                {"type": "move", "x": 100, "y": 440}, {"type": "line", "x": 160, "y": 440},
+                {"type": "line", "x": 160, "y": 480}, {"type": "line", "x": 100, "y": 480},
+                {"type": "close"}
+            ]);
+            if let Some(paint) = paint {
+                shape["fillPaint"] = paint;
+            }
+            if let Some(fill) = fill {
+                shape["fill"] = fill.into();
+            }
+            shape
+        };
+        let mut no_path = shape(None, Some("#ff0000"));
+        no_path["geometryPath"] = serde_json::json!([]);
+        // Its box covers the click; its path does not.
+        let mut triangle = shape(None, Some("#ff0000"));
+        triangle["geometryPath"] = serde_json::json!([
+            {"type": "move", "x": 100, "y": 440}, {"type": "line", "x": 160, "y": 480},
+            {"type": "line", "x": 100, "y": 480}, {"type": "close"}
+        ]);
+        let mut bowtie = shape(None, Some("#ff0000"));
+        bowtie["geometryPath"] = serde_json::json!([
+            {"type": "move", "x": 100, "y": 440}, {"type": "line", "x": 160, "y": 480},
+            {"type": "line", "x": 160, "y": 440}, {"type": "line", "x": 100, "y": 480},
+            {"type": "close"}
+        ]);
+        let mut narrow_bowtie = shape(None, Some("#ff0000"));
+        narrow_bowtie["w"] = serde_json::json!(0.011);
+        narrow_bowtie["geometryPath"] = serde_json::json!([
+            {"type": "move", "x": 100.002, "y": 440}, {"type": "line", "x": 100.011, "y": 480},
+            {"type": "line", "x": 100.011, "y": 440}, {"type": "line", "x": 100.002, "y": 480},
+            {"type": "close"}
+        ]);
+        let mut skewed = shape(None, Some("#ff0000"));
+        skewed["w"] = serde_json::json!(0.004);
+        skewed["geometryPath"] = serde_json::json!([
+            {"type": "move", "x": 99.997, "y": 440}, {"type": "line", "x": 100.013, "y": 440},
+            {"type": "line", "x": 100.013, "y": 480}, {"type": "line", "x": 100.009, "y": 480},
+            {"type": "close"}
+        ]);
+        // A rectangle filling the left half of its box, over the click until flipped.
+        let half = |transform: Option<serde_json::Value>| {
+            let mut shape = shape(None, Some("#ff0000"));
+            shape["geometryPath"] = serde_json::json!([
+                {"type": "move", "x": 100, "y": 440}, {"type": "line", "x": 130, "y": 440},
+                {"type": "line", "x": 130, "y": 480}, {"type": "line", "x": 100, "y": 480},
+                {"type": "close"}
+            ]);
+            if let Some(transform) = transform {
+                shape["transform"] = transform;
+            }
+            shape
+        };
+        let mut rotated = shape(None, Some("#ff0000"));
+        rotated["transform"] = serde_json::json!({"rotation": 45});
+        let mut turned = shape(None, Some("#ff0000"));
+        turned["transform"] = serde_json::json!({"rotation": 180});
+        for (x, primitive) in [
+            (100.0, no_width),
+            (120.0, no_height),
+            (
+                120.0,
+                shape(Some(serde_json::json!({"kind": "none"})), Some("#ff0000")),
+            ),
+            (120.0, shape(None, None)),
+            (120.0, shape(None, Some("transparent"))),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({"kind": "solid", "color": ""})),
+                    Some("#ff0000"),
+                ),
+            ),
+            (
+                120.0,
+                shape(Some(serde_json::json!({"kind": "picture"})), None),
+            ),
+            (
+                120.0,
+                shape(
+                    Some(
+                        serde_json::json!({"kind": "picture", "pictureRelId": "rId9", "pictureOpacity": 0}),
+                    ),
+                    None,
+                ),
+            ),
+            (120.0, no_path),
+            (140.0, triangle),
+            (140.0, bowtie),
+            (100.0055, narrow_bowtie),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({
+                        "kind": "picture", "pictureRelId": "rId9",
+                        "pictureStretchRect": {"left": 0.75}
+                    })),
+                    None,
+                ),
+            ),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({
+                        "kind": "picture", "pictureRelId": "rId9",
+                        "pictureSrcRect": {"left": -1}
+                    })),
+                    None,
+                ),
+            ),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({
+                        "kind": "picture", "pictureRelId": "rId9", "pictureFillMode": "tile",
+                        "pictureStretchRect": {"left": 0.75}
+                    })),
+                    None,
+                ),
+            ),
+            (
+                120.0,
+                shape(
+                    Some(serde_json::json!({
+                        "kind": "picture", "pictureRelId": "rId9", "pictureFillMode": "tile",
+                        "pictureSrcRect": {"left": -1}
+                    })),
+                    None,
+                ),
+            ),
+            (100.002, skewed),
+            (120.0, half(Some(serde_json::json!({"flipH": true})))),
+            (120.0, half(Some(serde_json::json!({"rotation": 180})))),
+            (120.0, rotated),
+        ] {
+            let dl = band_page("footer", 420.0, vec![primitive]);
+            let hit = hit_test_regions(&dl, 0, x, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Footer);
+            assert_eq!(hit.r_id.as_deref(), Some("rIdBand"));
+        }
+        for primitive in [
+            shape(None, Some("#ff0000")),
+            turned,
+            half(None),
+            shape(
+                Some(serde_json::json!({
+                    "kind": "picture", "pictureRelId": "rId9",
+                    "pictureStretchRect": {"left": -0.1, "top": 0}
+                })),
+                None,
+            ),
+            shape(
+                Some(serde_json::json!({
+                    "kind": "picture", "pictureRelId": "rId9",
+                    "pictureSrcRect": {"left": 0.25, "right": 0.25}
+                })),
+                None,
+            ),
+            half(Some(serde_json::json!({"flipH": true, "rotation": 180}))),
+            shape(
+                Some(serde_json::json!({"kind": "solid", "color": "#00ff00"})),
+                None,
+            ),
+            shape(Some(serde_json::json!({"kind": "gradient"})), None),
+            shape(
+                Some(serde_json::json!({"kind": "picture", "pictureRelId": "rId9"})),
+                None,
+            ),
+        ] {
+            let dl = band_page("footer", 420.0, vec![primitive]);
+            let hit = hit_test_regions(&dl, 0, 120.0, 455.0).unwrap();
+            assert_eq!(hit.region, HitRegion::Body);
+            assert_eq!(hit.pos, Some(10));
+        }
     }
 
     fn note_run(baseline: f64, doc_start: i64, group_id: &str) -> serde_json::Value {

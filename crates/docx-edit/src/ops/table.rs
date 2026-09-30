@@ -827,6 +827,20 @@ fn remove_row_at(
     Ok(())
 }
 
+pub(crate) fn table_revisions<T: ReadTxn>(table: &MapRef, txn: &T) -> [Option<Any>; 2] {
+    let Ok(data) = read_table(table, txn) else {
+        return [None, None];
+    };
+    [TR_INS, TR_DEL].map(|key| {
+        let stamp = data.rows.first()?.tr_pr.get(key)?;
+        let revision = row_revision_parts(stamp)?;
+        data.rows
+            .iter()
+            .all(|row| row.tr_pr.get(key).and_then(row_revision_parts).as_ref() == Some(&revision))
+            .then(|| stamp.clone())
+    })
+}
+
 /// Collects structural row revisions at their containing table embed. Multiple
 /// rows from one table insertion intentionally collapse to one entry when they
 /// share a revision id, matching the sidebar's "Inserted table" grouping.
@@ -905,7 +919,7 @@ pub(crate) fn resolve_table_row_revisions(
     span: Option<(u32, u32)>,
     filter: Option<&str>,
     resolved: &mut Vec<String>,
-) -> OpResult<()> {
+) -> OpResult<u32> {
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
     let mut tables = Vec::new();
     let mut offset = 0u32;
@@ -923,6 +937,7 @@ pub(crate) fn resolve_table_row_revisions(
         offset += len;
     }
 
+    let mut removed_tables = 0;
     for (table_offset, table_index, table) in tables.into_iter().rev() {
         let mut data = read_table(&table, txn)?;
         let mut remove = Vec::new();
@@ -951,6 +966,7 @@ pub(crate) fn resolve_table_row_revisions(
         if remove.len() == data.rows.len() {
             let locator = TableLocator::new(story_id, table_index);
             delete_table_in_txn(txn, &locator, story, table_offset, &data)?;
+            removed_tables += 1;
             continue;
         }
         let mut deleted = Vec::new();
@@ -959,7 +975,7 @@ pub(crate) fn resolve_table_row_revisions(
         }
         write_table(txn, &table, &data);
     }
-    Ok(())
+    Ok(removed_tables)
 }
 
 fn delete_table_in_txn(

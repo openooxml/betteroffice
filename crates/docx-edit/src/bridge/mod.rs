@@ -63,6 +63,7 @@ const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
+    pub compatibility_flags: docx_parse::CompatibilityFlags,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub toc_style_ids: BTreeSet<String>,
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
@@ -101,6 +102,14 @@ pub struct RenderEnv {
     pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
+    /// Lower the `data:` image sources seeding wrote as the `media:{n}`
+    /// tokens of their parts, which the host then resolves.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub media_tokens: bool,
+    /// The seeded media [`Self::media_tokens`] reads; lowering takes the
+    /// document's when empty.
+    #[serde(skip)]
+    pub media: crate::media::MediaSources,
 }
 
 impl RenderEnv {
@@ -320,15 +329,58 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None)
+}
+
+/// [`yrs_doc_to_mapped_layout_blocks`] plus the blocks it leaves out that a revision
+/// preview can reveal: suppressed field results and drawing-only paragraphs.
+pub(crate) fn yrs_doc_to_mapped_layout_blocks_with_revealable(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+) -> Result<(Vec<LayoutBlock>, LoweringMap, Vec<LayoutBlock>), BridgeError> {
+    let mut revealable = Some(Vec::new());
+    let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut revealable)?;
+    Ok((blocks, map, revealable.unwrap_or_default()))
+}
+
+fn yrs_doc_to_mapped_layout_blocks_inner(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+    revealable: &mut Option<Vec<LayoutBlock>>,
+) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
     if doc.yrs_doc().offset_kind() != OffsetKind::Utf16 {
         return Err(BridgeError::WrongOffsetKind);
     }
 
+    let with_media;
+    let env = match doc.media_sources() {
+        media if env.media_tokens && env.media.is_empty() && !media.is_empty() => {
+            with_media = RenderEnv {
+                media,
+                ..env.clone()
+            };
+            &with_media
+        }
+        _ => env,
+    };
     let mut list_state = ListState::new(doc.source_metadata().map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
     let mut map = LoweringMap::default();
-    let (blocks, _) = lower_story(
+    let session = txn.get_map(crate::identity::SESSION);
+    let has_sequence_metadata = session
+        .as_ref()
+        .is_some_and(|session| session.contains_key(&txn, crate::seed::OPAQUE_SEQUENCES));
+    let mut opaque_sequences: BTreeSet<String> = session
+        .map(|session| {
+            any_strings(shared_any(&session, &txn, crate::seed::OPAQUE_SEQUENCES).as_ref())
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    let (mut blocks, _) = lower_story(
         &txn,
         story_id,
         env,
@@ -337,7 +389,16 @@ pub fn yrs_doc_to_mapped_layout_blocks(
         &mut list_state,
         CellEdges::default(),
         &mut map,
+        &mut opaque_sequences,
+        revealable,
     )?;
+    // Word numbers SEQ fields in the main text only.
+    if story_id == "body" && has_sequence_metadata {
+        docx_layout::sequence_fields::number_sequence_fields_with_opaque(
+            &mut blocks,
+            opaque_sequences,
+        );
+    }
     map.finish();
     Ok((blocks, map))
 }
@@ -358,6 +419,8 @@ fn lower_story<T: ReadTxn>(
     list_state: &mut ListState,
     cell_edges: CellEdges,
     map: &mut LoweringMap,
+    opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
@@ -480,6 +543,8 @@ fn lower_story<T: ReadTxn>(
                                 before: cell_edges.before,
                                 after: false,
                             },
+                            opaque_sequences,
+                            revealable,
                         ));
                         None
                     });
@@ -544,6 +609,8 @@ fn lower_story<T: ReadTxn>(
                         block_pm_units,
                         list_state,
                         (map, story_slot),
+                        opaque_sequences,
+                        revealable,
                         segments,
                     );
                     suppress_cell_edge_spacing(
@@ -558,6 +625,8 @@ fn lower_story<T: ReadTxn>(
                         .is_some_and(|id| hidden_field_blocks.contains(&id))
                     {
                         blocks.extend(paragraph_blocks);
+                    } else if let Some(revealed) = revealable {
+                        revealed.extend(paragraph_blocks);
                     }
                     // The field's own paragraph is the one just closed, so the
                     // range it suppresses opens with the next block.
@@ -591,6 +660,8 @@ fn lower_story<T: ReadTxn>(
                                 before: cell_edges.before,
                                 after: false,
                             },
+                            opaque_sequences,
+                            revealable,
                         ));
                     }
                     if !paragraph_runs.is_empty()
@@ -620,9 +691,13 @@ fn lower_story<T: ReadTxn>(
                         active_stories,
                         unnumbered.as_mut().unwrap_or(&mut *list_state),
                         map,
+                        opaque_sequences,
+                        revealable,
                     )?;
                     if !hidden {
                         blocks.push(LayoutBlock::Table(lowered));
+                    } else if !previewed_out && let Some(revealed) = revealable {
+                        revealed.push(LayoutBlock::Table(lowered));
                     }
                     story_index += 1;
                     paragraph_start = story_index;
@@ -649,6 +724,8 @@ fn lower_story<T: ReadTxn>(
                                 before: cell_edges.before,
                                 after: false,
                             },
+                            opaque_sequences,
+                            revealable,
                         ));
                     }
                     if !at_block_boundary
@@ -719,6 +796,8 @@ fn lower_story<T: ReadTxn>(
                                 before: cell_edges.before,
                                 after: false,
                             },
+                            opaque_sequences,
+                            revealable,
                         ));
                     }
                     if !at_block_boundary
@@ -751,10 +830,14 @@ fn lower_story<T: ReadTxn>(
                             after: cell_edges.after && story_index + 1 == story.len(txn),
                         },
                         map,
+                        opaque_sequences,
+                        revealable,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     if !previewed_out && !hidden_field_blocks.contains(&child_story) {
                         blocks.extend(child_blocks);
+                    } else if !previewed_out && let Some(revealed) = revealable {
+                        revealed.extend(child_blocks);
                     }
                     story_index += 1;
                     paragraph_start = story_index;
@@ -839,6 +922,10 @@ fn lower_story<T: ReadTxn>(
                         "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
                         _ => "OTHER".to_owned(),
                     };
+                    let nested_sequences = lower_nested_sequences(
+                        instruction.as_deref(),
+                        shared_any(&field, txn, "resultProjection").as_ref(),
+                    );
                     paragraph_runs.push(RawRun {
                         kind: RawRunKind::Field {
                             field_type: mapped_type.clone(),
@@ -852,6 +939,11 @@ fn lower_story<T: ReadTxn>(
                             source: field_join
                                 .as_ref()
                                 .and_then(|_| shared_map_string(&field, txn, "fieldData")),
+                            locked: shared_any(&field, txn, "fldLock")
+                                .as_ref()
+                                .and_then(any_bool)
+                                .unwrap_or(false),
+                            nested_sequences,
                         },
                         formatting: lower_run_formatting(attributes, env),
                         story_start: story_index,
@@ -1126,7 +1218,17 @@ fn lower_story<T: ReadTxn>(
         }
 
         if let Some(join) = field_join.take() {
-            blocks.extend(join.flush(txn, story_id, env, list_state, map, story_slot, cell_edges));
+            blocks.extend(join.flush(
+                txn,
+                story_id,
+                env,
+                list_state,
+                map,
+                story_slot,
+                cell_edges,
+                opaque_sequences,
+                revealable,
+            ));
         }
         if !at_block_boundary
             || !paragraph_runs.is_empty()
@@ -1155,7 +1257,10 @@ pub fn yrsDocToLayoutBlocks(
 
 /// The paragraph a field's paragraph joins because the field's code hides its mark, and the
 /// paragraphs in between, which the code hides whole; bound at seed time.
-fn field_code_join<T: ReadTxn>(field: &MapRef, txn: &T) -> Option<(Vec<FieldCodeParagraph>, String)> {
+fn field_code_join<T: ReadTxn>(
+    field: &MapRef,
+    txn: &T,
+) -> Option<(Vec<FieldCodeParagraph>, String)> {
     let target = shared_map_string(field, txn, "fieldCodeTarget")?;
     let data = shared_map_string(field, txn, "fieldData")
         .and_then(|data| serde_json::from_str::<Value>(&data).ok());
@@ -1267,6 +1372,8 @@ impl FieldJoin {
         map: &mut LoweringMap,
         story_slot: u32,
         cell_edges: CellEdges,
+        opaque_sequences: &mut BTreeSet<String>,
+        revealable: &mut Option<Vec<LayoutBlock>>,
     ) -> Vec<LayoutBlock> {
         let mut blocks = flush_paragraph_parts(
             Vec::new(),
@@ -1280,6 +1387,8 @@ impl FieldJoin {
             self.pm_units,
             list_state,
             (map, story_slot),
+            opaque_sequences,
+            revealable,
             self.segments,
         );
         suppress_cell_edge_spacing(
@@ -1350,6 +1459,8 @@ fn lower_table<T: ReadTxn>(
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
     map: &mut LoweringMap,
+    opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
 ) -> Result<(TableBlock, u64), BridgeError> {
     let tbl_pr_value = shared_any(table, txn, "tblPr")
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
@@ -1462,8 +1573,19 @@ fn lower_table<T: ReadTxn>(
                     after: true,
                 },
                 map,
+                opaque_sequences,
+                revealable,
             )?;
 
+            if env.compatibility_flags.allow_space_of_same_style_in_table {
+                for block in &mut blocks {
+                    if let LayoutBlock::Paragraph(paragraph) = block
+                        && let Some(attrs) = &mut paragraph.attrs
+                    {
+                        attrs.contextual_spacing = Some(false);
+                    }
+                }
+            }
             let width_value = map_number(tc_pr, "width");
             let width_type = map_string(tc_pr, "widthType");
             let width =
@@ -1713,7 +1835,10 @@ fn lower_image_values(
         });
 
     ImageRun {
-        src: map_string(values, "src").unwrap_or_default(),
+        src: match values.get("src") {
+            Some(Any::String(src)) => env.media.token(src).unwrap_or_else(|| src.to_string()),
+            value => value_string(value).unwrap_or_default(),
+        },
         width,
         height,
         alt: map_string(values, "alt"),
@@ -1929,6 +2054,7 @@ fn lower_shape_block<T: ReadTxn>(
         x: None,
         y: None,
         inner_text: None,
+        nested_sequences: Vec::new(),
         inner_measures: None,
         children: Vec::new(),
         scene: None,
@@ -2200,19 +2326,28 @@ fn lower_inline_sdt_values(
                     "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
                     _ => "OTHER".to_owned(),
                 };
+                let instruction = payload
+                    .and_then(|payload| map_string(payload, "instruction"))
+                    .filter(|value| !value.is_empty());
+                let nested_sequences = lower_nested_sequences(
+                    instruction.as_deref(),
+                    payload.and_then(|payload| payload.get("resultProjection")),
+                );
                 runs.push(RawRun {
                     kind: RawRunKind::Field {
                         field_type: mapped_type.clone(),
                         raw_type: (field_type != mapped_type).then_some(field_type),
-                        instruction: payload
-                            .and_then(|payload| map_string(payload, "instruction"))
-                            .filter(|value| !value.is_empty()),
+                        instruction,
                         fallback: Some(
                             payload
                                 .and_then(|payload| map_string(payload, "displayText"))
                                 .unwrap_or_default(),
                         ),
                         source: payload.and_then(|payload| map_string(payload, "fieldData")),
+                        locked: payload
+                            .and_then(|payload| map_bool(payload, "fldLock"))
+                            .unwrap_or(false),
+                        nested_sequences,
                     },
                     formatting,
                     story_start: story_index,
@@ -2436,6 +2571,8 @@ enum RawRunKind {
         instruction: Option<String>,
         fallback: Option<String>,
         source: Option<String>,
+        locked: bool,
+        nested_sequences: Vec<String>,
     },
 }
 
@@ -2648,6 +2785,40 @@ fn push_text_chunks(
     }
 }
 
+fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<String>) {
+    opaque_sequences.extend(shape.nested_sequences.iter().cloned());
+    for run in shape
+        .inner_text
+        .iter()
+        .flatten()
+        .flat_map(|paragraph| &paragraph.runs)
+    {
+        if let Run::Field(field) = run {
+            opaque_sequences.extend(
+                field
+                    .instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
+            opaque_sequences.extend(field.nested_sequences.iter().cloned());
+        }
+    }
+    for child in &shape.children {
+        collect_shape_sequences(child, opaque_sequences);
+    }
+}
+
+fn lower_nested_sequences(
+    instruction: Option<&str>,
+    result_projection: Option<&Any>,
+) -> Vec<String> {
+    result_projection
+        .and(instruction)
+        .and_then(docx_layout::sequence_fields::sequence_name)
+        .into_iter()
+        .collect()
+}
+
 /// Emits the blocks one paragraph contributes. Anchored children are lifted
 /// out ahead of it and leave it whole; in-flow ones break it into the text
 /// segments around them, each carrying the same pilcrow properties.
@@ -2664,6 +2835,8 @@ fn flush_paragraph_parts<T: ReadTxn>(
     paragraph_pm_units: u32,
     list_state: &mut ListState,
     (map, story_slot): (&mut LoweringMap, u32),
+    opaque_sequences: &mut BTreeSet<String>,
+    revealable: &mut Option<Vec<LayoutBlock>>,
     mut carried: Vec<(u32, Vec<RawRun>)>,
 ) -> Vec<LayoutBlock> {
     let source = map.paragraphs.len() as u32;
@@ -2671,9 +2844,38 @@ fn flush_paragraph_parts<T: ReadTxn>(
         story_slot,
         shared_map_string(pilcrow, txn, "paraId").unwrap_or_default(),
     ));
-    drawings.retain(|drawing| drawing.visible(env));
+    drawings.retain(|drawing| {
+        if drawing.visible(env) {
+            return true;
+        }
+        if !drawing.revision_hidden
+            && let LayoutBlock::Shape(shape) = &drawing.block
+        {
+            collect_shape_sequences(shape, opaque_sequences);
+        }
+        false
+    });
     for runs in std::iter::once(&mut raw_runs).chain(carried.iter_mut().map(|(_, runs)| runs)) {
-        runs.retain(|run| run.visible(env));
+        runs.retain(|run| {
+            if run.visible(env) {
+                return true;
+            }
+            if !run.revision_hidden
+                && let RawRunKind::Field {
+                    instruction,
+                    nested_sequences,
+                    ..
+                } = &run.kind
+            {
+                opaque_sequences.extend(
+                    instruction
+                        .as_deref()
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
+                opaque_sequences.extend(nested_sequences.iter().cloned());
+            }
+            false
+        });
         if env.show_hidden_text {
             for run in runs.iter_mut() {
                 if run.formatting.hidden == Some(true) {
@@ -2770,6 +2972,26 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_units - segment_start,
             list_state,
             (map, source),
+            Vec::new(),
+        )));
+    }
+    if let Some(revealed) = revealable
+        && !blocks
+            .iter()
+            .any(|block| matches!(block, LayoutBlock::Paragraph(_)))
+    {
+        // A preview that hides every drawing leaves the paragraph itself.
+        revealed.push(LayoutBlock::Paragraph(flush_paragraph(
+            Vec::new(),
+            pilcrow,
+            pilcrow_attributes,
+            txn,
+            story_id,
+            env,
+            paragraph_pm_start,
+            0,
+            &mut list_state.clone(),
+            (&mut LoweringMap::default(), 0),
             Vec::new(),
         )));
     }
@@ -3104,6 +3326,8 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             raw_type,
             instruction,
             fallback,
+            locked,
+            nested_sequences,
             ..
         } => Run::Field(FieldRun {
             fmt: raw.formatting,
@@ -3111,6 +3335,8 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             raw_type,
             instruction,
             fallback,
+            locked,
+            nested_sequences,
             pm_start,
             pm_end,
         }),
@@ -3432,7 +3658,7 @@ fn lower_paragraph_attrs(
             .clone()
             .filter(|style| !style.is_empty());
     }
-    lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
+    lower_paragraph_spacing(values, &mut result, env);
     // Section document-grid pitch for line-height snapping, stamped at
     // lowering so incremental reuse compares resolved blocks. The engine
     // overwrites this per section after lowering.
@@ -3657,15 +3883,26 @@ fn suppress_cell_edge_spacing(
 fn lower_paragraph_spacing(
     values: &BTreeMap<String, Any>,
     result: &mut ParagraphAttrs,
-    line_px: Option<f64>,
+    env: &RenderEnv,
 ) {
-    let line_px = line_px
+    let line_px = env
+        .paragraph_spacing_line_px
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
+    let suppress_before = env.compatibility_flags.suppress_sp_bf_after_pg_brk
+        && true_property(values, "pageBreakBeforeRun") == Some(true);
     let spacing_map = values.get("spacing").and_then(any_map);
     let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
     let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
-    let before_lines = (!auto_before)
+    let (auto_before_px, auto_after_px) = if env
+        .compatibility_flags
+        .do_not_use_html_paragraph_auto_spacing
+    {
+        (twips_to_pixels(100.0), twips_to_pixels(200.0))
+    } else {
+        (AUTO_PARAGRAPH_SPACING_PX, AUTO_PARAGRAPH_SPACING_PX)
+    };
+    let before_lines = (!auto_before && !suppress_before)
         .then(|| value_number(values.get("spaceBeforeLines")))
         .flatten()
         .filter(|value| value.is_finite() && *value > 0.0);
@@ -3693,15 +3930,17 @@ fn lower_paragraph_spacing(
         let mut spacing = ParagraphSpacing {
             before_lines,
             after_lines,
-            before: if auto_before {
-                Some(AUTO_PARAGRAPH_SPACING_PX)
+            before: if suppress_before {
+                Some(0.0)
+            } else if auto_before {
+                Some(auto_before_px)
             } else {
                 before_lines
                     .map(|lines| lines * line_px / 100.0)
                     .or_else(|| before.map(twips_to_pixels))
             },
             after: if auto_after {
-                Some(AUTO_PARAGRAPH_SPACING_PX)
+                Some(auto_after_px)
             } else {
                 after_lines
                     .map(|lines| lines * line_px / 100.0)
@@ -4214,6 +4453,17 @@ fn map_bool(map: &std::collections::HashMap<String, Any>, key: &str) -> Option<b
     map.get(key).and_then(any_bool)
 }
 
+fn any_strings(value: Option<&Any>) -> Vec<String> {
+    match value {
+        Some(Any::Array(values)) => values
+            .iter()
+            .filter_map(any_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn map_number(map: &std::collections::HashMap<String, Any>, key: &str) -> Option<f64> {
     map.get(key).and_then(any_number)
 }
@@ -4271,6 +4521,30 @@ mod tests {
     use crate::{EditCtx, FormatPolicy, Position, RawOp, SimpleFormat, StoryRange};
 
     const DATE: &str = "2026-07-13T12:00:00Z";
+
+    #[test]
+    fn hard_break_spacing_suppression_clears_line_units_without_changing_authored_values() {
+        let values = BTreeMap::from([
+            ("spaceBeforeLines".to_owned(), Any::Number(200.0)),
+            ("spaceAfterLines".to_owned(), Any::Number(100.0)),
+            ("pageBreakBeforeRun".to_owned(), Any::Bool(true)),
+        ]);
+        let mut env = RenderEnv {
+            paragraph_spacing_line_px: Some(32.0),
+            ..RenderEnv::default()
+        };
+        let mut attrs = ParagraphAttrs::default();
+        lower_paragraph_spacing(&values, &mut attrs, &env);
+        assert_eq!(attrs.spacing.as_ref().unwrap().before, Some(64.0));
+        env.compatibility_flags.suppress_sp_bf_after_pg_brk = true;
+        lower_paragraph_spacing(&values, &mut attrs, &env);
+        let spacing = attrs.spacing.unwrap();
+        assert_eq!(spacing.before, Some(0.0));
+        assert_eq!(spacing.before_lines, None);
+        assert_eq!(spacing.after, Some(32.0));
+        assert_eq!(spacing.after_lines, Some(100.0));
+        assert_eq!(values["spaceBeforeLines"], Any::Number(200.0));
+    }
 
     fn any_map(entries: impl IntoIterator<Item = (&'static str, Any)>) -> Any {
         Any::Map(Arc::new(

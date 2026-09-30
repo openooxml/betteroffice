@@ -11,6 +11,8 @@ import { version as packageVersion } from '../package.json';
 
 export const VERSION: string = packageVersion;
 
+export { preloadDocxEngine } from '@betteroffice/docx/yrs';
+
 // Main editor contract
 export {
   DocxEditor,
@@ -126,6 +128,16 @@ export type {
 } from './commands/types';
 export type { DocxPointPosition, SelectionState } from './components/DocxEditor/types';
 export type {
+  DocxSearchOptions,
+  DocxSearchState,
+} from './components/DocxEditor/hooks/useHostSearch';
+export type {
+  DocxMemoryBudget,
+  DocxMemoryPressure,
+  DocxMemoryPressureLevel,
+  DocxMemoryStats,
+} from './components/DocxEditor/memoryStats';
+export type {
   RenderedDomContext,
   PositionCoordinates,
   PointPosition,
@@ -142,3 +154,19 @@ export {
 // Translations, PartialLocaleStrings, TranslationKey) live in
 // `@betteroffice/docx-i18n`; import them from there.
 export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n';
+
+// Host-proposal types — re-exported so hosts don't need to import
+// `@betteroffice/docx/yrs` directly for `proposeChanges`/`setProposalStates`/`withdrawProposals`/
+// `getProposals`.
+export type {
+  DocxOccurrence,
+  DocxProposalFailure,
+  DocxProposalInput,
+  DocxProposalRecord,
+  DocxProposalRequest,
+  DocxProposalResult,
+  DocxProposalSnapshot,
+  DocxProposalState,
+  DocxProposalStateRequest,
+  DocxProposalWithdrawRequest,
+} from '@betteroffice/docx/yrs';

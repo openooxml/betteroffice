@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -12,6 +12,7 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { YrsInput, type YrsInputProps, type YrsInputRef } from './YrsInput';
+import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import { performYrsHistoryAction } from './yrsCommands';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 
@@ -50,7 +51,11 @@ function inputFor(
   session: YrsSession,
   input: React.Ref<YrsInputRef>,
   applyResidentInput?: YrsInputProps['applyResidentInput'],
-  applyResidentDelete?: YrsInputProps['applyResidentDelete']
+  applyResidentDelete?: YrsInputProps['applyResidentDelete'],
+  props: Pick<
+    YrsInputProps,
+    'isSuggesting' | 'author' | 'onPendingInputChange' | 'resolveDisplayListQueries'
+  > = {}
 ) {
   const map = () =>
     createYrsInputPositionMap(
@@ -73,6 +78,7 @@ function inputFor(
       onDirectInput={() => {}}
       applyResidentInput={applyResidentInput}
       applyResidentDelete={applyResidentDelete}
+      {...props}
     />
   );
 }
@@ -137,6 +143,167 @@ test('flush seals a queued text batch before subsequent input', async () => {
   expect(session.paragraphs('body')[0].text).toBe('SeedAB');
 });
 
+test('suggesting type-over places the caret and stored formatting on the inserted text', async () => {
+  const session = await seededSession();
+  const paraId = session.paragraphs('body')[0]!.paraId;
+  session.setSelection(
+    { story: 'body', paraId, offset: 1 },
+    { story: 'body', paraId, offset: 3 }
+  );
+  const input = createRef<YrsInputRef>();
+  render(inputFor(session, input, undefined, undefined, { isSuggesting: true, author: 'Ada' }));
+  act(() => {
+    input.current!.applyStoredFormatting({ type: 'set', delta: { bold: true } });
+    input.current!.insertText('X');
+  });
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  expect(text(session)).toBe('SeeXd');
+  expect(session.selection()).toEqual({
+    anchor: { story: 'body', paraId, offset: 4 },
+    head: { story: 'body', paraId, offset: 4 },
+  });
+  const segments = session.storySegments('body');
+  const inserted = segments.find((segment) => segment.kind === 'text' && segment.text === 'X');
+  expect(inserted?.attributes.ins).toMatchObject({ author: 'Ada' });
+  expect(inserted?.attributes.bold).toBe(true);
+  const deleted = segments.find((segment) => segment.kind === 'text' && segment.text === 'ee');
+  expect(deleted?.attributes.del).toMatchObject({ author: 'Ada' });
+  expect(deleted?.attributes.bold).not.toBe(true);
+  act(() => input.current!.insertText('Y'));
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  expect(text(session)).toBe('SeeXYd');
+  expect(session.selection()?.head).toEqual({ story: 'body', paraId, offset: 5 });
+});
+
+test('suggesting type-over across paragraphs keeps the stored formatting at the caret', async () => {
+  const session = await seededSession();
+  const first = session.paragraphs('body')[0]!.paraId;
+  const { secondParaId: second } = session.splitParagraph({
+    story: 'body',
+    paraId: first,
+    offset: 2,
+  });
+  session.setSelection(
+    { story: 'body', paraId: second, offset: 1 },
+    { story: 'body', paraId: first, offset: 1 }
+  );
+  const input = createRef<YrsInputRef>();
+  render(inputFor(session, input, undefined, undefined, { isSuggesting: true, author: 'Ada' }));
+  act(() => {
+    input.current!.applyStoredFormatting({ type: 'set', delta: { bold: true } });
+    input.current!.insertText('X');
+  });
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  act(() => input.current!.insertText('Y'));
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  const typed = session
+    .storySegments('body')
+    .filter((segment) => segment.kind === 'text' && /[XY]/.test(segment.text));
+  expect(typed.map((segment) => (segment.kind === 'text' ? segment.text : '')).join('')).toBe(
+    'XY'
+  );
+  expect(typed.every((segment) => segment.attributes.bold === true)).toBe(true);
+});
+
+test('multiline suggesting type-over keeps the stored formatting on every piece', async () => {
+  for (const typed of ['\nX', 'X\nY']) {
+    const session = await seededSession();
+    const first = session.paragraphs('body')[0]!.paraId;
+    const { secondParaId: second } = session.splitParagraph({
+      story: 'body',
+      paraId: first,
+      offset: 2,
+    });
+    session.setSelection(
+      { story: 'body', paraId: first, offset: 1 },
+      { story: 'body', paraId: second, offset: 1 }
+    );
+    const input = createRef<YrsInputRef>();
+    render(inputFor(session, input, undefined, undefined, { isSuggesting: true, author: 'Ada' }));
+    act(() => {
+      input.current!.applyStoredFormatting({ type: 'set', delta: { bold: true } });
+      input.current!.insertText(typed);
+    });
+    await act(async () => {
+      await input.current!.flushPendingInput();
+    });
+    const inserted = session
+      .storySegments('body')
+      .filter((segment) => segment.kind === 'text' && /[XY]/.test(segment.text));
+    expect(inserted.map((segment) => (segment.kind === 'text' ? segment.text : '')).join('')).toBe(
+      typed.replace('\n', '')
+    );
+    expect(inserted.every((segment) => segment.attributes.bold === true)).toBe(true);
+    cleanup();
+  }
+});
+
+test('type-over keeps paragraph stored formatting apart from the carried override', async () => {
+  const setup = async (isSuggesting: boolean) => {
+    const session = await seededSession();
+    const first = session.paragraphs('body')[0]!.paraId;
+    const { secondParaId: second } = session.splitParagraph({
+      story: 'body',
+      paraId: first,
+      offset: 2,
+    });
+    const input = createRef<YrsInputRef>();
+    render(inputFor(session, input, undefined, undefined, { isSuggesting, author: 'Ada' }));
+    const store = (paraId: string, delta: Record<string, boolean>) => {
+      session.setSelection({ story: 'body', paraId, offset: 1 });
+      act(() => input.current!.applyStoredFormatting({ type: 'set', delta }));
+    };
+    store(first, { italic: true });
+    store(second, { bold: true });
+    const type = async (text: string) => {
+      act(() => input.current!.insertText(text));
+      await act(async () => {
+        await input.current!.flushPendingInput();
+      });
+    };
+    const attributesOf = (text: string) => {
+      const segment = session
+        .storySegments('body')
+        .find((candidate) => candidate.kind === 'text' && candidate.text.includes(text));
+      return segment?.attributes ?? {};
+    };
+    return { session, first, second, type, attributesOf };
+  };
+
+  // Plain type-over formats the text with its own paragraph's stored formatting.
+  const plain = await setup(false);
+  plain.session.setSelection(
+    { story: 'body', paraId: plain.first, offset: 1 },
+    { story: 'body', paraId: plain.second, offset: 1 }
+  );
+  await plain.type('X');
+  expect(plain.attributesOf('X').italic).toBe(true);
+  expect(plain.attributesOf('X').bold).not.toBe(true);
+  cleanup();
+
+  // A suggested one carries the head's, without displacing another paragraph's.
+  const suggested = await setup(true);
+  suggested.session.setSelection(
+    { story: 'body', paraId: suggested.second, offset: 1 },
+    { story: 'body', paraId: suggested.first, offset: 1 }
+  );
+  await suggested.type('X\nY');
+  expect(suggested.attributesOf('X').italic).toBe(true);
+  expect(suggested.attributesOf('Y').italic).toBe(true);
+  suggested.session.setSelection({ story: 'body', paraId: suggested.second, offset: 0 });
+  await suggested.type('Z');
+  expect(suggested.attributesOf('Z').bold).toBe(true);
+  cleanup();
+});
+
 test('flush includes a completed IME composition exactly once', async () => {
   const { session, input, view } = await mount();
   const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
@@ -175,6 +342,84 @@ test('flush rejects failed resident input instead of claiming it was committed',
   act(() => input.current!.insertText('lost'));
   await expect(input.current!.flushPendingInput()).rejects.toBe(failure);
   expect(session.paragraphs('body')[0].text).toBe('Seed');
+});
+
+test.each([
+  ['text input', 'unmount', false],
+  ['Backspace', 'session replacement', false],
+  ['text input', 'unmount', true],
+  ['Backspace', 'session replacement', true],
+])('resident %s never calls the old session after %s (Enter queued behind it: %p)', async (operation, lifecycle, queued) => {
+  const original = await seededSession();
+  let retired = false;
+  const afterRetirement: string[] = [];
+  const session = new Proxy(original, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (retired) {
+          afterRetirement.push(String(key));
+          throw new Error(`Retired session method: ${String(key)}`);
+        }
+        return value.apply(target, args);
+      };
+    },
+  });
+  let release!: (result: ResidentFrameApplyResult) => void;
+  const blocked = new Promise<ResidentFrameApplyResult>((resolve) => {
+    release = resolve;
+  });
+  let started!: () => void;
+  const applying = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const resident = mock((..._args: unknown[]) => {
+    started();
+    return blocked;
+  });
+  let finished!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    finished = resolve;
+  });
+  const onPendingInputChange = (pending: boolean) => {
+    if (!pending) finished();
+  };
+  const input = createRef<YrsInputRef>();
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const view = render(
+      inputFor(
+        session,
+        input,
+        operation === 'text input' ? resident : undefined,
+        operation === 'Backspace' ? resident : undefined,
+        { onPendingInputChange }
+      )
+    );
+    const textarea = view.getByTestId('yrs-input');
+    await act(async () => {
+      if (operation === 'text input') fireEvent.input(textarea, { target: { value: 'x' } });
+      else fireEvent.keyDown(textarea, { key: 'Backspace' });
+      await applying;
+      if (queued) fireEvent.keyDown(textarea, { key: 'Enter' });
+    });
+    expect(resident.mock.calls).toEqual(operation === 'text input' ? [['x']] : [['backward', 1]]);
+    if (lifecycle === 'unmount') view.unmount();
+    else {
+      const replacement = await seededSession();
+      view.rerender(inputFor(replacement, input, undefined, undefined, { onPendingInputChange }));
+    }
+    retired = true;
+    await act(async () => {
+      release({ frameEpoch: 1, caretSynchronized: true });
+      await settled;
+    });
+    expect(afterRetirement).toEqual([]);
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    errors.mockRestore();
+  }
 });
 
 test('undo waits behind pending typing and later typing waits behind undo', async () => {
@@ -416,6 +661,118 @@ test('a command admitted before the document was replaced is refused', async () 
     error = await command;
   });
   expect(admissionCode(error)).toBe('document-replaced');
+});
+
+test.each([false, true])(
+  'ArrowDown awaiting display queries never calls a replaced session (Enter queued behind it: %p)',
+  async (queued) => {
+    const original = await seededSession();
+    const replacement = await seededSession();
+    let released = false;
+    const afterRelease: string[] = [];
+    const session = new Proxy(original, {
+      get(target, key, receiver) {
+        const value = Reflect.get(target, key, receiver);
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          if (released) {
+            afterRelease.push(String(key));
+            throw new Error(`Released session method: ${String(key)}`);
+          }
+          return value.apply(target, args);
+        };
+      },
+    });
+    let releaseQueries!: (value: null) => void;
+    const blocked = new Promise<null>((resolve) => {
+      releaseQueries = resolve;
+    });
+    let started!: () => void;
+    const resolving = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const resolveDisplayListQueries = mock((_minimumFrameEpoch?: number | null) => {
+      started();
+      return blocked;
+    });
+    let finished!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    const onPendingInputChange = (pending: boolean) => {
+      if (!pending) finished();
+    };
+    const resident = mock(async (_text: string) => null);
+    const input = createRef<YrsInputRef>();
+    const setSelection = spyOn(original, 'setSelection');
+    const errors = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = render(inputFor(session, input, resident, undefined, {
+        onPendingInputChange,
+        resolveDisplayListQueries,
+      }));
+      await act(async () => {
+        fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'ArrowDown' });
+        await resolving;
+        if (queued) fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'Enter' });
+      });
+      expect(resolveDisplayListQueries.mock.calls).toEqual([[null]]);
+      view.rerender(inputFor(replacement, input, resident, undefined, { onPendingInputChange }));
+      const replacementSelection = replacement.selection();
+      setSelection.mockClear();
+      released = true;
+      await act(async () => {
+        releaseQueries(null);
+        await settled;
+      });
+      expect(afterRelease).toEqual([]);
+      expect(setSelection).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+      expect(replacement.selection()).toEqual(replacementSelection);
+      expect(text(replacement)).toBe('Seed');
+      act(() => input.current!.insertText(' B'));
+      await act(async () => {
+        await input.current!.flushPendingInput();
+      });
+      expect(resident.mock.calls).toEqual([[' B']]);
+      expect(text(replacement)).toBe('Seed B');
+      expect(replacement.selection()?.head.offset).toBe(6);
+      expect(afterRelease).toEqual([]);
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      setSelection.mockRestore();
+      errors.mockRestore();
+    }
+  }
+);
+
+test('a composition that ends as the input unmounts commits nothing to the released session', async () => {
+  const original = await seededSession();
+  let released = false;
+  const afterRelease: string[] = [];
+  const session = new Proxy(original, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (released) {
+          afterRelease.push(String(key));
+          throw new Error(`Released session method: ${String(key)}`);
+        }
+        return value.apply(target, args);
+      };
+    },
+  });
+  const view = render(inputFor(session, createRef<YrsInputRef>()));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  fireEvent.compositionStart(textarea);
+  textarea.value = '日本';
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  view.unmount();
+  released = true;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(afterRelease).toEqual([]);
+  expect(text(original)).toBe('Seed');
 });
 
 test('a command waiting on composition is refused when the input unmounts', async () => {

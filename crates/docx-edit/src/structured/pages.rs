@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use docx_layout::display_list::DisplayList;
 use docx_layout::footnotes::{NoteContent, NoteKind as LayoutNoteKind};
@@ -579,27 +580,46 @@ pub(crate) fn metadata_mismatch(
             )
         });
     }
-    let settings = |value: Option<&serde_json::Value>| {
-        serde_json::to_value(
-            value
-                .cloned()
-                .and_then(|value| {
-                    serde_json::from_value::<docx_layout::regions::AuthoredRegionSettings>(value)
-                        .ok()
-                })
-                .unwrap_or_default(),
-        )
-        .ok()
-    };
+    let requested = request.pointer("/regions/settings");
+    let compare_flags = requested
+        .and_then(|settings| settings.get("compatibilityFlags"))
+        .is_some_and(|flags| !flags.is_null());
     if !editor_owned
-        && settings(request.pointer("/regions/settings"))
-            != settings(read.and_then(|read| read.settings.as_ref()))
+        && normalized_region_settings(requested, compare_flags)
+            != normalized_region_settings(
+                read.and_then(|read| read.settings.as_ref()),
+                compare_flags,
+            )
     {
         return Some(
             "The layout's note and header settings differ from the document's; lay it out with its current settings.".to_owned(),
         );
     }
     None
+}
+
+fn normalized_region_settings(
+    value: Option<&serde_json::Value>,
+    compare_flags: bool,
+) -> Option<serde_json::Value> {
+    let mut settings = value
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<docx_layout::regions::AuthoredRegionSettings>(value).ok()
+        })
+        .unwrap_or_default();
+    if !compare_flags {
+        settings.compatibility_flags = None;
+    } else if let Some(flags) = settings.compatibility_flags.as_ref().and_then(|value| {
+        serde_json::from_value::<docx_parse::CompatibilityFlags>(value.clone()).ok()
+    }) {
+        settings.compatibility_flags = if flags == docx_parse::CompatibilityFlags::default() {
+            None
+        } else {
+            serde_json::to_value(flags).ok()
+        };
+    }
+    serde_json::to_value(settings).ok()
 }
 
 /// Whether any story that contributes to layout carries a pending revision, which would make
@@ -1398,7 +1418,7 @@ struct Mapper<'a, 't, T: ReadTxn> {
     maps: &'a HashMap<String, Rc<LoweringMap>>,
     views: Views<'t, T>,
     /// Paragraph positions by id, per story and view.
-    paragraph_indexes: HashMap<(String, u8), Option<(Rc<StoryView>, Rc<HashMap<String, usize>>)>>,
+    paragraph_indexes: HashMap<(String, u8), Option<(Arc<StoryView>, Rc<HashMap<String, usize>>)>>,
     /// Display units of every atom, per root, source paragraph and story unit.
     atom_units: HashMap<String, Rc<HashMap<(u32, u32), u64>>>,
     paragraph_bounds: HashMap<(String, u64), Rc<SourceBounds>>,
@@ -1569,7 +1589,7 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
         &mut self,
         story: &str,
         view: EditTextView,
-    ) -> Option<(Rc<StoryView>, Rc<HashMap<String, usize>>)> {
+    ) -> Option<(Arc<StoryView>, Rc<HashMap<String, usize>>)> {
         let key = (story.to_owned(), view_slot(view));
         if let Some(found) = self.paragraph_indexes.get(&key) {
             return found.clone();
@@ -1708,9 +1728,7 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 let raw_lo = span.raw_start + (lo - span.pm_start) as u32;
                 let raw_hi = span.raw_start + (hi - span.pm_start) as u32;
                 match intervals.texts.last_mut() {
-                    Some(last)
-                        if last.1 == raw_lo && last.2 + u64::from(last.1 - last.0) == lo =>
-                    {
+                    Some(last) if last.1 == raw_lo && last.2 + u64::from(last.1 - last.0) == lo => {
                         last.1 = raw_hi;
                     }
                     _ => intervals.texts.push((raw_lo, raw_hi, lo)),
@@ -1741,7 +1759,12 @@ impl<'a, 't, T: ReadTxn> Mapper<'a, 't, T> {
                 .texts
                 .iter()
                 .map(|text| (text.2 as i64, (text.2 + u64::from(text.1 - text.0)) as i64))
-                .chain(intervals.atoms.iter().flat_map(|atom| atom.2.iter().copied()))
+                .chain(
+                    intervals
+                        .atoms
+                        .iter()
+                        .flat_map(|atom| atom.2.iter().copied()),
+                )
                 .collect();
             let flags = match bounds.get(&paragraph_index) {
                 _ if !joined || empty_fragment => {
@@ -2289,4 +2312,63 @@ fn assemble(
         map.diagnostics.push(stop(page_index));
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn region_settings_compare_compatibility_flags_with_defaults() {
+        let defaults = normalized_region_settings(None, true);
+        for settings in [
+            json!({}),
+            json!({"compatibilityFlags": null}),
+            json!({"compatibilityFlags": {}}),
+            json!({"compatibilityFlags": {
+                "compatibilityMode": 12,
+                "suppressSpBfAfterPgBrk": false
+            }}),
+            json!({"compatibilityFlags": docx_parse::CompatibilityFlags::default()}),
+        ] {
+            assert_eq!(normalized_region_settings(Some(&settings), true), defaults);
+        }
+        for (flag, value) in [
+            ("compatibilityMode", json!(15)),
+            ("noLeading", json!(true)),
+            ("doNotExpandShiftReturn", json!(true)),
+            ("useWord97LineBreakRules", json!(true)),
+            ("balanceSingleByteDoubleByteWidth", json!(true)),
+            ("doNotUseHTMLParagraphAutoSpacing", json!(true)),
+            ("suppressSpBfAfterPgBrk", json!(true)),
+            ("allowSpaceOfSameStyleInTable", json!(true)),
+        ] {
+            let mut full = json!({"compatibilityFlags": docx_parse::CompatibilityFlags::default()});
+            full["compatibilityFlags"][flag] = value.clone();
+            let mut partial = json!({"compatibilityFlags": {}});
+            partial["compatibilityFlags"][flag] = value;
+            assert_eq!(
+                normalized_region_settings(Some(&partial), true),
+                normalized_region_settings(Some(&full), true),
+                "{flag}"
+            );
+            assert_ne!(
+                normalized_region_settings(Some(&partial), true),
+                defaults,
+                "{flag}"
+            );
+        }
+        for settings in [
+            json!({"compatibilityFlags": {"suppressSpBfAfterPgBrk": "true"}}),
+            json!({"evenAndOddHeaders": true}),
+        ] {
+            assert_ne!(normalized_region_settings(Some(&settings), true), defaults);
+        }
+        let authored = json!({"compatibilityFlags": {"compatibilityMode": 15}});
+        assert_eq!(
+            normalized_region_settings(Some(&authored), false),
+            normalized_region_settings(None, false)
+        );
+    }
 }

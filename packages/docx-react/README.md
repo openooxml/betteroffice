@@ -65,6 +65,15 @@ revisions) and the editor's command store, `commands`.
 Vanished (hidden) text stays out of the layout by default; pass
 `showHiddenText` to reveal it with normal wrapping.
 
+`previewFirstPage` (experimental, off by default) paints a display-only preview
+of a document's first pages before the whole document opens, then hands them
+over to it; the editor stays read-only until then. It is ignored with
+collaboration.
+
+`onFirstPagePainted` is called once per document when its first pages are painted
+on screen, from the preview or the full document, so a host can drop its loading
+state before the whole document is open.
+
 ## What works today
 
 - Editing with Word-faithful pagination; layout runs in Rust, never in the DOM
@@ -298,11 +307,13 @@ plain- and rich-text controls with `setContentControlText` steps through
 
 ## Host proposals
 
-`DocxEditorRef.proposeChanges()`, `setProposalStates()` and `getProposals()` flush
-pending input, then run the session's host proposals: a round of tracked changes
-grouped by the host's proposal ids, shown with the editor's tracked-change
-highlighting, and decisions that show accepted proposals as plain text and hide
-rejected ones without changing the document or undo history. Set
+`DocxEditorRef.proposeChanges()`, `setProposalStates()`, `withdrawProposals()` and
+`getProposals()` flush pending input, then run the session's host proposals: a
+round of tracked changes grouped by the host's proposal ids, shown with the
+editor's tracked-change highlighting, and decisions that show accepted proposals
+as plain text and hide rejected ones without changing the document or undo
+history. `withdrawProposals()` settles finished proposals as their decisions show
+them, outside undo history, so the next round searches the text the reader saw. Set
 `allowHostProposals` to use them in a read-only or viewing editor; typing,
 `applyEdits`, commands and plugin writes stay blocked there. Proposals never save
 or open the comments sidebar.
@@ -329,6 +340,38 @@ if (round.ok) {
   });
 }
 ```
+
+The input, result and refusal-code types (`DocxProposalRequest`, `DocxProposalResult`,
+`DocxProposalStateRequest`, `DocxProposalWithdrawRequest`, `DocxProposalSnapshot`, `DocxProposalFailure`, and related
+types) are re-exported from `@betteroffice/docx-react` -- no need to import
+`@betteroffice/docx/yrs` directly just to type host proposal code.
+
+## Host search
+
+`DocxEditorRef.search(query, options?)` drives the editor's find from a host's own
+search box. It highlights every match in the document body, tables included, makes
+the first match on or after the page in view current and scrolls it to the middle
+of the view, without moving the selection or focus. It works in a read-only editor
+and on pages that are not painted yet. Matching is case-insensitive unless
+`options.caseSensitive` is set, and an empty query clears.
+
+```tsx
+const state = await editorRef.current!.search('warranty');
+label.textContent = state.total ? `${state.current + 1} of ${state.total}` : 'No matches';
+
+editorRef.current!.searchNext(); // Enter
+editorRef.current!.searchPrevious(); // Shift+Enter
+editorRef.current!.clearSearch(); // closing the box
+
+const unsubscribe = editorRef.current!.onSearchChange((state) => render(state));
+```
+
+`searchNext()`, `searchPrevious()` and `searchGoTo(index)` wrap around, scroll the
+new current match into view and return the new state, or null without a search.
+`getSearchState()` reads it, and `onSearchChange` reports every change, including
+a re-run after the document changes, which keeps the current match, and `null` on
+clear. Highlights use the `.docx-find-highlight` and `.docx-find-highlight-current`
+classes, which a host stylesheet can restyle.
 
 ## Host plugins
 
@@ -491,6 +534,32 @@ Geometry is in unzoomed CSS pixels from each page's top-left corner, so zoom and
 scrolling do not change it. With `expectLayoutVersion` the editor never lays out
 again and a newer document is refused as `stale-document`. The promise rejects when
 the document is replaced meanwhile.
+
+## Memory
+
+Each wasm32 memory holds at most 4 GiB. `DocxEditorRef.getMemoryStats()` reports
+the editor's wasm memories on the main thread and in its resident worker: each
+module's memory size, which only grows and so is also its high-water mark, and for
+the editing core the bytes allocated now, the most allocated at once, and the size
+of an allocation that failed. `onMemoryPressure` is called when the fullest memory
+crosses a `memoryBudget` level, 75% and 90% of 4 GiB by default, and when it drops
+back; it stays silent below the warning level. The editing core counts by its
+allocated bytes and the other modules by their memory size.
+
+```tsx
+<DocxEditor
+  documentBuffer={bytes}
+  onMemoryPressure={({ level, stats }) => report(level, stats)}
+/>
+```
+
+`memoryBudget.workerLimitBytes` caps what the resident worker's editing core may
+allocate at once; an allocation past it fails as if the memory were full. A worker
+that runs out of memory is replaced by a fresh one once. If that one runs out too,
+the editor reports `ResidentWorkerOutOfMemoryError` from `@betteroffice/docx/yrs`
+through `onError`, with the worker's memories at that point, and stops rendering
+rather than moving the work to the main thread. Any other worker failure moves the
+work to the main thread.
 
 ## Framework notes
 

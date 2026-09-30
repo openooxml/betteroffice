@@ -58,6 +58,7 @@ beforeAll(async () => {
     contentBounds: { x: 80, y: 80, width: 640, height: 760 },
     primitives: [
       run(150, 101),
+      { ...run(40, 121), x: 400 },
       {
         kind: 'image',
         relId: 'rIdImage',
@@ -130,8 +131,11 @@ function clientPoint(host: HTMLElement, x: number, y: number) {
 }
 
 describe('public point query', () => {
-  for (const zoom of [0.75, 1.5]) {
-    test(`matches a page 2 click at ${zoom * 100}% after scrolling without moving focus`, () => {
+  for (const [zoom, x, y, start] of [
+    [0.75, 145, 145, 101], [1.5, 145, 145, 101],
+    [0.75, 445, 35, 121], [1.5, 445, 35, 121],
+  ]) {
+    test(`matches a page 2 click at (${x}, ${y}), ${zoom * 100}% after scrolling without moving focus`, () => {
       const host = hostAt(zoom, 800);
       const selections: Array<[number, number, string | undefined]> = [];
       let focused = false;
@@ -174,12 +178,12 @@ describe('public point query', () => {
         displayListQueries: queries,
         projector: createCanvasHostProjector(host, queries, zoom),
       });
-      const point = clientPoint(host, 145, 145);
+      const point = clientPoint(host, x, y);
       const active = document.activeElement;
       const hit = context.getPositionAtPoint(point.clientX, point.clientY);
       expect(hit).toMatchObject({ region: 'body', pageIndex: 1 });
-      expect(hit!.position).toBeGreaterThan(101);
-      expect(hit!.position).toBeLessThan(111);
+      expect(hit!.position).toBeGreaterThan(start);
+      expect(hit!.position).toBeLessThan(start + 10);
       expect(selections).toEqual([]);
       expect(focused).toBe(false);
       expect(document.activeElement).toBe(active);

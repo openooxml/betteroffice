@@ -15,7 +15,10 @@ use js_sys::{Object, Reflect, Uint8Array};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+mod retained;
 mod sanitize;
+
+pub use retained::RetainedPackage;
 
 pub use sanitize::{
     DocumentKind, DocumentKindError, detect_package_kind, sanitize_package,

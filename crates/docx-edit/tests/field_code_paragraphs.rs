@@ -9,8 +9,8 @@ use docx_edit::structured::{
     Anchor, FragmentSlice, PageDiagnosticCode, PageExportOptions, RevisionView, StorySelection,
 };
 use docx_edit::{
-    EditCtx, EditTextView, EngineSession, FormatPolicy, MergeDirection, RawOp, ReadParagraphsRequest,
-    StoryRange, seed_from_docx,
+    EditCtx, EditTextView, EngineSession, FormatPolicy, MergeDirection, RawOp,
+    ReadParagraphsRequest, StoryRange, seed_from_docx,
 };
 use serde_json::{Value, json};
 use yrs::Any;
@@ -287,9 +287,10 @@ fn a_rejected_spanning_field_does_not_join_its_paragraphs() {
                 len: 1,
                 attrs: [(
                     "ins".into(),
-                    Any::Map(std::sync::Arc::new(std::collections::HashMap::from([
-                        ("id".to_owned(), Any::from("field-insertion")),
-                    ]))),
+                    Any::Map(std::sync::Arc::new(std::collections::HashMap::from([(
+                        "id".to_owned(),
+                        Any::from("field-insertion"),
+                    )]))),
                 )]
                 .into(),
             }],
@@ -353,9 +354,10 @@ fn only_visible_inline_drawings_block_a_join() {
         if rejected {
             attrs.insert(
                 "ins".into(),
-                Any::Map(std::sync::Arc::new(std::collections::HashMap::from([
-                    ("id".to_owned(), Any::from("drawing-insertion")),
-                ]))),
+                Any::Map(std::sync::Arc::new(std::collections::HashMap::from([(
+                    "id".to_owned(),
+                    Any::from("drawing-insertion"),
+                )]))),
             );
         }
         let payload = if kind == "shape" {

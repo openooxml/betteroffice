@@ -15,6 +15,12 @@ import type {
   YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
+import type { OpenInWorker, WorkerOpenedDocument } from './useDisplayList';
+import {
+  deferWorkerOpenReplica,
+  ensureWorkerOpenReplica,
+  workerOpenReplicaPending,
+} from '../internals/workerOpenReplica';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 
@@ -23,6 +29,9 @@ export interface YrsCoreSession {
   session: YrsSession | null;
   /** The seed generation `session` was created for. */
   sessionGeneration: number | null;
+  replicaReady: boolean;
+  replicaReadyRef?: React.RefObject<boolean>;
+  experimentalWorkerOpen?: boolean;
   storyBlocks(storyId: string, env: YrsRenderEnv): LayoutBlock[] | null;
   bodyBlocks(env: YrsRenderEnv): LayoutBlock[] | null;
   inputPositionMap(storyId?: string): YrsInputPositionMap | null;
@@ -31,6 +40,23 @@ export interface YrsCoreSession {
   documentFromYrs(baseDocument?: Document | null): Document | null;
   /** Marks stories changed outside the save projection; the live selection's story by default. */
   publishDirectInput(stories?: string | readonly string[]): void;
+  /**
+   * `session` is a display-only preview of the document's first pages; the
+   * full session replaces it once they have painted.
+   */
+  previewing: boolean;
+  /** The preview session whose pages the renderer keeps until the full session's replace them. */
+  handoffFrom: YrsSession | null;
+  /** From the preview until a frame of the full session is presented: nothing reads or edits. */
+  opening: boolean;
+  /** A frame of `engine`'s layout was published for display. */
+  notifyFramePresented(engine: unknown): void;
+  /**
+   * Fails the load with `error` if its full session has yet to show a frame,
+   * dropping that session and the preview. Returns whether it did. An error
+   * of another session than `session`, when given, fails nothing.
+   */
+  failOpening(error: Error, session?: unknown): boolean;
   /**
    * Materializes the save projection base when the main thread is next idle,
    * for a host that projects the document on every change.
@@ -41,9 +67,54 @@ export interface YrsCoreSession {
 
 interface YrsCoreSessionCallbacks {
   isCurrentLoad?: (generation: number) => boolean;
-  onHostDocument?: (host: YrsDocxHost, generation: number) => void;
-  onError?: (error: Error, generation: number) => void;
+  /** A session was created for the current load, before it is seeded. */
+  onSession?: (session: YrsSession) => void;
+  onHostDocument?: (
+    host: YrsDocxHost,
+    generation: number,
+    session: YrsSession,
+    options?: { preview: boolean }
+  ) => void;
+  /** `opened`: the load's full document was already accepted. */
+  onError?: (error: Error, generation: number, options?: { opened: boolean }) => void;
+  onReplicaError?: (error: Error, generation: number) => void;
 }
+
+interface WorkerOpenOptions {
+  openInWorker: OpenInWorker;
+  renderedFrame: object | null;
+}
+
+export interface YrsCoreSessionOptions {
+  /** Open a display-only preview of the first pages before the full document. */
+  previewFirstPage?: boolean;
+  /** How long a preview waits for the full document to open; see {@link FULL_OPEN_TIMEOUT_MS}. */
+  fullOpenTimeoutMs?: number;
+  /** The engine the renderer still builds with; a replaced session it names lives on. */
+  heldEngine?: unknown;
+  /** The engine whose frame is on screen; a replaced session it names lives on. */
+  shownEngine?: unknown;
+  workerOpen?: WorkerOpenOptions;
+  /** Open images as `media:{n}` tokens the canvas resolves from the session. */
+  mediaTokens?: boolean;
+}
+
+/** Body blocks a first-page preview parses. */
+const PREVIEW_BODY_BLOCKS = 200;
+/** How long the full open waits for the preview's pages to paint. */
+const PREVIEW_PAINT_TIMEOUT_MS = 2000;
+/** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
+const PREVIEW_FRAME_WAIT_MS = 100;
+/** Bounds the wait for a worker frame to reach the screen before the replica hydrates. */
+const REPLICA_FRAME_WAIT_MS = 1000;
+/** Bounds the wait for a worker-opened session's first frame before the replica hydrates. */
+const REPLICA_OPEN_WAIT_MS = 5000;
+/**
+ * How long a preview waits for the full session, from the end of its own
+ * paint. A full open that has not produced one by then fails the load; once
+ * it exists, the preview stays until the full session's first frame shows.
+ */
+const FULL_OPEN_TIMEOUT_MS = 10_000;
 
 function mergeHeaderFooterMaps(
   full: Map<string, HeaderFooter> | undefined,
@@ -112,10 +183,30 @@ export function mergeDocxHostMetadata(full: Document, host: Document): Document 
   };
 }
 
+/** A display-only session of the first pages of `bytes`, or null when it cannot open. */
+async function openPreview(
+  yrs: YrsFacadeModule,
+  bytes: Uint8Array,
+  clientId: number | undefined
+): Promise<{ session: YrsSession; host: YrsDocxHost } | null> {
+  const session = await yrs.createYrsSession({ clientId });
+  try {
+    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    if (host) return { session, host };
+    session.destroy();
+    return null;
+  } catch (error) {
+    console.warn('[yrs] the first-page preview could not open; opening in full', error);
+    session.destroy();
+    return null;
+  }
+}
+
 export interface YrsSeedSources {
   bytes: Uint8Array | null;
   document: Document | null;
   initialUpdate?: Uint8Array;
+  mediaTokens?: boolean;
 }
 
 /**
@@ -127,9 +218,9 @@ export function seedYrsSession(
   seedDocumentIntoYrs: (document: Document) => void,
   seed: YrsSeedSources
 ): YrsDocxHost | null {
-  const { bytes, document, initialUpdate } = seed;
+  const { bytes, document, initialUpdate, mediaTokens } = seed;
   if (bytes) {
-    const host = session.openDocx(bytes, !initialUpdate);
+    const host = session.openDocx(bytes, !initialUpdate, mediaTokens ? { mediaTokens } : undefined);
     if (initialUpdate) session.loadState(initialUpdate.slice());
     return host;
   }
@@ -165,6 +256,52 @@ export function dirtyProjectionStory(activeStory: string): string {
     : 'body';
 }
 
+/**
+ * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
+ * still run with the session they rendered, and `held` names sessions still shown after it (a
+ * handed-off preview, the renderer's layout engine), so `retire` keeps such a session until
+ * nothing renders with it; any other session is freed at once, and unmounting frees every
+ * retired one.
+ */
+function useRetiredSessions(
+  session: YrsSession | null,
+  /** A fixed number of holders on every render: the effect compares them slot by slot. */
+  held: readonly unknown[]
+): (replaced: YrsSession | null) => void {
+  const renderedRef = useRef({ session, held });
+  renderedRef.current = { session, held };
+  const retiredRef = useRef(new Set<YrsSession>());
+  const unmountedRef = useRef(false);
+  useEffect(() => {
+    for (const retired of retiredRef.current) {
+      if (retired === session || held.includes(retired)) continue;
+      retiredRef.current.delete(retired);
+      retired.destroy();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, ...held]);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      for (const retired of retiredRef.current) retired.destroy();
+      retiredRef.current.clear();
+    };
+  }, []);
+  return useCallback((replaced: YrsSession | null): void => {
+    if (!replaced) return;
+    const rendered = renderedRef.current;
+    if (
+      !unmountedRef.current &&
+      (replaced === rendered.session || rendered.held.includes(replaced))
+    ) {
+      retiredRef.current.add(replaced);
+    } else {
+      replaced.destroy();
+    }
+  }, []);
+}
+
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
@@ -172,8 +309,10 @@ export function useYrsCoreSession(
   seedBytes: Uint8Array | null,
   seedGeneration: number,
   collaboration?: DocxEditorCollaborationOptions,
-  callbacks?: YrsCoreSessionCallbacks
+  callbacks?: YrsCoreSessionCallbacks,
+  options?: YrsCoreSessionOptions
 ): YrsCoreSession {
+  const workerOpen = options?.workerOpen;
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
   const sessionRef = useRef<YrsSession | null>(null);
@@ -186,69 +325,321 @@ export function useYrsCoreSession(
   const cancelCompatibilityWarmRef = useRef<(() => void) | null>(null);
   const seedBytesRef = useRef(seedBytes);
   seedBytesRef.current = seedBytes;
+  const mediaTokensRef = useRef(options?.mediaTokens);
+  mediaTokensRef.current = options?.mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
   const projectionStoriesRef = useRef(new Set<string>());
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
+  const [replicaReady, setReplicaReady] = useState(true);
+  const replicaReadyRef = useRef(true);
+  const openInWorker = workerOpen?.openInWorker;
+  const workerOpenEnabledRef = useRef(Boolean(openInWorker));
+  workerOpenEnabledRef.current = Boolean(openInWorker);
+  const pendingReplicaRef = useRef<ReturnType<typeof deferWorkerOpenReplica> | null>(null);
+  const startReplicaRef = useRef<(() => void) | null>(null);
+  const replicaWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inheritedFrameRef = useRef<object | null>(null);
+  const renderedFrameRef = useRef(workerOpen?.renderedFrame ?? null);
+  renderedFrameRef.current = workerOpen?.renderedFrame ?? null;
+  const [previewing, setPreviewing] = useState(false);
+  const [handoffFrom, setHandoffFrom] = useState<YrsSession | null>(null);
+  const paintWaitRef = useRef<{ session: YrsSession; resolve: () => void } | null>(null);
+  const previewingRef = useRef(false);
+  previewingRef.current = previewing;
+  const retiringRef = useRef<YrsSession | null>(null);
+  const failOpeningRef = useRef<((error: Error, session?: unknown) => boolean) | null>(null);
+  // Collaboration shares one replica from the start, so it never previews.
+  // Read once per load: a later change of the option does not reopen it.
+  const previewFirstPageRef = useRef(false);
+  previewFirstPageRef.current =
+    options?.previewFirstPage === true && !collaboration && !collaborationInitialUpdate;
+  const fullOpenTimeoutRef = useRef(FULL_OPEN_TIMEOUT_MS);
+  fullOpenTimeoutRef.current = options?.fullOpenTimeoutMs ?? FULL_OPEN_TIMEOUT_MS;
+  const retire = useRetiredSessions(session, [
+    handoffFrom,
+    options?.heldEngine ?? null,
+    options?.shownEngine ?? null,
+  ]);
+  // The handoff and the renderer's layout hold the preview until the full session replaces both.
+  const retirePreview = useCallback(
+    (retiring: YrsSession): void => {
+      if (retiringRef.current === retiring) {
+        retiringRef.current = null;
+        setHandoffFrom(null);
+      }
+      retire(retiring);
+    },
+    [retire]
+  );
 
   useEffect(() => {
     setSession(null);
+    setPreviewing(false);
+    setHandoffFrom(null);
+    if (openInWorker) {
+      replicaReadyRef.current = true;
+      setReplicaReady(true);
+    }
     if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
+    let openedWorker: WorkerOpenedDocument | null = null;
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
 
+    let abandoned = false;
+    let shown: { session: YrsSession; host: YrsDocxHost } | null = null;
+    let fullOpenTimer: ReturnType<typeof setTimeout> | null = null;
+    const stale = () =>
+      cancelled ||
+      abandoned ||
+      callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false;
+    const previewFirstPage = previewFirstPageRef.current;
+    // A media-token load keeps its full open on the main thread.
+    const openWorker = mediaTokensRef.current ? undefined : openInWorker;
+    // A failed full open takes the preview down with it, as a failed open
+    // without one would leave no session.
+    const dropPreview = (preview: YrsSession): void => {
+      if (sessionRef.current === preview) {
+        sessionRef.current = null;
+        setSession(null);
+      }
+      previewingRef.current = false;
+      setPreviewing(false);
+      retirePreview(preview);
+    };
+    const fail = (error: unknown, options?: { opened: boolean }): void => {
+      // A replaced load's preview was retired with it; the next load owns the preview state.
+      if (shown && !cancelled) dropPreview(shown.session);
+      if (!cancelled && callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false) {
+        callbacksRef.current?.onError?.(
+          error instanceof Error ? error : new Error(String(error)),
+          seedGeneration,
+          options
+        );
+      }
+    };
+
+    failOpeningRef.current = (error: Error, session?: unknown): boolean => {
+      const full = sessionRef.current;
+      if (!shown || stale() || !full || full === shown.session) return false;
+      if (session !== undefined && session !== full) return false;
+      abandoned = true;
+      pendingReplicaRef.current?.cancel();
+      pendingReplicaRef.current = null;
+      openedWorker?.destroy();
+      openedWorker = null;
+      sessionRef.current = null;
+      setSession(null);
+      retire(full);
+      retiringRef.current = null;
+      setHandoffFrom(null);
+      fail(error, { opened: true });
+      return true;
+    };
+
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
-        // A copy hashed with Web Crypto keeps the package's hash off this thread.
-        const bytes = seedBytes ? await yrs.prepareDocxBytes(seedBytes) : null;
-        if (cancelled || callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false) return;
+        // A copy hashed with Web Crypto keeps the package's hash off this
+        // thread; it hashes while the preview opens.
+        const prepared = seedBytes ? yrs.prepareDocxBytes(seedBytes) : Promise.resolve(null);
+        // Awaited below unless the load ends first.
+        prepared.catch(() => {});
+        // A preview paints the first pages before the full open begins.
+        const opened =
+          previewFirstPage && seedBytes
+            ? await openPreview(yrs, seedBytes, collaborationClientId)
+            : null;
+        shown = opened;
+        if (opened && stale()) {
+          opened.session.destroy();
+          return;
+        }
+        if (opened) {
+          callbacksRef.current?.onSession?.(opened.session);
+          const painted = new Promise<void>((resolve) => {
+            paintWaitRef.current = { session: opened.session, resolve };
+            setTimeout(resolve, PREVIEW_PAINT_TIMEOUT_MS);
+          });
+          sessionRef.current = opened.session;
+          facadeRef.current = yrs;
+          previewingRef.current = true;
+          setSession(opened.session);
+          setPreviewing(true);
+          setSessionGeneration(seedGeneration);
+          callbacksRef.current?.onHostDocument?.(opened.host, seedGeneration, opened.session, {
+            preview: true,
+          });
+          await painted;
+          if (paintWaitRef.current?.session === opened.session) paintWaitRef.current = null;
+          // Two frames: a worker canvas's commit can reach the screen a frame
+          // after the presentation, and a main-thread full open blocks this thread.
+          await new Promise<void>((resolve) => {
+            const bound = setTimeout(resolve, PREVIEW_FRAME_WAIT_MS);
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() =>
+                setTimeout(() => {
+                  clearTimeout(bound);
+                  resolve();
+                }, 0)
+              )
+            );
+          });
+          if (stale()) return;
+          const preview = opened.session;
+          fullOpenTimer = setTimeout(() => {
+            fullOpenTimer = null;
+            if (sessionRef.current !== preview) return;
+            abandoned = true;
+            fail(new Error('The document did not finish opening in time'));
+          }, fullOpenTimeoutRef.current);
+        }
+        const bytes = await prepared;
+        if (stale()) return;
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
-        if (
-          cancelled ||
-          callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false
-        ) {
+        if (stale()) {
           next.destroy();
           return;
         }
-        let host: YrsDocxHost | null;
+        callbacksRef.current?.onSession?.(next);
+        let host: YrsDocxHost | null = null;
         try {
-          host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
-            bytes,
-            document: seedDocument,
-            initialUpdate: collaborationInitialUpdate,
-          });
+          if (openWorker && bytes && !collaborationInitialUpdate) {
+            try {
+              openedWorker = await openWorker(
+                next,
+                bytes,
+                yrs.preparedDocxDigest(bytes),
+                seedGeneration
+              );
+              if (stale()) {
+                openedWorker?.destroy();
+                next.destroy();
+                return;
+              }
+              host = openedWorker ? yrs.decodeDocxHostJson(openedWorker.hostJson, bytes) : null;
+            } catch (error) {
+              if (error instanceof yrs.ResidentWorkerOutOfMemoryError) throw error;
+              openedWorker?.destroy();
+              openedWorker = null;
+            }
+          }
+          if (openWorker && stale()) {
+            openedWorker?.destroy();
+            next.destroy();
+            return;
+          }
+          if (openedWorker && bytes) {
+            inheritedFrameRef.current = renderedFrameRef.current;
+            const worker = openedWorker;
+            const source = bytes;
+            const pending = deferWorkerOpenReplica(
+              next,
+              async () => {
+                const update = await worker.encodeState();
+                return () => {
+                  next.openDocx(source, false);
+                  next.loadState(update);
+                };
+              },
+              () => {
+                worker.fallback();
+                next.openDocx(source, true);
+              },
+              () => {
+                if (stale()) return;
+                inputPositionMapsRef.current.clear();
+                replicaReadyRef.current = true;
+                worker.replicaReady();
+                setReplicaReady(true);
+              }
+            );
+            pendingReplicaRef.current = pending;
+            startReplicaRef.current = () => {
+              if (
+                stale() ||
+                sessionRef.current !== next ||
+                pendingReplicaRef.current !== pending
+              ) return;
+              if (replicaWaitTimerRef.current !== null) {
+                clearTimeout(replicaWaitTimerRef.current);
+                replicaWaitTimerRef.current = null;
+              }
+              pending.start();
+            };
+            replicaReadyRef.current = false;
+            setReplicaReady(false);
+            void pending.ready.catch((error: unknown) => {
+              if (!stale()) {
+                const onError = callbacksRef.current?.onReplicaError ?? callbacksRef.current?.onError;
+                onError?.(
+                  error instanceof Error ? error : new Error(String(error)),
+                  seedGeneration
+                );
+              }
+            });
+          } else {
+            host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
+              bytes,
+              document: seedDocument,
+              initialUpdate: collaborationInitialUpdate,
+              mediaTokens: mediaTokensRef.current,
+            });
+          }
         } catch (error) {
+          openedWorker?.destroy();
           next.destroy();
           throw error;
         }
         sessionRef.current = next;
         facadeRef.current = yrs;
+        if (fullOpenTimer !== null) {
+          clearTimeout(fullOpenTimer);
+          fullOpenTimer = null;
+        }
+        if (opened) {
+          // Maps and projections of the preview do not describe this session.
+          inputPositionMapsRef.current.clear();
+          projectionStoriesRef.current.clear();
+          compatibilityBaseRef.current = null;
+          previewingRef.current = false;
+          retiringRef.current = opened.session;
+          setHandoffFrom(opened.session);
+        }
         setSession(next);
+        setPreviewing(false);
         setSessionGeneration(seedGeneration);
-        if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration);
+        if (openedWorker && startReplicaRef.current) {
+          replicaWaitTimerRef.current = setTimeout(startReplicaRef.current, REPLICA_OPEN_WAIT_MS);
+        }
+        if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration, next);
       })
       .catch((error) => {
         console.error('[yrs] failed to start the editing session', error);
-        if (
-          !cancelled &&
-          callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false
-        ) {
-          callbacksRef.current?.onError?.(
-            error instanceof Error ? error : new Error(String(error)),
-            seedGeneration
-          );
-        }
+        if (abandoned) return;
+        fail(error);
       });
 
     return () => {
       cancelled = true;
+      pendingReplicaRef.current?.cancel();
+      pendingReplicaRef.current = null;
+      startReplicaRef.current = null;
+      if (replicaWaitTimerRef.current !== null) clearTimeout(replicaWaitTimerRef.current);
+      replicaWaitTimerRef.current = null;
+      openedWorker?.destroy();
+      failOpeningRef.current = null;
+      if (fullOpenTimer !== null) clearTimeout(fullOpenTimer);
+      paintWaitRef.current?.resolve();
+      paintWaitRef.current = null;
+      if (retiringRef.current !== sessionRef.current) retire(retiringRef.current);
+      retiringRef.current = null;
       cancelCompatibilityWarmRef.current?.();
       cancelCompatibilityWarmRef.current = null;
-      sessionRef.current?.destroy();
+      retire(sessionRef.current);
       sessionRef.current = null;
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
@@ -261,7 +652,59 @@ export function useYrsCoreSession(
     seedGeneration,
     collaborationClientId,
     collaborationInitialUpdate,
+    openInWorker,
+    retire,
+    retirePreview,
   ]);
+
+  useEffect(() => {
+    if (!openInWorker) return;
+    const frame = workerOpen?.renderedFrame;
+    const pending = pendingReplicaRef.current;
+    const start = startReplicaRef.current;
+    if (
+      !session ||
+      session !== sessionRef.current ||
+      !frame ||
+      frame === inheritedFrameRef.current ||
+      !pending?.pending ||
+      !start
+    ) return;
+    if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
+    if (replicaWaitTimerRef.current !== null) {
+      clearTimeout(replicaWaitTimerRef.current);
+    }
+    replicaWaitTimerRef.current = setTimeout(start, REPLICA_FRAME_WAIT_MS);
+    if (typeof requestAnimationFrame !== 'function') {
+      const timer = setTimeout(start, 0);
+      return () => clearTimeout(timer);
+    }
+    let frameId = requestAnimationFrame(() => {
+      frameId = requestAnimationFrame(start);
+    });
+    return () => cancelAnimationFrame(frameId);
+  }, [openInWorker, session, workerOpen?.renderedFrame, previewing, handoffFrom, options?.shownEngine]);
+
+  const notifyFramePresented = useCallback((engine: unknown): void => {
+    const waiting = paintWaitRef.current;
+    if (waiting && waiting.session === engine) {
+      paintWaitRef.current = null;
+      waiting.resolve();
+    }
+    const retiring = retiringRef.current;
+    if (retiring && engine === sessionRef.current && engine !== retiring) retirePreview(retiring);
+  }, [retirePreview]);
+
+  const failOpening = useCallback(
+    (error: Error, session?: unknown): boolean => {
+      if (retiringRef.current !== null && (failOpeningRef.current?.(error, session) ?? false)) {
+        return true;
+      }
+      if (session === undefined || session === sessionRef.current) startReplicaRef.current?.();
+      return false;
+    },
+    []
+  );
 
   // Save, export and getDocument materialize the base on first use; only a
   // host projecting every change asks for it ahead of the first edit.
@@ -270,6 +713,8 @@ export function useYrsCoreSession(
     if (
       !enabledRef.current ||
       !live ||
+      (workerOpenEnabledRef.current && workerOpenReplicaPending(live)) ||
+      live.isDisplayOnly() ||
       !seedBytesRef.current ||
       compatibilityBaseRef.current ||
       cancelCompatibilityWarmRef.current
@@ -296,10 +741,18 @@ export function useYrsCoreSession(
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;
-    if (!onReplica || !session) return;
+    // A preview is display-only, never a replica; the full session follows.
+    if (
+      !onReplica ||
+      !session ||
+      session.isDisplayOnly() ||
+      (openInWorker && !replicaReady)
+    ) {
+      return;
+    }
     onReplica(session);
     return () => onReplica(null);
-  }, [collaboration?.onReplica, session]);
+  }, [collaboration?.onReplica, openInWorker, replicaReady, session]);
 
   const storyBlocks = useCallback((storyId: string, env: YrsRenderEnv): LayoutBlock[] | null => {
     if (!enabledRef.current) return null;
@@ -352,8 +805,10 @@ export function useYrsCoreSession(
     const facade = facadeRef.current;
     const host = baseDocument === undefined ? documentRef.current : baseDocument;
     let base = host;
-    if (!enabledRef.current || !live || !facade || !base) return null;
+    // A preview holds only the first pages: nothing saves or exports it.
+    if (!enabledRef.current || previewingRef.current || !live || !facade || !base) return null;
     try {
+      if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(live);
       const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
@@ -389,6 +844,14 @@ export function useYrsCoreSession(
   return {
     session,
     sessionGeneration,
+    replicaReady: !openInWorker || replicaReady,
+    replicaReadyRef: openInWorker ? replicaReadyRef : undefined,
+    experimentalWorkerOpen: Boolean(openInWorker),
+    previewing,
+    handoffFrom,
+    opening: previewing || handoffFrom !== null,
+    notifyFramePresented,
+    failOpening,
     storyBlocks,
     bodyBlocks,
     inputPositionMap,

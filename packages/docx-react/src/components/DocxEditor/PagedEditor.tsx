@@ -40,6 +40,7 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import {
   computeAnchorPositionsFromYrs,
   displayPageCanvases,
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type TrackedChangesResult,
   type DisplayList,
@@ -91,7 +92,8 @@ import {
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
-import type { LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { FontRequirementsInWorker, LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import { workerOpenReplicaPending } from './internals/workerOpenReplica';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
@@ -296,7 +298,9 @@ export interface PagedEditorProps {
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
   /** Hands layout passes to the resident worker, which then owns them. */
   layoutInWorker?: LayoutInWorker;
-  onError?: (error: Error) => void;
+  fontRequirementsInWorker?: FontRequirementsInWorker;
+  /** `session`: the session whose layout failed, if known. */
+  onError?: (error: Error, session?: unknown) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   /** One-call resident body-text deletion supplied by the canvas frame owner. */
@@ -419,8 +423,11 @@ export interface PagedEditorRef {
   relayout(options?: { onHost?: boolean }): void;
   /** Scroll the visible pages to bring a display position into view. */
   scrollToPosition(position: number): void;
-  /** Scrolls a display position into view without moving focus or selection, saying why not. */
-  revealDisplayPosition(position: number): RevealPositionOutcome;
+  /**
+   * Scrolls a display position into view without moving focus or selection, saying why not.
+   * Aborting `signal` stops following the position while its page is still being built.
+   */
+  revealDisplayPosition(position: number, signal?: AbortSignal): RevealPositionOutcome;
   /**
    * Scroll to the paragraph identified by Word `w14:paraId`.
    * Pass `options.highlight` to briefly flash rendered paragraph fragments.
@@ -511,6 +518,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onTotalPagesChange,
       onLayoutComputed,
       layoutInWorker,
+      fontRequirementsInWorker,
       onError,
       applyResidentInput,
       applyResidentDelete,
@@ -575,6 +583,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
         numericIds: {},
         showHiddenText,
+        mediaTokens: true,
         ...(proposalPreview.revisionPreview
           ? { revisionPreview: proposalPreview.revisionPreview }
           : {}),
@@ -601,12 +610,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (loc: YrsLoc): number | null => {
         const map = yrsCore.inputPositionMap(loc.story);
         if (!map) return null;
-        const local = yrsLocToLocalDisplayPosition(map, loc);
         const rootStory =
           loc.story === 'body' || loc.story.startsWith('body:') ? 'body' : activeYrsRootStory;
         return (
           getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
-          (loc.story === rootStory ? local : null)
+          (loc.story === rootStory ? yrsLocToLocalDisplayPosition(map, loc) : null)
         );
       },
       [activeYrsRootStory, yrsCore.inputPositionMap]
@@ -726,6 +734,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onTotalPagesChange,
       onLayoutComputed: publishResidentLayout,
       layoutInWorker,
+      fontRequirementsInWorker,
+      experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;
@@ -770,6 +780,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, []);
 
     const yrsProjectionVersionRef = useRef(0);
+    const projectionReplicaReadyRef = useRef(yrsCore.replicaReady);
+    if (
+      yrsCore.experimentalWorkerOpen &&
+      projectionReplicaReadyRef.current !== yrsCore.replicaReady
+    ) {
+      projectionReplicaReadyRef.current = yrsCore.replicaReady;
+      yrsProjectionVersionRef.current += 1;
+    }
     const latestYrsToolbarSelectionRef = useRef<YrsToolbarSelection | null>(null);
     const stateListenersRef = useRef(new Set<() => void>());
     const notifyStateListeners = useCallback(() => {
@@ -948,7 +966,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       const session = yrsCore.session;
       if (!session) return;
       return session.onUpdate((_update, origin) => {
-        if (origin === 'remote') syncYrsInputState(true, origin);
+        if (
+          origin === 'remote' &&
+          (!yrsCore.experimentalWorkerOpen || !workerOpenReplicaPending(session))
+        ) {
+          syncYrsInputState(true, origin);
+        }
       });
     }, [syncYrsInputState, yrsCore.session]);
 
@@ -1113,13 +1136,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               range.start.paraId === range.end.paraId && range.start.offset === range.end.offset;
             if ((collapsed || existing) && command.displayText) {
               const at = { story: range.story, ...range.start };
-              if (existing) session.replaceRange(range, command.displayText, structuralAuthor);
-              else session.insertText(at, command.displayText, structuralAuthor);
-              range = {
+              const insertedRange = {
                 story: at.story,
                 start: { paraId: at.paraId, offset: at.offset },
                 end: { paraId: at.paraId, offset: at.offset + command.displayText.length },
               };
+              if (existing) {
+                const receipt = session.replaceRange(range, command.displayText, structuralAuthor);
+                range = receipt.range ?? insertedRange;
+              } else {
+                session.insertText(at, command.displayText, structuralAuthor);
+                range = insertedRange;
+              }
             }
             if (
               range.start.paraId === range.end.paraId &&
@@ -1375,6 +1403,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
         if (!session || !session.hasStory(rootStory)) return null;
+        if (yrsCore.experimentalWorkerOpen) {
+          const ready = yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady;
+          if (projectionReplicaReadyRef.current !== ready) {
+            projectionReplicaReadyRef.current = ready;
+            yrsProjectionVersionRef.current += 1;
+          }
+        }
         const cached = yrsPositionProjectionCacheRef.current;
         if (
           cached?.version === yrsProjectionVersionRef.current &&
@@ -1609,7 +1644,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     sidebarReadsRef.current ??= new SidebarRevisionReads();
     useEffect(() => {
       const session = yrsCore.session;
-      if (!session || !displayListQueries || !onAnchorPositionsChange) {
+      if (!session || !yrsCore.replicaReady || !displayListQueries || !onAnchorPositionsChange) {
         return;
       }
       const sidebarReads = sidebarReadsRef.current!;
@@ -1625,6 +1660,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         const target = canvasOverlayTarget ?? host?.parentElement ?? null;
         if (!target) return;
         const targetRect = target.getBoundingClientRect();
+        const targetZoom = effectiveZoom(target);
         const canvasByPage = new Map<number, HTMLCanvasElement>();
         for (const canvas of displayPageCanvases(host)) {
           const pageIndex = Number(canvas.dataset.pageIndex);
@@ -1636,7 +1672,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             resolveDisplayPageClientRect(host, displayListQueries, rect.pageIndex);
           const pageSize = displayListQueries.pageSize(rect.pageIndex);
           if (!pageRect || !pageSize || pageSize.height <= 0) return null;
-          return pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height);
+          return (
+            (pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height)) /
+            (zoom * targetZoom)
+          );
         };
         const { version, revisions } = sidebarReads.revisions(session);
         if (sidebarCommentIds.length === 0 && revisions.length === 0) {
@@ -1712,6 +1751,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       pagesContainerRef,
       sidebarCommentIds,
       yrsCore.session,
+      yrsCore.replicaReady,
+      zoom,
     ]);
 
     // Canvas renderer (H2): re-back the plugin-facing RenderedDomContext with
@@ -1721,7 +1762,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // source. The mirror speaks the same data-doc-* semantics
     // contract, so third-party plugins keep resolving geometry unchanged.
     useEffect(() => {
-      if (!displayListQueries || !onRenderedDomContextReady) return;
+      if (!yrsCore.replicaReady || !displayListQueries || !onRenderedDomContextReady) return;
       let cancelled = false;
       let hostRaf: number | null = null;
       const emit = (): void => {
@@ -1744,7 +1785,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         cancelled = true;
         if (hostRaf !== null) cancelAnimationFrame(hostRaf);
       };
-    }, [displayListQueries, onRenderedDomContextReady, canvasHostRef, zoom]);
+    }, [displayListQueries, onRenderedDomContextReady, canvasHostRef, zoom, yrsCore.replicaReady]);
 
     // Re-layout triggers: web-font load complete + header/footer content + render-env changes.
     useLayoutTriggers({
@@ -1777,6 +1818,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onReadyRef,
       documentFromYrs: yrsCore.documentFromYrs,
       yrsSession: yrsCore.session,
+      replicaReady: yrsCore.replicaReady,
+      experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsLocToDisplayPosition,
       syncYrsInputState: (docChanged, dirtyStory) =>
         syncYrsInputState(docChanged, 'local', dirtyStory),
@@ -1801,6 +1844,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     usePagedEditorCommandBridge({
       bridgeRef: commandBridgeRef,
+      experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
       yrsInputRef,
       session: yrsCore.session,
       rootStory: activeYrsRootStory,
@@ -1863,6 +1907,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           ref={yrsInputRef}
           enabled
           readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
+          replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
           session={yrsCore.session}
           story={activeYrsRootStory}
           isSuggesting={isSuggesting}
