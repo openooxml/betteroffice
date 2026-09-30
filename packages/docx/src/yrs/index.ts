@@ -1731,6 +1731,19 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       session.settle_revisions_json(JSON.stringify({ accept, reject }));
       markDirty(facade.storiesChangedSince(since).stories);
     },
+    ...(typeof session.begin_shared_reads === 'function' &&
+    typeof session.end_shared_reads === 'function'
+      ? {
+          sharedReads: <R>(read: () => R): R => {
+            session.begin_shared_reads();
+            try {
+              return read();
+            } finally {
+              session.end_shared_reads();
+            }
+          },
+        }
+      : {}),
   });
 
   const facade: YrsSession = {

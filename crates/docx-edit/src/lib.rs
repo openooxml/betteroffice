@@ -51,7 +51,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
@@ -526,6 +526,9 @@ pub struct EditingDoc {
     metadata: Mutex<Option<Arc<seed::SourceMetadata>>>,
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
+    shared_read_depth: AtomicU32,
+    /// Story projections held only inside a shared-read scope.
+    story_views: Mutex<EpochCache<target::StoryView>>,
     source: Mutex<Option<identity::SourcePackage>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
@@ -577,6 +580,8 @@ impl EditingDoc {
             metadata: Mutex::new(None),
             segment_indexes: Mutex::default(),
             chunk_snapshots: Mutex::default(),
+            shared_read_depth: AtomicU32::new(0),
+            story_views: Mutex::default(),
             source: Mutex::new(None),
             media: Mutex::new(None),
             media_sources: Mutex::default(),
@@ -612,6 +617,8 @@ impl EditingDoc {
     /// Retains the opened package's style and structure context and rotates the version.
     pub(crate) fn install_source(&self, source: seed::SourceMetadata, entropy: u64) {
         *self.metadata.lock().unwrap() = Some(Arc::new(source));
+        // Story projections read the source, so none built before it is served again.
+        self.epoch.fetch_add(1, Ordering::Relaxed);
         self.rotate_version(entropy);
     }
 
@@ -659,6 +666,24 @@ impl EditingDoc {
 
     pub fn client_id(&self) -> u64 {
         self.client_id
+    }
+
+    /// Until the matching `end_shared_reads`, committed reads share story projections of each document state.
+    pub fn begin_shared_reads(&self) {
+        self.shared_read_depth.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Ends a shared-read scope, dropping shared story projections when the last scope ends.
+    pub fn end_shared_reads(&self) {
+        let mut views = self.story_views.lock().unwrap();
+        let previous =
+            self.shared_read_depth
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+                    depth.checked_sub(1)
+                });
+        if previous == Ok(1) {
+            *views = EpochCache::default();
+        }
     }
 
     /// Retains the package the stories were, or will be, seeded from.
