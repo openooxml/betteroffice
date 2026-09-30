@@ -473,11 +473,13 @@ fn collect_paragraph_font_requirements(
         // What measurement takes a slot the run leaves unnamed from
         // (`family_for_slot` in ooxml-text).
         let run_family = formatting.font_family.as_deref().unwrap_or(fallback_family);
-        let unnamed = match text {
-            Some(_) => slots
-                .and_then(|slots| slots.h_ansi.as_deref().or(slots.ascii.as_deref()))
-                .unwrap_or(run_family),
-            None => run_family,
+        let text_unnamed = slots
+            .and_then(|slots| slots.h_ansi.as_deref().or(slots.ascii.as_deref()))
+            .unwrap_or(run_family);
+        let unnamed = if text.is_some() {
+            text_unnamed
+        } else {
+            run_family
         };
         collector.reach(unnamed, bold, italic, scripts);
         // An empty text run takes its metrics from the run's family alone.
@@ -492,11 +494,12 @@ fn collect_paragraph_font_requirements(
                 scripts,
             );
         }
+        // Text typed into a tab's or field's complex-script run resolves as text does.
         if slot_use.complex_script {
             collector.reach(
                 slots
                     .and_then(|slots| slots.cs.as_deref())
-                    .unwrap_or(unnamed),
+                    .unwrap_or(text_unnamed),
                 cs_bold,
                 cs_italic,
                 scripts,
@@ -4262,6 +4265,15 @@ mod tests {
             }
             assert_eq!(keys, expected, "{complex_script}");
         }
+    }
+
+    #[test]
+    fn complex_script_tab_reaches_the_text_face_for_an_unnamed_cs_slot() {
+        let keys = font_requirement_keys(json!({
+            "kind": "tab", "boldCs": true, "complexScript": true,
+            "fontSlots": {"ascii": "Arial", "hAnsi": "Courier New"}
+        }));
+        assert!(keys.contains(&"courier new|1|0".to_owned()), "{keys:?}");
     }
 
     #[test]
