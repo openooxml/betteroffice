@@ -33,10 +33,14 @@ function fakeDocument() {
     laidOutHere: [] as number[],
     workerAvailable: true,
     fontsReady: true,
+    preflights: 0,
   };
   const session = {
     version: () => String(doc.version),
-    layoutFontRequirementsJson: () => '[]',
+    layoutFontRequirementsJson: () => {
+      doc.preflights += 1;
+      return '[]';
+    },
     layoutDocumentWithRegionsRetainedJson: () => {
       doc.laidOutHere.push(doc.version);
       return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
@@ -48,11 +52,9 @@ function fakeDocument() {
 
 for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
   for (const inWorker of [false, true]) {
-    test(`preflight (${proposals}, worker=${inWorker}) keeps the flag out of layout`, async () => {
+    test(`decision fonts (${proposals}, worker=${inWorker}) warm after the layout request`, async () => {
       const { session } = fakeDocument();
-      const hostInputs: string[] = [];
-      const workerInputs: string[] = [];
-      const layoutInputs: string[] = [];
+      const order: string[] = [];
       const requirements: ResidentFontRequirement[] = [
         { key: 'regular', family: 'Calibri', bold: false, italic: false },
       ];
@@ -60,10 +62,14 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
         ...requirements,
         { key: 'decision', family: 'Symbol', bold: false, italic: false },
       ];
-      const measurementInputs: [
-        ResidentFontRequirement[],
-        ResidentFontRequirement[] | undefined,
-      ][] = [];
+      const preflight = (where: string, input: string) => {
+        const superset = JSON.parse(input).revisionFontSuperset === true;
+        order.push(`${where}:${superset ? 'superset' : 'exact'}`);
+        return JSON.stringify(superset ? warm : requirements);
+      };
+      const layoutInputs: string[] = [];
+      const measured: ResidentFontRequirement[][] = [];
+      const warmed: ResidentFontRequirement[][] = [];
       if (proposals !== 'unavailable') {
         Object.assign(session, {
           getProposals: () => {
@@ -73,11 +79,9 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
         });
       }
       Object.assign(session, {
-        layoutFontRequirementsJson: (input: string) => {
-          hostInputs.push(input);
-          return JSON.stringify(JSON.parse(input).revisionFontSuperset ? warm : requirements);
-        },
+        layoutFontRequirementsJson: (input: string) => preflight('host', input),
         layoutDocumentWithRegionsRetainedJson: (input: string) => {
+          order.push('layout');
           layoutInputs.push(input);
           return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
         },
@@ -89,23 +93,21 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
           renderEnv: {} as YrsRenderEnv,
           pageGap: 24,
           zoom: 1,
-          residentMeasurementConfig: (required, warming) => {
-            measurementInputs.push([required, warming]);
+          residentMeasurementConfig: (required) => {
+            measured.push(required);
             return {} as ResidentMeasurementConfig;
           },
+          warmFontRequirements: (fonts) => warmed.push(fonts),
           deferLayoutPass: () => false,
           pagesContainerRef: { current: null },
           viewportLayoutRef: { current: null },
           syncCoordinator: new LayoutSelectionGate(),
           getScrollContainer: () => null,
           experimentalWorkerOpen: inWorker,
-          fontRequirementsInWorker: (_session, input) => {
-            workerInputs.push(input);
-            return Promise.resolve(
-              JSON.stringify(JSON.parse(input).revisionFontSuperset ? warm : requirements)
-            );
-          },
+          fontRequirementsInWorker: (_session, input) =>
+            Promise.resolve(preflight('worker', input)),
           layoutInWorker: (_session, input) => {
+            order.push('layout');
             layoutInputs.push(input);
             return Promise.resolve({
               layout: { pages: [] } as unknown as Layout,
@@ -115,32 +117,99 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
         })
       );
       try {
-        await act(async () => hook.result.current.runLayoutPipeline({ onHost: !inWorker }));
+        await act(async () => {
+          hook.result.current.runLayoutPipeline({ onHost: !inWorker });
+          await new Promise((done) => setTimeout(done, 5));
+        });
+        const where = inWorker ? 'worker' : 'host';
+        expect(order).toEqual([
+          `${where}:exact`,
+          'layout',
+          ...(proposals === 'present' ? [`${where}:superset`] : []),
+        ]);
+        expect(measured).toEqual([requirements]);
+        expect(warmed).toEqual(proposals === 'present' ? [warm] : []);
         const request = hook.result.current.getLayoutRequest();
         expect(request).not.toBeNull();
-        const passInputs = inWorker ? workerInputs : hostInputs.slice(0, -1);
-        expect(passInputs).toHaveLength(proposals === 'present' ? 2 : 1);
-        expect(JSON.parse(passInputs[0]!)).not.toHaveProperty('revisionFontSuperset');
-        if (proposals === 'present') {
-          expect(JSON.parse(passInputs[1]!).revisionFontSuperset).toBe(true);
-        }
-        expect(hostInputs).toHaveLength(inWorker ? 1 : passInputs.length + 1);
-        expect(workerInputs).toHaveLength(inWorker ? passInputs.length : 0);
-        expect(JSON.parse(hostInputs.at(-1)!)).not.toHaveProperty('revisionFontSuperset');
-        expect(measurementInputs).toEqual([
-          [requirements, proposals === 'present' ? warm : undefined],
-          [requirements, undefined],
-        ]);
-        expect(layoutInputs).toHaveLength(1);
         for (const input of [...layoutInputs, request!]) {
           expect(JSON.parse(input)).not.toHaveProperty('revisionFontSuperset');
+          expect(JSON.parse(input)).not.toHaveProperty('measurement.revisionFontSuperset');
           expect(JSON.parse(input).renderEnv).not.toHaveProperty('revisionFontSuperset');
+        }
+        if (proposals === 'present') {
+          const pass = () =>
+            act(async () => {
+              hook.result.current.runLayoutPipeline({ onHost: !inWorker });
+              await new Promise((done) => setTimeout(done, 5));
+            });
+          const supersets = () => order.filter((step) => step.endsWith(':superset')).length;
+          await pass();
+          expect(supersets()).toBe(1);
+          Object.assign(session, {
+            getProposals: () => ({ proposals: [{ id: 'proposal' }, { id: 'another' }] }),
+          });
+          await pass();
+          expect(supersets()).toBe(2);
         }
       } finally {
         hook.unmount();
       }
     });
   }
+}
+
+for (const answer of ['rejects', 'null'] as const) {
+  test(`a worker superset preflight that ${answer} warms nothing and fails nothing`, async () => {
+    const { session } = fakeDocument();
+    const hostInputs: string[] = [];
+    const errors: Error[] = [];
+    const warmed: ResidentFontRequirement[][] = [];
+    Object.assign(session, {
+      getProposals: () => ({ proposals: [{ id: 'proposal' }] }),
+      layoutFontRequirementsJson: (input: string) => {
+        hostInputs.push(input);
+        return '[]';
+      },
+    });
+    const hook = renderHook(() =>
+      useLayoutPipeline({
+        document: null,
+        session,
+        renderEnv: {} as YrsRenderEnv,
+        pageGap: 24,
+        zoom: 1,
+        residentMeasurementConfig: () => ({}) as ResidentMeasurementConfig,
+        warmFontRequirements: (fonts) => warmed.push(fonts),
+        deferLayoutPass: () => false,
+        pagesContainerRef: { current: null },
+        viewportLayoutRef: { current: null },
+        syncCoordinator: new LayoutSelectionGate(),
+        getScrollContainer: () => null,
+        onError: (error) => errors.push(error),
+        experimentalWorkerOpen: true,
+        fontRequirementsInWorker: (_session, input) =>
+          JSON.parse(input).revisionFontSuperset
+            ? answer === 'rejects'
+              ? Promise.reject(new Error('superset preflight failed'))
+              : Promise.resolve(null)
+            : Promise.resolve('[]'),
+        layoutInWorker: () =>
+          Promise.resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
+      })
+    );
+    try {
+      await act(async () => {
+        hook.result.current.runLayoutPipeline();
+        await new Promise((done) => setTimeout(done, 5));
+      });
+      expect(sourceVersionOf(hook.result.current.layout)).toBe('1');
+      expect(errors).toEqual([]);
+      expect(warmed).toEqual([]);
+      expect(hostInputs).toEqual([]);
+    } finally {
+      hook.unmount();
+    }
+  });
 }
 
 /** A document whose version each test moves on; worker passes answer when the test says. */
@@ -163,18 +232,21 @@ async function opened() {
       syncCoordinator,
       getScrollContainer: () => null,
       onError: (error) => errors.push(error),
-      layoutInWorker: (asked) =>
-        doc.workerAvailable
-          ? new Promise<LayoutComputation | null>((resolve, reject) => {
-              worker.push({
-                at: Number(asked.version()),
-                answer: () =>
-                  resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
-                fail: () => resolve(null),
-                reject,
-              });
-            })
-          : null,
+      layoutInWorker: Object.assign(
+        (asked: YrsSession) =>
+          doc.workerAvailable
+            ? new Promise<LayoutComputation | null>((resolve, reject) => {
+                worker.push({
+                  at: Number(asked.version()),
+                  answer: () =>
+                    resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
+                  fail: () => resolve(null),
+                  reject,
+                });
+              })
+            : null,
+        { available: () => doc.workerAvailable }
+      ),
     }),
     { initialProps: { session } }
   );
@@ -415,9 +487,11 @@ test('a font warm-up pass never lays out here, even without a worker', async () 
   expect(doc.laidOutHere).toEqual([]);
 
   doc.workerAvailable = false;
+  const preflights = doc.preflights;
   act(() => hook.result.current.scheduleWarmLayout());
   await frame();
   expect(doc.laidOutHere).toEqual([]);
+  expect(doc.preflights).toBe(preflights);
 
   doc.version = 2;
   act(() => {
@@ -459,31 +533,63 @@ test('a direct run queued behind a worker pass is never a warm-up', async () => 
 });
 
 for (const ending of ['fails', 'throws'] as const) {
-  test(`a warm-up queued behind a worker pass that ${ending} still lays that pass out here`, async () => {
-    const { doc, worker, errors, hook, frame, shown } = await opened();
-    doc.version = 2;
-    act(() => hook.result.current.scheduleLayout('local', true));
-    await frame();
-    expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
-
-    act(() => hook.result.current.scheduleWarmLayout());
-    await frame();
-    expect(worker).toHaveLength(2);
-    doc.workerAvailable = false;
-    const failure = new Error('worker lost');
-    const log = spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      await act(async () => {
-        if (ending === 'fails') worker[1]!.fail();
-        else worker[1]!.reject(failure);
-        await new Promise((done) => setTimeout(done, 0));
-      });
+  test(`a warm-up queued behind a worker pass that ${ending} changes nothing it does`, async () => {
+    const outcomes: unknown[] = [];
+    for (const warmUp of [false, true]) {
+      const { doc, worker, errors, hook, frame, shown } = await opened();
+      doc.version = 2;
+      act(() => hook.result.current.scheduleLayout('local', true));
       await frame();
-    } finally {
-      log.mockRestore();
+      expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+
+      if (warmUp) act(() => hook.result.current.scheduleWarmLayout());
+      await frame();
+      expect(worker).toHaveLength(2);
+      doc.workerAvailable = false;
+      const log = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await act(async () => {
+          if (ending === 'fails') worker[1]!.fail();
+          else worker[1]!.reject(new Error('worker lost'));
+          await new Promise((done) => setTimeout(done, 0));
+        });
+        await frame();
+      } finally {
+        log.mockRestore();
+      }
+      outcomes.push({
+        laidOutHere: doc.laidOutHere,
+        shown: shown(),
+        errors: errors.map((error) => error.message),
+      });
+      hook.unmount();
     }
-    expect(doc.laidOutHere).toEqual([2]);
-    expect(shown()).toBe('2');
-    expect(errors).toEqual(ending === 'fails' ? [] : [failure]);
+    expect(outcomes[1]).toEqual(outcomes[0]);
+    expect(outcomes[0]).toEqual(
+      ending === 'fails'
+        ? { laidOutHere: [2], shown: '2', errors: [] }
+        : { laidOutHere: [], shown: '1', errors: ['worker lost'] }
+    );
   });
 }
+
+test('a warm-up behind a worker pass holds no settle and supersedes nothing', async () => {
+  const { doc, session, worker, errors, hook, frame, answer, shown } = await opened();
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('local', true));
+  await frame();
+  act(() => hook.result.current.scheduleWarmLayout());
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+  expect(isLayoutQueued(session)).toBe(false);
+
+  await answer(1);
+  expect(shown()).toBe('2');
+  expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
+  await answer(2);
+  expect(shown()).toBe('2');
+  expect(doc.laidOutHere).toEqual([]);
+  expect(errors).toEqual([]);
+});

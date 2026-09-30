@@ -695,6 +695,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const {
       deferLayoutPass,
       residentMeasurementConfig,
+      warmFontRequirements,
       runLayoutPipelineRef,
       scheduleWarmLayoutRef,
     } = useRustMeasurement({
@@ -729,6 +730,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       zoom,
       deferLayoutPass,
       residentMeasurementConfig,
+      warmFontRequirements,
       displayListQueries,
       interactionPageHostRef: canvasHostRef,
       pagesContainerRef,

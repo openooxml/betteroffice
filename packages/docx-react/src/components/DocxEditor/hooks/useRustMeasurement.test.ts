@@ -105,8 +105,9 @@ describe('useRustMeasurement warm requirements', () => {
     const { result, calls } = await prepared(() => pending);
     const plain = result.current.residentMeasurementConfig([regular]);
 
-    expect(result.current.residentMeasurementConfig([regular], [warm])).toEqual(plain);
-    expect(result.current.residentMeasurementConfig([regular], [warm])).toEqual(plain);
+    result.current.warmFontRequirements([warm]);
+    result.current.warmFontRequirements([warm]);
+    expect(result.current.residentMeasurementConfig([regular])).toEqual(plain);
     await waitFor(() => expect(calls.warmLoads).toBe(1));
     expect(calls.warmPasses).toBe(0);
 
@@ -116,13 +117,13 @@ describe('useRustMeasurement warm requirements', () => {
       regular: [1],
       warm: [2],
     });
-    result.current.residentMeasurementConfig([regular], [warm]);
+    result.current.warmFontRequirements([warm]);
     expect(calls).toEqual({ warmLoads: 1, warmPasses: 1, requiredPasses: 0 });
   });
 
   test('a warm font that never settles does not hold back another that loads', async () => {
     const { result, calls } = await prepared(() => Promise.resolve(bytesOf('warm')));
-    result.current.residentMeasurementConfig([regular], [later, warm]);
+    result.current.warmFontRequirements([later, warm]);
     await waitFor(() => expect(calls.warmPasses).toBe(1));
     expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
       regular: [1],
@@ -132,7 +133,8 @@ describe('useRustMeasurement warm requirements', () => {
 
   test('a warm font that never settles never blocks plain requirements', async () => {
     const { result, calls } = await prepared(() => new Promise<ArrayBuffer>(() => {}));
-    expect(result.current.residentMeasurementConfig([regular], [warm])?.fontChains).toEqual({
+    result.current.warmFontRequirements([warm]);
+    expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
       regular: [1],
     });
     await waitFor(() => expect(calls.warmLoads).toBe(1));
@@ -147,12 +149,14 @@ describe('useRustMeasurement warm requirements', () => {
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const { result, calls } = await prepared(() => Promise.reject(new Error('warm load failed')));
-      expect(result.current.residentMeasurementConfig([regular], [warm])?.fontChains).toEqual({
+      result.current.warmFontRequirements([warm]);
+      expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
         regular: [1],
       });
       await waitFor(() => expect(calls.warmPasses).toBe(1));
       for (let pass = 0; pass < 3; pass++) {
-        expect(result.current.residentMeasurementConfig([regular], [warm])?.fontChains).toEqual({
+        result.current.warmFontRequirements([warm]);
+        expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
           regular: [1],
         });
       }
@@ -166,7 +170,7 @@ describe('useRustMeasurement warm requirements', () => {
   test('a warm font that loads after unmount registers nothing and requests no pass', async () => {
     const { pending, finishLoad } = deferred();
     const { result, unmount, calls, registered } = await prepared(() => pending);
-    result.current.residentMeasurementConfig([regular], [warm]);
+    result.current.warmFontRequirements([warm]);
     await waitFor(() => expect(calls.warmLoads).toBe(1));
 
     unmount();
@@ -179,7 +183,7 @@ describe('useRustMeasurement warm requirements', () => {
   test('a warm font the replaced source was loading registers nothing and requests no pass', async () => {
     const { pending, finishLoad } = deferred();
     const { result, rerender, calls, registered, engineWith } = await prepared(() => pending);
-    result.current.residentMeasurementConfig([regular], [warm]);
+    result.current.warmFontRequirements([warm]);
     await waitFor(() => expect(calls.warmLoads).toBe(1));
 
     rerender({ engine: engineWith() });
@@ -203,7 +207,8 @@ describe('useRustMeasurement warm requirements', () => {
     const { result, calls } = await prepared(() => Promise.resolve(bytesOf('warm')));
     const readyWarm = { ...warm, family: regular.family };
     const plain = result.current.residentMeasurementConfig([regular]);
-    expect(result.current.residentMeasurementConfig([regular], [readyWarm])).toEqual(plain);
+    result.current.warmFontRequirements([readyWarm]);
+    expect(result.current.residentMeasurementConfig([regular])).toEqual(plain);
     expect(result.current.residentMeasurementConfig([regular])).toEqual(plain);
     expect(calls).toEqual({ warmLoads: 0, warmPasses: 0, requiredPasses: 0 });
   });

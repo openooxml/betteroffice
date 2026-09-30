@@ -198,6 +198,8 @@ export type LayoutInWorker = ((
   request: string
 ) => Promise<WorkerLayoutComputation | null> | null) & {
   prewarm?: (session: YrsSession) => (() => void) | null;
+  /** False when no worker can take a pass for `session`. */
+  available?: (session: YrsSession) => boolean;
 };
 
 /**
@@ -1700,8 +1702,9 @@ export function useRustDisplayList(
   const layoutInWorkerRef: { current: LayoutInWorker } = useRef<LayoutInWorker>(layoutInWorker);
   layoutInWorkerRef.current = layoutInWorker;
   const prewarmableLayoutInWorker = useMemo(
-    () => Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker }),
-    [layoutInWorker, prewarmLayoutWorker]
+    () =>
+      Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker, available: canLayoutInWorker }),
+    [layoutInWorker, prewarmLayoutWorker, canLayoutInWorker]
   );
 
   const attachOffscreenCanvases = useCallback(

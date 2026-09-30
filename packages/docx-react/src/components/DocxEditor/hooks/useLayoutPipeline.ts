@@ -77,9 +77,10 @@ export interface UseLayoutPipelineOptions {
   pageGap: number;
   zoom: number;
   residentMeasurementConfig: (
-    requirements: ResidentFontRequirement[],
-    warm?: ResidentFontRequirement[]
+    requirements: ResidentFontRequirement[]
   ) => ResidentMeasurementConfig | null;
+  /** Loads the fonts every proposal decision would need (`useRustMeasurement`). */
+  warmFontRequirements?: (warm: ResidentFontRequirement[]) => void;
   /**
    * Rust measurement readiness gate (`useRustMeasurement.deferLayoutPass`).
    * Checked before computing (engine may still be loading) and before
@@ -139,15 +140,11 @@ function mergeInWorker(current: boolean | null, next: boolean): boolean {
   return (current ?? true) && next;
 }
 
-/** Preflight for warming every proposal decision's fonts. */
-function supersetPreflightInput(
-  session: YrsSession,
-  request: ReturnType<typeof buildResidentRegionLayoutRequest>
-): string | null {
+/** The proposals whose decisions' fonts a warm-up loads, or null when there are none. */
+function proposalSetKey(session: YrsSession): string | null {
   try {
-    return session.getProposals().proposals.length > 0
-      ? JSON.stringify({ ...request, revisionFontSuperset: true })
-      : null;
+    const { proposals } = session.getProposals();
+    return proposals.length > 0 ? proposals.map((proposal) => proposal.id).join('\u0000') : null;
   } catch {
     return null;
   }
@@ -161,6 +158,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     pageGap,
     zoom,
     residentMeasurementConfig,
+    warmFontRequirements,
     deferLayoutPass,
     displayListQueries,
     interactionPageHostRef,
@@ -202,6 +200,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   layoutInWorkerRef.current = layoutInWorker;
   const fontRequirementsInWorkerRef = useRef(fontRequirementsInWorker);
   fontRequirementsInWorkerRef.current = fontRequirementsInWorker;
+  const warmFontRequirementsRef = useRef(warmFontRequirements);
+  warmFontRequirementsRef.current = warmFontRequirements;
   const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
   workerOpenEnabledRef.current = experimentalWorkerOpen;
   // Bumped by every pass, so a worker pass answering late never overwrites a
@@ -239,6 +239,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     null
   );
   const queuedBehindWorkerRef = useRef(false);
+  // A warm-up waits for the pass in flight too, but holds no settle and supersedes nothing.
+  const queuedWarmBehindWorkerRef = useRef(false);
   const schedulerRef = useRef<number | null>(null);
   const runRef = useRef<() => void>(() => {});
   const unmountedRef = useRef(false);
@@ -342,6 +344,43 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Layout Pipeline
   // =========================================================================
 
+  // Once per proposal set, after the pass's layout request; never fatal, and with worker open
+  // never swept on this thread.
+  const warmedProposalsRef = useRef<{ session: YrsSession; key: string } | null>(null);
+  const warmDecisionFonts = useCallback((owner: YrsSession, request: object): void => {
+    const key = warmFontRequirementsRef.current ? proposalSetKey(owner) : null;
+    const warmed = warmedProposalsRef.current;
+    if (key === null || (warmed?.session === owner && warmed.key === key)) return;
+    const claim = { session: owner, key };
+    warmedProposalsRef.current = claim;
+    const warmInput = JSON.stringify({ ...request, revisionFontSuperset: true });
+    const adopt = (json: string | null): void => {
+      if (json === null || sessionRef.current !== owner || unmountedRef.current) return;
+      warmFontRequirementsRef.current?.(JSON.parse(json) as ResidentFontRequirement[]);
+    };
+    const failed = (): void => {
+      if (warmedProposalsRef.current === claim) warmedProposalsRef.current = null;
+    };
+    if (workerOpenEnabledRef.current && fontRequirementsInWorkerRef.current) {
+      try {
+        const pending = fontRequirementsInWorkerRef.current(owner, warmInput);
+        if (pending) void pending.then(adopt).catch(failed);
+        else failed();
+      } catch {
+        failed();
+      }
+      return;
+    }
+    setTimeout(() => {
+      if (sessionRef.current !== owner || unmountedRef.current) return;
+      try {
+        adopt(owner.layoutFontRequirementsJson(warmInput));
+      } catch {
+        failed();
+      }
+    }, 0);
+  }, []);
+
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
       // A direct run (a trigger or font load) is real work, whether it runs now or queues.
@@ -355,15 +394,26 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       const waits =
         inWorker || (!onHost && pendingInWorkerRef.current === null && !inFlight?.opening);
       if (waits && session && inFlight?.session === session) {
+        pendingLayoutOriginRef.current ??= 'local';
+        if (pendingWarmOnlyRef.current === true) {
+          queuedWarmBehindWorkerRef.current = true;
+          return;
+        }
         queuedBehindWorkerRef.current = true;
         markLayoutQueued(session, true);
-        pendingLayoutOriginRef.current ??= 'local';
         return;
       }
       queuedBehindWorkerRef.current = false;
+      queuedWarmBehindWorkerRef.current = false;
       pendingInWorkerRef.current = null;
       const warmOnly = pendingWarmOnlyRef.current === true;
       pendingWarmOnlyRef.current = null;
+      // A warm-up lays out only in a worker; without one it has nothing to do.
+      const worker = layoutInWorkerRef.current;
+      if (warmOnly && (!session || !worker || worker.available?.(session) === false)) {
+        pendingLayoutOriginRef.current = null;
+        return;
+      }
       const pass = ++passRef.current;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
       pendingLayoutOriginRef.current = null;
@@ -385,27 +435,19 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         return;
       }
 
-      const run = (workerRequirements?: string | null, workerWarm?: string | null): void => {
+      const run = (workerRequirements?: string | null): void => {
         let measurement: ResidentMeasurementConfig | null = null;
         try {
           const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
           const input = JSON.stringify(request);
-          const warmInput = supersetPreflightInput(session, request);
           const pendingRequirements =
             workerOpenEnabledRef.current && workerRequirements === undefined
               ? fontRequirementsInWorkerRef.current?.(session, input)
               : null;
           if (pendingRequirements) {
-            const pendingWarm = warmInput
-              ? Promise.resolve().then(
-                  () => fontRequirementsInWorkerRef.current?.(session, warmInput) ?? null
-                )
-              : null;
-            void Promise.all([pendingRequirements, pendingWarm]).then(
-              ([requirements, warm]) => {
-                if (pass === passRef.current && sessionRef.current === session) {
-                  run(requirements, warm);
-                }
+            void pendingRequirements.then(
+              (requirements) => {
+                if (pass === passRef.current && sessionRef.current === session) run(requirements);
               },
               (error: unknown) => {
                 if (pass !== passRef.current || sessionRef.current !== session) return;
@@ -422,12 +464,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           const requirements = JSON.parse(
             workerRequirements ?? session.layoutFontRequirementsJson(input)
           ) as ResidentFontRequirement[];
-          const warm = warmInput
-            ? (JSON.parse(
-                workerWarm ?? session.layoutFontRequirementsJson(warmInput)
-              ) as ResidentFontRequirement[])
-            : undefined;
-          measurement = residentMeasurementConfig(requirements, warm);
+          measurement = residentMeasurementConfig(requirements);
         } catch (error) {
           console.error('[PagedEditor] Resident font preflight error:', error);
           markLayoutQueued(session, false);
@@ -593,16 +630,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         }
         // The spare warmed while fonts loaded has been adopted by now, or is not needed.
         releaseWorkerPrewarm(session);
+        if (!warmOnly) warmDecisionFonts(session, { ...request, measurement: undefined });
         if (!workerPass) {
           if (!warmOnly) layOutHere();
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
         workerPassRef.current = { pass, session, opening: !inWorker && !previewOnly };
-        // The pass queued behind this one lays out in its place, so it carries this pass's work.
-        const handOverToQueued = (): void => {
-          if (!warmOnly) pendingWarmOnlyRef.current = false;
-        };
         void workerPass
           .then(
             (computation) => {
@@ -619,8 +653,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                   ? workerOpenSourceVersion(session, sourceVersion)
                   : sourceVersion);
               if (!computation || (stale && !queued)) {
-                if (queued) handOverToQueued();
-                else if (!warmOnly) layOutHere();
+                if (!queued && !warmOnly) layOutHere();
                 return;
               }
               if (stale || queued) markSupersededLayout(computation.layout);
@@ -639,9 +672,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                     if (queuedBehindWorkerRef.current) markSupersededLayout(complete.layout);
                     // Nothing the user did changed: keep their viewport.
                     applyComputation(complete, 'remote');
-                  } else if (queuedBehindWorkerRef.current) {
-                    handOverToQueued();
-                  } else if (!warmOnly) {
+                  } else if (!queuedBehindWorkerRef.current && !warmOnly) {
                     layOutHere();
                   }
                 },
@@ -650,7 +681,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             },
             (error: unknown) => {
               if (pass !== passRef.current) return;
-              if (queuedBehindWorkerRef.current) handOverToQueued();
               // The display reports a worker out of memory; nothing lays out here.
               if (error instanceof ResidentWorkerOutOfMemoryError) return;
               console.error('[PagedEditor] Layout pipeline error:', error);
@@ -661,7 +691,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             if (pass === passRef.current) syncCoordinator.onLayoutComplete(currentEpoch);
             if (workerPassRef.current?.pass !== pass) return;
             workerPassRef.current = null;
-            if (queuedBehindWorkerRef.current && sessionRef.current === session) {
+            if (
+              (queuedBehindWorkerRef.current || queuedWarmBehindWorkerRef.current) &&
+              sessionRef.current === session
+            ) {
               requestPass();
             }
           });
@@ -684,6 +717,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       scrollRestoreController,
       requestPass,
       releaseWorkerPrewarm,
+      warmDecisionFonts,
     ]
   );
 
