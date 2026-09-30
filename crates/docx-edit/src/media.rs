@@ -3,104 +3,133 @@
 //! Opening parses images as tokens naming their package part
 //! ([`docx_parse::media::MediaTable`]). Seeding writes those tokens into the
 //! stories only when asked to; by default it writes the parts' `data:` URLs,
-//! which every replica can read, and remembers a fingerprint of each so that
+//! which every replica can read, and remembers a keyed digest of each so that
 //! layout, display lists and frames still carry the short token. A host
 //! resolving tokens reads the bytes from the same package.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::hash::Hasher;
+use std::sync::{Arc, Mutex};
 
 use docx_parse::media::{MediaTable, media_token, media_token_index};
 use yrs::Any;
 
 use crate::raw::RawOp;
 
-/// Fingerprints of the `data:` URLs seeding wrote, each to the index of the
-/// part it came from. Equal when shared.
+/// Digests of the `data:` URLs seeding wrote, each to the index of the part
+/// it came from.
 #[derive(Clone, Debug, Default)]
-pub struct MediaSources(Arc<HashMap<u64, u32>>);
+pub struct MediaSources(Arc<Sources>);
+
+#[derive(Debug, Default)]
+struct Sources {
+    key: (u64, u64),
+    parts: HashMap<u64, u32>,
+    /// Sources already looked up, by address. Holding each keeps its address
+    /// from naming another string.
+    seen: Mutex<HashMap<usize, (Arc<str>, Option<u32>)>>,
+}
 
 impl PartialEq for MediaSources {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+            || (self.0.key == other.0.key && self.0.parts == other.0.parts)
     }
 }
 
 impl MediaSources {
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.parts.is_empty()
     }
 
-    /// The token layout carries for an image source: a token as it is, and a
-    /// `data:` URL seeding wrote as the token of its part.
-    pub fn token<'a>(&self, src: &'a str) -> Cow<'a, str> {
-        if src.starts_with("data:")
-            && let Some(index) = self.0.get(&fingerprint(src))
-        {
-            return Cow::Owned(media_token(*index as usize));
+    /// The token of the part a `data:` image source seeding wrote came from.
+    pub fn token(&self, src: &Arc<str>) -> Option<String> {
+        if self.is_empty() || !src.starts_with("data:") {
+            return None;
         }
-        Cow::Borrowed(src)
+        let address = Arc::as_ptr(src) as *const u8 as usize;
+        let mut seen = self.0.seen.lock().unwrap();
+        let index = match seen.get(&address) {
+            Some((_, index)) => *index,
+            None => {
+                let index = self.0.parts.get(&self.digest(src)).copied();
+                seen.insert(address, (Arc::clone(src), index));
+                index
+            }
+        };
+        index.map(|index| media_token(index as usize))
     }
 
-    /// `[[fingerprint hex, index], …]`, for a replica that did not seed.
+    /// [`Self::token`] for a source read out of JSON.
+    pub fn token_of(&self, src: &str) -> Option<String> {
+        if self.is_empty() || !src.starts_with("data:") {
+            return None;
+        }
+        self.0
+            .parts
+            .get(&self.digest(src))
+            .map(|index| media_token(*index as usize))
+    }
+
+    fn digest(&self, src: &str) -> u64 {
+        digest(self.0.key, src)
+    }
+
+    /// The key and digests, for a replica that did not seed.
     pub fn to_json(&self) -> String {
-        let entries: Vec<(String, u32)> = self
+        let parts: Vec<(String, u32)> = self
             .0
+            .parts
             .iter()
-            .map(|(fingerprint, index)| (format!("{fingerprint:016x}"), *index))
+            .map(|(digest, index)| (format!("{digest:016x}"), *index))
             .collect();
-        serde_json::to_string(&entries).expect("fingerprints serialize")
+        serde_json::json!({
+            "key": [format!("{:016x}", self.0.key.0), format!("{:016x}", self.0.key.1)],
+            "parts": parts,
+        })
+        .to_string()
     }
 
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let entries: Vec<(String, u32)> =
-            serde_json::from_str(json).map_err(|error| error.to_string())?;
-        entries
-            .into_iter()
-            .map(|(fingerprint, index)| {
-                u64::from_str_radix(&fingerprint, 16)
-                    .map(|fingerprint| (fingerprint, index))
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<Result<HashMap<_, _>, _>>()
-            .map(|entries| Self(Arc::new(entries)))
-    }
-}
-
-/// Bytes sampled from each end and across the middle of a source.
-const ENDS: usize = 256;
-const SAMPLES: usize = 64;
-const SAMPLE: usize = 16;
-
-/// A 64-bit FNV-1a digest of a source's length, both ends and evenly spaced
-/// samples: equal for one `data:` URL, and for two different images only by
-/// matching byte for byte at every sampled offset.
-fn fingerprint(src: &str) -> u64 {
-    let bytes = src.as_bytes();
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut feed = |chunk: &[u8]| {
-        for byte in chunk {
-            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            key: (String, String),
+            parts: Vec<(String, u32)>,
         }
-    };
-    feed(&(bytes.len() as u64).to_le_bytes());
-    feed(&bytes[..bytes.len().min(ENDS)]);
-    feed(&bytes[bytes.len().saturating_sub(ENDS)..]);
-    for sample in 0..SAMPLES {
-        let at = bytes.len() * sample / SAMPLES;
-        feed(&bytes[at..(at + SAMPLE).min(bytes.len())]);
+        let hex = |value: &str| u64::from_str_radix(value, 16).map_err(|error| error.to_string());
+        let wire: Wire = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        Ok(Self(Arc::new(Sources {
+            key: (hex(&wire.key.0)?, hex(&wire.key.1)?),
+            parts: wire
+                .parts
+                .iter()
+                .map(|(digest, index)| Ok((hex(digest)?, *index)))
+                .collect::<Result<_, String>>()?,
+            seen: Mutex::default(),
+        })))
     }
-    hash
 }
+
+/// SipHash-2-4 of the whole source under a per-document random key: equal
+/// sources share a digest, and no peer can make another source match one.
+#[allow(deprecated)]
+fn digest(key: (u64, u64), src: &str) -> u64 {
+    let mut hasher = std::hash::SipHasher::new_with_keys(key.0, key.1);
+    hasher.write(src.as_bytes());
+    hasher.finish()
+}
+
+/// Payload keys whose string is the JSON of a parsed object that can hold
+/// images.
+const JSON_PAYLOADS: &[&str] = &["shapeJson", "chartJson", "fieldData", "propertiesJson"];
 
 /// Replaces the tokens of seed `ops` with the `data:` URLs of their parts,
-/// each built once and shared, and returns the fingerprints of those URLs.
-/// A token inside a JSON string, such as a shape's source, is replaced in
-/// place under its `"src"` key.
+/// each built once and shared. With `layout_tokens`, returns the sources that
+/// let layout carry the tokens again.
 pub(crate) fn write_data_urls<'a>(
     ops: impl IntoIterator<Item = &'a mut RawOp>,
     table: &MediaTable,
+    layout_tokens: bool,
 ) -> MediaSources {
     let mut writer = DataUrls {
         table,
@@ -121,13 +150,27 @@ pub(crate) fn write_data_urls<'a>(
             | RawOp::RemoveComment { .. } => {}
         }
     }
-    MediaSources(Arc::new(
-        writer
-            .urls
-            .into_iter()
-            .filter_map(|(index, url)| Some((fingerprint(&url?), index as u32)))
-            .collect(),
-    ))
+    if !layout_tokens {
+        return MediaSources::default();
+    }
+    let [k0, k1] = crate::identity::entropy();
+    let key = (k0, k1);
+    let mut parts = HashMap::new();
+    let mut seen = HashMap::new();
+    for (index, url) in writer.urls {
+        if let Some(url) = url {
+            parts.insert(digest(key, &url), index as u32);
+            seen.insert(
+                Arc::as_ptr(&url) as *const u8 as usize,
+                (url, Some(index as u32)),
+            );
+        }
+    }
+    MediaSources(Arc::new(Sources {
+        key,
+        parts,
+        seen: Mutex::new(seen),
+    }))
 }
 
 struct DataUrls<'a> {
@@ -155,7 +198,9 @@ impl DataUrls<'_> {
             Any::String(text) if key == "src" => media_token_index(text)
                 .and_then(|index| self.url(index))
                 .map(Any::String),
-            Any::String(text) if text.contains("\"src\":\"media:") => {
+            Any::String(text)
+                if JSON_PAYLOADS.contains(&key) && text.contains("\"src\":\"media:") =>
+            {
                 Some(Any::String(self.json(text).into()))
             }
             Any::Array(items) => {
@@ -213,25 +258,41 @@ impl DataUrls<'_> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn fingerprints_tell_sources_apart_by_any_sampled_byte() {
-        let source = format!("data:image/png;base64,{}", "A".repeat(10_000));
-        let mut changed = source.clone().into_bytes();
-        changed[5_000] = b'B';
-        let changed = String::from_utf8(changed).unwrap();
-        assert_eq!(fingerprint(&source), fingerprint(&source.clone()));
-        assert_ne!(fingerprint(&source), fingerprint(&changed));
-        assert_ne!(fingerprint(&source), fingerprint(&format!("{source}A")));
-        assert_eq!(fingerprint(""), fingerprint(""));
+    fn sources(entries: &[(&str, u32)]) -> MediaSources {
+        let key = (7, 11);
+        MediaSources(Arc::new(Sources {
+            key,
+            parts: entries
+                .iter()
+                .map(|(src, index)| (digest(key, src), *index))
+                .collect(),
+            seen: Mutex::default(),
+        }))
     }
 
     #[test]
-    fn sources_round_trip_and_map_only_what_seeding_wrote() {
-        let sources = MediaSources(Arc::new(HashMap::from([(fingerprint("data:a"), 3)])));
+    fn a_source_maps_only_when_every_byte_matches() {
+        let source = format!("data:image/bmp;base64,{}", "A".repeat(10_000));
+        let mut changed = source.clone().into_bytes();
+        changed[7_777] = b'B';
+        let changed = String::from_utf8(changed).unwrap();
+        let sources = sources(&[(&source, 3)]);
+        assert_eq!(
+            sources.token(&Arc::from(source.as_str())).as_deref(),
+            Some("media:3")
+        );
+        assert_eq!(sources.token(&Arc::from(changed.as_str())), None);
+        assert_eq!(sources.token_of(&source).as_deref(), Some("media:3"));
+        assert_eq!(sources.token_of("media:3"), None);
+    }
+
+    #[test]
+    fn sources_round_trip_and_compare_by_content() {
+        let sources = sources(&[("data:a", 3), ("data:b", 4)]);
         let loaded = MediaSources::from_json(&sources.to_json()).unwrap();
-        assert_eq!(loaded.token("data:a"), "media:3");
-        assert_eq!(loaded.token("data:b"), "data:b");
-        assert_eq!(loaded.token("media:7"), "media:7");
-        assert!(MediaSources::from_json("[[\"zz\",1]]").is_err());
+        assert_eq!(loaded, sources);
+        assert_eq!(loaded.token_of("data:b").as_deref(), Some("media:4"));
+        assert_eq!(MediaSources::default(), MediaSources::default());
+        assert!(MediaSources::from_json(r#"{"key":["zz","0"],"parts":[]}"#).is_err());
     }
 }

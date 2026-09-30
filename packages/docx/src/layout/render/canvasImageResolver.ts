@@ -19,6 +19,8 @@ import type { ImageResolver } from './canvasBackend';
 export interface CanvasImageResolverOptions {
   /** The bytes and media type of a `media:{n}` source, or null. */
   media?: (token: string) => { bytes: Uint8Array; mimeType: string } | null;
+  /** Identifies the package `media` reads; a new value decodes tokens anew. */
+  mediaScope?: () => number;
 }
 
 const MEDIA_TOKEN = /^media:(0|[1-9]\d*)$/;
@@ -46,11 +48,12 @@ export function createCanvasImageResolver(
   options: CanvasImageResolverOptions = {}
 ): ImageResolver {
   const cache = new Map<string, Promise<CanvasImageSource | null>>();
-  const { media } = options;
+  const { media, mediaScope } = options;
   return (relId: string) => {
     const token = media && MEDIA_TOKEN.test(relId);
     if (!token && !relId.startsWith('blob:') && !relId.startsWith('data:')) return null;
-    let pending = cache.get(relId);
+    const key = token ? `${mediaScope?.() ?? 0} ${relId}` : relId;
+    let pending = cache.get(key);
     if (!pending) {
       pending = new Promise<CanvasImageSource | null>((resolve) => {
         let url = relId;
@@ -73,7 +76,7 @@ export function createCanvasImageResolver(
         img.onerror = () => settle(null);
         img.src = url;
       });
-      cache.set(relId, pending);
+      cache.set(key, pending);
     }
     return pending;
   };

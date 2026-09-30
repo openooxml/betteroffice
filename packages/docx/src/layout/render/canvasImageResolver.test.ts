@@ -61,6 +61,23 @@ describe('createCanvasImageResolver', () => {
     expect(reads).toEqual(['media:3', 'media:4']);
   });
 
+  it('reads a token again once the media scope changes', async () => {
+    let scope = 1;
+    const reads: number[] = [];
+    const resolve = createCanvasImageResolver({
+      media: () => {
+        reads.push(scope);
+        return { bytes: new Uint8Array([scope]), mimeType: 'image/png' };
+      },
+      mediaScope: () => scope,
+    });
+    const first = await resolve('media:0');
+    expect(await resolve('media:0')).toBe(first);
+    scope = 2;
+    expect(await resolve('media:0')).not.toBe(first);
+    expect(reads).toEqual([1, 2]);
+  });
+
   it('refuses tokens without a media source and other schemes', () => {
     expect(createCanvasImageResolver()('media:0')).toBeNull();
     const resolve = createCanvasImageResolver({ media: () => null });

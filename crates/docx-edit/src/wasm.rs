@@ -1327,7 +1327,10 @@ impl EditSession {
             let seed_media = if self.media_tokens.get() {
                 crate::seed::SeedMedia::AsParsed
             } else {
-                crate::seed::SeedMedia::DataUrls(&media)
+                crate::seed::SeedMedia::DataUrls {
+                    table: &media,
+                    layout_tokens: true,
+                }
             };
             let fonts = crate::seed::seed_parsed_docx(
                 self.engine.doc(),

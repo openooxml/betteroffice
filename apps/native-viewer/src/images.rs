@@ -86,7 +86,7 @@ impl ImageRegistry {
             }
         }
         let media = ooxml_opc::RetainedPackage::new(Arc::from(docx))
-            .and_then(|package| MediaTable::new(package, 0))
+            .and_then(MediaTable::new)
             .ok();
         Ok(Self {
             raw,

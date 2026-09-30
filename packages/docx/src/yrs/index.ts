@@ -966,6 +966,8 @@ export interface YrsSession extends CollaborationReplica {
    * image source names, or `null` for any other source.
    */
   mediaSource(token: string): YrsMediaSource | null;
+  /** Changes with every package opened, which `media:{n}` sources then name. */
+  mediaScope(): number;
   /** The `data:` URL a `media:{n}` image source stands for, or `null`. */
   mediaDataUrl(token: string): string | null;
   /**
@@ -1577,6 +1579,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
   // `data:` URLs of the opened package's `media:{n}` sources.
   const mediaDataUrls = new Map<string, string | null>();
+  let mediaScope = 0;
+  const openMedia = (): void => {
+    mediaDataUrls.clear();
+    mediaScope += 1;
+  };
 
   const openDocx = (
     bytes: Uint8Array,
@@ -1585,7 +1592,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   ): YrsDocxHost => {
     const source = bytes.slice();
     markDirty('all');
-    mediaDataUrls.clear();
+    openMedia();
     const json = mutate(() => {
       session.set_media_tokens(options.mediaTokens === true);
       const opened = session.open_docx(
@@ -1641,7 +1648,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     clientId,
     openDocxPreview: (bytes, blocks) => {
       markDirty('all');
-      mediaDataUrls.clear();
+      openMedia();
       const json = mutate(() => session.open_docx_preview(bytes, blocks));
       if (json === undefined) return null;
       partialDocument = true;
@@ -1839,6 +1846,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     loadMediaSources: (json) => session.load_media_sources(json),
     mediaDataUrl,
+    mediaScope: () => mediaScope,
     materializeDocx: () => {
       const source = docxSource;
       const json = session.materialize_docx();

@@ -60,13 +60,13 @@ fn fresh_generation() -> String {
 }
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-fn entropy() -> [u64; 2] {
+pub(crate) fn entropy() -> [u64; 2] {
     let draw = || (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
     [draw() ^ ((js_sys::Date::now() as u64) << 11), draw()]
 }
 
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
-fn entropy() -> [u64; 2] {
+pub(crate) fn entropy() -> [u64; 2] {
     use std::hash::{BuildHasher, Hasher};
     static OPENINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let opening = OPENINGS.fetch_add(1, Ordering::Relaxed);

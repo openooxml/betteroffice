@@ -292,7 +292,9 @@ fn shape_fill(shape: &Value, env: &RenderEnv) -> Option<Value> {
                     {
                         fill.insert(
                             "pictureSrc".to_owned(),
-                            Value::String(env.media.token(src).into_owned()),
+                            Value::String(
+                                env.media.token_of(src).unwrap_or_else(|| src.to_owned()),
+                            ),
                         );
                     }
                 }

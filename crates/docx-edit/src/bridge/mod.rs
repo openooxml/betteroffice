@@ -1405,11 +1405,10 @@ fn lower_image_values(
         });
 
     ImageRun {
-        src: values
-            .get("src")
-            .and_then(any_str)
-            .map(|src| env.media.token(src).into_owned())
-            .unwrap_or_default(),
+        src: match values.get("src") {
+            Some(Any::String(src)) => env.media.token(src).unwrap_or_else(|| src.to_string()),
+            value => value_string(value).unwrap_or_default(),
+        },
         width,
         height,
         alt: map_string(values, "alt"),

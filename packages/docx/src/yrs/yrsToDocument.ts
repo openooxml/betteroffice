@@ -553,6 +553,7 @@ function fieldFromPayload(payload: Attrs, attributes: Attrs): SimpleField | Comp
   if (fieldData && fieldData.length <= 2_000_000) {
     try {
       const stored = JSON.parse(fieldData) as SimpleField | ComplexField;
+      if (fieldData.includes('"media:')) resolveMediaSrcs(stored);
       const children = stored.type === 'simpleField' ? stored.content : stored.fieldResult;
       if (
         (stored.type === 'simpleField' || stored.type === 'complexField') &&
@@ -775,6 +776,7 @@ function chartRunFromPayload(payload: Attrs): Run | null {
   if (!json) return null;
   try {
     const chart = JSON.parse(json) as Chart;
+    if (json.includes('"media:')) resolveMediaSrcs(chart);
     if (chart?.type !== 'chart' || typeof chart.chartType !== 'string') return null;
     return { type: 'run', content: [{ type: 'chart', chart }] };
   } catch {
@@ -870,6 +872,7 @@ function inlineSdtFromPayload(payload: Attrs): InlineSdt {
   if (propertiesJson && propertiesJson.length <= 1_000_000) {
     try {
       const parsed = JSON.parse(propertiesJson) as SdtProperties;
+      if (propertiesJson.includes('"media:')) resolveMediaSrcs(parsed);
       if (parsed && typeof parsed === 'object' && typeof parsed.sdtType === 'string') {
         properties = parsed;
       }

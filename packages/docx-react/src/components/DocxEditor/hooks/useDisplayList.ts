@@ -1707,7 +1707,11 @@ export function useCanvasRenderer(
   );
   // Decoded images of one session's document; the next session starts empty.
   const resolveImage = useMemo(
-    () => createCanvasImageResolver({ media: (token) => engine?.mediaSource?.(token) ?? null }),
+    () =>
+      createCanvasImageResolver({
+        media: (token) => engine?.mediaSource?.(token) ?? null,
+        mediaScope: () => engine?.mediaScope?.() ?? 0,
+      }),
     [engine]
   );
   const status: UseCanvasRendererResult['status'] = error

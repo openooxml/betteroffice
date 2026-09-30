@@ -4661,9 +4661,12 @@ pub(crate) enum SeedMedia<'a> {
     /// As parsed: `media:{n}` tokens, which only a reader holding the
     /// package resolves.
     AsParsed,
-    /// As their parts' `data:` URLs, which every replica reads; layout still
-    /// carries the tokens.
-    DataUrls(&'a docx_parse::media::MediaTable),
+    /// As their parts' `data:` URLs, which every replica reads; with
+    /// `layout_tokens`, layout still carries the tokens.
+    DataUrls {
+        table: &'a docx_parse::media::MediaTable,
+        layout_tokens: bool,
+    },
 }
 
 fn seed_lowered(
@@ -4695,9 +4698,13 @@ fn seed_lowered(
     }
     let sources = match media {
         SeedMedia::AsParsed => crate::media::MediaSources::default(),
-        SeedMedia::DataUrls(table) => crate::media::write_data_urls(
+        SeedMedia::DataUrls {
+            table,
+            layout_tokens,
+        } => crate::media::write_data_urls(
             batches.iter_mut().flat_map(|(_, ops)| ops.iter_mut()),
             table,
+            layout_tokens,
         ),
     };
     document
@@ -5253,6 +5260,30 @@ fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
     });
 }
 
+/// Seeds `bytes` as the browser editor opens them: `data:` URLs in the
+/// stories, tokens in layout.
+#[cfg(test)]
+pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let source: Arc<[u8]> = Arc::from(bytes);
+    let digest = package_digest(&source);
+    let (envelope, parts, media) =
+        parse_docx_package_with_media(Arc::clone(&source), digest.clone())?;
+    seed_parsed_docx(
+        document,
+        envelope,
+        parts,
+        source,
+        digest,
+        SeedMedia::DataUrls {
+            table: &media,
+            layout_tokens: true,
+        },
+    )?;
+    document.install_media(media);
+    document.begin_opening(None);
+    Ok(())
+}
+
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
     let digest = package_digest(bytes);
     let bytes: Arc<[u8]> = Arc::from(bytes);
@@ -5264,7 +5295,10 @@ pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), St
         parts,
         bytes,
         digest,
-        SeedMedia::DataUrls(&media),
+        SeedMedia::DataUrls {
+            table: &media,
+            layout_tokens: false,
+        },
     )?;
     document.install_media(media);
     Ok(())
@@ -5886,8 +5920,11 @@ mod tests {
             ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec()),
         ])
         .unwrap();
+        let native = EditingDoc::new(6);
+        seed_from_docx(&native, &bytes).unwrap();
+        assert!(native.media_sources().is_empty());
         let seeded = EditingDoc::new(7);
-        seed_from_docx(&seeded, &bytes).unwrap();
+        seed_with_layout_tokens(&seeded, &bytes).unwrap();
         let image_src = |doc: &EditingDoc| {
             let blocks = crate::bridge::yrs_doc_to_layout_blocks(
                 doc,
@@ -5909,6 +5946,7 @@ mod tests {
         };
         assert_eq!(image_src(&seeded), "media:1");
         let data_url = "data:image/png;base64,iVBORwECAwQ=".to_owned();
+        assert_eq!(image_src(&native), data_url);
         assert_eq!(
             seeded.media_table().unwrap().resolve("media:1"),
             Some(data_url.clone())

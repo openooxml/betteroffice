@@ -674,8 +674,13 @@ impl EditingDoc {
         self.media_sources.lock().unwrap().clone()
     }
 
+    /// Replaces the media sources, invalidating what was lowered with others.
     pub(crate) fn set_media_sources(&self, sources: media::MediaSources) {
-        *self.media_sources.lock().unwrap() = sources;
+        let mut current = self.media_sources.lock().unwrap();
+        if *current != sources {
+            *current = sources;
+            self.epoch.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// The media behind the `media:{n}` image sources of the stories seeded
@@ -688,9 +693,7 @@ impl EditingDoc {
                 identity::SourcePackage::Ready(index) => index.bytes(),
             };
             let package = ooxml_opc::RetainedPackage::new(bytes).ok()?;
-            *media = Some(Arc::new(
-                docx_parse::media::MediaTable::new(package, 0).ok()?,
-            ));
+            *media = Some(Arc::new(docx_parse::media::MediaTable::new(package).ok()?));
         }
         media.clone()
     }

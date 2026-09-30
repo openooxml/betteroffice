@@ -6448,7 +6448,7 @@ mod tests {
                 .unwrap()
         };
         let full = EngineSession::new(312);
-        crate::seed::seed_from_docx(full.doc(), &bytes).unwrap();
+        crate::seed::seed_with_layout_tokens(full.doc(), &bytes).unwrap();
         full.layout_document_with_regions_retained_json(&request)
             .unwrap();
         let preview = EngineSession::new(312);
