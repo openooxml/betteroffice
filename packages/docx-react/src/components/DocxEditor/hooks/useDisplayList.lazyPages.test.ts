@@ -193,6 +193,49 @@ test('an edit schedules idle rebuilds for formerly built pages away from the vie
   }
 });
 
+test('page builds wait for the frame of an edit in flight', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const pages = () => result.current.frame!.displayList.pages;
+    const last = pages().length - 1;
+    expect(pages()[last]!.unbuilt).toBe(true);
+    const { paraId } = JSON.parse(engine.paragraphs('body'))[0] as { paraId: string };
+    engine.set_selection('body', paraId, 1, paraId, 1);
+    worker.holdInputReplies = true;
+    let pendingEdit: ReturnType<typeof result.current.applyInput> | undefined;
+    await act(async () => {
+      pendingEdit = result.current.applyInput('New ');
+    });
+    await waitFor(() => expect(worker.heldInputReplies).toHaveLength(1));
+    const pageBuilds = () => worker.posted.filter((request) => request.type === 'buildPages');
+    await act(async () => {
+      runIdleCallbacks();
+      result.current.setDisplayWindow(last, last + 1);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    expect(pageBuilds()).toEqual([]);
+
+    worker.holdInputReplies = false;
+    await act(async () => {
+      worker.releaseInputReplies();
+      expect(await pendingEdit!).not.toBeNull();
+    });
+    const adopted = result.current.frame!.frameEpoch;
+    await waitFor(() => expect(pages()[last]!.unbuilt).toBeFalsy());
+    expect(pageBuilds()[0]).toMatchObject({ pages: [last], expectedFrameEpoch: adopted });
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
 test('a failed page build hands rendering back to the main thread', async () => {
   const { engine, inputs, host } = lazyFixture();
   const errors = spyOn(console, 'error').mockImplementation(() => {});

@@ -210,6 +210,10 @@ const SETTLE_BUILD_BATCH_PAGES = 32;
 /** Unbuilt pages built per idle period away from the viewport. */
 const BACKGROUND_BUILD_BATCH_PAGES = 16;
 const BACKGROUND_BUILD_DELAY_MS = 200;
+/** How often a page build waiting behind a newer worker frame checks again. */
+const PAGE_BUILD_RETRY_MS = 50;
+/** How long a page build waits for the display to adopt a worker frame. */
+const UNADOPTED_FRAME_WAIT_MS = 2000;
 
 type PageBuildTimer = ReturnType<typeof setTimeout> | { idle: number };
 
@@ -422,6 +426,8 @@ export function useRustDisplayList(
   const pageBuildInFlightRef = useRef(false);
   const pageBuildTimerRef = useRef<PageBuildTimer | null>(null);
   const schedulePageBuildsWhenIdleRef = useRef<() => void>(() => {});
+  const retryPageBuildsRef = useRef<() => void>(() => {});
+  const unadoptedFrameSinceRef = useRef<number | null>(null);
   const workerLayoutFramesRef = useRef(new WeakMap<Layout, WorkerLayoutFrame>());
   const completionGateRef = useRef<(() => void) | null>(null);
   const resolvedCommentIdsRef = useRef(resolvedCommentIds);
@@ -1055,6 +1061,20 @@ export function useRustDisplayList(
         if (pages[index]?.unbuilt) unbuilt.push(index);
       }
       if (unbuilt.length === 0) return;
+      // Behind a worker frame the display has not adopted, the pages would
+      // come back as a whole-document recovery frame: wait for it.
+      const framePending = worker.client.frameRequestPending();
+      if (framePending || worker.client.answeredFrame() > frame.frameEpoch) {
+        const now = performance.now();
+        if (framePending || unadoptedFrameSinceRef.current === null) {
+          unadoptedFrameSinceRef.current = now;
+        }
+        if (now - unadoptedFrameSinceRef.current < UNADOPTED_FRAME_WAIT_MS) {
+          retryPageBuildsRef.current();
+          return;
+        }
+      }
+      unadoptedFrameSinceRef.current = null;
       let batch = unbuilt.filter((index) => index >= start && index < end);
       if (batch.length === 0) {
         const settling = settleWaitersRef.current.size > 0;
@@ -1154,6 +1174,7 @@ export function useRustDisplayList(
     },
     [buildUnbuiltPages]
   );
+  retryPageBuildsRef.current = () => schedulePageBuilds(PAGE_BUILD_RETRY_MS);
   schedulePageBuildsWhenIdleRef.current = () => {
     cancelPageBuilds(pageBuildTimerRef);
     pageBuildTimerRef.current =
@@ -1645,21 +1666,30 @@ export function useRustDisplayList(
       const prebuilt = workerLayoutFramesRef.current.get(layout);
       if (prebuilt) workerLayoutFramesRef.current.delete(layout);
       try {
+        const delta = prebuilt ? decodeFrameDelta(prebuilt.result.frame) : null;
+        const base = frameBase(hostEngine);
         // The frame is adopted only while nothing newer reached the session
-        // or the display since the worker built it.
+        // or the display since the worker built it. A whole frame (the worker
+        // sends one when a page build ran first) replaces any older base.
+        const appliesTo = !prebuilt
+          ? undefined
+          : (base?.frameEpoch ?? null) === (prebuilt.previousFrame?.frameEpoch ?? null)
+            ? prebuilt.previousFrame
+            : delta?.full && (!base || delta.frameEpoch > base.frameEpoch)
+              ? base
+              : undefined;
         if (
           prebuilt &&
+          delta &&
+          appliesTo !== undefined &&
           prebuilt.engine === hostEngine &&
           workerRef.current?.engine === hostEngine &&
           prebuilt.contentEpoch === contentEpoch &&
-          (frameBase(hostEngine)?.frameEpoch ?? null) ===
-            (prebuilt.previousFrame?.frameEpoch ?? null) &&
           prebuilt.layoutExtras === JSON.stringify(frameExtrasInputs())
         ) {
           // The worker ran this layout and built its frame in the same pass.
-          const { result, previousFrame } = prebuilt;
-          const delta = decodeFrameDelta(result.frame);
-          const nextFrame = applyFrameDelta(previousFrame, delta);
+          const { result } = prebuilt;
+          const nextFrame = applyFrameDelta(appliesTo, delta);
           pending = Promise.resolve({
             displayList: nextFrame.displayList,
             frame: nextFrame,

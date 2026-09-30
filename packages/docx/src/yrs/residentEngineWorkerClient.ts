@@ -75,6 +75,15 @@ export interface ResidentEngineWorkerApplyResult extends ResidentEngineWorkerFra
   applied: true;
 }
 
+const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
+  'bootstrap',
+  'sync',
+  'completeLayout',
+  'buildFrame',
+  'applyInput',
+  'applyDelete',
+]);
+
 type PendingRequest = {
   type: AwaitedRequest['type'];
   resolve(response: ResidentEngineWorkerResponse & { ok: true }): void;
@@ -127,11 +136,15 @@ export class ResidentEngineWorkerClient {
   private lastSnapshotId = 0;
   private keepSurfaces = false;
   private lastMemory: WasmModuleMemory[] | null = null;
+  private answeredFrameEpoch = 0;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
       const response = event.data;
       if (response.memory) this.lastMemory = response.memory;
+      if (response.ok && response.caret) {
+        this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
+      }
       if (response.ok && response.stateVector && response.id >= this.lastSnapshotId) {
         this.remoteVector = new Uint8Array(response.stateVector);
       }
@@ -175,6 +188,19 @@ export class ResidentEngineWorkerClient {
 
   layoutRevision(): number {
     return this.revision;
+  }
+
+  /** @internal The newest frame epoch a reply carried; 0 before any frame. */
+  answeredFrame(): number {
+    return this.answeredFrameEpoch;
+  }
+
+  /** @internal Whether a frame request other than `buildPages` awaits its reply. */
+  frameRequestPending(): boolean {
+    for (const { type } of this.pending.values()) {
+      if (FRAME_REQUESTS.has(type)) return true;
+    }
+    return false;
   }
 
   /** The worker replica's last reported yrs state vector (null before any). */
