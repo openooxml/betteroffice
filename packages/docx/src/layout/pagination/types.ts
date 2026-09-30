@@ -374,6 +374,8 @@ export type FieldRun = RunFormatting & {
   fallback?: string;
   /** `w:fldLock`: the field keeps its cached result. */
   locked?: boolean;
+  /** Sequences of `SEQ` fields nested in this field; they keep their cached results. */
+  nestedSequences?: string[];
   pmStart?: number;
   pmEnd?: number;
 };

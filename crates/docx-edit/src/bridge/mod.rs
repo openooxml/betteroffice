@@ -681,6 +681,9 @@ fn lower_story<T: ReadTxn>(
                                 .as_ref()
                                 .and_then(any_bool)
                                 .unwrap_or(false),
+                            nested_sequences: any_strings(
+                                shared_any(&field, txn, "nestedSequences").as_ref(),
+                            ),
                         },
                         formatting: lower_run_formatting(attributes, env),
                         story_start: story_index,
@@ -1900,6 +1903,9 @@ fn lower_inline_sdt_values(
                         locked: payload
                             .and_then(|payload| map_bool(payload, "fldLock"))
                             .unwrap_or(false),
+                        nested_sequences: any_strings(
+                            payload.and_then(|payload| payload.get("nestedSequences")),
+                        ),
                     },
                     formatting,
                     story_start: story_index,
@@ -2123,6 +2129,7 @@ enum RawRunKind {
         instruction: Option<String>,
         fallback: Option<String>,
         locked: bool,
+        nested_sequences: Vec<String>,
     },
 }
 
@@ -2729,6 +2736,7 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             instruction,
             fallback,
             locked,
+            nested_sequences,
         } => Run::Field(FieldRun {
             fmt: raw.formatting,
             field_type,
@@ -2736,6 +2744,7 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             instruction,
             fallback,
             locked,
+            nested_sequences,
             pm_start,
             pm_end,
         }),
@@ -3837,6 +3846,17 @@ fn map_string(map: &std::collections::HashMap<String, Any>, key: &str) -> Option
 
 fn map_bool(map: &std::collections::HashMap<String, Any>, key: &str) -> Option<bool> {
     map.get(key).and_then(any_bool)
+}
+
+fn any_strings(value: Option<&Any>) -> Vec<String> {
+    match value {
+        Some(Any::Array(values)) => values
+            .iter()
+            .filter_map(any_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 pub(crate) fn map_number(map: &std::collections::HashMap<String, Any>, key: &str) -> Option<f64> {

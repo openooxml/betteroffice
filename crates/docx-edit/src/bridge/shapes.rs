@@ -563,6 +563,7 @@ fn shape_field_run(field_value: &Value) -> Run {
         instruction,
         fallback: Some(fallback),
         locked: field_value.get("fldLock").and_then(Value::as_bool) == Some(true),
+        nested_sequences: crate::seed::nested_sequence_names(field_value),
         pm_start: None,
         pm_end: None,
     })

@@ -422,6 +422,10 @@ pub struct FieldRun {
     /// `w:fldLock`: Word keeps the cached result when it updates fields.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
+    /// Sequences (lower-case names) of SEQ fields nested in this field's code
+    /// or result, which the field's single run doesn't show.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_sequences: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1422,6 +1426,7 @@ impl PartialEq for FieldRun {
             instruction: _,
             fallback: _,
             locked: _,
+            nested_sequences: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1431,6 +1436,7 @@ impl PartialEq for FieldRun {
             && self.instruction == other.instruction
             && self.fallback == other.fallback
             && self.locked == other.locked
+            && self.nested_sequences == other.nested_sequences
     }
 }
 

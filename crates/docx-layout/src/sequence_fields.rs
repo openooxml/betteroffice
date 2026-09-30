@@ -8,10 +8,11 @@
 //! given, and evaluates no other field.
 //!
 //! Only instructions it understands in full are numbered. A sequence with a
-//! chapter reset (`\s`), a bookmark argument, an unusable reset or an unknown
-//! switch keeps all of its cached results, and so does a single field with a
-//! format other than `ARABIC`, `ROMAN` or `ALPHABETIC`, a numeric or date
-//! picture, or a `w:fldLock` (a locked field still counts).
+//! chapter reset (`\s`), a bookmark argument, an unusable reset, an unknown
+//! switch or a field nested in another field keeps all of its cached results,
+//! and so does a single field with a format other than `ARABIC`, `ROMAN` or
+//! `ALPHABETIC` among its switches, a numeric or date picture, or a
+//! `w:fldLock` (a locked field still counts).
 
 use std::collections::{HashMap, HashSet};
 
@@ -58,7 +59,10 @@ struct Seq {
 /// block stands.
 pub fn number_sequence_fields(blocks: &mut [LayoutBlock]) {
     let mut fields = Vec::new();
-    collect_blocks(blocks, &mut fields);
+    // Sequences with a field nested in another field, which Word counts and
+    // the blocks don't show.
+    let mut nested = HashSet::new();
+    collect_blocks(blocks, &mut fields, &mut nested);
     let parsed: Vec<_> = fields.iter().map(|field| parse(field)).collect();
     let opaque: HashSet<&str> = parsed
         .iter()
@@ -66,6 +70,7 @@ pub fn number_sequence_fields(blocks: &mut [LayoutBlock]) {
             Parsed::Opaque(name) => Some(name.as_str()),
             _ => None,
         })
+        .chain(nested.iter().map(String::as_str))
         .collect();
     let mut counters = HashMap::<&str, i64>::new();
     let mut results = Vec::with_capacity(parsed.len());
@@ -95,40 +100,71 @@ pub fn number_sequence_fields(blocks: &mut [LayoutBlock]) {
     }
 }
 
-fn collect_blocks<'a>(blocks: &'a mut [LayoutBlock], fields: &mut Vec<&'a mut FieldRun>) {
+fn collect_blocks<'a>(
+    blocks: &'a mut [LayoutBlock],
+    fields: &mut Vec<&'a mut FieldRun>,
+    nested: &mut HashSet<String>,
+) {
     for block in blocks {
         match block {
-            LayoutBlock::Paragraph(paragraph) => collect_paragraph(paragraph, fields),
+            LayoutBlock::Paragraph(paragraph) => collect_paragraph(paragraph, fields, nested),
             LayoutBlock::Table(table) => {
                 for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
-                    collect_blocks(&mut cell.blocks, fields);
+                    collect_blocks(&mut cell.blocks, fields, nested);
                 }
             }
             LayoutBlock::TextBox(text_box) => {
                 for paragraph in &mut text_box.content {
-                    collect_paragraph(paragraph, fields);
+                    collect_paragraph(paragraph, fields, nested);
                 }
             }
-            LayoutBlock::Shape(shape) => collect_shape(shape, fields),
+            LayoutBlock::Shape(shape) => collect_shape(shape, fields, nested),
             _ => {}
         }
     }
 }
 
-fn collect_shape<'a>(shape: &'a mut ShapeBlock, fields: &mut Vec<&'a mut FieldRun>) {
+fn collect_shape<'a>(
+    shape: &'a mut ShapeBlock,
+    fields: &mut Vec<&'a mut FieldRun>,
+    nested: &mut HashSet<String>,
+) {
     for paragraph in shape.inner_text.iter_mut().flatten() {
-        collect_paragraph(paragraph, fields);
+        collect_paragraph(paragraph, fields, nested);
     }
     for child in &mut shape.children {
-        collect_shape(child, fields);
+        collect_shape(child, fields, nested);
     }
 }
 
-fn collect_paragraph<'a>(paragraph: &'a mut ParagraphBlock, fields: &mut Vec<&'a mut FieldRun>) {
-    fields.extend(paragraph.runs.iter_mut().filter_map(|run| match run {
-        Run::Field(field) if field.raw_type.as_deref() == Some("SEQ") => Some(field),
-        _ => None,
-    }));
+fn collect_paragraph<'a>(
+    paragraph: &'a mut ParagraphBlock,
+    fields: &mut Vec<&'a mut FieldRun>,
+    nested: &mut HashSet<String>,
+) {
+    for run in &mut paragraph.runs {
+        let Run::Field(field) = run else { continue };
+        nested.extend(field.nested_sequences.iter().cloned());
+        if field.raw_type.as_deref() == Some("SEQ") {
+            fields.push(field);
+        }
+    }
+}
+
+/// The sequence a SEQ instruction counts, in lower case (Word matches names
+/// without regard to case); `None` for another field or a SEQ without a name.
+pub fn sequence_name(instruction: &str) -> Option<String> {
+    seq_name(&mut tokens(instruction))
+}
+
+fn seq_name<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<String> {
+    tokens
+        .next()
+        .filter(|token| token.eq_ignore_ascii_case("SEQ"))?;
+    tokens
+        .next()
+        .filter(|token| !token.starts_with('\\'))
+        .map(str::to_lowercase)
 }
 
 fn parse(field: &FieldRun) -> Parsed {
@@ -136,17 +172,9 @@ fn parse(field: &FieldRun) -> Parsed {
         return Parsed::Skip;
     };
     let mut tokens = tokens(instruction);
-    if !tokens
-        .next()
-        .is_some_and(|token| token.eq_ignore_ascii_case("SEQ"))
-    {
-        return Parsed::Skip;
-    }
-    let Some(name) = tokens.next().filter(|token| !token.starts_with('\\')) else {
+    let Some(name) = seq_name(&mut tokens) else {
         return Parsed::Skip;
     };
-    // Word matches sequence names without regard to case.
-    let name = name.to_lowercase();
     let mut step = None;
     let mut seq = Seq {
         name: String::new(),

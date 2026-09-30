@@ -1501,21 +1501,50 @@ fn field_payload(
             .flatten()
     });
     let merged = merge_text_formatting(style_formatting, formatting);
-    (
-        map_from_value(json!({
-            "fieldType": nullish(field(Some(field_value), "fieldType")),
-            "instruction": nullish(field(Some(field_value), "instruction")),
-            "displayText": display_text,
-            "fieldKind": if kind == "simpleField" { "simple" } else { "complex" },
-            "fldLock": boolean(field(Some(field_value), "fldLock")).unwrap_or(false),
-            "dirty": boolean(field(Some(field_value), "dirty")).unwrap_or(false),
-            "displayMode": string(field(field(Some(field_value), "fieldTree"), "displayMode")).unwrap_or("result"),
-            "hasCachedResult": !display_text.is_empty(),
-            "fieldData": source_json(field_value, source),
-            "modelKind": "field"
-        })),
-        formatting_to_marks(merged.as_ref()),
-    )
+    let mut payload = map_from_value(json!({
+        "fieldType": nullish(field(Some(field_value), "fieldType")),
+        "instruction": nullish(field(Some(field_value), "instruction")),
+        "displayText": display_text,
+        "fieldKind": if kind == "simpleField" { "simple" } else { "complex" },
+        "fldLock": boolean(field(Some(field_value), "fldLock")).unwrap_or(false),
+        "dirty": boolean(field(Some(field_value), "dirty")).unwrap_or(false),
+        "displayMode": string(field(field(Some(field_value), "fieldTree"), "displayMode")).unwrap_or("result"),
+        "hasCachedResult": !display_text.is_empty(),
+        "fieldData": source_json(field_value, source),
+        "modelKind": "field"
+    }));
+    let nested = nested_sequence_names(field_value);
+    if !nested.is_empty() {
+        payload.insert("nestedSequences".to_owned(), json!(nested));
+    }
+    (payload, formatting_to_marks(merged.as_ref()))
+}
+
+/// The sequences of SEQ fields nested anywhere in a field's code or result.
+pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
+    fn walk(value: &Value, names: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if matches!(
+                    string(map.get("type")),
+                    Some("complexField" | "simpleField")
+                ) && let Some(name) = string(map.get("instruction"))
+                    .and_then(docx_layout::sequence_fields::sequence_name)
+                    && !names.contains(&name)
+                {
+                    names.push(name);
+                }
+                map.values().for_each(|value| walk(value, names));
+            }
+            Value::Array(values) => values.iter().for_each(|value| walk(value, names)),
+            _ => {}
+        }
+    }
+    let mut names = Vec::new();
+    if let Value::Object(map) = field_value {
+        map.values().for_each(|value| walk(value, &mut names));
+    }
+    names
 }
 
 fn math_payload(math: &Value) -> JsonObject {
