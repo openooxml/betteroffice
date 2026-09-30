@@ -23,6 +23,7 @@ import {
   type YrsStoryRange,
 } from '@betteroffice/docx/yrs';
 import {
+  effectiveZoom,
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
@@ -37,6 +38,7 @@ import {
   yrsTableSelectionRange,
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
+import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
@@ -1306,10 +1308,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const nextLeft = pageRect.left + caret.x * scaleX;
     const nextTop = pageRect.top + caret.y * scaleY;
     const nextHeight = Math.max(1, caret.height * scaleY);
+    const inputZoom = textareaRef.current ? effectiveZoom(textareaRef.current) : 1;
+    const style = {
+      left: nextLeft / inputZoom,
+      top: nextTop / inputZoom,
+      height: nextHeight / inputZoom,
+    };
     setPositionStyle((current) =>
-      current.left === nextLeft && current.top === nextTop && current.height === nextHeight
+      current.left === style.left && current.top === style.top && current.height === style.height
         ? current
-        : { left: nextLeft, top: nextTop, height: nextHeight }
+        : style
     );
     const stickySelection = session?.selection() ?? null;
     const previousStickySelection = lastCaretScrollSelectionRef.current;
@@ -1322,14 +1330,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged)
     ) {
       const scroller = findVerticalScrollParentOrRoot(host);
-      const viewport = scroller.getBoundingClientRect();
-      const margin = 24;
-      const caretBottom = nextTop + nextHeight;
-      if (nextTop < viewport.top + margin) {
-        scroller.scrollTop += nextTop - viewport.top - margin;
-      } else if (caretBottom > viewport.bottom - margin) {
-        scroller.scrollTop += caretBottom - viewport.bottom + margin;
-      }
+      const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
+      if (delta !== 0) scroller.scrollTop += delta;
     }
   }, [
     canvasHostRef,
