@@ -854,8 +854,12 @@ fn place(
             && !plan.keep_with_next.interior_members.contains(&i)
         {
             let state_idx = paginator.get_current();
-            let page_content_height =
-                paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
+            // between float bands a run stays whole only in the tallest gap
+            let page_content_height = if paginator.has_float_bands() {
+                paginator.get_column_capacity()
+            } else {
+                paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top
+            };
             let page_has_content = paginator.page_fragment_count(state_idx) > 0;
             let group_height = hooks::measure_keep_with_next_group_at(
                 group,
@@ -2837,6 +2841,38 @@ mod pagination_rule_tests {
             serde_json::to_string(&incremental.layout).unwrap(),
             serde_json::to_string(&previous.layout).unwrap()
         );
+    }
+
+    #[test]
+    fn a_heading_above_a_table_stays_when_its_first_slice_only_fits_past_a_float_band() {
+        let cell_paragraph = json!({
+            "kind": "paragraph", "id": 10,
+            "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+        });
+        let lines: Vec<_> = [25.0, 25.0, 20.0, 20.0].into_iter().map(line).collect();
+        let table = json!({
+            "block": {
+                "kind": "table", "id": 3,
+                "rows": [{ "id": 20, "cells": [{ "id": 30, "blocks": [cell_paragraph] }] }],
+                "columnWidths": [100],
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [100], "totalWidth": 100, "totalHeight": 90,
+                "rows": [{ "height": 90, "cells": [{ "width": 100, "height": 90, "blocks": [
+                    { "kind": "paragraph", "lines": lines, "totalHeight": 90 }
+                ] }] }],
+            },
+        });
+        let mut value = input(vec![
+            paragraph(1, 1, 5.0, json!({})),
+            paragraph(2, 1, 15.0, json!({ "keepNext": true })),
+            table,
+        ]);
+        value.options.section_page_float_bands = Some(
+            serde_json::from_value(json!([{"default": [{"top": 60, "bottom": 65}]}])).unwrap(),
+        );
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 2);
     }
 
     fn oversized_cant_split_table() -> serde_json::Value {
