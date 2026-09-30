@@ -31,7 +31,6 @@ pub use ooxml_drawingml::normalize_table_column_widths;
 
 use serde::Serialize;
 
-use crate::measure_blocks::DEFAULT_CELL_PADDING_X;
 use crate::types::TableBlock;
 
 /// Twips per inch.
@@ -173,6 +172,26 @@ pub(crate) fn preferred_width_px(
             resolve_table_width_px(legacy_value, legacy_type, parent_width)
                 .or_else(|| legacy_px.filter(|value| *value > 0.0))
         })
+}
+
+fn legacy_preferred_width_px(
+    preferred: Option<&crate::types::PreferredWidth>,
+    legacy_value: Option<f64>,
+    legacy_type: Option<&str>,
+    parent_width: f64,
+    legacy_px: Option<f64>,
+) -> Option<f64> {
+    let resolve = |value, width_type: Option<&str>| {
+        resolve_table_width_px(
+            value,
+            width_type.filter(|kind| *kind != "auto"),
+            parent_width,
+        )
+    };
+    preferred
+        .and_then(|width| resolve(width.value, width.r#type.as_deref()))
+        .or_else(|| resolve(legacy_value, legacy_type))
+        .or_else(|| legacy_px.filter(|value| *value > 0.0))
 }
 
 /// Raises a span's columns until they total `required`, sharing the shortfall
@@ -450,98 +469,105 @@ fn autofit_content_widths(
     (minimums, maximums)
 }
 
-/// Whether a cell holds content that shrinking would crop instead of rewrap:
-/// an inline image, or any block other than a paragraph (a nested table, an
-/// image, shape, chart or text box).
-fn holds_rigid_content(blocks: &[crate::types::LayoutBlock]) -> bool {
-    blocks.iter().any(|block| match block {
-        crate::types::LayoutBlock::Paragraph(paragraph) => paragraph
-            .runs
-            .iter()
-            .any(|run| matches!(run, crate::types::Run::Image(_))),
-        _ => true,
-    })
-}
-
-/// The widest inline image among a cell's paragraphs, which shrinking can't narrow.
-fn widest_inline_image(blocks: &[crate::types::LayoutBlock]) -> f64 {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            crate::types::LayoutBlock::Paragraph(paragraph) => Some(paragraph),
-            _ => None,
-        })
-        .flat_map(|paragraph| &paragraph.runs)
-        .filter_map(|run| match run {
-            crate::types::Run::Image(image) => {
-                Some(crate::measure_blocks::synthetic_inline_image_width(image))
-            }
-            _ => None,
-        })
-        .fold(0.0, f64::max)
-}
-
-/// A cell's narrowest width before shrinking crops or hides its content, and
-/// whether that content is rigid (it can't rewrap at all). A rigid cell whose
-/// minimum content width is unknown can't be narrowed safely at all.
-fn cell_shrink_floor(
-    table_block: &TableBlock,
-    grid_cell: &ResolvedGridCell,
-    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
-) -> (f64, bool) {
-    let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
-    let padding = cell
-        .padding
-        .as_ref()
-        .map_or(2.0 * DEFAULT_CELL_PADDING_X, |padding| {
-            padding.left + padding.right
-        });
-    let floor = padding + widest_inline_image(&cell.blocks).max(1.0);
-    let rigid = holds_rigid_content(&cell.blocks);
-    if !rigid {
-        return (floor, false);
-    }
-    let minimum = cell
-        .min_content_width
-        .or(content_widths
-            .and_then(|rows| rows.get(grid_cell.row_index))
-            .and_then(|cells| cells.get(grid_cell.cell_index))
-            .copied()
-            .flatten()
-            .map(|widths| widths.0))
-        .unwrap_or(f64::INFINITY);
-    (floor.max(minimum), true)
-}
-
-fn span_width(widths: &[f64], grid_cell: &ResolvedGridCell) -> f64 {
-    widths
-        .iter()
-        .skip(grid_cell.column_index)
-        .take(grid_cell.col_span)
-        .sum()
-}
-
-/// Autofit column widths, or `None` to keep the declared grid when they
-/// would crop a cell's content.
-fn resolve_autofit_column_widths(
+fn legacy_autofit_column_widths(
     table_block: &TableBlock,
     content_width: f64,
     col_count: usize,
     explicit_width_px: Option<f64>,
-    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
-) -> Option<Vec<f64>> {
-    let widths = autofit_column_widths(
-        table_block,
-        content_width,
+) -> Vec<f64> {
+    let source = table_block
+        .grid_widths
+        .as_deref()
+        .or(table_block.column_widths.as_deref())
+        .unwrap_or(&[]);
+    let base = normalize_table_column_widths(
+        source,
         col_count,
-        explicit_width_px,
-        content_widths,
-    )?;
-    let crops = resolve_cell_grid(table_block).iter().any(|grid_cell| {
-        let (floor, rigid) = cell_shrink_floor(table_block, grid_cell, content_widths);
-        rigid && span_width(&widths, grid_cell) < floor
-    });
-    (!crops).then_some(widths)
+        explicit_width_px.unwrap_or(content_width),
+    );
+    let mut minimums = vec![0.0; col_count];
+    let mut maximums = vec![0.0; col_count];
+    for grid_cell in resolve_cell_grid(table_block) {
+        let Some(cell) = table_block
+            .rows
+            .get(grid_cell.row_index)
+            .and_then(|row| row.cells.get(grid_cell.cell_index))
+        else {
+            continue;
+        };
+        let preferred = legacy_preferred_width_px(
+            cell.preferred_width.as_ref(),
+            cell.width_value,
+            cell.width_type.as_deref(),
+            explicit_width_px.unwrap_or(content_width),
+            cell.width,
+        );
+        let mut minimum = cell.min_content_width.unwrap_or(0.0).max(0.0);
+        if cell.no_wrap.unwrap_or(false) {
+            minimum = minimum.max(cell.max_content_width.unwrap_or(0.0));
+        }
+        let maximum = minimum.max(cell.max_content_width.or(preferred).unwrap_or(0.0));
+        add_span_constraint(
+            &mut minimums,
+            grid_cell.column_index,
+            grid_cell.col_span,
+            minimum,
+        );
+        add_span_constraint(
+            &mut maximums,
+            grid_cell.column_index,
+            grid_cell.col_span,
+            maximum,
+        );
+        if let Some(preferred) = preferred {
+            add_span_constraint(
+                &mut maximums,
+                grid_cell.column_index,
+                grid_cell.col_span,
+                preferred,
+            );
+        }
+    }
+    for column in 0..col_count {
+        if minimums[column] <= 0.0 {
+            minimums[column] = base[column].min(if maximums[column] > 0.0 {
+                maximums[column]
+            } else {
+                base[column]
+            });
+        }
+        maximums[column] = maximums[column].max(minimums[column]);
+        if maximums[column] <= 0.0 {
+            maximums[column] = base[column];
+        }
+    }
+    let min_total: f64 = minimums.iter().sum();
+    let max_total: f64 = maximums.iter().sum();
+    let target = min_total.max(content_width.min(explicit_width_px.unwrap_or(
+        if max_total > 0.0 {
+            max_total
+        } else {
+            content_width
+        },
+    )));
+    if target >= max_total {
+        return distribute_to_target(maximums, target);
+    }
+    let flex: Vec<f64> = maximums
+        .iter()
+        .zip(&minimums)
+        .map(|(max, min)| (max - min).max(0.0))
+        .collect();
+    let flex_total: f64 = flex.iter().sum();
+    let extra = (target - min_total).max(0.0);
+    if flex_total <= 0.0 {
+        return distribute_to_target(minimums, target);
+    }
+    minimums
+        .into_iter()
+        .enumerate()
+        .map(|(index, min)| min + extra * flex[index] / flex_total)
+        .collect()
 }
 
 fn autofit_column_widths(
@@ -571,11 +597,7 @@ fn autofit_column_widths(
     if target < min_total {
         let scale = target / min_total;
         let widths: Vec<f64> = minimums.into_iter().map(|width| width * scale).collect();
-        let mut column_floors = vec![1.0_f64; col_count];
-        let mut cells = resolve_cell_grid(table_block);
-        cells.sort_by_key(|cell| (cell.col_span, cell.column_index));
-        let mut below_cell_floor = false;
-        for grid_cell in cells {
+        for grid_cell in resolve_cell_grid(table_block) {
             let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
             let minimum = cell.min_content_width.or(content_widths
                 .and_then(|rows| rows.get(grid_cell.row_index))
@@ -583,22 +605,14 @@ fn autofit_column_widths(
                 .copied()
                 .flatten()
                 .map(|widths| widths.0));
-            if minimum.is_some_and(|minimum| span_width(&widths, &grid_cell) < minimum) {
+            let width: f64 = widths
+                .iter()
+                .skip(grid_cell.column_index)
+                .take(grid_cell.col_span)
+                .sum();
+            if minimum.is_some_and(|minimum| width < minimum) {
                 return None;
             }
-            let (floor, _) = cell_shrink_floor(table_block, &grid_cell, content_widths);
-            below_cell_floor |= span_width(&widths, &grid_cell) < floor;
-            if floor.is_finite() {
-                add_span_constraint(
-                    &mut column_floors,
-                    grid_cell.column_index,
-                    grid_cell.col_span,
-                    floor,
-                );
-            }
-        }
-        if below_cell_floor && content_width >= column_floors.iter().sum::<f64>() {
-            return None;
         }
         return Some(widths);
     }
@@ -643,6 +657,10 @@ fn table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
     (content_width - table_indent(table_block)).max(0.0)
 }
 
+fn legacy_table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
+    (content_width - table_block.indent.unwrap_or(0.0).max(0.0)).max(0.0)
+}
+
 /// Grid columns whose width no cell states, for a table that states no width
 /// of its own and whose resolved `widths` leave room in `content_width`.
 ///
@@ -666,7 +684,7 @@ pub fn content_sized_columns(
     {
         return Vec::new();
     }
-    if preferred_width_px(
+    if legacy_preferred_width_px(
         table_block.preferred_width.as_ref(),
         table_block.width,
         table_block.width_type.as_deref(),
@@ -678,7 +696,7 @@ pub fn content_sized_columns(
         return Vec::new();
     }
     let total: f64 = widths.iter().sum();
-    if !total.is_finite() || total >= table_width_budget(table_block, content_width) {
+    if !total.is_finite() || total >= legacy_table_width_budget(table_block, content_width) {
         return Vec::new();
     }
     let mut priced = vec![false; widths.len()];
@@ -693,7 +711,7 @@ pub fn content_sized_columns(
         else {
             continue;
         };
-        if preferred_width_px(
+        if legacy_preferred_width_px(
             cell.preferred_width.as_ref(),
             cell.width_value,
             cell.width_type.as_deref(),
@@ -719,7 +737,7 @@ pub fn grow_content_sized_columns(
     widths: &mut [f64],
 ) {
     let total: f64 = widths.iter().sum();
-    let slack = table_width_budget(table_block, content_width) - total;
+    let slack = legacy_table_width_budget(table_block, content_width) - total;
     if !(slack > 0.0) {
         return;
     }
@@ -785,7 +803,39 @@ pub(crate) fn resolve_content_fitted_column_widths(
         );
     }
     if !table_block.rows.is_empty() && algorithm == "autofit" {
-        if let Some(widths) = resolve_autofit_column_widths(
+        let unknown = table_block.rows.iter().enumerate().any(|(row_index, row)| {
+            row.grid_before.is_some_and(|before| before > 0)
+                || row.cells.iter().enumerate().any(|(cell_index, cell)| {
+                    cell.grid_start.is_some()
+                        || match content_widths {
+                            Some(rows) => rows
+                                .get(row_index)
+                                .and_then(|cells| cells.get(cell_index))
+                                .is_none_or(Option::is_none),
+                            None => {
+                                cell.min_content_width.is_none() || cell.max_content_width.is_none()
+                            }
+                        }
+                })
+        });
+        if unknown {
+            return (
+                legacy_autofit_column_widths(
+                    table_block,
+                    content_width,
+                    col_count,
+                    legacy_preferred_width_px(
+                        table_block.preferred_width.as_ref(),
+                        table_block.width,
+                        table_block.width_type.as_deref(),
+                        content_width,
+                        None,
+                    ),
+                ),
+                false,
+            );
+        }
+        if let Some(widths) = autofit_column_widths(
             table_block,
             content_width,
             col_count,
@@ -1107,6 +1157,35 @@ mod tests {
     }
 
     #[test]
+    fn autofit_unknown_widths_use_main_metadata_and_report_unfitted() {
+        let content = vec![vec![None], vec![Some((3.5547, 3.5547))]];
+        for (preferred, expected) in [
+            (json!({"value": 2500, "type": "pct"}), 300.0),
+            (json!({"value": 1500, "type": "dxa"}), 100.0),
+            (json!({"value": 4500, "type": "auto"}), 300.0),
+        ] {
+            let mut block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "autofit", "gridWidths": [100],
+                "rows": [
+                    {"id": 0, "cells": [{"id": 0, "blocks": [], "preferredWidth": preferred}]},
+                    {"id": 1, "cells": [plain_cell()]}
+                ]
+            }))
+            .unwrap();
+            assert_eq!(
+                resolve_content_fitted_column_widths(&block, 600.0, Some(&content)),
+                (vec![expected], false)
+            );
+            block.width = Some(9000.0);
+            block.width_type = Some("auto".to_owned());
+            assert_eq!(
+                resolve_content_fitted_column_widths(&block, 600.0, Some(&content)),
+                (vec![600.0], false)
+            );
+        }
+    }
+
+    #[test]
     fn autofit_whose_indent_leaves_too_little_room_keeps_its_grid() {
         for (indent, grid) in [
             (600.0, json!({"columnWidths": [100, 100]})),
@@ -1313,8 +1392,8 @@ mod tests {
     }
 
     #[test]
-    fn autofit_keeps_its_grid_when_a_preferred_width_would_crop_an_unmeasured_image() {
-        for (indent, preferred) in [(0, 1500), (100, 3750)] {
+    fn autofit_unmeasured_images_use_main_preferred_widths() {
+        for (indent, preferred, expected) in [(0, 1500, 100.0), (100, 3750, 250.0)] {
             let block: TableBlock = serde_json::from_value(json!({
                 "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
                 "rows": [{"id": 0, "cells": [
@@ -1334,7 +1413,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 resolve_table_column_widths(&block, 600.0),
-                vec![300.0, 300.0],
+                vec![expected, 300.0],
                 "indent {indent}"
             );
         }
@@ -1367,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn autofit_nested_tables_keep_the_outer_grid_and_child_grid_fallback() {
+    fn autofit_nested_tables_keep_the_outer_grid_and_main_child_width() {
         use crate::measure_blocks::{MeasurementConfig, measure_block};
         use crate::types::{BlockExtent, LayoutBlock};
 
@@ -1410,7 +1489,7 @@ mod tests {
         assert_eq!(content, vec![vec![None]]);
         assert_eq!(
             resolve_table_column_widths_with_content(child, 600.0, Some(&content)),
-            vec![300.0]
+            vec![100.0]
         );
         let BlockExtent::Table(measured) = measure_block(&mut outer, 600.0, &config).unwrap()
         else {
@@ -1422,7 +1501,7 @@ mod tests {
         let BlockExtent::Table(child) = &cell.blocks[0] else {
             panic!()
         };
-        assert_eq!(child.column_widths.iter().sum::<f64>(), 300.0);
+        assert_eq!(child.column_widths.iter().sum::<f64>(), 100.0);
         assert!(child.column_widths.iter().sum::<f64>() <= cell.width);
     }
 

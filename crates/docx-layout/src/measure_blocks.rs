@@ -18,7 +18,7 @@ use crate::types::{
 };
 use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
-pub(crate) const DEFAULT_CELL_PADDING_X: f64 = 7.0;
+const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
 /// Zones one anchor frame may accumulate, matching the measurement layer's cap.
 const MAX_ACTIVE_ZONES: usize = 200;
@@ -2046,15 +2046,19 @@ fn table_content_widths(
                     .iter()
                     .enumerate()
                     .map(|(cell_index, cell)| {
-                        if cell.min_content_width.is_some() && cell.max_content_width.is_some() {
-                            return None;
-                        }
                         if (cell_index == 0 || table.bidi == Some(true))
                             && left_border_inset(cell) > 0.0
                         {
                             return None;
                         }
-                        cell_content_widths(cell, content_width, config)
+                        cell_content_widths(cell, content_width, config).map(
+                            |(minimum, maximum)| {
+                                (
+                                    cell.min_content_width.unwrap_or(minimum),
+                                    cell.max_content_width.unwrap_or(maximum),
+                                )
+                            },
+                        )
                     })
                     .collect()
             })
@@ -3158,6 +3162,159 @@ mod tests {
                 cell_content_widths(&hanging.rows[0].cells[0], 600.0, &config),
                 None
             );
+        });
+    }
+
+    fn autofit_repro_config() -> MeasurementConfig {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        MeasurementConfig {
+            font_chains: BTreeMap::from([("arial|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+            authoritative_shaping: true,
+            ..MeasurementConfig::default()
+        }
+    }
+
+    fn autofit_repro_table(grid: f64, paragraphs: &[Value]) -> TableBlock {
+        let rows: Vec<Value> = paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, paragraph)| {
+                json!({"id": index, "cells": [
+                    {"id": index, "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0},
+                     "blocks": [paragraph]}
+                ]})
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "id": "table", "layoutMode": "autofit", "gridWidths": [grid], "rows": rows
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn autofit_unknown_text_keeps_main_width_across_rows() {
+        crate::with_private_measure_fonts(|| {
+            let config = autofit_repro_config();
+            for (text, attrs, bordered, sibling) in [
+                (
+                    "WWWW",
+                    json!({"indent": {"left": 0, "hanging": 20}}),
+                    false,
+                    "W",
+                ),
+                ("WWWW", json!({"alignment": "center"}), true, "W"),
+                ("W", json!(null), true, "i"),
+            ] {
+                let mut table = autofit_repro_table(
+                    100.0,
+                    &[
+                        json!({"kind": "paragraph", "id": "unknown", "attrs": attrs,
+                               "runs": [{"kind": "text", "text": text}]}),
+                        json!({"kind": "paragraph", "id": "known",
+                               "runs": [{"kind": "text", "text": sibling}]}),
+                    ],
+                );
+                if bordered {
+                    table.rows[0].cells[0].borders =
+                        Some(serde_json::from_value(json!({"left": {"width": 8}})).unwrap());
+                }
+                let widths = table_content_widths(&table, 600.0, &config).unwrap();
+                assert_eq!(widths[0][0], None);
+                assert!(widths[1][0].is_some());
+                assert_eq!(
+                    fitted_table_column_widths(&table, 600.0, &config),
+                    (vec![100.0], false)
+                );
+                let measured = measure_table(&mut table, 600.0, &config).unwrap();
+                assert_eq!(measured.column_widths, vec![100.0]);
+                for row in &measured.rows {
+                    assert_eq!(row.cells[0].width, 100.0);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn autofit_unknown_widths_apply_main_legacy_growth() {
+        crate::with_private_measure_fonts(|| {
+            let config = autofit_repro_config();
+            for (attrs, grid_before, grid_start) in [
+                (json!({"indent": {"left": 0, "hanging": 20}}), None, None),
+                (json!(null), None, Some(0)),
+                (json!(null), Some(1), None),
+            ] {
+                let mut table = autofit_repro_table(
+                    50.0,
+                    &[
+                        json!({"kind": "paragraph", "id": "paragraph", "attrs": attrs,
+                               "runs": [{"kind": "text", "text": "WWWW"}]}),
+                    ],
+                );
+                table.rows[0].grid_before = grid_before;
+                table.rows[0].cells[0].grid_start = grid_start;
+                let mut legacy = vec![50.0; count_table_columns(&table)];
+                assert_eq!(
+                    fitted_table_column_widths(&table, 600.0, &config),
+                    (legacy.clone(), false)
+                );
+                let columns = content_sized_columns(&table, 600.0, &legacy);
+                let maximums = column_content_maximums(&table, &columns, 600.0, &config).unwrap();
+                grow_content_sized_columns(&table, 600.0, &maximums, &mut legacy);
+                let column = grid_before.unwrap_or(0) as usize;
+                assert!((legacy[column] - 60.41).abs() < 0.01);
+                let measured = measure_table(&mut table, 600.0, &config).unwrap();
+                assert_eq!(measured.column_widths, legacy);
+                assert_eq!(measured.rows[0].cells[0].width, legacy[column]);
+            }
+        });
+    }
+
+    #[test]
+    fn autofit_negative_tracking_and_condensed_runs_keep_main_width() {
+        crate::with_private_measure_fonts(|| {
+            let config = autofit_repro_config();
+            for formatting in [
+                json!({"letterSpacing": -10}),
+                json!({"letterSpacing": -0.01}),
+                json!({"horizontalScale": 50}),
+                json!({"horizontalScale": 99}),
+            ] {
+                let mut run = json!({"kind": "text", "text": "Wi"});
+                run.as_object_mut()
+                    .unwrap()
+                    .extend(formatting.as_object().unwrap().clone());
+                let mut table = autofit_repro_table(
+                    100.0,
+                    &[json!({"kind": "paragraph", "id": "paragraph", "runs": [run]})],
+                );
+                assert_eq!(
+                    cell_content_widths(&table.rows[0].cells[0], 600.0, &config),
+                    None
+                );
+                assert_eq!(
+                    fitted_table_column_widths(&table, 600.0, &config),
+                    (vec![100.0], false)
+                );
+                assert_eq!(
+                    measure_table(&mut table, 600.0, &config)
+                        .unwrap()
+                        .column_widths,
+                    vec![100.0]
+                );
+            }
+            let table = autofit_repro_table(
+                100.0,
+                &[json!({"kind": "paragraph", "id": "paragraph", "runs": [
+                    {"kind": "text", "text": "Wi", "letterSpacing": 1, "horizontalScale": 100}
+                ]})],
+            );
+            let (widths, fitted) = fitted_table_column_widths(&table, 600.0, &config);
+            assert!(fitted);
+            assert!(widths[0] < 100.0);
         });
     }
 

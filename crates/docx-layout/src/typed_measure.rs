@@ -63,6 +63,18 @@ pub(crate) fn intrinsic_widths(
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Option<(f64, f64)> {
+    if paragraph.runs.iter().any(|run| {
+        let fmt = match run {
+            Run::Text(text) => &text.fmt,
+            Run::Tab(tab) => &tab.fmt,
+            Run::Field(field) => &field.fmt,
+            _ => return false,
+        };
+        fmt.letter_spacing.is_some_and(|spacing| spacing < 0.0)
+            || fmt.horizontal_scale.is_some_and(|scale| scale < 100.0)
+    }) {
+        return None;
+    }
     let block = block_in(paragraph, content_width)?;
     let defaults = defaults_in(&config.defaults)?;
     let request = MeasureRequest {
