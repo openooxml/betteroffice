@@ -292,6 +292,7 @@ function useHarness(props: HarnessProps) {
     modeRef: { current: 'viewing' },
     allowHostProposalsRef: { current: props.allowHostProposals === true },
     hostSearch: {} as DocxHostSearch,
+    settledDisplayList: renderer.settledDisplayList,
   });
   const bridgeRef = useRef<PagedEditorCommandBridge | null>(null);
   const inputRef = useRef<YrsInputRef | null>(null);
@@ -1364,13 +1365,13 @@ const workerProposalProps: HarnessProps = {
 async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   const harness = renderHook(useHarness, { initialProps: props });
   await waitFor(() => expect(harness.result.current.core.workerProposalsReady).toBe(true));
-  await waitFor(() => expect(harness.result.current.renderer.completingLayout).toBeNull(), {
-    timeout: 5000,
+  await act(async () => {
+    await harness.result.current.ref.current!.whenLayoutComplete({ timeoutMs: 5000 });
   });
   return harness;
 }
 
-test('worker-held proposals reject proposal OOM without reopening source bytes', async () => {
+test('worker-held proposals fail the document on proposal OOM without reopening source bytes', async () => {
   const options: Parameters<typeof installWorker>[0] = {};
   const { workers, posted } = installWorker(options);
   const { result, unmount } = await openWorkerProposals();
@@ -1396,8 +1397,8 @@ test('worker-held proposals reject proposal OOM without reopening source bytes',
     await waitFor(() => expect(
       sourceVersionOf(result.current.renderer.queries)
     ).toBe(held.version));
-    await waitFor(() => expect(result.current.renderer.completingLayout).toBeNull());
     options.oomStage = 'proposal';
+    let failure!: ResidentWorkerOutOfMemoryError;
     await act(async () => {
       await expect(api.proposeChanges({
         expectVersion: held.version,
@@ -1406,13 +1407,15 @@ test('worker-held proposals reject proposal OOM without reopening source bytes',
           suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
           op: 'insertText', at: 'end', text: ' Next',
         }],
+      }).catch((error) => {
+        failure = error;
+        throw error;
       })).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
     });
-    expect(await api.getProposals()).toEqual(held);
-    await expect(api.readParagraphs({ view: 'accepted' })).rejects.toThrow(
-      'The resident worker holding this document is gone'
-    );
-    expect(await api.getProposals()).toEqual(held);
+    await expect(api.getProposals()).rejects.toBe(failure);
+    await expect(api.readParagraphs({ view: 'accepted' })).rejects.toBe(failure);
+    await expect(api.getProposals()).rejects.toBe(failure);
+    await waitFor(() => expect(result.current.renderer.error).toBe(failure));
     expect(workers).toHaveLength(1);
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
     expect(posted.filter((request) => request.type === 'proposal' &&
@@ -1448,41 +1451,49 @@ test('a document read OOM before proposals reopens the source document once', as
 }, 15_000);
 
 test.each([true, false])(
-  'worker revisions wait for layout completion with onWorkerRevisions=%s',
+  'worker revisions are asked at the replica gate, before the completion finishes, with onWorkerRevisions=%s',
   async (withCallback) => {
-    let completing = () => false;
+    let completionReplied = false;
     const asked: boolean[] = [];
     const onWorkerRevisions = mock(() => {});
     const { workers, posted } = installWorker({
       holdState: true,
+      holdCompletion: true,
       revisionCount: 1,
-      onRevisionCount: () => asked.push(completing()),
+      onRevisionCount: () => asked.push(completionReplied),
     });
     const frames = holdFrames();
     const props = {
       ...workerProposalProps,
-      holdReplica: true,
+      followCompletion: true,
       onWorkerRevisions: withCallback ? onWorkerRevisions : undefined,
     };
-    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
-    completing = () => result.current.renderer.completingLayout !== null;
+    const { result, unmount } = renderHook(useHarness, { initialProps: props });
     try {
       await waitFor(() => expect(result.current.host).not.toBeNull());
       const session = result.current.core.session!;
-      await waitFor(() => expect(result.current.renderer.completingLayout).toBe(session));
+      const receive = workers[0].onmessage;
+      workers[0].onmessage = (event) => {
+        if (posted.some((request) =>
+          request.type === 'completeLayout' && request.id === event.data.id
+        )) completionReplied = true;
+        receive?.(event);
+      };
+      await waitFor(() => expect(posted.map((request) => request.type)).toContain('completeLayout'), {
+        timeout: 5000,
+      });
+      await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull());
+      await act(async () => {});
+      expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+      expect(onWorkerRevisions).not.toHaveBeenCalled();
       act(() => result.current.presentFrame());
       act(() => frames.run());
       act(() => frames.run());
-      expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
-      expect(onWorkerRevisions).not.toHaveBeenCalled();
-      rerender({ ...props, holdReplica: false });
-      await waitFor(() => expect(result.current.renderer.completingLayout).toBeNull(), {
-        timeout: 5000,
-      });
       await waitFor(() => expect(posted.filter((request) =>
         request.type === 'revisionCount'
       )).toHaveLength(1));
       expect(asked).toEqual([false]);
+      expect(completionReplied).toBe(false);
       expect(posted.findIndex((request) => request.type === 'revisionCount')).toBeGreaterThan(
         posted.findIndex((request) => request.type === 'completeLayout')
       );
@@ -1493,8 +1504,7 @@ test.each([true, false])(
           request.type === 'encodeState'
         )).toHaveLength(1));
       }
-      rerender({ ...props, holdReplica: true });
-      rerender({ ...props, holdReplica: false });
+      act(() => result.current.presentFrame());
       act(() => frames.run());
       act(() => frames.run());
       await act(async () => {});
