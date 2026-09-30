@@ -51,6 +51,7 @@ async function mount(page = 1) {
   session.createStory('hdr1', 'the header');
 
   const reveals: number[] = [];
+  const signals: AbortSignal[] = [];
   let placeable = () => true;
   const editor = {
     getYrsSession: () => session,
@@ -58,8 +59,9 @@ async function mount(page = 1) {
     flushPendingInput: async () => {},
     yrsLocToDisplayPosition: (loc: Parameters<PagedEditorRef['yrsLocToDisplayPosition']>[0]) =>
       createYrsPositionProjection(session, 'body')!.positionForLoc(loc),
-    revealDisplayPosition: (position: number) => {
+    revealDisplayPosition: (position: number, signal?: AbortSignal) => {
       reveals.push(position);
+      if (signal) signals.push(signal);
       return placeable() ? ('scrolled' as const) : ('unsupported' as const);
     },
   } as unknown as PagedEditorRef;
@@ -75,6 +77,12 @@ async function mount(page = 1) {
   const queries = (version: number) => {
     if (!lists.has(version)) {
       lists.set(version, {
+        displayList: {
+          pages: [
+            { pageIndex: 0, primitives: [{ kind: 'text', docStart: 0, docEnd: splitAt - 1 }] },
+            { pageIndex: 1, primitives: [{ kind: 'text', docStart: splitAt, docEnd: 100000 }] },
+          ],
+        },
         anchorRect: (position: number) => ({
           pageIndex: position < splitAt ? 0 : 1,
           x: 0,
@@ -113,6 +121,7 @@ async function mount(page = 1) {
     last,
     hook,
     reveals,
+    signals,
     events,
     pagedEditorRef,
     layOut: (canPlace: () => boolean) => {
@@ -299,15 +308,14 @@ test('a reveal against a layout of an older version waits for the current one', 
   await act(async () => {
     await hook.result.current.api.search('dog');
   });
-  // no scroll to where the older layout has the match
-  expect(reveals).toHaveLength(0);
+  expect(reveals).toHaveLength(1);
   stamp(1, session.version());
   hook.rerender({ version: 1 });
-  expect(reveals).toHaveLength(1);
+  expect(reveals).toHaveLength(2);
   hook.rerender({ version: 1 });
   stamp(2, session.version());
   hook.rerender({ version: 2 });
-  expect(reveals).toHaveLength(1);
+  expect(reveals).toHaveLength(2);
 });
 
 test('navigating right after an edit steps from the carried match', async () => {
@@ -351,6 +359,19 @@ test('a listener that clears the search ends the round of events', async () => {
   expect(later.at(-1)).toBeNull();
   expect(later.filter((state) => state?.current === 1)).toHaveLength(0);
   expect(events.at(-1)).toBeNull();
+});
+
+test('clearing or moving on stops following the last reveal onto an unbuilt page', async () => {
+  const { hook, signals } = await mount();
+  await act(async () => {
+    await hook.result.current.api.search('the');
+  });
+  act(() => {
+    hook.result.current.api.searchNext();
+  });
+  expect(signals.map((signal) => signal.aborted)).toEqual([true, false]);
+  act(() => hook.result.current.api.clearSearch());
+  expect(signals.every((signal) => signal.aborted)).toBe(true);
 });
 
 test('an empty query clears', async () => {

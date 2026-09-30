@@ -6,6 +6,11 @@ import type { PagedEditorRef } from '../PagedEditor';
 import type { CanvasFindMatch } from '../overlays/CanvasFindHighlightOverlay';
 import { scrollViewport } from '../internals/viewportBand';
 import { sourceVersionOf } from '../internals/layoutProvenance';
+import {
+  displayOrder,
+  matchesInRange,
+  pagePositionIntervals,
+} from '../overlays/CanvasFindHighlightOverlay';
 
 /** Options for {@link DocxHostSearch.search}. */
 export interface DocxSearchOptions {
@@ -108,6 +113,14 @@ function firstInView(
 ): number {
   if (matches.length === 0) return -1;
   if (!queries || pageIndex <= 0) return 0;
+  // A table row split across pages puts page indices out of position order, so the positions
+  // the page paints decide first.
+  const order = displayOrder(matches);
+  let first = Infinity;
+  for (const { from, to } of pagePositionIntervals(queries.displayList, { start: pageIndex, end: pageIndex })) {
+    first = Math.min(first, ...matchesInRange(matches, order, from, to).slice(0, 1));
+  }
+  if (Number.isFinite(first)) return first;
   let low = 0;
   let high = matches.length;
   while (low < high) {
@@ -195,23 +208,36 @@ export function useHostSearch({
     }
   }, []);
 
-  /** Scrolls to `position`, and keeps it pending until a layout of `version` placed it. */
+  // Stops the editor following the last reveal onto a page that is still being built.
+  const revealAbortRef = useRef<AbortController | null>(null);
+  const stopRevealing = useCallback(() => {
+    pendingRevealRef.current = null;
+    revealAbortRef.current?.abort();
+    revealAbortRef.current = null;
+  }, []);
+
+  /**
+   * Scrolls to `position`, and keeps it pending until a layout of `version` has placed it:
+   * a layout of another version may show the match elsewhere.
+   */
   const reveal = useCallback(
     (position: number, version: string) => {
+      stopRevealing();
+      const abort = new AbortController();
+      revealAbortRef.current = abort;
+      const outcome = pagedEditorRef.current?.revealDisplayPosition(position, abort.signal);
       const shown = sourceVersionOf(queriesRef.current);
-      const current = shown === null ? runRef.current?.placed !== false : shown === version;
-      // a layout of another version would scroll to where the match was, not where it is
-      const outcome = current ? pagedEditorRef.current?.revealDisplayPosition(position) : null;
-      pendingRevealRef.current = outcome === 'scrolled' ? null : position;
+      const placed = shown === null ? runRef.current?.placed !== false : shown === version;
+      pendingRevealRef.current = outcome === 'scrolled' && placed ? null : position;
     },
-    [pagedEditorRef]
+    [pagedEditorRef, stopRevealing]
   );
 
   const clearSearch = useCallback(() => {
     generationRef.current += 1;
-    pendingRevealRef.current = null;
+    stopRevealing();
     if (runRef.current) publish(null);
-  }, [publish]);
+  }, [publish, stopRevealing]);
 
   /**
    * `run` against the session as it is now, keeping its current match. `fresh` says whether a
@@ -251,7 +277,7 @@ export function useHostSearch({
     if (session.version() === run.version) return run;
     const next = refreshed(run, editor, session, false);
     publish(next);
-    return next;
+    return runRef.current === next ? next : null;
   }, [clearSearch, pagedEditorRef, publish, refreshed]);
 
   const goTo = useCallback(
@@ -277,7 +303,7 @@ export function useHostSearch({
       if (editor?.hasPendingInput()) await editor.flushPendingInput();
       if (generation !== generationRef.current) return stateOf(runRef.current) ?? empty;
       const session = editor?.getYrsSession();
-      pendingRevealRef.current = null;
+      stopRevealing();
       if (!editor || !session || query === '') {
         publish(null);
         return empty;
@@ -300,7 +326,7 @@ export function useHostSearch({
       if (current >= 0) reveal(matches[current].displayFrom, run.version);
       return stateOf(run)!;
     },
-    [canvasHostRef, pagedEditorRef, publish, reveal]
+    [canvasHostRef, pagedEditorRef, publish, reveal, stopRevealing]
   );
 
   // A new display list follows every document change, and every page the layout adds.
@@ -315,7 +341,8 @@ export function useHostSearch({
     }
     if (session.version() !== run.version || !run.placed) {
       const revealing = pendingRevealRef.current !== null;
-      pendingRevealRef.current = null;
+      // positions moved: never keep following the old one onto an unbuilt page
+      stopRevealing();
       const next = refreshed(run, editor, session, true);
       publish(next);
       if (revealing && runRef.current === next && next.current >= 0) {
@@ -324,7 +351,7 @@ export function useHostSearch({
     } else if (pendingRevealRef.current !== null) {
       reveal(pendingRevealRef.current, run.version);
     }
-  }, [clearSearch, displayListQueries, pagedEditorRef, publish, refreshed, reveal]);
+  }, [clearSearch, displayListQueries, pagedEditorRef, publish, refreshed, reveal, stopRevealing]);
 
   useEffect(() => clearSearch, [clearSearch]);
 

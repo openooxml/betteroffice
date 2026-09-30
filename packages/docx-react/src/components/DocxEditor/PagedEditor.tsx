@@ -420,8 +420,11 @@ export interface PagedEditorRef {
   relayout(options?: { onHost?: boolean }): void;
   /** Scroll the visible pages to bring a display position into view. */
   scrollToPosition(position: number): void;
-  /** Scrolls a display position into view without moving focus or selection, saying why not. */
-  revealDisplayPosition(position: number): RevealPositionOutcome;
+  /**
+   * Scrolls a display position into view without moving focus or selection, saying why not.
+   * Aborting `signal` stops following the position while its page is still being built.
+   */
+  revealDisplayPosition(position: number, signal?: AbortSignal): RevealPositionOutcome;
   /**
    * Scroll to the paragraph identified by Word `w14:paraId`.
    * Pass `options.highlight` to briefly flash rendered paragraph fragments.

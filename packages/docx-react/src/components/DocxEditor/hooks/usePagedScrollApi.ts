@@ -40,8 +40,11 @@ export type RevealPositionOutcome = 'scrolled' | 'layout-unavailable' | 'unsuppo
 
 export interface UsePagedScrollApiReturn {
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
-  /** Scrolls a position into view without touching focus or selection. */
-  revealPositionImpl: (position: number) => RevealPositionOutcome;
+  /**
+   * Scrolls a position into view without touching focus or selection. Aborting `signal` stops
+   * following the position while its page is still being built.
+   */
+  revealPositionImpl: (position: number, signal?: AbortSignal) => RevealPositionOutcome;
   scrollToPageImpl: (pageNumber: number) => void;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
 }
@@ -170,7 +173,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   );
 
   const revealPositionImpl = useCallback(
-    (position: number): RevealPositionOutcome => {
+    (position: number, signal?: AbortSignal): RevealPositionOutcome => {
       if (!Number.isInteger(position) || position < 0) return 'unsupported';
       if (!displayListQueries) return 'layout-unavailable';
       clearPendingRefine();
@@ -179,9 +182,16 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       onNavigationIntent?.();
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = new AbortController();
-      return scrollAnchorIntoView(displayListQueries, rect, position, true)
-        ? 'scrolled'
-        : 'layout-unavailable';
+      const scrolled = scrollAnchorIntoView(displayListQueries, rect, position, true);
+      const pending = pendingRefineRef.current;
+      if (pending && signal) {
+        const stop = () => {
+          if (pendingRefineRef.current === pending) clearPendingRefine();
+        };
+        if (signal.aborted) stop();
+        else signal.addEventListener('abort', stop, { once: true, signal: pending.stop.signal });
+      }
+      return scrolled ? 'scrolled' : 'layout-unavailable';
     },
     [clearPendingRefine, displayListQueries, onNavigationIntent, scrollAnchorIntoView]
   );

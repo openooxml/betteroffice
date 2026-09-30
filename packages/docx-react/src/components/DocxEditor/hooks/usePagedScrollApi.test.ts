@@ -221,3 +221,36 @@ test('a user scroll or a later navigation drops the pending refinement', async (
   await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
   expect(scrolls).toHaveLength(2);
 });
+
+test('aborting a reveal stops following its position onto an unbuilt page', async () => {
+  const { scroller, host, scrolls } = pagedDom();
+  const placeholder = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
+  const match = { pageIndex: 6, x: 20, y: 900, width: 0, height: 16 };
+  const { result, rerender } = renderHook(
+    ({ displayListQueries }) =>
+      usePagedScrollApi({
+        pagesContainerRef: { current: host },
+        yrsInputRef: { current: null },
+        yrsSession: null,
+        yrsLocToDisplayPosition: () => null,
+        getScrollContainer: () => scroller,
+        displayListQueries,
+      }),
+    { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
+  );
+  const abort = new AbortController();
+  await act(async () => {
+    expect(result.current.revealPositionImpl(500, abort.signal)).toBe('scrolled');
+  });
+  abort.abort();
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+  expect(scrolls).toHaveLength(1);
+
+  const kept = new AbortController();
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(false, placeholder) }));
+  await act(async () => {
+    result.current.revealPositionImpl(500, kept.signal);
+  });
+  await act(async () => rerender({ displayListQueries: unbuiltQueries(true, match) }));
+  expect(scrolls).toHaveLength(3);
+});
