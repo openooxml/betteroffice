@@ -1949,8 +1949,10 @@ fn table_floating_zone_at_x(
     let text_on_right = column_width
         .filter(|width| width.is_finite() && *width > 0.0 && *width == content_width)
         .filter(|_| {
-            floating.horz_anchor.as_deref() == Some("text")
-                && !matches!(floating.tblp_x_spec.as_deref(), Some("inside" | "outside"))
+            matches!(
+                floating.horz_anchor.as_deref(),
+                None | Some("text" | "margin")
+            ) && !matches!(floating.tblp_x_spec.as_deref(), Some("inside" | "outside"))
                 && match floating.tblp_x {
                     Some(offset) => offset.is_finite(),
                     None => matches!(

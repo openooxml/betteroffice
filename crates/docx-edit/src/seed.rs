@@ -4131,9 +4131,7 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
             UnitContent::Text(text) => utf16_len(text),
             UnitContent::Embed { .. } => 1,
         };
-        if let Some(comment_id) = &unit.comment_id
-            && comment_id != "0"
-        {
+        if let Some(comment_id) = &unit.comment_id {
             let index = plan
                 .comment_coverage
                 .iter()
@@ -4607,7 +4605,7 @@ fn visit_story(
                             StoryOptions {
                                 include_page_breaks: false,
                                 append_body_tail: false,
-                                seed_comments: false,
+                                seed_comments: options.seed_comments,
                             },
                         );
                     }
@@ -4641,7 +4639,7 @@ fn visit_story(
                     StoryOptions {
                         include_page_breaks: options.include_page_breaks,
                         append_body_tail: false,
-                        seed_comments: false,
+                        seed_comments: options.seed_comments,
                     },
                 );
                 last_kind = Some("blockSdt");

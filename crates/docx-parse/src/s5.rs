@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::canonical::{canonical_sha256, from_serializable, to_canonical_bytes};
 use crate::inline::{
     BookmarkEnd, BookmarkStart, Hyperlink, InlineNode, ParsedFieldInstruction, RunProjection,
-    SdtProperties, SimpleField, parse_bookmark_end, parse_bookmark_start, parse_field_instruction,
-    parse_hyperlink, parse_inline_container, parse_run, parse_sdt_properties, parse_simple_field,
+    SdtProperties, SimpleField, has_bookmark_id, parse_bookmark_end, parse_bookmark_start,
+    parse_field_instruction, parse_hyperlink, parse_inline_container, parse_run,
+    parse_sdt_properties, parse_simple_field,
 };
 use crate::relationships::{RelationshipMap, parse_relationships};
 use crate::settings::{is_valid_utf8_xml_text, parse_settings};
@@ -177,13 +178,17 @@ pub fn project_xml_part(
             }
             "bookmarkStart" => {
                 budget.charge_leaf_value(path)?;
-                projection
-                    .bookmark_starts
-                    .push(parse_bookmark_start(element));
+                if has_bookmark_id(element) {
+                    projection
+                        .bookmark_starts
+                        .push(parse_bookmark_start(element));
+                }
             }
             "bookmarkEnd" => {
                 budget.charge_leaf_value(path)?;
-                projection.bookmark_ends.push(parse_bookmark_end(element));
+                if has_bookmark_id(element) {
+                    projection.bookmark_ends.push(parse_bookmark_end(element));
+                }
             }
             "sdt" => {
                 budget.charge_leaf_value(path)?;
@@ -304,6 +309,39 @@ fn find_part<'a>(parts: &'a [(String, Vec<u8>)], path: &str) -> Option<&'a [u8]>
 mod tests {
     use super::*;
     use crate::xml::parse_xml;
+
+    #[test]
+    fn keeps_bookmark_zero_and_drops_bookmarks_without_an_id() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let document = parse_xml(
+            r#"<w:document xmlns:w="w"><w:body><w:p><w:bookmarkStart/><w:bookmarkStart w:id="x"/><w:bookmarkStart w:id="0" w:name="zero"/><w:r><w:t>A😀</w:t></w:r><w:bookmarkEnd w:id="0"/><w:bookmarkEnd/><w:bookmarkEnd w:id="x"/></w:p></w:body></w:document>"#.as_bytes(),
+            "word/document.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let projection = project_xml_part(
+            document.root().unwrap(),
+            "word/document.xml",
+            &RelationshipMap::new(),
+            None,
+            None,
+            None,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(projection.bookmark_starts.len(), 1);
+        assert_eq!(projection.bookmark_starts[0].id, 0.0);
+        assert_eq!(projection.bookmark_ends.len(), 1);
+        assert_eq!(projection.bookmark_ends[0].id, 0.0);
+        assert_eq!(projection.paragraph_inlines[0].len(), 3);
+        let InlineNode::BookmarkEnd(end) = &projection.paragraph_inlines[0][2] else {
+            panic!("bookmark end")
+        };
+        assert_eq!(end.id, 0.0);
+        assert_eq!(end.position.as_ref().unwrap().offset, Some(3.0));
+    }
 
     #[test]
     fn projects_complete_inline_elements_in_document_order() {

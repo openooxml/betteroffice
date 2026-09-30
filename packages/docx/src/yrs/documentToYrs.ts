@@ -1640,7 +1640,7 @@ function addCommentCoverage(plan: StoryPlan): void {
   let offset = 0;
   for (const unit of plan.units) {
     const width = unit.kind === 'text' ? unit.text.length : 1;
-    if (unit.commentId !== undefined && unit.commentId !== 0) {
+    if (unit.commentId !== undefined) {
       const intervals = plan.commentCoverage.get(unit.commentId);
       const previous = intervals?.[intervals.length - 1];
       if (previous && previous[1] === offset) previous[1] = offset + width;
@@ -1862,7 +1862,7 @@ function visitStory(
             {
               includePageBreaks: false,
               appendBodyTail: false,
-              seedComments: false,
+              seedComments: options.seedComments,
               extraRunFormatting: cell.extraRunFormatting,
               tableParagraphFormatting: cell.paragraphFormatting,
             }
@@ -1882,7 +1882,7 @@ function visitStory(
     visitStory(context, childStory, block.content, {
       includePageBreaks: options.includePageBreaks,
       appendBodyTail: false,
-      seedComments: false,
+      seedComments: options.seedComments,
       tableParagraphFormatting: options.tableParagraphFormatting,
     });
     lastKind = 'blockSdt';

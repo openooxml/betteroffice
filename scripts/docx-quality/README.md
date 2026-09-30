@@ -22,4 +22,4 @@ The output directory must be empty. Captures use 150 DPI and export all pages; `
 
 For release comparisons, extract the desired DOCX and DOCX React npm tarballs into `.source/`, then set `QUALITY_PACKAGE_ROOT` and `QUALITY_REACT_ROOT` when starting a server on a different port. Label captures with the actual release version. Restart servers after builds; automatic reloads are disabled and each port uses its own cache.
 
-Use the [Office reference and comparison scripts](../office-quality/README.md) to export from Word and inspect the local image diff. [Earlier quality measurements](RESULTS.md) are a historical summary; their downloaded corpus, manifests, and raw records remain local and are not bundled with this harness.
+Use the [Office reference and comparison scripts](../office-quality/README.md) to export from Word and inspect the local image diff.

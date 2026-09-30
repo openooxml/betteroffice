@@ -74,7 +74,9 @@ pub fn parse_comments(
             continue;
         }
         parser.budget.charge_comment(parser.part)?;
-        let id = integer_attribute(child, "w", "id").unwrap_or(0.0);
+        let Some(id) = integer_attribute(child, "w", "id") else {
+            continue;
+        };
         let author = child
             .attribute(Some("w"), "author")
             .unwrap_or("Unknown")
@@ -377,6 +379,24 @@ mod tests {
     }
 
     #[test]
+    fn keeps_comment_zero_and_drops_comments_without_an_id() {
+        let comments = parse(
+            r#"<w:comments xmlns:w="w" xmlns:w14="w14"><w:comment w:author="Missing"><w:p w14:paraId="FFFF"/></w:comment><w:comment w:id="0" w:author="Ada"><w:p w14:paraId="AAAA"/></w:comment><w:comment w:id="x" w:author="Invalid"><w:p w14:paraId="EEEE"/></w:comment><w:comment w:id="1" w:author="Grace"><w:p w14:paraId="BBBB"/></w:comment></w:comments>"#,
+            None,
+            Some(
+                r#"<w15:commentsEx xmlns:w15="x"><w15:commentEx w15:paraId="BBBB" w15:paraIdParent="AAAA"/></w15:commentsEx>"#,
+            ),
+        );
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].id, 0.0);
+        assert_eq!(comments[0].author, "Ada");
+        assert_eq!(comments[0].palette_index, 0.0);
+        assert_eq!(comments[1].id, 1.0);
+        assert_eq!(comments[1].palette_index, 1.0);
+        assert_eq!(comments[1].parent_id, Some(0.0));
+    }
+
+    #[test]
     fn joins_utc_done_and_reply_metadata_case_insensitively() {
         let comments = parse(
             r#"<w:comments xmlns:w="w" xmlns:w14="w14"><w:comment w:id="1" w:author="Ada" w14:paraId="ABCD"><w:p w14:paraId="AAAA"><w:r><w:t>parent</w:t></w:r></w:p></w:comment><w:comment w:id="2" w:author="Ada"><w:p w14:paraId="BBBB"/><w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:comment></w:comments>"#,
@@ -465,7 +485,7 @@ mod tests {
         limits.max_comments = 1;
         let mut budget = ParseBudget::new(&limits);
         let document = parse_xml(
-            br#"<w:comments xmlns:w="w"><w:comment w:id="1"/><w:comment w:id="2"/></w:comments>"#,
+            br#"<w:comments xmlns:w="w"><w:comment/><w:comment w:id="2"/></w:comments>"#,
             "word/comments.xml",
             &mut budget,
         )

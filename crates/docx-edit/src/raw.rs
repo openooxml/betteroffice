@@ -530,7 +530,7 @@ fn apply_raw_ops_to_story(
                     }
                     _ => run.seed_range = None,
                 }
-                apply_raw_op_absolute(txn, &story, story_id, op, rekeyed)?;
+                apply_raw_op_absolute(txn, &story, story_id, op, deterministic, rekeyed)?;
             }
         }
     }
@@ -569,6 +569,7 @@ fn apply_raw_op_absolute(
     story: &TextRef,
     story_id: &str,
     op: RawOp,
+    seeding: bool,
     rekeyed: &mut Vec<MapRef>,
 ) -> OpResult<()> {
     match op {
@@ -650,6 +651,17 @@ fn apply_raw_op_absolute(
             let comments = txn
                 .get_map(COMMENTS)
                 .expect("comments root is declared by EditingDoc::new");
+            if seeding
+                && let Some(seeded) = comments
+                    .get(txn, id.as_str())
+                    .and_then(|value| value.cast::<MapRef>().ok())
+            {
+                if let Some(Out::Any(Any::Array(earlier))) = seeded.get(txn, "anchors") {
+                    anchors.splice(0..0, earlier.iter().cloned());
+                }
+                seeded.insert(txn, "anchors", Any::Array(Arc::from(anchors)));
+                return Ok(());
+            }
             let comment = comments.insert(txn, id.as_str(), MapPrelim::default());
             comment.insert(txn, "author", author.as_str());
             comment.insert(txn, "date", date.as_str());

@@ -4,6 +4,13 @@
 
 NO inline comments unless the code is not understandable without them. Docstrings must be extremely concise.
 
+## Docs
+
+- Don't add or edit docs, READMEs, guides or comments to describe a fix or a change's history. The PR body and the changeset carry that.
+- Touch user docs only when public API or user-visible behaviour changes, and then minimally.
+- No process, status, planning or agent-loop documents in the repo: operating guides, running benchmark logs, overnight plans, personal paths or environments.
+- `openspec/` is only for major, long-term initiatives. Keep a spec current or delete it.
+
 ## Titles
 
 PR and commit titles use scoped conventional commits: `type(scope): summary`. Scope is the affected area — a format (`docx`, `xlsx`, `pptx`, `vsdx`), a shared crate (`opc`, `text`), or an area (`ci`, `deps`, `web`, `agents`). Keep the summary concise and imperative.
