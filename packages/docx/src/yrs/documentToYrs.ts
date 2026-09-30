@@ -629,7 +629,8 @@ function fieldToUnits(
   value: SimpleField | ComplexField,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
-  projectionId: number
+  projectionId: number,
+  opaqueSequences: string[]
 ): InlineUnit[] {
   const result = value.structuredResult?.inline ?? [];
   const code = value.type === 'complexField' ? value.structuredCode?.inline ?? [] : [];
@@ -645,6 +646,7 @@ function fieldToUnits(
   const children: Attrs[] = [];
   projectedChildren.forEach(({ child, index }) => {
     if (child.type !== 'hyperlink' && child.type !== 'simpleField') return;
+    if (child.type === 'hyperlink') opaqueSequences.push(...hyperlinkSequenceNames(child));
     const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
     const projected = child.type === 'hyperlink'
       ? hyperlinkToUnits(child, styleFormatting, styleResolver)
@@ -686,9 +688,11 @@ function noteRefUnit(
   );
 }
 
-/** The tracked insertion or deletion a drawing keeps from its run. */
+/** The hidden state and tracked change a drawing keeps. */
 function trackedMarks(marks: readonly MarkDescriptor[]): MarkDescriptor[] {
-  return marks.filter((mark) => mark.name === 'insertion' || mark.name === 'deletion');
+  return marks.filter((mark) =>
+    mark.name === 'hidden' || mark.name === 'insertion' || mark.name === 'deletion'
+  );
 }
 
 function runContentToUnits(
@@ -812,7 +816,8 @@ function trackedToUnits(
   content: Extract<ParagraphContent, { type: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' }>,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
-  commentId?: number
+  commentId: number | undefined,
+  opaqueSequences: string[]
 ): InlineUnit[] {
   const kind = content.type === 'insertion' || content.type === 'moveTo' ? 'insertion' : 'deletion';
   const mark = trackedMark(
@@ -825,6 +830,7 @@ function trackedToUnits(
     if (child.type === 'run') {
       units.push(...runToUnits(child, styleFormatting, styleResolver, commentId, [mark]));
     } else {
+      opaqueSequences.push(...hyperlinkSequenceNames(child));
       const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, [mark]);
       for (const unit of linked) {
         if (commentId !== undefined) unit.commentId = commentId;
@@ -838,7 +844,8 @@ function trackedToUnits(
 function sdtPayload(
   sdt: InlineSdt,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null
+  styleResolver: StyleResolver | null,
+  opaqueSequences: string[]
 ): Attrs {
   const content: Array<
     | { kind: 'text'; text: string; attrs: YrsAttrs }
@@ -871,12 +878,13 @@ function sdtPayload(
     if (child.type === 'run') {
       runToUnits(child, styleFormatting, styleResolver).forEach(append);
     } else if (child.type === 'hyperlink') {
+      opaqueSequences.push(...hyperlinkSequenceNames(child));
       hyperlinkToUnits(child, styleFormatting, styleResolver).forEach(append);
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       const field = fieldPayload(child, styleFormatting);
       append(embedUnit('field', field.payload, field.marks));
     } else if (child.type === 'inlineSdt') {
-      append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver)));
+      append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences)));
     } else if (child.type === 'mathEquation') {
       append(embedUnit('math', mathPayload(child)));
     }
@@ -1170,6 +1178,7 @@ function paragraphUnits(
   tableParagraphFormatting?: ParagraphFormatting
 ): { units: InlineUnit[]; ppr: Attrs } {
   const units: InlineUnit[] = [];
+  const opaqueSequences: string[] = [];
   const activeComments = new Set<number>();
   let boundaries: Attrs[] | undefined = [];
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
@@ -1186,6 +1195,7 @@ function paragraphUnits(
       units.push(...runToUnits(content, styleFormatting, styleResolver, commentId));
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
+      opaqueSequences.push(...hyperlinkSequenceNames(content));
       const linked = hyperlinkToUnits(content, styleFormatting, styleResolver);
       for (const unit of linked) {
         if (commentId !== undefined) unit.commentId = commentId;
@@ -1193,11 +1203,11 @@ function paragraphUnits(
       units.push(...linked);
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
-      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex));
+      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex, opaqueSequences));
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
       units.push(
-        embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver), [], undefined, 2)
+        embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver, opaqueSequences), [], undefined, 2)
       );
     } else if (
       content.type === 'insertion' ||
@@ -1206,7 +1216,7 @@ function paragraphUnits(
       content.type === 'moveTo'
     ) {
       boundaries = undefined;
-      units.push(...trackedToUnits(content, styleFormatting, styleResolver, commentId));
+      units.push(...trackedToUnits(content, styleFormatting, styleResolver, commentId, opaqueSequences));
     } else if (content.type === 'mathEquation') {
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
@@ -1216,6 +1226,7 @@ function paragraphUnits(
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
   const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting);
+  if (opaqueSequences.length > 0) attrs.opaqueSequences = [...new Set(opaqueSequences)];
   return { units, ppr: paraAttrsToPpr(attrs) };
 }
 

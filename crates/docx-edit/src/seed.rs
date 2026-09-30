@@ -3013,7 +3013,12 @@ fn paragraph_units(
         }
         unit_counts.push(units.len() - start);
     }
-    let attrs = paragraph_attrs(paragraph, styles, &units, &unit_counts, boundaries);
+    let mut attrs = paragraph_attrs(paragraph, styles, &units, &unit_counts, boundaries);
+    if !opaque_sequences.is_empty() {
+        let mut seen = HashSet::new();
+        opaque_sequences.retain(|name| seen.insert(name.clone()));
+        attrs.insert("opaqueSequences".to_owned(), json!(opaque_sequences));
+    }
     ParagraphUnits {
         ppr: para_attrs_to_ppr(attrs),
         units,

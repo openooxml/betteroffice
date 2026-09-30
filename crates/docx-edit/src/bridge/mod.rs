@@ -680,6 +680,11 @@ fn lower_story<T: ReadTxn>(
                         "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
                         _ => "OTHER".to_owned(),
                     };
+                    let nested_sequences = lower_nested_sequences(
+                        instruction.as_deref(),
+                        shared_any(&field, txn, "nestedSequences").as_ref(),
+                        shared_any(&field, txn, "resultProjection").as_ref(),
+                    );
                     paragraph_runs.push(RawRun {
                         kind: RawRunKind::Field {
                             field_type: mapped_type.clone(),
@@ -694,9 +699,7 @@ fn lower_story<T: ReadTxn>(
                                 .as_ref()
                                 .and_then(any_bool)
                                 .unwrap_or(false),
-                            nested_sequences: any_strings(
-                                shared_any(&field, txn, "nestedSequences").as_ref(),
-                            ),
+                            nested_sequences,
                         },
                         formatting: lower_run_formatting(attributes, env),
                         story_start: story_index,
@@ -1904,13 +1907,19 @@ fn lower_inline_sdt_values(
                     "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
                     _ => "OTHER".to_owned(),
                 };
+                let instruction = payload
+                    .and_then(|payload| map_string(payload, "instruction"))
+                    .filter(|value| !value.is_empty());
+                let nested_sequences = lower_nested_sequences(
+                    instruction.as_deref(),
+                    payload.and_then(|payload| payload.get("nestedSequences")),
+                    payload.and_then(|payload| payload.get("resultProjection")),
+                );
                 runs.push(RawRun {
                     kind: RawRunKind::Field {
                         field_type: mapped_type.clone(),
                         raw_type: (field_type != mapped_type).then_some(field_type),
-                        instruction: payload
-                            .and_then(|payload| map_string(payload, "instruction"))
-                            .filter(|value| !value.is_empty()),
+                        instruction,
                         fallback: Some(
                             payload
                                 .and_then(|payload| map_string(payload, "displayText"))
@@ -1919,9 +1928,7 @@ fn lower_inline_sdt_values(
                         locked: payload
                             .and_then(|payload| map_bool(payload, "fldLock"))
                             .unwrap_or(false),
-                        nested_sequences: any_strings(
-                            payload.and_then(|payload| payload.get("nestedSequences")),
-                        ),
+                        nested_sequences,
                     },
                     formatting,
                     story_start: story_index,
@@ -2335,6 +2342,18 @@ fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<S
     }
 }
 
+fn lower_nested_sequences(
+    instruction: Option<&str>,
+    nested_sequences: Option<&Any>,
+    result_projection: Option<&Any>,
+) -> Vec<String> {
+    let mut names = any_strings(nested_sequences);
+    if result_projection.is_some() {
+        names.extend(instruction.and_then(docx_layout::sequence_fields::sequence_name));
+    }
+    names
+}
+
 /// Emits the blocks one paragraph contributes. Anchored children are lifted
 /// out ahead of it and leave it whole; in-flow ones break it into the text
 /// segments around them, each carrying the same pilcrow properties.
@@ -2357,6 +2376,9 @@ fn flush_paragraph_parts<T: ReadTxn>(
     map.paragraphs.push((
         story_slot,
         shared_map_string(pilcrow, txn, "paraId").unwrap_or_default(),
+    ));
+    opaque_sequences.extend(any_strings(
+        shared_any(pilcrow, txn, "opaqueSequences").as_ref(),
     ));
     raw_runs.retain(|run| !run.revision_hidden);
     drawings.retain(|drawing| !drawing.revision_hidden);

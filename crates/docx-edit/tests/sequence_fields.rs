@@ -2,6 +2,7 @@ use docx_edit::bridge::{RenderEnv, yrs_doc_to_layout_blocks};
 use docx_edit::{EditingDoc, seed_from_docx};
 use docx_layout::types::{LayoutBlock, Run};
 use serde_json::Value;
+use yrs::{Map, Out, ReadTxn, Text, Transact};
 
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
@@ -220,6 +221,72 @@ fn a_body_projected_sequence_result_is_not_duplicated() {
 }
 
 #[test]
+fn legacy_projected_sequence_owners_keep_cached_results() {
+    for result in [
+        r#"<w:hyperlink w:anchor="top"><w:r><w:t>1</w:t></w:r></w:hyperlink>"#,
+        r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+    ] {
+        let projected = field("SEQ Figure").replacen("<w:r><w:t>7</w:t></w:r>", result, 1);
+        let body = format!("<w:p>{projected}</w:p>");
+        let seeded = EditingDoc::new(1);
+        seed_from_docx(&seeded, &document(&body)).unwrap();
+        let legacy = EditingDoc::new(2);
+        legacy
+            .apply_update_v1(&seeded.encode_state_as_update_v1())
+            .unwrap();
+        {
+            let mut txn = legacy.yrs_doc().transact_mut();
+            let stories = txn.get_map("stories").unwrap();
+            let Some(Out::YText(story)) = stories.get(&txn, "body") else {
+                panic!("body");
+            };
+            let mut owners = 0;
+            for diff in story.diff(&txn, yrs::types::text::YChange::identity) {
+                if let Out::YMap(field) = diff.insert
+                    && field.get(&txn, "resultProjection").is_some()
+                {
+                    assert!(field.remove(&mut txn, "nestedSequences").is_some());
+                    owners += 1;
+                }
+            }
+            assert_eq!(owners, 1);
+        }
+        let hydrated = EditingDoc::new(3);
+        hydrated
+            .apply_update_v1(&legacy.encode_state_as_update_v1())
+            .unwrap();
+        for doc in [&legacy, &hydrated] {
+            for show_hidden_text in [false, true] {
+                let blocks = yrs_doc_to_layout_blocks(
+                    doc,
+                    "body",
+                    &RenderEnv {
+                        show_hidden_text,
+                        ..RenderEnv::default()
+                    },
+                )
+                .unwrap();
+                let text: String = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        LayoutBlock::Paragraph(paragraph) => Some(&paragraph.runs),
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter_map(|run| match run {
+                        Run::Text(text) => Some(text.text.as_str()),
+                        Run::Field(field) => field.fallback.as_deref(),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(text, "1");
+                assert_eq!(boxed_sequence_results_in(&blocks), [(false, String::new())]);
+            }
+        }
+    }
+}
+
+#[test]
 fn hidden_sequence_fields_keep_visible_cached_results() {
     let hidden = r#"<w:fldSimple w:instr="SEQ Figure"><w:r><w:rPr><w:vanish/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>"#;
     let visible = r#"<w:fldSimple w:instr="SEQ Figure"><w:r><w:t>2</w:t></w:r></w:fldSimple>"#;
@@ -294,6 +361,108 @@ fn hidden_text_boxes_keep_sequences_with_typed_or_raw_hyperlink_fields_opaque() 
             assert_eq!(
                 boxed_sequence_results_in(&lowered_body(&body, false, hydrated)),
                 [(false, "2"), (false, "1")].map(|(boxed, result)| (boxed, result.to_owned()))
+            );
+        }
+    }
+}
+
+#[test]
+fn hidden_text_boxes_preserve_stale_visible_captions() {
+    let hidden_box = text_box(&field("SEQ Figure")).replacen(
+        "<w:r><w:drawing>",
+        "<w:r><w:rPr><w:vanish/></w:rPr><w:drawing>",
+        1,
+    );
+    let body = [
+        format!("<w:p>{hidden_box}</w:p>"),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>9</w:t>", 1)),
+    ]
+    .concat();
+    for hydrated in [false, true] {
+        for show_hidden_text in [false, true] {
+            let expected = if show_hidden_text {
+                vec![(true, "1".to_owned()), (false, "2".to_owned())]
+            } else {
+                vec![(false, "9".to_owned())]
+            };
+            assert_eq!(
+                boxed_sequence_results_in(&lowered_body(&body, show_hidden_text, hydrated)),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn shape_fields_preserve_visible_cached_result_fragments() {
+    for hidden_text in ["", "0"] {
+        let hidden_result = if hidden_text.is_empty() {
+            String::new()
+        } else {
+            format!("<w:t>{hidden_text}</w:t>")
+        };
+        let cached = format!(
+            r#"<w:fldSimple w:instr="SEQ Figure" w:fldLock="true"><w:r><w:rPr><w:vanish/></w:rPr>{hidden_result}</w:r><w:r><w:t>1</w:t></w:r></w:fldSimple>"#
+        );
+        let body = [
+            format!("<w:p>{}</w:p>", text_box(&cached)),
+            paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>9</w:t>", 1)),
+        ]
+        .concat();
+        for hydrated in [false, true] {
+            for show_hidden_text in [false, true] {
+                let boxed = if show_hidden_text {
+                    format!("{hidden_text}1")
+                } else {
+                    "1".to_owned()
+                };
+                let caption = if !show_hidden_text && !hidden_text.is_empty() {
+                    "9"
+                } else {
+                    "2"
+                };
+                assert_eq!(
+                    boxed_sequence_results_in(&lowered_body(&body, show_hidden_text, hydrated)),
+                    [(true, boxed), (false, caption.to_owned())]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hidden_shape_runs_omit_line_breaks() {
+    let content = format!(
+        r#"{}<w:r><w:rPr><w:vanish/></w:rPr><w:br/></w:r>{}"#,
+        run("Before"),
+        run("After")
+    );
+    let body = format!("<w:p>{}</w:p>", text_box(&content));
+    for hydrated in [false, true] {
+        for show_hidden_text in [false, true] {
+            let blocks = lowered_body(&body, show_hidden_text, hydrated);
+            let runs = blocks
+                .iter()
+                .filter_map(|block| match block {
+                    LayoutBlock::Shape(shape) => shape.inner_text.as_ref(),
+                    _ => None,
+                })
+                .flatten()
+                .flat_map(|paragraph| &paragraph.runs)
+                .collect::<Vec<_>>();
+            let text: String = runs
+                .iter()
+                .filter_map(|run| match run {
+                    Run::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(text, "BeforeAfter");
+            assert_eq!(
+                runs.iter()
+                    .filter(|run| matches!(run, Run::LineBreak(_)))
+                    .count(),
+                usize::from(show_hidden_text)
             );
         }
     }
@@ -419,7 +588,14 @@ fn a_body_typed_hyperlink_sequence_in_an_sdt_keeps_cached_results() {
         paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
     ]
     .concat();
-    assert_eq!(sequence_results(&body), ["2"]);
+    for hydrated in [false, true] {
+        for show_hidden_text in [false, true] {
+            assert_eq!(
+                boxed_sequence_results_in(&lowered_body(&body, show_hidden_text, hydrated)),
+                [(false, "2".to_owned())]
+            );
+        }
+    }
 }
 
 #[test]

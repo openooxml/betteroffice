@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
-import type { LayoutBlock } from '../layout/pagination/types';
+import type { LayoutBlock, Run as LayoutRun } from '../layout/pagination/types';
 import type { ComplexField, Document, Run, SimpleField } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from './index';
@@ -24,11 +24,53 @@ function sequencePackage(body: string): Uint8Array<ArrayBuffer> {
   const parts = new Map([
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
     ['_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'],
-    ['word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr/></w:body></w:document>`],
+    ['word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body>${body}<w:sectPr/></w:body></w:document>`],
   ]);
   return new Uint8Array(
     rezipPartsToArrayBuffer(new Map([...parts].map(([name, xml]) => [name, toBytes(xml)])))
   );
+}
+
+function sequenceTextBox(content: string, hidden = false): string {
+  return `<w:r>${hidden ? '<w:rPr><w:vanish/></w:rPr>' : ''}<w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>right</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1600000" cy="228600"/><wp:wrapNone/><wp:docPr id="1" name="Box 1"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1600000" cy="228600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p>${content}</w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+}
+
+function sequenceRuns(blocks: readonly LayoutBlock[]): LayoutRun[] {
+  return blocks.flatMap((block) => {
+    switch (block.kind) {
+      case 'paragraph': return block.runs;
+      case 'shape': return [...sequenceRuns(block.innerText ?? []), ...sequenceRuns(block.children ?? [])];
+      case 'textBox': return sequenceRuns(block.content);
+      case 'table': return block.rows.flatMap((row) => row.cells.flatMap((cell) => sequenceRuns(cell.blocks)));
+      default: return [];
+    }
+  });
+}
+
+async function seedSequenceSessions(bytes: Uint8Array<ArrayBuffer>) {
+  const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+  const [engine, projected, plain, nativePeer, projectedPeer, hydrated] = await Promise.all([
+    createYrsSession({ clientId: 47030 }),
+    createYrsSession({ clientId: 47031 }),
+    createYrsSession({ clientId: 47032 }),
+    createYrsSession({ clientId: 47033 }),
+    createYrsSession({ clientId: 47034 }),
+    createYrsSession({ clientId: 47035 }),
+  ]);
+  const sessions = [engine, projected, plain, nativePeer, projectedPeer, hydrated];
+  try {
+    engine.seedFromDocx(bytes);
+    documentToYrs(projected, parsed);
+    documentToYrs(plain, withoutSourceOrdinals(parsed) as Document);
+    nativePeer.loadState(engine.encodeState());
+    projectedPeer.loadState(projected.encodeState());
+    hydrated.openDocx(bytes, false);
+    hydrated.loadState(projected.encodeState());
+    return { engine, projected, plain, nativePeer, projectedPeer, hydrated, sessions };
+  } catch (error) {
+    for (const session of sessions) session.destroy();
+    throw error;
+  }
 }
 
 /** The model without the source occurrences a parse for an editing session records. */
@@ -189,6 +231,60 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+  it.each([
+    ['native', 'hyperlink'],
+    ['native', 'simpleField'],
+    ['typescript', 'hyperlink'],
+    ['typescript', 'simpleField'],
+  ])('keeps legacy projected SEQ owners opaque (%s, %s)', async (seeder, kind) => {
+    const result = kind === 'hyperlink'
+      ? '<w:hyperlink w:anchor="top"><w:r><w:t>1</w:t></w:r></w:hyperlink>'
+      : '<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>';
+    const bytes = sequencePackage(`<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> SEQ Figure </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`);
+    const source = await createYrsSession({ clientId: 47036 });
+    const peer = await createYrsSession({ clientId: 47037 });
+    const hydrated = await createYrsSession({ clientId: 47038 });
+    try {
+      if (seeder === 'native') source.seedFromDocx(bytes);
+      else documentToYrs(source, await parseDocx(bytes.buffer, { preloadFonts: false }));
+      let index = 0;
+      let owners = 0;
+      for (const segment of source.storySegments('body')) {
+        if (segment.kind === 'embed' && segment.payload.resultProjection) {
+          const payload = { ...segment.payload };
+          delete payload.nestedSequences;
+          source.applyRawOps('body', [
+            { op: 'delete', index, len: 1 },
+            { op: 'insertEmbed', index, kind: 'field', payload, attrs: segment.attributes },
+          ]);
+          owners++;
+        }
+        index += segment.kind === 'text' ? segment.text.length : 1;
+      }
+      expect(owners).toBe(1);
+      peer.loadState(source.encodeState());
+      hydrated.openDocx(bytes, false);
+      hydrated.loadState(source.encodeState());
+      for (const session of [source, peer, hydrated]) {
+        const owner = session.storySegments('body').find((segment) =>
+          segment.kind === 'embed' && segment.payload.resultProjection
+        );
+        expect(owner?.kind === 'embed' && owner.payload).not.toHaveProperty('nestedSequences');
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const text = sequenceRuns(blocks)
+            .map((run) => run.kind === 'text' ? run.text : run.kind === 'field' ? run.fallback ?? '' : '')
+            .join('');
+          expect(text).toBe('1');
+        }
+      }
+    } finally {
+      source.destroy();
+      peer.destroy();
+      hydrated.destroy();
+    }
+  });
+
   it('keeps the visible caption at 2 when hidden SEQs are seeded and hydrated', async () => {
     const bytes = sequencePackage('<w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:rPr><w:vanish/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:t>2</w:t></w:r></w:fldSimple></w:p>');
     const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
@@ -249,25 +345,83 @@ describe('DOCX engine seeding', () => {
   it('keeps cached body SEQs after a typed SEQ in a hyperlink SDT when seeding and hydrating', async () => {
     const field = (cached: string): string => `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> SEQ Figure </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>${cached}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
     const bytes = sequencePackage(`<w:p><w:hyperlink w:anchor="top"><w:sdt><w:sdtPr/><w:sdtContent>${field('1')}</w:sdtContent></w:sdt></w:hyperlink></w:p><w:p>${field('2')}</w:p>`);
-    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
-    const engine = await createYrsSession({ clientId: 47011 });
-    const projected = await createYrsSession({ clientId: 47012 });
-    const hydrated = await createYrsSession({ clientId: 47013 });
+    const { engine, projected, plain, nativePeer, projectedPeer, hydrated, sessions } = await seedSequenceSessions(bytes);
     try {
-      engine.seedFromDocx(bytes);
-      documentToYrs(projected, parsed);
-      hydrated.openDocx(bytes, false);
-      hydrated.loadState(projected.encodeState());
-      for (const session of [engine, hydrated]) {
-        const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
-        const results = blocks.flatMap((block) => block.kind === 'paragraph' ? block.runs : [])
-          .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
-        expect(results).toEqual(['2']);
+      for (const session of [engine, projected, plain, nativePeer, projectedPeer, hydrated]) {
+        const paragraph = session.storySegments('body').find((segment) => segment.kind === 'pilcrow');
+        expect(paragraph?.kind === 'pilcrow' && paragraph.properties.opaqueSequences).toEqual(['figure']);
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const results = sequenceRuns(blocks)
+            .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+          expect(results).toEqual(['2']);
+        }
       }
     } finally {
-      engine.destroy();
-      projected.destroy();
-      hydrated.destroy();
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('preserves stale captions after hidden text boxes across seed and hydration paths', async () => {
+    const boxed = '<w:fldSimple w:instr="SEQ Figure"><w:r><w:t>1</w:t></w:r></w:fldSimple>';
+    const bytes = sequencePackage(`<w:p>${sequenceTextBox(boxed, true)}</w:p><w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>`);
+    const { sessions } = await seedSequenceSessions(bytes);
+    try {
+      for (const session of sessions) {
+        const drawing = session.storySegments('body').find((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'shape'
+        );
+        expect(drawing?.attributes.hidden).toBe(true);
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const results = sequenceRuns(blocks)
+            .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+          expect(results).toEqual(showHiddenText ? ['1', '2'] : ['9']);
+          expect(blocks.some((block) => block.kind === 'shape')).toBe(showHiddenText);
+        }
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it.each(['', '0'])('preserves visible cached shape field fragments (%s)', async (hiddenText) => {
+    const hiddenResult = hiddenText ? `<w:t>${hiddenText}</w:t>` : '';
+    const cached = `<w:fldSimple w:instr="SEQ Figure" w:fldLock="true"><w:r><w:rPr><w:vanish/></w:rPr>${hiddenResult}</w:r><w:r><w:t>1</w:t></w:r></w:fldSimple>`;
+    const bytes = sequencePackage(`<w:p>${sequenceTextBox(cached)}</w:p><w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>`);
+    const { sessions } = await seedSequenceSessions(bytes);
+    try {
+      for (const session of sessions) {
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const results = sequenceRuns(blocks)
+            .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+          expect(results).toEqual([
+            showHiddenText ? `${hiddenText}1` : '1',
+            !showHiddenText && hiddenText ? '9' : '2',
+          ]);
+        }
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('omits line breaks from hidden shape runs across seed and hydration paths', async () => {
+    const content = '<w:r><w:t>Before</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:br/></w:r><w:r><w:t>After</w:t></w:r>';
+    const bytes = sequencePackage(`<w:p>${sequenceTextBox(content)}</w:p>`);
+    const { sessions } = await seedSequenceSessions(bytes);
+    try {
+      for (const session of sessions) {
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const runs = sequenceRuns(blocks);
+          expect(runs.filter((run) => run.kind === 'lineBreak')).toHaveLength(showHiddenText ? 1 : 0);
+          expect(runs.flatMap((run) => run.kind === 'text' ? [run.text] : []).join('')).toBe('BeforeAfter');
+        }
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
     }
   });
 
