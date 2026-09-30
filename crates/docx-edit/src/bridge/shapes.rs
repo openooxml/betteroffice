@@ -151,7 +151,7 @@ fn lower_shape(
         id: BlockId::Str(block_id),
         shape_type,
         geometry_path,
-        fill: shape_fill(shape),
+        fill: shape_fill(shape, env),
         stroke: shape_stroke(shape),
         transform: shape_transform(shape),
         width,
@@ -250,7 +250,7 @@ fn text_body_in_pixels(properties: &Value) -> Value {
     properties
 }
 
-fn shape_fill(shape: &Value) -> Option<Value> {
+fn shape_fill(shape: &Value, env: &RenderEnv) -> Option<Value> {
     if let Some(paint) = object(shape, "fillPaint")
         && let Some(kind) = string_in(paint, "kind")
     {
@@ -284,9 +284,18 @@ fn shape_fill(shape: &Value) -> Option<Value> {
                     if let Some(src) = object_value(picture)
                         .and_then(|value| value.get("src"))
                         .and_then(Value::as_str)
-                        .filter(|value| value.starts_with("data:") || value.starts_with("blob:"))
+                        .filter(|value| {
+                            value.starts_with("data:")
+                                || value.starts_with("blob:")
+                                || docx_parse::media::media_token_index(value).is_some()
+                        })
                     {
-                        fill.insert("pictureSrc".to_owned(), Value::String(src.to_owned()));
+                        fill.insert(
+                            "pictureSrc".to_owned(),
+                            Value::String(
+                                env.media.token_of(src).unwrap_or_else(|| src.to_owned()),
+                            ),
+                        );
                     }
                 }
                 for (source, target) in [

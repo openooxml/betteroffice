@@ -15,7 +15,8 @@ import { extractEmbeddedFontFaces } from '@betteroffice/docx/utils';
 export type RustFontChainsProvider = () => Record<string, number[]> | undefined;
 
 export interface UseRustMeasurementOptions {
-  onError?: (error: Error) => void;
+  /** `textEngine`: the engine whose fonts failed to load, if any. */
+  onError?: (error: Error, textEngine?: RustTextEngine | null) => void;
   document: Document | null;
   fontProvider?: BundledFontProvider;
   fontChainsProviderRef?: React.RefObject<RustFontChainsProvider | null>;
@@ -30,6 +31,29 @@ export interface UseRustMeasurementReturn {
   runLayoutPipelineRef: React.RefObject<(() => void) | null>;
 }
 
+/** `engine` until `release()`: fonts that finish loading after it register nothing. */
+function releasableTextEngine(engine: RustTextEngine): {
+  engine: RustTextEngine;
+  release: () => void;
+} {
+  let released = false;
+  return {
+    engine: {
+      registerFont: (bytes) => (released ? -1 : engine.registerFont(bytes)),
+      ...(engine.registerSubstituteFont && {
+        registerSubstituteFont: (id: number, family: string) =>
+          released ? id : engine.registerSubstituteFont!(id, family),
+      }),
+      clearFonts: () => {
+        if (!released) engine.clearFonts();
+      },
+    },
+    release: () => {
+      released = true;
+    },
+  };
+}
+
 export function useRustMeasurement(
   options: UseRustMeasurementOptions
 ): UseRustMeasurementReturn {
@@ -39,6 +63,7 @@ export function useRustMeasurement(
   const runLayoutPipelineRef = useRef<(() => void) | null>(null);
   const sourceRef = useRef<RustMeasureSource | null>(null);
   const sourceEngineRef = useRef<RustTextEngine | null>(null);
+  const releaseSourceRef = useRef<(() => void) | null>(null);
   const latestFontChainsRef = useRef<Record<string, number[]>>({});
   const requirementWarmupsRef = useRef(new Map<string, Promise<void>>());
   const fedFontSourceRef = useRef<{
@@ -65,8 +90,13 @@ export function useRustMeasurement(
         }
         const firstLoad = !source;
         if (!source) {
-          source = createRustMeasureSource({ engine, bundled: fontProviderRef.current });
+          const releasable = releasableTextEngine(engine);
+          source = createRustMeasureSource({
+            engine: releasable.engine,
+            bundled: fontProviderRef.current,
+          });
           sourceRef.current = source;
+          releaseSourceRef.current = releasable.release;
         }
         source.setCompat(document?.package.settings?.compatibilityFlags);
 
@@ -83,13 +113,28 @@ export function useRustMeasurement(
         if (firstLoad) runLayoutPipelineRef.current?.();
       } catch (error) {
         console.error('[useRustMeasurement] Rust font engine failed to load', error);
-        if (!cancelled) onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+        if (!cancelled) {
+          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), textEngine);
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
   }, [document, textEngine]);
+
+  // A replaced or unmounted editor may free the session behind `textEngine`: font loads and
+  // layout passes its source still has pending end with it.
+  useEffect(
+    () => () => {
+      releaseSourceRef.current?.();
+      releaseSourceRef.current = null;
+      sourceRef.current = null;
+      // The next source starts over, even on the same engine.
+      sourceEngineRef.current = null;
+    },
+    [textEngine]
+  );
 
   const deferLayoutPass = useCallback((): boolean => sourceRef.current === null, []);
 

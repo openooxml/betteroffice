@@ -28,6 +28,7 @@ import {
   type UseRustDisplayListResult,
 } from './useDisplayList';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
+import type { DocxHostSearch } from './useHostSearch';
 import { usePagedEditorRefApi } from './usePagedEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -108,6 +109,7 @@ function Harness({ session, layout, overrides, pagedRef, docxRef, display }: Har
     getPositionAtPoint: () => null,
   });
   useDocxEditorRefApi({
+    hostSearch: {} as DocxHostSearch,
     ref: docxRef,
     document: null,
     documentFromYrs: () => null,

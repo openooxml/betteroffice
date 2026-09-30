@@ -38,7 +38,7 @@ import { ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
-import { clearPresented, markPresented } from './internals/layoutProvenance';
+import { clearPresented, markPresented, markReplayFailed } from './internals/layoutProvenance';
 import { viewportColumnBand } from './internals/viewportBand';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
@@ -591,8 +591,14 @@ export function CanvasPagesView({
     let cancelled = false;
     glyphCacheRef.current = null;
     setGlyphCacheReady(false);
-    const provider = glyphOutlineProvider
-      ? Promise.resolve(glyphOutlineProvider)
+    // A replay still rasterizing once its engine is replaced or unmounted reads no outline from
+    // it (the engine may be freed) and falls back to text.
+    const outlines = glyphOutlineProvider;
+    const provider = outlines
+      ? Promise.resolve<GlyphOutlineProvider>((fontId, glyphId) => {
+          if (cancelled) throw new Error('The glyph outlines belong to a released engine');
+          return outlines(fontId, glyphId);
+        })
       : loadGlyphOutlineProvider();
     void provider
       .then((provider) => {
@@ -612,7 +618,7 @@ export function CanvasPagesView({
   const windowStart = effectiveWindow?.start ?? -1;
   const windowEnd = effectiveWindow?.end ?? -1;
   const pageCount = displayList.pages.length;
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (windowPending) return;
     if (windowStart < 0) onPageWindowChange?.(0, pageCount);
     else onPageWindowChange?.(windowStart, windowEnd + 1);
@@ -683,7 +689,7 @@ export function CanvasPagesView({
           pendingAttachRef.current = null;
           const current = pendingAttach.generation === replayGenerationRef.current;
           if (attached && current && innerHostRef.current) {
-            markPresented(innerHostRef.current, pendingAttach.displayList);
+            markPresented(innerHostRef.current, pendingAttach.displayList, { worker: true });
           }
         }, () => {
           if (pendingAttachRef.current === pendingAttach) pendingAttachRef.current = null;
@@ -699,7 +705,7 @@ export function CanvasPagesView({
           pendingAttach.displayList = displayList;
         } else if (offscreenAttachedRef.current && host) {
           // The worker presents a frame before it replies with it, so these pages show no other.
-          markPresented(host, displayList);
+          markPresented(host, displayList, { worker: true });
         }
         // Heal any publish lost to ordering (StrictMode remount, late
         // resolution): the worker is attached and this pass kept it active.
@@ -765,6 +771,7 @@ export function CanvasPagesView({
       (error) => {
         if (replayGeneration === replayGenerationRef.current) {
           console.error('[CanvasRenderer] Canvas replay failed', error);
+          markReplayFailed(displayList, error);
         }
       }
     );

@@ -113,6 +113,29 @@ test('a replaced session stays usable until the editor renders without it', asyn
   expect(hook.result.current).not.toBe(replaced);
 });
 
+test('a replaced session lives while the renderer still builds with it', async () => {
+  const first = fixture();
+  const hook = renderHook(
+    ({ bytes, generation, held }: { bytes: Uint8Array; generation: number; held: unknown }) =>
+      useYrsCoreSession(true, null, null, bytes, generation, undefined, undefined, {
+        heldEngine: held,
+      }).session,
+    { initialProps: { bytes: first, generation: 1, held: null as unknown } }
+  );
+  await waitFor(() => expect(hook.result.current).not.toBeNull());
+  const replaced = hook.result.current!;
+  hook.rerender({ bytes: first, generation: 1, held: replaced });
+  const next = fixture();
+  hook.rerender({ bytes: next, generation: 2, held: replaced });
+  await waitFor(() => expect(hook.result.current).not.toBeNull());
+  expect(hook.result.current).not.toBe(replaced);
+  expect(() => replaced.version()).not.toThrow();
+  // The next document's layout reaches the renderer.
+  hook.rerender({ bytes: next, generation: 2, held: hook.result.current });
+  expect(() => replaced.version()).toThrow();
+  hook.unmount();
+});
+
 test('opening never materializes the compatibility document by itself', async () => {
   const { project, materializations } = await openedSession();
   await act(idle);

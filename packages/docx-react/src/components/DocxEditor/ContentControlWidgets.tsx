@@ -89,6 +89,13 @@ export function ContentControlWidgets({
     if (!container) return;
 
     const activate = (trigger: HTMLElement) => {
+      if (
+        trigger.hasAttribute('disabled') ||
+        trigger.getAttribute('aria-disabled') === 'true' ||
+        trigger.closest('[inert]')
+      ) {
+        return;
+      }
       const kind = trigger.dataset.sdtWidget;
       if (!kind) return;
       const target = targetFromTrigger(trigger);

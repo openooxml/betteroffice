@@ -30,7 +30,7 @@ use yrs::types::text::YChange;
 use yrs::types::{Delta, EntryChange, Event};
 use yrs::{
     Any, BranchID, DeepObservable, Doc, Map, MapRef, Observable, Out, ReadTxn, Subscription, Text,
-    TextRef, Transact, TransactionMut,
+    TextRef, Transact, Transaction, TransactionMut,
 };
 
 use crate::{
@@ -60,13 +60,13 @@ fn fresh_generation() -> String {
 }
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-fn entropy() -> [u64; 2] {
+pub(crate) fn entropy() -> [u64; 2] {
     let draw = || (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
     [draw() ^ ((js_sys::Date::now() as u64) << 11), draw()]
 }
 
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
-fn entropy() -> [u64; 2] {
+pub(crate) fn entropy() -> [u64; 2] {
     use std::hash::{BuildHasher, Hasher};
     static OPENINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let opening = OPENINGS.fetch_add(1, Ordering::Relaxed);
@@ -353,6 +353,10 @@ pub(crate) struct SourceIndex {
 }
 
 impl SourceIndex {
+    pub(crate) fn bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.bytes)
+    }
+
     pub(crate) fn new(
         package_sha256: String,
         bytes: Arc<[u8]>,
@@ -519,7 +523,7 @@ struct StoryState {
 fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
     let (scan, mut comments) = {
         let txn = doc.yrs_doc().transact();
-        let scan = Scan::new(&txn);
+        let scan = doc.committed_scan(&txn);
         let comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>> = scan
             .stories
             .iter()
@@ -545,13 +549,8 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
         .collect()
 }
 
-/// SHA-256 over every segment of a story exactly as
-/// [`EditingDoc::story_segments`] hands it to the save projection: each
-/// text, paragraph mark and embed with its full payload and its full
-/// attribute map (tracked insertions and deletions, formatting), map keys
-/// sorted and nulls kept. The one exclusion is the paragraph identity the
-/// save plan patches in place: the segments already leave out the session
-/// key, Word paragraph ID, source ID and editor-only marker.
+/// SHA-256 of save segments, expanding media tokens, sorting map keys and keeping nulls.
+/// [`EditingDoc::story_segments`] already excludes paragraph identities.
 fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
     use sha2::{Digest, Sha256};
     fn ordered(value: &Any) -> serde_json::Value {
@@ -571,8 +570,12 @@ fn story_fingerprint(doc: &EditingDoc, story: &str) -> Option<[u8; 32]> {
                 .collect(),
         )
     }
+    let mut segments = doc.story_segments(story).ok()?;
+    if let Some(media) = doc.media_table() {
+        crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
+    }
     let mut hasher = Sha256::new();
-    for segment in doc.story_segments(story).ok()? {
+    for segment in segments {
         let content = match &segment.content {
             crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
             crate::SegmentContent::Pilcrow(properties) => {
@@ -650,7 +653,7 @@ impl Pilcrow {
 }
 
 /// Every story and pilcrow, stories in sorted order, plus each nested story's parent.
-struct Scan {
+pub(crate) struct Scan {
     stories: Vec<String>,
     pilcrows: Vec<Pilcrow>,
     parents: HashMap<String, String>,
@@ -729,6 +732,10 @@ impl Scan {
         story
     }
 }
+
+/// The [`Scan`] of the last committed state read, with the epoch it was read at.
+#[derive(Default)]
+pub(crate) struct ScanCache(Mutex<Option<(u64, Arc<Scan>)>>);
 
 struct Claim {
     owner: String,
@@ -1365,6 +1372,22 @@ impl Repairs {
 }
 
 impl EditingDoc {
+    /// [`Scan::new`] over the committed state `txn` reads, shared by every
+    /// read-only query until the next committed change.
+    fn committed_scan(&self, txn: &Transaction<'_>) -> Arc<Scan> {
+        // No commit lands while `txn` is open, so this is the epoch of what it reads.
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        let mut cache = self.scan_cache.0.lock().unwrap();
+        if let Some((cached, scan)) = cache.as_ref()
+            && *cached == epoch
+        {
+            return Arc::clone(scan);
+        }
+        let scan = Arc::new(Scan::new(txn));
+        *cache = Some((epoch, Arc::clone(&scan)));
+        scan
+    }
+
     /// Starts a new opening of this document: writes its generation into
     /// replicated state, identical on every replica that syncs it, so session
     /// anchors from any other opening never resolve here, even one seeded
@@ -1900,12 +1923,12 @@ impl EditingDoc {
             let claims = claims(&txn);
             let assignments = source_assignments(&txn);
             let mut current: HashMap<String, u32> = HashMap::new();
-            for pilcrow in Scan::new(&txn).pilcrows {
+            for pilcrow in &self.committed_scan(&txn).pilcrows {
                 if let Some(id) = pilcrow
                     .saved_id(source.as_deref())
                     .and_then(|(id, _)| parse_paragraph_id(&id))
                 {
-                    current.insert(pilcrow.key, id);
+                    current.insert(pilcrow.key.clone(), id);
                 }
             }
             if let Some(source) = source.as_deref() {
@@ -1984,7 +2007,7 @@ impl EditingDoc {
         let txn = self.yrs_doc().transact();
         let claims = claims(&txn);
         let assignments = source_assignments(&txn);
-        let scan = Scan::new(&txn);
+        let scan = self.committed_scan(&txn);
         let id_origin = |id: &str, owner: &str| {
             claim(&claims, id, owner).map_or(ParagraphIdOrigin::Source, |claim| claim.origin)
         };
@@ -2068,7 +2091,7 @@ impl EditingDoc {
         }
         let source = self.source_index();
         let txn = self.yrs_doc().transact();
-        let scan = Scan::new(&txn);
+        let scan = self.committed_scan(&txn);
         let by_key = |key: &str, story: Option<&str>| -> Vec<ParagraphRef> {
             scan.pilcrows
                 .iter()
@@ -2157,7 +2180,7 @@ impl EditingDoc {
         };
         let txn = self.yrs_doc().transact();
         let assignments = source_assignments(&txn);
-        let scan = Scan::new(&txn);
+        let scan = self.committed_scan(&txn);
         drop(txn);
         let mut plan = ParagraphSavePlan {
             assignments: source
@@ -2243,6 +2266,61 @@ mod tests {
         EditCtx::local("", DATE)
     }
 
+    #[test]
+    fn media_sources_have_the_same_fingerprint_in_both_seed_modes() {
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/media/picture.png".to_owned(), vec![1, 2, 3, 4])])
+                .unwrap();
+        let table = docx_parse::media::MediaTable::new(
+            ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap(),
+        )
+        .unwrap();
+        let url = table.data_url(0).unwrap();
+        for key in [
+            "src",
+            "shapeJson",
+            "chartJson",
+            "fieldData",
+            "propertiesJson",
+        ] {
+            let document = |src: &str| {
+                let doc = EditingDoc::new(7);
+                doc.create_story("body", "", "Normal", "left").unwrap();
+                let value = if key == "src" {
+                    src.to_owned()
+                } else {
+                    serde_json::json!({"nested": [{"src": src, "label": "media:0"}]}).to_string()
+                };
+                doc.apply_raw_ops(
+                    "body",
+                    vec![crate::RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "image".into(),
+                        payload: vec![(key.into(), Any::String(value.into()))],
+                        attrs: Default::default(),
+                    }],
+                    &ctx(),
+                )
+                .unwrap();
+                doc
+            };
+            let default = document(&url);
+            let expected = story_fingerprint(&default, "body").unwrap();
+            let segments = default.story_segments("body").unwrap();
+            default.install_media(table.clone());
+            assert_eq!(story_fingerprint(&default, "body"), Some(expected), "{key}");
+            let mut normalized = segments.clone();
+            crate::media::write_segment_data_urls(&mut normalized, &table).unwrap();
+            assert_eq!(normalized, segments, "{key}");
+            let tokens = document("media:0");
+            tokens.install_media(table.clone());
+            assert_eq!(story_fingerprint(&tokens, "body"), Some(expected), "{key}");
+            let changed = document("data:image/png;base64,AQIDBQ==");
+            changed.install_media(table.clone());
+            assert_ne!(story_fingerprint(&changed, "body"), Some(expected), "{key}");
+        }
+    }
+
     fn session(story: &str, key: &str) -> ParagraphRef {
         ParagraphRef::Session {
             story: story.into(),
@@ -2326,6 +2404,129 @@ mod tests {
         let restored = &doc.paragraph_identities().paragraphs[1];
         assert_eq!(restored.paragraph, session("body", &split.second_para_id));
         assert_eq!(restored.ooxml_para_id.as_deref(), Some(second.as_str()));
+    }
+
+    fn scan_view(scan: &Scan) -> (Vec<String>, Vec<String>, BTreeMap<String, String>) {
+        let pilcrows = scan.pilcrows.iter().map(|pilcrow| {
+            format!(
+                "{} {} {:?} {:?} {} {} {:?}",
+                pilcrow.story,
+                pilcrow.key,
+                pilcrow.allocated,
+                pilcrow.source,
+                pilcrow.synthetic,
+                pilcrow.content,
+                AsRef::<Branch>::as_ref(&pilcrow.map).id(),
+            )
+        });
+        (
+            scan.stories.clone(),
+            pilcrows.collect(),
+            scan.parents.clone().into_iter().collect(),
+        )
+    }
+
+    /// The cached scan, checked against a fresh one of the same state.
+    fn checked_scan(doc: &EditingDoc) -> Arc<Scan> {
+        let txn = doc.yrs_doc().transact();
+        let cached = doc.committed_scan(&txn);
+        assert_eq!(scan_view(&cached), scan_view(&Scan::new(&txn)));
+        cached
+    }
+
+    /// Every read-only identity query, answered from the cache and cold.
+    fn queries_agree(doc: &EditingDoc) {
+        let answers = |cold: bool| {
+            let forget = || {
+                if cold {
+                    *doc.scan_cache.0.lock().unwrap() = None;
+                }
+            };
+            forget();
+            let identities = doc.paragraph_identities();
+            let anchors: Vec<_> = identities
+                .paragraphs
+                .iter()
+                .map(|identity| {
+                    let ParagraphRef::Session { story, para_id } = &identity.paragraph else {
+                        unreachable!("no source package is retained");
+                    };
+                    forget();
+                    doc.resolve_paragraph_anchor(&ParagraphAnchor::Session {
+                        session_id: identities.session_id.clone(),
+                        story: story.clone(),
+                        para_id: para_id.clone(),
+                    })
+                })
+                .collect();
+            (format!("{identities:?}"), format!("{anchors:?}"))
+        };
+        checked_scan(doc);
+        assert_eq!(answers(false), answers(true));
+    }
+
+    #[test]
+    fn the_cached_scan_matches_a_fresh_one_across_edits_undo_and_remote_updates() {
+        let doc = EditingDoc::new(7);
+        doc.create_story("body", "abcd", "Normal", "left").unwrap();
+        doc.create_story("hf:rIdHeader", "head", "Normal", "left")
+            .unwrap();
+        let mut undo = doc.undo_manager();
+        let opened = checked_scan(&doc);
+        assert!(Arc::ptr_eq(&opened, &checked_scan(&doc)));
+        queries_agree(&doc);
+
+        doc.split_paragraph(&ctx(), Position::new("body", 2), None)
+            .unwrap();
+        let split = checked_scan(&doc);
+        assert!(!Arc::ptr_eq(&opened, &split));
+        assert_eq!(split.pilcrows.len(), 3);
+        queries_agree(&doc);
+
+        doc.persist_paragraph_ids().unwrap();
+        let persisted = checked_scan(&doc);
+        assert!(!Arc::ptr_eq(&split, &persisted));
+        assert!(persisted.pilcrows[0].allocated.is_some());
+        queries_agree(&doc);
+
+        assert!(undo.undo());
+        assert_eq!(checked_scan(&doc).pilcrows.len(), 2);
+        queries_agree(&doc);
+        assert!(undo.redo());
+        assert_eq!(checked_scan(&doc).pilcrows.len(), 3);
+        queries_agree(&doc);
+
+        let remote = EditingDoc::new(9);
+        remote
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        remote
+            .split_paragraph(&ctx(), Position::new("body", 1), None)
+            .unwrap();
+        remote
+            .insert_text(
+                &ctx(),
+                Position::new("hf:rIdHeader", 0),
+                "x",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        let before = checked_scan(&doc);
+        doc.apply_update_v1(
+            &remote
+                .encode_diff_v1(&doc.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+        let merged = checked_scan(&doc);
+        assert!(!Arc::ptr_eq(&before, &merged));
+        assert_eq!(merged.pilcrows.len(), 4);
+        queries_agree(&doc);
+
+        doc.delete_range(&ctx(), StoryRange::new("body", 0, 2))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&merged, &checked_scan(&doc)));
+        queries_agree(&doc);
     }
 
     #[test]

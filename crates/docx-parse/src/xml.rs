@@ -90,6 +90,8 @@ pub struct ParseBudget<'a> {
     notes: usize,
     comments: usize,
     source_ordinals: bool,
+    media: Option<&'a crate::media::MediaTable>,
+    media_error: Option<String>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -109,7 +111,28 @@ impl<'a> ParseBudget<'a> {
             notes: 0,
             comments: 0,
             source_ordinals: false,
+            media: None,
+            media_error: None,
         }
+    }
+
+    /// Reads the bytes behind `media:{n}` image sources from `table`.
+    pub(crate) fn read_media_from(&mut self, table: &'a crate::media::MediaTable) {
+        self.media = Some(table);
+    }
+
+    /// The table `media:{n}` image sources name, when parsing with one.
+    pub(crate) fn media_table(&self) -> Option<&'a crate::media::MediaTable> {
+        self.media
+    }
+
+    /// Fails the parse with the first media part that could not be read.
+    pub(crate) fn fail_media_read(&mut self, error: String) {
+        self.media_error.get_or_insert(error);
+    }
+
+    pub(crate) fn media_read_error(&mut self) -> Option<String> {
+        self.media_error.take()
     }
 
     /// Records each parsed paragraph's `w:p` occurrence in its part; see

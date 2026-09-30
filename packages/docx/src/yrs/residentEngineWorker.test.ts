@@ -15,7 +15,13 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const modules: Record<string, string> = {
     './residentEngineSession':
-      'export const createResidentEngineSession = async (heapLimitBytes) => ((testHarness.heapLimits ??= []).push(heapLimitBytes), testHarness.session);',
+      `export const createResidentEngineSession = async (heapLimitBytes) => {
+        await testHarness.preload();
+        testHarness.sessionsCreated += 1;
+        (testHarness.heapLimits ??= []).push(heapLimitBytes);
+        return testHarness.session;
+      };`,
+    './wasm/index': 'export const preloadEditWasm = () => testHarness.preload();',
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; } }',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
@@ -79,8 +85,27 @@ function worker() {
     },
   };
   const harness = {
+    initializations: 0,
+    sessionsCreated: 0,
+    wasmReady: false,
+    failWarm: null as Error | null,
+    preloadBlock: null as Promise<void> | null,
+    async preload(): Promise<void> {
+      await harness.preloadBlock;
+      if (harness.failWarm) {
+        const error = harness.failWarm;
+        harness.failWarm = null;
+        throw error;
+      }
+      if (!harness.wasmReady) {
+        harness.initializations += 1;
+        harness.wasmReady = true;
+      }
+    },
     delta: null as DecodedFrameDelta | null,
     caret: null as YrsResidentCaretRect | null,
+    displayWindows: [] as [number, number][],
+    windowedIncrementalBuilds: [] as boolean[],
     rasterized: [] as number[],
     presented: [] as number[],
     failRaster: null as number | null,
@@ -88,14 +113,37 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       loadState() {},
+      loadMediaSources(_json: string) {},
       setPartialDocument() {},
+      setDisplayWindow(start: number, end: number) {
+        harness.displayWindows.push([start, end]);
+      },
+      setWindowedIncrementalBuilds(enabled: boolean) {
+        harness.windowedIncrementalBuilds.push(enabled);
+      },
       clearFonts() {},
       layoutDocumentJson() {},
+      layoutDocumentWithRegionsRetained() {},
+      retainedHeadersFootersJson(): string | undefined {
+        return undefined;
+      },
       onUpdate() {
         return () => {};
       },
       buildDisplayListFrame() {
         return new Uint8Array([frameEpoch]);
+      },
+      setSelection() {},
+      applyInput() {
+        delta([1]);
+        return new Uint8Array([frameEpoch]);
+      },
+      applyDelete() {
+        delta([1]);
+        return new Uint8Array([frameEpoch]);
+      },
+      residentDeletedUnits() {
+        return 1;
       },
       residentCaretSnapshot() {
         return { frameEpoch, caretRect: harness.caret };
@@ -187,12 +235,16 @@ function worker() {
       harness.rasterized = [];
       harness.presented = [];
     },
-    async bootstrap(pageCount = 3, heapLimitBytes?: number) {
+    async bootstrap(
+      pageCount = 3,
+      { keepSurfaces = false, heapLimitBytes }: { keepSurfaces?: boolean; heapLimitBytes?: number } = {}
+    ) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
         type: 'bootstrap',
         expectedFrameEpoch: 0,
         extras: '',
+        ...(keepSurfaces ? { keepSurfaces } : {}),
         ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
         snapshot: {
           clientId: 1,
@@ -208,7 +260,12 @@ function worker() {
         },
       });
     },
-    build(upserts: number[], width = 100, caret: YrsResidentCaretRect | null = null) {
+    build(
+      upserts: number[],
+      width = 100,
+      caret: YrsResidentCaretRect | null = null,
+      displayWindow?: [number, number]
+    ) {
       delta(upserts, false, width);
       harness.caret = caret;
       return send({
@@ -216,6 +273,7 @@ function worker() {
         extras: '',
         expectedFrameEpoch: frameEpoch - 1,
         paintCaret: !!caret,
+        displayWindow,
       });
     },
     attach(active: number[], zoom = 1, color = '#000') {
@@ -253,7 +311,112 @@ function deferred() {
   return { promise, resolve };
 }
 
+describe('resident worker warmup', () => {
+  test('initializes wasm without creating a session, then bootstraps a frame', async () => {
+    const w = worker();
+    expect(await w.send({ type: 'warm' })).toMatchObject({ ok: true });
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(await w.build([])).toMatchObject({
+      ok: false,
+      error: 'Resident engine worker is not initialized',
+    });
+    expect(await w.bootstrap()).toMatchObject({ ok: true, layoutRevision: 1 });
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(1);
+    expect((await w.attach([1])).ok).toBe(true);
+    expect(w.harness.rasterized).toEqual([1]);
+  });
+
+  test('retries initialization after a failed warm, including a wasm runtime error', async () => {
+    const w = worker();
+    w.harness.failWarm = new WebAssembly.RuntimeError('init failed');
+    const failed = await w.send({ type: 'warm' });
+    expect(failed).toMatchObject({ ok: false, error: 'init failed' });
+    expect(failed).not.toHaveProperty('terminal');
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(1);
+  });
+
+  test('queues bootstrap behind an in-flight warm', async () => {
+    const w = worker();
+    const loading = deferred();
+    w.harness.preloadBlock = loading.promise;
+    const warm = w.send({ type: 'warm' });
+    const bootstrap = w.bootstrap();
+    await Promise.resolve();
+    expect(w.harness.sessionsCreated).toBe(0);
+    expect(w.answered).toEqual([]);
+    loading.resolve();
+    expect((await warm).ok).toBe(true);
+    expect((await bootstrap).ok).toBe(true);
+    expect(w.answered).toEqual([1, 2]);
+    expect(w.harness.initializations).toBe(1);
+  });
+});
+
 describe('resident worker page damage', () => {
+  test('frame requests opt into windowed incremental builds only with a display window', async () => {
+    const w = worker();
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false]);
+    expect((await w.build([], 100, null, [8, 11])).ok).toBe(true);
+    expect(w.harness.displayWindows).toEqual([[8, 11]]);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false, true]);
+    expect((await w.build([])).ok).toBe(true);
+    expect(w.harness.displayWindows).toEqual([[8, 11]]);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false, true, false]);
+  });
+
+  test('input and delete requests without a display window disable a previous opt-in', async () => {
+    const w = worker();
+    await w.bootstrap();
+    const loc = { story: 'body', paraId: 'p1', offset: 1 };
+    const options = {
+      selection: { anchor: loc, head: loc },
+      profile: false,
+      paintCaret: false,
+    };
+    expect((await w.build([], 100, caret(1), [8, 11])).ok).toBe(true);
+    expect(
+      (
+        await w.send({
+          type: 'applyInput',
+          text: 'x',
+          expectedFrameEpoch: 2,
+          ...options,
+        })
+      ).ok
+    ).toBe(true);
+    expect((await w.build([], 100, caret(1), [8, 11])).ok).toBe(true);
+    expect(
+      (
+        await w.send({
+          type: 'applyDelete',
+          direction: 'backward',
+          count: 1,
+          expectedFrameEpoch: 4,
+          ...options,
+        })
+      ).ok
+    ).toBe(true);
+    expect(w.harness.windowedIncrementalBuilds).toEqual([false, true, false, true, false]);
+  });
+
+  test('a bootstrap that keeps surfaces paints the next document into the attached canvases', async () => {
+    const w = worker();
+    await w.bootstrap(3);
+    await w.attach([1, 2]);
+    w.resetCalls();
+    expect((await w.bootstrap(3, { keepSurfaces: true })).ok).toBe(true);
+    expect(w.harness.presented).toEqual([1, 2]);
+    w.resetCalls();
+    await w.bootstrap(3);
+    expect(w.harness.presented).toEqual([]);
+  });
+
   test('paints each page once while a three-page window crosses twelve pages', async () => {
     const w = worker();
     await w.bootstrap(12);
@@ -398,6 +561,8 @@ describe('resident worker page damage', () => {
 describe('resident worker layout ownership', () => {
   test('returns the layout it ran and completes the frame extras from it', async () => {
     const w = worker();
+    expect((await w.send({ type: 'warm' })).ok).toBe(true);
+    expect(w.harness.sessionsCreated).toBe(0);
     const extras: string[] = [];
     const layoutJson = JSON.stringify({
       layout: { pages: [] },
@@ -405,8 +570,14 @@ describe('resident worker layout ownership', () => {
       notesConverged: true,
     });
     let epoch = 0;
+    const layouts: string[] = [];
     Object.assign(w.harness.session, {
-      layoutDocumentWithRegionsRetainedJson: () => layoutJson,
+      layoutDocumentWithRegionsRetainedJson: () => {
+        layouts.push('reply');
+        return layoutJson;
+      },
+      layoutDocumentWithRegionsRetained: () => layouts.push('retained'),
+      retainedHeadersFootersJson: () => JSON.stringify({ parts: [] }),
       residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
       buildDisplayListFrame: (input: string) => {
         extras.push(input);
@@ -445,6 +616,8 @@ describe('resident worker layout ownership', () => {
       layoutExtras: JSON.stringify({ resolvedCommentIds: [4], fontChains: { 'a|0|0': [1] } }),
     });
     expect(reply.ok && reply.layoutJson).toBe(layoutJson);
+    expect(w.harness.initializations).toBe(1);
+    expect(w.harness.sessionsCreated).toBe(1);
     expect(extras).toEqual([
       '{"headersFooters":{"parts":[]},"fontChains":{"a|0|0":[1]},"resolvedCommentIds":[4]}',
     ]);
@@ -458,6 +631,7 @@ describe('resident worker layout ownership', () => {
     });
     expect(plain.ok && plain.layoutJson).toBeUndefined();
     expect(extras.at(-1)).toBe('given');
+    expect(layouts).toEqual(['reply', 'retained']);
   });
 
   test('marks a replica as a preview or not before it lays it out', async () => {
@@ -466,10 +640,7 @@ describe('resident worker layout ownership', () => {
     Object.assign(w.harness.session, {
       loadState: () => calls.push('load'),
       setPartialDocument: (partial: boolean) => calls.push(`partial:${partial}`),
-      layoutDocumentWithRegionsRetainedJson: () => {
-        calls.push('layout');
-        return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
-      },
+      layoutDocumentWithRegionsRetained: () => calls.push('layout'),
     });
     const snapshot = {
       clientId: 1,
@@ -499,6 +670,36 @@ describe('resident worker layout ownership', () => {
     expect(calls).toEqual(['load', 'partial:false', 'layout']);
   });
 
+  test('lays out the media sources a snapshot carries, and clears them when it carries none', async () => {
+    const w = worker();
+    const loaded: string[] = [];
+    Object.assign(w.harness.session, {
+      loadMediaSources: (json: string) => loaded.push(json),
+      layoutDocumentWithRegionsRetainedJson: () =>
+        JSON.stringify({ layout: { pages: [] }, notesConverged: true }),
+    });
+    const snapshot = {
+      clientId: 1,
+      state: new Uint8Array(),
+      fontsRevision: 0,
+      fonts: [],
+      renderInputs: [],
+      measureInputs: [],
+      layoutInput: '{}',
+      layoutWithRegions: true,
+      layoutRevision: 1,
+      selection: null,
+    };
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '{}',
+      snapshot: { ...snapshot, mediaSources: '{"sources":1}' },
+    });
+    await w.send({ type: 'sync', expectedFrameEpoch: 0, extras: '{}', paintCaret: false, snapshot });
+    expect(loaded).toEqual(['{"sources":1}', '']);
+  });
+
   test('finishes a provisional layout on request and before other work', async () => {
     const w = worker();
     const extras: string[] = [];
@@ -506,6 +707,7 @@ describe('resident worker layout ownership', () => {
     let epoch = 0;
     const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
     const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
+    let headersFooters = '{"parts":["full"]}';
     Object.assign(w.harness.session, {
       layoutDocumentWithRegionsPrefixRetainedJson: (_input: string, pages: number) => {
         calls.push(`prefix:${pages}`);
@@ -515,6 +717,7 @@ describe('resident worker layout ownership', () => {
         calls.push('full');
         return full;
       },
+      retainedHeadersFootersJson: () => headersFooters,
       residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
       buildDisplayListFrame: (input: string) => {
         extras.push(input);
@@ -576,16 +779,56 @@ describe('resident worker layout ownership', () => {
     });
     await w.send({ type: 'buildFrame', extras: 'given', expectedFrameEpoch: 3, paintCaret: false });
     expect(calls.slice(2)).toEqual(['prefix:3', 'full']);
+    // A later edit changes what the session retains; the completed layout's reply keeps its own.
+    headersFooters = '{"parts":["edited"]}';
     const late = await w.send({ type: 'completeLayout', expectedFrameEpoch: 4, paintCaret: false });
     expect(late.ok && late.layoutJson).toBe(full);
+    expect(extras.at(-1)).toBe('{"headersFooters":{"parts":["full"]}}');
     expect(calls).toHaveLength(4);
+
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '',
+      snapshot,
+      layoutExtras: '{}',
+      provisionalPages: 3,
+    });
+    Object.assign(w.harness.session, {
+      setSelection: () => {},
+      applyInput: (_text: string, expected: number) => {
+        calls.push('input');
+        const session = w.harness.session as unknown as {
+          buildDisplayListFrame: (input: string, expected: number) => Uint8Array;
+        };
+        return session.buildDisplayListFrame('input', expected);
+      },
+    });
+    // A header caret needs no body caret geometry from the stub.
+    const loc = { story: 'header1', paraId: '1', offset: 0 };
+    const selection = { anchor: loc, head: loc };
+    await w.send({
+      type: 'applyInput',
+      text: 'x',
+      selection,
+      expectedFrameEpoch: epoch,
+      profile: false,
+      paintCaret: false,
+    });
+    expect(calls.slice(4)).toEqual(['prefix:3', 'full', 'input']);
+    // The edit re-paginated: a completion built now would pair its cached headers with the new pages.
+    const framesBefore = extras.length;
+    const afterEdit = await w.send({ type: 'completeLayout', expectedFrameEpoch: epoch, paintCaret: false });
+    expect(afterEdit.ok && afterEdit.frame).toBeUndefined();
+    expect(afterEdit.ok && afterEdit.layoutJson).toBeUndefined();
+    expect(extras).toHaveLength(framesBefore);
   });
 });
 
 describe('resident worker memory', () => {
   test('a bootstrap starts the session under its heap limit', async () => {
     const w = worker();
-    await w.bootstrap(3, 1024);
+    await w.bootstrap(3, { heapLimitBytes: 1024 });
     await w.bootstrap();
     expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toEqual([1024, undefined]);
   });
@@ -1010,5 +1253,257 @@ describe('sliced layout completion', () => {
     const completed = await w.send({ type: 'completeLayout', expectedFrameEpoch: 1, paintCaret: false });
     expect(completed.ok && completed.layoutJson).toBe(full);
     expect(calls).toEqual(['whole']);
+  });
+});
+
+describe('resident worker opening', () => {
+  const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
+  const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
+  const snapshot = {
+    clientId: 1,
+    state: new Uint8Array([5]),
+    fontsRevision: 1,
+    fonts: [new Uint8Array([9])],
+    renderInputs: [],
+    measureInputs: [],
+    layoutInput: '{"request":1}',
+    layoutWithRegions: true,
+    layoutRevision: 1,
+    selection: null,
+  };
+
+  function openingWorker() {
+    const w = worker();
+    const calls: string[] = [];
+    let epoch = 0;
+    Object.assign(w.harness.session, {
+      openDocx: (bytes: Uint8Array, digest?: string, generation?: string) => {
+        calls.push(`open:${bytes.join(',')}:${digest}:${generation}`);
+        return '{"host":1}';
+      },
+      layoutFontRequirementsJson: (input: string) => {
+        calls.push(`requirements:${input}`);
+        return '[{"key":"a"}]';
+      },
+      loadState: () => calls.push('loadState'),
+      registerFont: () => {
+        calls.push('font');
+        return 1;
+      },
+      layoutDocumentWithRegionsPrefixRetainedJson: (input: string, pages: number) => {
+        calls.push(`prefix:${input}:${pages}`);
+        return provisional;
+      },
+      layoutDocumentWithRegionsRetainedJson: (input: string) => {
+        calls.push(`layout:${input}`);
+        return full;
+      },
+      beginRegionLayout: (input: string) => {
+        calls.push(`begin:${input}`);
+        return { measuredBlocks: 0, bodyBlocks: 2 };
+      },
+      resumeRegionLayout: (blocks: number) => {
+        calls.push(`resume:${blocks}`);
+        return { measuredBlocks: 2, bodyBlocks: 2, layoutJson: full };
+      },
+      residentCaretSnapshot: () => ({ frameEpoch: epoch, caretRect: null }),
+      buildDisplayListFrame: (_input: string, expectedFrameEpoch: number) => {
+        calls.push(`frame:${expectedFrameEpoch}`);
+        epoch += 1;
+        w.harness.delta = {
+          protocolVersion: 1,
+          full: true,
+          frameEpoch: epoch,
+          baseFrameEpoch: 0,
+          docEpoch: epoch,
+          layoutEpoch: epoch,
+          pageCount: 0,
+          operations: [],
+          bytes: new Uint8Array(),
+        };
+        return new Uint8Array([0]);
+      },
+      encodeState: () => {
+        calls.push('state');
+        return new Uint8Array([7, 8]);
+      },
+    });
+    return { w, calls };
+  }
+
+  test('opens a package, lays it out without a state to load, and hands its state over', async () => {
+    const { w, calls } = openingWorker();
+    const opened = await w.send({
+      type: 'open',
+      bytes: new Uint8Array([1, 2, 3]).buffer,
+      digest: 'abc',
+      generation: 'opening',
+      heapLimitBytes: 1024,
+    });
+    expect(opened.ok && opened.hostJson).toBe('{"host":1}');
+    expect(opened.ok && opened.stateVector).toBeDefined();
+    expect(opened.memory).toEqual(w.harness.memories);
+    const requirements = await w.send({ type: 'fontRequirements', layoutInput: '{"request":1}' });
+    expect(requirements.ok && requirements.requirementsJson).toBe('[{"key":"a"}]');
+    expect(requirements.memory).toEqual(w.harness.memories);
+
+    const framed = await w.send({
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      layoutExtras: '{}',
+      expectedFrameEpoch: 0,
+      provisionalPages: 3,
+    });
+    expect(framed.ok && framed.layoutJson).toBe(provisional);
+    expect(framed.ok && framed.layoutProvisional).toBe(true);
+    expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toEqual([1024]);
+    expect(calls).toEqual([
+      'open:1,2,3:abc:opening',
+      'requirements:{"request":1}',
+      'font',
+      'prefix:{"request":1}:3',
+      'frame:0',
+    ]);
+
+    const state = await w.send({ type: 'encodeState' });
+    expect(state.ok && [...new Uint8Array(state.state!)]).toEqual([7, 8]);
+    expect(state.memory).toEqual(w.harness.memories);
+    expect(calls[calls.length - 1]).toBe('state');
+
+    const completed = await w.send({
+      type: 'completeLayout',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+      sliceBlocks: 2,
+    });
+    expect(completed.ok && completed.layoutJson).toBe(full);
+    expect(completed.ok && completed.layoutProvisional).toBeUndefined();
+    expect(calls.slice(-3)).toEqual(['begin:{"request":1}', 'resume:2', 'frame:1']);
+  });
+
+  test('a snapshot bootstrap lays out the same provisional prefix after loading state', async () => {
+    const { w, calls } = openingWorker();
+    const framed = await w.send({
+      type: 'bootstrap',
+      snapshot,
+      extras: '',
+      layoutExtras: '{}',
+      expectedFrameEpoch: 0,
+      provisionalPages: 3,
+    });
+    expect(framed.ok && framed.layoutJson).toBe(provisional);
+    expect(framed.ok && framed.layoutProvisional).toBe(true);
+    expect(calls).toEqual(['loadState', 'font', 'prefix:{"request":1}:3', 'frame:0']);
+  });
+
+  for (const type of ['open', 'fontRequirements', 'encodeState'] as const) {
+    test(`${type} attributes an OOM trap and refuses queued requests`, async () => {
+      const { w, calls } = openingWorker();
+      if (type !== 'open') {
+        await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer });
+      }
+      calls.length = 0;
+      w.harness.memories[0].failedAllocationBytes = 64;
+      const method = {
+        open: 'openDocx',
+        fontRequirements: 'layoutFontRequirementsJson',
+        encodeState: 'encodeState',
+      }[type];
+      Object.assign(w.harness.session, {
+        [method]: () => {
+          calls.push('trap');
+          throw new WebAssembly.RuntimeError('unreachable');
+        },
+      });
+      const failed = w.send(
+        type === 'open'
+          ? { type, bytes: new Uint8Array([4]).buffer }
+          : type === 'fontRequirements'
+            ? { type, layoutInput: snapshot.layoutInput }
+            : { type }
+      );
+      const queued = w.send({ type: 'encodeState' });
+      for (const reply of await Promise.all([failed, queued])) {
+        expect(!reply.ok && reply.terminal && reply.outOfMemory).toBe(true);
+        expect(!reply.ok && reply.error).toBe(
+          'Resident engine worker ran out of memory allocating 64 bytes: unreachable'
+        );
+        expect(reply.memory).toEqual(w.harness.memories);
+        expect(w.answered.filter((id) => id === reply.id)).toHaveLength(1);
+      }
+      expect(calls).toEqual(['trap']);
+    });
+  }
+
+  test('a second open fails and keeps the document the first one opened', async () => {
+    const { w, calls } = openingWorker();
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
+    const second = await w.send({ type: 'open', bytes: new Uint8Array([2]).buffer });
+    expect(!second.ok && second.error).toBe('Resident engine worker already holds a document');
+    expect(!second.ok && second.terminal).toBeFalsy();
+    const framed = await w.send({
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      expectedFrameEpoch: 0,
+    });
+    expect(framed.ok).toBe(true);
+    expect(calls.filter((call) => call.startsWith('open:'))).toEqual(['open:1:undefined:undefined']);
+    expect((w.harness as { heapLimits?: unknown[] }).heapLimits).toHaveLength(1);
+  });
+
+  test('an opened bootstrap refuses a heap limit other than the one it opened under', async () => {
+    const { w } = openingWorker();
+    await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer, heapLimitBytes: 1024 });
+    const bootstrap = (heapLimitBytes?: number) =>
+      w.send({
+        type: 'bootstrap',
+        opened: true,
+        snapshot,
+        extras: '',
+        expectedFrameEpoch: 0,
+        ...(heapLimitBytes !== undefined ? { heapLimitBytes } : {}),
+      });
+    const refused = await bootstrap(2048);
+    expect(!refused.ok && refused.error).toBe(
+      'Resident engine worker opened its document under another heap limit'
+    );
+    expect((await bootstrap(1024)).ok).toBe(true);
+  });
+
+  test('a package that fails to open frees its session and leaves the worker able to open', async () => {
+    const { w, calls } = openingWorker();
+    const { openDocx } = w.harness.session as { openDocx?: unknown };
+    Object.assign(w.harness.session, {
+      openDocx: () => {
+        throw new Error('not a package');
+      },
+      destroy: () => calls.push('destroy'),
+    });
+    const failed = await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer });
+    expect(!failed.ok && failed.error).toBe('not a package');
+    expect(!failed.ok && failed.terminal).toBeFalsy();
+    expect(calls).toEqual(['destroy']);
+    Object.assign(w.harness.session, { openDocx });
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([2]).buffer })).ok).toBe(true);
+  });
+
+  test('a bootstrap of an opened document fails, and keeps the worker, when nothing was opened', async () => {
+    const { w, calls } = openingWorker();
+    const refused = await w.send({
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      expectedFrameEpoch: 0,
+    });
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.terminal).toBeFalsy();
+    expect(calls).toEqual([]);
+    const opened = await w.send({ type: 'open', bytes: new Uint8Array([4]).buffer });
+    expect(opened.ok).toBe(true);
   });
 });

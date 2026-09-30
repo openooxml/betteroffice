@@ -1,4 +1,4 @@
-import type { YrsLoc, YrsSession } from '../../yrs';
+import type { YrsLoc, YrsSession, YrsStorySegment } from '../../yrs';
 
 /** A yrs location projected into the position space used by the display list. */
 export interface YrsSidebarDisplayPoint {
@@ -41,6 +41,8 @@ interface StoryGeometryRoot {
   hfRid?: string;
 }
 
+type StorySegmentsReader = (story: string) => YrsStorySegment[];
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -61,14 +63,19 @@ function childStories(payload: Record<string, unknown>): string[] {
   return direct;
 }
 
-function geometryRoots(session: YrsSession): Map<string, StoryGeometryRoot> {
+function geometryRoots(
+  session: YrsSession,
+  segmentsByStory: Map<string, YrsStorySegment[]>
+): Map<string, StoryGeometryRoot> {
   const storyIds = session.storyIds();
   const childrenByStory = new Map<string, string[]>();
   const nestedStories = new Set<string>();
   for (const story of storyIds) {
     const children: string[] = [];
     try {
-      for (const segment of session.storySegments(story)) {
+      const segments = session.storySegments(story);
+      segmentsByStory.set(story, segments);
+      for (const segment of segments) {
         if (segment.kind !== 'embed') continue;
         for (const child of childStories(segment.payload)) {
           children.push(child);
@@ -101,7 +108,7 @@ function geometryRoots(session: YrsSession): Map<string, StoryGeometryRoot> {
 }
 
 function tableNodeSize(
-  session: YrsSession,
+  segmentsOf: StorySegmentsReader,
   payload: Record<string, unknown>,
   pmStart: number,
   paragraphs: Map<string, ParagraphDisplaySpan>,
@@ -117,7 +124,7 @@ function tableNodeSize(
       const cell = asRecord(rawCell);
       const childStory = typeof cell?.story === 'string' ? cell.story : null;
       const contentSize = childStory
-        ? indexStory(session, childStory, cellPmStart + 1, paragraphs, activeStories)
+        ? indexStory(segmentsOf, childStory, cellPmStart + 1, paragraphs, activeStories)
         : 0;
       cellPmStart += contentSize + 2;
     }
@@ -128,7 +135,7 @@ function tableNodeSize(
 
 /** Index one yrs story in the same token space used by the renderer. */
 function indexStory(
-  session: YrsSession,
+  segmentsOf: StorySegmentsReader,
   story: string,
   pmBase: number,
   paragraphs: Map<string, ParagraphDisplaySpan>,
@@ -142,7 +149,7 @@ function indexStory(
     let paragraphPmUnits = 0;
     let atBlockBoundary = true;
 
-    for (const segment of session.storySegments(story)) {
+    for (const segment of segmentsOf(story)) {
       if (segment.kind === 'text') {
         paragraphPmUnits += segment.text.length;
         atBlockBoundary = false;
@@ -159,14 +166,14 @@ function indexStory(
       }
 
       if (segment.embedKind === 'table' && atBlockBoundary) {
-        pmCursor += tableNodeSize(session, segment.payload, pmCursor, paragraphs, activeStories);
+        pmCursor += tableNodeSize(segmentsOf, segment.payload, pmCursor, paragraphs, activeStories);
         paragraphPmStart = pmCursor;
         continue;
       }
       if (segment.embedKind === 'blockSdt' && atBlockBoundary) {
         const childStory = typeof segment.payload.story === 'string' ? segment.payload.story : null;
         const contentSize = childStory
-          ? indexStory(session, childStory, pmCursor + 1, paragraphs, activeStories)
+          ? indexStory(segmentsOf, childStory, pmCursor + 1, paragraphs, activeStories)
           : 0;
         pmCursor += contentSize + 2;
         paragraphPmStart = pmCursor;
@@ -214,7 +221,20 @@ export function createYrsSidebarProjection(session: YrsSession): YrsSidebarProje
 
 function projectSession(session: YrsSession): YrsSidebarProjection {
   const paragraphMaps = new Map<string, Map<string, ParagraphDisplaySpan> | null>();
-  const roots = geometryRoots(session);
+  const segmentsByStory = new Map<string, YrsStorySegment[]>();
+  const segmentsOf: StorySegmentsReader = (story) => {
+    const segments = segmentsByStory.get(story);
+    if (segments !== undefined) {
+      segmentsByStory.delete(story);
+      return segments;
+    }
+    return session.storySegments(story);
+  };
+  const roots = geometryRoots(session, segmentsByStory);
+  // Only the stories a root indexes are read again.
+  for (const story of segmentsByStory.keys()) {
+    if (!roots.has(story)) segmentsByStory.delete(story);
+  }
 
   const paragraphsForStory = (story: string): Map<string, ParagraphDisplaySpan> | null => {
     const root = roots.get(story)?.story;
@@ -223,7 +243,7 @@ function projectSession(session: YrsSession): YrsSidebarProjection {
 
     try {
       const paragraphs = new Map<string, ParagraphDisplaySpan>();
-      indexStory(session, root, 0, paragraphs, new Set());
+      indexStory(segmentsOf, root, 0, paragraphs, new Set());
       paragraphMaps.set(root, paragraphs);
       return paragraphs;
     } catch {
@@ -231,6 +251,10 @@ function projectSession(session: YrsSession): YrsSidebarProjection {
       // gated sidebar read must not fall back to it. Leave that story unplaced.
       paragraphMaps.set(root, null);
       return null;
+    } finally {
+      for (const [story, owner] of roots) {
+        if (owner.story === root) segmentsByStory.delete(story);
+      }
     }
   };
 

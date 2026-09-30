@@ -66,6 +66,12 @@ fn value_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 #[test]
 fn demo_fixture_round_trips_through_serde_types() {
     let typed: DisplayList = serde_json::from_str(DEMO_FIXTURE).expect("fixture parses");
+    assert!(
+        typed
+            .pages
+            .iter()
+            .all(|page| page.watermark_primitive_count.is_none())
+    );
 
     // no field loss: re-serialized output is value-identical to the fixture
     let out = serde_json::to_string(&typed).expect("serializes");
@@ -1405,6 +1411,7 @@ fn text_watermark_emits_rotated_translucent_text_primitive() {
     let json = build_display_list_json(&input.to_string()).expect("builds");
     let dl: DisplayList = serde_json::from_str(&json).unwrap();
     assert_eq!(dl.pages[0].primitives.len(), 1);
+    assert_eq!(dl.pages[0].watermark_primitive_count, Some(1));
     let Primitive::Text(t) = &dl.pages[0].primitives[0] else {
         panic!("watermark should emit text");
     };
@@ -1448,6 +1455,7 @@ fn picture_watermark_emits_decorative_washout_image_primitive() {
     let json = build_display_list_json(&input.to_string()).expect("builds");
     let dl: DisplayList = serde_json::from_str(&json).unwrap();
     assert_eq!(dl.pages[0].primitives.len(), 1);
+    assert_eq!(dl.pages[0].watermark_primitive_count, Some(1));
     let Primitive::Image(img) = &dl.pages[0].primitives[0] else {
         panic!("watermark should emit image");
     };
