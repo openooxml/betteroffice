@@ -249,15 +249,11 @@ pub fn measure_keep_with_next_group_at(
 /// leave that row no break in the room under the band), or a headerless
 /// table's first row (its smallest slice when the row is taller than
 /// `capacity`), extended to the end of any keep-with-next row chain starting
-/// in them that fits `capacity` along with the rows above it. A page- or
-/// margin-anchored floating table that fits keeps its line slice, as it is
-/// not placed in the flow.
+/// in them that fits `capacity` along with the rows above it. A floating
+/// table keeps its line slice, as it is not placed in the flow.
 fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64) -> f64 {
     let breaks = RowBreaks::new(block, measure);
-    if let Some(floating) = block.floating.as_ref()
-        && measure.total_height <= capacity
-        && !floats_in_text_flow(floating)
-    {
+    if block.floating.is_some() {
         return first_table_fragment_height(block, measure, breaks.lines());
     }
     let mut first = first_table_fragment_height(block, measure, &breaks.kept);
@@ -308,16 +304,6 @@ fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64)
         top += row.height;
     }
     slice
-}
-
-/// Whether placement can put a floating table in the text flow (moving it
-/// whole or, when it spans the column, splitting it into rows), as it does
-/// for a text-anchored one; a page- or margin-anchored one, or one lifted
-/// above its paragraph, only overlays.
-fn floats_in_text_flow(floating: &crate::types::FloatingTablePosition) -> bool {
-    floating.vert_anchor.as_deref().unwrap_or("text") == "text"
-        && !matches!(floating.tblp_x_spec.as_deref(), Some("inside" | "outside"))
-        && !floating.tblp_y.is_some_and(|y| y.is_finite() && y < 0.0)
 }
 
 /// Whether a paragraph forbids splitting its own lines across a page (keepLines).

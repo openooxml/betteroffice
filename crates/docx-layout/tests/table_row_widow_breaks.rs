@@ -375,7 +375,7 @@ fn a_keep_next_heading_stays_beside_a_text_floating_table_lifted_above_it() {
 }
 
 #[test]
-fn a_keep_next_heading_moves_with_a_full_width_text_floating_table() {
+fn a_full_width_text_floating_table_splits_its_rows_at_any_line() {
     let mut table = table_rows(&[
         (1, json!({}), json!({"isHeader": true})),
         (2, json!({"widowControl": true}), json!({})),
@@ -388,5 +388,5 @@ fn a_keep_next_heading_moves_with_a_full_width_text_floating_table() {
     }
     table["block"]["floating"] =
         json!({"horzAnchor": "margin", "vertAnchor": "text", "tblpX": 0, "tblpY": 0});
-    assert_eq!(heading_and_table_pages_after(2, table), (Some(1), Some(1)));
+    assert_eq!(heading_and_table_pages_after(2, table), (Some(0), Some(0)));
 }

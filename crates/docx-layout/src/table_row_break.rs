@@ -113,7 +113,8 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
 
 /// A table's row break geometry under the paragraph rules, with every
 /// whole-line bottom built on first use for a row those rules leave no break
-/// in a whole column, which Word then breaks at any line.
+/// in a whole column, which Word then breaks at any line. A floating table
+/// keeps whole-line breaks throughout.
 pub(crate) struct RowBreaks<'a> {
     block: &'a TableBlock,
     measure: &'a TableExtent,
@@ -126,7 +127,7 @@ impl<'a> RowBreaks<'a> {
         Self {
             block,
             measure,
-            kept: build_table_row_break_info(block, measure),
+            kept: row_break_info(block, measure, block.floating.is_none()),
             lines: OnceCell::new(),
         }
     }
