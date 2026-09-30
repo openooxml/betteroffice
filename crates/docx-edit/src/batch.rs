@@ -2807,26 +2807,46 @@ impl EditingDoc {
         }))
     }
 
-    /// Resolves tracked changes by revision id outside undo history, as a host batch does: the
-    /// `accept` ids apply and the `reject` ids roll back, as [`EditingDoc::accept_change`] and
-    /// [`EditingDoc::reject_change`] resolve them. An id that matches nothing is skipped. Returns
-    /// the ids resolved.
+    /// Resolves tracked changes by revision id in one transaction outside undo history, as a host
+    /// batch commits: the `accept` ids apply and the `reject` ids roll back, as
+    /// [`EditingDoc::accept_change`] and [`EditingDoc::reject_change`] resolve them. An id that
+    /// matches nothing is skipped; any other failure leaves the document unchanged. Returns the
+    /// ids resolved.
     pub fn settle_revisions(
         &self,
         accept: &[crate::RevisionId],
         reject: &[crate::RevisionId],
         history: &UndoSession,
     ) -> crate::OpResult<Vec<crate::RevisionId>> {
+        if !history.belongs_to(self) {
+            return Err(EditError::InvalidUpdate(
+                "the undo history belongs to another document".to_owned(),
+            )
+            .into());
+        }
+        let (state, state_vector) = {
+            let txn = self.yrs_doc().transact();
+            if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
+                return Err(EditError::InvalidUpdate(
+                    "the document holds updates that are not integrated yet".to_owned(),
+                )
+                .into());
+            }
+            (
+                deterministic::encode_state_as_update_v1(&txn, &StateVector::default()),
+                txn.state_vector(),
+            )
+        };
+        let stage = self.fork(&state)?;
         let ctx = EditCtx::system("");
         let mut resolved = Vec::new();
-        history.add_undo_barrier();
         for (ids, accepting) in [(accept, true), (reject, false)] {
             for id in ids {
                 let target = crate::ChangeTarget::Revision(id.clone());
                 let outcome = if accepting {
-                    self.accept_change(&ctx, &target)
+                    stage.accept_change(&ctx, &target)
                 } else {
-                    self.reject_change(&ctx, &target)
+                    stage.reject_change(&ctx, &target)
                 };
                 match outcome {
                     Ok(receipt) => resolved.extend(receipt.revision_ids),
@@ -2835,7 +2855,20 @@ impl EditingDoc {
                 }
             }
         }
+        if resolved.is_empty() {
+            return Ok(resolved);
+        }
+        let update = deterministic::encode_diff_v1(&stage.yrs_doc().transact(), &state_vector);
+        let adoption = Update::decode_v1(&update)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         history.add_undo_barrier();
+        self.yrs_doc()
+            .transact_mut_with(HOST_ORIGIN)
+            .apply_update(adoption)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        history.add_undo_barrier();
+        self.id_counter
+            .store(stage.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
         Ok(resolved)
     }
 
