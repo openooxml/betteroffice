@@ -229,7 +229,9 @@ fn layout_table_with_position(
     let header_rows_height = get_header_rows_height(measure, header_row_count);
     let breaks = RowBreaks::new(block, measure);
     let first_fragment_height = first_table_fragment_height(block, measure, &breaks.kept);
-    let keep_heights = row_keep_heights(block, measure, &breaks, paginator.get_column_capacity());
+    // a chain's follower slice depends on the column it lands in
+    let mut keep_heights: Vec<f64> = Vec::new();
+    let mut keep_heights_capacity = f64::NAN;
 
     let mut row_index = 0usize;
     let mut consumed = 0.0f64; // px of rows[row_index] already placed on a previous fragment
@@ -239,6 +241,10 @@ fn layout_table_with_position(
         let is_first_fragment = row_index == 0 && consumed == 0.0;
         // The tallest stretch a fresh column offers between float bands.
         let column_capacity = paginator.get_column_capacity();
+        if column_capacity != keep_heights_capacity {
+            keep_heights = row_keep_heights(block, measure, &breaks, column_capacity);
+            keep_heights_capacity = column_capacity;
+        }
         let body_capacity = if header_row_count > 0 && header_rows_height <= column_capacity {
             column_capacity - header_rows_height
         } else {
