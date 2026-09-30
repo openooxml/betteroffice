@@ -510,6 +510,11 @@ export function useRustDisplayList(
   // The engines whose worker ran out of memory, each with the failure once its
   // replacement did too. Weak, so a replaced document's session is not kept.
   const outOfMemoryRef = useRef(new WeakMap<YrsSession, ResidentWorkerOutOfMemoryError | null>());
+  // Background work that runs a worker out of memory stops for that engine, and the replacement
+  // it causes leaves the engine's own replacement to a later failure.
+  const backgroundOutOfMemoryRef = useRef(new WeakSet<YrsSession>());
+  const backgroundKilledRef = useRef(new WeakSet<ResidentEngineWorkerClient>());
+  const spareReplacementRef = useRef(new WeakSet<YrsSession>());
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
   const displayWindowListenersRef = useRef(new Set<() => void>());
   const displayWindow = useMemo<DisplayWindow>(
@@ -773,7 +778,8 @@ export function useRustDisplayList(
     return () => clearTimeout(id);
   }, [snapshot.queries]);
 
-  // A worker that ran out of memory is replaced by a fresh one once. The main
+  // A worker that ran out of memory is replaced by a fresh one once, and once more when
+  // background work ran it out of memory. The main
   // thread never takes over its work: its memory has the same limit and
   // already holds the document. `retry` asks the caller to use the current
   // worker, `stale` means the failed worker no longer serves this engine.
@@ -797,8 +803,12 @@ export function useRustDisplayList(
       workerRef.current = null;
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
-      if (!previous) {
-        outOfMemoryRef.current.set(hostEngine, null);
+      const background = client !== null && backgroundKilledRef.current.has(client);
+      if (!previous || background || spareReplacementRef.current.delete(hostEngine)) {
+        if (!previous) {
+          outOfMemoryRef.current.set(hostEngine, null);
+          if (background) spareReplacementRef.current.add(hostEngine);
+        }
         console.warn(
           '[CanvasRenderer] Resident engine worker ran out of memory; starting a fresh worker',
           failure
@@ -1268,12 +1278,26 @@ export function useRustDisplayList(
     [dropWorker, isCurrentWorker, overrides?.build, requestOpenedWorker, sessionLoad]
   );
 
+  const backgroundFailure = useCallback(
+    (hostEngine: YrsSession, client: ResidentEngineWorkerClient, error: unknown): void => {
+      if (!(error instanceof ResidentWorkerOutOfMemoryError)) return;
+      backgroundOutOfMemoryRef.current.add(hostEngine);
+      if (workerRef.current?.client === client) backgroundKilledRef.current.add(client);
+    },
+    []
+  );
+
   const fontRequirementsInWorker = useCallback<FontRequirementsInWorker>(
     (hostEngine, request, options) => {
       if (options?.background) {
         // Only a worker already laying out this document answers, hydrated or not.
         const current = workerRef.current;
-        if (!current || current.engine !== hostEngine || !current.client.bootstrapSent()) {
+        if (
+          !current ||
+          current.engine !== hostEngine ||
+          !current.client.bootstrapSent() ||
+          backgroundOutOfMemoryRef.current.has(hostEngine)
+        ) {
           return null;
         }
         return current.client
@@ -1282,7 +1306,10 @@ export function useRustDisplayList(
             JSON.parse(requirements);
             return requirements;
           })
-          .catch(() => null);
+          .catch((error: unknown) => {
+            backgroundFailure(hostEngine, current.client, error);
+            return null;
+          });
       }
       if (!workerOpenEnabledRef.current || !workerOpenReplicaPending(hostEngine)) return null;
       if (!workerOpenSourcesRef.current.has(hostEngine)) {
@@ -1309,7 +1336,7 @@ export function useRustDisplayList(
           return null;
         });
     },
-    [dropWorker, isCurrentWorker, requestOpenedWorker]
+    [backgroundFailure, dropWorker, isCurrentWorker, requestOpenedWorker]
   );
 
   const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
@@ -1549,7 +1576,12 @@ export function useRustDisplayList(
       }
       const outOfMemory = outOfMemoryRef.current.get(hostEngine);
       if (outOfMemory) return background ? null : rejectedWorkerLayout(outOfMemory);
-      if (background && workerRef.current?.engine !== hostEngine) return null;
+      if (
+        background &&
+        (workerRef.current?.engine !== hostEngine || backgroundOutOfMemoryRef.current.has(hostEngine))
+      ) {
+        return null;
+      }
       if (
         workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine) &&
         workerRef.current?.engine !== hostEngine &&
@@ -1620,6 +1652,7 @@ export function useRustDisplayList(
         cause: unknown
       ): Promise<WorkerLayoutComputation | null> | null => {
         const current = workerRef.current;
+        if (background) backgroundFailure(hostEngine, worker, cause);
         if (
           background ||
           unmountedRef.current ||
@@ -1711,6 +1744,7 @@ export function useRustDisplayList(
         .catch(unavailable);
     },
     [
+      backgroundFailure,
       canLayoutInWorker,
       dropWorker,
       frameBase,

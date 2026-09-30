@@ -127,10 +127,11 @@ for (const proposals of ['present', 'empty', 'unavailable', 'throwing']) {
           hook.result.current.runLayoutPipeline({ onHost: !inWorker });
           await new Promise((done) => setTimeout(done, 5));
         });
+        const where = inWorker ? 'worker' : 'host';
         expect(order).toEqual([
-          `${inWorker ? 'worker' : 'host'}:exact`,
+          `${where}:exact`,
           'layout',
-          ...(proposals === 'present' ? ['worker:superset'] : []),
+          ...(proposals === 'present' ? [`${where}:superset`] : []),
         ]);
         expect(measured).toEqual([requirements]);
         expect(warmed).toEqual(proposals === 'present' ? [warm] : []);

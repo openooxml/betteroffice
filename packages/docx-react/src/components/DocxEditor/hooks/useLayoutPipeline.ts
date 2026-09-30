@@ -352,44 +352,49 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Layout Pipeline
   // =========================================================================
 
-  // Once per proposal set, after the pass's layout request, by the worker already laying the
-  // document out; here only without one. Never fatal.
+  // Once per proposal set, after the pass's layout request, where the pass laid the document out
+  // (a worker's copy may lag a pass laid out here). Never fatal.
   const warmedProposalsRef = useRef<{ session: YrsSession; key: string } | null>(null);
-  const warmDecisionFonts = useCallback((owner: YrsSession, request: object): void => {
-    const key = warmFontRequirementsRef.current ? proposalSetKey(owner) : null;
-    const warmed = warmedProposalsRef.current;
-    if (key === null || (warmed?.session === owner && warmed.key === key)) return;
-    const claim = { session: owner, key };
-    warmedProposalsRef.current = claim;
-    const warmInput = JSON.stringify({ ...request, revisionFontSuperset: true });
-    const failed = (): void => {
-      if (warmedProposalsRef.current === claim) warmedProposalsRef.current = null;
-    };
-    const adopt = (json: string | null): void => {
-      if (json === null) return failed();
-      if (sessionRef.current !== owner || unmountedRef.current) return;
-      warmFontRequirementsRef.current?.(JSON.parse(json) as ResidentFontRequirement[]);
-    };
-    let pending: Promise<string | null> | null = null;
-    try {
-      pending =
-        fontRequirementsInWorkerRef.current?.(owner, warmInput, { background: true }) ?? null;
-    } catch {}
-    if (pending) {
-      void pending.then(adopt).catch(failed);
-      return;
-    }
-    // An unhydrated worker-open replica has no document to sweep here.
-    if (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)) return failed();
-    setTimeout(() => {
-      if (sessionRef.current !== owner || unmountedRef.current) return;
+  const warmDecisionFonts = useCallback(
+    (owner: YrsSession, request: object, here: boolean): void => {
+      const key = warmFontRequirementsRef.current ? proposalSetKey(owner) : null;
+      const warmed = warmedProposalsRef.current;
+      if (key === null || (warmed?.session === owner && warmed.key === key)) return;
+      const claim = { session: owner, key };
+      warmedProposalsRef.current = claim;
+      const warmInput = JSON.stringify({ ...request, revisionFontSuperset: true });
+      const failed = (): void => {
+        if (warmedProposalsRef.current === claim) warmedProposalsRef.current = null;
+      };
+      const adopt = (json: string | null): void => {
+        if (json === null) return failed();
+        if (sessionRef.current !== owner || unmountedRef.current) return;
+        warmFontRequirementsRef.current?.(JSON.parse(json) as ResidentFontRequirement[]);
+      };
+      let pending: Promise<string | null> | null = null;
       try {
-        adopt(owner.layoutFontRequirementsJson(warmInput));
-      } catch {
-        failed();
+        if (!here) {
+          pending =
+            fontRequirementsInWorkerRef.current?.(owner, warmInput, { background: true }) ?? null;
+        }
+      } catch {}
+      if (pending) {
+        void pending.then(adopt).catch(failed);
+        return;
       }
-    }, 0);
-  }, []);
+      // An unhydrated worker-open replica has no document to sweep here.
+      if (workerOpenEnabledRef.current && workerOpenReplicaPending(owner)) return failed();
+      setTimeout(() => {
+        if (sessionRef.current !== owner || unmountedRef.current) return;
+        try {
+          adopt(owner.layoutFontRequirementsJson(warmInput));
+        } catch {
+          failed();
+        }
+      }, 0);
+    },
+    []
+  );
 
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
@@ -658,12 +663,12 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         if (!workerPass) {
           if (!warmOnly) {
             layOutHere();
-            warmDecisionFonts(session, { ...request, measurement: undefined });
+            warmDecisionFonts(session, { ...request, measurement: undefined }, true);
           }
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
-        if (!warmOnly) warmDecisionFonts(session, { ...request, measurement: undefined });
+        if (!warmOnly) warmDecisionFonts(session, { ...request, measurement: undefined }, false);
         workerPassRef.current = { pass, session, opening: !inWorker && !previewOnly };
         void workerPass
           .then(

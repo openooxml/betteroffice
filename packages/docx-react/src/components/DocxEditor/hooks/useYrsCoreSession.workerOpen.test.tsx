@@ -1069,7 +1069,7 @@ test.each([false, true])(
   }
 );
 
-test('background worker layout OOM waits for the next foreground pass to recover', async () => {
+test('background worker layout OOM waits for the next foreground pass to recover, stops background work and spares the next replacement', async () => {
   const options: { oomStage?: 'sync' } = {};
   const { workers, posted } = installWorker(options);
   const frames = holdFrames();
@@ -1123,6 +1123,37 @@ test('background worker layout OOM waits for the next foreground pass to recover
     expect(result.current.renderer.status).toBe('ready');
     expect(result.current.renderer.error).toBeNull();
     expect(result.current.errors).toEqual([]);
+
+    const count = posted.length;
+    expect(result.current.renderer.layoutInWorker(session, input, { background: true })).toBeNull();
+    expect(
+      result.current.renderer.fontRequirementsInWorker(session, input, { background: true })
+    ).toBeNull();
+    expect(posted).toHaveLength(count);
+
+    await act(async () => {
+      const pass = result.current.renderer.layoutInWorker(session, input);
+      expect(pass).not.toBeNull();
+      expect(await pass).not.toBeNull();
+    });
+    expect(workers).toHaveLength(3);
+    expect(workers[2]!.requests).toEqual(['open', 'bootstrap']);
+    expect(result.current.renderer.error).toBeNull();
+    expect(result.current.errors).toEqual([]);
+
+    let failure: unknown = null;
+    await act(async () => {
+      const pass = result.current.renderer.layoutInWorker(session, input);
+      expect(pass).not.toBeNull();
+      await pass!.catch((error: unknown) => {
+        failure = error;
+      });
+    });
+    expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(workers).toHaveLength(3);
+    await waitFor(() =>
+      expect(result.current.renderer.error).toBeInstanceOf(ResidentWorkerOutOfMemoryError)
+    );
     unmount();
   } finally {
     cleanup();
