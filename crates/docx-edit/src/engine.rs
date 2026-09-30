@@ -94,7 +94,7 @@ struct MeasurementState {
 #[derive(Debug)]
 struct ResidentRegionState {
     request_json: String,
-    /// [`layout_options_fingerprint`] of `request_json`.
+    /// [`pagination_request_fingerprint`] of `request_json`.
     request_fingerprint: String,
     headers_footers: Option<serde_json::Value>,
     /// Inputs retained from the last full region pass so a plain body-text
@@ -1043,6 +1043,17 @@ fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
         }
     }
     pages::sha256_hex(canonical_json(&request).as_bytes())
+}
+
+/// [`layout_options_fingerprint`] without the revision preview.
+fn pagination_request_fingerprint(mut request: serde_json::Value) -> String {
+    if let Some(env) = request
+        .get_mut("renderEnv")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        env.remove("revisionPreview");
+    }
+    layout_options_fingerprint(request)
 }
 
 fn font_requirements_fingerprint(mut request: serde_json::Value) -> Result<u64, String> {
@@ -2088,11 +2099,13 @@ impl EngineSession {
         input_json: &str,
         prefix_pages: Option<usize>,
     ) -> Result<PreparedRegionLayout, String> {
-        let request_fingerprint = layout_options_fingerprint(
+        let request_fingerprint = pagination_request_fingerprint(
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?,
         );
         // Reused pages keep the section stamps and page labels of the regions
-        // they were laid out under, so a regions change paginates afresh.
+        // they were laid out under, so a regions change paginates afresh. A
+        // revision preview changes only the blocks it decides, which the block
+        // fingerprints catch.
         if self
             .regions
             .borrow()

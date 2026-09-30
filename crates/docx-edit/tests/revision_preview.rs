@@ -583,6 +583,58 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
 }
 
 #[test]
+fn a_preview_decision_paginates_incrementally_as_a_fresh_layout_would() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let filler = |range: std::ops::Range<usize>| -> String {
+        range
+            .map(|index| {
+                format!(
+                    "<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"
+                )
+            })
+            .collect()
+    };
+    let bytes = document(&format!("{}{PROPOSALS}{}", filler(0..90), filler(90..120)));
+    let blocks = 123;
+    let layout = |engine: &EngineSession, ids: &[String; 3], env: &RenderEnv| {
+        let mut output = engine
+            .layout_document_with_regions_json(&layout_request(env, font))
+            .unwrap();
+        for (index, id) in ids.iter().enumerate() {
+            output = output.replace(id.as_str(), &format!("revision-{index}"));
+        }
+        let mut output: Value = serde_json::from_str(&output).unwrap();
+        output["layout"].take()
+    };
+    let (engine, ids) = proposals_in(&bytes);
+    let native = layout(&engine, &ids, &RenderEnv::default());
+    assert!(native["pages"].as_array().unwrap().len() > 3);
+    let [replace, delete, insert] = [0, 1, 2];
+    for decisions in [
+        vec![(insert, Accepted)],
+        vec![(replace, Accepted), (delete, Accepted), (insert, Accepted)],
+        vec![(delete, Rejected)],
+        vec![],
+    ] {
+        let env = |ids: &[String; 3]| {
+            preview(
+                &decisions
+                    .iter()
+                    .map(|&(index, decision)| (ids[index].as_str(), decision))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let before = engine.stats();
+        let incremental = layout(&engine, &ids, &env(&ids));
+        let after = engine.stats();
+        assert!(after.incremental_pagination_calls > before.incremental_pagination_calls);
+        assert!(after.pagination_blocks_placed - before.pagination_blocks_placed < blocks);
+        let (fresh, fresh_ids) = proposals_in(&bytes);
+        assert_eq!(incremental, layout(&fresh, &fresh_ids, &env(&fresh_ids)));
+    }
+}
+
+#[test]
 fn a_previewed_page_break_revision_moves_the_following_page() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let two_paragraphs =
