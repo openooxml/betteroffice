@@ -21,8 +21,7 @@ interface WorkerPass {
   answer(): void;
 }
 
-/** A document whose version each test moves on; worker passes answer when the test says. */
-async function opened() {
+function fakeDocument() {
   const doc = { version: 1, laidOutHere: [] as number[], workerAvailable: true };
   const session = {
     version: () => String(doc.version),
@@ -33,9 +32,16 @@ async function opened() {
     },
     residentWorkerProbe: () => ({ layoutRevision: 1 }),
   } as unknown as YrsSession;
+  return { doc, session };
+}
+
+/** A document whose version each test moves on; worker passes answer when the test says. */
+async function opened() {
+  const { doc, session } = fakeDocument();
   const worker: WorkerPass[] = [];
   const errors: Error[] = [];
-  const hook = renderHook(() =>
+  const syncCoordinator = new LayoutSelectionGate();
+  const hook = renderHook(({ session }) =>
     useLayoutPipeline({
       document: null,
       session,
@@ -46,20 +52,21 @@ async function opened() {
       deferLayoutPass: () => false,
       pagesContainerRef: { current: null },
       viewportLayoutRef: { current: null },
-      syncCoordinator: new LayoutSelectionGate(),
+      syncCoordinator,
       getScrollContainer: () => null,
       onError: (error) => errors.push(error),
-      layoutInWorker: () =>
+      layoutInWorker: (asked) =>
         doc.workerAvailable
           ? new Promise<LayoutComputation | null>((resolve) => {
               worker.push({
-                at: doc.version,
+                at: Number(asked.version()),
                 answer: () =>
                   resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
               });
             })
           : null,
-    })
+    }),
+    { initialProps: { session } }
   );
   const frame = () =>
     act(async () => {
@@ -189,4 +196,29 @@ test('a host batch lays out here when no worker takes it', async () => {
   expect(worker).toHaveLength(1);
   expect(doc.laidOutHere).toEqual([2]);
   expect(shown()).toBe('2');
+});
+
+test('a new session lays out while the replaced one still has a worker pass queued', async () => {
+  const { doc, worker, errors, hook, frame, answer, shown } = await opened();
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('local', true));
+  await frame();
+  doc.version = 3;
+  act(() => hook.result.current.scheduleLayout('local', true));
+  await frame();
+  expect(worker).toHaveLength(2);
+
+  const next = fakeDocument();
+  next.doc.version = 7;
+  hook.rerender({ session: next.session });
+  act(() => hook.result.current.runLayoutPipeline());
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2, 7]);
+  await answer(2);
+  expect(shown()).toBe('7');
+  await answer(1);
+  await frame();
+  expect(shown()).toBe('7');
+  expect(worker).toHaveLength(3);
+  expect(doc.laidOutHere).toEqual([]);
+  expect(errors).toEqual([]);
 });
