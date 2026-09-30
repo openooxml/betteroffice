@@ -361,6 +361,16 @@ pub fn layout_document_incremental(
         .map(|(&head, _)| head)
         .min()
         .unwrap_or(dirty_index);
+    // Balancing weighs all of a section's content, so an edit anywhere in a
+    // section whose columns balance resumes before the section opens them.
+    let dirty_section = plan
+        .break_indices
+        .partition_point(|&index| index < dirty_index);
+    let restart_index = if section_balances_columns(&plan, dirty_section, &initial_config) {
+        restart_index.min(section_start(&plan, dirty_section))
+    } else {
+        restart_index
+    };
     let resume = previous_checkpoints
         .iter()
         .rev()
@@ -474,6 +484,30 @@ fn section_ends_with_next_column(plan: &LayoutPlan, section_index: usize) -> boo
         && break_type_after_section(plan, section_index) == Some(SectionBreakType::NextColumn)
 }
 
+/// Whether placement balances a section's columns where its column region opens.
+fn section_balances_columns(
+    plan: &LayoutPlan,
+    section_index: usize,
+    initial_config: &SectionLayoutConfig,
+) -> bool {
+    plan.section_configs
+        .get(section_index)
+        .unwrap_or(initial_config)
+        .columns
+        .as_ref()
+        .map_or(1.0, |columns| columns.count)
+        > 1.0
+        && !section_ends_with_next_column(plan, section_index)
+}
+
+/// The index of a section's first block.
+fn section_start(plan: &LayoutPlan, section_index: usize) -> usize {
+    section_index
+        .checked_sub(1)
+        .and_then(|previous| plan.break_indices.get(previous))
+        .map_or(0, |section_break| section_break + 1)
+}
+
 /// The block walk itself, per the module's ordering rules. Returns early once
 /// a checkpoint matches the retained layout, which is how incremental placement
 /// detects convergence.
@@ -490,22 +524,25 @@ fn place(
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
 
-    if initial_config
-        .columns
-        .as_ref()
-        .map_or(1.0, |columns| columns.count)
-        > 1.0
-        && !section_ends_with_next_column(plan, section_idx)
-    {
+    // Balancing belongs to the page a section's column region opens on: a
+    // pass from the document start balances the first section, and a resumed
+    // pass rebalances only when its checkpoint's page is that page.
+    let balances = if start_index == 0 {
+        section_balances_columns(plan, 0, initial_config)
+    } else {
+        paginator.balances_region()
+    };
+    if balances {
         hooks::balance_terminal_continuous_text_columns(
             measured,
             paginator,
-            start_index,
+            section_start(plan, section_idx),
             plan.break_indices
-                .first()
+                .get(section_idx)
                 .copied()
                 .unwrap_or(measured.len()),
         )?;
+        paginator.mark_balanced_region();
     }
 
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
@@ -703,6 +740,7 @@ fn place(
                         i + 1,
                         next_break_index.unwrap_or(measured.len()),
                     )?;
+                    paginator.mark_balanced_region();
                 }
 
                 section_idx += 1;
