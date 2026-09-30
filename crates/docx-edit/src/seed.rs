@@ -1528,16 +1528,12 @@ fn image_payload(image: &Value) -> JsonObject {
         "shapeType": nullish(field(Some(image), "shapeType")),
         "opacity": nullish(field(Some(image), "opacity")),
         "effectExtentTop": number(field(field(Some(image), "padding"), "top"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentBottom": number(field(field(Some(image), "padding"), "bottom"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentLeft": number(field(field(Some(image), "padding"), "left"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentRight": number(field(field(Some(image), "padding"), "right"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "layoutInCell": nullish(field(Some(image), "layoutInCell")),
         "allowOverlap": nullish(field(Some(image), "allowOverlap"))
