@@ -279,3 +279,35 @@ fn an_oversized_cant_split_row_keeps_widow_control_where_a_fresh_page_allows_it(
         [(1, 100.0), (2, 60.0)]
     );
 }
+
+#[test]
+fn a_keep_next_heading_moves_with_a_header_table_over_a_kept_row() {
+    let (filler, filler_measure) = paragraph(1, 3, json!({}));
+    let (heading, heading_measure) = paragraph(2, 1, json!({"keepNext": true}));
+    let table = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (8, json!({"keepLines": true, "widowControl": false}), json!({})),
+    ]);
+    let input = json!({
+        "measured":[
+            {"block":filler,"measure":filler_measure},
+            {"block":heading,"measure":heading_measure},
+            table,
+        ],
+        "options":{"pageSize":{"w":200,"h":120},
+            "margins":{"top":10,"right":10,"bottom":10,"left":10}}
+    });
+    let layout: Value =
+        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
+            .unwrap();
+    let page_of = |matches: &dyn Fn(&Value) -> bool| {
+        layout["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|page| page["fragments"].as_array().unwrap().iter().any(matches))
+    };
+    let heading_page = page_of(&|fragment| fragment["blockId"] == 2);
+    let table_page = page_of(&|fragment| fragment["kind"] == "table");
+    assert_eq!((heading_page, table_page), (Some(1), Some(1)));
+}
