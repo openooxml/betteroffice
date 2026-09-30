@@ -377,7 +377,7 @@ export function DocxEditorPagedArea({
               setCommentSelectionRange(selection);
               pagedEditorRef.current?.setSelection(selection.to);
             }
-            setAddCommentYPosition(floatingCommentBtn.top);
+            setAddCommentYPosition(floatingCommentBtn.top / zoom);
             setShowCommentsSidebar(true);
             setIsAddingComment(true);
             setFloatingCommentBtn(null);

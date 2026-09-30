@@ -226,6 +226,38 @@ export function dirtyProjectionStory(activeStory: string): string {
     : 'body';
 }
 
+/**
+ * Frees sessions the editor let go of. Consumers' effects in the commit that replaces a session
+ * still run with the session they rendered, so `retire` keeps that one until they render without
+ * it; any other session is freed at once, and unmounting frees every retired one.
+ */
+function useRetiredSessions(session: YrsSession | null): (replaced: YrsSession | null) => void {
+  const renderedRef = useRef(session);
+  renderedRef.current = session;
+  const retiredRef = useRef(new Set<YrsSession>());
+  const unmountedRef = useRef(false);
+  useEffect(() => {
+    for (const retired of retiredRef.current) {
+      if (retired === session) continue;
+      retiredRef.current.delete(retired);
+      retired.destroy();
+    }
+  }, [session]);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      for (const retired of retiredRef.current) retired.destroy();
+      retiredRef.current.clear();
+    };
+  }, []);
+  return useCallback((replaced: YrsSession | null): void => {
+    if (!replaced) return;
+    if (replaced === renderedRef.current && !unmountedRef.current) retiredRef.current.add(replaced);
+    else replaced.destroy();
+  }, []);
+}
+
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
@@ -268,8 +300,9 @@ export function useYrsCoreSession(
     options?.previewFirstPage === true && !collaboration && !collaborationInitialUpdate;
   const fullOpenTimeoutRef = useRef(FULL_OPEN_TIMEOUT_MS);
   fullOpenTimeoutRef.current = options?.fullOpenTimeoutMs ?? FULL_OPEN_TIMEOUT_MS;
+  const retire = useRetiredSessions(session);
   // The preview leaves once components have let go of it, on the next commit.
-  const retire = useCallback((retiring: YrsSession): void => {
+  const retirePreview = useCallback((retiring: YrsSession): void => {
     if (retiringRef.current === retiring) {
       retiringRef.current = null;
       setHandoffFrom(null);
@@ -304,7 +337,7 @@ export function useYrsCoreSession(
       }
       previewingRef.current = false;
       setPreviewing(false);
-      retire(preview);
+      retirePreview(preview);
     };
     const fail = (error: unknown, options?: { opened: boolean }): void => {
       if (shown) dropPreview(shown.session);
@@ -431,11 +464,11 @@ export function useYrsCoreSession(
       if (fullOpenTimer !== null) clearTimeout(fullOpenTimer);
       paintWaitRef.current?.resolve();
       paintWaitRef.current = null;
-      if (retiringRef.current !== sessionRef.current) retiringRef.current?.destroy();
+      if (retiringRef.current !== sessionRef.current) retire(retiringRef.current);
       retiringRef.current = null;
       cancelCompatibilityWarmRef.current?.();
       cancelCompatibilityWarmRef.current = null;
-      sessionRef.current?.destroy();
+      retire(sessionRef.current);
       sessionRef.current = null;
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
@@ -448,6 +481,8 @@ export function useYrsCoreSession(
     seedGeneration,
     collaborationClientId,
     collaborationInitialUpdate,
+    retire,
+    retirePreview,
   ]);
 
   const notifyFramePresented = useCallback((engine: unknown): void => {
@@ -457,8 +492,8 @@ export function useYrsCoreSession(
       waiting.resolve();
     }
     const retiring = retiringRef.current;
-    if (retiring && engine === sessionRef.current && engine !== retiring) retire(retiring);
-  }, [retire]);
+    if (retiring && engine === sessionRef.current && engine !== retiring) retirePreview(retiring);
+  }, [retirePreview]);
 
   const failOpening = useCallback(
     (error: Error, session?: unknown): boolean =>

@@ -537,7 +537,7 @@ fn place(
             paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
 
-        // at the head of a keep-with-next group, move to a fresh page when the
+        // at the head of a keep-with-next group, move to a fresh column when the
         // whole group would otherwise straddle the boundary
         if let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
             && !plan.keep_with_next.interior_members.contains(&i)
@@ -546,15 +546,37 @@ fn place(
             let page_content_height =
                 paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
             let page_has_content = paginator.page_fragment_count(state_idx) > 0;
-            let group_height = hooks::measure_keep_with_next_group(group, measured)?;
-            let must_advance = hooks::keep_with_next_group_must_advance(
+            let group_height = hooks::measure_keep_with_next_group_at(
+                group,
+                measured,
+                |before| paginator.leading_spacing(before),
+                paginator.state(state_idx).deferred_spacing,
+                page_content_height,
+            )?;
+            let fresh_page_height = hooks::measure_keep_with_next_group_at(
+                group,
+                measured,
+                |_| 0.0,
+                0.0,
+                page_content_height,
+            )?;
+            let must_advance = hooks::keep_with_next_group_must_advance_from(
                 group_height,
+                fresh_page_height,
                 paginator.get_available_height(),
                 page_content_height,
                 page_has_content,
             )?;
             if must_advance {
-                paginator.force_authored_page_break(false);
+                // advance until a column holds the run or a fresh page opens
+                loop {
+                    let idx = paginator.advance_for_overflow();
+                    if paginator.state(idx).column_index == 0
+                        || fresh_page_height <= paginator.get_available_height()
+                    {
+                        break;
+                    }
+                }
             }
         }
 
