@@ -748,6 +748,17 @@ impl Paginator {
         self.current_column_has_flow_content
     }
 
+    /// Whether column balancing shortened the state's region above its page's
+    /// body bottom.
+    pub fn balanced_limit_in_force(&self, idx: usize) -> bool {
+        let state = &self.states[idx];
+        let page = &self.pages[state.page_index];
+        let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+        let (limit, _) =
+            self.content_bottom(page.size.h - margins.bottom, page.number, &page.float_bands);
+        state.content_limit < limit
+    }
+
     /// Number of fragments already on the state's page.
     pub fn page_fragment_count(&self, idx: usize) -> usize {
         self.pages[self.states[idx].page_index].fragments.len()

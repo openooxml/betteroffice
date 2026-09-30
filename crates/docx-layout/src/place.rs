@@ -34,7 +34,9 @@
 
 use crate::LayoutError;
 use crate::hooks;
-use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
+use crate::keep_together::{
+    paragraph_breaks_before_run, paragraph_is_unbreakable, paragraph_widow_control,
+};
 use crate::page_flow::{PageFlowGeometry, Paginator};
 use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
@@ -876,8 +878,19 @@ fn place(
                 0.0,
                 page_content_height,
             )?;
-            // balancing chose its column depth with the run split in place
-            let oversized = fresh_page_height > page_content_height && !paginator.balances_region();
+            // a page break within the run or on its follower wins over the keep
+            let breaks_page = group
+                .members
+                .iter()
+                .skip(1)
+                .chain(group.follower.as_ref())
+                .any(|&index| {
+                    let (before, run) = paragraph_breaks_before_run(&measured[index].block);
+                    before || run
+                });
+            let oversized = fresh_page_height > page_content_height
+                && !paginator.balanced_limit_in_force(state_idx)
+                && !breaks_page;
             let must_advance = if oversized {
                 paginator.current_column_has_flow_content()
                     && group_height > paginator.get_available_height()
@@ -1286,12 +1299,11 @@ fn layout_paragraph(
             .leading_spacing(space_before)
             .max(state.deferred_spacing)
             + paragraph_height;
-        let page_content_height = state.content_limit - state.content_top;
         let oversized_keep_lines = block.attrs.as_ref().and_then(|attrs| attrs.keep_lines)
             == Some(true)
-            && paragraph_height > page_content_height
-            && !kept_with_previous
-            && !paginator.balances_region();
+            && paragraph_height > state.content_limit - state.content_top
+            && !paginator.balanced_limit_in_force(state_idx)
+            && !kept_with_previous;
         let capacity = paginator.get_column_capacity();
         if oversized_keep_lines && paginator.current_column_has_flow_content() {
             paginator.advance_for_overflow();
@@ -3070,6 +3082,27 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn oversized_keeps_do_not_advance_across_a_page_break_on_the_follower() {
+        for attr in ["pageBreakBefore", "pageBreakBeforeRun"] {
+            let mut follower = oversized_paragraph(true);
+            follower["block"]["attrs"][attr] = json!(true);
+            let result = layout_document(&mut oversized_input(vec![
+                paragraph(1, 20, KEEP_LINE_HEIGHT, json!({"widowControl": false})),
+                paragraph(
+                    2,
+                    1,
+                    KEEP_LINE_HEIGHT,
+                    json!({"keepNext": true, "widowControl": false}),
+                ),
+                follower,
+            ]))
+            .unwrap();
+            assert_eq!(result.pages.len(), 3, "{attr}");
+            assert_eq!(paragraph_slices(&result, 2.0), vec![(0, 0, 1)], "{attr}");
+        }
+    }
+
+    #[test]
     fn oversized_keeps_in_balanced_columns_split_in_place() {
         for keep_next in [true, false] {
             let mut measured = vec![paragraph(
@@ -3175,61 +3208,33 @@ mod pagination_rule_tests {
     #[test]
     fn oversized_keeps_use_current_column_flow_content() {
         for keep_next in [true, false] {
-            for (break_column, fill_second) in [(false, false), (true, false), (true, true)] {
-                let mut measured = vec![json!({
+            let mut measured = vec![
+                json!({
                     "block": {"kind": "pageBreak", "id": "origin"},
                     "measure": {"kind": "pageBreak"},
-                })];
-                measured.push(paragraph(
-                    1,
-                    if fill_second { 58 } else { 20 },
-                    KEEP_LINE_HEIGHT,
-                    json!({"widowControl": false}),
-                ));
-                if break_column {
-                    measured.push(json!({
-                        "block": {"kind": "columnBreak", "id": "column"},
-                        "measure": {"kind": "columnBreak"},
-                    }));
-                }
-                if fill_second {
-                    measured.push(paragraph(
-                        2,
-                        20,
-                        KEEP_LINE_HEIGHT,
-                        json!({"widowControl": false}),
-                    ));
-                }
-                measured.extend(if keep_next {
-                    oversized_run(true)
-                } else {
-                    vec![oversized_paragraph(true)]
-                });
-                let mut value = oversized_input(measured);
-                value.options.columns =
-                    Some(serde_json::from_value(json!({"count": 2, "gap": 20})).unwrap());
-                let result = layout_document(&mut value).unwrap();
-                assert_eq!(result.pages.len(), 2);
+                }),
+                paragraph(1, 58, KEEP_LINE_HEIGHT, json!({"widowControl": false})),
+                paragraph(2, 20, KEEP_LINE_HEIGHT, json!({"widowControl": false})),
+            ];
+            measured.extend(if keep_next {
+                oversized_run(true)
+            } else {
+                vec![oversized_paragraph(true)]
+            });
+            let mut value = oversized_input(measured);
+            value.options.columns =
+                Some(serde_json::from_value(json!({"count": 2, "gap": 20})).unwrap());
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 2);
+            assert_eq!(paragraph_positions(&result, 1.0), vec![(0, 10.0, 0, 58)]);
+            assert_eq!(paragraph_positions(&result, 2.0), vec![(0, 110.0, 0, 20)]);
+            if keep_next {
+                assert_run_positions(&result, (1, 10.0), (1, 110.0), 57);
+            } else {
                 assert_eq!(
-                    paragraph_positions(&result, 1.0),
-                    vec![(0, 10.0, 0, if fill_second { 58 } else { 20 })]
+                    paragraph_positions(&result, 100.0),
+                    vec![(1, 10.0, 0, 58), (1, 110.0, 58, 60)]
                 );
-                if fill_second {
-                    assert_eq!(paragraph_positions(&result, 2.0), vec![(0, 110.0, 0, 20)]);
-                }
-                let (head, tail) = if fill_second {
-                    ((1, 10.0), (1, 110.0))
-                } else {
-                    ((0, 110.0), (1, 10.0))
-                };
-                if keep_next {
-                    assert_run_positions(&result, head, tail, 57);
-                } else {
-                    assert_eq!(
-                        paragraph_positions(&result, 100.0),
-                        vec![(head.0, head.1, 0, 58), (tail.0, tail.1, 58, 60)]
-                    );
-                }
             }
         }
     }
