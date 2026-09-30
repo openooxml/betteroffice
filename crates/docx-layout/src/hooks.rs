@@ -208,7 +208,6 @@ fn layout_table_with_position(
 
     let mut row_index = 0usize;
     let mut consumed = 0.0f64; // px of rows[row_index] already placed on a previous fragment
-    let mut moved_row = None;
 
     'rows: while row_index < rows.len() {
         let state_idx = paginator.get_current();
@@ -252,7 +251,7 @@ fn layout_table_with_position(
             0.0
         };
         // Without cantSplit, a first body row whose paragraph rules leave no break
-        // below the header band starts on a fresh column with the band.
+        // below the header band starts with the band at its first line, as main does.
         let first_body_kept_oversized = is_first_fragment
             && header_row_count > 0
             && header_row_count < rows.len()
@@ -261,12 +260,13 @@ fn layout_table_with_position(
                 .get(header_row_count)
                 .is_some_and(|row| row.cant_split.unwrap_or(false))
             && breaks.kept_oversized(header_row_count, 0.0, body_capacity);
-        let header_start_height =
-            if first_fragment_height <= column_capacity || first_body_kept_oversized {
-                first_fragment_height
-            } else {
-                header_rows_height
-            };
+        let header_start_height = if first_body_kept_oversized {
+            header_rows_height + breaks.fresh_slice(header_row_count, 0.0, body_capacity)
+        } else if first_fragment_height <= column_capacity {
+            first_fragment_height
+        } else {
+            header_rows_height
+        };
         if is_first_fragment
             && header_row_count > 0
             && (header_start_height <= column_capacity || first_body_kept_oversized)
@@ -371,20 +371,16 @@ fn layout_table_with_position(
                     && clip_top == 0.0
                     && cur == header_row_count
                     && !cant_split
-                    && paginator.state(state_idx).pen_y == paginator.state(state_idx).content_top
                     && breaks.kept_oversized(cur, 0.0, row_capacity))
             {
                 // Nothing of this row fits, but earlier rows did — end before it,
                 // unless they are the header band above an unavoidable split.
             } else if !cant_split
                 && !block.rows.get(cur).is_some_and(|row| row.is_exact_height())
-                && (snap_row_break(&breaks.kept, cur, start_off, row_capacity) > 0.0
-                    || (paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
-                        && moved_row != Some(cur)))
+                && snap_row_break(&breaks.kept, cur, start_off, row_capacity) > 0.0
             {
-                // Nothing fits below content already in this column: start the
-                // fragment in the next one.
-                moved_row = Some(cur);
+                // The paragraph rules allow a break that a whole column holds:
+                // start the fragment in the next one.
                 paginator.advance_for_overflow();
                 continue 'rows;
             } else {
