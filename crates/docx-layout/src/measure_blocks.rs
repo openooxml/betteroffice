@@ -1360,12 +1360,17 @@ fn extract_floating_zones(
 ) -> Result<Vec<AnchoredFloatingZone>, String> {
     let mut zones = Vec::new();
     // Painting lets a negative indent run past a wrap margin, so a side that
-    // main didn't choose could put such a line inside the table.
-    let table_wrap_frames = if blocks.iter().any(has_negative_side_indent) {
-        &[]
-    } else {
-        table_wrap_frames
-    };
+    // main didn't choose could put such a line inside the table: a float flow
+    // holding one keeps main's side for its tables.
+    let mut negative_flows = vec![false; blocks.len()];
+    let mut start = 0;
+    for index in 1..=blocks.len() {
+        if index == blocks.len() || resets_float_flow(&blocks[index]) {
+            let negative = blocks[start..index].iter().any(has_negative_side_indent);
+            negative_flows[start..index].fill(negative);
+            start = index;
+        }
+    }
     for (block_index, block) in blocks.iter().enumerate() {
         match block {
             LayoutBlock::Paragraph(paragraph) => {
@@ -1376,10 +1381,10 @@ fn extract_floating_zones(
                     table,
                     block_index,
                     content_width,
-                    widths
-                        .get(block_index)
-                        .copied()
-                        .filter(|_| table_wrap_frames.get(block_index) == Some(&true)),
+                    widths.get(block_index).copied().filter(|_| {
+                        table_wrap_frames.get(block_index) == Some(&true)
+                            && !negative_flows[block_index]
+                    }),
                     config,
                     &mut zones,
                 )?;
@@ -2489,13 +2494,15 @@ mod tests {
                         "horzAnchor": "text", "tblpX": 140, "leftFromText": 9, "rightFromText": 13
                     }
                 },
-                {"kind": "paragraph", "id": "text", "attrs": {"indent": indent}, "runs": []}
+                {"kind": "paragraph", "id": "text", "attrs": {"indent": indent}, "runs": []},
+                {"kind": "pageBreak", "id": "break"},
+                {"kind": "paragraph", "id": "later", "attrs": {"indent": {"right": -100}}, "runs": []}
             ]))
             .unwrap();
             let flow = FloatFlow::with_table_wrap_frames(
                 &blocks,
-                &[600.0, 600.0],
-                &[true, true],
+                &[600.0; 4],
+                &[true; 4],
                 &MeasurementConfig::default(),
                 None,
             )
