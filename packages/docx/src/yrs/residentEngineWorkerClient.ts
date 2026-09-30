@@ -121,6 +121,7 @@ export class ResidentEngineWorkerClient {
   private bootstrapped = false;
   /** Set once `open` is sent, with the heap limit it opened under. */
   private openedHeapLimit: { bytes?: number } | null = null;
+  private bootstraps = 0;
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
@@ -260,6 +261,7 @@ export class ResidentEngineWorkerClient {
     }
     const fontsRevision = snapshot.fontsRevision;
     this.bootstrapped = true;
+    const generation = ++this.bootstraps;
     const pending = this.request(
       {
         type: 'bootstrap',
@@ -282,7 +284,7 @@ export class ResidentEngineWorkerClient {
       response = await pending;
     } catch (error) {
       // The open it was queued behind failed, so the worker holds no document to bootstrap.
-      if (options.opened && !this.openedHeapLimit) {
+      if (options.opened && !this.openedHeapLimit && generation === this.bootstraps) {
         this.bootstrapped = false;
         this.remoteVector = null;
         this.appliedFontsRevision = null;
