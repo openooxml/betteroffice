@@ -412,7 +412,10 @@ fn autofit_content_widths(
             .filter(|column| percentages[*column] <= 0.0)
             .collect();
         if percentage_total < 1.0 {
-            let natural: f64 = remaining_columns.iter().map(|column| maximums[*column]).sum();
+            let natural: f64 = remaining_columns
+                .iter()
+                .map(|column| maximums[*column])
+                .sum();
             table_width = table_width.max(natural / (1.0 - percentage_total));
         }
         table_width = table_width.min(content_width);
@@ -792,7 +795,10 @@ mod tests {
 
     #[test]
     fn automatic_width_ignores_nonzero_values() {
-        assert_eq!(resolve_table_width_px(Some(4500.0), Some("auto"), 600.0), None);
+        assert_eq!(
+            resolve_table_width_px(Some(4500.0), Some("auto"), 600.0),
+            None
+        );
     }
 
     #[test]

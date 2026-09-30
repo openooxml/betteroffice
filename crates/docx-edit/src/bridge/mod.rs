@@ -4374,8 +4374,7 @@ mod tests {
                 &EditCtx::local("", DATE),
             )
             .unwrap();
-            let mut blocks =
-                yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let mut blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
             let LayoutBlock::Table(table) = &mut blocks[0] else {
                 panic!()
             };
