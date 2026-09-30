@@ -186,7 +186,11 @@ export function useDocumentLoader({
   );
 
   const reportLayoutError = useCallback(
-    (error: Error) => loadGeneration.reportError(yrsSeedGeneration, error, onError),
+    (error: Error, onCurrentError?: (error: Error) => void) =>
+      loadGeneration.reportError(yrsSeedGeneration, error, (current) => {
+        onCurrentError?.(current);
+        onError?.(current);
+      }),
     [loadGeneration, yrsSeedGeneration, onError]
   );
 
