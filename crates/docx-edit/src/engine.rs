@@ -994,11 +994,10 @@ fn full_build_pages(display: &DisplayState, page_count: usize) -> Vec<bool> {
 /// Where the resident caret sits, for the pages a windowed build keeps.
 #[derive(Clone, Copy)]
 enum CaretExtent {
-    /// Its display position, when the paragraph lowers one display position
-    /// per story unit.
+    /// Its display position, when the lowering maps its run one display
+    /// position per story unit.
     Position(f64),
-    /// Its paragraph's whole display span otherwise, as inline content such as
-    /// a content control expands when lowered.
+    /// Its paragraph's whole display span otherwise, as in an atom or hidden text.
     Paragraph(f64, f64),
     /// No block maps it, so every re-placed page is kept.
     Unmapped,
@@ -1090,6 +1089,43 @@ fn resident_paragraph_span(input: &LayoutInput, para_id: &str) -> Option<(f64, f
         visit(&measured.block, para_id, &mut span);
     }
     span
+}
+
+/// The display position of story index `index` in paragraph `para_id` of `story`, from the
+/// lowering whose blocks start that paragraph at `start`. `None` inside an atom or hidden
+/// text, or a run that does not show one display position per story unit.
+fn lowered_caret_position(
+    map: &LoweringMap,
+    story: &str,
+    para_id: &str,
+    start: f64,
+    index: u32,
+) -> Option<f64> {
+    let source = map.paragraphs.iter().position(|(slot, id)| {
+        id == para_id
+            && map
+                .stories
+                .get(*slot as usize)
+                .is_some_and(|name| name == story)
+    })?;
+    let source = u32::try_from(source).ok()?;
+    let first_block = map
+        .paragraph_blocks
+        .iter()
+        .filter(|(_, paragraph)| *paragraph == source)
+        .map(|(pm, _)| *pm)
+        .min()?;
+    if first_block as f64 != start {
+        return None;
+    }
+    map.spans.iter().find_map(|span| {
+        let units = span.raw_end.checked_sub(span.raw_start)?;
+        (span.paragraph == source
+            && !span.atom
+            && span.pm_end.checked_sub(span.pm_start) == Some(u64::from(units))
+            && (span.raw_start..=span.raw_end).contains(&index))
+        .then(|| (span.pm_start + u64::from(index - span.raw_start)) as f64)
+    })
 }
 
 fn paragraph_offset_position(start: f64, offset: u32) -> Option<i64> {
@@ -3601,13 +3637,26 @@ impl EngineSession {
                                 let paragraph = segments.para_at(index)?;
                                 let (start, end) =
                                     resident_paragraph_span(input, &paragraph.para_id)?;
-                                let units = paragraph.pilcrow.saturating_sub(paragraph.node_start);
-                                let offset = index.saturating_sub(paragraph.node_start);
-                                Some(if end - start == f64::from(units) + 2.0 {
-                                    CaretExtent::Position(start + 1.0 + f64::from(offset))
-                                } else {
-                                    CaretExtent::Paragraph(start, end)
-                                })
+                                let epoch = self.doc_epoch();
+                                let position = self
+                                    .render
+                                    .borrow()
+                                    .stories
+                                    .values()
+                                    .filter(|lowered| lowered.doc_epoch == epoch)
+                                    .find_map(|lowered| {
+                                        lowered_caret_position(
+                                            &lowered.map,
+                                            story,
+                                            &paragraph.para_id,
+                                            start,
+                                            index,
+                                        )
+                                    });
+                                Some(position.map_or(
+                                    CaretExtent::Paragraph(start, end),
+                                    CaretExtent::Position,
+                                ))
                             };
                             extent().unwrap_or(CaretExtent::Unmapped)
                         })
@@ -7921,6 +7970,125 @@ mod tests {
         assert_eq!(last_page(&engine), caret_page);
         let edited = engine.with_display_list(Clone::clone).unwrap();
         assert!(!edited.pages[caret_page].unbuilt);
+        assert_eq!(
+            edited.pages[caret_page],
+            full_display_build(&engine, &extras).pages[caret_page]
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn an_edit_builds_the_caret_page_when_equal_paragraph_lengths_hide_a_shift() {
+        use yrs::{Assoc, IndexedSequence};
+
+        let (engine, extras, _) = paged_region_engine(
+            214,
+            &format!(
+                "<w:p>{}<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>Z</w:t></w:r></w:sdtContent></w:sdt></w:p>{}",
+                "<w:r><w:t>Text across several pages</w:t><w:br/></w:r>".repeat(80),
+                "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(40)
+            ),
+        );
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let ctx = crate::EditCtx::local("", "");
+        for index in 0..2 {
+            engine
+                .doc()
+                .insert_embed(
+                    &ctx,
+                    crate::Position::new("body", index),
+                    "chart",
+                    vec![
+                        ("chartJson".to_owned(), Any::from("{}")),
+                        ("width".to_owned(), Any::Number(8.0)),
+                        ("height".to_owned(), Any::Number(8.0)),
+                    ],
+                )
+                .unwrap();
+        }
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let initial = engine.with_display_list(Clone::clone).unwrap();
+        assert!(initial.pages.len() >= 4);
+        assert!(initial.pages.iter().all(|page| !page.unbuilt));
+        assert_eq!(initial.pages, full_display_build(&engine, &extras).pages);
+
+        let txn = engine.doc().yrs_doc().transact();
+        let text = crate::story_ref(&txn, "body").unwrap();
+        let bounds = crate::op::para_bounds(&text, &txn).remove(0);
+        drop(txn);
+        let (start, end) = resident_paragraph_span(
+            engine.pagination.borrow().input.as_ref().unwrap(),
+            &bounds.para_id,
+        )
+        .unwrap();
+        assert_eq!(start, 2.0);
+        assert_eq!(end - start, f64::from(bounds.len()) + 2.0);
+
+        let caret_page = 1;
+        let fragment_end = |engine: &EngineSession, page: usize| {
+            engine.pagination.borrow().layout.as_ref().unwrap().pages[page]
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Paragraph(value)
+                        if block_key(&value.block_id) == bounds.para_id =>
+                    {
+                        value.pm_end
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert!(fragment_end(&engine, caret_page + 1) < end);
+        let offset = (fragment_end(&engine, caret_page) - 2.0) as u32;
+        assert!(offset > 2 && offset < bounds.pilcrow - 1);
+        let txn = engine.doc().yrs_doc().transact();
+        let text = crate::story_ref(&txn, "body").unwrap();
+        let head = text.sticky_index(&txn, offset, Assoc::After).unwrap();
+        drop(txn);
+        engine.set_resident_caret_head(Some(("body".to_owned(), head)));
+        let window_page = initial.pages.len() - 1;
+        engine.set_display_window(Some(window_page..window_page + 1));
+        engine.set_windowed_incremental_builds(true);
+
+        engine
+            .doc()
+            .insert_text(
+                &ctx,
+                crate::Position::new("body", offset),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        let txn = engine.doc().yrs_doc().transact();
+        let caret_index = {
+            let caret = engine.resident_caret_head.borrow();
+            caret.as_ref().unwrap().1.get_offset(&txn).unwrap().index
+        };
+        drop(txn);
+        assert_eq!(caret_index, offset + 1);
+        let caret_position = f64::from(caret_index) + 1.0;
+        assert_eq!(caret_position, fragment_end(&engine, caret_page) - 1.0);
+        let (start, end) = resident_paragraph_span(
+            engine.pagination.borrow().input.as_ref().unwrap(),
+            &bounds.para_id,
+        )
+        .unwrap();
+        assert_eq!(end - start, f64::from(bounds.len() + 1) + 2.0);
+        assert_eq!(start + 1.0 + f64::from(caret_index), caret_position + 2.0);
+        let edited = engine.with_display_list(Clone::clone).unwrap();
+        assert_eq!(edited.pages.len(), initial.pages.len());
+        assert!(!edited.pages[caret_page].unbuilt);
+        assert!(!edited.pages[window_page].unbuilt);
+        assert!(edited.pages[caret_page + 1].unbuilt);
         assert_eq!(
             edited.pages[caret_page],
             full_display_build(&engine, &extras).pages[caret_page]
