@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
@@ -60,10 +60,10 @@ class FakeWorker {
   terminate(): void {}
 }
 
-function setup() {
-  const native = createEditSession(9301);
-  native.create_story('body', 'Owned layout', 'Normal', 'left');
-  const layoutJson = native.layout_document_with_regions_retained_json(REQUEST);
+function setup(clientId = 9301, text = 'Owned layout', request = REQUEST) {
+  const native = createEditSession(clientId);
+  native.create_story('body', text, 'Normal', 'left');
+  const layoutJson = native.layout_document_with_regions_retained_json(request);
   const frame = native.build_display_list_frame(JSON.stringify({}), 0);
   const adopted: string[] = [];
   const engine = {
@@ -131,6 +131,121 @@ test('a worker-run layout arrives with its frame and needs no second worker pass
     unmount();
   } finally {
     native.free();
+  }
+});
+
+test('a retained worker query facade forwards within a document load but never to the next document', async () => {
+  const requestB = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: { pageWidth: 14400 } }] },
+  });
+  const documentA = setup();
+  const documentB = setup(9302, 'Document B', requestB);
+  const engineQueriesB = {
+    displayHitTestRegionsJson: mock(() => 'null'),
+    displayVerticalMoveJson: mock(() => 'null'),
+    displayRangeRectsJson: mock(() => '[]'),
+    displayRangeRectsRegionJson: mock(() => '[]'),
+  };
+  Object.assign(documentB.engine, engineQueriesB);
+  try {
+    const { preloadLayoutWasm } = await import('@betteroffice/docx/wasm/layout');
+    await preloadLayoutWasm(
+      new Uint8Array(
+        readFileSync(
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+        )
+      )
+    );
+    let inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentA.layoutJson),
+    };
+    const overrides = { getInputs: () => inputs };
+    const { result, rerender, unmount } = renderHook(
+      ({ layout, source }) => useRustDisplayList(layout, overrides, undefined, undefined, source),
+      { initialProps: { layout: inputs.layout as Layout, source: documentA.engine } }
+    );
+    const publish = async (worker: FakeWorker, frame: Uint8Array, frameEpoch: number) => {
+      await act(async () => {
+        worker.reply({
+          id: worker.posted.at(-1)!.id,
+          ok: true,
+          frame: frame.slice().buffer,
+          caret: { frameEpoch, caretRect: null },
+          selection: null,
+          layoutRevision: 0,
+        });
+      });
+      await waitFor(() => {
+        if (result.current.error) throw result.current.error;
+        expect(result.current.frame?.frameEpoch).toBe(frameEpoch);
+        expect(result.current.queries).not.toBeNull();
+        expect(result.current.workerSurfacesActive).toBe(true);
+      });
+      return result.current.queries!;
+    };
+    const workerA = FakeWorker.last!;
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const queriesA0 = await publish(workerA, documentA.frame, 1);
+    const displayListA0 = queriesA0.displayList;
+    const pageSizeA0 = queriesA0.pageSize(0);
+    expect(pageSizeA0).not.toBeNull();
+    await queriesA0.whenReady();
+    queriesA0.prime();
+
+    const layoutA1 = documentA.native.layout_document_with_regions_retained_json(REQUEST);
+    inputs = {
+      ...JSON.parse(documentA.native.retained_kernel_inputs_json()),
+      ...JSON.parse(layoutA1),
+    };
+    const frameA1 = documentA.native.build_display_list_frame('{}', 1);
+    await act(async () => {
+      rerender({ layout: inputs.layout, source: documentA.engine });
+    });
+    expect(workerA.posted.at(-1)).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 1 });
+    const queriesA1 = await publish(workerA, frameA1, 2);
+    await queriesA1.whenReady();
+    queriesA1.prime();
+    expect(queriesA1).not.toBe(queriesA0);
+    expect(queriesA1.displayList).not.toBe(displayListA0);
+    expect(queriesA1.displayList.pages[0]).toBe(displayListA0.pages[0]);
+    expect(queriesA0.displayList).toBe(queriesA1.displayList);
+    expect(queriesA0.pageSize(0)).toEqual(queriesA1.pageSize(0));
+
+    act(() => result.current.resetSettled());
+    expect(result.current.awaitingDocument()).toBe(true);
+    inputs = {
+      ...JSON.parse(documentB.native.retained_kernel_inputs_json()),
+      ...JSON.parse(documentB.layoutJson),
+    };
+    await act(async () => {
+      rerender({ layout: inputs.layout, source: documentB.engine });
+    });
+    const workerB = FakeWorker.last!;
+    expect(workerB).not.toBe(workerA);
+    expect(workerB.posted.at(-1)).toMatchObject({ type: 'bootstrap' });
+    const queriesB = await publish(workerB, documentB.frame, 1);
+    expect(result.current.awaitingDocument()).toBe(false);
+    expect(queriesB.pageSize(0)).not.toEqual(pageSizeA0);
+    expect(queriesB.pageSize(0)).not.toEqual(queriesA1.pageSize(0));
+    const requestsToB = workerB.posted.length;
+
+    expect(queriesA0.displayList).toBe(displayListA0);
+    expect(queriesA0.displayList).not.toBe(queriesB.displayList);
+    expect(queriesA0.pageSize(0)).toEqual(pageSizeA0);
+    expect(queriesA0.rangeRects(0, 10)).toEqual([]);
+    expect(queriesA0.hitTestRegions(0, 100, 100)).toBeNull();
+    expect(queriesA0.caretRect(1)).toBeNull();
+    for (const query of Object.values(engineQueriesB)) expect(query).not.toHaveBeenCalled();
+    expect(workerB.posted).toHaveLength(requestsToB);
+    queriesA0.dispose();
+    queriesA1.dispose();
+    queriesB.dispose();
+    unmount();
+  } finally {
+    documentA.native.free();
+    documentB.native.free();
   }
 });
 
