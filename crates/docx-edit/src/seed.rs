@@ -5800,7 +5800,7 @@ mod tests {
             .chain(provenance.relocated.iter().map(|record| &record.pin));
         for pin in pins {
             assert_eq!(
-                pin.position,
+                pin.position.get().cloned().flatten(),
                 Pin::sticky(&txn, &pin.story, pin.unit),
                 "{}:{}",
                 pin.story,
