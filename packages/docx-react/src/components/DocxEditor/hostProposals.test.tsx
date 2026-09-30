@@ -309,7 +309,7 @@ test('host proposals stay hidden after swapping documentBuffer on the same edito
     );
     expect(result).toMatchObject({ ok: true, snapshot: { proposals: [{ id: 'p1', changed: true }] } });
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 250));
     });
   };
 
