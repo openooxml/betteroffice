@@ -327,7 +327,7 @@ test('a provisional layout that a host layout replaced does not run again once i
   }
 });
 
-test('a display build that fails beside a worker pass leaves the pass its replacement worker', async () => {
+test('a display build beside a worker pass for its revision leaves the pass its replacement worker', async () => {
   const { native, frame, engine, layoutJson } = setup();
   const { host, adopted } = revisedHost(engine);
   const warnings = spyOn(console, 'warn').mockImplementation(() => {});
@@ -349,12 +349,13 @@ test('a display build that fails beside a worker pass leaves the pass its replac
     await act(async () => rerender({ layout: computation.layout, resolved: undefined }));
     await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(1));
 
-    // A relayout and a display build are both waiting when the worker runs out of memory.
+    // A display build for the revision a relayout is laying out leaves the frame to that
+    // pass, which then runs out of memory.
     await act(async () => {
       void result.current.layoutInWorker(host, REQUEST);
       rerender({ layout: computation.layout, resolved: new Set([7]) });
     });
-    expect(first!.posted.map((request) => request.type)).toEqual(['bootstrap', 'sync', 'sync']);
+    expect(first!.posted.map((request) => request.type)).toEqual(['bootstrap', 'sync']);
     await act(async () => first!.outOfMemory());
     expect(FakeWorker.spawned).toHaveLength(2);
     const second = FakeWorker.spawned[1]!;

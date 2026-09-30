@@ -312,7 +312,8 @@ test('queued syncs load their state and only the newest lays out and builds a fr
     expect(reply.superseded).toBe(true);
     expect(reply.frame).toBeUndefined();
     expect(reply.layoutJson).toBeUndefined();
-    expect(new Uint8Array(reply.stateVector!)).toEqual([firstVector, secondVector][index]);
+    const sent = [firstVector, secondVector][index]!;
+    expect([...new Uint8Array(reply.stateVector!)]).toEqual([...sent]);
   }
   expect(replies[2]!.superseded).toBeUndefined();
   expect(client.remoteStateVector()).toEqual(main.encodeStateVector());
