@@ -46,6 +46,7 @@ import type { RustFontChainsProvider } from './useRustMeasurement';
 import { displayListNeedsHostImages } from '../canvasPresentation';
 import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
+  isLayoutQueued,
   isSupersededLayout,
   readSessionVersion,
   revisionPreviewKey,
@@ -283,6 +284,8 @@ export function useRustDisplayList(
 ): UseRustDisplayListResult {
   const requestLayoutRef = useRef(requestLayout);
   requestLayoutRef.current = requestLayout;
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
   const workerHeapLimitRef = useRef(workerHeapLimitBytes);
   workerHeapLimitRef.current = workerHeapLimitBytes;
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
@@ -306,6 +309,8 @@ export function useRustDisplayList(
   const markSettled = useCallback(
     (epoch: number | null, failure: Error | null = null, authoritative = false): void => {
       if (replacedLayoutRef.current && !authoritative) return;
+      // A queued layout pass may change what shows, such as the revision preview.
+      if (!failure && !authoritative && isLayoutQueued(engineRef.current)) return;
       settledEpochRef.current = epoch;
       settleErrorRef.current = failure;
       for (const waiter of [...settleWaitersRef.current]) waiter();
@@ -1654,6 +1659,7 @@ export function useRustDisplayList(
           const current =
             displayList !== null &&
             settledEpochRef.current === contentEpochRef.current &&
+            !isLayoutQueued(engineRef.current) &&
             !displayList.pages.some((page) => page.unbuilt);
           if (!failure && !current) {
             if (displayList?.pages.some((page) => page.unbuilt)) schedulePageBuilds(0);

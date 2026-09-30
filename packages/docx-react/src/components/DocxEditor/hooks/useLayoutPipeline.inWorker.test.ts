@@ -4,7 +4,7 @@ import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { YrsRenderEnv, YrsSession } from '@betteroffice/docx/yrs';
-import { isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
+import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internals/layoutProvenance';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -83,7 +83,7 @@ async function opened() {
   act(() => hook.result.current.runLayoutPipeline());
   await answer(0);
   expect(shown()).toBe('1');
-  return { doc, worker, errors, hook, frame, answer, shown };
+  return { doc, session, worker, errors, hook, frame, answer, shown };
 }
 
 test('host batches and remote updates lay out in the worker, local edits here', async () => {
@@ -176,14 +176,17 @@ test('updates that land while the worker lays out queue one pass for the latest 
 });
 
 test('a pass no change asked to run here waits for the worker pass in flight', async () => {
-  const { doc, worker, errors, hook, frame, answer, shown } = await opened();
+  const { doc, session, worker, errors, hook, frame, answer, shown } = await opened();
 
   doc.version = 2;
   act(() => hook.result.current.scheduleLayout('local', true));
   await frame();
+  expect(isLayoutQueued(session)).toBe(false);
   act(() => hook.result.current.runLayoutPipeline());
   await frame();
   expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+  // Nothing the display shows settles a wait until the queued pass runs.
+  expect(isLayoutQueued(session)).toBe(true);
 
   await answer(1);
   expect(shown()).toBe('2');
@@ -191,6 +194,7 @@ test('a pass no change asked to run here waits for the worker pass in flight', a
   expect(isSupersededLayout(hook.result.current.layout)).toBe(true);
   await frame();
   expect(worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
+  expect(isLayoutQueued(session)).toBe(false);
   await answer(2);
   expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
   expect(doc.laidOutHere).toEqual([]);
@@ -209,10 +213,9 @@ test('a worker pass that fails with a pass queued behind it leaves the layout to
     worker[1]!.fail();
     await new Promise((done) => setTimeout(done, 0));
   });
-  expect(doc.laidOutHere).toEqual([]);
-  expect(shown()).toBe('1');
-
   await frame();
+  // Only the queued pass lays out, here: the failed one left it the layout.
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
   expect(doc.laidOutHere).toEqual([2]);
   expect(shown()).toBe('2');
   expect(isSupersededLayout(hook.result.current.layout)).toBe(false);

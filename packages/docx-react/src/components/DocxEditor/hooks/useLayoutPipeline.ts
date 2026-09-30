@@ -28,6 +28,7 @@ import type { LayoutInWorker } from './useDisplayList';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
+  markLayoutQueued,
   markSupersededLayout,
   readSessionVersion,
   revisionPreviewKey,
@@ -306,10 +307,12 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         inWorker || (!onHost && pendingInWorkerRef.current === null && !inFlight?.opening);
       if (waits && session && inFlight?.session === session) {
         queuedBehindWorkerRef.current = true;
+        markLayoutQueued(session, true);
         pendingLayoutOriginRef.current ??= 'local';
         return;
       }
       queuedBehindWorkerRef.current = false;
+      if (session) markLayoutQueued(session, false);
       pendingInWorkerRef.current = null;
       const pass = ++passRef.current;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
@@ -687,6 +690,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     unmountedRef.current = false;
     return () => {
       unmountedRef.current = true;
+      if (sessionRef.current) markLayoutQueued(sessionRef.current, false);
       passRef.current += 1;
       if (schedulerRef.current != null) cancelAnimationFrame(schedulerRef.current);
       schedulerRef.current = null;
