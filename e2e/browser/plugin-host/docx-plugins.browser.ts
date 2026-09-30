@@ -248,7 +248,11 @@ test('page overlays stay on the previous layout while an edit lays out, then fol
       if (!document.querySelector('[data-probe-page="0"]')) gaps.count += 1;
     });
     observer.observe(document.body, { childList: true, subtree: true });
-    Object.assign(window, { __gaps: gaps, __gapObserver: observer });
+    Object.assign(window, {
+      __gaps: gaps,
+      __gapObserver: observer,
+      __probePage: document.querySelector('[data-probe-page="0"]'),
+    });
     const paragraphs = Array.from({ length: 80 }, (_, index) => ({
       text: `Filler paragraph ${index + 1} moves the document onto a second page.`,
     }));
@@ -268,14 +272,19 @@ test('page overlays stay on the previous layout while an edit lays out, then fol
   });
   await expect(page.locator('[data-probe-page="1"]')).toBeAttached({ timeout: 60_000 });
   const after = await page.evaluate(() => {
-    const { __gaps, __gapObserver, __probe } = window as unknown as LooseProbe & {
+    const { __gaps, __gapObserver, __probe, __probePage } = window as unknown as LooseProbe & {
       __gaps: { count: number };
       __gapObserver: MutationObserver;
+      __probePage: Element | null;
     };
     __gapObserver.disconnect();
-    return { gaps: __gaps.count, version: __probe.geometry.layout.version };
+    return {
+      gaps: __gaps.count,
+      same: document.querySelector('[data-probe-page="0"]') === __probePage,
+      version: __probe.geometry.layout.version,
+    };
   });
-  expect(after).toEqual({ gaps: 0, version });
+  expect(after).toEqual({ gaps: 0, same: true, version });
   await expect
     .poll(async () => Math.max(...(await offsets(page))), { timeout: 30_000 })
     .toBeLessThan(1.5);

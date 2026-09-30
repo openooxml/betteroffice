@@ -816,6 +816,7 @@ describe('DocxEditor plugins', () => {
     expect(retained.toOverlayRect(unit)).not.toBeNull();
 
     let next = '';
+    const mounted = marker();
     const frames: FrameRequestCallback[] = [];
     const frame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
       frames.push(callback);
@@ -827,6 +828,7 @@ describe('DocxEditor plugins', () => {
         if (applied.ok) next = applied.version;
       });
       expect(next).not.toBe('');
+      expect(marker()).toBe(mounted);
       expect(marker()!.dataset).toMatchObject({ version, snapshot: next });
       expect(geometries.at(-1)!.layout.version).toBe(version);
       expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
@@ -838,6 +840,7 @@ describe('DocxEditor plugins', () => {
       for (const callback of frames.splice(0)) callback(performance.now());
     });
     await until(() => marker()?.dataset.version === next);
+    expect(marker()).toBe(mounted);
     const afterEdit = layouts.slice(layouts.lastIndexOf(version) + 1);
     expect(afterEdit[0]).toBeNull();
     expect(afterEdit.at(-1)).toBe(next);

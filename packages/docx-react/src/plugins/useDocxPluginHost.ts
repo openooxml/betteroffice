@@ -78,7 +78,7 @@ export interface DocxPluginHostBinding {
   sidebarItems: ReactSidebarItem[];
   /** The editor's own rendered-DOM context. */
   renderedDomContext: RenderedDomContext | null;
-  /** The geometry overlays draw with while the host waits for a layout of the document. */
+  /** The geometry overlays draw with while the host's own layout is behind or not yet built. */
   heldGeometry: DocxPluginGeometry | null;
   overlayLayerRef: (element: HTMLDivElement | null) => void;
   /** Receives each rendered-DOM context the paged editor builds. */
@@ -103,6 +103,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const translateRef = useRef(translate);
   translateRef.current = translate;
   const geometryRef = useRef<DocxPluginGeometry | null>(null);
+  const adoptedRef = useRef<{ session: YrsSession; geometry: DocxPluginGeometry } | null>(null);
+  const heldRef = useRef<DocxPluginGeometry | null>(null);
+  const queriesCurrentRef = useRef(false);
   const layoutRef = useRef<DocxPluginLayout | null>(null);
   const formattingRef = useRef<SelectionState | null>(null);
   const layoutListeners = useRef(new Set<() => void>());
@@ -322,9 +325,11 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
                 : null;
             },
             () =>
-              host.layoutId() === null &&
+              heldRef.current?.layout === currentLayout &&
               latest.current.zoom === currentLayout.zoom &&
-              dom.context.pagesContainer.isConnected
+              dom.context.pagesContainer.isConnected &&
+              (isPresented(dom.context.pagesContainer, dom.queries.displayList) ||
+                queriesCurrentRef.current)
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.
@@ -332,13 +337,19 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     [host, currentLayout, dom, options.queries, layer, moved]
   );
   geometryRef.current = geometry;
-  // Overlays keep the layout the host last adopted until it adopts the next one.
-  const adoptedRef = useRef<{ session: YrsSession; geometry: DocxPluginGeometry } | null>(null);
-  if (geometry && options.session && host.layoutId() === geometry.layout.id) {
-    adoptedRef.current = { session: options.session, geometry };
+  // Overlays keep the layout the host last adopted until geometry for the next one exists.
+  const adopted = geometry && host.layoutId() === geometry.layout.id ? geometry : null;
+  if (adopted && options.session) {
+    adoptedRef.current = { session: options.session, geometry: adopted };
   }
-  const heldGeometry =
-    adoptedRef.current?.session === options.session ? adoptedRef.current.geometry : null;
+  // Pages that already show a layout of the current version will get its geometry next.
+  queriesCurrentRef.current = layout !== null;
+  const lastAdopted =
+    !options.layoutError && adoptedRef.current?.session === options.session
+      ? adoptedRef.current.geometry
+      : null;
+  heldRef.current = adopted ? null : lastAdopted;
+  const heldGeometry = adopted ?? lastAdopted;
 
   useEffect(() => {
     host.layoutChanged(currentLayout);

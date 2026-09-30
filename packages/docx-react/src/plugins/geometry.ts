@@ -149,9 +149,9 @@ function lastInReadingOrder(rects: readonly DisplayListRect[]): DisplayListRect 
 }
 
 /**
- * Geometry of the current frame; visible unbuilt pages wait for exact content. While `held`, no
- * newer layout has replaced this one yet, so `toOverlayRect` still answers; hit tests and
- * anchors wait for the new layout.
+ * Geometry of the current frame; visible unbuilt pages wait for exact content. While `held`,
+ * overlays still draw this layout until geometry for the next one exists, so `toOverlayRect`
+ * answers; hit tests and anchors wait for the new layout.
  */
 export function createPluginGeometry(
   layout: DocxPluginLayout,
