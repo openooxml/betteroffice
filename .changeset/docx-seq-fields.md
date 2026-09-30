@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": minor
 ---
 
-Number SEQ fields, such as figure and table captions, in document order as Word does when it updates fields. A chapter-numbered sequence, or a field in a number format BetterOffice doesn't compute, keeps its saved result. Hidden text in text boxes and shapes is no longer shown unless hidden text is.
+Number SEQ fields, such as figure and table captions, in document order as Word does; chapter-numbered sequences and number formats BetterOffice doesn't compute keep their saved result. Hidden text in text boxes and shapes stays hidden unless hidden text is shown.
