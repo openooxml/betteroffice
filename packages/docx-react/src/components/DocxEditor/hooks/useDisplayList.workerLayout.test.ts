@@ -48,6 +48,7 @@ class FakeWorker {
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
   posted: ResidentEngineWorkerRequest[] = [];
+  terminated = false;
   constructor() {
     FakeWorker.last = this;
   }
@@ -57,7 +58,9 @@ class FakeWorker {
   reply(response: ResidentEngineWorkerResponse): void {
     this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
   }
-  terminate(): void {}
+  terminate(): void {
+    this.terminated = true;
+  }
 }
 
 function setup() {
@@ -155,6 +158,74 @@ test('a failed worker layout hands the pass back to the main thread', async () =
     native.free();
   }
 });
+
+for (const phase of ['layout', 'completion'] as const) {
+  test(`a replaced worker's ${phase} failure keeps its successor`, async () => {
+    const { native, layoutJson, frame, engine } = setup();
+    const errors = spyOn(console, 'error').mockImplementation(() => {});
+    const resetFrameBase = spyOn(engine, 'resetFrameBase');
+    try {
+      const { result, unmount } = renderHook(() =>
+        useRustDisplayList(null, undefined, undefined, undefined, null)
+      );
+      const pending = result.current.layoutInWorker(engine, REQUEST);
+      expect(pending).not.toBeNull();
+      const replaced = FakeWorker.last!;
+      let obsolete: Promise<unknown> = pending!;
+      if (phase === 'completion') {
+        replaced.reply({
+          id: replaced.posted[0].id,
+          ok: true,
+          frame: frame.slice().buffer,
+          caret: { frameEpoch: 1, caretRect: null },
+          selection: null,
+          layoutRevision: 1,
+          layoutJson,
+          layoutProvisional: true,
+        });
+        const provisional = await pending!;
+        expect(provisional?.complete).toBeDefined();
+        obsolete = provisional!.complete!;
+        await act(async () => {
+          void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
+          replaced.reply({ id: replaced.posted[1].id, ok: true });
+        });
+        await waitFor(() =>
+          expect(replaced.posted.at(-1)).toMatchObject({ type: 'completeLayout' })
+        );
+      }
+
+      await act(async () => {
+        const other = result.current.layoutInWorker({ ...engine } as YrsSession, REQUEST);
+        const current = result.current.layoutInWorker(engine, REQUEST);
+        expect(current).not.toBeNull();
+        const successor = FakeWorker.last!;
+        expect(successor).not.toBe(replaced);
+        expect(replaced.terminated).toBe(true);
+        successor.reply({
+          id: successor.posted[0].id,
+          ok: true,
+          frame: frame.slice().buffer,
+          caret: { frameEpoch: 1, caretRect: null },
+          selection: null,
+          layoutRevision: 3,
+          layoutJson,
+        });
+        expect(await obsolete).toBeNull();
+        expect(await other!).toBeNull();
+        expect((await current!)?.layout.pages.length).toBeGreaterThan(0);
+        expect(successor.terminated).toBe(false);
+      });
+      expect(resetFrameBase).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+      unmount();
+    } finally {
+      resetFrameBase.mockRestore();
+      errors.mockRestore();
+      native.free();
+    }
+  });
+}
 
 test('a frame built for other display extras is not adopted', async () => {
   const { native, layoutJson, frame, engine } = setup();

@@ -1112,6 +1112,7 @@ export function useRustDisplayList(
           if (outcome === 'stale') return null;
           return layoutInWorkerRef.current?.(hostEngine, request) ?? null;
         }
+        if (workerRef.current !== owner) return null;
         console.error(
           '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
           cause

@@ -32,7 +32,9 @@ use serde::Serialize;
 use yrs::Subscription;
 
 use crate::EditingDoc;
-use crate::bridge::{BridgeError, LoweringMap, RenderEnv, yrs_doc_to_mapped_layout_blocks};
+use crate::bridge::{
+    BridgeError, LoweringMap, RenderEnv, RevisionPreview, yrs_doc_to_mapped_layout_blocks,
+};
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
     encode_frame_delta_pages,
@@ -80,7 +82,7 @@ struct MeasurementState {
 #[derive(Debug)]
 struct ResidentRegionState {
     request_json: String,
-    /// [`layout_options_fingerprint`] of `request_json`.
+    /// [`region_options_fingerprint`] of `request_json`.
     request_fingerprint: String,
     headers_footers: Option<serde_json::Value>,
     /// Inputs retained from the last full region pass so a plain body-text
@@ -151,6 +153,7 @@ struct PreparedRegionLayout {
     notes: docx_layout::footnotes::NoteLayoutInput,
     measurement: docx_layout::measure_blocks::MeasurementConfig,
     parsed_render_env: Option<RenderEnv>,
+    revision_preview_key: u64,
     measurement_fingerprint: u64,
     fonts: (u64, usize),
     resident_body: bool,
@@ -760,6 +763,11 @@ struct PaginationState {
     checkpoints: Vec<LayoutCheckpoint>,
     block_fingerprints: Vec<u64>,
     options_fingerprint: u64,
+    revision_preview_key: u64,
+    /// The decisions [`Self::revision_preview_key`] identifies.
+    revision_preview: BTreeMap<String, RevisionPreview>,
+    /// The document epoch the retained input was lowered at.
+    doc_epoch: u64,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
     position_deltas: HashMap<String, i64>,
@@ -935,6 +943,26 @@ fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
         }
     }
     pages::sha256_hex(canonical_json(&request).as_bytes())
+}
+
+/// Identifies the revision preview a pass lays out under; 0 is none.
+fn revision_preview_key(env: &RenderEnv) -> Result<u64, String> {
+    if env.revision_preview.is_empty() {
+        return Ok(0);
+    }
+    serde_json::to_vec(&env.revision_preview)
+        .map(|bytes| hash_bytes(&bytes))
+        .map_err(|error| format!("fingerprint revision preview: {error}"))
+}
+
+fn region_options_fingerprint(mut request: serde_json::Value) -> String {
+    if let Some(env) = request
+        .get_mut("renderEnv")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        env.remove("revisionPreview");
+    }
+    layout_options_fingerprint(request)
 }
 
 /// `value` as JSON with object keys sorted, whatever order they were read in.
@@ -1258,6 +1286,16 @@ fn suppress_contextual_spacing(blocks: &[LayoutBlock], index: usize, owned: &mut
     {
         spacing.after = Some(0.0);
     }
+}
+
+/// Whether `block` is, or nests, one of `paragraphs`.
+fn block_holds_paragraph(block: &LayoutBlock, paragraphs: &HashSet<String>) -> bool {
+    if let LayoutBlock::Paragraph(paragraph) = block {
+        return paragraphs.contains(block_key(&paragraph.id).as_ref());
+    }
+    let mut keys = Vec::new();
+    nested_block_keys(block, &mut keys);
+    keys.iter().any(|key| paragraphs.contains(key))
 }
 
 fn nested_block_keys(block: &LayoutBlock, out: &mut Vec<String>) {
@@ -1849,7 +1887,7 @@ impl EngineSession {
         input_json: &str,
         prefix_pages: Option<usize>,
     ) -> Result<PreparedRegionLayout, String> {
-        let request_fingerprint = layout_options_fingerprint(
+        let request_fingerprint = region_options_fingerprint(
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?,
         );
         // Reused pages keep the section stamps and page labels of the regions
@@ -1874,6 +1912,9 @@ impl EngineSession {
                     .map_err(|error| format!("parse render environment: {error}"))?,
             )
         };
+        let revision_preview_key = parsed_render_env
+            .as_ref()
+            .map_or(Ok(0), revision_preview_key)?;
         if regions.sections.len() <= 1
             && let Some(env) = &mut parsed_render_env
         {
@@ -2023,6 +2064,7 @@ impl EngineSession {
             notes,
             measurement,
             parsed_render_env,
+            revision_preview_key,
             measurement_fingerprint,
             fonts,
             resident_body,
@@ -2047,6 +2089,7 @@ impl EngineSession {
             mut notes,
             measurement,
             parsed_render_env,
+            revision_preview_key,
             measurement_fingerprint,
             fonts,
             resident_body,
@@ -2062,6 +2105,10 @@ impl EngineSession {
             body.is_none(),
             "the body is measured before a pass finishes"
         );
+        let revision_preview = parsed_render_env
+            .as_ref()
+            .map(|env| env.revision_preview.clone())
+            .unwrap_or_default();
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
             self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env)?
         } else {
@@ -2106,7 +2153,11 @@ impl EngineSession {
             }))
         .then(|| input.clone());
         let (mut initial_layout, mut arena) = if refs.is_empty() {
-            self.layout_document_value_with_fingerprints(input, block_fingerprints.clone())?;
+            self.layout_document_value_with_fingerprints(
+                input,
+                block_fingerprints.clone(),
+                Some((revision_preview_key, &revision_preview, resident_body)),
+            )?;
             let layout = self
                 .pagination
                 .borrow_mut()
@@ -2175,7 +2226,11 @@ impl EngineSession {
             } else {
                 block_fingerprints
             };
-            self.layout_document_value_with_fingerprints(final_input, fingerprints)?;
+            self.layout_document_value_with_fingerprints(
+                final_input,
+                fingerprints,
+                Some((revision_preview_key, &revision_preview, resident_body)),
+            )?;
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
@@ -2503,16 +2558,83 @@ impl EngineSession {
     /// and `apply_input`.
     fn layout_document_value(&self, input: LayoutInput) -> Result<(), String> {
         let block_fingerprints = measured_fingerprints(&input)?;
-        self.layout_document_value_with_fingerprints(input, block_fingerprints)
+        self.layout_document_value_with_fingerprints(input, block_fingerprints, None)
     }
 
     /// Paginate a resident measured arena whose clean block fingerprints were
     /// retained while rebuilding the dirty paragraph. Compatibility callers
     /// still enter through `layout_document_value` and fingerprint every block.
+    /// The paragraphs of the body and its nested stories that hold a revision
+    /// whose previewed decision differs between `previous` and `next`.
+    fn preview_changed_paragraphs(
+        &self,
+        previous: &BTreeMap<String, RevisionPreview>,
+        next: &BTreeMap<String, RevisionPreview>,
+    ) -> Result<HashSet<String>, String> {
+        let changed: HashSet<&str> = previous
+            .keys()
+            .chain(next.keys())
+            .filter(|id| previous.get(*id) != next.get(*id))
+            .map(String::as_str)
+            .collect();
+        let mut paragraphs = HashSet::new();
+        if changed.is_empty() {
+            return Ok(paragraphs);
+        }
+        use yrs::{Map, ReadTxn, Transact};
+        let stories: Vec<String> = {
+            let txn = self.doc.yrs_doc().transact();
+            txn.get_map(crate::STORIES)
+                .map_or_else(Vec::new, |stories| {
+                    stories
+                        .keys(&txn)
+                        .filter(|story| *story == "body" || is_nested_body_story(story))
+                        .map(str::to_owned)
+                        .collect()
+                })
+        };
+        for story in stories {
+            let mut ranges: Vec<(u32, u32)> = self
+                .doc
+                .story_changes(&story)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|(change, _)| changed.contains(change.revision_id.as_str()))
+                .map(|(_, range)| range)
+                .collect();
+            let txn = self.doc.yrs_doc().transact();
+            let text = crate::story_ref(&txn, &story).map_err(|error| error.to_string())?;
+            // An inline content control keeps its content's revisions in its payload.
+            ranges.extend(
+                self.doc
+                    .chunk_snapshot(&story, &text, &txn)
+                    .iter()
+                    .filter(|chunk| {
+                        matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
+                            if crate::map_string(map, &txn, crate::KIND_KEY).as_deref() == Some("sdt"))
+                    })
+                    .map(|chunk| (chunk.start, chunk.end())),
+            );
+            if ranges.is_empty() {
+                continue;
+            }
+            for bounds in crate::op::para_bounds(&text, &txn) {
+                if ranges
+                    .iter()
+                    .any(|&(from, to)| from <= bounds.pilcrow && bounds.start <= to)
+                {
+                    paragraphs.insert(bounds.para_id);
+                }
+            }
+        }
+        Ok(paragraphs)
+    }
+
     fn layout_document_value_with_fingerprints(
         &self,
         mut input: LayoutInput,
-        block_fingerprints: Vec<u64>,
+        mut block_fingerprints: Vec<u64>,
+        revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
     ) -> Result<(), String> {
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
@@ -2524,6 +2646,37 @@ impl EngineSession {
         let mut deltas = HashMap::new();
         let run = {
             let mut previous = self.pagination.borrow_mut();
+            // A preview shows the document at its source positions, so a block whose
+            // content is unchanged but whose positions moved shows other source: it is
+            // placed afresh rather than shifted.
+            // Over an unchanged document lowered from its body story, only a block
+            // holding a revision whose decision changed can show other source.
+            if let Some((key, preview, resident)) = revision_preview
+                && key != previous.revision_preview_key
+                && incremental_eligible(&previous, &input, input_options_fingerprint)
+                && let moved = (resident && previous.doc_epoch == self.doc_epoch())
+                    .then(|| self.preview_changed_paragraphs(&previous.revision_preview, preview))
+                    .transpose()?
+                && moved.as_ref().is_none_or(|moved| !moved.is_empty())
+            {
+                let retained = previous.input.as_ref().expect("eligibility checked input");
+                for (((fingerprint, retained_fingerprint), next), retained) in block_fingerprints
+                    .iter_mut()
+                    .zip(&previous.block_fingerprints)
+                    .zip(&input.measured)
+                    .zip(&retained.measured)
+                {
+                    if *fingerprint == *retained_fingerprint
+                        && moved
+                            .as_ref()
+                            .is_none_or(|moved| block_holds_paragraph(&next.block, moved))
+                        && crate::fingerprint::fingerprint_with_positions(&next.block)?
+                            != crate::fingerprint::fingerprint_with_positions(&retained.block)?
+                    {
+                        *fingerprint ^= 1;
+                    }
+                }
+            }
             let first_dirty = previous
                 .block_fingerprints
                 .iter()
@@ -2594,6 +2747,11 @@ impl EngineSession {
         pagination.checkpoints = run.checkpoints;
         pagination.block_fingerprints = block_fingerprints;
         pagination.options_fingerprint = input_options_fingerprint;
+        pagination.doc_epoch = self.doc_epoch();
+        if let Some((key, preview, _)) = revision_preview {
+            pagination.revision_preview_key = key;
+            pagination.revision_preview = preview.clone();
+        }
         pagination.rebuilt_page_start = run.rebuilt_page_start;
         pagination.rebuilt_page_end = run.rebuilt_page_end;
         pagination.position_deltas = deltas;
@@ -3118,7 +3276,11 @@ impl EngineSession {
             return self.build_display_list_frame(&extras, expected_frame_epoch);
         }
         let resident = self.resident_layout_input(story)?;
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.layout_document_value_with_fingerprints(
+            resident.input,
+            resident.block_fingerprints,
+            None,
+        )?;
         let extras = self
             .display
             .borrow()
@@ -3187,7 +3349,9 @@ impl EngineSession {
         if env != pass_env {
             return Ok(false);
         }
-        if self.regional_fingerprint(&regions, &env) != regional {
+        if self.regional_fingerprint(&regions, &env) != regional
+            || revision_preview_key(&env)? != self.pagination.borrow().revision_preview_key
+        {
             return Ok(false);
         }
         let outcome = self
@@ -3255,7 +3419,11 @@ impl EngineSession {
         };
         phase(RegionResidentPhase::Measured);
         let previous_capture = self.capture.borrow_mut().take();
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.layout_document_value_with_fingerprints(
+            resident.input,
+            resident.block_fingerprints,
+            None,
+        )?;
         let mut pagination = self.pagination.borrow_mut();
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
@@ -3366,6 +3534,7 @@ impl EngineSession {
             self.layout_document_value_with_fingerprints(
                 resident.input,
                 resident.block_fingerprints,
+                None,
             )?;
             let finished = now();
             profile.paginate_ms = finished - started;
@@ -3905,6 +4074,17 @@ impl EngineSession {
                     &format!("The editor's layout request cannot be read: {error}"),
                 )
             })?;
+        if current
+            .as_ref()
+            .and_then(|request| request.get("renderEnv"))
+            .and_then(|env| env.get("revisionPreview"))
+            .is_some_and(|preview| !RenderEnv::parse_revision_preview(preview).is_empty())
+        {
+            return Err(refuse(
+                ExportFailureCode::UnsupportedRevisionLayout,
+                "The retained layout previews revision decisions instead of their markup.",
+            ));
+        }
         if let Some(message) = pages::metadata_mismatch(&self.doc, &request, current.is_some()) {
             return Err(refuse(ExportFailureCode::StaleLayout, &message));
         }
