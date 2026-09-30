@@ -4517,6 +4517,7 @@ pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
 /// Parses a DOCX for editing with the inflated parts the identity index
 /// reads. `digest` is its [`package_digest`], so the parser does not hash the
 /// package again.
+#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn parse_docx_package_with_digest(
     bytes: &[u8],
     digest: String,

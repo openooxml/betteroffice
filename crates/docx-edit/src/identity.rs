@@ -2248,25 +2248,28 @@ mod tests {
 
     #[test]
     fn media_sources_have_the_same_fingerprint_in_both_seed_modes() {
-        let bytes = ooxml_opc::rezip_parts(&[(
-            "word/media/picture.png".to_owned(),
-            vec![1, 2, 3, 4],
-        )])
-        .unwrap();
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/media/picture.png".to_owned(), vec![1, 2, 3, 4])])
+                .unwrap();
         let table = docx_parse::media::MediaTable::new(
             ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap(),
         )
         .unwrap();
         let url = table.data_url(0).unwrap();
-        for key in ["src", "shapeJson", "chartJson", "fieldData", "propertiesJson"] {
+        for key in [
+            "src",
+            "shapeJson",
+            "chartJson",
+            "fieldData",
+            "propertiesJson",
+        ] {
             let document = |src: &str| {
                 let doc = EditingDoc::new(7);
                 doc.create_story("body", "", "Normal", "left").unwrap();
                 let value = if key == "src" {
                     src.to_owned()
                 } else {
-                    serde_json::json!({"nested": [{"src": src, "label": "media:0"}]})
-                        .to_string()
+                    serde_json::json!({"nested": [{"src": src, "label": "media:0"}]}).to_string()
                 };
                 doc.apply_raw_ops(
                     "body",
