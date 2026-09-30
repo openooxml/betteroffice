@@ -942,11 +942,11 @@ test('disabled worker open preserves main-thread open, projection and flush with
     const session = result.current.core.session!;
     expect(result.current.mainOpens).toEqual([true]);
     expect(replicas).toEqual([session]);
-    expect(result.current.loadChecks).toEqual([1, 1]);
+    expect(result.current.loadChecks).toEqual([1, 1, 1]);
     act(() => rerender({ ...props }));
     await act(async () => {});
     expect(replicas).toEqual([session]);
-    expect(result.current.loadChecks).toEqual([1, 1]);
+    expect(result.current.loadChecks).toEqual([1, 1, 1]);
     expect(result.current.core.documentFromYrs()).not.toBeNull();
     act(() => result.current.core.scheduleCompatibilityWarm());
     result.current.core.cancelCompatibilityWarm();

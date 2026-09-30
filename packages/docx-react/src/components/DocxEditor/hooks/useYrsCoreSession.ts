@@ -569,8 +569,7 @@ export function useYrsCoreSession(
         const full = await (early ?? openFull());
         earlyTaken = true;
         if (!full) return;
-        // An early open may have finished while the preview showed.
-        if (early && stale()) {
+        if (stale()) {
           openedWorker?.destroy();
           openedWorker = null;
           full.next.destroy();
