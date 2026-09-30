@@ -1071,6 +1071,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     { heldEngines: [canvasRenderer.layoutEngine] }
   );
   sessionGenerationRef.current = yrsCore.sessionGeneration;
+  // A failed load has nothing to build: the renderer lets go of the previous document.
+  const releaseRenderer = canvasRenderer.onLayoutComputed;
+  useEffect(() => {
+    if (state.parseError) releaseRenderer(null, null);
+  }, [state.parseError, releaseRenderer]);
   // Content listeners project the document on every edit; warm its base once
   // the first pages are on screen so neither opening nor the first key pays.
   useCompatibilityWarm(

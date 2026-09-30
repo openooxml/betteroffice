@@ -459,6 +459,8 @@ export function useRustDisplayList(
       if (dispatchHoldTimerRef.current !== null) {
         clearTimeout(dispatchHoldTimerRef.current);
       }
+      // A build the worker leaves unanswered must not fall back on the freed session.
+      generationRef.current += 1;
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();

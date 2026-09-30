@@ -15,22 +15,29 @@ const { act, cleanup, render } = await import('@testing-library/react');
 const real = await import('@betteroffice/docx/yrs');
 const { createYrsSession } = real;
 const afterDestroy: string[] = [];
+const live = new Set<unknown>();
 mock.module('@betteroffice/docx/yrs', () => ({
   ...real,
   createYrsSession: async (options: Parameters<typeof createYrsSession>[0]) => {
     const session = await createYrsSession(options);
     let destroyed = false;
-    return new Proxy(session, {
+    const proxy: typeof session = new Proxy(session, {
       get(target, key, receiver) {
         const value = Reflect.get(target, key, receiver);
         if (typeof value !== 'function') return value;
         return (...args: unknown[]) => {
-          if (key === 'destroy') destroyed = true;
-          else if (destroyed) afterDestroy.push(String(key));
+          if (key === 'destroy') {
+            destroyed = true;
+            live.delete(proxy);
+          } else if (destroyed) {
+            afterDestroy.push(String(key));
+          }
           return value.apply(target, args);
         };
       },
     });
+    live.add(proxy);
+    return proxy;
   },
 }));
 const { DocxEditor } = await import('../../index');
@@ -112,6 +119,19 @@ test('loading another document never calls into the session it replaced', async 
   await settle(2500);
   view.rerender(<DocxEditor documentBuffer={await commentedDocx(4)} />);
   await settle(3000);
+  expect(afterDestroy).toEqual([]);
+  view.unmount();
+}, 30_000);
+
+test('a load that fails frees the document it replaced', async () => {
+  afterDestroy.length = 0;
+  const view = render(<DocxEditor documentBuffer={await commentedDocx(2)} />);
+  await settle(2500);
+  const detached = await commentedDocx(1);
+  structuredClone(detached, { transfer: [detached] });
+  view.rerender(<DocxEditor documentBuffer={detached} />);
+  await settle(1500);
+  expect(live.size).toBe(0);
   expect(afterDestroy).toEqual([]);
   view.unmount();
 }, 30_000);

@@ -622,6 +622,61 @@ test('a StrictMode remount keeps the worker its second mount started', async () 
   }
 });
 
+test('unmounting while the worker builds never builds on the host engine', async () => {
+  const native = createEditSession(9103);
+  native.create_story('body', 'Unmounted text', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  let posted = 0;
+  class FakeWorker {
+    onmessage = null;
+    onerror = null;
+    onmessageerror = null;
+    postMessage(): void {
+      posted += 1;
+    }
+    terminate(): void {}
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const builds: string[] = [];
+  const engine = {
+    buildDisplayListJson: (input: string) => {
+      builds.push('json');
+      return native.build_display_list_json(input);
+    },
+    resetFrameBase: () => native.reset_frame_base(),
+    buildDisplayListFrame: (input: string, epoch: number) => {
+      builds.push('frame');
+      return native.build_display_list_frame(input, epoch);
+    },
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    encodeStateVector: () => new Uint8Array(),
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, { getInputs: () => inputs }, undefined, undefined, engine)
+    );
+    expect(posted).toBe(1);
+    unmount();
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    expect(builds).toEqual([]);
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
+
 test('each session decodes its images into a cache of its own', () => {
   const { result } = renderHook(() => useCanvasRenderer());
   const first = { name: 'first' } as unknown as YrsSession;
