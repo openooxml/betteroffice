@@ -2865,16 +2865,15 @@ impl EngineSession {
                 })
         };
         for story in stories {
-            let mut ranges: Vec<(u32, u32)> = self
-                .doc
-                .story_changes(&story)
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .filter(|(change, _)| changed.contains(change.revision_id.as_str()))
-                .map(|(_, range)| range)
-                .collect();
             let txn = self.doc.yrs_doc().transact();
             let text = crate::story_ref(&txn, &story).map_err(|error| error.to_string())?;
+            let mut ranges: Vec<(u32, u32)> = self
+                .doc
+                .story_raw_changes(&story, &text, &txn)
+                .into_iter()
+                .filter(|change| changed.contains(change.id.as_str()))
+                .map(|change| (change.start, change.end))
+                .collect();
             // An inline content control keeps its content's revisions in its payload.
             ranges.extend(
                 self.doc
@@ -2889,11 +2888,19 @@ impl EngineSession {
             if ranges.is_empty() {
                 continue;
             }
+            // Paragraphs come in story order: one overlaps a range when the
+            // furthest end among the ranges starting by its pilcrow reaches it.
+            ranges.sort_unstable();
+            let mut next_range = 0;
+            let mut furthest_end = None;
             for bounds in crate::op::para_bounds(&text, &txn) {
-                if ranges
-                    .iter()
-                    .any(|&(from, to)| from <= bounds.pilcrow && bounds.start <= to)
+                while let Some(&(from, to)) = ranges.get(next_range)
+                    && from <= bounds.pilcrow
                 {
+                    furthest_end = furthest_end.max(Some(to));
+                    next_range += 1;
+                }
+                if furthest_end.is_some_and(|end| bounds.start <= end) {
                     paragraphs.insert(bounds.para_id);
                 }
             }

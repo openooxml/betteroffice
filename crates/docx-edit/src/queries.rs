@@ -13,6 +13,17 @@ use crate::{
     map_string, story_ref,
 };
 
+/// A tracked change with its story-global `[start, end)`, before its paragraph
+/// locations are resolved.
+pub(crate) struct RawChange {
+    pub(crate) id: String,
+    kind: ChangeKind,
+    author: String,
+    date: String,
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+}
+
 /// Which projection of the story text a read query uses.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TextView {
@@ -592,15 +603,40 @@ impl EditingDoc {
     pub(crate) fn story_changes(&self, story_id: &str) -> OpResult<Vec<(ChangeInfo, (u32, u32))>> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, story_id)?;
-        let chunks = self.chunk_snapshot(story_id, &story, &txn);
-        struct RawChange {
-            id: String,
-            kind: ChangeKind,
-            author: String,
-            date: String,
-            start: u32,
-            end: u32,
+        let raw = self.story_raw_changes(story_id, &story, &txn);
+        if raw.is_empty() {
+            return Ok(Vec::new());
         }
+        let bounds = crate::op::para_bounds(&story, &txn);
+        raw.into_iter()
+            .map(|change| {
+                let range = LocRange {
+                    start: crate::op::loc_in_bounds(story_id, &bounds, change.start)?,
+                    end: crate::op::loc_in_bounds(story_id, &bounds, change.end)?,
+                };
+                Ok((
+                    ChangeInfo {
+                        revision_id: change.id,
+                        kind: change.kind,
+                        author: change.author,
+                        date: change.date,
+                        range,
+                    },
+                    (change.start, change.end),
+                ))
+            })
+            .collect()
+    }
+
+    /// A story's tracked changes as [`Self::story_changes`] finds them, ordered by
+    /// position, without resolving paragraph locations (a story may hold none).
+    pub(crate) fn story_raw_changes<T: ReadTxn>(
+        &self,
+        story_id: &str,
+        story: &yrs::TextRef,
+        txn: &T,
+    ) -> Vec<RawChange> {
+        let chunks = self.chunk_snapshot(story_id, story, txn);
         let mut raw: Vec<RawChange> = Vec::new();
         for chunk in chunks.iter() {
             if let ChunkKind::Pilcrow(map) = &chunk.kind {
@@ -608,7 +644,7 @@ impl EditingDoc {
                     (crate::PPR_INS, ChangeKind::ParagraphMarkInsertion),
                     (crate::PPR_DEL, ChangeKind::ParagraphMarkDeletion),
                 ] {
-                    if let Some(Out::Any(value)) = map.get(&txn, key)
+                    if let Some(Out::Any(value)) = map.get(txn, key)
                         && let Some((id, author, date)) = revision_parts(&value)
                     {
                         raw.push(RawChange {
@@ -621,7 +657,7 @@ impl EditingDoc {
                         });
                     }
                 }
-                if let Some(Out::Any(Any::Array(changes))) = map.get(&txn, crate::PPR_CHANGE) {
+                if let Some(Out::Any(Any::Array(changes))) = map.get(txn, crate::PPR_CHANGE) {
                     for change in changes.iter() {
                         if let Some((id, author, date)) = revision_parts(change) {
                             raw.push(RawChange {
@@ -664,7 +700,7 @@ impl EditingDoc {
             }
         }
         raw.extend(
-            table_row_changes(&story, &txn)
+            table_row_changes(story, txn)
                 .into_iter()
                 .map(|change| RawChange {
                     id: change.revision_id,
@@ -681,28 +717,7 @@ impl EditingDoc {
                 }),
         );
         raw.sort_by_key(|change| change.start);
-        if raw.is_empty() {
-            return Ok(Vec::new());
-        }
-        let bounds = crate::op::para_bounds(&story, &txn);
-        raw.into_iter()
-            .map(|change| {
-                let range = LocRange {
-                    start: crate::op::loc_in_bounds(story_id, &bounds, change.start)?,
-                    end: crate::op::loc_in_bounds(story_id, &bounds, change.end)?,
-                };
-                Ok((
-                    ChangeInfo {
-                        revision_id: change.id,
-                        kind: change.kind,
-                        author: change.author,
-                        date: change.date,
-                        range,
-                    },
-                    (change.start, change.end),
-                ))
-            })
-            .collect()
+        raw
     }
 
     /// The Loc range covering every unit stamped with the revision ID (any story).

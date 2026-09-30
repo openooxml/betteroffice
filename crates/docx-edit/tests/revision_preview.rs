@@ -20,13 +20,29 @@ const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/
 const PROPOSALS: &str = r#"<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Alpha </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>beta</w:t></w:r><w:r><w:t xml:space="preserve"> gamma</w:t></w:r></w:p><w:p w14:paraId="00000002"><w:r><w:t>Delta</w:t></w:r></w:p><w:p w14:paraId="00000003"><w:r><w:t>Title</w:t></w:r></w:p>"#;
 
 fn document(body: &str) -> Vec<u8> {
-    let parts = [
-        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#.to_owned()),
+    headed_document(body, None)
+}
+
+/// [`document`], with `header` as the default header of its one section.
+fn headed_document(body: &str, header: Option<&str>) -> Vec<u8> {
+    let (header_type, header_rel, header_ref) = header.map_or(("", "", ""), |_| (
+        r#"<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>"#,
+        r#"<Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>"#,
+        r#"<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr>"#,
+    ));
+    let mut parts = vec![
+        ("[Content_Types].xml", format!(r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>{header_type}</Types>"#)),
         ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
-        ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#.to_owned()),
+        ("word/_rels/document.xml.rels", format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>{header_rel}</Relationships>"#)),
         ("word/numbering.xml", format!(r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#)),
-        ("word/document.xml", format!(r#"<w:document {NS}><w:body>{body}</w:body></w:document>"#)),
+        ("word/document.xml", format!(r#"<w:document {NS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}{header_ref}</w:body></w:document>"#)),
     ];
+    if let Some(header) = header {
+        parts.push((
+            "word/header1.xml",
+            format!(r#"<w:hdr {NS}>{header}</w:hdr>"#),
+        ));
+    }
     ooxml_opc::rezip_parts(
         &parts
             .into_iter()
@@ -985,6 +1001,36 @@ fn hidden_ranges_collapse_to_the_neighbouring_edges() {
             assert!(docx_layout::hit::caret_rect(list, 25).is_none());
         })
         .unwrap();
+}
+
+#[test]
+fn a_preview_change_reads_revisions_in_a_story_without_paragraphs() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let header = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:ins w:id="9" w:author="Bo" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let body: String = (0..120)
+        .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"))
+        .chain([r#"<w:p><w:r><w:t>Tail</w:t></w:r><w:ins w:id="1" w:author="Bo" w:date="2026-01-01T00:00:00Z"><w:r><w:t xml:space="preserve"> added</w:t></w:r></w:ins></w:p>"#.to_owned()])
+        .collect();
+    let bytes = headed_document(&body, Some(header));
+    let seeded = || {
+        let engine = EngineSession::new(75103);
+        seed_from_docx(engine.doc(), &bytes).unwrap();
+        engine
+    };
+    let engine = seeded();
+    engine
+        .layout_document_with_regions_json(&layout_request(&RenderEnv::default(), font))
+        .unwrap();
+    let request = layout_request(&preview(&[("1", Accepted)]), font);
+    let before = engine.stats();
+    let incremental = engine.layout_document_with_regions_json(&request).unwrap();
+    assert!(engine.stats().incremental_pagination_calls > before.incremental_pagination_calls);
+    assert_eq!(
+        incremental,
+        seeded()
+            .layout_document_with_regions_json(&request)
+            .unwrap()
+    );
 }
 
 #[test]
