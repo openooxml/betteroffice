@@ -9,7 +9,7 @@ import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
 import { stampSourceVersion } from '../internals/layoutProvenance';
 import { yrsCellStory } from '../yrsCommands';
-import { useHostSearch, type DocxSearchState } from './useHostSearch';
+import { topPageInView, useHostSearch, type DocxSearchState } from './useHostSearch';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -134,6 +134,8 @@ async function mount(page = 1, repeat = false) {
     signals,
     events,
     pagedEditorRef,
+    host,
+    queries,
     layOut: (canPlace: () => boolean) => {
       placeable = canPlace;
     },
@@ -200,6 +202,53 @@ test('a repeated header on the page in view does not send the search back', asyn
   });
   expect(hook.result.current.api.getSearchState()?.current).toBe(2);
   expect(reveals).toEqual([hook.result.current.highlight!.matches[2].displayFrom]);
+});
+
+test('starts at the nearest later page beyond the look-ahead with non-monotonic match pages', async () => {
+  const { first, hook, reveals, pagedEditorRef, host, queries } = await mount(3);
+  const farMatch = pagedEditorRef.current!.yrsLocToDisplayPosition({
+    story: 'body',
+    paraId: first,
+    offset: 12,
+  })!;
+  const displayListQueries = queries(0);
+  Object.assign(displayListQueries, {
+    displayList: {
+      pages: Array.from({ length: 41 }, (_, pageIndex) => ({
+        pageIndex,
+        primitives: pageIndex === 0
+          ? [
+              { kind: 'text', docStart: 0, docEnd: farMatch },
+              { kind: 'text', docStart: farMatch + 3, docEnd: 100000 },
+            ]
+          : pageIndex === 40
+            ? [{ kind: 'text', docStart: farMatch, docEnd: farMatch + 3 }]
+            : [],
+      })),
+    },
+    anchorRect: (position: number) => ({
+      pageIndex: position === farMatch ? 40 : 0,
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+    }),
+  });
+  const canvas = document.createElement('canvas');
+  canvas.dataset.pageIndex = '2';
+  canvas.getBoundingClientRect = () => new DOMRect(0, 10, 800, 990);
+  host.append(canvas);
+  expect(topPageInView(host)).toBe(2);
+
+  let state = null as DocxSearchState | null;
+  await act(async () => {
+    state = await hook.result.current.api.search('the');
+  });
+  const matches = hook.result.current.highlight!.matches;
+  expect(matches.map((match) => displayListQueries.anchorRect(match.displayFrom)?.pageIndex)).toEqual([0, 40, 0, 0, 0]);
+  expect(state).toMatchObject({ total: 5, current: 1 });
+  expect(hook.result.current.highlight!.current).toBe(1);
+  expect(reveals).toEqual([matches[1].displayFrom]);
 });
 
 test('a document change re-runs the search and keeps the current match', async () => {

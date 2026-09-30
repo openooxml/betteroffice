@@ -193,6 +193,8 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const pending = pendingRefineRef.current;
       if (pending) pending.version = yrsSession?.version();
       if (pending && signal) {
+        // The caller ends the follow through `signal`, however long the page takes to build.
+        pending.until = Number.POSITIVE_INFINITY;
         const stop = () => {
           if (pendingRefineRef.current === pending) clearPendingRefine();
         };

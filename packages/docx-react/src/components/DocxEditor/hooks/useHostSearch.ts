@@ -141,15 +141,16 @@ function firstInView(
     const first = firstOnPage(matches, order, queries, index, pageIndex);
     if (first >= 0) return first;
   }
-  let low = 0;
-  let high = matches.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    const page = queries.anchorRect(matches[middle].displayFrom)?.pageIndex;
-    if (page != null && page < pageIndex) low = middle + 1;
-    else high = middle;
+  let nearest = -1;
+  let nearestPage = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < matches.length; index += 1) {
+    const page = queries.anchorRect(matches[index].displayFrom)?.pageIndex;
+    if (page != null && page >= pageIndex && page < nearestPage) {
+      nearest = index;
+      nearestPage = page;
+    }
   }
-  return low < matches.length ? low : 0;
+  return nearest >= 0 ? nearest : 0;
 }
 
 function anchorOf(session: YrsSession, match: SearchMatch | undefined): YrsStickyPosition | null {
