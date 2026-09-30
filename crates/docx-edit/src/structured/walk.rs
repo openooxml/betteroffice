@@ -4385,6 +4385,7 @@ fn set_identities_aside(value: &mut Value, prefix: &str) {
     match value {
         Value::Object(object) => {
             object.remove(crate::PARA_ID);
+            object.remove(crate::JOIN_DONOR);
             if let Some(Value::Array(ids)) = object.get_mut("fieldResultBlocks") {
                 ids.iter_mut().for_each(|id| *id = Value::Null);
             }

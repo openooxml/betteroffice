@@ -300,8 +300,10 @@ fn resolve_story(
                     removed += 1;
                     continue;
                 }
-                let deferred =
-                    join && Some(chunk.start) != final_pilcrow && boundary_revisions.is_some();
+                let deferred = Some(chunk.start) != final_pilcrow
+                    && boundary_revisions.is_some_and(|revisions| {
+                        join || revisions.iter().any(Option::is_some)
+                    });
                 if (ins_hit || del_hit) && !deferred {
                     map.remove(txn, JOIN_DONOR);
                 }
