@@ -8,6 +8,7 @@ import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 
 export type ResidentEngineWorkerRequest =
+  | { id: number; type: 'warm' }
   | {
       id: number;
       type: 'bootstrap';

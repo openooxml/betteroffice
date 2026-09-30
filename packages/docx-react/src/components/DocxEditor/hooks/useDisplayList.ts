@@ -28,6 +28,7 @@ import {
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  takePreloadedResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   sameYrsSelection,
   type ResidentCaretPaintStyle,
@@ -352,6 +353,34 @@ export function useRustDisplayList(
     }
     return load;
   }, []);
+  const spawnedWorkerEnginesRef = useRef(new WeakSet<YrsSession>());
+  // The worker for `hostEngine`: its own, the one of the session it
+  // takes over from, a spare, or a new one.
+  const workerFor = useCallback(
+    (hostEngine: YrsSession): NonNullable<typeof workerRef.current> => {
+      const current = workerRef.current;
+      if (current?.engine === hostEngine) return current;
+      const load = sessionLoad(hostEngine);
+      const replacement = spawnedWorkerEnginesRef.current.has(hostEngine);
+      spawnedWorkerEnginesRef.current.add(hostEngine);
+      if (current && handoffFromRef?.current === current.engine) {
+        current.client.rebootstrap();
+        workerRef.current = { engine: hostEngine, client: current.client, load };
+        return workerRef.current;
+      }
+      current?.client.destroy();
+      // A successor that fails to construct leaves no destroyed client current.
+      workerRef.current = null;
+      const spare = replacement ? null : takePreloadedResidentEngineWorker();
+      workerRef.current = {
+        engine: hostEngine,
+        client: spare ?? new ResidentEngineWorkerClient(),
+        load,
+      };
+      return workerRef.current;
+    },
+    [handoffFromRef, sessionLoad]
+  );
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   // No worker starts once the hook is gone, whatever failure arrives late.
   const unmountedRef = useRef(false);
@@ -950,27 +979,6 @@ export function useRustDisplayList(
     setWorkerSurfacesActive(false);
     setWorkerPresentationActive(false);
   }, [setWorkerPresentationActive]);
-
-  // The worker for `hostEngine`: its own, the one of the session it
-  // takes over from, or a new one.
-  const workerFor = useCallback(
-    (hostEngine: YrsSession): NonNullable<typeof workerRef.current> => {
-      const current = workerRef.current;
-      if (current?.engine === hostEngine) return current;
-      const load = sessionLoad(hostEngine);
-      if (current && handoffFromRef?.current === current.engine) {
-        current.client.rebootstrap();
-        workerRef.current = { engine: hostEngine, client: current.client, load };
-        return workerRef.current;
-      }
-      current?.client.destroy();
-      // A successor that fails to construct leaves no destroyed client current.
-      workerRef.current = null;
-      workerRef.current = { engine: hostEngine, client: new ResidentEngineWorkerClient(), load };
-      return workerRef.current;
-    },
-    [handoffFromRef, sessionLoad]
-  );
 
   /** The frame `engine`'s next frame applies to. */
   const frameBase = useCallback(
@@ -1690,6 +1698,7 @@ export function useRustDisplayList(
     replaceOutOfMemoryWorker,
     requestSettleRelayout,
     sessionLoad,
+    workerFor,
   ]);
 
   const resetSettled = useCallback(
