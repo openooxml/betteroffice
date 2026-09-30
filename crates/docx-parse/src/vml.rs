@@ -9,10 +9,10 @@ use crate::image::{
     Image, ImageCrop, ImageEffect, ImageEffects, ImagePosition, ImageSize, ImageWrap, PositionAxis,
     placeholder_image,
 };
-use crate::media::{MediaMap, resolve_image_data};
+use crate::media::{MediaMap, media_token_index, resolve_image_data};
 use crate::relationships::RelationshipMap;
 use crate::scalars::ColorValue;
-use crate::xml::{XmlElement, namespaces};
+use crate::xml::{ParseBudget, XmlElement, namespaces};
 
 const EMU_PER_PIXEL: f64 = 9_525.0;
 const MAX_STYLE_BYTES: usize = 65_536;
@@ -228,6 +228,17 @@ pub fn parse_vml_image_content(
     relationships: Option<&RelationshipMap>,
     media: Option<&MediaMap>,
 ) -> Option<Image> {
+    vml_image_content(picture, relationships, media, None)
+}
+
+/// [`parse_vml_image_content`] reading `media:{n}` sources through `budget`'s
+/// media table, where a failed read fails the parse.
+pub(crate) fn vml_image_content(
+    picture: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    mut budget: Option<&mut ParseBudget<'_>>,
+) -> Option<Image> {
     let mut shapes = Vec::new();
     collect_vml_shapes(picture, 0, &mut shapes);
     for shape in shapes.into_iter().take(MAX_VML_SHAPES) {
@@ -255,9 +266,9 @@ pub fn parse_vml_image_content(
         let mut width = css_length_to_px(style.get("width").map(String::as_str));
         let mut height = css_length_to_px(style.get("height").map(String::as_str));
         if width.is_none() || height.is_none() {
-            if let Some((intrinsic_width, intrinsic_height)) =
-                intrinsic_size_px(bytes_from_image_src(resolved.src.as_deref()).as_deref())
-                && intrinsic_width > 0.0
+            if let Some((intrinsic_width, intrinsic_height)) = intrinsic_size_px(
+                image_src_bytes(resolved.src.as_deref(), budget.as_deref_mut()).as_deref(),
+            ) && intrinsic_width > 0.0
                 && intrinsic_height > 0.0
             {
                 match (width, height) {
@@ -703,6 +714,22 @@ fn vml_vertical_relative_to(raw: Option<&str>) -> &'static str {
         Some("line") => "line",
         _ => "paragraph",
     }
+}
+
+fn image_src_bytes(source: Option<&str>, budget: Option<&mut ParseBudget<'_>>) -> Option<Vec<u8>> {
+    let index = source.and_then(media_token_index);
+    if let (Some(budget), Some(index)) = (budget, index)
+        && let Some(table) = budget.media_table()
+    {
+        return match table.bytes(index) {
+            Ok(bytes) => Some(bytes.into_owned()),
+            Err(error) => {
+                budget.fail_media_read(error);
+                None
+            }
+        };
+    }
+    bytes_from_image_src(source)
 }
 
 fn bytes_from_image_src(source: Option<&str>) -> Option<Vec<u8>> {
