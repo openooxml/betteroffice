@@ -716,6 +716,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       layoutUpdateOrigin,
       runLayoutPipeline,
       scheduleLayout,
+      scheduleWarmLayout,
       cancelPendingScrollRestore,
       navigationEpoch,
       getLayoutRequest,

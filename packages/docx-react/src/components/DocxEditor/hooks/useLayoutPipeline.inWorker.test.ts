@@ -435,3 +435,23 @@ test('a font warm-up pass never lays out here, even without a worker', async () 
   expect(shown()).toBe('2');
   expect(errors).toEqual([]);
 });
+
+test('a direct run queued behind a worker pass is never a warm-up', async () => {
+  const { doc, worker, errors, hook, frame, shown } = await opened();
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('local', true));
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+
+  doc.version = 3;
+  act(() => {
+    hook.result.current.scheduleWarmLayout();
+    hook.result.current.runLayoutPipeline();
+  });
+  doc.workerAvailable = false;
+  act(() => worker[1]!.fail());
+  await frame();
+  expect(doc.laidOutHere).toEqual([3]);
+  expect(shown()).toBe('3');
+  expect(errors).toEqual([]);
+});

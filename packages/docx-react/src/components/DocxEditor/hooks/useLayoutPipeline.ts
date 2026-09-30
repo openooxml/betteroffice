@@ -344,6 +344,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
+      // A direct run (a trigger or font load) is real work, whether it runs now or queues.
+      if (!scheduledRunRef.current) pendingWarmOnlyRef.current = false;
       const onHost = options?.onHost === true || pendingOnHostRef.current;
       const inWorker = !onHost && pendingInWorkerRef.current === true;
       const inFlight = workerPassRef.current;
@@ -360,8 +362,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       }
       queuedBehindWorkerRef.current = false;
       pendingInWorkerRef.current = null;
-      // A direct run (a trigger or font load) is never a warm-up.
-      const warmOnly = scheduledRunRef.current && pendingWarmOnlyRef.current === true;
+      const warmOnly = pendingWarmOnlyRef.current === true;
       pendingWarmOnlyRef.current = null;
       const pass = ++passRef.current;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
