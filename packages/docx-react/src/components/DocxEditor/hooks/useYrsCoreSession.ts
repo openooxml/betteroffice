@@ -692,8 +692,11 @@ export function useYrsCoreSession(
 
   const failOpening = useCallback(
     (error: Error, session?: unknown): boolean => {
+      if (retiringRef.current !== null && (failOpeningRef.current?.(error, session) ?? false)) {
+        return true;
+      }
       if (session === undefined || session === sessionRef.current) startReplicaRef.current?.();
-      return retiringRef.current !== null && (failOpeningRef.current?.(error, session) ?? false);
+      return false;
     },
     []
   );
