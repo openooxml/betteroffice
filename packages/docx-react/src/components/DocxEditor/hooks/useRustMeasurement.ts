@@ -127,6 +127,8 @@ export function useRustMeasurement(
       releaseSourceRef.current?.();
       releaseSourceRef.current = null;
       sourceRef.current = null;
+      // The next source starts over, even on the same engine.
+      sourceEngineRef.current = null;
     },
     [textEngine]
   );
