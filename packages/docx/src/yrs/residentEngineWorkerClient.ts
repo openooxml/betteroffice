@@ -199,9 +199,9 @@ export class ResidentEngineWorkerClient {
     }
     const reservation = { bytes: options.heapLimitBytes };
     this.openedHeapLimit = reservation;
-    const copy = new Uint8Array(bytes);
     let response: ResidentEngineWorkerResponse & { ok: true };
     try {
+      const copy = new Uint8Array(bytes);
       response = await this.request(
         {
           type: 'open',
@@ -246,6 +246,9 @@ export class ResidentEngineWorkerClient {
     extras: string,
     options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
+    if (options.opened && !this.openedHeapLimit) {
+      throw new ResidentWorkerFailureError('Resident engine worker has no opened document');
+    }
     if (
       options.opened &&
       options.heapLimitBytes !== undefined &&
@@ -274,7 +277,18 @@ export class ResidentEngineWorkerClient {
       snapshotTransfers(snapshot)
     );
     this.recordSent(options.stateVector, fontsRevision);
-    const response = await pending;
+    let response: ResidentEngineWorkerResponse & { ok: true };
+    try {
+      response = await pending;
+    } catch (error) {
+      // The open it was queued behind failed, so the worker holds no document to bootstrap.
+      if (options.opened && !this.openedHeapLimit) {
+        this.bootstrapped = false;
+        this.remoteVector = null;
+        this.appliedFontsRevision = null;
+      }
+      throw error;
+    }
     const result = frameResult(response);
     this.recordSync(response, fontsRevision);
     this.ready = true;
