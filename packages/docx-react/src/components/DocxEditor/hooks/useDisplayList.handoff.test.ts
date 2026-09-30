@@ -107,6 +107,7 @@ test('a session handed over keeps its worker and shows the old pages until the n
           undefined,
           source,
           undefined,
+          undefined,
           handoffFrom
         );
         shown.push(hook.displayList);
@@ -163,7 +164,7 @@ test('glyph outlines and decoded images come from the session whose pages are sh
   const shown: Array<[string, string | undefined, ImageResolver]> = [];
   try {
     const { result, unmount } = renderHook(() => {
-      const renderer = useCanvasRenderer(undefined, undefined, undefined, handoffFrom);
+      const renderer = useCanvasRenderer(undefined, undefined, undefined, undefined, handoffFrom);
       shown.push([
         text(renderer.displayList),
         (renderer.glyphOutlineProvider as ((json: string) => string) | null)?.(''),
@@ -223,7 +224,16 @@ test('a request of the preview failing after the handover leaves the new session
   try {
     const { result, rerender, unmount } = renderHook(
       ({ layout, source }) =>
-        useRustDisplayList(layout, undefined, undefined, undefined, source, undefined, handoffFrom),
+        useRustDisplayList(
+          layout,
+          undefined,
+          undefined,
+          undefined,
+          source,
+          undefined,
+          undefined,
+          handoffFrom
+        ),
       { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
     );
     const layOut = async (
@@ -283,7 +293,16 @@ test('input for a session the worker does not serve takes the host path', async 
   try {
     const { result, rerender, unmount } = renderHook(
       ({ layout, source }) =>
-        useRustDisplayList(layout, undefined, undefined, undefined, source, undefined, handoffFrom),
+        useRustDisplayList(
+          layout,
+          undefined,
+          undefined,
+          undefined,
+          source,
+          undefined,
+          undefined,
+          handoffFrom
+        ),
       { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
     );
     const pending = result.current.layoutInWorker(preview.engine, REQUEST);
@@ -327,7 +346,7 @@ test('a display-only preview never asks the worker for the rest of its layout', 
   try {
     const { result, rerender, unmount } = renderHook(
       ({ layout, source }) =>
-        useRustDisplayList(layout, undefined, undefined, undefined, source, undefined, {
+        useRustDisplayList(layout, undefined, undefined, undefined, source, undefined, undefined, {
           current: null,
         }),
       { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
@@ -470,7 +489,16 @@ test("a worker handed to another session builds no pages of the old session's fr
   try {
     const { result, rerender, unmount } = renderHook(
       ({ layout, source }) =>
-        useRustDisplayList(layout, undefined, undefined, undefined, source, undefined, handoffFrom),
+        useRustDisplayList(
+          layout,
+          undefined,
+          undefined,
+          undefined,
+          source,
+          undefined,
+          undefined,
+          handoffFrom
+        ),
       { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
     );
     const first = result.current.layoutInWorker(preview.engine, preview.request)!;

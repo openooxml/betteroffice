@@ -52,7 +52,10 @@ function inputFor(
   input: React.Ref<YrsInputRef>,
   applyResidentInput?: YrsInputProps['applyResidentInput'],
   applyResidentDelete?: YrsInputProps['applyResidentDelete'],
-  props: Pick<YrsInputProps, 'isSuggesting' | 'author' | 'onPendingInputChange'> = {}
+  props: Pick<
+    YrsInputProps,
+    'isSuggesting' | 'author' | 'onPendingInputChange' | 'resolveDisplayListQueries'
+  > = {}
 ) {
   const map = () =>
     createYrsInputPositionMap(
@@ -659,6 +662,89 @@ test('a command admitted before the document was replaced is refused', async () 
   });
   expect(admissionCode(error)).toBe('document-replaced');
 });
+
+test.each([false, true])(
+  'ArrowDown awaiting display queries never calls a replaced session (Enter queued behind it: %p)',
+  async (queued) => {
+    const original = await seededSession();
+    const replacement = await seededSession();
+    let released = false;
+    const afterRelease: string[] = [];
+    const session = new Proxy(original, {
+      get(target, key, receiver) {
+        const value = Reflect.get(target, key, receiver);
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          if (released) {
+            afterRelease.push(String(key));
+            throw new Error(`Released session method: ${String(key)}`);
+          }
+          return value.apply(target, args);
+        };
+      },
+    });
+    let releaseQueries!: (value: null) => void;
+    const blocked = new Promise<null>((resolve) => {
+      releaseQueries = resolve;
+    });
+    let started!: () => void;
+    const resolving = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const resolveDisplayListQueries = mock((_minimumFrameEpoch?: number | null) => {
+      started();
+      return blocked;
+    });
+    let finished!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    const onPendingInputChange = (pending: boolean) => {
+      if (!pending) finished();
+    };
+    const resident = mock(async (_text: string) => null);
+    const input = createRef<YrsInputRef>();
+    const setSelection = spyOn(original, 'setSelection');
+    const errors = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = render(inputFor(session, input, resident, undefined, {
+        onPendingInputChange,
+        resolveDisplayListQueries,
+      }));
+      await act(async () => {
+        fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'ArrowDown' });
+        await resolving;
+        if (queued) fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'Enter' });
+      });
+      expect(resolveDisplayListQueries.mock.calls).toEqual([[null]]);
+      view.rerender(inputFor(replacement, input, resident, undefined, { onPendingInputChange }));
+      const replacementSelection = replacement.selection();
+      setSelection.mockClear();
+      released = true;
+      await act(async () => {
+        releaseQueries(null);
+        await settled;
+      });
+      expect(afterRelease).toEqual([]);
+      expect(setSelection).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+      expect(replacement.selection()).toEqual(replacementSelection);
+      expect(text(replacement)).toBe('Seed');
+      act(() => input.current!.insertText(' B'));
+      await act(async () => {
+        await input.current!.flushPendingInput();
+      });
+      expect(resident.mock.calls).toEqual([[' B']]);
+      expect(text(replacement)).toBe('Seed B');
+      expect(replacement.selection()?.head.offset).toBe(6);
+      expect(afterRelease).toEqual([]);
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      setSelection.mockRestore();
+      errors.mockRestore();
+    }
+  }
+);
 
 test('a command waiting on composition is refused when the input unmounts', async () => {
   const { input, view } = await mount();

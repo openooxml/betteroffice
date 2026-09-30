@@ -58,6 +58,8 @@ export interface YrsCoreSession {
 
 interface YrsCoreSessionCallbacks {
   isCurrentLoad?: (generation: number) => boolean;
+  /** A session was created for the current load, before it is seeded. */
+  onSession?: (session: YrsSession) => void;
   onHostDocument?: (
     host: YrsDocxHost,
     generation: number,
@@ -408,6 +410,7 @@ export function useYrsCoreSession(
           return;
         }
         if (opened) {
+          callbacksRef.current?.onSession?.(opened.session);
           const painted = new Promise<void>((resolve) => {
             paintWaitRef.current = { session: opened.session, resolve };
             setTimeout(resolve, PREVIEW_PAINT_TIMEOUT_MS);
@@ -450,6 +453,7 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
+        callbacksRef.current?.onSession?.(next);
         let host: YrsDocxHost | null;
         try {
           host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {

@@ -10,6 +10,7 @@ import type {
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
+import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 
 export interface ResidentEngineWorkerFrame {
   frame: Uint8Array;
@@ -40,6 +41,13 @@ export interface ResidentEngineWorkerLayoutOptions {
   stateVector?: Uint8Array;
   /** Bootstrap only: lay out just the body's first pages before replying. */
   provisionalPages?: number;
+  /** Bootstrap only: the epoch of the frame the host shows; the worker's frames follow it. */
+  frameEpoch?: number;
+  /**
+   * Bootstrap only: the most the worker's editing core may allocate at once.
+   * An allocation past it stops the worker with {@link ResidentWorkerOutOfMemoryError}.
+   */
+  heapLimitBytes?: number;
 }
 
 /** How a bootstrap or sync builds its frame. */
@@ -105,15 +113,21 @@ export class ResidentEngineWorkerClient {
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
   private keepSurfaces = false;
+  private lastMemory: WasmModuleMemory[] | null = null;
 
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
       const response = event.data;
+      if (response.memory) this.lastMemory = response.memory;
       if (response.ok && response.stateVector && response.id >= this.lastSnapshotId) {
         this.remoteVector = new Uint8Array(response.stateVector);
       }
       if (!response.ok && response.terminal) {
-        this.fail(new ResidentWorkerUnavailableError(response.error));
+        this.fail(
+          response.outOfMemory
+            ? new ResidentWorkerOutOfMemoryError(response.error, response.memory ?? [])
+            : new ResidentWorkerUnavailableError(response.error)
+        );
         return;
       }
       if (this.pending.size > 0) this.armWatchdog();
@@ -134,6 +148,11 @@ export class ResidentEngineWorkerClient {
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  /** The worker's wasm memories as of its latest reply; null before one. */
+  memory(): WasmModuleMemory[] | null {
+    return this.lastMemory;
   }
 
   layoutRevision(): number {
@@ -183,13 +202,14 @@ export class ResidentEngineWorkerClient {
         type: 'bootstrap',
         snapshot,
         extras,
-        expectedFrameEpoch: 0,
+        expectedFrameEpoch: options.frameEpoch ?? 0,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
         ...(options.displayWindow ? { displayWindow: options.displayWindow } : {}),
         ...(options.provisionalPages !== undefined
           ? { provisionalPages: options.provisionalPages }
           : {}),
         ...(keepSurfaces ? { keepSurfaces: true } : {}),
+        ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
       },
       snapshotTransfers(snapshot)
     );
@@ -292,7 +312,7 @@ export class ResidentEngineWorkerClient {
       );
       return { applied: true, ...result };
     } catch (error) {
-      if (error instanceof ResidentWorkerUnavailableError) return { applied: false };
+      if (inputUnavailable(error)) return { applied: false };
       throw error;
     }
   }
@@ -320,7 +340,7 @@ export class ResidentEngineWorkerClient {
       );
       return { applied: true, ...result };
     } catch (error) {
-      if (error instanceof ResidentWorkerUnavailableError) return { applied: false };
+      if (inputUnavailable(error)) return { applied: false };
       throw error;
     }
   }
@@ -438,6 +458,25 @@ class ResidentWorkerUnavailableError extends Error {}
 
 /** The worker itself failed (crash, timeout, torn-down, corrupt reply). */
 export class ResidentWorkerFailureError extends Error {}
+
+/** The worker trapped because its wasm memory could not grow any further. */
+export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {
+  constructor(
+    message: string,
+    /** The worker's wasm memories when it trapped. */
+    readonly memory: WasmModuleMemory[]
+  ) {
+    super(message);
+  }
+}
+
+/** Input the worker could not take; running out of memory is left to the caller. */
+function inputUnavailable(error: unknown): boolean {
+  return (
+    error instanceof ResidentWorkerUnavailableError &&
+    !(error instanceof ResidentWorkerOutOfMemoryError)
+  );
+}
 
 function residentWorkerError(message: string, unavailable = false): Error {
   return unavailable ? new ResidentWorkerUnavailableError(message) : new Error(message);
