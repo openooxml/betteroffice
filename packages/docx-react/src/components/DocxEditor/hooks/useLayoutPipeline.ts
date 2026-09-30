@@ -312,7 +312,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         return;
       }
       queuedBehindWorkerRef.current = false;
-      if (session) markLayoutQueued(session, false);
       pendingInWorkerRef.current = null;
       const pass = ++passRef.current;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
@@ -343,6 +342,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         measurement = residentMeasurementConfig(requirements);
       } catch (error) {
         console.error('[PagedEditor] Resident font preflight error:', error);
+        markLayoutQueued(session, false);
         onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
@@ -358,6 +358,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         return;
       }
       pendingOnHostRef.current = false;
+      // A queued pass deferred above still holds settles until it gets this far.
+      markLayoutQueued(session, false);
 
       const computeInputs = { document, pageGap, session, renderEnv, measurement };
       const sourceVersion = readSessionVersion(session);

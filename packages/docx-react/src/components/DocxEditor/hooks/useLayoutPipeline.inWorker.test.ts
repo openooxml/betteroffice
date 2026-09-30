@@ -23,7 +23,12 @@ interface WorkerPass {
 }
 
 function fakeDocument() {
-  const doc = { version: 1, laidOutHere: [] as number[], workerAvailable: true };
+  const doc = {
+    version: 1,
+    laidOutHere: [] as number[],
+    workerAvailable: true,
+    fontsReady: true,
+  };
   const session = {
     version: () => String(doc.version),
     layoutFontRequirementsJson: () => '[]',
@@ -49,7 +54,7 @@ async function opened() {
       renderEnv: {} as YrsRenderEnv,
       pageGap: 24,
       zoom: 1,
-      residentMeasurementConfig: () => ({}) as ResidentMeasurementConfig,
+      residentMeasurementConfig: () => (doc.fontsReady ? ({} as ResidentMeasurementConfig) : null),
       deferLayoutPass: () => false,
       pagesContainerRef: { current: null },
       viewportLayoutRef: { current: null },
@@ -198,6 +203,28 @@ test('a pass no change asked to run here waits for the worker pass in flight', a
   await answer(2);
   expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
   expect(doc.laidOutHere).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test('a queued pass that waits for fonts holds settles until it lays out', async () => {
+  const { doc, session, worker, errors, hook, frame, answer } = await opened();
+
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('local', true));
+  await frame();
+  act(() => hook.result.current.runLayoutPipeline());
+  await frame();
+  doc.fontsReady = false;
+  await answer(1);
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2]);
+  expect(isLayoutQueued(session)).toBe(true);
+
+  doc.fontsReady = true;
+  act(() => hook.result.current.runLayoutPipeline());
+  await frame();
+  expect(worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
+  expect(isLayoutQueued(session)).toBe(false);
   expect(errors).toEqual([]);
 });
 

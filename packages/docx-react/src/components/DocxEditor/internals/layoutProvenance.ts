@@ -26,7 +26,7 @@ export function isSupersededLayout(layout: object | null | undefined): boolean {
 
 const queuedLayoutSessions = new WeakSet<object>();
 
-/** Records whether a layout pass for `session` waits behind a worker pass. */
+/** Records whether a pass for `session` that waited behind a worker pass has yet to start. */
 export function markLayoutQueued(session: object, queued: boolean): void {
   if (queued) queuedLayoutSessions.add(session);
   else queuedLayoutSessions.delete(session);
