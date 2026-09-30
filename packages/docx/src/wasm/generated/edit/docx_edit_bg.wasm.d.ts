@@ -133,6 +133,7 @@ export const editsession_set_column_width: (a: number, b: number, c: number, d: 
 export const editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+export const editsession_set_display_retain_built_pages: (a: number, b: number) => void;
 export const editsession_set_display_window: (a: number, b: number, c: number) => void;
 export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
