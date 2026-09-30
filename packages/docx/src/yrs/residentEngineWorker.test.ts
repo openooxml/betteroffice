@@ -1345,6 +1345,7 @@ describe('resident worker opening', () => {
         calls.push('state');
         return new Uint8Array([7, 8]);
       },
+      proposalEngine: { version: () => 'opened' },
     });
     return { w, calls };
   }
@@ -1387,6 +1388,8 @@ describe('resident worker opening', () => {
 
     const state = await w.send({ type: 'encodeState' });
     expect(state.ok && [...new Uint8Array(state.state!)]).toEqual([7, 8]);
+    expect(state.ok && state.version).toBe('opened');
+    expect(state.ok && state.proposals).toEqual({ previewVersion: 0, entries: [] });
     expect(state.memory).toEqual(w.harness.memories);
     expect(calls[calls.length - 1]).toBe('state');
 

@@ -432,7 +432,7 @@ export function computeProposalGeometryMirror(
   const projectionFor = (rootStory: string): YrsPositionProjection | null =>
     once(projections, rootStory, () =>
       createYrsPositionProjection(reader, rootStory, {
-        segments: (story) => segmentsAt(reader, version, story),
+        segments: (story) => segmentsAt(reader, version, story) as YrsStorySegment[],
       })
     );
   const inputMap = (story: string): YrsInputPositionMap | null =>

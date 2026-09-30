@@ -831,10 +831,12 @@ export function createProposalRegistry(session: DocxProposalSession): DocxPropos
       );
     },
     mirror(mirror) {
-      // Like the registry's own changes, a new document version alone notifies no one.
+      // A new mirrored version alone, such as a pending-change marker, notifies no one; ending the
+      // mirror notifies when the session's own version differs from the mirrored one.
+      const ending = mirror === null;
       const visible = () => {
-        const { version: _, ...rest } = snapshot();
-        return JSON.stringify(canonical(rest));
+        const { version, ...rest } = snapshot();
+        return JSON.stringify(canonical(ending ? { version, ...rest } : rest));
       };
       const before = visible();
       if (mirror) {

@@ -223,25 +223,26 @@ describe('proposal registry', () => {
     expect(registry.snapshot()).toEqual({ ...original, version: 'worker-v1' });
     const next = { version: 'worker-v2', proposals: source.exportState() };
     registry.mirror(next);
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(1);
+    expect(registry.snapshot().version).toBe('worker-v2');
     next.proposals.previewVersion = 2;
     registry.mirror(next);
-    expect(events).toHaveLength(3);
+    expect(events).toHaveLength(2);
     next.proposals.entries[1]!.record.state = 'rejected';
     registry.mirror(next);
-    expect(events).toHaveLength(4);
+    expect(events).toHaveLength(3);
     registry.mirror(structuredClone(next));
-    expect(events).toHaveLength(4);
+    expect(events).toHaveLength(3);
 
     registry.mirror(null);
-    expect(events).toHaveLength(5);
+    expect(events).toHaveLength(4);
     expect(registry.snapshot()).toEqual({
       version: session.version(),
       previewVersion: 2,
       proposals: next.proposals.entries.map(({ record }) => record),
     });
     registry.mirror(null);
-    expect(events).toHaveLength(5);
+    expect(events).toHaveLength(4);
     expect(snapshotOf(registry.propose({ expectVersion: 'stale', proposals: inputs }))).toEqual(
       registry.snapshot()
     );
@@ -273,7 +274,8 @@ describe('proposal registry', () => {
     registry.mirror({ version: 'worker', proposals: { previewVersion: 1, entries: [] } });
     expect(events).toHaveLength(1);
     registry.mirror(null);
-    expect(events).toHaveLength(1);
+    expect(events).toHaveLength(2);
+    expect(events[1]!.version).toBe(session.version());
     expect(registry.snapshot().previewVersion).toBe(1);
     registry.destroy();
   });
