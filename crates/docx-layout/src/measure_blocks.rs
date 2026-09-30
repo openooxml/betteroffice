@@ -3030,10 +3030,7 @@ mod tests {
             "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0}
         }))
         .unwrap();
-        assert_eq!(
-            cell_content_widths(&cell, 600.0, &config),
-            None
-        );
+        assert_eq!(cell_content_widths(&cell, 600.0, &config), None);
     }
 
     #[test]

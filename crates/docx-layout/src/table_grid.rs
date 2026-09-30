@@ -577,14 +577,12 @@ fn autofit_column_widths(
         let mut below_cell_floor = false;
         for grid_cell in cells {
             let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
-            let minimum = cell
-                .min_content_width
-                .or(content_widths
-                    .and_then(|rows| rows.get(grid_cell.row_index))
-                    .and_then(|cells| cells.get(grid_cell.cell_index))
-                    .copied()
-                    .flatten()
-                    .map(|widths| widths.0));
+            let minimum = cell.min_content_width.or(content_widths
+                .and_then(|rows| rows.get(grid_cell.row_index))
+                .and_then(|cells| cells.get(grid_cell.cell_index))
+                .copied()
+                .flatten()
+                .map(|widths| widths.0));
             if minimum.is_some_and(|minimum| span_width(&widths, &grid_cell) < minimum) {
                 return None;
             }
@@ -1405,7 +1403,8 @@ mod tests {
             resolve_table_column_widths_with_content(child, 600.0, Some(&content)),
             vec![300.0]
         );
-        let BlockExtent::Table(measured) = measure_block(&mut outer, 600.0, &config).unwrap() else {
+        let BlockExtent::Table(measured) = measure_block(&mut outer, 600.0, &config).unwrap()
+        else {
             panic!()
         };
         assert_eq!(measured.column_widths, vec![300.0]);
