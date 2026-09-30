@@ -3,9 +3,10 @@
  *
  * `target` comes from `hit_test_regions` (`crates/docx-layout/src/hit.rs`) and
  * names what a click would act on; nothing here re-derives geometry. This maps
- * it onto the editor's modes, as the DOM painter's stylesheet also did for a
- * read-only document, for the body behind an open header/footer editor, and
- * for a picture as a select target.
+ * it onto the editor's modes, as the DOM painter's stylesheet also did for the
+ * body behind an open header/footer editor and for a picture as a select
+ * target. A read-only document shows the text cursor over body text only,
+ * where a drag selects.
  *
  * An idle header/footer band deliberately DIFFERS from that stylesheet, which
  * gave the whole band a hand: here it reads as text over its own runs, since a
@@ -32,7 +33,9 @@ export function canvasHoverCursor(
   mode: CanvasHoverMode,
   hit: DisplayListRegionHit | null
 ): CanvasHoverCursor {
-  if (mode.readOnly || !hit) return 'default';
+  if (!hit) return 'default';
+  // a read-only document selects body text and nothing else
+  if (mode.readOnly) return hit.region === 'body' && hit.target === 'text' ? 'text' : 'default';
   if (mode.partEdit) {
     // only the open part accepts typing; the body and every sibling are inert
     if (!hitBelongsToPart(mode.partEdit, hit)) return 'default';
