@@ -195,6 +195,20 @@ pub fn measure_keep_with_next_group_at(
     deferred: f64,
     capacity: f64,
 ) -> f64 {
+    measure_keep_with_next_group_witnessing(group, measured, leading, deferred, capacity, true)
+}
+
+/// [`measure_keep_with_next_group_at`], where a headerless table follower
+/// witnesses its whole first row unless `split_first_row` (and the row is not
+/// taller than `capacity`).
+pub(crate) fn measure_keep_with_next_group_witnessing(
+    group: &KeepWithNextGroup,
+    measured: &[MeasuredBlock],
+    leading: impl Fn(f64) -> f64,
+    deferred: f64,
+    capacity: f64,
+    split_first_row: bool,
+) -> f64 {
     let mut budget = 0.0;
     let mut owed = deferred;
     for (position, &index) in group.members.iter().enumerate() {
@@ -227,7 +241,9 @@ pub fn measure_keep_with_next_group_at(
             }
         }
         Some(BlockExtent::Table(table)) => match follower.map(|mb| &mb.block) {
-            Some(LayoutBlock::Table(block)) => table_leading_slice(block, table, capacity),
+            Some(LayoutBlock::Table(block)) => {
+                table_leading_slice(block, table, capacity, split_first_row)
+            }
             _ => 0.0,
         },
         Some(BlockExtent::Image(image)) => image.height,
@@ -247,11 +263,17 @@ pub fn measure_keep_with_next_group_at(
 /// Height (px) of the shortest first fragment placement gives a table: its
 /// header band and first body slice (its first line when the paragraph rules
 /// leave that row no break in the room under the band), or the smallest slice
-/// of a headerless table's first row (the whole row when it cannot split),
-/// extended to the end of any keep-with-next row chain starting in them that
-/// fits `capacity` along with the rows above it. A floating table keeps its
-/// line slice, as it is not placed in the flow.
-fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64) -> f64 {
+/// of a headerless table's first row (the whole row when it cannot split, or
+/// unless `split_first_row` and the row fits `capacity`), extended to the end
+/// of any keep-with-next row chain starting in them that fits `capacity` along
+/// with the rows above it. A floating table keeps its line slice, as it is not
+/// placed in the flow.
+fn table_leading_slice(
+    block: &TableBlock,
+    measure: &TableExtent,
+    capacity: f64,
+    split_first_row: bool,
+) -> f64 {
     let breaks = RowBreaks::new(block, measure);
     if block.floating.is_some() {
         return first_table_fragment_height(block, measure, breaks.lines());
@@ -262,7 +284,15 @@ fn table_leading_slice(block: &TableBlock, measure: &TableExtent, capacity: f64)
         .iter()
         .take_while(|row| row.is_header.unwrap_or(false))
         .count();
-    if headers == 0 && !measure.rows.is_empty() {
+    let oversized_first_row = measure
+        .rows
+        .first()
+        .is_some_and(|row| row.height > capacity)
+        && !block
+            .rows
+            .first()
+            .is_some_and(|row| row.cant_split.unwrap_or(false) || row.is_exact_height());
+    if headers == 0 && !measure.rows.is_empty() && (split_first_row || oversized_first_row) {
         first = breaks.fresh_slice(0, 0.0, capacity);
     } else if headers > 0
         && headers < measure.rows.len()

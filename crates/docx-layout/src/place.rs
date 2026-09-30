@@ -34,7 +34,9 @@
 
 use crate::LayoutError;
 use crate::hooks;
-use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
+use crate::keep_together::{
+    measure_keep_with_next_group_witnessing, paragraph_is_unbreakable, paragraph_widow_control,
+};
 use crate::page_flow::{PageFlowGeometry, Paginator};
 use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
@@ -854,27 +856,28 @@ fn place(
             && !plan.keep_with_next.interior_members.contains(&i)
         {
             let state_idx = paginator.get_current();
-            // between float bands a run stays whole only in the tallest gap
-            let page_content_height = if paginator.has_float_bands() {
-                paginator.get_column_capacity()
-            } else {
-                paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top
-            };
+            let page_content_height =
+                paginator.state(state_idx).content_limit - paginator.state(state_idx).content_top;
             let page_has_content = paginator.page_fragment_count(state_idx) > 0;
-            let group_height = hooks::measure_keep_with_next_group_at(
+            // between float bands a table row's first slice may not share a gap
+            // with the run, so a table follower keeps its whole first row there
+            let split_first_row = !paginator.has_float_bands();
+            let group_height = measure_keep_with_next_group_witnessing(
                 group,
                 measured,
                 |before| paginator.leading_spacing(before),
                 paginator.state(state_idx).deferred_spacing,
                 page_content_height,
-            )?;
-            let fresh_page_height = hooks::measure_keep_with_next_group_at(
+                split_first_row,
+            );
+            let fresh_page_height = measure_keep_with_next_group_witnessing(
                 group,
                 measured,
                 |_| 0.0,
                 0.0,
                 page_content_height,
-            )?;
+                split_first_row,
+            );
             let must_advance = hooks::keep_with_next_group_must_advance_from(
                 group_height,
                 fresh_page_height,
@@ -2844,7 +2847,7 @@ mod pagination_rule_tests {
     }
 
     #[test]
-    fn a_heading_above_a_table_stays_when_its_first_slice_only_fits_past_a_float_band() {
+    fn a_heading_above_a_table_on_a_page_with_float_bands_keeps_the_whole_row_witness() {
         let cell_paragraph = json!({
             "kind": "paragraph", "id": 10,
             "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
@@ -2873,6 +2876,11 @@ mod pagination_rule_tests {
         );
         let result = layout_document(&mut value).unwrap();
         assert_eq!(result.pages.len(), 2);
+        assert!(result.pages[0].fragments.iter().any(|fragment| matches!(
+            fragment,
+            Fragment::Paragraph(p)
+                if matches!(p.block_id, crate::types::BlockId::Num(value) if value == 2.0)
+        )));
     }
 
     fn oversized_cant_split_table() -> serde_json::Value {
