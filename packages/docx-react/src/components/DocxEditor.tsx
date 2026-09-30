@@ -88,6 +88,10 @@ import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditin
 import type { PartEditTarget } from './DocxEditor/partEdit';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
 import { useCompatibilityWarm, useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
+import {
+  useDocxEnginePrewarm,
+  useDocxEnginePrewarmOnBytes,
+} from './DocxEditor/hooks/useDocxEnginePrewarm';
 import { useContextMenus } from './DocxEditor/hooks/useContextMenus';
 import { useCommentManagement } from './DocxEditor/hooks/useCommentManagement';
 import { useCommentLifecycle } from './DocxEditor/hooks/useCommentLifecycle';
@@ -159,6 +163,11 @@ export type { DocxEditorCollaborationOptions, DocxPointPosition } from './DocxEd
 export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Document data — ArrayBuffer, Uint8Array, Blob, or File */
   documentBuffer?: DocxInput | null;
+  /**
+   * Preload the editing engine on mount. Off by default.
+   * @experimental
+   */
+  experimentalPrewarm?: boolean;
   /** Pre-parsed document (alternative to documentBuffer) */
   document?: Document | null;
   /** Callback when document is saved */
@@ -751,6 +760,7 @@ import {
 export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function DocxEditor(
   {
     documentBuffer,
+    experimentalPrewarm = false,
     document: initialDocument,
     onSave,
     onSaveRequest,
@@ -823,6 +833,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   },
   ref
 ) {
+  useDocxEnginePrewarm(experimentalPrewarm);
   // Host slot the Rust measure source (mounted deep in PagedEditor) fills with
   // the merged doc-wide font chains; the canvas display-list build reads it to
   // gate GlyphRun emission. Null until Rust measurement warms its first chains.
@@ -1094,6 +1105,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     },
     [reportDocumentLayoutError, resetSettled, yrsSeedGeneration]
   );
+  useDocxEnginePrewarmOnBytes(experimentalPrewarm, yrsSeedBytes);
   const yrsCore = useYrsCoreSession(
     true,
     history.state,
@@ -1544,6 +1556,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         : null,
     loadGeneration: yrsSeedGeneration,
     queries: canvasRenderer.queries,
+    layoutError: canvasRenderer.error,
     zoom: state.zoom,
     canvasHostRef: canvasRenderer.canvasHostRef,
     overlayTarget: pluginOverlayTarget,

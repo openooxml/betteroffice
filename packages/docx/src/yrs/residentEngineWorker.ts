@@ -5,6 +5,7 @@ import {
   createResidentEngineSession,
   type ResidentEngineSession,
 } from './residentEngineSession';
+import { preloadEditWasm } from './wasm/index';
 import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
@@ -67,7 +68,9 @@ interface LayoutRequest {
   layoutExtras?: string;
 }
 let incompleteLayout: (LayoutRequest & { layoutInput: string }) | null = null;
-let completedLayout: (LayoutRequest & { layoutJson: string }) | null = null;
+let completedLayout:
+  | (LayoutRequest & { layoutJson: string; headersFootersJson: string | undefined })
+  | null = null;
 // A `completeLayout` measured a few blocks at a time, as operations queued
 // behind the requests that arrive meanwhile.
 interface SlicedCompletion {
@@ -142,6 +145,20 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
 }
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  if (request.type === 'warm') {
+    try {
+      await preloadEditWasm();
+      reply({ id: request.id, ok: true });
+    } catch (error) {
+      // No session exists yet, so a failed load is retried by the next request.
+      reply({
+        id: request.id,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
   if (request.type === 'destroy') {
     destroySession();
     return;
@@ -154,7 +171,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // safely while the main replica applies worker updates with local origin.
     session = await createResidentEngineSession(request.heapLimitBytes);
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    const { layoutJson, provisional } = hydrate(request.snapshot, request.provisionalPages);
+    const { layoutJson, provisional } = hydrate(
+      request.snapshot,
+      request.provisionalPages,
+      request.layoutExtras !== undefined
+    );
     if (provisional) {
       incompleteLayout = {
         layoutInput: request.snapshot.layoutInput,
@@ -193,7 +214,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     unsubscribe?.();
     unsubscribe = null;
     if (request.displayWindow) session.setDisplayWindow(...request.displayWindow);
-    const { layoutJson } = hydrate(request.snapshot);
+    const { layoutJson } = hydrate(request.snapshot, undefined, request.layoutExtras !== undefined);
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
@@ -304,6 +325,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   await completeProvisionalLayout();
+  // The edit replaces the pagination a cached completion's frame would paint.
+  completedLayout = null;
   session.setSelection(request.selection.anchor, request.selection.head);
   pendingUpdates = [];
   const started = performance.now();
@@ -363,11 +386,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 
 /**
  * Loads a snapshot and runs its layout, over the first `provisionalPages`
- * pages only when given; returns the region layout reply.
+ * pages only when given; returns the region layout reply, which a full pass
+ * serializes only when `reply` asks for it.
  */
 function hydrate(
   snapshot: YrsResidentWorkerSnapshot,
-  provisionalPages?: number
+  provisionalPages?: number,
+  reply = true
 ): { layoutJson: string | null; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
@@ -396,6 +421,8 @@ function hydrate(
       provisionalPages
     );
     provisional = (JSON.parse(layoutJson) as { provisional?: boolean }).provisional === true;
+  } else if (snapshot.layoutWithRegions && !reply) {
+    session.layoutDocumentWithRegionsRetained(snapshot.layoutInput);
   } else if (snapshot.layoutWithRegions) {
     // the retained reply leaves out the tens-of-MB measured arena
     layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
@@ -430,6 +457,7 @@ async function completeProvisionalLayout(): Promise<void> {
     completedLayout = {
       ...request,
       layoutJson: layoutJson ?? session.layoutDocumentWithRegionsRetainedJson(layoutInput),
+      headersFootersJson: session.retainedHeadersFootersJson(),
     };
     if (waiting) {
       await replyCompletedLayout(waiting.id, waiting.expectedFrameEpoch, waiting.paintCaret);
@@ -456,7 +484,7 @@ async function replyCompletedLayout(
   pendingUpdates = [];
   const started = performance.now();
   const frame = session.buildDisplayListFrame(
-    frameExtras(completed.extras, completed.layoutExtras, completed.layoutJson),
+    frameExtras(completed.extras, completed.layoutExtras, null, completed.headersFootersJson),
     expectedFrameEpoch
   );
   await replyFrame(
@@ -547,7 +575,11 @@ async function completionSlice(completion: SlicedCompletion): Promise<void> {
   const { layoutInput: _input, ...request } = incompleteLayout;
   incompleteLayout = null;
   slicedCompletion = null;
-  completedLayout = { ...request, layoutJson: progress.layoutJson };
+  completedLayout = {
+    ...request,
+    layoutJson: progress.layoutJson,
+    headersFootersJson: session.retainedHeadersFootersJson(),
+  };
   await replyCompletedLayout(completion.id, completion.expectedFrameEpoch, completion.paintCaret);
 }
 
@@ -560,17 +592,24 @@ function supersedeSlicedCompletion(): void {
 
 /**
  * The extras a frame is built with. For a layout this worker owns, the host
- * sends them without the header/footer payload, which only this layout has.
+ * sends them without the header/footer payload, which only this layout has:
+ * the session retains it after a region layout (`layoutJson` is its reply),
+ * or a completed layout captured it.
  */
 function frameExtras(
   extras: string,
   layoutExtras: string | undefined,
-  layoutJson: string | null
+  layoutJson: string | null,
+  headersFootersJson?: string
 ): string {
   if (layoutExtras === undefined) return extras;
-  const headersFooters = layoutJson
-    ? (JSON.parse(layoutJson) as Pick<DisplayListBuildInputs, 'headersFooters'>).headersFooters
-    : undefined;
+  const retained =
+    headersFootersJson ??
+    (layoutJson === null ? undefined : session?.retainedHeadersFootersJson());
+  const headersFooters =
+    retained === undefined
+      ? undefined
+      : (JSON.parse(retained) as DisplayListBuildInputs['headersFooters']);
   return encodeDisplayListFrameExtras({
     ...(JSON.parse(layoutExtras) as DisplayListBuildInputs),
     ...(headersFooters ? { headersFooters } : {}),
