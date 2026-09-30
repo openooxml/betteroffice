@@ -1626,34 +1626,45 @@ impl EngineSession {
     }
 
     pub fn layout_font_requirements_json(&self, input_json: &str) -> Result<String, String> {
+        self.layout_font_requirements(input_json, true)
+    }
+
+    fn layout_font_requirements(
+        &self,
+        input_json: &str,
+        use_preview_superset: bool,
+    ) -> Result<String, String> {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (input, regions, notes, measurement, render_env, body_story) = request.split();
-        let cache_key =
-            if !RenderEnv::parse_revision_preview(&render_env["revisionPreview"]).is_empty() {
-                let request =
-                    serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-                let fingerprint = font_requirements_fingerprint(request)?;
-                let epoch = self.doc_epoch();
-                if let Some(cached) = self.preview_font_requirements.borrow().as_ref()
-                    && cached.doc_epoch == epoch
-                    && cached.request_fingerprint == fingerprint
-                {
-                    return Ok(cached.json.clone());
-                }
-                Some((epoch, fingerprint))
-            } else {
-                None
-            };
+        let cache_key = if use_preview_superset
+            && !RenderEnv::parse_revision_preview(&render_env["revisionPreview"]).is_empty()
+        {
+            let request =
+                serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+            let fingerprint = font_requirements_fingerprint(request)?;
+            let epoch = self.doc_epoch();
+            if let Some(cached) = self.preview_font_requirements.borrow().as_ref()
+                && cached.doc_epoch == epoch
+                && cached.request_fingerprint == fingerprint
+            {
+                return Ok(cached.json.clone());
+            }
+            Some((epoch, fingerprint))
+        } else {
+            None
+        };
         let default_family =
             docx_layout::measure_blocks::default_font_family(&measurement.defaults);
         let mut requirements = BTreeMap::new();
+        let mut preview_superset_safe = true;
         if cache_key.is_some() {
-            docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                input.measured.iter().map(|measured| &measured.block),
-                default_family,
-                &mut requirements,
-            );
+            preview_superset_safe &=
+                docx_layout::measure_blocks::collect_preview_font_requirements_into(
+                    input.measured.iter().map(|measured| &measured.block),
+                    default_family,
+                    &mut requirements,
+                );
         } else {
             docx_layout::measure_blocks::collect_font_requirements_into(
                 input.measured.iter().map(|measured| &measured.block),
@@ -1696,11 +1707,12 @@ impl EngineSession {
             for story in stories {
                 self.with_lowered_story(&story, &render_env, |blocks| {
                     if cache_key.is_some() {
-                        docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                            blocks,
-                            default_family,
-                            &mut requirements,
-                        );
+                        preview_superset_safe &=
+                            docx_layout::measure_blocks::collect_preview_font_requirements_into(
+                                blocks,
+                                default_family,
+                                &mut requirements,
+                            );
                     } else {
                         docx_layout::measure_blocks::collect_font_requirements_into(
                             blocks,
@@ -1720,13 +1732,17 @@ impl EngineSession {
                             .expect("resident story exists after lowering")
                             .revealable_blocks,
                     );
-                    docx_layout::measure_blocks::collect_preview_font_requirements_into(
-                        revealable.iter(),
-                        default_family,
-                        &mut requirements,
-                    );
+                    preview_superset_safe &=
+                        docx_layout::measure_blocks::collect_preview_font_requirements_into(
+                            revealable.iter(),
+                            default_family,
+                            &mut requirements,
+                        );
                 }
             }
+        }
+        if cache_key.is_some() && !preview_superset_safe {
+            return self.layout_font_requirements(input_json, false);
         }
         let json = serde_json::to_string(&requirements.into_values().collect::<Vec<_>>())
             .map_err(|error| format!("serialize: {error}"))?;
@@ -5985,6 +6001,46 @@ mod tests {
             requirement.key == "preview han|0|0"
                 && requirement.scripts.contains(&"cjk-sc".to_owned())
         }));
+    }
+
+    #[test]
+    fn preview_font_preflight_preserves_exact_cjk_fallbacks() {
+        let engine = EngineSession::new(1371);
+        let blocks = [serde_json::json!({
+            "type": "paragraph", "content": [font_preflight_run("骨", "Calibri")]
+        })];
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        let insertion = engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::Position::new("body", 1),
+                "かな",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        for (decision, script) in [
+            (crate::bridge::RevisionPreview::Rejected, "cjk-sc"),
+            (crate::bridge::RevisionPreview::Accepted, "cjk-jp"),
+            (crate::bridge::RevisionPreview::Rejected, "cjk-sc"),
+        ] {
+            let env =
+                RenderEnv::default().with_revision_preview(&insertion.revision_ids[0], decision);
+            let blocks =
+                crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap();
+            let exact = docx_layout::measure_blocks::collect_font_requirements(&blocks, "Calibri");
+            let request = serde_json::json!({"bodyStory": "body", "renderEnv": env});
+            let requirements: serde_json::Value = serde_json::from_str(
+                &engine
+                    .layout_font_requirements_json(&request.to_string())
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(requirements, serde_json::to_value(exact).unwrap());
+            assert_eq!(requirements[0]["key"], "calibri|0|0");
+            assert_eq!(requirements[0]["scripts"], serde_json::json!([script]));
+            assert!(engine.preview_font_requirements.borrow().is_none());
+        }
     }
 
     #[test]

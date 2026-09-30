@@ -112,12 +112,12 @@ pub fn collect_font_requirements_into<'a>(
     }
 }
 
-/// Fonts any revision preview of `blocks` may need.
+/// Fonts any revision preview may need; returns false for ambiguous CJK fallbacks.
 pub fn collect_preview_font_requirements_into<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     default_family: &str,
     requirements: &mut BTreeMap<String, FontRequirement>,
-) {
+) -> bool {
     let blocks: Vec<&LayoutBlock> = blocks.into_iter().collect();
     // A preview hiding the drawings that split a paragraph joins its segments.
     let mut segment_scripts = HashMap::<String, Vec<String>>::new();
@@ -193,6 +193,14 @@ pub fn collect_preview_font_requirements_into<'a>(
             }
         });
     }
+    requirements.values().all(|requirement| {
+        requirement
+            .scripts
+            .iter()
+            .filter(|script| matches!(script.as_str(), "cjk-jp" | "cjk-sc" | "cjk-tc" | "cjk-kr"))
+            .count()
+            <= 1
+    })
 }
 
 /// The family measurement gives text naming none: `defaults.fontFamily`, else Calibri.
