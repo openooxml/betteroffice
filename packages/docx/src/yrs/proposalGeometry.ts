@@ -38,7 +38,10 @@ export type AnchorReader = Pick<
 
 /** @internal */
 export type ProposalGeometryReader = AnchorReader &
-  Pick<YrsSession, 'storyIds' | 'paragraphs' | 'locateParagraph' | 'version'>;
+  Pick<
+    YrsSession,
+    'storyIds' | 'paragraphs' | 'paragraphIdCount' | 'locateParagraph' | 'version'
+  >;
 
 /** @internal */
 export type AnchorGeometryTarget =
@@ -482,9 +485,9 @@ export function resolveNavigationTarget(
 ): { loc: YrsLoc; position: number } | 'missing-target' | 'ambiguous-target' | 'unsupported' {
   if (typeof story !== 'string' || typeof paraId !== 'string') return 'missing-target';
   if (!reader.hasStory(story)) return 'missing-target';
-  const matches = reader.paragraphs(story).filter((paragraph) => paragraph.paraId === paraId);
-  if (matches.length === 0) return 'missing-target';
-  if (matches.length > 1) return 'ambiguous-target';
+  const count = reader.paragraphIdCount(story, paraId);
+  if (count === 0) return 'missing-target';
+  if (count > 1) return 'ambiguous-target';
   const loc = { story, paraId, offset: 0 };
   const point = createYrsSidebarProjection(reader).locToDisplayPoint(loc);
   if (!point || point.hfRid) return 'unsupported';

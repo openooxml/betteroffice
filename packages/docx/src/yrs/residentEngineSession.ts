@@ -145,6 +145,7 @@ export async function createResidentEngineSession(
     hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
     storyIds: () => session.story_ids(),
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
+    paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     locateParagraph: (story, paraId) =>
