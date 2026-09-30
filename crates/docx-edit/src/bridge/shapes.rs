@@ -496,6 +496,11 @@ fn shape_content_runs(
             .collect(),
         Some("complexField") => match projected_result(content, depth) {
             Some(result) => {
+                nested_sequences.extend(
+                    string(content, "instruction")
+                        .as_deref()
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
                 nested_sequences.extend(crate::seed::nested_sequence_names(content));
                 let formatting = field(content, "formatting");
                 result
