@@ -417,6 +417,7 @@ function imagePayload(image: Image): Attrs {
     position: image.position
       ? {
           relativeHeight: image.position.relativeHeight,
+          behindDoc: image.position.behindDoc,
           horizontal: image.position.horizontal
             ? {
                 relativeTo: image.position.horizontal.relativeTo,

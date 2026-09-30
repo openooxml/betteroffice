@@ -1472,6 +1472,8 @@ export type Page = {
   fragments: Fragment[];
   /** Page margins. */
   margins: PageMargins;
+  bodyMargins?: PageMargins;
+  bodyAnchorMargins?: PageMargins;
   /** Page size (width, height). */
   size: { w: number; h: number };
   /** Page orientation. */
@@ -1625,6 +1627,12 @@ export type LayoutOptions = {
   footnoteReservedHeights?: Map<number, number>;
   /** Section break type for the body-level (final) section (for section transition logic). */
   bodyBreakType?: 'continuous' | 'nextPage' | 'evenPage' | 'oddPage' | 'nextColumn';
+  sectionPageFloatBands?: Array<{
+    default: Array<{ top: number; bottom: number; oddPage?: boolean }>;
+    first?: Array<{ top: number; bottom: number; oddPage?: boolean }> | null;
+    even?: Array<{ top: number; bottom: number; oddPage?: boolean }> | null;
+    anchorMargins?: PageMargins;
+  }>;
   /** Effective section states, indexed by section. Undefined = legacy globals. */
   sections?: Array<{
     sectionId?: string;

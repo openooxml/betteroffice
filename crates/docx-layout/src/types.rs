@@ -1955,6 +1955,8 @@ pub struct LayoutOptions {
     /// footer other than the default one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_margins: Option<Vec<SectionPageMargins>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_page_float_bands: Option<Vec<SectionPageFloatBands>>,
     #[serde(default)]
     pub sections: Option<Vec<SectionLayoutContract>>,
 }
@@ -1973,6 +1975,28 @@ pub struct SectionPageMargins {
     pub even: Option<PageMargins>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<u64>,
+}
+
+/// A full-width float exclusion in page coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageFloatBand {
+    pub top: f64,
+    pub bottom: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub odd_page: Option<bool>,
+}
+
+/// Float bands for each header/footer variant a section shows.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SectionPageFloatBands {
+    pub default: Vec<PageFloatBand>,
+    pub first: Option<Vec<PageFloatBand>>,
+    pub even: Option<Vec<PageFloatBand>>,
+    /// Authored margins for float anchors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_margins: Option<PageMargins>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -2272,7 +2296,15 @@ pub struct HeaderFooterRefs {
 pub struct Page {
     pub number: u32,
     pub fragments: Vec<Fragment>,
+    #[serde(skip)]
+    pub(crate) float_bands: Vec<PageFloatBand>,
     pub margins: PageMargins,
+    /// Body flow margins when they differ from the anchor frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_margins: Option<PageMargins>,
+    /// Effective body anchor margins before float exclusions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_anchor_margins: Option<PageMargins>,
     pub size: Size,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orientation: Option<String>,

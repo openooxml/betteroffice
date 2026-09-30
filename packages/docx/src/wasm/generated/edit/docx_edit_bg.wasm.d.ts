@@ -182,7 +182,7 @@ export const list_docx_content_controls_json: (a: number, b: number, c: number, 
 export const render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
-export const clear_measure_fonts: () => void;
+export const clear_measure_fonts: () => [number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
