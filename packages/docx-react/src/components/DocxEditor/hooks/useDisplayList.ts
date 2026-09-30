@@ -510,10 +510,11 @@ export function useRustDisplayList(
   // The engines whose worker ran out of memory, each with the failure once its
   // replacement did too. Weak, so a replaced document's session is not kept.
   const outOfMemoryRef = useRef(new WeakMap<YrsSession, ResidentWorkerOutOfMemoryError | null>());
-  // Background work that runs a worker out of memory stops for that engine, and the replacement
-  // it causes leaves the engine's own replacement to a later failure.
+  // Background work that ran a worker out of memory: the engines it stops for, the workers it
+  // killed (whose replacement leaves the engine's own to a later failure), and those it runs on.
   const backgroundOutOfMemoryRef = useRef(new WeakSet<YrsSession>());
   const backgroundKilledRef = useRef(new WeakSet<ResidentEngineWorkerClient>());
+  const backgroundPendingRef = useRef(new WeakMap<ResidentEngineWorkerClient, number>());
   const spareReplacementRef = useRef(new WeakSet<YrsSession>());
   const displayWindowRef = useRef<[number, number]>(INITIAL_DISPLAY_WINDOW);
   const displayWindowListenersRef = useRef(new Set<() => void>());
@@ -803,7 +804,12 @@ export function useRustDisplayList(
       workerRef.current = null;
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
-      const background = client !== null && backgroundKilledRef.current.has(client);
+      // Whichever of its requests' handlers runs first, a worker that failed with a background
+      // request pending counts as run out of memory by it.
+      const background =
+        client !== null &&
+        (backgroundKilledRef.current.has(client) ||
+          (backgroundPendingRef.current.get(client) ?? 0) > 0);
       if (!previous || background || spareReplacementRef.current.delete(hostEngine)) {
         if (!previous) {
           outOfMemoryRef.current.set(hostEngine, null);
@@ -1278,11 +1284,23 @@ export function useRustDisplayList(
     [dropWorker, isCurrentWorker, overrides?.build, requestOpenedWorker, sessionLoad]
   );
 
-  const backgroundFailure = useCallback(
-    (hostEngine: YrsSession, client: ResidentEngineWorkerClient, error: unknown): void => {
-      if (!(error instanceof ResidentWorkerOutOfMemoryError)) return;
-      backgroundOutOfMemoryRef.current.add(hostEngine);
-      if (workerRef.current?.client === client) backgroundKilledRef.current.add(client);
+  // Background work that runs its worker out of memory stops for that engine.
+  const trackBackground = useCallback(
+    <T,>(
+      hostEngine: YrsSession,
+      client: ResidentEngineWorkerClient,
+      request: Promise<T>
+    ): Promise<T> => {
+      const pending = backgroundPendingRef.current;
+      pending.set(client, (pending.get(client) ?? 0) + 1);
+      const settled = () => pending.set(client, (pending.get(client) ?? 1) - 1);
+      void request.then(settled, (error: unknown) => {
+        settled();
+        if (!(error instanceof ResidentWorkerOutOfMemoryError)) return;
+        backgroundOutOfMemoryRef.current.add(hostEngine);
+        backgroundKilledRef.current.add(client);
+      });
+      return request;
     },
     []
   );
@@ -1300,16 +1318,12 @@ export function useRustDisplayList(
         ) {
           return null;
         }
-        return current.client
-          .fontRequirements(request)
+        return trackBackground(hostEngine, current.client, current.client.fontRequirements(request))
           .then((requirements) => {
             JSON.parse(requirements);
             return requirements;
           })
-          .catch((error: unknown) => {
-            backgroundFailure(hostEngine, current.client, error);
-            return null;
-          });
+          .catch(() => null);
       }
       if (!workerOpenEnabledRef.current || !workerOpenReplicaPending(hostEngine)) return null;
       if (!workerOpenSourcesRef.current.has(hostEngine)) {
@@ -1336,7 +1350,7 @@ export function useRustDisplayList(
           return null;
         });
     },
-    [backgroundFailure, dropWorker, isCurrentWorker, requestOpenedWorker]
+    [dropWorker, isCurrentWorker, requestOpenedWorker, trackBackground]
   );
 
   const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
@@ -1643,16 +1657,16 @@ export function useRustDisplayList(
         !bootstrapping &&
         workerPresentationActiveRef.current &&
         paintedCaretMachine.shouldPaint(performance.now());
-      const reply = bootstrapping
+      const sent = bootstrapping
         ? worker.bootstrap(snapshot, '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
+      const reply = background ? trackBackground(hostEngine, worker, sent) : sent;
       // A worker out of memory runs the pass again in a fresh worker; once
       // that one runs out too, the pass rejects and nothing lays out here.
       const unavailable = (
         cause: unknown
       ): Promise<WorkerLayoutComputation | null> | null => {
         const current = workerRef.current;
-        if (background) backgroundFailure(hostEngine, worker, cause);
         if (
           background ||
           unmountedRef.current ||
@@ -1744,7 +1758,7 @@ export function useRustDisplayList(
         .catch(unavailable);
     },
     [
-      backgroundFailure,
+      trackBackground,
       canLayoutInWorker,
       dropWorker,
       frameBase,

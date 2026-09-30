@@ -467,6 +467,16 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             workerOpenEnabledRef.current && workerRequirements === undefined
               ? fontRequirementsInWorkerRef.current?.(session, input, background)
               : null;
+          // A warm-up no worker answers has nothing to lay out.
+          if (
+            warmOnly &&
+            workerOpenEnabledRef.current &&
+            workerRequirements === undefined &&
+            !pendingRequirements
+          ) {
+            syncCoordinator.onLayoutComplete(currentEpoch);
+            return;
+          }
           if (pendingRequirements) {
             void pendingRequirements.then(
               (requirements) => {

@@ -1161,6 +1161,63 @@ test('background worker layout OOM waits for the next foreground pass to recover
   }
 });
 
+test('a foreground request that fails with a background one pending spares the next replacement too', async () => {
+  const options: { oomStage?: 'sync' } = {};
+  const { workers, posted } = installWorker(options);
+  const frames = holdFrames();
+  try {
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: shortBytes, readOnly: true, holdReplica: true },
+    });
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    const session = result.current.core.session!;
+    const input = posted.find((request) => request.type === 'bootstrap')!.snapshot.layoutInput;
+    const layOut = async () => {
+      const pass = result.current.renderer.layoutInWorker(session, input);
+      expect(pass).not.toBeNull();
+      return pass!.catch((error: unknown) => error);
+    };
+
+    options.oomStage = 'sync';
+    let foreground: Promise<unknown> = Promise.resolve(null);
+    let background: Promise<unknown> = Promise.resolve(null);
+    act(() => {
+      foreground = layOut();
+      background = result.current.renderer.layoutInWorker(session, input, { background: true })!;
+    });
+    options.oomStage = undefined;
+    await act(async () => {
+      expect(await foreground).not.toBeNull();
+      expect(await background).toBeNull();
+    });
+    expect(workers).toHaveLength(2);
+    expect(result.current.renderer.error).toBeNull();
+    expect(
+      result.current.renderer.fontRequirementsInWorker(session, input, { background: true })
+    ).toBeNull();
+
+    options.oomStage = 'sync';
+    await act(async () => {
+      expect(await layOut()).not.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    });
+    expect(workers).toHaveLength(3);
+    expect(result.current.renderer.error).toBeNull();
+
+    await act(async () => {
+      expect(await layOut()).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    });
+    expect(workers).toHaveLength(3);
+    await waitFor(() =>
+      expect(result.current.renderer.error).toBeInstanceOf(ResidentWorkerOutOfMemoryError)
+    );
+    expect(result.current.mainOpens).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    frames.restore();
+  }
+});
+
 test('read-only handoff fallback requests a new frame and restores queries', async () => {
   installWorker({ failState: true });
   const { result } = renderHook(useHarness, { initialProps: { ...initialProps, readOnly: true } });

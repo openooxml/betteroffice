@@ -773,6 +773,7 @@ test('a warm-up asks the worker in the background and stops when the worker cann
   const preflights: unknown[] = [];
   const layouts: unknown[] = [];
   const answers: (string | null)[] = [];
+  let unanswered = false;
   Object.assign(session, {
     layoutFontRequirementsJson: (input: string) => {
       hostInputs.push(input);
@@ -795,6 +796,7 @@ test('a warm-up asks the worker in the background and stops when the worker cann
       experimentalWorkerOpen: true,
       fontRequirementsInWorker: (_owner, _input, options) => {
         preflights.push(options);
+        if (unanswered && options?.background) return null;
         return Promise.resolve(answers.length > 0 ? answers.shift()! : '[]');
       },
       layoutInWorker: Object.assign(
@@ -828,6 +830,13 @@ test('a warm-up asks the worker in the background and stops when the worker cann
     act(() => hook.result.current.scheduleWarmLayout());
     await settle();
     expect(preflights).toHaveLength(3);
+    expect(layouts).toHaveLength(2);
+    expect(hostInputs).toEqual([]);
+
+    unanswered = true;
+    act(() => hook.result.current.scheduleWarmLayout());
+    await settle();
+    expect(preflights).toHaveLength(4);
     expect(layouts).toHaveLength(2);
     expect(hostInputs).toEqual([]);
   } finally {
