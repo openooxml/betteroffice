@@ -976,12 +976,23 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const failOpeningRef = useRef<(error: Error, session?: unknown) => boolean>(() => false);
   const handledRenderErrorRef = useRef<Error | null>(null);
   const renderErrorEngine = canvasRenderer.errorEngine ?? undefined;
+  const coreSessionRef = useRef<unknown>(null);
+  // A worker-opened session the editor has not taken yet fails through its open.
+  const untakenWorkerSession = useCallback(
+    (session?: unknown) =>
+      experimentalWorkerOpen &&
+      session != null &&
+      session !== coreSessionRef.current &&
+      (session as YrsSession).isDisplayOnly?.() !== true,
+    [experimentalWorkerOpen]
+  );
   useEffect(() => {
     const error = canvasRenderer.error;
     if (!error || error === handledRenderErrorRef.current) return;
     handledRenderErrorRef.current = error;
+    if (untakenWorkerSession(renderErrorEngine)) return;
     if (!failOpeningRef.current(error, renderErrorEngine)) onError?.(error);
-  }, [canvasRenderer.error, renderErrorEngine, onError]);
+  }, [canvasRenderer.error, renderErrorEngine, onError, untakenWorkerSession]);
   useMemoryPressure(onMemoryPressure, memoryBudget, canvasRenderer.workerMemory, [
     canvasRenderer.frame,
     canvasRenderer.error,
@@ -1194,22 +1205,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // API and commands see a document that is still loading.
   const opening = yrsCore.opening;
   failOpeningRef.current = yrsCore.failOpening;
-  const coreSessionRef = useRef<unknown>(null);
   coreSessionRef.current = yrsCore.session;
   const reportPagedError = useCallback(
     (error: Error, session?: unknown) => {
-      // A worker-opened session the editor has not taken yet fails through its open.
-      if (
-        experimentalWorkerOpen &&
-        session != null &&
-        session !== coreSessionRef.current &&
-        (session as YrsSession).isDisplayOnly?.() !== true
-      ) {
-        return;
-      }
+      if (untakenWorkerSession(session)) return;
       if (!failOpeningRef.current(error, session)) reportLayoutError(error, session);
     },
-    [experimentalWorkerOpen, reportLayoutError]
+    [untakenWorkerSession, reportLayoutError]
   );
   const readOnly = modeReadOnly || opening;
   if (opening) writeModeRef.current = 'viewing';

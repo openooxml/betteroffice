@@ -1398,7 +1398,7 @@ export function useRustDisplayList(
         !canUseResidentEngineWorker() ||
         !isWorkerHostEngine(hostEngine) ||
         !hostEngine.adoptResidentWorkerLayout ||
-        (workerOpenEnabledRef.current && hostEngine.isDisplayOnly()) ||
+        (workerOpenEnabledRef.current && hostEngine.isDisplayOnly?.() === true) ||
         workerFallbackEngineRef.current === hostEngine ||
         handedOverEnginesRef.current.has(hostEngine)
       ) {
@@ -1713,7 +1713,7 @@ export function useRustDisplayList(
     const workerEligible =
       residentEngine !== null &&
       workerFallbackEngineRef.current !== residentEngine &&
-      !(workerOpenEnabledRef.current && residentEngine.isDisplayOnly());
+      !(workerOpenEnabledRef.current && residentEngine.isDisplayOnly?.() === true);
     // Cheap probe only: the full snapshot (document state, font bytes) is
     // built lazily below, and only for bootstrap/sync — steady-state frame
     // builds never encode state or copy fonts.
