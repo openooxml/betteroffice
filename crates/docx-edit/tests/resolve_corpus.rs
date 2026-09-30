@@ -18,6 +18,7 @@ use yrs::Any;
 use yrs::types::Attrs;
 
 const DATE: &str = "2026-07-14T12:00:00Z";
+const BLOCK_DATE: &str = "2026-07-15T12:00:00Z";
 
 fn local() -> EditCtx {
     EditCtx::local("Owner", DATE)
@@ -89,6 +90,330 @@ fn assert_block_boundary(doc: &EditingDoc, kind: &str, text: Option<&str>) {
         | (LayoutBlock::ColumnBreak(_), "columnBreak") => true,
         _ => false,
     });
+}
+
+fn assert_joined_body(doc: &EditingDoc, text: &str) {
+    assert_eq!(body_texts(doc), [text]);
+    assert_eq!(body_len(doc), text.encode_utf16().count() as u32 + 1);
+    assert!(doc.list_revisions().unwrap().is_empty());
+    let blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert!(matches!(&blocks[0], LayoutBlock::Paragraph(_)));
+}
+
+fn seed_pending_block(doc: &EditingDoc, kind: &str, deleted: bool) -> [String; 2] {
+    doc.create_story("body", "oldtail", "Normal", "left")
+        .unwrap();
+    let split_ctx = if deleted { local() } else { suggesting("Ada") };
+    let split = doc
+        .split_paragraph(&split_ctx, Position::new("body", 3), None)
+        .unwrap();
+    let block_ctx = EditCtx::local("Bob", BLOCK_DATE).suggesting();
+    let insert_ctx = if deleted { local() } else { block_ctx.clone() };
+    let inserted = if kind == "table" {
+        let table = doc
+            .insert_table(&insert_ctx, Position::new("body", 4), 1, 1)
+            .unwrap();
+        doc.insert_text(
+            &local(),
+            Position::new(&table.created_story_ids[0], 0),
+            "cell",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        table.revision_ids
+    } else {
+        let payload = if kind == "blockSdt" {
+            doc.create_story("control", "inside", "Normal", "left")
+                .unwrap();
+            vec![("story".to_owned(), Any::from("control"))]
+        } else {
+            vec![]
+        };
+        doc.insert_embed(&insert_ctx, Position::new("body", 4), kind, payload)
+            .unwrap()
+            .revision_ids
+    };
+    if deleted {
+        let mark = doc
+            .delete_range(&suggesting("Ada"), StoryRange::new("body", 3, 4))
+            .unwrap();
+        let block_ids = if kind == "table" {
+            doc.delete_row(&block_ctx, &TableRange::cell(CellLoc::new("body", 0, 0, 0)))
+                .unwrap()
+                .revision_ids
+        } else {
+            doc.delete_range(&block_ctx, StoryRange::new("body", 4, 5))
+                .unwrap()
+                .revision_ids
+        };
+        [mark.revision_ids[0].clone(), block_ids[0].clone()]
+    } else {
+        [split.revision_ids[0].clone(), inserted[0].clone()]
+    }
+}
+
+fn assert_inherited_block_revision(doc: &EditingDoc, id: &str, insertion: bool) {
+    let expected = Any::Map(Arc::new(HashMap::from([
+        ("id".to_owned(), Any::from(id)),
+        ("author".to_owned(), Any::from("Bob")),
+        ("date".to_owned(), Any::from(BLOCK_DATE)),
+    ])));
+    let mark = doc
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .find(|segment| matches!(segment.content, SegmentContent::Pilcrow(_)))
+        .unwrap();
+    let SegmentContent::Pilcrow(properties) = mark.content else {
+        unreachable!()
+    };
+    let (marker, attr, other_marker, other_attr) = if insertion {
+        ("pPrIns", "ins", "pPrDel", "del")
+    } else {
+        ("pPrDel", "del", "pPrIns", "ins")
+    };
+    assert_eq!(properties.values.get(marker), Some(&expected));
+    assert_eq!(mark.attributes.get(attr), Some(&expected));
+    assert!(!properties.values.contains_key(other_marker));
+    assert!(
+        mark.attributes
+            .get(other_attr)
+            .is_none_or(|stamp| *stamp == Any::Null)
+    );
+    let revisions = doc.list_revisions().unwrap();
+    assert_eq!(revisions.len(), 2);
+    assert!(
+        revisions
+            .iter()
+            .all(|revision| revision.change.revision_id == id)
+    );
+    let kind = if insertion {
+        ChangeKind::ParagraphMarkInsertion
+    } else {
+        ChangeKind::ParagraphMarkDeletion
+    };
+    assert!(
+        revisions
+            .iter()
+            .any(|revision| revision.change.kind == kind)
+    );
+}
+
+fn assert_pending_blocks_resolve_in_either_order(accept: bool) {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for mark_first in [false, true] {
+            let doc = EditingDoc::new(315);
+            let expected_ids = seed_pending_block(&doc, kind, accept);
+            let mut ids: Vec<String> = doc
+                .list_revisions()
+                .unwrap()
+                .into_iter()
+                .map(|revision| revision.change.revision_id)
+                .collect();
+            ids.dedup();
+            assert_eq!(ids, expected_ids);
+            if !mark_first {
+                ids.reverse();
+            }
+            for (slot, id) in ids.iter().enumerate() {
+                let target = ChangeTarget::Revision(id.clone());
+                let receipt = if accept {
+                    doc.accept_change(&local(), &target)
+                } else {
+                    doc.reject_change(&local(), &target)
+                }
+                .unwrap();
+                assert_eq!(receipt.revision_ids, [id.clone()]);
+                assert!(receipt.range.is_none());
+                if slot == 0 && mark_first {
+                    assert_inherited_block_revision(&doc, &expected_ids[1], !accept);
+                }
+            }
+            assert_joined_body(&doc, "oldtail");
+        }
+    }
+}
+
+#[test]
+fn rejecting_inserted_marks_and_blocks_joins_in_either_revision_order() {
+    assert_pending_blocks_resolve_in_either_order(false);
+}
+
+#[test]
+fn accepting_deleted_marks_and_blocks_joins_in_either_revision_order() {
+    assert_pending_blocks_resolve_in_either_order(true);
+}
+
+#[test]
+fn retained_marks_follow_pending_blocks_when_the_blocks_are_kept() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for accept_mark in [false, true] {
+            let doc = EditingDoc::new(316);
+            let ids = seed_pending_block(&doc, kind, accept_mark);
+            let target = ChangeTarget::Revision(ids[0].clone());
+            if accept_mark {
+                doc.accept_change(&local(), &target).unwrap();
+            } else {
+                doc.reject_change(&local(), &target).unwrap();
+            }
+            assert_inherited_block_revision(&doc, &ids[1], !accept_mark);
+            let target = ChangeTarget::Revision(ids[1].clone());
+            let receipt = if accept_mark {
+                doc.reject_change(&local(), &target)
+            } else {
+                doc.accept_change(&local(), &target)
+            }
+            .unwrap();
+            assert_eq!(receipt.revision_ids, [ids[1].clone()]);
+            assert_block_boundary(&doc, kind, Some("old"));
+        }
+    }
+}
+
+#[test]
+fn resolving_pending_block_ranges_and_all_changes_still_joins() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for accept in [false, true] {
+            for target in ["range", "all", "mark"] {
+                let doc = EditingDoc::new(317);
+                let ids = seed_pending_block(&doc, kind, accept);
+                let expected_ids: BTreeSet<String> = if target == "mark" {
+                    [ids[1].clone()].into_iter().collect()
+                } else {
+                    ids.iter().cloned().collect()
+                };
+                if target == "mark" {
+                    let target = ChangeTarget::Range(StoryRange::new("body", 3, 4));
+                    let receipt = if accept {
+                        doc.accept_change(&local(), &target)
+                    } else {
+                        doc.reject_change(&local(), &target)
+                    }
+                    .unwrap();
+                    assert_eq!(receipt.revision_ids, [ids[0].clone()]);
+                    assert_eq!(
+                        receipt.range.unwrap(),
+                        doc.loc_range_of(&StoryRange::new("body", 3, 4)).unwrap()
+                    );
+                    assert_inherited_block_revision(&doc, &ids[1], !accept);
+                }
+                let expected_range =
+                    StoryRange::new("body", 0, if target == "all" { 8 } else { 3 });
+                let target = boundary_target(
+                    &doc,
+                    &ids[1],
+                    5,
+                    if target == "mark" { "range" } else { target },
+                );
+                let receipt = if accept {
+                    doc.accept_change(&local(), &target)
+                } else {
+                    doc.reject_change(&local(), &target)
+                }
+                .unwrap();
+                let resolved: BTreeSet<String> = receipt.revision_ids.into_iter().collect();
+                assert_eq!(resolved, expected_ids);
+                assert_eq!(
+                    receipt.range.unwrap(),
+                    doc.loc_range_of(&expected_range).unwrap()
+                );
+                assert_joined_body(&doc, "oldtail");
+            }
+        }
+    }
+}
+
+#[test]
+fn plain_edits_and_split_retraction_link_retained_marks_to_pending_blocks() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for deleted_block in [false, true] {
+            for operation in ["delete", "replace", "rich", "merge", "retract"] {
+                if deleted_block && operation == "retract" {
+                    continue;
+                }
+                let doc = EditingDoc::new(318);
+                let ids = seed_pending_block(&doc, kind, deleted_block);
+                let para = doc.paragraphs("body").unwrap()[0].para_id.clone();
+                let receipt = match operation {
+                    "delete" => doc.delete_range(&local(), StoryRange::new("body", 3, 4)),
+                    "replace" => doc.replace_range(&local(), StoryRange::new("body", 0, 4), "X"),
+                    "rich" => doc.replace_range_rich(
+                        &local(),
+                        StoryRange::new("body", 0, 4),
+                        &[RichRun {
+                            text: "X".to_owned(),
+                            attrs: Default::default(),
+                        }],
+                    ),
+                    "merge" => doc.merge_paragraphs(&local(), &para, MergeDirection::Forward),
+                    "retract" => {
+                        doc.merge_paragraphs(&suggesting("Ada"), &para, MergeDirection::Forward)
+                    }
+                    _ => unreachable!(),
+                }
+                .unwrap();
+                assert_eq!(
+                    receipt.revision_ids,
+                    if operation == "retract" {
+                        vec![ids[0].clone()]
+                    } else {
+                        vec![]
+                    }
+                );
+                assert_inherited_block_revision(&doc, &ids[1], !deleted_block);
+                let target = ChangeTarget::Revision(ids[1].clone());
+                if deleted_block {
+                    doc.accept_change(&local(), &target).unwrap();
+                } else {
+                    doc.reject_change(&local(), &target).unwrap();
+                }
+                let text = if matches!(operation, "replace" | "rich") {
+                    "Xtail"
+                } else {
+                    "oldtail"
+                };
+                assert_joined_body(&doc, text);
+            }
+        }
+    }
+}
+
+#[test]
+fn inherited_block_stamps_and_resolution_undo_and_redo_together() {
+    for kind in ["table", "blockSdt", "pageBreak", "columnBreak"] {
+        for accept in [false, true] {
+            let doc = EditingDoc::new(319);
+            let ids = seed_pending_block(&doc, kind, accept);
+            let original = doc.list_revisions().unwrap();
+            let mut undo = doc.undo_manager();
+            for id in &ids {
+                let target = ChangeTarget::Revision(id.clone());
+                if accept {
+                    doc.accept_change(&local(), &target).unwrap();
+                } else {
+                    doc.reject_change(&local(), &target).unwrap();
+                }
+                undo.add_undo_barrier();
+            }
+            assert_joined_body(&doc, "oldtail");
+            assert!(undo.undo());
+            assert_eq!(body_texts(&doc), ["old", "tail"]);
+            assert_inherited_block_revision(&doc, &ids[1], !accept);
+            assert_eq!(
+                yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default())
+                    .unwrap()
+                    .len(),
+                3
+            );
+            assert!(undo.undo());
+            assert_eq!(doc.list_revisions().unwrap(), original);
+            assert!(undo.redo());
+            assert_inherited_block_revision(&doc, &ids[1], !accept);
+            assert!(undo.redo());
+            assert_joined_body(&doc, "oldtail");
+        }
+    }
 }
 
 #[test]
@@ -362,7 +687,8 @@ fn accepting_only_the_mark_keeps_a_deleted_block_outside_the_target() {
         let mark = doc
             .delete_range(&suggesting("Ada"), StoryRange::new("body", 3, 4))
             .unwrap();
-        doc.delete_range(&suggesting("Bob"), StoryRange::new("body", 4, 5))
+        let block = doc
+            .delete_range(&suggesting("Bob"), StoryRange::new("body", 4, 5))
             .unwrap();
         let target = if by_id {
             ChangeTarget::Revision(mark.revision_ids[0].clone())
@@ -371,8 +697,14 @@ fn accepting_only_the_mark_keeps_a_deleted_block_outside_the_target() {
         };
         doc.accept_change(&local(), &target).unwrap();
         assert_eq!(body_texts(&doc), ["old", "tail"]);
-        assert_eq!(change_count(&doc), 1);
+        assert_eq!(change_count(&doc), 2);
         yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        doc.accept_change(
+            &local(),
+            &ChangeTarget::Revision(block.revision_ids[0].clone()),
+        )
+        .unwrap();
+        assert_joined_body(&doc, "oldtail");
     }
 }
 

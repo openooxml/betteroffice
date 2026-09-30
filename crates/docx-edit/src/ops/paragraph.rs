@@ -32,7 +32,8 @@ use crate::identity::{self, IdAllocator, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::{
     adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, block_embed_at,
-    capture_pilcrow, paragraph_content_before, revision_id_in_range, snapshot_range,
+    capture_pilcrow, inherit_block_revisions, paragraph_content_before, revision_id_in_range,
+    snapshot_range,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
@@ -522,6 +523,13 @@ impl EditingDoc {
         let pilcrow_index = boundary.bounds.pilcrow;
         let needs_boundary = block_embed_at(&story, &txn, pilcrow_index + 1)
             && paragraph_content_before(&story, &txn, pilcrow_index);
+        let block_revisions = needs_boundary
+            .then(|| {
+                snapshot_range(&story, &txn, pilcrow_index + 1, pilcrow_index + 2)
+                    .first()
+                    .and_then(|chunk| chunk.block_revisions(&txn))
+            })
+            .flatten();
         let own_insert = ctx
             .is_suggesting()
             .then(|| paragraph_revision_id(&boundary.map, &txn, PPR_INS, &ctx.author))
@@ -565,6 +573,15 @@ impl EditingDoc {
                         );
                     }
                 }
+                if let Some(revisions) = block_revisions.as_ref() {
+                    inherit_block_revisions(
+                        &mut txn,
+                        &story,
+                        pilcrow_index,
+                        &boundary.map,
+                        revisions,
+                    );
+                }
             } else {
                 let (donor_id, mut donor_props) = capture_pilcrow(&boundary.map, &txn);
                 donor_props.retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL));
@@ -584,6 +601,22 @@ impl EditingDoc {
             let (donor_id, donor_props) = capture_pilcrow(&boundary.map, &txn);
             story.remove_range(&mut txn, pilcrow_index, 1);
             adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+        } else if let Some(revisions) = block_revisions
+            && revisions.iter().any(Option::is_some)
+        {
+            for key in [PPR_INS, PPR_DEL] {
+                boundary.map.remove(&mut txn, key);
+            }
+            story.format(
+                &mut txn,
+                pilcrow_index,
+                1,
+                Attrs::from([
+                    (Arc::from(crate::INS), Any::Null),
+                    (Arc::from(DEL), Any::Null),
+                ]),
+            );
+            inherit_block_revisions(&mut txn, &story, pilcrow_index, &boundary.map, &revisions);
         }
         let caret = crate::op::loc_range_in_txn(
             &boundary.story_id,

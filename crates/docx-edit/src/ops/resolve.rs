@@ -21,10 +21,10 @@
 //! revision being applied. A story's FINAL pilcrow is never removed, because a
 //! document always keeps its last paragraph mark; a join that would remove it
 //! clears the markers instead. A mark before a surviving block embed stays when
-//! paragraph content would otherwise interrupt the block.
+//! paragraph content would otherwise interrupt the block, inheriting any pending
+//! revision that could remove that block.
 //!
-//! Resolving APPLIES a revision, it does not author one: no new revision is
-//! ever stamped and the context's suggesting mode is ignored.
+//! Resolving authors no new revision id; the context's suggesting mode is ignored.
 //!
 //! Structural table-row revisions (`trIns`/`trDel`) live in each row's `trPr`
 //! bag and resolve in the same transaction as story-unit revisions; removing a
@@ -39,7 +39,7 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::table::resolve_table_row_revisions;
-use crate::ops::{Chunk, ChunkKind, snapshot};
+use crate::ops::{Chunk, ChunkKind, inherit_block_revisions, snapshot};
 use crate::queries::revision_parts;
 use crate::{
     DEL, EditCtx, EditingDoc, INS, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId, StoryRange,
@@ -239,13 +239,13 @@ fn resolve_story(
         })
         .collect();
     let mut removed = 0;
-    let mut next_is_block_embed = false;
+    let mut next_block_revisions = None;
     // Reverse walk so physical removals never shift the indices still to be visited.
     for (slot, chunk) in chunks.iter().enumerate().rev() {
         let overlap_start = chunk.start.max(span_start);
         let overlap_end = chunk.end().min(span_end);
         if overlap_end <= overlap_start {
-            next_is_block_embed = chunk.is_block_embed(txn);
+            next_block_revisions = chunk.block_revisions(txn);
             continue;
         }
         match &chunk.kind {
@@ -263,10 +263,10 @@ fn resolve_story(
                     ResolveMode::Accept => del_hit,
                     ResolveMode::Reject => ins_hit,
                 };
-                if join
-                    && Some(chunk.start) != final_pilcrow
-                    && !(next_is_block_embed && content_before[slot])
-                {
+                let boundary_revisions = next_block_revisions
+                    .as_ref()
+                    .filter(|_| content_before[slot]);
+                if join && Some(chunk.start) != final_pilcrow && boundary_revisions.is_none() {
                     match mode {
                         ResolveMode::Accept => {
                             record(resolved, ppr_del.as_ref());
@@ -294,7 +294,13 @@ fn resolve_story(
                         clear_attr(txn, story, chunk.start, 1, attr_key);
                     }
                 }
-                next_is_block_embed = false;
+                if join
+                    && Some(chunk.start) != final_pilcrow
+                    && let Some(revisions) = boundary_revisions
+                {
+                    inherit_block_revisions(txn, story, chunk.start, map, revisions);
+                }
+                next_block_revisions = None;
             }
             ChunkKind::Text(_) | ChunkKind::Embed(_) => {
                 let ins = active_stamp(chunk.attrs.get(INS).cloned(), filter);
@@ -313,7 +319,7 @@ fn resolve_story(
                     story.remove_range(txn, overlap_start, overlap_end - overlap_start);
                     removed += overlap_end - overlap_start;
                     if overlap_start > chunk.start || overlap_end < chunk.end() {
-                        next_is_block_embed = false;
+                        next_block_revisions = None;
                     }
                 } else {
                     match mode {
@@ -327,7 +333,16 @@ fn resolve_story(
                         }
                         _ => {}
                     }
-                    next_is_block_embed = chunk.is_block_embed(txn);
+                    next_block_revisions = chunk.block_revisions(txn).map(|mut revisions| {
+                        let cleared = match mode {
+                            ResolveMode::Accept => 0,
+                            ResolveMode::Reject => 1,
+                        };
+                        if active_stamp(revisions[cleared].clone(), filter).is_some() {
+                            revisions[cleared] = None;
+                        }
+                        revisions
+                    });
                 }
             }
         }

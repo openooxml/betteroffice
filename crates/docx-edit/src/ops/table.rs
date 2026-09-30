@@ -827,6 +827,20 @@ fn remove_row_at(
     Ok(())
 }
 
+pub(crate) fn table_revisions<T: ReadTxn>(table: &MapRef, txn: &T) -> [Option<Any>; 2] {
+    let Ok(data) = read_table(table, txn) else {
+        return [None, None];
+    };
+    [TR_INS, TR_DEL].map(|key| {
+        let stamp = data.rows.first()?.tr_pr.get(key)?;
+        let revision = row_revision_parts(stamp)?;
+        data.rows
+            .iter()
+            .all(|row| row.tr_pr.get(key).and_then(row_revision_parts).as_ref() == Some(&revision))
+            .then(|| stamp.clone())
+    })
+}
+
 /// Collects structural row revisions at their containing table embed. Multiple
 /// rows from one table insertion intentionally collapse to one entry when they
 /// share a revision id, matching the sidebar's "Inserted table" grouping.
