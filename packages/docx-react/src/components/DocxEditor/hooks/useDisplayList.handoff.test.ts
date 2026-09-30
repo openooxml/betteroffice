@@ -3,11 +3,7 @@ import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import {
-  loadRustDisplayListQueryEngine,
-  type DisplayList,
-  type ImageResolver,
-} from '@betteroffice/docx/layout/render';
+import type { DisplayList, ImageResolver } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type {
@@ -165,22 +161,11 @@ test('a session handed over keeps its worker and shows the old pages until the n
     expect(text(live.displayList)).toContain('Full');
     expect(live.rangeRects(1, 2).length).toBeGreaterThan(0);
 
-    const queryEngine = await loadRustDisplayListQueryEngine();
-    const reads = [
-      spyOn(queryEngine, 'rangeRectsByHandle'),
-      spyOn(queryEngine, 'hitTestRegionsByHandle'),
-      spyOn(queryEngine, 'rangeRectsJson'),
-      spyOn(queryEngine, 'hitTestRegionsJson'),
-    ];
+    // The preview and the full session are one document, so the preview's queries answer from the full layout.
     warnings.mockClear();
-    try {
-      expect(stale.rangeRects(1, 2)).toEqual([]);
-      expect(stale.hitTestRegions(0, 100, 100)).toBeNull();
-      for (const read of reads) expect(read).not.toHaveBeenCalled();
-      expect(warnings).not.toHaveBeenCalled();
-    } finally {
-      for (const read of reads) read.mockRestore();
-    }
+    expect(stale.rangeRects(1, 2)).toEqual(live.rangeRects(1, 2));
+    expect(stale.hitTestRegions(0, 100, 100)).toEqual(live.hitTestRegions(0, 100, 100));
+    expect(warnings).not.toHaveBeenCalled();
 
     expect(FakeWorker.created).toHaveLength(1);
     const worker = FakeWorker.created[0]!;
