@@ -11,9 +11,10 @@ bottom 1134, left 1418, header 709 and footer 709. The text column is 9355 twips
 (467.75pt). Minimal document defaults select Arial 11pt, single line spacing,
 and zero paragraph spacing. No paragraph names a style.
 
-Each floating table is text anchored with `tblpY="1"`, 141 twips of left and
-right text clearance, `tblOverlap="never"`, automatic preferred table width,
-a fixed one-column grid, and 28 twip cell margins on every edge. Rows have
+Each floating table is text anchored with `tblpY="1"` (horizontally too,
+unless the table below names another anchor), 141 twips of left and right text
+clearance, `tblOverlap="never"`, automatic preferred table width, a fixed
+one-column grid, and 28 twip cell margins on every edge. Rows have
 natural heights. The first row contains one inline picture whose `wp:extent`
 is 120pt x 120pt. The second contains a caption separated by `w:br`.
 
@@ -24,6 +25,8 @@ is 120pt x 120pt. The second contains a caption separated by `w:br`.
 | `right-5500.docx` | right | 5500 twips | 350 ASCII characters |
 | `left-5500.docx` | left | 5500 twips | 350 ASCII characters |
 | `right-5500-empty-anchor.docx` | right | 5500 twips | empty, then the 350-character paragraph |
+| `right-4820-margin.docx` | right, `w:horzAnchor="margin"` | 4820 twips | 350 ASCII characters |
+| `right-4820-no-anchor.docx` | right, no `w:horzAnchor` | 4820 twips | 350 ASCII characters |
 
 The body text is 15 repetitions of `alpha beta gamma delta ` followed by
 `alpha`, exactly 350 characters. An empty separator follows it. The last
