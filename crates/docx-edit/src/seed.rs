@@ -4131,9 +4131,7 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
             UnitContent::Text(text) => utf16_len(text),
             UnitContent::Embed { .. } => 1,
         };
-        if let Some(comment_id) = &unit.comment_id
-            && comment_id != "0"
-        {
+        if let Some(comment_id) = &unit.comment_id {
             let index = plan
                 .comment_coverage
                 .iter()

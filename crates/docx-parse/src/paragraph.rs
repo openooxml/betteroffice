@@ -634,11 +634,13 @@ fn parse_paragraph_contents(
                 }));
             }
             "commentRangeStart" | "commentRangeEnd" => {
-                output.push(ParagraphContent::CommentRange(CommentRange {
-                    node_type: child.local_name().to_owned(),
-                    id: parse_range_id(child),
-                    offset: None,
-                }));
+                if let Some(id) = range_id(child) {
+                    output.push(ParagraphContent::CommentRange(CommentRange {
+                        node_type: child.local_name().to_owned(),
+                        id,
+                        offset: None,
+                    }));
+                }
             }
             "oMath" | "oMathPara" => output.push(ParagraphContent::Inline(InlineNode::Math(
                 parse_math(child),
@@ -952,10 +954,13 @@ fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
 }
 
 fn parse_range_id(element: &XmlElement) -> f64 {
+    range_id(element).unwrap_or(0.0)
+}
+
+fn range_id(element: &XmlElement) -> Option<f64> {
     element
         .attribute(Some("w"), "id")
         .and_then(parse_javascript_integer_prefix)
-        .unwrap_or(0.0)
 }
 
 fn parse_math(element: &XmlElement) -> MathEquation {
@@ -1684,6 +1689,31 @@ mod tests {
         );
         assert_eq!(run_texts(&paragraph), ["a", "b", "c", "d"]);
         assert_eq!(paragraph.content.len(), 4);
+    }
+
+    #[test]
+    fn keeps_comment_range_zero_and_drops_ranges_without_an_id() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:commentRangeStart/>
+              <w:commentRangeStart w:id="0"/>
+              <w:r><w:t>a</w:t></w:r>
+              <w:commentRangeEnd w:id="0"/>
+              <w:commentRangeEnd w:id="x"/>
+            </w:p>"#,
+        );
+        let ranges: Vec<_> = paragraph
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ParagraphContent::CommentRange(range) => Some((range.node_type.as_str(), range.id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ranges,
+            [("commentRangeStart", 0.0), ("commentRangeEnd", 0.0)]
+        );
     }
 
     #[test]

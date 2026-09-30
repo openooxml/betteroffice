@@ -48,7 +48,7 @@ const BODY =
   `<w:p w14:paraId="0C000006">${t('Go to ')}<w:hyperlink w:anchor="target">${t('page ')}` +
   `<w:fldSimple w:instr=" PAGE ">${t('7')}</w:fldSimple>${t(' of the text')}</w:hyperlink>${t(' now')}</w:p>`;
 
-function docx(body = BODY): Uint8Array {
+function docx(body = BODY, commentIds = [1]): Uint8Array {
   const parts: Record<string, string> = {
     '[Content_Types].xml':
       '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -59,7 +59,7 @@ function docx(body = BODY): Uint8Array {
     '_rels/.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`,
     'word/_rels/document.xml.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdC" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rIdH" Type="${REL}/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>`,
     'word/document.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>${body}<w:sectPr/></w:body></w:document>`,
-    'word/comments.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments ${NS}><w:comment w:id="1" w:author="Reviewer"><w:p w14:paraId="0D000001">${t('Check')}</w:p></w:comment></w:comments>`,
+    'word/comments.xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments ${NS}>${commentIds.map((id) => `<w:comment w:id="${id}" w:author="Reviewer"><w:p w14:paraId="0D00000${id}">${t('Check')}</w:p></w:comment>`).join('')}</w:comments>`,
   };
   return new Uint8Array(
     rezipPartsToArrayBuffer(new Map(Object.entries(parts).map(([name, xml]) => [name, toBytes(xml)])))
@@ -345,6 +345,37 @@ describe('a reanchored comment', () => {
       expect(anchored(await open(bytes, 91006), '1')).toBe('words');
     }
   });
+});
+
+describe('a source comment', () => {
+  for (const id of [0, 1]) {
+    const bytes = () => docx(BODY.replaceAll('w:id="1"', `w:id="${id}"`), [id]);
+    const reopened = async (saved: Uint8Array) => [await open(saved, 91071), await seeded(saved, 91072)];
+
+    it(`with id ${id} reanchors with undo and redo and saves its new range`, async () => {
+      const session = await open(bytes(), 91070);
+      session.beginUndoCapture();
+      session.setCommentRanges(String(id), [range(session, 2, 0, 7)]);
+      expect(anchored(session, String(id))).toBe('Closing');
+      expect(session.undo()).toBe(true);
+      expect(anchored(session, String(id))).toBe('Intro');
+      expect(session.redo()).toBe(true);
+      for (const [path, saved] of await saves(session)) {
+        expect([path, markers(saved, id)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+        for (const session of await reopened(saved)) expect(anchored(session, String(id))).toBe('Closing');
+      }
+    });
+
+    it(`with id ${id} keeps its range after an edit elsewhere`, async () => {
+      const session = await open(bytes(), 91073);
+      const { paraId } = session.paragraphs('body')[2]!;
+      session.insertText({ story: 'body', paraId, offset: 0 }, 'QA ');
+      for (const [path, saved] of await saves(session)) {
+        expect([path, markers(saved, id)]).toEqual([path, ['RangeStart', 'RangeEnd', 'Reference']]);
+        for (const session of await reopened(saved)) expect(anchored(session, String(id))).toBe('Intro');
+      }
+    });
+  }
 });
 
 describe('an added comment range', () => {
