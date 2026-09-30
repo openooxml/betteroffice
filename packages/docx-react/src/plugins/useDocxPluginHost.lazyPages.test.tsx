@@ -205,7 +205,7 @@ async function visibleProposal(editDuringScroll: boolean): Promise<void> {
     // A paragraph spanning pages falls back to its built first page.
     expect(geometry()!.getAnchorGeometry(target)).toMatchObject(
       editDuringScroll
-        ? { ok: true, rects: [] }
+        ? { ok: true, rects: [], anchor: { pageIndex: 0 } }
         : { ok: true, rects: [], anchor: { pageIndex: last, width: 0, height: 0 } }
     );
 
