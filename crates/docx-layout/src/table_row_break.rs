@@ -115,6 +115,43 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
 /// whole-line bottom built on first use for a row those rules leave no break
 /// in a whole column, which Word then breaks at any line. A floating table
 /// keeps whole-line breaks throughout.
+/// Whether row `r`'s `w:trHeight` minimum, not its cells' content, sets its
+/// measured height.
+fn minimum_height_governs(
+    block: &TableBlock,
+    measure: &TableExtent,
+    resolved: &[crate::table_grid::ResolvedGridCell],
+    r: usize,
+) -> bool {
+    let Some(minimum) = block
+        .rows
+        .get(r)
+        .and_then(|row| row.height)
+        .filter(|height| *height > 0.0)
+    else {
+        return false;
+    };
+    let (mut content, mut padding) = (0.0_f64, 0.0_f64);
+    for grid in resolved.iter().filter(|grid| grid.row_index == r) {
+        let (Some(cell), Some(measured)) = (
+            block.rows[r].cells.get(grid.cell_index),
+            measure.rows[r].cells.get(grid.cell_index),
+        ) else {
+            continue;
+        };
+        if grid.row_span > 1 {
+            continue;
+        }
+        content = content.max(measured.height);
+        padding = padding.max(
+            cell.padding
+                .as_ref()
+                .map_or(0.0, |padding| padding.top + padding.bottom),
+        );
+    }
+    content > 0.0 && minimum + padding >= content
+}
+
 pub(crate) struct RowBreaks<'a> {
     block: &'a TableBlock,
     measure: &'a TableExtent,
@@ -193,7 +230,11 @@ fn row_break_info(
         // check in the paginator — makes every downstream consumer
         // (`snap_row_break`, `minimum_row_slice`, `first_table_fragment_height`)
         // see the row as atomic by construction.
-        if block.rows.get(r).is_some_and(|row| row.is_exact_height()) {
+        // A row its minimum height sizes, taller than its content, moves whole
+        // too: Word breaks a row only inside content that overflows it.
+        if block.rows.get(r).is_some_and(|row| row.is_exact_height())
+            || minimum_height_governs(block, measure, &resolved, r)
+        {
             break_offsets.push(vec![row_height]);
             continue;
         }
@@ -704,6 +745,18 @@ mod tests {
         }))
         .unwrap();
         (block, measure)
+    }
+
+    #[test]
+    fn a_row_its_minimum_height_sizes_offers_only_its_full_height_boundary() {
+        for (lines, atomic) in [(2, true), (3, true), (4, false)] {
+            let content = lines as f64 * LINE;
+            let (block, mut measure) =
+                single_row_table(Some(3.0 * LINE), None, None, lines, content.max(3.0 * LINE));
+            measure.rows[0].cells[0].height = content;
+            let info = build_table_row_break_info(&block, &measure);
+            assert_eq!(info.break_offsets[0].len() == 1, atomic, "{lines} lines");
+        }
     }
 
     #[test]
