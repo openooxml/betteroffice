@@ -14,13 +14,82 @@ pub(crate) fn is_wmf(bytes: &[u8]) -> bool {
         || (matches!(u16_at(bytes, 0), Some(1 | 2)) && u16_at(bytes, 2) == Some(9))
 }
 
-pub(crate) fn store_object<const FULL: bool>(player: &mut Player<FULL>, object: GdiObject) {
-    if let Some(slot) = player.objects.iter_mut().find(|slot| slot.is_none()) {
-        *slot = Some(object);
-        return;
+pub(crate) struct FreeObjects {
+    slots: [u64; MAX_HANDLES / 64],
+    groups: u64,
+}
+
+impl FreeObjects {
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: [u64::MAX; MAX_HANDLES / 64],
+            groups: u64::MAX,
+        }
     }
-    if player.objects.len() < MAX_HANDLES {
-        player.objects.push(Some(object));
+
+    fn take(&mut self) -> Option<usize> {
+        if self.groups == 0 {
+            return None;
+        }
+        let group = self.groups.trailing_zeros() as usize;
+        let slot = self.slots[group].trailing_zeros() as usize;
+        self.slots[group] &= !(1 << slot);
+        if self.slots[group] == 0 {
+            self.groups &= !(1 << group);
+        }
+        Some(group * 64 + slot)
+    }
+
+    fn release(&mut self, slot: usize) {
+        self.slots[slot / 64] |= 1 << (slot % 64);
+        self.groups |= 1 << (slot / 64);
+    }
+}
+
+pub(crate) fn store_object<const FULL: bool>(player: &mut Player<FULL>, object: GdiObject) {
+    if let Some(index) = player.free_objects.take() {
+        player.store(index, object);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::Brush;
+
+    #[test]
+    fn object_churn_reuses_the_lowest_free_slot() {
+        for handles in [0, MAX_HANDLES] {
+            let mut player = Player::<true>::new((0.0, 0.0, 10.0, 10.0), handles, (10.0, 10.0));
+            for index in 0..MAX_HANDLES {
+                store_object(
+                    &mut player,
+                    GdiObject::Brush(Brush::solid(index as u32, true)),
+                );
+                let Some(GdiObject::Brush(brush)) = &player.objects[index] else {
+                    panic!("a brush in the next free slot");
+                };
+                assert_eq!(brush.color, index as u32);
+            }
+            store_object(&mut player, GdiObject::Opaque);
+            assert_eq!(player.objects.len(), MAX_HANDLES);
+            assert_eq!(player.free_objects.groups, 0);
+            for index in [4095u16, 64, 0, 63] {
+                wmf_record(&mut player, &index.to_le_bytes(), 0x01F0, 0).unwrap();
+            }
+            for index in [0, 63, 64, 4095] {
+                store_object(&mut player, GdiObject::Opaque);
+                assert!(matches!(player.objects[index], Some(GdiObject::Opaque)));
+            }
+            for _ in 0..32 {
+                wmf_record(&mut player, &0u16.to_le_bytes(), 0x01F0, 0).unwrap();
+                assert_eq!(player.free_objects.groups, 1);
+                assert_eq!(player.free_objects.slots[0], 1);
+                store_object(&mut player, GdiObject::Opaque);
+                assert!(matches!(player.objects[0], Some(GdiObject::Opaque)));
+                assert_eq!(player.free_objects.groups, 0);
+            }
+        }
     }
 }
 
@@ -268,6 +337,7 @@ fn wmf_record<const FULL: bool>(
                 && let Some(slot) = player.objects.get_mut(index as usize)
             {
                 *slot = None;
+                player.free_objects.release(index as usize);
             }
         }
         0x0324 | 0x0325 => {

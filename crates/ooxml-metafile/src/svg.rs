@@ -72,10 +72,19 @@ fn clean(value: f64) -> f64 {
     if value.is_finite() { value } else { 1.0 }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct GradientKey {
+    stops: *const (f64, Rgba),
+    start: [u64; 2],
+    end: [u64; 2],
+    spread: u8,
+}
+
 struct Writer {
     out: String,
     clips: HashMap<*const ClipChain, usize>,
     paints: HashMap<String, usize>,
+    gradients: HashMap<GradientKey, usize>,
     /// Each bitmap's `data:` URL, encoded once however often it is drawn.
     bitmaps: HashMap<*const Bitmap, Result<Arc<str>, Oversize>>,
     /// Set when a write stopped at the size limit.
@@ -90,6 +99,7 @@ pub(crate) fn write(drawing: &Drawing) -> Result<String, Refusal> {
         out: String::new(),
         clips: HashMap::new(),
         paints: HashMap::new(),
+        gradients: HashMap::new(),
         bitmaps: HashMap::new(),
         full: false,
         next: 0,
@@ -238,8 +248,16 @@ impl Writer {
                 (format!("url(#p{id})"), None)
             }
             Paint::Linear(gradient) => {
-                let key = format!("g{gradient:?}");
-                let id = self.define(key, |writer, id| {
+                let key = GradientKey {
+                    stops: Arc::as_ptr(&gradient.stops).cast(),
+                    start: [gradient.start.0.to_bits(), gradient.start.1.to_bits()],
+                    end: [gradient.end.0.to_bits(), gradient.end.1.to_bits()],
+                    spread: gradient.spread as u8,
+                };
+                if let Some(id) = self.gradients.get(&key) {
+                    return (format!("url(#p{id})"), None);
+                }
+                let id = self.define(format!("g{gradient:?}"), |writer, id| {
                     let spread = match gradient.spread {
                         Spread::Pad => "pad",
                         Spread::Repeat => "repeat",
@@ -267,6 +285,7 @@ impl Writer {
                     }
                     writer.out.push_str("</linearGradient>");
                 });
+                self.gradients.insert(key, id);
                 (format!("url(#p{id})"), None)
             }
         }
@@ -680,4 +699,101 @@ fn font_family(face: &str) -> String {
         if family.is_empty() { "" } else { ", " }
     );
     family
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drawing::LinearGradient;
+    use crate::test_records::*;
+
+    #[test]
+    fn repeated_linear_fills_define_one_gradient() {
+        let mut brush = plus_linear_brush(1, [0.0, 0.0, 10.0, 10.0], 0xff00_0000, 0xffff_ffff);
+        brush.2[8..12].copy_from_slice(&4u32.to_le_bytes());
+        brush.2.extend(u32s(&[256]));
+        brush
+            .2
+            .extend((0..256).flat_map(|index| (index as f32 / 255.0).to_le_bytes()));
+        brush.2.extend(u32s(&[0xff00_0000; 256]));
+        let mut records = vec![plus_header(false), brush];
+        for _ in 0..32 {
+            records.push((
+                0x400A,
+                0,
+                [u32s(&[1, 1]), f32s(&[0.0, 0.0, 10.0, 10.0])].concat(),
+            ));
+        }
+        records.push(plus_eof());
+        let (kind, body) = plus(&records);
+        let drawing = crate::replay(&Emf::new(100, 100).rec(kind, &body).bytes()).unwrap();
+        assert_eq!(drawing.ops.len(), 32);
+        let svg = write(&drawing).unwrap();
+        assert_eq!(svg.matches("<linearGradient").count(), 1);
+        assert_eq!(svg.matches("<stop ").count(), 256);
+        assert_eq!(svg.matches("fill=\"url(#p1)\"").count(), 32);
+    }
+
+    #[test]
+    fn linear_gradient_markup_and_content_deduplication_stay_identical() {
+        let gradient = LinearGradient {
+            start: (0.0, 0.0),
+            end: (10.0, 0.0),
+            stops: vec![(0.0, Rgba::BLACK), (1.0, Rgba::WHITE)].into(),
+            spread: Spread::Pad,
+        };
+        let shape = |gradient| {
+            Op::Shape(Shape {
+                path: crate::player::rect_path([0.0, 0.0, 10.0, 10.0]),
+                fill: Some(Paint::Linear(Arc::new(gradient))),
+                stroke: None,
+                even_odd: false,
+                clip: None,
+            })
+        };
+        let mut drawing = Drawing {
+            width: 10.0,
+            height: 10.0,
+            ops: vec![shape(gradient.clone())],
+            omissions: Vec::new(),
+        };
+        let svg = write(&drawing).unwrap();
+        assert_eq!(
+            svg,
+            concat!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" preserveAspectRatio="none"><defs>"#,
+                r#"<linearGradient id="p1" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="10" y2="0" spreadMethod="pad">"#,
+                r##"<stop offset="0" stop-color="#000000"/><stop offset="1" stop-color="#ffffff"/></linearGradient></defs>"##,
+                r##"<path d="M0 0L10 0L10 10L0 10Z" fill="url(#p1)"/></svg>"##,
+            )
+        );
+        drawing.ops.push(shape(LinearGradient {
+            stops: gradient.stops.to_vec().into(),
+            ..gradient.clone()
+        }));
+        assert_eq!(
+            write(&drawing).unwrap().matches("<linearGradient").count(),
+            1
+        );
+        for changed in [
+            LinearGradient {
+                start: (1.0, 0.0),
+                ..gradient.clone()
+            },
+            LinearGradient {
+                end: (20.0, 0.0),
+                ..gradient.clone()
+            },
+            LinearGradient {
+                spread: Spread::Repeat,
+                ..gradient
+            },
+        ] {
+            drawing.ops.push(shape(changed));
+        }
+        assert_eq!(
+            write(&drawing).unwrap().matches("<linearGradient").count(),
+            4
+        );
+    }
 }

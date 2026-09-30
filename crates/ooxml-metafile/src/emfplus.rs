@@ -515,6 +515,7 @@ fn play<const FULL: bool>(
         }
         0x4026 | 0x4029 => {
             let index = u32_at(data, 0)?;
+            player.charge(state.stack.len(), 0)?;
             if let Some(position) = state.stack.iter().rposition(|(saved, _)| *saved == index) {
                 state.graphics = state.stack[position].1.clone();
                 state.stack.truncate(position);
@@ -2119,4 +2120,75 @@ fn draw_driver_string<const FULL: bool>(
         clip,
     }));
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+    use crate::player::SharedBudget;
+
+    #[test]
+    fn restore_charges_scans_and_uses_the_latest_matching_state() {
+        let budget = Rc::new(SharedBudget {
+            remaining: Cell::new(crate::ReplayBudget {
+                work: 20,
+                pixels: 0,
+            }),
+            exceeded: Cell::new(false),
+        });
+        let mut player = Player::<true>::new((0.0, 0.0, 10.0, 10.0), 0, (10.0, 10.0));
+        player.budget = Some(Rc::clone(&budget));
+        let mut state = State::new(false, (96.0, 96.0));
+        for (id, x) in [(1u32, 10.0), (2, 20.0), (1, 30.0)] {
+            state.graphics.world[4] = x;
+            assert_eq!(
+                play(&mut player, &mut state, 0x4025, 0, &id.to_le_bytes()),
+                Some(true)
+            );
+        }
+        state.graphics.world[4] = 40.0;
+        assert_eq!(
+            play(&mut player, &mut state, 0x4026, 0, &99u32.to_le_bytes()),
+            Some(true)
+        );
+        assert_eq!(state.graphics.world[4], 40.0);
+        assert_eq!(state.stack.len(), 3);
+        for (kind, id, x, depth) in [
+            (0x4026, 1u32, 30.0, 2),
+            (0x4029, 2, 20.0, 1),
+            (0x4026, 1, 10.0, 0),
+        ] {
+            assert_eq!(
+                play(&mut player, &mut state, kind, 0, &id.to_le_bytes()),
+                Some(true)
+            );
+            assert_eq!(state.graphics.world[4], x);
+            assert_eq!(state.stack.len(), depth);
+        }
+        assert_eq!(player.commands, 9);
+        assert_eq!(budget.remaining.get().work, 11);
+    }
+
+    #[test]
+    fn restore_refuses_before_scanning_past_the_budget() {
+        let budget = Rc::new(SharedBudget {
+            remaining: Cell::new(crate::ReplayBudget { work: 2, pixels: 0 }),
+            exceeded: Cell::new(false),
+        });
+        let mut player = Player::<true>::new((0.0, 0.0, 10.0, 10.0), 0, (10.0, 10.0));
+        player.budget = Some(Rc::clone(&budget));
+        let mut state = State::new(false, (96.0, 96.0));
+        for id in 0u32..3 {
+            play(&mut player, &mut state, 0x4025, 0, &id.to_le_bytes()).unwrap();
+        }
+        assert_eq!(
+            play(&mut player, &mut state, 0x4026, 0, &0u32.to_le_bytes()),
+            None
+        );
+        assert_eq!(state.stack.len(), 3);
+        assert!(budget.exceeded.get());
+        assert_eq!(budget.remaining.get().work, 0);
+    }
 }

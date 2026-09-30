@@ -244,6 +244,7 @@ pub(crate) struct Player<const FULL: bool> {
     pub dc: Dc,
     pub saved: Vec<Dc>,
     pub objects: Vec<Option<GdiObject>>,
+    pub free_objects: crate::wmf::FreeObjects,
     /// The frame in device units, as `(x, y, width, height)`.
     pub frame: (f64, f64, f64, f64),
     /// Output units across the frame: `(1, 1)` for fractions of it.
@@ -286,6 +287,7 @@ impl<const FULL: bool> Player<FULL> {
             dc: Dc::default(),
             saved: Vec::new(),
             objects: vec![None; handles.min(MAX_HANDLES)],
+            free_objects: crate::wmf::FreeObjects::new(),
             frame,
             unit,
             device_per_mm: (96.0 / 25.4, 96.0 / 25.4),
@@ -847,6 +849,19 @@ impl<const FULL: bool> Player<FULL> {
         even_odd: bool,
         mode: Combine,
     ) -> Option<()> {
+        if FULL {
+            let copied = if matches!(mode, Combine::Or | Combine::Xor)
+                && !same_clip(&self.dc.clip, &self.dc.meta)
+            {
+                self.dc
+                    .clip
+                    .as_ref()
+                    .map_or(0, |clip| clip.region.path.len())
+            } else {
+                0
+            };
+            self.charge(path.len().saturating_add(copied), 0)?;
+        }
         let region = |exclude| ClipRegion {
             path: path.clone(),
             even_odd,
@@ -882,9 +897,6 @@ impl<const FULL: bool> Player<FULL> {
         };
         if ClipChain::depth(&clip) > self.limits.clip_depth {
             return self.refuse("clip regions nest past the depth limit");
-        }
-        if FULL && let Some(link) = clip.as_deref() {
-            self.charge(link.region.path.len(), 0)?;
         }
         self.dc.clip = clip;
         Some(())
@@ -1045,6 +1057,9 @@ pub(crate) fn translate(command: &mut PathCommand, dx: f64, dy: f64) {
 
 /// Reads a path back as an axis-aligned rectangle, or `None` if it is not one.
 pub(crate) fn axis_aligned_rect(path: &[PathCommand]) -> Option<[f64; 4]> {
+    if path.len() > 16 {
+        return None;
+    }
     let mut corners: Vec<(f64, f64)> = Vec::with_capacity(5);
     for command in path {
         match command {
@@ -1088,5 +1103,94 @@ pub(crate) fn stock_object(index: u32) -> Option<GdiObject> {
         7 => pen(0x0000_0000),
         8 => Some(GdiObject::Pen(Pen::solid(0, 0.0, false))),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_records::*;
+
+    #[test]
+    fn rectangle_recognition_stops_at_sixteen_commands() {
+        let rect = [0.0, 0.0, 10.0, 10.0];
+        let mut path = rect_path(rect);
+        path.splice(1..1, vec![PathCommand::Line { x: 0.0, y: 0.0 }; 11]);
+        assert_eq!(path.len(), 16);
+        assert_eq!(axis_aligned_rect(&path), Some(rect));
+        path.insert(1, PathCommand::Line { x: 0.0, y: 0.0 });
+        assert_eq!(axis_aligned_rect(&path), None);
+        assert_eq!(
+            axis_aligned_rect(&vec![PathCommand::Line { x: 0.0, y: 0.0 }; 64]),
+            None
+        );
+    }
+
+    #[test]
+    fn ignored_clip_unions_charge_the_input_path() {
+        let budget = Rc::new(SharedBudget {
+            remaining: Cell::new(crate::ReplayBudget {
+                work: 100,
+                pixels: 0,
+            }),
+            exceeded: Cell::new(false),
+        });
+        let mut player = Player::<true>::new((0.0, 0.0, 10.0, 10.0), 0, (10.0, 10.0));
+        player.budget = Some(Rc::clone(&budget));
+        player
+            .combine_clip(
+                vec![PathCommand::Line { x: 0.0, y: 0.0 }; 64],
+                false,
+                Combine::Or,
+            )
+            .unwrap();
+        assert!(player.dc.clip.is_none());
+        assert_eq!(player.commands, 64);
+        assert_eq!(budget.remaining.get().work, 36);
+    }
+
+    #[test]
+    fn repeated_intersections_and_clipped_text_keep_work_linear() {
+        let replay = |count: usize| {
+            let mut records = vec![bare(59), poly16(87, &[(0, 0); 64]), bare(60), value(67, 5)];
+            let mut small = i32s(&[0, 0, 1, 0x0204, 1]);
+            small.extend(f32s(&[1.0, 1.0]));
+            small.extend(i32s(&[0, 0, 10, 10]));
+            small.extend(b"x\0\0\0");
+            for _ in 0..count {
+                records.extend([
+                    bare(33),
+                    intersect_clip(0, 0, 10, 10),
+                    value(34, u32::MAX),
+                    text_out(0, 0, "x", None, 4, [0, 0, 10, 10]),
+                    (108, small.clone()),
+                ]);
+            }
+            let budget = Rc::new(SharedBudget {
+                remaining: Cell::new(crate::ReplayBudget {
+                    work: 10_000,
+                    pixels: 0,
+                }),
+                exceeded: Cell::new(false),
+            });
+            let player = crate::play_emf::<true>(
+                &Emf::new(100, 100).recs(records).bytes(),
+                0,
+                false,
+                Some(Rc::clone(&budget)),
+            )
+            .unwrap();
+            assert_eq!(player.commands, 128 + count * 15);
+            assert_eq!(player.ops.len(), count * 2);
+            assert_eq!(player.dc.clip.as_ref().unwrap().region.path.len(), 64);
+            for op in &player.ops {
+                let Op::Text(text) = op else {
+                    panic!("a clipped text run");
+                };
+                assert_eq!(ClipChain::depth(&text.clip), 2);
+            }
+            10_000 - budget.remaining.get().work
+        };
+        assert_eq!(replay(5) - replay(1), 4 * 24);
     }
 }

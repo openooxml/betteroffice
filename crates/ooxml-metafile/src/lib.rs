@@ -20,6 +20,10 @@ mod text;
 mod transform;
 mod wmf;
 
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_records;
+
 pub use drawing::{Drawing, Omission, Refusal};
 pub use shapes::{MetafileDrawing, MetafileOp, MetafileStroke, decode};
 #[cfg(feature = "svg")]

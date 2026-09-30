@@ -65,7 +65,7 @@ impl MediaTable {
         let total = scan
             .parts
             .iter()
-            .filter(|part| part.transcode)
+            .filter(|part| part.transcode && !part.metafile)
             .fold(scan.images, |total, part| total.saturating_add(part.size));
         if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
             return Err(budget_exceeded());
@@ -73,7 +73,7 @@ impl MediaTable {
         let mut parts = scan
             .parts
             .iter()
-            .filter(|part| part.transcode)
+            .filter(|part| part.transcode && !part.metafile)
             .map(|part| {
                 scan.package
                     .read(part.position)
@@ -197,6 +197,7 @@ struct ScannedPart {
     size: u64,
     image: bool,
     transcode: bool,
+    metafile: bool,
 }
 
 impl MediaScan {
@@ -209,10 +210,16 @@ impl MediaScan {
             if !is_media_path(path) {
                 continue;
             }
-            let prefix = package.read_prefix(position, SNIFFED_BYTES)?;
-            let image = is_image(&prefix);
-            let transcode = transcodes(&prefix, media_mime_type(path));
-            if image && !transcode {
+            let mime_type = media_mime_type(path);
+            let prefix = match package.read_prefix(position, SNIFFED_BYTES) {
+                Ok(prefix) => prefix,
+                Err(_) if metafile_transcode(&[], mime_type) => Vec::new(),
+                Err(error) => return Err(error),
+            };
+            let metafile = metafile_transcode(&prefix, mime_type);
+            let image = is_image(&prefix) || metafile;
+            let transcode = transcodes(&prefix, mime_type);
+            if image && (!transcode || metafile) {
                 images = images.saturating_add(size);
                 if images > budget {
                     return Err(format!("inflated size exceeds {budget} bytes"));
@@ -224,6 +231,7 @@ impl MediaScan {
                 size,
                 image,
                 transcode,
+                metafile,
             });
         }
         Ok(Self {
@@ -238,7 +246,7 @@ impl MediaScan {
     pub(crate) fn keeps_compressed(&self, path: &str) -> bool {
         self.parts
             .iter()
-            .any(|part| part.image && !part.transcode && part.path == path)
+            .any(|part| part.image && (!part.transcode || part.metafile) && part.path == path)
     }
 
     /// What the images left compressed leave of the budget.
@@ -259,12 +267,27 @@ impl MediaScan {
             .into_iter()
             .map(|part| {
                 let mime_type = media_mime_type(&part.path);
-                let (mime_type, display) = if part.transcode {
+                let data = if part.metafile {
+                    match package.read(part.position) {
+                        Ok(data) => Some(data),
+                        Err(error) => {
+                            warnings.push(format!(
+                                "Metafile image {} could not be read for display: {error}",
+                                part.path
+                            ));
+                            None
+                        }
+                    }
+                } else if part.transcode {
                     let index = inflated
                         .iter()
                         .position(|(path, _)| path == &part.path)
                         .ok_or_else(|| format!("missing inflated media part {}", part.path))?;
-                    let data = inflated.remove(index).1;
+                    Some(inflated.remove(index).1)
+                } else {
+                    None
+                };
+                let (mime_type, display) = if let Some(data) = data {
                     let (display, mime_type, warning) =
                         display_form(&data, mime_type, &part.path, &mut budget);
                     warnings.extend(warning);
@@ -422,6 +445,14 @@ fn transcodes(prefix: &[u8], mime_type: &str) -> bool {
     #[cfg(feature = "tiff")]
     if is_tiff(prefix) {
         return true;
+    }
+    metafile_transcode(prefix, mime_type)
+}
+
+fn metafile_transcode(prefix: &[u8], mime_type: &str) -> bool {
+    #[cfg(feature = "tiff")]
+    if is_tiff(prefix) {
+        return false;
     }
     #[cfg(feature = "metafile")]
     if ooxml_metafile::is_metafile(prefix)
@@ -662,6 +693,113 @@ mod tests {
             &media["word/media/a.png"],
             &media["media/a.png"]
         ));
+    }
+
+    #[cfg(any(feature = "metafile", feature = "tiff"))]
+    fn corrupt_image_package(path: &str, prefix: &[u8], broken_deflate: bool) -> (Arc<[u8]>, u64) {
+        let mut image = vec![0u8; 128];
+        image[..prefix.len()].copy_from_slice(prefix);
+        let document = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p><w:r><w:pict><v:shape id="Picture 1" style="width:10pt;height:10pt"><v:imagedata r:id="rId1"/></v:shape></w:pict></w:r></w:p></w:body></w:document>"#.to_vec();
+        let relationships = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{}"/></Relationships>"#,
+            path.strip_prefix("word/").unwrap()
+        ).into_bytes();
+        let total = (image.len() + document.len() + relationships.len()) as u64;
+        let mut bytes = ooxml_opc::rezip_parts(&[
+            ("word/document.xml".to_owned(), document),
+            ("word/_rels/document.xml.rels".to_owned(), relationships),
+            (path.to_owned(), image),
+        ])
+        .unwrap();
+        let central = bytes
+            .windows(4)
+            .enumerate()
+            .find_map(|(at, signature)| {
+                (signature == b"PK\x01\x02"
+                    && bytes.get(at + 46..at + 46 + path.len()) == Some(path.as_bytes()))
+                .then_some(at)
+            })
+            .unwrap();
+        let local =
+            u32::from_le_bytes(bytes[central + 42..central + 46].try_into().unwrap()) as usize;
+        if broken_deflate {
+            let name =
+                u16::from_le_bytes(bytes[local + 26..local + 28].try_into().unwrap()) as usize;
+            let extra =
+                u16::from_le_bytes(bytes[local + 28..local + 30].try_into().unwrap()) as usize;
+            bytes[local + 30 + name + extra] = 0x07;
+        } else {
+            bytes[central + 16] ^= 1;
+            bytes[local + 14] ^= 1;
+        }
+        (bytes.into(), total)
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn corrupt_metafile_entries_open_with_lazy_broken_pictures_and_warnings() {
+        use crate::s9::{
+            S9ParseOptions, media_table_parts_within, parse_docx_s9_wire_with_media_table,
+        };
+
+        let mut emf_prefix = vec![0u8; 44];
+        emf_prefix[..4].copy_from_slice(&1u32.to_le_bytes());
+        emf_prefix[40..44].copy_from_slice(b" EMF");
+        for (path, prefix) in [
+            ("word/media/image1.emf", emf_prefix.as_slice()),
+            ("word/media/image1.wmf", &[0xd7, 0xcd, 0xc6, 0x9a][..]),
+        ] {
+            for broken_deflate in [false, true] {
+                let (bytes, total) = corrupt_image_package(path, prefix, broken_deflate);
+                let package = RetainedPackage::new(Arc::clone(&bytes)).unwrap();
+                let table = MediaTable::new(package).unwrap();
+                assert_eq!(table.len(), 1);
+                assert_eq!(table.path(0), Some(path));
+                assert_eq!(table.mime_type(0), Some(media_mime_type(path)));
+                assert!(table.parts[0].display.is_none());
+                assert!(table.keeps_compressed(path));
+                assert!(table.bytes(0).is_err());
+                assert_eq!(table.resolve("media:0"), None);
+                assert_eq!(table.warnings().len(), 1);
+                assert!(table.warnings()[0].contains(path));
+                assert!(
+                    table
+                        .check_budget(MAX_TOTAL_UNCOMPRESSED_BYTES - 128)
+                        .is_ok()
+                );
+                assert!(
+                    table
+                        .check_budget(MAX_TOTAL_UNCOMPRESSED_BYTES - 127)
+                        .is_err()
+                );
+                let (parts, bounded) = media_table_parts_within(&bytes, total).unwrap();
+                assert_eq!(parts.len(), 2);
+                assert_eq!(bounded.warnings(), table.warnings());
+                assert!(media_table_parts_within(&bytes, total - 1).is_err());
+                let (wire, _, parsed) = parse_docx_s9_wire_with_media_table(
+                    bytes,
+                    S9ParseOptions::default(),
+                    &crate::ParseLimits::default(),
+                )
+                .unwrap();
+                assert_eq!(wire.document.warnings.as_deref(), Some(parsed.warnings()));
+                let json = serde_json::to_string(&wire).unwrap();
+                assert!(json.contains(r#""type":"image""#));
+                assert!(json.contains(r#""src":"media:0""#));
+                assert!(parsed.bytes(0).is_err());
+            }
+        }
+    }
+
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn corrupt_tiff_entries_still_fail_extraction() {
+        for path in ["word/media/image1.tif", "word/media/image1.emf"] {
+            let (bytes, _) = corrupt_image_package(path, b"II\x2a\x00", false);
+            let package = RetainedPackage::new(Arc::clone(&bytes)).unwrap();
+            assert!(MediaTable::new(package).is_err());
+            assert!(crate::s9::media_table_parts(&bytes).is_err());
+        }
     }
 
     #[cfg(feature = "metafile")]
