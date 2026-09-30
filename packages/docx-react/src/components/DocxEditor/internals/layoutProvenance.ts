@@ -47,10 +47,33 @@ export function readSessionVersion(
 }
 
 const presentedLists = new WeakMap<object, object>();
+const presentListeners = new Set<(displayList: object) => void>();
 
 /** Records that the canvas pages under `host` finished painting `displayList`. */
 export function markPresented(host: object, displayList: object): void {
   presentedLists.set(host, displayList);
+  for (const listener of [...presentListeners]) listener(displayList);
+}
+
+/** Calls `listener` with each display list whose pages finish painting. */
+export function onPresented(listener: (displayList: object) => void): () => void {
+  presentListeners.add(listener);
+  return () => presentListeners.delete(listener);
+}
+
+const replayFailureListeners = new Set<(displayList: object, error: unknown) => void>();
+
+/** Records that the canvas pages failed to paint `displayList`. */
+export function markReplayFailed(displayList: object, error: unknown): void {
+  for (const listener of [...replayFailureListeners]) listener(displayList, error);
+}
+
+/** Calls `listener` with each display list whose pages fail to paint. */
+export function onReplayFailed(
+  listener: (displayList: object, error: unknown) => void
+): () => void {
+  replayFailureListeners.add(listener);
+  return () => replayFailureListeners.delete(listener);
 }
 
 /** Forgets what `host` shows, while its canvas pages repaint for a new surface or zoom. */
