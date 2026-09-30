@@ -8,9 +8,8 @@
 //! Column widths come from one of three algorithms, chosen by
 //! `w:tblLayout`/the block's width algorithm:
 //!
-//! - **fixed** — normalize the declared grid, then raise columns so the first
-//!   row's preferred cell widths fit, sharing a spanning cell's deficit evenly
-//!   across the columns it covers, then fit any explicit table width.
+//! - **fixed** — normalize the declared grid, then apply the first row's
+//!   preferred cell widths before fitting any explicit table width.
 //! - **autofit** — accumulate per-column minimum and maximum content widths
 //!   from every cell, bounded by preferred cell widths and the content budget.
 //!   Distribute room above minimums in proportion to column flex (`max - min`),
@@ -23,8 +22,8 @@
 //!
 //! A width pair resolves through the preferred-width element, then the flat
 //! value/type pair, then a raw pixel width. `pct` units are 50ths of a percent
-//! (ECMA-376 §17.18.111, so 5000 means 100%); `dxa`, `auto` and an absent type
-//! are twips at 96 DPI. Zero, negative and NaN widths never resolve.
+//! (ECMA-376 §17.18.111, so 5000 means 100%); `dxa` and an absent type are twips
+//! at 96 DPI. Automatic, zero, negative and NaN widths never resolve.
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,8 +48,7 @@ fn js_truthy(v: f64) -> bool {
     v != 0.0 && !v.is_nan()
 }
 
-/// Resolve a DOCX width pair to pixels. `pct` values are 50ths of a percent
-/// (ECMA-376 §17.18.111 — 5000 means 100%). `dxa` / `auto` / unset are twips.
+/// Resolves twips or a percentage in 50ths of a percent to pixels.
 pub fn resolve_table_width_px(
     value: Option<f64>,
     width_type: Option<&str>,
@@ -63,7 +61,7 @@ pub fn resolve_table_width_px(
     if width_type == Some("pct") {
         return Some((parent_width * value) / 5000.0);
     }
-    if width_type.is_none() || width_type == Some("dxa") || width_type == Some("auto") {
+    if width_type.is_none() || width_type == Some("dxa") {
         return Some(twips_to_pixels(value));
     }
     None
@@ -153,19 +151,27 @@ pub fn count_table_columns(table_block: &TableBlock) -> usize {
 
 /// Resolves a width through the preferred element, then the flat value/type
 /// pair, then a raw pixel width.
-fn preferred_width_px(
+pub(crate) fn preferred_width_px(
     preferred: Option<&crate::types::PreferredWidth>,
     legacy_value: Option<f64>,
     legacy_type: Option<&str>,
     parent_width: f64,
     legacy_px: Option<f64>,
 ) -> Option<f64> {
+    if preferred.is_some_and(|width| width.r#type.as_deref() == Some("auto")) {
+        return None;
+    }
     preferred
         .and_then(|width| {
             resolve_table_width_px(width.value, width.r#type.as_deref(), parent_width)
         })
-        .or_else(|| resolve_table_width_px(legacy_value, legacy_type, parent_width))
-        .or_else(|| legacy_px.filter(|value| *value > 0.0))
+        .or_else(|| {
+            if legacy_type == Some("auto") {
+                return None;
+            }
+            resolve_table_width_px(legacy_value, legacy_type, parent_width)
+                .or_else(|| legacy_px.filter(|value| *value > 0.0))
+        })
 }
 
 /// Raises a span's columns until they total `required`, sharing the shortfall
@@ -215,6 +221,7 @@ fn resolve_fixed_column_widths(
         col_count,
         explicit_width_px.unwrap_or(content_width),
     );
+    let table_width = explicit_width_px.unwrap_or_else(|| widths.iter().sum());
     for grid_cell in resolve_cell_grid(table_block)
         .into_iter()
         .filter(|cell| cell.row_index == 0)
@@ -226,15 +233,23 @@ fn resolve_fixed_column_widths(
             cell.preferred_width.as_ref(),
             cell.width_value,
             cell.width_type.as_deref(),
-            explicit_width_px.unwrap_or(content_width),
+            table_width,
             cell.width,
         ) {
-            add_span_constraint(
-                &mut widths,
-                grid_cell.column_index,
-                grid_cell.col_span,
-                preferred,
-            );
+            let start = grid_cell.column_index;
+            let end = widths.len().min(start + grid_cell.col_span);
+            if start >= end {
+                continue;
+            }
+            let total: f64 = widths[start..end].iter().sum();
+            if total > preferred {
+                let scale = preferred / total;
+                for width in &mut widths[start..end] {
+                    *width *= scale;
+                }
+            } else {
+                add_span_constraint(&mut widths, start, grid_cell.col_span, preferred);
+            }
         }
     }
     if let Some(target) = explicit_width_px {
@@ -279,9 +294,30 @@ fn autofit_content_widths(
             cell.preferred_width.as_ref(),
             cell.width_value,
             cell.width_type.as_deref(),
-            explicit_width_px.unwrap_or(content_width),
+            explicit_width_px.unwrap_or(0.0),
             cell.width,
-        );
+        )
+        .filter(|width| *width > 0.0);
+        let width_type = cell
+            .preferred_width
+            .as_ref()
+            .filter(|width| {
+                width.r#type.as_deref() == Some("auto")
+                    || resolve_table_width_px(width.value, width.r#type.as_deref(), 1.0).is_some()
+            })
+            .map(|width| width.r#type.as_deref())
+            .unwrap_or(cell.width_type.as_deref());
+        let percentage = if width_type == Some("pct") {
+            preferred_width_px(
+                cell.preferred_width.as_ref(),
+                cell.width_value,
+                cell.width_type.as_deref(),
+                1.0,
+                cell.width,
+            )
+        } else {
+            None
+        };
         let measured = content_widths
             .and_then(|rows| rows.get(grid_cell.row_index))
             .and_then(|cells| cells.get(grid_cell.cell_index))
@@ -294,19 +330,6 @@ fn autofit_content_widths(
             .unwrap_or(0.0)
             .max(0.0);
         if cell.no_wrap.unwrap_or(false) {
-            let width_type = cell
-                .preferred_width
-                .as_ref()
-                .filter(|width| {
-                    resolve_table_width_px(
-                        width.value,
-                        width.r#type.as_deref(),
-                        explicit_width_px.unwrap_or(content_width),
-                    )
-                    .is_some()
-                })
-                .map(|width| width.r#type.as_deref())
-                .unwrap_or(cell.width_type.as_deref());
             let absolute =
                 width_type == Some("dxa") || (width_type.is_none() && preferred.is_some());
             minimum = minimum.max(if absolute {
@@ -316,10 +339,10 @@ fn autofit_content_widths(
             });
         }
         let maximum = minimum.max(preferred.or(max_content_width).unwrap_or(0.0));
-        constraints.push((grid_cell, minimum, maximum, preferred));
+        constraints.push((grid_cell, minimum, maximum, preferred, percentage));
     }
-    constraints.sort_by_key(|(cell, _, _, _)| (cell.col_span, cell.column_index));
-    for (grid_cell, minimum, _, _) in &constraints {
+    constraints.sort_by_key(|(cell, _, _, _, _)| (cell.col_span, cell.column_index));
+    for (grid_cell, minimum, _, _, _) in &constraints {
         add_span_constraint(
             &mut minimums,
             grid_cell.column_index,
@@ -330,7 +353,7 @@ fn autofit_content_widths(
     let mut maximums = minimums.clone();
     let mut preferences = minimums.clone();
     let mut priced = vec![false; col_count];
-    for (grid_cell, _, maximum, preferred) in &constraints {
+    for (grid_cell, _, maximum, preferred, _) in &constraints {
         add_span_constraint(
             &mut maximums,
             grid_cell.column_index,
@@ -364,6 +387,47 @@ fn autofit_content_widths(
         maximums[column] = maximums[column].max(minimums[column]);
         if maximums[column] <= 0.0 {
             maximums[column] = base[column];
+        }
+    }
+    if explicit_width_px.is_none() && constraints.iter().any(|(_, _, _, _, pct)| pct.is_some()) {
+        let mut table_width: f64 = maximums.iter().sum();
+        let mut percentages = vec![0.0; col_count];
+        for (cell, _, _, _, percentage) in &constraints {
+            let Some(percentage) = percentage else {
+                continue;
+            };
+            let start = cell.column_index;
+            let end = col_count.min(start + cell.col_span);
+            if start >= end {
+                continue;
+            }
+            let natural: f64 = maximums[start..end].iter().sum();
+            table_width = table_width.max(natural / percentage);
+            add_span_constraint(&mut percentages, start, cell.col_span, *percentage);
+        }
+        let percentage_total: f64 = percentages.iter().sum();
+        let remaining_columns: Vec<usize> = (0..col_count)
+            .filter(|column| percentages[*column] <= 0.0)
+            .collect();
+        if percentage_total < 1.0 {
+            let natural: f64 = remaining_columns.iter().map(|column| maximums[*column]).sum();
+            table_width = table_width.max(natural / (1.0 - percentage_total));
+        }
+        table_width = table_width.min(content_width);
+        let (_, resolved) = autofit_content_widths(
+            table_block,
+            content_width,
+            col_count,
+            Some(table_width),
+            content_widths,
+        );
+        maximums = resolved;
+        if !remaining_columns.is_empty() {
+            let total: f64 = maximums.iter().sum();
+            let share = (table_width - total).max(0.0) / remaining_columns.len() as f64;
+            for column in remaining_columns {
+                maximums[column] += share;
+            }
         }
     }
     (minimums, maximums)
@@ -510,7 +574,7 @@ pub fn content_sized_columns(
             cell.preferred_width.as_ref(),
             cell.width_value,
             cell.width_type.as_deref(),
-            content_width,
+            total,
             cell.width,
         )
         .is_some()
@@ -714,6 +778,11 @@ mod tests {
     }
 
     #[test]
+    fn automatic_width_ignores_nonzero_values() {
+        assert_eq!(resolve_table_width_px(Some(4500.0), Some("auto"), 600.0), None);
+    }
+
+    #[test]
     fn total_width_sums_explicit_column_widths() {
         assert_eq!(
             resolve_table_total_width_px(&table_with_column_widths(vec![200.0, 300.0]), 800.0),
@@ -798,6 +867,62 @@ mod tests {
     }
 
     #[test]
+    fn fixed_layout_replaces_first_row_grid_widths_before_reducing_the_total() {
+        for (table_width, expected) in [
+            (9000.0, [100.0, 500.0]),
+            (6000.0, [200.0 / 3.0, 1000.0 / 3.0]),
+        ] {
+            let mut block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "fixed",
+                "gridWidths": [twips_to_pixels(4500.0), twips_to_pixels(4500.0)],
+                "preferredWidth": {"value": table_width, "type": "dxa"},
+                "rows": [
+                    {"id": 0, "cells": [
+                        {"id": 0, "blocks": [], "preferredWidth": {"value": 1500, "type": "dxa"}},
+                        {"id": 1, "blocks": [], "preferredWidth": {"value": 7500, "type": "dxa"}}
+                    ]},
+                    {"id": 1, "cells": [
+                        {"id": 2, "blocks": [], "widthValue": 7500, "widthType": "dxa"},
+                        {"id": 3, "blocks": [], "widthValue": 1500, "widthType": "dxa"}
+                    ]}
+                ]
+            }))
+            .unwrap();
+            for legacy in [false, true] {
+                if legacy {
+                    for cell in &mut block.rows[0].cells {
+                        let preferred = cell.preferred_width.take().unwrap();
+                        cell.width_value = preferred.value;
+                        cell.width_type = preferred.r#type;
+                    }
+                }
+                let widths = resolve_table_column_widths(&block, 601.333_333);
+                for (actual, expected) in widths.iter().zip(expected) {
+                    assert_close_to(*actual, expected, 6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_layout_replaces_spanning_first_row_preferences() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "fixed", "gridWidths": [300, 300, 300],
+            "preferredWidth": {"value": 9000, "type": "dxa"},
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "blocks": [], "colSpan": 2,
+                 "preferredWidth": {"value": 1500, "type": "dxa"}},
+                {"id": 1, "blocks": [], "preferredWidth": {"value": 7500, "type": "dxa"}}
+            ]}]
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_table_column_widths(&block, 600.0),
+            vec![50.0, 50.0, 500.0]
+        );
+    }
+
+    #[test]
     fn autofit_uses_intrinsic_min_and_max_widths_and_shrinks_to_content() {
         let block: TableBlock = serde_json::from_value(json!({
             "id": 0,
@@ -813,6 +938,100 @@ mod tests {
             resolve_table_column_widths(&block, 600.0),
             vec![150.0, 200.0]
         );
+    }
+
+    #[test]
+    fn autofit_cell_percentages_use_the_content_sized_table_width() {
+        let mut block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "preferredWidth": {"value": 2500, "type": "pct"},
+                 "blocks": [{"kind": "paragraph", "id": 0, "runs": [{"kind": "text", "text": "Hello"}]}]},
+                {"id": 1, "preferredWidth": {"value": 2500, "type": "pct"},
+                 "blocks": [{"kind": "paragraph", "id": 1, "runs": [{"kind": "text", "text": "Hello"}]}]}
+            ]}]
+        }))
+        .unwrap();
+        let content = vec![vec![Some((36.0, 36.0)), Some((36.0, 36.0))]];
+        for legacy in [false, true] {
+            if legacy {
+                for cell in &mut block.rows[0].cells {
+                    let preferred = cell.preferred_width.take().unwrap();
+                    cell.width_value = preferred.value;
+                    cell.width_type = preferred.r#type;
+                }
+            }
+            let widths =
+                resolve_table_column_widths_with_content(&block, 601.333_333, Some(&content));
+            for width in widths {
+                assert_close_to(width, 36.0, 6);
+            }
+            let (minimum, maximum) =
+                resolve_table_intrinsic_widths(&block, 601.333_333, Some(&content));
+            assert_close_to(minimum, 72.0, 6);
+            assert_close_to(maximum, 72.0, 6);
+        }
+        block.width = Some(9000.0);
+        block.width_type = Some("dxa".to_owned());
+        assert_eq!(
+            resolve_table_column_widths_with_content(&block, 601.333_333, Some(&content)),
+            vec![300.0, 300.0]
+        );
+    }
+
+    #[test]
+    fn autofit_percentages_balance_unequal_content_and_unpriced_columns() {
+        for (first, second, expected) in [
+            (Some(2500), Some(2500), [72.0, 72.0]),
+            (Some(2500), None, [72.0, 72.0]),
+            (Some(1250), Some(3750), [36.0, 108.0]),
+            (Some(3750), None, [216.0, 72.0]),
+        ] {
+            let block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "widthValue": first, "widthType": "pct",
+                     "minContentWidth": 36, "maxContentWidth": 36},
+                    {"id": 1, "blocks": [], "widthValue": second, "widthType": "pct",
+                     "minContentWidth": 72, "maxContentWidth": 72}
+                ]}]
+            }))
+            .unwrap();
+            let widths = resolve_table_column_widths(&block, 601.333_333);
+            for (actual, expected) in widths.iter().zip(expected) {
+                assert_close_to(*actual, expected, 6);
+            }
+        }
+    }
+
+    #[test]
+    fn autofit_automatic_cell_widths_ignore_numeric_and_pixel_preferences() {
+        let mut block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
+            "width": 9000, "widthType": "auto",
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "width": 300, "preferredWidth": {"value": 4500, "type": "auto"},
+                 "minContentWidth": 36, "maxContentWidth": 36,
+                 "blocks": [{"kind": "paragraph", "id": 0, "runs": [{"kind": "text", "text": "Hello"}]}]},
+                {"id": 1, "width": 300, "preferredWidth": {"value": 4500, "type": "auto"},
+                 "minContentWidth": 36, "maxContentWidth": 36,
+                 "blocks": [{"kind": "paragraph", "id": 1, "runs": [{"kind": "text", "text": "Hello"}]}]}
+            ]}]
+        }))
+        .unwrap();
+        for legacy in [false, true] {
+            if legacy {
+                for cell in &mut block.rows[0].cells {
+                    let preferred = cell.preferred_width.take().unwrap();
+                    cell.width_value = preferred.value;
+                    cell.width_type = preferred.r#type;
+                }
+            }
+            let widths = resolve_table_column_widths(&block, 601.333_333);
+            for width in widths {
+                assert_close_to(width, 36.0, 6);
+            }
+        }
     }
 
     #[test]
@@ -945,6 +1164,7 @@ mod tests {
         for (preferred, expected) in [
             (json!({"value": 1500, "type": "dxa"}), 100.0),
             (json!({"value": 0, "type": "auto"}), 642.99),
+            (json!({"value": 4500, "type": "auto"}), 642.99),
             (json!({"value": 500, "type": "pct"}), 642.99),
         ] {
             let mut block: TableBlock = serde_json::from_value(json!({

@@ -1141,12 +1141,13 @@ fn lower_table<T: ReadTxn>(
                 map,
             )?;
 
-            let width_value = map_number(tc_pr, "width");
             let width_type = map_string(tc_pr, "widthType");
+            let width_value =
+                map_number(tc_pr, "width").filter(|_| width_type.as_deref() != Some("auto"));
             let width =
                 width_value.filter(|value| *value != 0.0).and_then(|value| {
                     match width_type.as_deref() {
-                        None | Some("dxa") | Some("auto") => Some(twips_to_pixels(value)),
+                        None | Some("dxa") => Some(twips_to_pixels(value)),
                         _ => None,
                     }
                 });
@@ -4324,6 +4325,80 @@ mod tests {
             shifted.pointer("/1/rows/0/id"),
             Some(&Value::from(format!("{stable_table_id}:r0")))
         );
+    }
+
+    #[test]
+    fn native_table_widths_honor_fixed_percent_and_automatic_preferences() {
+        for (layout, table_width, width_type, cell_widths, expected) in [
+            ("fixed", Some(9000), "dxa", [1500, 7500], [100.0, 500.0]),
+            ("autofit", None, "pct", [2500, 2500], [36.0, 36.0]),
+            ("autofit", None, "auto", [4500, 4500], [36.0, 36.0]),
+        ] {
+            let doc = EditingDoc::new(41);
+            for (story, para) in [("body:t0:r0c0", "c00p"), ("body:t0:r0c1", "c01p")] {
+                replace_story_with_paragraph(&doc, story, para, "Hello");
+            }
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            let tbl_pr = json!({
+                "tableLayout": layout,
+                "width": table_width,
+                "widthType": if table_width.is_some() { "dxa" } else { "auto" }
+            });
+            let rows = json!([{"trPr": {}, "cells": [
+                {"tcPr": {"width": cell_widths[0], "widthType": width_type},
+                 "story": "body:t0:r0c0"},
+                {"tcPr": {"width": cell_widths[1], "widthType": width_type},
+                 "story": "body:t0:r0c1"}
+            ]}]);
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "table".to_owned(),
+                        payload: vec![
+                            (
+                                "tblPr".to_owned(),
+                                Any::from_json(&tbl_pr.to_string()).unwrap(),
+                            ),
+                            ("grid".to_owned(), Any::from_json("[4500,4500]").unwrap()),
+                            (
+                                "rows".to_owned(),
+                                Any::from_json(&rows.to_string()).unwrap(),
+                            ),
+                        ],
+                        attrs: Attrs::new(),
+                    },
+                ],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let mut blocks =
+                yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let LayoutBlock::Table(table) = &mut blocks[0] else {
+                panic!()
+            };
+            assert_eq!(table.layout_mode.as_deref(), Some(layout));
+            assert_eq!(table.column_widths, Some(vec![300.0, 300.0]));
+            for cell in &mut table.rows[0].cells {
+                if width_type == "auto" {
+                    assert_eq!(cell.width, None);
+                    assert_eq!(cell.width_value, None);
+                    assert_eq!(cell.preferred_width, None);
+                    assert_eq!(cell.width_type.as_deref(), Some("auto"));
+                } else if width_type == "pct" {
+                    assert_eq!(cell.width, None);
+                    assert_eq!(cell.width_value, Some(2500.0));
+                }
+                cell.min_content_width = Some(36.0);
+                cell.max_content_width = Some(36.0);
+            }
+            let widths = docx_layout::table_grid::resolve_table_column_widths(table, 601.333_333);
+            for (actual, expected) in widths.iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-6, "{width_type}: {widths:?}");
+            }
+        }
     }
 
     #[test]

@@ -7,9 +7,8 @@ use serde_json::Value;
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
 use crate::table_grid::{
-    content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
-    resolve_table_column_widths_with_content, resolve_table_intrinsic_widths,
-    resolve_table_width_px,
+    content_sized_columns, count_table_columns, grow_content_sized_columns, preferred_width_px,
+    resolve_cell_grid, resolve_table_column_widths_with_content, resolve_table_intrinsic_widths,
 };
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
@@ -1887,15 +1886,25 @@ fn measure_table(
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Result<TableExtent, String> {
-    let explicit_width =
-        resolve_table_width_px(table.width, table.width_type.as_deref(), content_width);
-    let target_width = explicit_width.unwrap_or(content_width);
+    let explicit_width = preferred_width_px(
+        table.preferred_width.as_ref(),
+        table.width,
+        table.width_type.as_deref(),
+        content_width,
+        None,
+    );
     let mut column_widths = measure_table_column_widths(table, content_width, config);
     let content_sized = content_sized_columns(table, content_width, &column_widths);
     if !content_sized.is_empty() {
         let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
         grow_content_sized_columns(table, content_width, &maximums, &mut column_widths);
     }
+    let resolved_total: f64 = column_widths.iter().sum();
+    let target_width = if resolved_total > 0.0 {
+        resolved_total
+    } else {
+        explicit_width.unwrap_or(content_width)
+    };
     let grid = resolve_cell_grid(table);
     let mut rows = Vec::with_capacity(table.rows.len());
 
@@ -1913,17 +1922,14 @@ fn measure_table(
                 .take(col_span)
                 .sum::<f64>();
             if cell_width == 0.0 {
-                cell_width = cell
-                    .width
-                    .filter(|width| *width > 0.0)
-                    .or_else(|| {
-                        resolve_table_width_px(
-                            cell.width_value,
-                            cell.width_type.as_deref(),
-                            target_width,
-                        )
-                    })
-                    .unwrap_or(100.0);
+                cell_width = preferred_width_px(
+                    cell.preferred_width.as_ref(),
+                    cell.width_value,
+                    cell.width_type.as_deref(),
+                    target_width,
+                    cell.width,
+                )
+                .unwrap_or(100.0);
             }
             let left = cell
                 .padding
@@ -2086,7 +2092,6 @@ fn measure_table(
     }
 
     let total_height = rows.iter().map(|row| row.height).sum();
-    let resolved_total = column_widths.iter().sum::<f64>();
     Ok(TableExtent {
         rows,
         column_widths,
