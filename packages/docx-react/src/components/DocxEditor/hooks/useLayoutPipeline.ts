@@ -432,6 +432,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           console.error('[PagedEditor] Resident worker layout could not start:', error);
         }
       }
+      // The spare warmed while fonts loaded has been adopted by now, or is not needed.
+      if (workerPrewarmRef.current?.session === session) {
+        workerPrewarmRef.current.release();
+        workerPrewarmRef.current = null;
+      }
       if (!workerPass) {
         layOutHere();
         syncCoordinator.onLayoutComplete(currentEpoch);

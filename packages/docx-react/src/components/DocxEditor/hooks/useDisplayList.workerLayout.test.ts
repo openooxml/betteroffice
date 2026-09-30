@@ -225,6 +225,44 @@ test('session change and unmount release a font-deferred spare before another ed
   }
 });
 
+test('a font-deferred spare the first layout does not adopt is released', async () => {
+  for (const ending of ['build', 'onHost']) {
+    const source = setupLayoutPipeline();
+    Object.assign(source.engine, {
+      layoutDocumentWithRegionsRetainedJson: () => source.layoutJson,
+    });
+    let settleFonts: () => void = () => {};
+    let measurement: ResidentMeasurementConfig | null = null;
+    const fonts = new Promise<void>((resolve) => (settleFonts = resolve)).then(() => {
+      measurement = {} as ResidentMeasurementConfig;
+    });
+    const build = mock(async () => ({ pages: [] }));
+    const hook = renderHook(
+      ({ overrides }) => useWorkerLayoutPipeline(source.engine, () => measurement, overrides),
+      { initialProps: { overrides: undefined as Parameters<typeof useRustDisplayList>[1] } }
+    );
+    try {
+      act(() => hook.result.current.runLayoutPipeline());
+      const spare = FakeWorker.last!;
+      expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
+      if (ending === 'build') hook.rerender({ overrides: { build } });
+      await act(async () => {
+        settleFonts();
+        await fonts;
+      });
+      act(() => hook.result.current.runLayoutPipeline({ onHost: ending === 'onHost' }));
+      expect(hook.result.current.layout?.pages.length).toBeGreaterThan(0);
+      expect(spare.posted.map((request) => request.type)).toEqual(['warm']);
+      expect(source.adopted).toEqual([]);
+      await waitFor(() => expect(spare.terminated).toBe(true));
+      expect(takePreloadedResidentEngineWorker()).toBeNull();
+    } finally {
+      hook.unmount();
+      source.native.free();
+    }
+  }
+});
+
 test('font-deferred passes warm only when the worker path is eligible', () => {
   const source = setupLayoutPipeline();
   const initialWorkers = FakeWorker.instances.length;
