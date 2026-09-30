@@ -513,9 +513,8 @@ export function useRustDisplayList(
       if (dispatchHoldTimerRef.current !== null) {
         clearTimeout(dispatchHoldTimerRef.current);
       }
-      // A build or input the worker leaves unanswered must not fall back on the freed session.
+      // A build the worker leaves unanswered must not fall back on the freed session.
       generationRef.current += 1;
-      documentLoadsRef.current += 1;
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
@@ -695,7 +694,8 @@ export function useRustDisplayList(
         return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false, deletedUnits };
       };
       // An input to a document another load replaced, or an unmount freed, applies to nothing.
-      const dropped = (): boolean => documentLoadsRef.current !== documentLoad;
+      const dropped = (): boolean =>
+        unmountedRef.current || documentLoadsRef.current !== documentLoad;
       const run = async (): Promise<ResidentFrameApplyResult | null> => {
         if (dropped()) return { frameEpoch: null, caretSynchronized: false };
         const worker = workerRef.current;
@@ -1114,10 +1114,9 @@ export function useRustDisplayList(
         cause: unknown
       ): Promise<WorkerLayoutComputation | null> | null => {
         const current = workerRef.current;
-        // A worker another document, session or an unmount let go of fails nothing current.
-        if (owner.load !== documentLoadsRef.current || (current && current.engine !== hostEngine)) {
-          return null;
-        }
+        // A pass of a session no worker serves any more, or of another
+        // document, fails nothing current and starts no worker.
+        if (owner.load !== documentLoadsRef.current || current?.engine !== hostEngine) return null;
         if (cause instanceof ResidentWorkerOutOfMemoryError) {
           // A newer layout, here or in a worker, replaced this pass: the host
           // drops it, and a newer worker request recovers the worker it asks.
