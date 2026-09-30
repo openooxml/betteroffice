@@ -270,6 +270,21 @@ test('a layout from other inputs is laid out again with the current ones', async
   expect(events).toEqual(['flush', 'relayout']);
 });
 
+test('a layout that previews decisions the editor no longer shows is laid out again', async () => {
+  const { session, request, layout } = await openSession();
+  const previewing = JSON.parse(request) as { renderEnv: Record<string, unknown> };
+  previewing.renderEnv = { ...previewing.renderEnv, revisionPreview: { '1': 'accepted' } };
+  layout(JSON.stringify(previewing));
+  expect(session.exportStructuredWithPagesFor(MARKUP, request)).toMatchObject({
+    ok: false,
+    failure: { code: 'unsupported-revision-layout' },
+  });
+  const { events, api } = await setup({ session, request: () => request, relayout: layout });
+  const result = await api().exportStructuredWithPages(MARKUP);
+  if (!result.ok) throw new Error(result.failure.message);
+  expect(events).toEqual(['flush', 'relayout']);
+});
+
 test('an export waits for the fonts the document needs', async () => {
   const { session, request, layout } = await openSession();
   layout();
