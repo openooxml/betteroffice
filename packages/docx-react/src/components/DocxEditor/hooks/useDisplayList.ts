@@ -522,7 +522,8 @@ export function useRustDisplayList(
   const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const suppressWorkerInvalidationRef = useRef(0);
   const [workerSurfacesActive, setWorkerSurfacesActive] = useState(false);
-  const [pendingCompletion, setPendingCompletion] = useState<YrsSession | null>(null);
+  // One entry per provisional layout, so only its own gate clears it.
+  const [pendingCompletion, setPendingCompletion] = useState<{ engine: YrsSession } | null>(null);
   const workerPresentationActiveRef = useRef(false);
   const [workerPresentationActive, setWorkerPresentationActiveState] = useState(false);
 
@@ -1648,7 +1649,8 @@ export function useRustDisplayList(
           // surfaces are attached: the worker answers in order, so asking
           // sooner would hold back the first paint until it is done.
           const provisionalEpoch = result.caret.frameEpoch;
-          if (workerOpenEnabledRef.current) setPendingCompletion(hostEngine);
+          const gate = { engine: hostEngine };
+          if (workerOpenEnabledRef.current) setPendingCompletion(gate);
           const surfaced = new Promise<void>((resolve) => {
             completionGateRef.current = resolve;
             setTimeout(resolve, PROVISIONAL_SURFACE_WAIT_MS);
@@ -1656,7 +1658,7 @@ export function useRustDisplayList(
           const complete = surfaced
             // A worker handed to another session lays out that session now.
             .then(() => {
-              setPendingCompletion((current) => (current === hostEngine ? null : current));
+              setPendingCompletion((current) => (current === gate ? null : current));
               return workerRef.current?.engine === hostEngine
                 ? worker.completeLayout(provisionalEpoch, false, COMPLETION_SLICE_BLOCKS)
                 : null;
@@ -2321,7 +2323,7 @@ export function useRustDisplayList(
     setRetainBuiltPages,
     workerMemory,
     workerSurfacesActive,
-    pendingCompletion,
+    pendingCompletion: pendingCompletion?.engine ?? null,
     workerPresentationActive,
     setWorkerPresentationActive,
     attachOffscreenCanvases,
