@@ -104,3 +104,12 @@ fn a_chain_of_headings_collapses_the_gaps_between_them() {
         pages(&[("Line 001", "Line 052"), ("Line 053", "Line 080")])
     );
 }
+
+#[test]
+fn a_page_break_before_the_follower_leaves_the_heading_in_place() {
+    // 57 lines, a keepNext heading, then a paragraph with pageBreakBefore
+    assert_eq!(
+        page_lines("keep-next-page-break-before"),
+        pages(&[("F01", "H"), ("B", "B")])
+    );
+}

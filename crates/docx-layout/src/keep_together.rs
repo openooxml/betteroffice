@@ -67,8 +67,10 @@ fn is_bound_paragraph(block: &LayoutBlock) -> bool {
 ///
 /// A run grows while the next block is another keep-with-next paragraph; it
 /// ends at a break block, a non-paragraph block, a paragraph without keepNext,
-/// or the end of the list. When the terminator is a plain paragraph it becomes
-/// the run's follower, since the run must land on the follower's page.
+/// a paragraph that starts a new page, or the end of the list. When the
+/// terminator is a plain paragraph it becomes the run's follower, since the run
+/// must land on the follower's page. A paragraph that starts a new page is
+/// never a follower: Word lets the page break win over keepNext.
 pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
     let mut groups_by_head: BTreeMap<usize, KeepWithNextGroup> = BTreeMap::new();
     let mut interior_members: BTreeSet<usize> = BTreeSet::new();
@@ -83,7 +85,10 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
         let mut members: Vec<usize> = vec![cursor];
         let mut tail_index = cursor;
         let mut probe = cursor + 1;
-        while probe < measured.len() && is_bound_paragraph(&measured[probe].block) {
+        while probe < measured.len()
+            && is_bound_paragraph(&measured[probe].block)
+            && !paragraph_breaks_before(&measured[probe].block)
+        {
             members.push(probe);
             tail_index = probe;
             probe += 1;
@@ -93,6 +98,7 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
         // supported flow object. Forced/section breaks terminate it.
         let after_tail = tail_index + 1;
         let follower = if after_tail < measured.len()
+            && !paragraph_breaks_before(&measured[after_tail].block)
             && matches!(
                 measured[after_tail].block,
                 LayoutBlock::Paragraph(_)
@@ -425,6 +431,42 @@ mod tests {
             .zip(measures)
             .map(|(block, measure)| MeasuredBlock { block, measure })
             .collect()
+    }
+
+    #[test]
+    fn a_paragraph_that_starts_a_new_page_ends_a_keep_with_next_run() {
+        let page_break_before = |text: &str, keep_next: bool| {
+            paragraph(
+                vec![text_run(text)],
+                Some(ParagraphAttrs {
+                    keep_next: keep_next.then_some(true),
+                    page_break_before: Some(true),
+                    ..Default::default()
+                }),
+            )
+        };
+        let line = || make_paragraph_measure(vec![make_line(20.0)]);
+        let measured = to_measured_blocks(
+            vec![
+                make_paragraph_block("Heading", true),
+                page_break_before("Chapter", true),
+                make_paragraph_block("Body", false),
+                make_paragraph_block("Heading", true),
+                page_break_before("Chapter", false),
+            ],
+            vec![line(), line(), line(), line(), line()],
+        );
+
+        let scan = analyze_keep_with_next(&measured);
+        let groups: Vec<(Vec<usize>, Option<usize>)> = scan
+            .groups_by_head
+            .values()
+            .map(|group| (group.members.clone(), group.follower))
+            .collect();
+        assert_eq!(
+            groups,
+            vec![(vec![0], None), (vec![1], Some(2)), (vec![3], None)]
+        );
     }
 
     #[test]
