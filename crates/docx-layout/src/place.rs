@@ -1364,7 +1364,9 @@ fn layout_paragraph(
             }
             if remaining_after == 1 && fitting_lines > 2 {
                 fitting_lines -= 1;
-                pushed_widow = true;
+                // at a float band the space below it still takes the line, and
+                // balancing chose its column depth with the line kept here
+                pushed_widow = !has_float_bands && !paginator.balances_region();
                 let removed = &lines[current_line_index + fitting_lines];
                 lines_height -= removed.line_height + removed.float_skip_before.unwrap_or(0.0);
             }
@@ -1411,7 +1413,7 @@ fn layout_paragraph(
         current_line_index += fitting_lines;
 
         // leftover lines: move the pen to a column/page with room for the next;
-        // a line pushed down for widow control still fits here, so break anyway
+        // a line widow control pushed down still fits here, so break anyway
         if pushed_widow {
             paginator.advance_for_overflow();
         } else if current_line_index < lines.len() {
@@ -2955,6 +2957,32 @@ mod pagination_rule_tests {
             ]);
             assert_eq!(paragraph_slices(&result, 2.0), expected);
         }
+    }
+
+    #[test]
+    fn widow_control_keeps_the_pushed_line_above_a_float_band_on_its_page() {
+        let mut value = input(vec![paragraph(1, 4, 20.0, json!({}))]);
+        value.options.page_size = Some(crate::types::Size { w: 200.0, h: 220.0 });
+        value.options.section_page_float_bands = Some(
+            serde_json::from_value(json!([{"default": [{"top": 70, "bottom": 90}]}])).unwrap(),
+        );
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 1);
+    }
+
+    #[test]
+    fn widow_control_in_balanced_columns_keeps_the_section_on_one_page() {
+        let mut value = input(vec![
+            paragraph(1, 4, 20.0, json!({})),
+            paragraph(2, 5, 20.0, json!({})),
+            paragraph(3, 4, 20.0, json!({})),
+            paragraph(4, 5, 20.0, json!({})),
+        ]);
+        value.options.page_size = Some(crate::types::Size { w: 500.0, h: 320.0 });
+        value.options.columns =
+            Some(serde_json::from_value(json!({"count": 3, "gap": 20})).unwrap());
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 1);
     }
 
     fn paragraph_slices(layout: &Layout, id: f64) -> Vec<(usize, usize, usize)> {
