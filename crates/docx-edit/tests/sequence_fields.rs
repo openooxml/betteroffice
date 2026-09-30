@@ -233,26 +233,26 @@ fn legacy_state_without_sequence_metadata_keeps_all_cached_results() {
     let doc = EditingDoc::new(1);
     seed_from_docx(&doc, &document(&body)).unwrap();
     {
-        let mut txn = doc.yrs_doc().transact_mut();
-        let stories = txn.get_map("stories").unwrap();
-        let Some(Out::YText(story)) = stories.get(&txn, "body") else {
-            panic!("body");
-        };
-        let mut nested_fields = 0;
-        for diff in story.diff(&txn, yrs::types::text::YChange::identity) {
-            if let Out::YMap(field) = diff.insert
-                && field.remove(&mut txn, "nestedSequences").is_some()
-            {
-                nested_fields += 1;
-            }
-        }
-        assert_eq!(nested_fields, 1);
+        let txn = doc.yrs_doc().transact();
+        let session = txn.get_map("session").unwrap();
+        assert_eq!(
+            session.get(&txn, "opaqueSequences"),
+            Some(Out::Any(Any::Array(vec![Any::from("figure")].into())))
+        );
     }
     for (has_metadata, expected) in [(true, ["1", "2", "2"]), (false, ["1", "2", "3"])] {
-        if !has_metadata {
+        {
             let mut txn = doc.yrs_doc().transact_mut();
             let session = txn.get_map("session").unwrap();
-            assert!(session.remove(&mut txn, "opaqueSequences").is_some());
+            if has_metadata {
+                session.insert(
+                    &mut txn,
+                    "opaqueSequences",
+                    Any::Array(Vec::<Any>::new().into()),
+                );
+            } else {
+                assert!(session.remove(&mut txn, "opaqueSequences").is_some());
+            }
         }
         let peer = EditingDoc::new(2);
         peer.apply_update_v1(&doc.encode_state_as_update_v1())
@@ -274,6 +274,29 @@ fn legacy_state_without_sequence_metadata_keeps_all_cached_results() {
             assert_eq!(results, expected);
         }
     }
+}
+
+#[test]
+fn nested_sequences_keep_the_seed_operations_of_a_document_without_them() {
+    let seed_clocks = |name: &str| {
+        let nested = format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> QUOTE "</w:instrText></w:r>{}<w:r><w:instrText xml:space="preserve">" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            field(&format!("{name} Figure"))
+        );
+        let doc = EditingDoc::new(1);
+        seed_from_docx(
+            &doc,
+            &document(&[paragraph(&nested), paragraph(&run("After"))].concat()),
+        )
+        .unwrap();
+        let txn = doc.yrs_doc().transact();
+        txn.state_vector()
+            .iter()
+            .filter(|(client, _)| **client != yrs::ClientID::new(0x1_0000_05e9))
+            .map(|(client, clock)| (*client, *clock))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(seed_clocks("SEQ"), seed_clocks("XEQ"));
 }
 
 #[test]
@@ -320,7 +343,7 @@ fn legacy_projected_sequence_owners_keep_cached_results() {
             .apply_update_v1(&seeded.encode_state_as_update_v1())
             .unwrap();
         {
-            let mut txn = legacy.yrs_doc().transact_mut();
+            let txn = legacy.yrs_doc().transact();
             let stories = txn.get_map("stories").unwrap();
             let Some(Out::YText(story)) = stories.get(&txn, "body") else {
                 panic!("body");
@@ -330,7 +353,7 @@ fn legacy_projected_sequence_owners_keep_cached_results() {
                 if let Out::YMap(field) = diff.insert
                     && field.get(&txn, "resultProjection").is_some()
                 {
-                    assert!(field.remove(&mut txn, "nestedSequences").is_some());
+                    assert!(field.get(&txn, "nestedSequences").is_none());
                     owners += 1;
                 }
             }

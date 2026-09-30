@@ -708,7 +708,6 @@ fn lower_story<T: ReadTxn>(
                     };
                     let nested_sequences = lower_nested_sequences(
                         instruction.as_deref(),
-                        shared_any(&field, txn, "nestedSequences").as_ref(),
                         shared_any(&field, txn, "resultProjection").as_ref(),
                     );
                     paragraph_runs.push(RawRun {
@@ -1950,7 +1949,6 @@ fn lower_inline_sdt_values(
                     .filter(|value| !value.is_empty());
                 let nested_sequences = lower_nested_sequences(
                     instruction.as_deref(),
-                    payload.and_then(|payload| payload.get("nestedSequences")),
                     payload.and_then(|payload| payload.get("resultProjection")),
                 );
                 runs.push(RawRun {
@@ -2382,14 +2380,13 @@ fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<S
 
 fn lower_nested_sequences(
     instruction: Option<&str>,
-    nested_sequences: Option<&Any>,
     result_projection: Option<&Any>,
 ) -> Vec<String> {
-    let mut names = any_strings(nested_sequences);
-    if result_projection.is_some() {
-        names.extend(instruction.and_then(docx_layout::sequence_fields::sequence_name));
-    }
-    names
+    result_projection
+        .and(instruction)
+        .and_then(docx_layout::sequence_fields::sequence_name)
+        .into_iter()
+        .collect()
 }
 
 /// Emits the blocks one paragraph contributes. Anchored children are lifted

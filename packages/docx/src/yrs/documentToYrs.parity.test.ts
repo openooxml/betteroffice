@@ -6,7 +6,7 @@ import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
 import type { LayoutBlock, Run as LayoutRun, ShapeBlock } from '../layout/pagination/types';
-import type { ComplexField, Document, Run, SimpleField } from '../types/document';
+import type { ComplexField, Document, ParagraphContent, Run, SimpleField } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
 import { documentToYrs } from './documentToYrs';
@@ -108,6 +108,30 @@ function expectEquivalentStories(left: YrsSession, right: YrsSession): void {
   }
 }
 
+function seedClocks(session: YrsSession): Map<bigint, bigint> {
+  const vector = session.encodeStateVector();
+  let offset = 0;
+  const read = (): bigint => {
+    let value = 0n;
+    let shift = 0n;
+    while (offset < vector.length) {
+      const byte = vector[offset++];
+      value += BigInt(byte & 0x7f) << shift;
+      if ((byte & 0x80) === 0) return value;
+      shift += 7n;
+    }
+    throw new Error('Truncated state vector');
+  };
+  const clocks = new Map<bigint, bigint>();
+  for (let remaining = read(); remaining > 0n; remaining--) {
+    const client = read();
+    const clock = read();
+    if (client !== 0x1_0000_05e9n) clocks.set(client, clock);
+  }
+  expect(offset).toBe(vector.length);
+  return clocks;
+}
+
 describe('DOCX engine seeding', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
@@ -139,21 +163,24 @@ describe('DOCX engine seeding', () => {
         segment.kind === 'embed' && segment.embedKind === 'field' ? [segment.payload] : []
       );
       expect(payloads).toHaveLength(3);
-      expect(payloads[0]).not.toHaveProperty('nestedSequences');
-      expect(payloads[1]).toMatchObject({ displayText: '2', nestedSequences: ['figure'] });
-      expect(payloads[2]).not.toHaveProperty('nestedSequences');
+      for (const payload of payloads) expect(payload).not.toHaveProperty('nestedSequences');
+      expect(payloads[1]).toMatchObject({ displayText: '2' });
+      const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
+      const results = sequenceRuns(blocks)
+        .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+      expect(results).toEqual(['1', '3']);
     } finally {
       session.destroy();
     }
   });
 
-  it('collects nested SEQ names from field trees with Rust token and case semantics', async () => {
+  it.each(['field', 'hyperlink', 'sdt'])('collects nested SEQ names from field trees with Rust token and case semantics (%s)', async (placement) => {
     const run: Run = { type: 'run', content: [{ type: 'text', text: '2' }] };
-    const simple = (instruction: string): SimpleField => ({
+    const simple = (instruction: string, cached = '2'): SimpleField => ({
       type: 'simpleField',
       fieldType: 'SEQ',
       instruction,
-      content: [run],
+      content: [{ type: 'run', content: [{ type: 'text', text: cached }] }],
     });
     const quote: ComplexField = {
       type: 'complexField',
@@ -187,26 +214,62 @@ describe('DOCX engine seeding', () => {
         }],
       },
     };
+    const content: ParagraphContent = placement === 'hyperlink'
+      ? { type: 'hyperlink', anchor: 'top', children: [], structuredChildren: [quote] }
+      : placement === 'sdt'
+        ? { type: 'inlineSdt', properties: { sdtType: 'richText' }, content: [quote] }
+        : quote;
+    const instructions = ['figure', 'table caption', 'other', 'result', 'ignored']
+      .map((name) => `SEQ "${name}"`);
     const document: Document = {
-      package: { document: { content: [{ type: 'paragraph', content: [quote] }] } },
+      package: {
+        document: {
+          content: [
+            { type: 'paragraph', content: [content] },
+            ...instructions.map((instruction) => ({
+              type: 'paragraph' as const,
+              content: [simple(instruction, '9')],
+            })),
+          ],
+        },
+      },
     };
     const session = await createYrsSession({ clientId: 47008 });
     try {
       documentToYrs(session, document);
-      const outer = session.storySegments('body').find((segment) =>
-        segment.kind === 'embed' &&
-        segment.embedKind === 'field' &&
-        segment.payload.fieldType === 'QUOTE'
+      const payloads = session.storySegments('body').flatMap((segment) =>
+        segment.kind === 'embed' ? [segment.payload] : []
       );
-      expect(outer?.kind === 'embed' && outer.payload.nestedSequences).toEqual([
-        'figure',
-        'table caption',
-        'other',
-        'result',
-      ]);
+      expect(JSON.stringify(payloads)).not.toContain('nestedSequences');
+      const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
+      const results = sequenceRuns(blocks).flatMap((run) =>
+        run.kind === 'field' && run.rawType === 'SEQ' && instructions.includes(run.instruction ?? '')
+          ? [run.fallback] : []
+      );
+      expect(results).toEqual(['9', '9', '9', '9', '1']);
     } finally {
       session.destroy();
     }
+  });
+
+  it('keeps seed clocks unchanged by nested SEQ names', async () => {
+    const seed = async (kind: string): Promise<Map<bigint, bigint>> => {
+      const field = `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ${kind} Figure </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+      const nested = `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> QUOTE "</w:instrText></w:r>${field}<w:r><w:instrText xml:space="preserve">" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+      const bytes = sequencePackage(`<w:p>${nested}</w:p><w:p><w:r><w:t>After</w:t></w:r></w:p>`);
+      const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+      const session = await createYrsSession({ clientId: 47039 });
+      try {
+        documentToYrs(session, parsed);
+        return seedClocks(session);
+      } finally {
+        session.destroy();
+      }
+    };
+    const sequence = await seed('SEQ');
+    const control = await seed('XEQ');
+    expect(sequence.size).toBeGreaterThan(0);
+    expect(sequence).toEqual(control);
   });
 
   it.each(['hyperlink', 'simpleField'])('keeps projected SEQ owners opaque when seeding and hydrating (%s)', async (kind) => {
@@ -229,7 +292,8 @@ describe('DOCX engine seeding', () => {
           segment.embedKind === 'field' &&
           segment.payload.fieldType === 'SEQ'
         );
-        expect(owner?.kind === 'embed' && owner.payload.nestedSequences).toEqual(['figure']);
+        expect(owner).toBeDefined();
+        expect(owner?.kind === 'embed' && owner.payload).not.toHaveProperty('nestedSequences');
         const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
         const text = blocks.flatMap((block) => block.kind === 'paragraph' ? block.runs : [])
           .map((run) => run.kind === 'text' ? run.text : run.kind === 'field' ? run.fallback ?? '' : '')
@@ -259,21 +323,10 @@ describe('DOCX engine seeding', () => {
     try {
       if (seeder === 'native') source.seedFromDocx(bytes);
       else documentToYrs(source, await parseDocx(bytes.buffer, { preloadFonts: false }));
-      let index = 0;
-      let owners = 0;
-      for (const segment of source.storySegments('body')) {
-        if (segment.kind === 'embed' && segment.payload.resultProjection) {
-          const payload = { ...segment.payload };
-          delete payload.nestedSequences;
-          source.applyRawOps('body', [
-            { op: 'delete', index, len: 1 },
-            { op: 'insertEmbed', index, kind: 'field', payload, attrs: segment.attributes },
-          ]);
-          owners++;
-        }
-        index += segment.kind === 'text' ? segment.text.length : 1;
-      }
-      expect(owners).toBe(1);
+      const owners = source.storySegments('body').filter((segment) =>
+        segment.kind === 'embed' && segment.payload.resultProjection
+      );
+      expect(owners).toHaveLength(1);
       peer.loadState(source.encodeState());
       hydrated.openDocx(bytes, false);
       hydrated.loadState(source.encodeState());
@@ -281,6 +334,7 @@ describe('DOCX engine seeding', () => {
         const owner = session.storySegments('body').find((segment) =>
           segment.kind === 'embed' && segment.payload.resultProjection
         );
+        expect(owner).toBeDefined();
         expect(owner?.kind === 'embed' && owner.payload).not.toHaveProperty('nestedSequences');
         for (const showHiddenText of [false, true]) {
           const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
@@ -341,13 +395,16 @@ describe('DOCX engine seeding', () => {
         segment.embedKind === 'field' &&
         segment.payload.fieldType === 'QUOTE'
       );
-      expect(quote?.kind === 'embed' && quote.payload.nestedSequences).toEqual(['figure']);
+      expect(quote).toBeDefined();
+      expect(quote?.kind === 'embed' && quote.payload).not.toHaveProperty('nestedSequences');
       hydrated.openDocx(bytes, false);
       hydrated.loadState(projected.encodeState());
-      const blocks = hydrated.yrsBlocksForStory('body', {}) as LayoutBlock[];
-      const results = blocks.flatMap((block) => block.kind === 'paragraph' ? block.runs : [])
-        .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
-      expect(results).toEqual(['2', '1']);
+      for (const session of [projected, hydrated]) {
+        const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
+        const results = blocks.flatMap((block) => block.kind === 'paragraph' ? block.runs : [])
+          .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+        expect(results).toEqual(['2', '1']);
+      }
     } finally {
       projected.destroy();
       hydrated.destroy();

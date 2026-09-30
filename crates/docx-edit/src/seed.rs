@@ -79,7 +79,7 @@ fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return false;
     };
-    let mut pending: Vec<Out> = stories.values(txn).collect();
+    let mut pending: Vec<Out> = stories.iter(txn).map(|(_, value)| value).collect();
     let mut anys: Vec<Any> = Vec::new();
     while let Some(value) = pending.pop() {
         match value {
@@ -89,7 +89,7 @@ fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
                     .map(|chunk| chunk.insert)
                     .filter(|insert| !matches!(insert, Out::Any(Any::String(_)))),
             ),
-            Out::YMap(map) => pending.extend(map.values(txn)),
+            Out::YMap(map) => pending.extend(map.iter(txn).map(|(_, value)| value)),
             Out::YArray(array) => pending.extend(array.iter(txn)),
             Out::Any(any) => anys.push(any),
             _ => {}
@@ -1588,23 +1588,21 @@ fn field_payload(
             .flatten()
     });
     let merged = merge_text_formatting(style_formatting, formatting);
-    let mut payload = map_from_value(json!({
-        "fieldType": nullish(field(Some(field_value), "fieldType")),
-        "instruction": nullish(field(Some(field_value), "instruction")),
-        "displayText": display_text,
-        "fieldKind": if kind == "simpleField" { "simple" } else { "complex" },
-        "fldLock": boolean(field(Some(field_value), "fldLock")).unwrap_or(false),
-        "dirty": boolean(field(Some(field_value), "dirty")).unwrap_or(false),
-        "displayMode": string(field(field(Some(field_value), "fieldTree"), "displayMode")).unwrap_or("result"),
-        "hasCachedResult": !display_text.is_empty(),
-        "fieldData": source_json(field_value, source),
-        "modelKind": "field"
-    }));
-    let nested = nested_sequence_names(field_value);
-    if !nested.is_empty() {
-        payload.insert("nestedSequences".to_owned(), json!(nested));
-    }
-    (payload, formatting_to_marks(merged.as_ref()))
+    (
+        map_from_value(json!({
+            "fieldType": nullish(field(Some(field_value), "fieldType")),
+            "instruction": nullish(field(Some(field_value), "instruction")),
+            "displayText": display_text,
+            "fieldKind": if kind == "simpleField" { "simple" } else { "complex" },
+            "fldLock": boolean(field(Some(field_value), "fldLock")).unwrap_or(false),
+            "dirty": boolean(field(Some(field_value), "dirty")).unwrap_or(false),
+            "displayMode": string(field(field(Some(field_value), "fieldTree"), "displayMode")).unwrap_or("result"),
+            "hasCachedResult": !display_text.is_empty(),
+            "fieldData": source_json(field_value, source),
+            "modelKind": "field"
+        })),
+        formatting_to_marks(merged.as_ref()),
+    )
 }
 
 /// The sequences of SEQ fields nested anywhere in a field's code or result.
@@ -1932,6 +1930,7 @@ fn hyperlink_to_units(
     styles: &StyleResolver,
     extra_marks: &[Mark],
     source: &BTreeMap<String, String>,
+    opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let mut units = Vec::new();
     let link = hyperlink_mark(hyperlink);
@@ -1950,6 +1949,7 @@ fn hyperlink_to_units(
                 }
             }
             "simpleField" | "complexField" => {
+                opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 let marks: Vec<Mark> = marks
                     .into_iter()
@@ -2002,6 +2002,7 @@ fn field_to_units(
             )
         })
     {
+        opaque_sequences.extend(nested_sequence_names(value));
         let (payload, marks) = field_payload(value, style_formatting, source);
         return vec![embed_unit("field", payload, &marks, None, 1)];
     }
@@ -2011,9 +2012,17 @@ fn field_to_units(
         let mut projected = match string(field(Some(child), "type")) {
             Some("hyperlink") => {
                 opaque_sequences.extend(hyperlink_sequence_names(child));
-                hyperlink_to_units(child, style_formatting, styles, &[], source)
+                hyperlink_to_units(
+                    child,
+                    style_formatting,
+                    styles,
+                    &[],
+                    source,
+                    opaque_sequences,
+                )
             }
             Some("simpleField") => {
+                opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 vec![embed_unit("field", payload, &marks, None, 1)]
             }
@@ -2041,15 +2050,14 @@ fn field_to_units(
             .collect(),
     );
     let (mut payload, marks) = field_payload(&visible, style_formatting, source);
-    if let Some(name) = string(field(Some(value), "instruction"))
+    let sequence_owner = string(field(Some(value), "instruction"))
         .and_then(docx_layout::sequence_fields::sequence_name)
-    {
-        let mut nested = nested_sequence_names(value);
-        if !nested.contains(&name) {
-            nested.push(name);
-        }
-        payload.insert("nestedSequences".to_owned(), json!(nested));
-    }
+        .is_some();
+    opaque_sequences.extend(nested_sequence_names(if sequence_owner {
+        value
+    } else {
+        &visible
+    }));
     payload.insert(
         "fieldData".to_owned(),
         Value::String(source_json(value, source)),
@@ -2114,6 +2122,7 @@ fn tracked_to_units(
                 styles,
                 std::slice::from_ref(&marker),
                 source,
+                opaque_sequences,
             );
             if let Some(comment_id) = &comment_id {
                 for unit in &mut linked {
@@ -2197,11 +2206,19 @@ fn sdt_payload(
             }
             "hyperlink" => {
                 opaque_sequences.extend(hyperlink_sequence_names(child));
-                for unit in hyperlink_to_units(child, style_formatting, styles, &[], source) {
+                for unit in hyperlink_to_units(
+                    child,
+                    style_formatting,
+                    styles,
+                    &[],
+                    source,
+                    opaque_sequences,
+                ) {
                     append(&mut content, unit);
                 }
             }
             "simpleField" | "complexField" => {
+                opaque_sequences.extend(nested_sequence_names(child));
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 append(&mut content, embed_unit("field", payload, &marks, None, 1));
             }
@@ -2774,7 +2791,14 @@ fn control_break_offsets(
                         at = run(inner, at, &mut offsets);
                     }
                 }
-                offset += units_width(&hyperlink_to_units(child, None, styles, &[], source));
+                offset += units_width(&hyperlink_to_units(
+                    child,
+                    None,
+                    styles,
+                    &[],
+                    source,
+                    &mut Vec::new(),
+                ));
             }
             "inlineSdt" => {
                 let (nested, below) = control_break_offsets(child, styles, source);
@@ -2888,7 +2912,8 @@ fn content_breaks(
                         output,
                     );
                 } else {
-                    offset += hyperlink_to_units(child, None, styles, &[], source).len();
+                    offset +=
+                        hyperlink_to_units(child, None, styles, &[], source, &mut Vec::new()).len();
                 }
             }
         }
@@ -3023,8 +3048,14 @@ fn paragraph_units(
             "hyperlink" => {
                 boundaries = None;
                 opaque_sequences.extend(hyperlink_sequence_names(content));
-                let mut linked =
-                    hyperlink_to_units(content, style_formatting.as_ref(), styles, &[], source);
+                let mut linked = hyperlink_to_units(
+                    content,
+                    style_formatting.as_ref(),
+                    styles,
+                    &[],
+                    source,
+                    &mut opaque_sequences,
+                );
                 for unit in &mut linked {
                     unit.comment_id.clone_from(&comment_id);
                 }
@@ -5656,6 +5687,40 @@ mod tests {
             ]}
         ]});
         assert_eq!(hyperlink_sequence_names(&hyperlink), ["table", "figure"]);
+    }
+
+    #[test]
+    fn nested_sequence_metadata_covers_all_field_views_in_inline_wrappers() {
+        let field = json!({
+            "type": "complexField", "fieldType": "QUOTE", "instruction": "QUOTE",
+            "fieldCode": [], "fieldResult": [],
+            "structuredCode": {"inline": []}, "structuredResult": {"inline": []},
+            "fieldTree": {"children": [{"result": {"inline": [
+                {"type": "simpleField", "fieldType": "SEQ", "instruction": "SEQ Figure", "content": []}
+            ]}}]}
+        });
+        for content in [
+            field.clone(),
+            json!({"type": "hyperlink", "children": [], "structuredChildren": [field.clone()]}),
+            json!({"type": "inlineSdt", "properties": {}, "content": [field]}),
+        ] {
+            let paragraph = paragraph_units(
+                &json!({"type": "paragraph", "content": [content]}),
+                &StyleResolver::new(None),
+                None,
+                &BTreeMap::new(),
+            );
+            assert_eq!(paragraph.opaque_sequences, ["figure"]);
+            for unit in paragraph.units {
+                if let UnitContent::Embed { payload, .. } = unit.content {
+                    assert!(
+                        !serde_json::to_string(&payload)
+                            .unwrap()
+                            .contains("nestedSequences")
+                    );
+                }
+            }
+        }
     }
 
     fn seed_body(blocks: &[Value]) -> EditingDoc {

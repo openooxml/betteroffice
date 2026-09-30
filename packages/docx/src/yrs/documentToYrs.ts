@@ -489,7 +489,6 @@ function fieldPayload(
   const formatting =
     fieldFormatting ?? (field.type === 'complexField' ? field.formatting : undefined);
   const displayMode = field.fieldTree?.displayMode ?? 'result';
-  const nestedSequences = nestedSequenceNames(field);
   return {
     payload: {
       fieldType: field.fieldType,
@@ -502,7 +501,6 @@ function fieldPayload(
       hasCachedResult: displayText.length > 0,
       fieldData: JSON.stringify(field),
       modelKind: 'field',
-      ...(nestedSequences.length > 0 ? { nestedSequences } : {}),
     },
     marks: formattingToMarks(mergeTextFormatting(styleFormatting, formatting)),
   };
@@ -640,6 +638,7 @@ function fieldToUnits(
     ...result.map((child, index) => ({ child, index })),
   ];
   if (value.type !== 'complexField' || !projectedChildren.some(({ child }) => child.type === 'hyperlink' || child.type === 'simpleField')) {
+    opaqueSequences.push(...nestedSequenceNames(value));
     const field = fieldPayload(value, styleFormatting);
     return [embedUnit('field', field.payload, field.marks)];
   }
@@ -647,10 +646,12 @@ function fieldToUnits(
   const children: Attrs[] = [];
   projectedChildren.forEach(({ child, index }) => {
     if (child.type !== 'hyperlink' && child.type !== 'simpleField') return;
-    if (child.type === 'hyperlink') opaqueSequences.push(...hyperlinkSequenceNames(child));
+    opaqueSequences.push(
+      ...(child.type === 'hyperlink' ? hyperlinkSequenceNames(child) : nestedSequenceNames(child))
+    );
     const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
     const projected = child.type === 'hyperlink'
-      ? hyperlinkToUnits(child, styleFormatting, styleResolver)
+      ? hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences)
       : [embedUnit('field', nested!.payload, nested!.marks)];
     children.push({ index, items: projected.map((unit) => unit.kind === 'text'
       ? { kind: 'text', text: unit.text, attributes: unit.attrs }
@@ -660,10 +661,9 @@ function fieldToUnits(
   });
   const visible = { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') };
   const field = fieldPayload(visible, styleFormatting);
-  const name = sequenceName(value.instruction ?? '');
-  if (name !== undefined) {
-    field.payload.nestedSequences = [...new Set([...nestedSequenceNames(value), name])];
-  }
+  opaqueSequences.push(
+    ...nestedSequenceNames(sequenceName(value.instruction ?? '') === undefined ? visible : value)
+  );
   field.payload.fieldData = JSON.stringify(value);
   field.payload.resultProjection = { id: projectionId, children };
   units.push(embedUnit('field', field.payload, field.marks));
@@ -779,6 +779,7 @@ function hyperlinkToUnits(
   hyperlink: Hyperlink,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
+  opaqueSequences: string[],
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const units: InlineUnit[] = [];
@@ -788,6 +789,7 @@ function hyperlinkToUnits(
       const marks = [...runMarks(child, styleFormatting, styleResolver), ...extraMarks, link];
       for (const content of child.content) units.push(...runContentToUnits(content, marks));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
+      opaqueSequences.push(...nestedSequenceNames(child));
       const field = fieldPayload(child, styleFormatting);
       units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link]));
     } else if (child.type === 'mathEquation') {
@@ -832,7 +834,7 @@ function trackedToUnits(
       units.push(...runToUnits(child, styleFormatting, styleResolver, commentId, [mark]));
     } else {
       opaqueSequences.push(...hyperlinkSequenceNames(child));
-      const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, [mark]);
+      const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]);
       for (const unit of linked) {
         if (commentId !== undefined) unit.commentId = commentId;
       }
@@ -880,8 +882,9 @@ function sdtPayload(
       runToUnits(child, styleFormatting, styleResolver).forEach(append);
     } else if (child.type === 'hyperlink') {
       opaqueSequences.push(...hyperlinkSequenceNames(child));
-      hyperlinkToUnits(child, styleFormatting, styleResolver).forEach(append);
+      hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
+      opaqueSequences.push(...nestedSequenceNames(child));
       const field = fieldPayload(child, styleFormatting);
       append(embedUnit('field', field.payload, field.marks));
     } else if (child.type === 'inlineSdt') {
@@ -1197,7 +1200,7 @@ function paragraphUnits(
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
       opaqueSequences.push(...hyperlinkSequenceNames(content));
-      const linked = hyperlinkToUnits(content, styleFormatting, styleResolver);
+      const linked = hyperlinkToUnits(content, styleFormatting, styleResolver, opaqueSequences);
       for (const unit of linked) {
         if (commentId !== undefined) unit.commentId = commentId;
       }
