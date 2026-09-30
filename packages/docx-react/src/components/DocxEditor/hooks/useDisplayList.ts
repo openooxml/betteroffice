@@ -28,6 +28,8 @@ import {
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  preloadResidentEngineWorker,
+  retainPreloadedResidentEngineWorker,
   takePreloadedResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   sameYrsSelection,
@@ -154,10 +156,12 @@ export interface UseRustDisplayListResult {
  * no layout of its own. Null when no worker can take it, and a null result
  * when the worker failed; either way the caller lays out on the main thread.
  */
-export type LayoutInWorker = (
+export type LayoutInWorker = ((
   session: YrsSession,
   request: string
-) => Promise<WorkerLayoutComputation | null> | null;
+) => Promise<WorkerLayoutComputation | null> | null) & {
+  prewarm?: (session: YrsSession) => (() => void) | null;
+};
 
 /**
  * A worker layout. On open it may cover only the first pages: `complete`
@@ -1162,18 +1166,36 @@ export function useRustDisplayList(
 
   useEffect(() => () => cancelPageBuilds(pageBuildTimerRef), []);
 
-  const layoutInWorker = useCallback<LayoutInWorker>(
-    (hostEngine, request) => {
-      if (
+  const canLayoutInWorker = useCallback(
+    (hostEngine: YrsSession): boolean =>
+      !(
         overrides?.build ||
         !canUseResidentEngineWorker() ||
         !isWorkerHostEngine(hostEngine) ||
         !hostEngine.adoptResidentWorkerLayout ||
         workerFallbackEngineRef.current === hostEngine ||
         handedOverEnginesRef.current.has(hostEngine)
-      ) {
-        return null;
-      }
+      ),
+    [overrides?.build]
+  );
+  const prewarmLayoutWorker = useCallback(
+    (hostEngine: YrsSession): (() => void) | null => {
+      const current = workerRef.current;
+      if (
+        !canLayoutInWorker(hostEngine) ||
+        outOfMemoryRef.current.get(hostEngine) ||
+        spawnedWorkerEnginesRef.current.has(hostEngine) ||
+        (current && handoffFromRef?.current === current.engine)
+      ) return null;
+      void preloadResidentEngineWorker().catch(() => {});
+      return retainPreloadedResidentEngineWorker();
+    },
+    [canLayoutInWorker, handoffFromRef]
+  );
+
+  const layoutInWorker = useCallback<LayoutInWorker>(
+    (hostEngine, request) => {
+      if (!canLayoutInWorker(hostEngine)) return null;
       const outOfMemory = outOfMemoryRef.current.get(hostEngine);
       if (outOfMemory) return Promise.reject(outOfMemory);
       const owner = workerFor(hostEngine);
@@ -1306,10 +1328,10 @@ export function useRustDisplayList(
         .catch(unavailable);
     },
     [
+      canLayoutInWorker,
       dropWorker,
       frameBase,
       frameExtrasInputs,
-      overrides?.build,
       paintedCaretMachine,
       queryEpochGate,
       replaceOutOfMemoryWorker,
@@ -1318,6 +1340,10 @@ export function useRustDisplayList(
   );
   const layoutInWorkerRef = useRef(layoutInWorker);
   layoutInWorkerRef.current = layoutInWorker;
+  const prewarmableLayoutInWorker = useMemo(
+    () => Object.assign(layoutInWorker, { prewarm: prewarmLayoutWorker }),
+    [layoutInWorker, prewarmLayoutWorker]
+  );
 
   const attachOffscreenCanvases = useCallback(
     async (
@@ -1824,7 +1850,7 @@ export function useRustDisplayList(
     caret: snapshot.caret,
     applyInput,
     applyDelete,
-    layoutInWorker,
+    layoutInWorker: prewarmableLayoutInWorker,
     presentedEngine,
     shownFrameEngine,
     release,

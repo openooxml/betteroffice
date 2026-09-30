@@ -84,6 +84,7 @@ export {
   ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
+  preloadResidentEngineWorker,
   retainPreloadedResidentEngineWorker,
   takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,

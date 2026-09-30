@@ -171,6 +171,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   sessionRef.current = session;
   // The document version the first pass of this session laid out.
   const openedVersionRef = useRef<{ session: YrsSession; version: string | null } | null>(null);
+  const workerPrewarmRef = useRef<{ session: YrsSession; release: () => void } | null>(null);
+  useEffect(() => () => {
+    const worker = workerPrewarmRef.current;
+    if (!worker || worker.session !== session) return;
+    worker.release();
+    workerPrewarmRef.current = null;
+  }, [session]);
   // A deferred pass that had to run on this thread keeps that requirement.
   const pendingOnHostRef = useRef(false);
   onTotalPagesChangeRef.current = onTotalPagesChange;
@@ -296,6 +303,22 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         return;
       }
       if (!measurement) {
+        if (!onHost && workerPrewarmRef.current?.session !== session) {
+          const version = readSessionVersion(session);
+          if (
+            version !== null &&
+            (openedVersionRef.current?.session !== session ||
+              version === openedVersionRef.current.version)
+          ) {
+            try {
+              const release = layoutInWorkerRef.current?.prewarm?.(session);
+              if (release) {
+                workerPrewarmRef.current?.release();
+                workerPrewarmRef.current = { session, release };
+              }
+            } catch {}
+          }
+        }
         pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
           pendingLayoutOriginRef.current,
           layoutUpdateOrigin
