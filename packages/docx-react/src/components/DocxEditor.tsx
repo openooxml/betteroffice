@@ -1194,11 +1194,22 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // API and commands see a document that is still loading.
   const opening = yrsCore.opening;
   failOpeningRef.current = yrsCore.failOpening;
+  const coreSessionRef = useRef<unknown>(null);
+  coreSessionRef.current = yrsCore.session;
   const reportPagedError = useCallback(
     (error: Error, session?: unknown) => {
+      // A worker-opened session the editor has not taken yet fails through its open.
+      if (
+        experimentalWorkerOpen &&
+        session != null &&
+        session !== coreSessionRef.current &&
+        (session as YrsSession).isDisplayOnly?.() !== true
+      ) {
+        return;
+      }
       if (!failOpeningRef.current(error, session)) reportLayoutError(error, session);
     },
-    [reportLayoutError]
+    [experimentalWorkerOpen, reportLayoutError]
   );
   const readOnly = modeReadOnly || opening;
   if (opening) writeModeRef.current = 'viewing';
