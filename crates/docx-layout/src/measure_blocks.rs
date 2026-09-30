@@ -2927,7 +2927,7 @@ mod tests {
     }
 
     #[test]
-    fn measured_autofit_content_respects_page_limits_and_preferred_widths() {
+    fn measured_autofit_content_respects_grid_fallback_and_preferred_widths() {
         crate::with_private_measure_fonts(|| {
             let font = crate::register_measure_font(include_bytes!(
                 "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
@@ -2940,7 +2940,7 @@ mod tests {
                 ..MeasurementConfig::default()
             };
             for (text, preferred, expected) in [
-                ("W".repeat(100), None, 600.0),
+                ("W".repeat(100), None, 100.0),
                 ("hello world ".repeat(3), Some(1500), 100.0),
             ] {
                 let mut table: TableBlock = serde_json::from_value(json!({
