@@ -812,6 +812,7 @@ fn prepare_text_run(
                     let base = family_for_slot(run, FontSlot::HAnsi, &input.defaults.font_family);
                     input
                         .chain_for(base, bold, italic)
+                        .or_else(|_| input.chain_for(base, run.bold, run.italic))
                         .or_else(|_| input.chain_for(base, false, false))?
                 }
                 resolved => resolved?,

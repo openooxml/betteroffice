@@ -3033,24 +3033,27 @@ fn east_asia_hint_moves_only_ambiguous_characters() {
 fn script_slot_without_a_chain_measures_with_the_run_family() {
     let mut store = FontStore::new();
     store.register(FIXTURE.to_vec()).expect("base registers");
-    let measure = |text: &str, slots: Value, complex_script: bool| {
+    let measure = |text: &str, slots: Value, complex_script: bool, chains: Value| {
         let input = json!({
             "block": { "kind": "paragraph", "runs": [{
                 "kind": "text", "text": text, "fontSlots": slots,
-                "complexScript": complex_script, "bold": true, "boldCs": false
+                "complexScript": complex_script, "bold": true, "boldCs": false, "italicCs": true
             }] },
             "maxWidth": 500.0,
-            "fontChains": { "base|0|0": [0], "base|1|0": [0] },
+            "fontChains": chains,
             "defaults": { "fontSize": 12.0, "fontFamily": "base" }
         });
         measure_paragraph_json(&store, &input.to_string()).expect("measures")
     };
     let named = json!({ "hAnsi": "base", "eastAsia": "SimSun", "cs": "Traditional Arabic" });
     let plain = json!({ "hAnsi": "base" });
+    // Only the run's own style was collected, as for a tab-formatted run.
+    let collected = json!({ "base|1|0": [0] });
+    let all = json!({ "base|0|0": [0], "base|1|0": [0], "base|0|1": [0], "base|1|1": [0] });
     for (text, complex_script) in [("日", false), ("א", false), ("A", true)] {
         assert_eq!(
-            measure(text, named.clone(), complex_script),
-            measure(text, plain.clone(), complex_script),
+            measure(text, named.clone(), complex_script, collected.clone()),
+            measure(text, plain.clone(), complex_script, all.clone()),
             "{text:?}"
         );
     }
