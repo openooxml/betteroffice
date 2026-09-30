@@ -4091,7 +4091,7 @@ impl EngineSession {
             } else {
                 None
             };
-            if pagination.last_incremental && display.extras_fingerprint == extras_fingerprint {
+            if pagination.last_incremental {
                 // The first range is rebuilt as a range; the pages after it shift,
                 // but later ranges, the pages elsewhere whose notes anchor to
                 // references the edit moved, and retained pages whose section or
@@ -4128,25 +4128,44 @@ impl EngineSession {
                     .collect();
                 let rebuilt_pages: HashSet<usize> =
                     first.clone().chain(note_pages.iter().copied()).collect();
-                let build = window_build_pages(&display, layout, &rebuilt_pages, caret);
+                let extras_match = display.extras_fingerprint == extras_fingerprint;
+                let build = if extras_match {
+                    window_build_pages(&display, layout, &rebuilt_pages, caret)
+                } else {
+                    windowed_full_build_pages(&display, layout, caret)
+                };
                 let incremental = if let DisplayState {
                     list: Some(previous),
                     resident_input: Some(resident_input),
                     ..
                 } = &mut *display
                 {
-                    docx_layout::update_resident_display_list_incremental_partial_observed(
-                        input,
-                        layout,
-                        resident_input,
-                        previous,
-                        first.start,
-                        first.end,
-                        &note_pages,
-                        &pagination.position_deltas,
-                        &|index| build.get(index).copied().unwrap_or(true),
-                        observe_display_phase,
-                    )?
+                    if extras_match {
+                        docx_layout::update_resident_display_list_incremental_partial_observed(
+                            input,
+                            layout,
+                            resident_input,
+                            previous,
+                            first.start,
+                            first.end,
+                            &note_pages,
+                            &pagination.position_deltas,
+                            &|index| build.get(index).copied().unwrap_or(true),
+                            observe_display_phase,
+                        )?
+                    } else {
+                        docx_layout::update_resident_display_list_extras_partial_observed(
+                            input,
+                            layout,
+                            extras_json,
+                            resident_input,
+                            previous,
+                            &rebuilt_pages,
+                            &pagination.position_deltas,
+                            &|index| build.get(index).copied().unwrap_or(true),
+                            observe_display_phase,
+                        )?
+                    }
                 } else {
                     false
                 };
@@ -4164,14 +4183,24 @@ impl EngineSession {
                     display.list = Some(list);
                 }
                 let rebuilt_display_pages = if incremental {
-                    rebuilt_pages
-                        .iter()
-                        .filter(|&&index| build.get(index).copied().unwrap_or(true))
-                        .count()
+                    if extras_match {
+                        rebuilt_pages
+                            .iter()
+                            .filter(|&&index| build.get(index).copied().unwrap_or(true))
+                            .count()
+                    } else {
+                        (0..layout.pages.len())
+                            .filter(|&index| build.get(index).copied().unwrap_or(true))
+                            .count()
+                    }
                 } else {
                     rebuilt_pages.len()
                 };
-                (incremental, rebuilt_display_pages, rebuilt_pages)
+                (
+                    incremental && extras_match,
+                    rebuilt_display_pages,
+                    rebuilt_pages,
+                )
             } else {
                 let build = windowed_full_build_pages(&display, layout, caret);
                 let (resident_input, list) =

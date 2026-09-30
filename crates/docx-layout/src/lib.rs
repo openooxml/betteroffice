@@ -413,6 +413,37 @@ pub fn update_resident_display_list_incremental_observed(
     })
 }
 
+/// [`update_resident_display_list_incremental_partial_observed`] for a display
+/// extras change: refreshes the retained input's extras fields in place, then
+/// applies the same page-scoped refresh and converged-position patching.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_extras_partial_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    extras: &str,
+    resident: &mut display_list::ResidentDisplayInput,
+    previous: &mut display_list::DisplayList,
+    selected_pages: &std::collections::HashSet<usize>,
+    position_deltas: &std::collections::HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<bool, String> {
+    with_measure_fonts(|store| {
+        display_list::update_resident_display_list_extras_partial_with_fonts_observed(
+            pagination,
+            layout,
+            extras,
+            &store.borrow(),
+            resident,
+            previous,
+            selected_pages,
+            position_deltas,
+            build,
+            observe_phase,
+        )
+    })
+}
+
 /// [`update_resident_display_list_incremental_observed`] that builds only the
 /// rebuilt pages `build` selects, replacing the others with unbuilt placeholders.
 #[allow(clippy::too_many_arguments)]
