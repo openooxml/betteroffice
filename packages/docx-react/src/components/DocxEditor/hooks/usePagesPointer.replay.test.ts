@@ -7,7 +7,15 @@ import type { YrsInputRef } from '../YrsInput';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 import { usePagesPointer, type UsePagesPointerOptions } from './usePagesPointer';
-import { usePagedEditorRefApi } from './usePagedEditorRefApi';
+import {
+  usePagedEditorCommandBridge,
+  usePagedEditorRefApi,
+  type PagedEditorCommandBridge,
+} from './usePagedEditorRefApi';
+import {
+  deferWorkerOpenReplica,
+  requestWorkerOpenReplica,
+} from '../internals/workerOpenReplica';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -45,6 +53,9 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
       selections.push([anchor, head, story]),
     displaySelection: () => null,
     selectAll: () => {},
+    insertText: () => {},
+    deleteSelection: () => {},
+    runAfterPendingInput: <T,>(operation: () => T) => Promise.resolve(operation()),
     selectWordAtDisplay: (position: number, story: string) => words.push([position, story]),
     selectParagraphAtDisplay: (position: number, story: string) =>
       paragraphs.push([position, story]),
@@ -84,6 +95,12 @@ function mouse(type: string, clientX: number, clientY = 400, detail = 1): void {
     target.dispatchEvent(
       new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY, button: 0, detail })
     );
+  });
+}
+
+function pointerDown(target: EventTarget, pointerType: string): void {
+  act(() => {
+    target.dispatchEvent(Object.assign(new Event('pointerdown', { bubbles: true }), { pointerType }));
   });
 }
 
@@ -226,6 +243,41 @@ test('a pending drag across cells in one table replays a cell selection', () => 
   expect(selections).toEqual([]);
 });
 
+test('a table drag held through the replica load keeps extending the cell selection', () => {
+  const anchor: YrsCellLoc = { story: 'body', tableIndex: 0, row: 0, column: 0 };
+  const head: YrsCellLoc = { ...anchor, column: 1 };
+  const setCellSelection = mock(() => {});
+  const { opts, projection, selections } = options({
+    yrsSession: { cellSelection: () => null, setCellSelection } as unknown as YrsSession,
+  });
+  projection.targetAt = (position) => ({
+    story: position === 20 ? 'body:t0:r0c0' : 'body:t0:r0c1',
+    displayPosition: 1,
+    cell: position === 20 ? anchor : head,
+  });
+  const frame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+    callback(0);
+    return 1;
+  });
+  try {
+    const view = renderHook(() => usePagesPointer(opts));
+
+    mouse('mousedown', 200);
+    opts.replicaReady = true;
+    view.rerender();
+    expect(selections).toEqual([[1, 1, 'body:t0:r0c0']]);
+    expect(setCellSelection).toHaveBeenCalledTimes(1);
+    expect(setCellSelection).toHaveBeenLastCalledWith({ anchor, head: anchor });
+
+    mouse('mousemove', 450);
+    expect(setCellSelection).toHaveBeenCalledTimes(2);
+    expect(setCellSelection).toHaveBeenLastCalledWith({ anchor, head });
+    mouse('mouseup', 450);
+  } finally {
+    frame.mockRestore();
+  }
+});
+
 test.each([70, null])('a pending bookmark link replays with bookmark position %s', (bookmark) => {
   const queries = fakeQueries();
   queries.displayList.pages[0]!.primitives = [{
@@ -278,6 +330,85 @@ test.each(['pointerdown', 'keydown'])('outside %s drops a pending gesture', (typ
   } finally {
     outside.remove();
   }
+});
+
+test.each(['touch', 'pen'])('a %s press on a page drops a pending gesture', (pointerType) => {
+  const { opts, selections, words } = options();
+  const view = renderHook(() => usePagesPointer(opts));
+
+  click(2);
+  pointerDown(host.firstElementChild!, pointerType);
+
+  opts.replicaReady = true;
+  view.rerender();
+  expect(words).toEqual([]);
+  expect(selections).toEqual([]);
+});
+
+test('a mouse press on a page leaves the pending gesture to its mousedown', () => {
+  const { opts, words } = options();
+  const view = renderHook(() => usePagesPointer(opts));
+
+  click(2);
+  pointerDown(host.firstElementChild!, 'mouse');
+
+  opts.replicaReady = true;
+  view.rerender();
+  expect(words).toEqual([[20, 'body']]);
+});
+
+test('scrolling drops a pending link navigation but keeps a pending selection', () => {
+  const queries = fakeQueries();
+  queries.displayList.pages[0]!.primitives = [{
+    kind: 'text', text: 'link', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 5,
+    href: '#bookmark',
+  }];
+  const scrollToPositionImpl = mock(() => {});
+  const link = options({ displayListQueries: queries, scrollToPositionImpl });
+  link.projection.bookmarkPosition = mock(() => 70);
+  const linkView = renderHook(() => usePagesPointer(link.opts));
+  click(1, 200, 405);
+  act(() => document.body.dispatchEvent(new Event('wheel', { bubbles: true })));
+  link.opts.replicaReady = true;
+  linkView.rerender();
+  expect(link.projection.bookmarkPosition).not.toHaveBeenCalled();
+  expect(scrollToPositionImpl).not.toHaveBeenCalled();
+  expect(link.selections).toEqual([]);
+  linkView.unmount();
+
+  const word = options();
+  const wordView = renderHook(() => usePagesPointer(word.opts));
+  click(2);
+  act(() => document.body.dispatchEvent(new Event('wheel', { bubbles: true })));
+  word.opts.replicaReady = true;
+  wordView.rerender();
+  expect(word.words).toEqual([[20, 'body']]);
+});
+
+test.each([false, true])('a change committed after the replica loads drops the replay: %s', async (changed) => {
+  let version = 'empty';
+  const session = { cellSelection: () => null, version: () => version } as unknown as YrsSession;
+  deferWorkerOpenReplica(
+    session,
+    async () => () => {
+      version = 'loaded';
+    },
+    () => {},
+    () => {}
+  );
+  const { opts, words, selections } = options({ yrsSession: session });
+  const view = renderHook(() => usePagesPointer(opts));
+
+  click(2);
+  await act(async () => {
+    await requestWorkerOpenReplica(session);
+  });
+  if (changed) version = 'edited';
+  opts.replicaReady = true;
+  view.rerender();
+  expect(words).toEqual(changed ? [] : [[20, 'body']]);
+  expect(selections).toEqual([]);
 });
 
 test('input on the pages or the focused hidden input keeps a pending gesture', () => {
@@ -474,6 +605,10 @@ for (const [name, navigate] of [
   ['highlightRange', (ref: PagedEditorRef) => ref.highlightRange(20, 45)],
   ['scrollToPage', (ref: PagedEditorRef) => ref.scrollToPage(1)],
   ['revealDisplayPosition', (ref: PagedEditorRef) => ref.revealDisplayPosition(45)],
+  ['insertText', (ref: PagedEditorRef) => ref.insertText('x')],
+  ['deleteSelection', (ref: PagedEditorRef) => ref.deleteSelection()],
+  ['undo', (ref: PagedEditorRef) => ref.undo()],
+  ['redo', (ref: PagedEditorRef) => ref.redo()],
 ] as const) {
   test(`${name} supersedes a gesture while the replica is loading`, () => {
     const { opts, words, selections } = options({
@@ -481,6 +616,9 @@ for (const [name, navigate] of [
         cellSelection: () => null,
         resolveComment: () => [],
         listRevisions: () => [],
+        selection: () => null,
+        undo: () => false,
+        redo: () => false,
       } as unknown as YrsSession,
     });
     const ref = createRef<PagedEditorRef>();
@@ -515,6 +653,55 @@ for (const [name, navigate] of [
 
     click(2);
     act(() => navigate(ref.current!));
+
+    opts.replicaReady = true;
+    view.rerender();
+    expect(words).toEqual([]);
+    expect(selections).toEqual([]);
+  });
+}
+
+for (const [name, admit] of [
+  ['runAfterPendingInput', (bridge: PagedEditorCommandBridge) => bridge.runAfterPendingInput(() => undefined)],
+  ['format', (bridge: PagedEditorCommandBridge) => bridge.format({ type: 'bold' } as never)],
+  ['command', (bridge: PagedEditorCommandBridge) => bridge.command({ type: 'insertTable' } as never)],
+  ['history', (bridge: PagedEditorCommandBridge) => bridge.history(false)],
+] as const) {
+  test(`command bridge ${name} supersedes a gesture while the replica is loading`, async () => {
+    const session = {
+      cellSelection: () => null,
+      selection: () => null,
+      undo: () => false,
+      redo: () => false,
+    } as unknown as YrsSession;
+    const { opts, words, selections } = options({ yrsSession: session });
+    const bridgeRef = { current: null as PagedEditorCommandBridge | null };
+    const view = renderHook(() => {
+      const pointer = usePagesPointer(opts);
+      usePagedEditorCommandBridge({
+        bumpInputEpoch: pointer.bumpInputEpoch,
+        bridgeRef,
+        yrsInputRef: opts.yrsInputRef,
+        session,
+        rootStory: 'body',
+        inputPositionMap: () => null,
+        latestSelectionRef: { current: null },
+        listenersRef: { current: new Set() },
+        getPositionProjection: () => null,
+        displayPositionToLoc: () => null,
+        format: () => false,
+        command: () => false,
+        syncYrsInputState: () => false,
+        yrsLocToDisplayPosition: () => null,
+        scrollToPositionImpl: () => {},
+      });
+      return pointer;
+    });
+
+    click(2);
+    await act(async () => {
+      await admit(bridgeRef.current!);
+    });
 
     opts.replicaReady = true;
     view.rerender();

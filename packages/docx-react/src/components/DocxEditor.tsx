@@ -187,7 +187,8 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
   /**
-   * Open DOCX files in the resident worker. Off by default.
+   * Open DOCX files in the resident worker. Off by default. A read-only editor without
+   * collaboration then loads its main-thread copy of the document only when something needs it.
    * @experimental
    */
   experimentalWorkerOpen?: boolean;

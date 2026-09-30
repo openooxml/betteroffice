@@ -10,6 +10,7 @@ interface PendingReplica {
   onDemand?: () => boolean;
   initialVersion: string;
   readyVersion?: string;
+  loadedVersion?: string;
 }
 
 const replicas = new WeakMap<YrsSession, PendingReplica>();
@@ -42,6 +43,7 @@ export function deferWorkerOpenReplica(
         if (!handoff) throw error;
         fallback();
       }
+      replica.loadedVersion = session.version();
       replica.pending = false;
       onReady();
       resolve();
@@ -107,6 +109,11 @@ export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | und
 export function workerOpenReplicaOnDemand(session: YrsSession): boolean {
   const replica = replicas.get(session);
   return replica?.pending === true && replica.onDemand?.() === true;
+}
+
+/** The version `session` had when its replica loaded; a later version holds a newer change. */
+export function workerOpenReplicaLoadedVersion(session: YrsSession): string | undefined {
+  return replicas.get(session)?.loadedVersion;
 }
 
 export function ensureWorkerOpenReplica(session: YrsSession): void {

@@ -169,6 +169,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     isFocused: () => yrsInputRef.current?.isFocused() ?? false,
     undo: () => {
+      bumpInputEpochRef.current?.();
       const session = yrsSessionRef.current;
       const result = session
         ? performYrsHistoryAction(session, false)
@@ -177,6 +178,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       return result.changed;
     },
     redo: () => {
+      bumpInputEpochRef.current?.();
       const session = yrsSessionRef.current;
       const result = session
         ? performYrsHistoryAction(session, true)
@@ -190,8 +192,14 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       bumpInputEpochRef.current?.();
       setDisplaySelection(anchor, head);
     },
-    insertText: (text) => yrsInputRef.current?.insertText(text),
-    deleteSelection: () => yrsInputRef.current?.deleteSelection(),
+    insertText: (text) => {
+      bumpInputEpochRef.current?.();
+      yrsInputRef.current?.insertText(text);
+    },
+    deleteSelection: () => {
+      bumpInputEpochRef.current?.();
+      yrsInputRef.current?.deleteSelection();
+    },
     selectAll: () => {
       bumpInputEpochRef.current?.();
       yrsInputRef.current?.selectAll();
@@ -430,6 +438,7 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
   if (!bridge.current) {
     bridge.current = {
       runAfterPendingInput(operation) {
+        latest.current.bumpInputEpoch?.();
         const session = latest.current.session;
         const ready = latest.current.experimentalWorkerOpen && session ? awaitWorkerOpenReplica(session) : undefined;
         if (ready) {
@@ -503,10 +512,17 @@ export function usePagedEditorCommandBridge(options: UsePagedEditorCommandBridge
         const node = pos == null ? null : current.getPositionProjection()?.nodeAt(pos);
         return node?.kind === 'image' ? node.start : null;
       },
-      format: (action) => latest.current.format(action),
-      command: (command) => latest.current.command(command),
+      format: (action) => {
+        latest.current.bumpInputEpoch?.();
+        return latest.current.format(action);
+      },
+      command: (command) => {
+        latest.current.bumpInputEpoch?.();
+        return latest.current.command(command);
+      },
       history(redo) {
         const current = latest.current;
+        current.bumpInputEpoch?.();
         const session = current.session;
         if (!session) return false;
         const result = performYrsHistoryAction(session, redo);

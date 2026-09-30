@@ -25,6 +25,7 @@ import {
   type CanvasHoverCursor,
 } from '../hoverCursor';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
+import { workerOpenReplicaLoadedVersion } from '../internals/workerOpenReplica';
 import {
   hitBelongsToPart,
   isNoteAreaHit,
@@ -229,7 +230,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const target = event.target;
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
       if (target instanceof Element) {
-        if (target.closest('.canvas-page') && host?.contains(target)) return;
+        // A touch or pen pan on a page has no mousedown to supersede the gesture itself.
+        const pointerType = event.type === 'pointerdown' ? (event as PointerEvent).pointerType : '';
+        const panning = pointerType === 'touch' || pointerType === 'pen';
+        if (!panning && target.closest('.canvas-page') && host?.contains(target)) return;
         if (target.closest('.paged-editor__yrs-input')) {
           const editor = host?.closest('.paged-editor');
           if (
@@ -240,11 +244,17 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       }
       bumpInputEpoch();
     };
+    // Scrolling away cancels a pending link's navigation, not a selection.
+    const onWheel = () => {
+      if (pendingGestureRef.current?.kind === 'link') bumpInputEpoch();
+    };
     document.addEventListener('pointerdown', onInput, true);
     document.addEventListener('keydown', onInput, true);
+    document.addEventListener('wheel', onWheel, { capture: true, passive: true });
     pendingGestureCleanupRef.current = () => {
       document.removeEventListener('pointerdown', onInput, true);
       document.removeEventListener('keydown', onInput, true);
+      document.removeEventListener('wheel', onWheel, true);
     };
   }, [bumpInputEpoch, canvasHostRef, pagesContainerRef, yrsInputRef]);
   useEffect(() => {
@@ -375,61 +385,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const focusInput = useCallback(() => yrsInputRef.current?.focus(), [yrsInputRef]);
 
-  useEffect(() => {
-    if (!replicaReady) return;
-    const pending = pendingGestureRef.current;
-    clearPendingGesture();
-    if (!pending || pending.epoch !== inputEpochRef.current) return;
-    if (pending.kind === 'caret') {
-      setTextSelection(pending.anchor);
-    } else if (pending.kind === 'range') {
-      const anchor = resolveTarget(pending.anchor)?.cell;
-      const head = resolveTarget(pending.head)?.cell;
-      if (anchor && head && yrsSession && sameYrsTable(anchor, head) && !sameYrsCell(anchor, head)) {
-        yrsSession.setCellSelection({ anchor, head });
-        syncYrsInputState(false);
-        setSelectionRects([]);
-        setCaretPosition(null);
-      } else {
-        setTextSelection(pending.anchor, pending.head);
-      }
-    } else if (pending.kind === 'link') {
-      const projection = getYrsPositionProjection(yrsRootStory);
-      if (!projection) return;
-      const targetPos = projection.bookmarkPosition(pending.href!.slice(1));
-      if (targetPos != null) {
-        scrollToPositionImpl(targetPos);
-        setTextSelection(targetPos + 1);
-      } else {
-        setTextSelection(pending.anchor);
-      }
-    } else {
-      const target = resolveTarget(pending.anchor);
-      if (!target) return;
-      if (pending.kind === 'word') {
-        yrsInputRef.current?.selectWordAtDisplay(target.displayPosition, target.story);
-      } else {
-        yrsInputRef.current?.selectParagraphAtDisplay(target.displayPosition, target.story);
-      }
-    }
-    const active = document.activeElement;
-    if (!active || active === document.body || yrsInputRef.current?.isFocused()) focusInput();
-  }, [
-    clearPendingGesture,
-    focusInput,
-    getYrsPositionProjection,
-    replicaReady,
-    resolveTarget,
-    scrollToPositionImpl,
-    setCaretPosition,
-    setSelectionRects,
-    setTextSelection,
-    syncYrsInputState,
-    yrsInputRef,
-    yrsRootStory,
-    yrsSession,
-  ]);
-
   const beginTextDrag = useCallback(
     (position: number): void => {
       yrsCellDragAnchorRef.current = resolveTarget(position)?.cell ?? null;
@@ -489,6 +444,67 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     },
     [resolveTarget, setCaretPosition, setSelectionRects, syncYrsInputState, yrsSession]
   );
+
+  useEffect(() => {
+    if (!replicaReady) return;
+    const pending = pendingGestureRef.current;
+    clearPendingGesture();
+    if (!pending || pending.epoch !== inputEpochRef.current) return;
+    // A change committed since the replica loaded is newer than the gesture.
+    const loadedVersion = yrsSession ? workerOpenReplicaLoadedVersion(yrsSession) : undefined;
+    if (loadedVersion !== undefined && yrsSession!.version() !== loadedVersion) {
+      isDraggingRef.current = false;
+      dragAnchorRef.current = null;
+      return;
+    }
+    // A drag still held when the replica lands keeps extending from its anchor, cells included.
+    const dragging = isDraggingRef.current && pending.kind !== 'link';
+    if (dragging || pending.kind === 'range') {
+      yrsCellDragAnchorRef.current = resolveTarget(pending.anchor)?.cell ?? null;
+      yrsCellDraggingRef.current = false;
+    }
+    if (pending.kind === 'caret') {
+      setTextSelection(pending.anchor);
+    } else if (pending.kind === 'range') {
+      if (!extendCellSelection(pending.head)) setTextSelection(pending.anchor, pending.head);
+      if (!dragging) {
+        yrsCellDragAnchorRef.current = null;
+        yrsCellDraggingRef.current = false;
+      }
+    } else if (pending.kind === 'link') {
+      const projection = getYrsPositionProjection(yrsRootStory);
+      if (!projection) return;
+      const targetPos = projection.bookmarkPosition(pending.href!.slice(1));
+      if (targetPos != null) {
+        scrollToPositionImpl(targetPos);
+        setTextSelection(targetPos + 1);
+      } else {
+        setTextSelection(pending.anchor);
+      }
+    } else {
+      const target = resolveTarget(pending.anchor);
+      if (!target) return;
+      if (pending.kind === 'word') {
+        yrsInputRef.current?.selectWordAtDisplay(target.displayPosition, target.story);
+      } else {
+        yrsInputRef.current?.selectParagraphAtDisplay(target.displayPosition, target.story);
+      }
+    }
+    const active = document.activeElement;
+    if (!active || active === document.body || yrsInputRef.current?.isFocused()) focusInput();
+  }, [
+    clearPendingGesture,
+    extendCellSelection,
+    focusInput,
+    getYrsPositionProjection,
+    replicaReady,
+    resolveTarget,
+    scrollToPositionImpl,
+    setTextSelection,
+    yrsInputRef,
+    yrsRootStory,
+    yrsSession,
+  ]);
 
   const handlePagesMouseDown = useCallback(
     (e: React.MouseEvent) => {
