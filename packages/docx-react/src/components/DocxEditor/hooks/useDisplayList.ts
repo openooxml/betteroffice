@@ -195,9 +195,11 @@ export interface UseRustDisplayListResult {
  * no layout of its own. Null when no worker can take it, and a null result
  * when the worker failed; either way the caller lays out on the main thread.
  */
+/** A `background` pass answers null on any failure and never falls back, hydrates or retries. */
 export type LayoutInWorker = ((
   session: YrsSession,
-  request: string
+  request: string,
+  options?: { background?: boolean }
 ) => Promise<WorkerLayoutComputation | null> | null) & {
   prewarm?: (session: YrsSession) => (() => void) | null;
   /** False when no worker can take a pass for `session`. */
@@ -1134,7 +1136,9 @@ export function useRustDisplayList(
     async <T,>(
       hostEngine: YrsSession,
       request: (owner: NonNullable<typeof workerRef.current>) => Promise<T>,
-      onOwner?: (owner: NonNullable<typeof workerRef.current>) => void
+      onOwner?: (owner: NonNullable<typeof workerRef.current>) => void,
+      // Optional work neither starts a worker nor recovers one that ran out of memory.
+      { background = false }: { background?: boolean } = {}
     ): Promise<T> => {
       const source = workerOpenSourcesRef.current.get(hostEngine);
       const load = sessionLoad(hostEngine);
@@ -1151,6 +1155,7 @@ export function useRustDisplayList(
           throw new SupersededPreviewError();
         }
         if (workerRef.current?.engine !== hostEngine) {
+          if (background) throw new SupersededPreviewError();
           const owner = workerFor(hostEngine);
           owner.opened = true;
           owner.opening = owner.client
@@ -1184,7 +1189,9 @@ export function useRustDisplayList(
           return result;
         } catch (error) {
           if (error instanceof ResidentWorkerOutOfMemoryError) {
-            if (replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry') continue;
+            if (!background && replaceOutOfMemoryWorker(hostEngine, owner, error) === 'retry') {
+              continue;
+            }
           } else {
             if (!isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
           }
@@ -1276,7 +1283,8 @@ export function useRustDisplayList(
       return requestOpenedWorker(
         hostEngine,
         (current) => current.client.fontRequirements(request),
-        (current) => { owner.current = current; }
+        (current) => { owner.current = current; },
+        { background }
       )
         .then((requirements) => {
           JSON.parse(requirements);
@@ -1525,13 +1533,15 @@ export function useRustDisplayList(
   );
 
   const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
-    (hostEngine, request) => {
+    (hostEngine, request, passOptions) => {
+      const background = passOptions?.background === true;
       if (!canLayoutInWorker(hostEngine) || !hostEngine.adoptResidentWorkerLayout) {
-        if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(hostEngine);
+        if (workerOpenEnabledRef.current && !background) ensureWorkerOpenReplica(hostEngine);
         return null;
       }
       const outOfMemory = outOfMemoryRef.current.get(hostEngine);
-      if (outOfMemory) return rejectedWorkerLayout(outOfMemory);
+      if (outOfMemory) return background ? null : rejectedWorkerLayout(outOfMemory);
+      if (background && workerRef.current?.engine !== hostEngine) return null;
       if (
         workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine) &&
         workerRef.current?.engine !== hostEngine &&
@@ -1563,7 +1573,7 @@ export function useRustDisplayList(
             }
       );
       if (!snapshot) {
-        if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(hostEngine);
+        if (workerOpenEnabledRef.current && !background) ensureWorkerOpenReplica(hostEngine);
         return null;
       }
       const previewKey = layoutPreviewKey(request) ?? '';
@@ -1603,6 +1613,7 @@ export function useRustDisplayList(
       ): Promise<WorkerLayoutComputation | null> | null => {
         const current = workerRef.current;
         if (
+          background ||
           unmountedRef.current ||
           owner.load !== documentLoadsRef.current ||
           (current && current.engine !== hostEngine)

@@ -432,6 +432,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         return;
       }
       const pass = ++passRef.current;
+      // A warm-up's worker requests never fall back, hydrate or retry.
+      const background = warmOnly ? { background: true } : undefined;
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
       pendingLayoutOriginRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
@@ -459,12 +461,18 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           const input = JSON.stringify(request);
           const pendingRequirements =
             workerOpenEnabledRef.current && workerRequirements === undefined
-              ? fontRequirementsInWorkerRef.current?.(session, input)
+              ? fontRequirementsInWorkerRef.current?.(session, input, background)
               : null;
           if (pendingRequirements) {
             void pendingRequirements.then(
               (requirements) => {
-                if (pass === passRef.current && sessionRef.current === session) run(requirements);
+                if (pass !== passRef.current || sessionRef.current !== session) return;
+                // A warm-up the worker could not answer has nothing to lay out.
+                if (warmOnly && requirements === null) {
+                  syncCoordinator.onLayoutComplete(currentEpoch);
+                  return;
+                }
+                run(requirements);
               },
               (error: unknown) => {
                 if (pass !== passRef.current || sessionRef.current !== session) return;
@@ -640,7 +648,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                 : openedVersionRef.current.version))
         ) {
           try {
-            workerPass = layoutInWorkerRef.current?.(session, JSON.stringify(request)) ?? null;
+            workerPass =
+              layoutInWorkerRef.current?.(session, JSON.stringify(request), background) ?? null;
           } catch (error) {
             console.error('[PagedEditor] Resident worker layout could not start:', error);
           }

@@ -761,3 +761,72 @@ test('a hydrated worker-open session warms decision fonts here, after the pass',
     hook.unmount();
   }
 });
+
+test('a warm-up asks the worker in the background and stops when the worker cannot answer', async () => {
+  const { session } = fakeDocument();
+  deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
+  const hostInputs: string[] = [];
+  const preflights: unknown[] = [];
+  const layouts: unknown[] = [];
+  const answers: (string | null)[] = [];
+  Object.assign(session, {
+    layoutFontRequirementsJson: (input: string) => {
+      hostInputs.push(input);
+      return '[]';
+    },
+  });
+  const hook = renderHook(() =>
+    useLayoutPipeline({
+      document: null,
+      session,
+      renderEnv: {} as YrsRenderEnv,
+      pageGap: 24,
+      zoom: 1,
+      residentMeasurementConfig: () => ({}) as ResidentMeasurementConfig,
+      deferLayoutPass: () => false,
+      pagesContainerRef: { current: null },
+      viewportLayoutRef: { current: null },
+      syncCoordinator: new LayoutSelectionGate(),
+      getScrollContainer: () => null,
+      experimentalWorkerOpen: true,
+      fontRequirementsInWorker: (_owner, _input, options) => {
+        preflights.push(options);
+        return Promise.resolve(answers.length > 0 ? answers.shift()! : '[]');
+      },
+      layoutInWorker: Object.assign(
+        (_owner: YrsSession, _request: string, options?: { background?: boolean }) => {
+          layouts.push(options);
+          return Promise.resolve({
+            layout: { pages: [] } as unknown as Layout,
+            notesConverged: true,
+          });
+        },
+        { available: () => true }
+      ),
+    })
+  );
+  const settle = () =>
+    act(async () => {
+      await new Promise((done) => setTimeout(done, 40));
+    });
+  try {
+    act(() => hook.result.current.runLayoutPipeline());
+    await settle();
+    expect(preflights).toEqual([undefined]);
+    expect(layouts).toEqual([undefined]);
+
+    act(() => hook.result.current.scheduleWarmLayout());
+    await settle();
+    expect(preflights).toEqual([undefined, { background: true }]);
+    expect(layouts).toEqual([undefined, { background: true }]);
+
+    answers.push(null);
+    act(() => hook.result.current.scheduleWarmLayout());
+    await settle();
+    expect(preflights).toHaveLength(3);
+    expect(layouts).toHaveLength(2);
+    expect(hostInputs).toEqual([]);
+  } finally {
+    hook.unmount();
+  }
+});
