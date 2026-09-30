@@ -31,8 +31,8 @@
 //! adjacency of document positions decides.
 //!
 //! Region scoping matters because a page carries several independent
-//! documents. [`hit_test_regions`] tests the page's header and footer bands
-//! first (simple vertical containment against the band box) and then its note
+//! documents. [`hit_test_regions`] lets direct body hits override header and
+//! footer bands, then tests their vertical bounds and the page's note
 //! areas, resolving inside the winning one and returning the region kind with
 //! the part that owns it — an `rId` for a band, a note id for a note, whose
 //! story is `fn:{id}` / `en:{id}`. The position then addresses THAT document,
@@ -765,6 +765,7 @@ pub fn hit_test(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<i
 struct PointResolution {
     pos: Option<i64>,
     target: HoverTarget,
+    direct: bool,
 }
 
 /// What sits under a point, for pointer-cursor feedback.
@@ -891,6 +892,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
                 } else {
                     HoverTarget::Text
                 },
+                direct: true,
             };
         }
     }
@@ -910,6 +912,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
                     return PointResolution {
                         pos: Some(ds),
                         target,
+                        direct: true,
                     };
                 }
             }
@@ -932,6 +935,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
                     return PointResolution {
                         pos: Some(ds),
                         target,
+                        direct: true,
                     };
                 }
             }
@@ -940,7 +944,11 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
     }
 
     if hits.is_empty() {
-        return PointResolution { pos: None, target };
+        return PointResolution {
+            pos: None,
+            target,
+            direct: false,
+        };
     }
 
     // 3. nearest line by vertical center distance (blank-line markers included)
@@ -966,6 +974,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
     PointResolution {
         pos: position_for_hits(line.iter().copied(), x),
         target,
+        direct: false,
     }
 }
 
@@ -1131,18 +1140,8 @@ fn text_box_distance_squared(prims: &[Primitive], x: f64, y: f64) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-/// Resolves a point against the page's header and footer bands, then its note
-/// areas, before falling through to the body.
-///
-/// Band membership is the vertical `[y, y + height]` test on the region's box.
-/// A point inside a band always identifies that region even when `pos` is
-/// `None` — an empty band still owns the click, and the region alone is what
-/// routes editing into that header or footer.
-///
-/// A note area stacks several independent documents, so it resolves against
-/// the story nearest the point rather than the area as a whole: a click cannot
-/// borrow a position from another note. Like a band it carries no content box,
-/// so only its runs read as typeable text.
+/// Direct body hits override header/footer bands; empty band spots activate
+/// that part. Note areas resolve against the nearest note story.
 pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<RegionHit> {
     let page = dl.pages.get(page_index)?;
 
@@ -1152,29 +1151,32 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
         y >= top && y <= bottom
     };
 
-    if let Some(h) = &page.header
-        && in_band(h)
-    {
-        let resolved = resolve_point(&h.primitives, false, x, y);
-        return Some(RegionHit {
-            region: HitRegion::Header,
-            r_id: Some(h.r_id.clone()),
-            note_id: None,
-            pos: resolved.pos,
-            target: resolved.target,
-        });
-    }
-    if let Some(f) = &page.footer
-        && in_band(f)
-    {
-        let resolved = resolve_point(&f.primitives, false, x, y);
-        return Some(RegionHit {
-            region: HitRegion::Footer,
-            r_id: Some(f.r_id.clone()),
-            note_id: None,
-            pos: resolved.pos,
-            target: resolved.target,
-        });
+    for (region, band) in [
+        (HitRegion::Header, &page.header),
+        (HitRegion::Footer, &page.footer),
+    ] {
+        if let Some(band) = band
+            && in_band(band)
+        {
+            let body = resolve_point(&page.primitives, false, x, y);
+            if body.direct {
+                return Some(RegionHit {
+                    region: HitRegion::Body,
+                    r_id: None,
+                    note_id: None,
+                    pos: body.pos,
+                    target: body.target,
+                });
+            }
+            let resolved = resolve_point(&band.primitives, false, x, y);
+            return Some(RegionHit {
+                region,
+                r_id: Some(band.r_id.clone()),
+                note_id: None,
+                pos: resolved.pos,
+                target: resolved.target,
+            });
+        }
     }
     if let Some(area) = page.note_areas.iter().find(|area| in_note_area(area, y)) {
         let story = note_stories(area)
@@ -1820,6 +1822,64 @@ mod tests {
             serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
             vec![run(100.0, 100.0, 50.0, 1), image(100.0, 200.0, Some(10))],
         )
+    }
+
+    #[test]
+    fn body_content_in_header_footer_bands_wins_but_empty_spots_activate_the_band() {
+        for (kind, top, region) in [
+            ("header", 0.0, HitRegion::Header),
+            ("footer", 420.0, HitRegion::Footer),
+        ] {
+            let mut text_box = run(300.0, top + 40.0, 50.0, 20);
+            text_box["blockKey"] = "text-box-paragraph".into();
+            let mut watermark = image(0.0, top, None);
+            watermark["w"] = 500.into();
+            watermark["h"] = 80.into();
+            let mut dl = page(
+                serde_json::json!({"x": 0, "y": 0, "width": 500, "height": 500}),
+                vec![
+                    watermark,
+                    run(100.0, top + 40.0, 50.0, 1),
+                    image(200.0, top + 20.0, Some(10)),
+                    text_box,
+                ],
+            );
+            dl.pages[0].watermark_primitive_count = Some(1);
+            let band = serde_json::from_value(serde_json::json!({
+                "rId": "rIdBand", "kind": kind, "y": top, "height": 80,
+                "primitives": [run(100.0, top + 40.0, 250.0, 50)]
+            }))
+            .unwrap();
+            if kind == "header" {
+                dl.pages[0].header = Some(band);
+            } else {
+                dl.pages[0].footer = Some(band);
+            }
+
+            for (x, start, end, target) in [
+                (120.0, 1, 6, HoverTarget::Text),
+                (220.0, 10, 10, HoverTarget::Image),
+                (320.0, 20, 25, HoverTarget::Text),
+            ] {
+                let hit = hit_test_regions(&dl, 0, x, top + 35.0).unwrap();
+                assert_eq!(hit.region, HitRegion::Body);
+                assert_eq!(hit.r_id, None);
+                assert_eq!(hit.target, target);
+                assert!(hit.pos.is_some_and(|pos| (start..=end).contains(&pos)));
+            }
+
+            let empty = hit_test_regions(&dl, 0, 400.0, top + 35.0).unwrap();
+            assert_eq!(empty.region, region);
+            assert_eq!(empty.r_id.as_deref(), Some("rIdBand"));
+            let page = &mut dl.pages[0];
+            if let Some(band) = page.header.as_mut().or(page.footer.as_mut()) {
+                band.primitives.clear();
+            }
+            let empty = hit_test_regions(&dl, 0, 400.0, top + 35.0).unwrap();
+            assert_eq!(empty.region, region);
+            assert_eq!(empty.pos, None);
+            assert_eq!(empty.target, HoverTarget::None);
+        }
     }
 
     fn note_run(baseline: f64, doc_start: i64, group_id: &str) -> serde_json::Value {

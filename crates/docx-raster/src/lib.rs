@@ -424,15 +424,21 @@ impl<'k> Renderer<'k> {
         {
             paint_page_border(pixmap, border, &mut self.scratch.budget)?;
         }
-        // Word's layers: the header and footer, drawings in front of their
-        // text included, lie under the body and its notes.
+        let (watermark, body) = page.primitives.split_at(
+            page.watermark_primitive_count
+                .unwrap_or(0)
+                .min(page.primitives.len()),
+        );
+        for primitive in watermark {
+            self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
+        }
         for region in [&page.header, &page.footer].into_iter().flatten() {
             let scope = ImageScope::HeaderFooter(&region.r_id);
             for primitive in &region.primitives {
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
-        for primitive in &page.primitives {
+        for primitive in body {
             self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
         for area in &page.note_areas {

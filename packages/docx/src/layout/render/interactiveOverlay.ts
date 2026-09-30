@@ -88,25 +88,35 @@ export function buildInteractiveOverlayPage(
     event.stopPropagation();
   });
 
-  const primitives = pagePrimitives(page);
-  const groups = collectSdtExtents(primitives);
-  for (const extent of [...groups.values()].sort(compareSdtExtents)) {
-    root.appendChild(renderBoundary(extent, doc, options.labels));
-  }
+  for (const [layer, primitives] of pagePrimitiveLayers(page).entries()) {
+    const groups = collectSdtExtents(primitives);
+    for (const extent of [...groups.values()].sort(compareSdtExtents)) {
+      const boundary = renderBoundary(extent, doc, options.labels);
+      boundary.style.zIndex = String(layer);
+      root.appendChild(boundary);
+    }
 
-  const widgets = collectWidgetExtents(primitives);
-  for (const extent of widgets.values()) {
-    root.appendChild(renderInlineWidget(extent, doc, options.labels));
+    const widgets = collectWidgetExtents(primitives);
+    for (const extent of widgets.values()) {
+      const widget = renderInlineWidget(extent, doc, options.labels);
+      widget.style.zIndex = String(layer);
+      root.appendChild(widget);
+    }
   }
   return root;
 }
 
-function pagePrimitives(page: DisplayPage): DisplayPrimitive[] {
+function pagePrimitiveLayers(page: DisplayPage): DisplayPrimitive[][] {
+  const watermarkPrimitiveCount = Math.min(
+    page.watermarkPrimitiveCount ?? 0,
+    page.primitives.length
+  );
   return [
-    ...page.primitives,
-    ...(page.header?.primitives ?? []),
-    ...(page.footer?.primitives ?? []),
-    ...(page.noteAreas ?? []).flatMap((area) => [
+    page.primitives.slice(0, watermarkPrimitiveCount),
+    page.header?.primitives ?? [],
+    page.footer?.primitives ?? [],
+    page.primitives.slice(watermarkPrimitiveCount),
+    ...(page.noteAreas ?? []).map((area) => [
       ...(area.separatorPrimitives ?? []),
       ...(area.primitives ?? []),
     ]),
@@ -307,7 +317,7 @@ function boundaryControls(attrs: SdtAttrs): {
 
 /** Whether `buildInteractiveOverlayPage(page)` holds a control Tab stops at. */
 export function interactiveOverlayHasTabStops(page: DisplayPage): boolean {
-  const primitives = pagePrimitives(page);
+  const primitives = pagePrimitiveLayers(page).flat();
   for (const extent of collectSdtExtents(primitives).values()) {
     const { kind, repeat } = boundaryControls(extent.attrs);
     if (kind || repeat) return true;

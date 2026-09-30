@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Headers and footers now paint beneath the body, as in Word, so a header drawing set in front of text no longer covers body text in the editor or in PNG export.
+Headers and footers now paint beneath the body, with watermarks beneath both, as in Word. Overlapping body content and controls receive clicks above header and footer content, while empty header and footer areas remain available for editing.
