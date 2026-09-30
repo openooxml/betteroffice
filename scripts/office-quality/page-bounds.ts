@@ -12,14 +12,17 @@ export type OfficePageBounds = {
 
 const maximumPixels = 8192;
 
-export function validatePageBounds(input: unknown): OfficePageBounds | null {
+export function validatePageBounds(
+  input: unknown,
+  maxPages = MAX_REFERENCE_PAGES
+): OfficePageBounds | null {
   if (input == null) return null;
   const profile = input as OfficePageBounds;
   if (
     profile.kind !== 'office-page-bounds' ||
     !Array.isArray(profile.pages) ||
     !profile.pages.length ||
-    profile.pages.length > MAX_REFERENCE_PAGES
+    profile.pages.length > maxPages
   )
     throw new Error('Invalid Office page bounds profile');
   return {
