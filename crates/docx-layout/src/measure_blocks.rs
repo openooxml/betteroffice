@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1935,11 +1935,17 @@ fn cell_content_widths(
     for block in &cell.blocks {
         let widths = match block {
             LayoutBlock::Paragraph(paragraph) => {
+                if paragraph.runs.iter().any(
+                    |run| matches!(run, crate::types::Run::Image(image) if floating_image_run(image)),
+                ) {
+                    return None;
+                }
                 crate::typed_measure::intrinsic_widths(paragraph, content_width, config)?
             }
             LayoutBlock::Table(_) => return None,
             LayoutBlock::Image(image) if image.anchor.is_none() => (image.width, image.width),
             LayoutBlock::Shape(shape) if !anchored_shape(shape) => (shape.width, shape.width),
+            LayoutBlock::Image(_) | LayoutBlock::Shape(_) => return None,
             LayoutBlock::Chart(chart) => (chart.width, chart.width),
             LayoutBlock::TextBox(text_box) => (text_box.width, text_box.width),
             _ => continue,
@@ -1948,6 +1954,27 @@ fn cell_content_widths(
         maximum = maximum.max(widths.1);
     }
     Some((minimum + padding, maximum + padding))
+}
+
+/// Floating drawings paint at their own width, which intrinsic sizing doesn't see.
+fn floating_image_run(image: &crate::types::ImageRun) -> bool {
+    image.display_mode.as_deref() == Some("float")
+        || matches!(
+            image.wrap_type.as_deref(),
+            Some("square" | "tight" | "through" | "behind" | "inFront")
+        )
+}
+
+/// The drawn left border that painting insets a first-column cell's content by.
+fn left_border_inset(cell: &crate::types::TableCell) -> f64 {
+    cell.borders
+        .as_ref()
+        .and_then(|borders| borders.left.as_ref())
+        .filter(|border| {
+            !matches!(border.style.as_deref(), Some("none" | "nil")) && border.width != Some(0.0)
+        })
+        .map_or(0.0, |border| border.width.unwrap_or(1.0))
+        .max(0.0)
 }
 
 fn table_content_widths(
@@ -1963,19 +1990,38 @@ fn table_content_widths(
     {
         return None;
     }
+    let col_count = count_table_columns(table);
+    let first_column: HashSet<(usize, usize)> = resolve_cell_grid(table)
+        .into_iter()
+        .filter(|cell| {
+            if table.bidi == Some(true) {
+                cell.column_index + cell.col_span >= col_count
+            } else {
+                cell.column_index == 0
+            }
+        })
+        .map(|cell| (cell.row_index, cell.cell_index))
+        .collect();
     Some(
         table
             .rows
             .iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(row_index, row)| {
                 row.cells
                     .iter()
-                    .map(|cell| {
+                    .enumerate()
+                    .map(|(cell_index, cell)| {
                         if cell.min_content_width.is_some() && cell.max_content_width.is_some() {
-                            None
-                        } else {
-                            cell_content_widths(cell, content_width, config)
+                            return None;
                         }
+                        let inset = if first_column.contains(&(row_index, cell_index)) {
+                            left_border_inset(cell)
+                        } else {
+                            0.0
+                        };
+                        cell_content_widths(cell, content_width, config)
+                            .map(|(minimum, maximum)| (minimum + inset, maximum + inset))
                     })
                     .collect()
             })
@@ -2998,6 +3044,61 @@ mod tests {
                         .all(|line| line.synthetic_fallback != Some(true))
                 );
             }
+        });
+    }
+
+    #[test]
+    fn autofit_keeps_room_for_floating_drawings_and_the_painted_left_border() {
+        crate::with_private_measure_fonts(|| {
+            let font = crate::register_measure_font(include_bytes!(
+                "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+            ))
+            .unwrap();
+            let config = MeasurementConfig {
+                font_chains: BTreeMap::from([("arial|0|0".to_owned(), vec![font])]),
+                defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+                authoritative_shaping: true,
+                ..MeasurementConfig::default()
+            };
+            let table = |grid: f64, borders: serde_json::Value, runs: serde_json::Value| {
+                serde_json::from_value::<TableBlock>(json!({
+                    "id": "table", "layoutMode": "autofit", "gridWidths": [grid],
+                    "rows": [{"id": "row", "cells": [
+                        {"id": "cell", "borders": borders,
+                         "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0},
+                         "blocks": [{"kind": "paragraph", "id": "paragraph", "runs": runs}]}
+                    ]}]
+                }))
+                .unwrap()
+            };
+            let floating = table(
+                300.0,
+                json!(null),
+                json!([
+                    {"kind": "image", "src": "inline", "width": 20, "height": 10},
+                    {"kind": "image", "src": "float", "width": 200, "height": 10,
+                     "wrapType": "square", "displayMode": "float"}
+                ]),
+            );
+            assert_eq!(
+                cell_content_widths(&floating.rows[0].cells[0], 600.0, &config),
+                None
+            );
+            assert_eq!(
+                measure_table_column_widths(&floating, 600.0, &config),
+                vec![300.0]
+            );
+            let image = json!([{"kind": "image", "src": "inline", "width": 80, "height": 10}]);
+            let bordered = table(100.0, json!({"left": {"width": 8}}), image.clone());
+            assert_eq!(
+                measure_table_column_widths(&bordered, 600.0, &config),
+                vec![88.0]
+            );
+            let hidden = table(100.0, json!({"left": {"width": 8, "style": "nil"}}), image);
+            assert_eq!(
+                measure_table_column_widths(&hidden, 600.0, &config),
+                vec![80.0]
+            );
         });
     }
 
