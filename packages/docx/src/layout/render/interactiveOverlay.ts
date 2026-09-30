@@ -243,14 +243,9 @@ function bodyPaintsRectCenter(body: DisplayPrimitive[], rect: GeoRect): boolean 
   });
 }
 
-/** A run whose glyphs have no fill and no outline, as the canvas paints it. */
+/** A run with no glyph fill: whether its outline paints differs by canvas path, so it covers nothing. */
 function textPaintsNothing(run: TextRunPrimitive | GlyphRunPrimitive): boolean {
-  const effects = run.modernEffects;
-  return (
-    effects?.textFill?.kind === 'none' &&
-    !run.textOutline &&
-    (!effects.textOutline || effects.textOutline.noFill === true)
-  );
+  return run.modernEffects?.textFill?.kind === 'none';
 }
 
 export function hideOccludedControl(element: HTMLElement): void {

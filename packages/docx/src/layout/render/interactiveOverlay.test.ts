@@ -188,7 +188,7 @@ test('whitespace-only body text does not hide header controls', () => {
   }
 });
 
-test('body text with no fill and no outline does not hide header controls', () => {
+test('body text with no fill does not hide header controls', () => {
   const none = { modernEffects: { textFill: { kind: 'none' as const } } };
   const runs: DisplayPrimitive[] = [{
     kind: 'text', text: 'covered', x: 100, baselineY: 35, width: 60,
@@ -200,7 +200,7 @@ test('body text with no fill and no outline does not hide header controls', () =
   for (const run of runs) {
     expectHidden(headerWidget([run]));
     expectActive(headerWidget([{ ...run, ...none } as DisplayPrimitive]));
-    expectHidden(headerWidget([{ ...run, ...none, textOutline: true } as DisplayPrimitive]));
+    expectActive(headerWidget([{ ...run, ...none, textOutline: true } as DisplayPrimitive]));
   }
 });
 
