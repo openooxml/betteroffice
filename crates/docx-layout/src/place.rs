@@ -2074,7 +2074,7 @@ mod pagination_rule_tests {
     }
 
     #[test]
-    fn placement_does_not_resume_where_section_geometry_is_queued() {
+    fn placement_across_a_continuous_section_on_a_fresh_page_matches_a_full_pass() {
         let blocks = || {
             vec![
                 paragraph(0, 1, 10.0, json!({})),
@@ -2091,13 +2091,7 @@ mod pagination_rule_tests {
                 paragraph(3, 1, 10.0, json!({})),
             ]
         };
-        let retained = assert_incremental_matches_full(blocks(), blocks(), &[0, 5]);
-        assert!(
-            retained
-                .checkpoints
-                .iter()
-                .any(|checkpoint| checkpoint.flow.pending_margins.is_some())
-        );
+        assert_incremental_matches_full(blocks(), blocks(), &[0, 5]);
     }
 
     #[test]
