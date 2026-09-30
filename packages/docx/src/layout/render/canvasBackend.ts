@@ -1311,13 +1311,11 @@ async function drawImagePrimitive(
 ): Promise<void> {
   if (!resolveImage) return;
   const source = await resolveImage(image.relId);
-  // An embedded picture the browser cannot decode paints a placeholder; a
-  // source the resolver refuses to fetch still paints nothing.
-  if (!source && !isEmbeddedImageSource(image.relId)) return;
+  if (!source) return;
   const frame = imageContentFrame(image);
   ctx.save();
   multiplyGlobalAlpha(ctx, image.opacity);
-  const filter = source ? imageFilter(image) : undefined;
+  const filter = imageFilter(image);
   if (filter && 'filter' in ctx) {
     (ctx as CanvasRenderingContext2D & { filter: string }).filter = filter;
   }
@@ -1329,15 +1327,7 @@ async function drawImagePrimitive(
     if (image.flipH || image.flipV) ctx.scale(image.flipH ? -1 : 1, image.flipV ? -1 : 1);
     ctx.translate(-cx, -cy);
   }
-  if (!source) {
-    ctx.save();
-    if (image.shapeType === 'ellipse') {
-      traceImageEllipse(ctx, frame);
-      ctx.clip();
-    }
-    drawImagePlaceholder(ctx, frame);
-    ctx.restore();
-  } else if (image.shapeType === 'ellipse') {
+  if (image.shapeType === 'ellipse') {
     ctx.save();
     traceImageEllipse(ctx, frame);
     ctx.clip();
@@ -1359,39 +1349,6 @@ async function drawImagePrimitive(
       ctx.stroke();
     }
   }
-  ctx.restore();
-}
-
-function isEmbeddedImageSource(source: string): boolean {
-  return source.startsWith('data:') || source.startsWith('blob:');
-}
-
-/** A neutral box with a small picture glyph, for a picture that did not decode. */
-function drawImagePlaceholder(ctx: CanvasRenderingContext2D, frame: GeoRect): void {
-  if (frame.w <= 0 || frame.h <= 0) return;
-  ctx.save();
-  ctx.fillStyle = '#f1f3f4';
-  ctx.fillRect(frame.x, frame.y, frame.w, frame.h);
-  ctx.strokeStyle = '#c4c7c5';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([]);
-  ctx.strokeRect(frame.x + 0.5, frame.y + 0.5, Math.max(0, frame.w - 1), Math.max(0, frame.h - 1));
-  const scale = Math.min(Math.max(Math.min(frame.w, frame.h) / 48, 0.25), 4);
-  ctx.translate(frame.x + frame.w / 2, frame.y + frame.h / 2);
-  ctx.scale(scale, scale);
-  ctx.strokeStyle = '#9aa0a6';
-  ctx.lineWidth = 1.5;
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  ctx.rect(-12, -9, 24, 18);
-  ctx.moveTo(-3, -3.5);
-  ctx.arc(-5, -3.5, 2, 0, 2 * Math.PI);
-  ctx.moveTo(-10, 7);
-  ctx.lineTo(-3, 0);
-  ctx.lineTo(2, 5);
-  ctx.lineTo(5, 2);
-  ctx.lineTo(10, 7);
-  ctx.stroke();
   ctx.restore();
 }
 

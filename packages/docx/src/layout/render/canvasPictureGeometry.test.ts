@@ -93,43 +93,12 @@ test.each([undefined, 'rect', 'roundRect'])('preset %s retains rectangular pictu
   expect(recorder.depth()).toBe(0);
 });
 
-test('an embedded picture that does not decode paints a placeholder inside its transforms', async () => {
-  const recorder = recordingContext();
-  await drawPrimitive(recorder.ctx, {
-    ...image(),
-    relId: 'data:image/x-emf;base64,AQAAAA==',
-    rotationDeg: 90,
-    border: { width: 2, color: '#123456' },
-  }, { resolveImage: async () => null });
-  expect(recorder.images).toEqual([]);
-  const rotate = recorder.calls.findIndex((call) => call[0] === 'rotate');
-  const fill = recorder.calls.findIndex((call) => call[0] === 'fillRect');
-  expect(rotate).toBeGreaterThanOrEqual(0);
-  expect(fill).toBeGreaterThan(rotate);
-  expect(recorder.calls[fill]).toEqual(['fillRect', 10, 20, 100, 80]);
-  expect(recorder.calls).toContainEqual(['strokeRect', 10, 20, 100, 80]);
-  expect(recorder.depth()).toBe(0);
-});
-
-test('an ellipse picture that does not decode clips its placeholder to the ellipse', async () => {
-  const recorder = recordingContext();
-  await drawPrimitive(recorder.ctx, {
-    ...image('ellipse'),
-    relId: 'data:image/x-emf;base64,AQAAAA==',
-  }, { resolveImage: async () => null });
-  const clip = recorder.calls.findIndex((call) => call[0] === 'clip');
-  const fill = recorder.calls.findIndex((call) => call[0] === 'fillRect');
-  expect(recorder.calls[clip - 1]).toEqual(['ellipse', 60, 60, 50, 40, 0, 0, 2 * Math.PI]);
-  expect(fill).toBeGreaterThan(clip);
-  expect(recorder.depth()).toBe(0);
-});
-
-test.each(['rId7', 'https://example.com/picture.png'])(
-  'a source the resolver refuses (%s) paints nothing',
+test.each(['data:image/x-emf;base64,AQAAAA==', 'rId7'])(
+  'a picture the resolver returns null for (%s) paints nothing',
   async (relId) => {
     const recorder = recordingContext();
-    await drawPrimitive(recorder.ctx, { ...image(), relId }, { resolveImage: async () => null });
-    expect(recorder.calls.some((call) => call[0] === 'fillRect' || call[0] === 'strokeRect')).toBe(false);
+    await drawPrimitive(recorder.ctx, { ...image(), relId, border: { width: 2 } }, { resolveImage: async () => null });
+    expect(recorder.calls).toEqual([]);
     expect(recorder.depth()).toBe(0);
   }
 );
