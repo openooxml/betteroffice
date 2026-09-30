@@ -730,7 +730,8 @@ pub fn clear_measure_fonts() {
     measure_blocks::clear_extent_cache();
 }
 
-/// wasm wrapper over [`clear_measure_fonts`].
+/// Drop every registered measurement font (ids restart at 0). Callers must
+/// re-register before the next `measure_paragraph_json`.
 #[wasm_bindgen(js_name = clear_measure_fonts)]
 pub fn clear_measure_fonts_wasm() -> Result<(), JsValue> {
     module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
