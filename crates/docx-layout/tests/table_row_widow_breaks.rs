@@ -362,3 +362,20 @@ fn a_keep_next_heading_stays_beside_a_fitting_floating_table() {
         json!({"horzAnchor": "page", "tblpX": 90, "vertAnchor": "page", "tblpY": 10});
     assert_eq!(heading_and_table_pages_after(2, table).0, Some(0));
 }
+
+#[test]
+fn a_keep_next_heading_moves_with_a_full_width_text_floating_table() {
+    let mut table = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (2, json!({"widowControl": true}), json!({})),
+    ]);
+    table["block"]["columnWidths"] = json!([180]);
+    table["measure"]["columnWidths"] = json!([180]);
+    table["measure"]["totalWidth"] = json!(180);
+    for row in table["measure"]["rows"].as_array_mut().unwrap() {
+        row["cells"][0]["width"] = json!(180);
+    }
+    table["block"]["floating"] =
+        json!({"horzAnchor": "margin", "vertAnchor": "text", "tblpX": 0, "tblpY": 0});
+    assert_eq!(heading_and_table_pages_after(2, table), (Some(1), Some(1)));
+}
