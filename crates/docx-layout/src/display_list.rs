@@ -87,6 +87,7 @@ use ooxml_drawingml::chart::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 /// A compiled document: one entry per laid-out page, in document order.
@@ -10678,7 +10679,7 @@ fn source_blocks_by_key(
     let mut blocks = HashMap::new();
     for measured in &pagination.measured {
         if let Some(key) = resident_block_key(&measured.block) {
-            blocks.entry(key).or_insert(measured);
+            blocks.entry(key.into_owned()).or_insert(measured);
         }
     }
     blocks
@@ -10749,7 +10750,8 @@ fn layout_page_position_span(
             Fragment::Shape(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Chart(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Table(fragment) => {
-                if let Some(measured) = blocks.get(&resident_block_id_key(&fragment.block_id))
+                if let Some(measured) =
+                    blocks.get(resident_block_id_key(&fragment.block_id).as_ref())
                     && let LayoutBlock::Table(table) = &measured.block
                 {
                     let end = fragment.row_end.min(table.rows.len());
@@ -10819,7 +10821,7 @@ fn resident_build_input_for(
         .iter()
         .filter(|measured| {
             placed.as_ref().is_none_or(|keys| {
-                resident_block_key(&measured.block).is_some_and(|key| keys.contains(&key))
+                resident_block_key(&measured.block).is_some_and(|key| keys.contains(key.as_ref()))
             })
         })
         .map(|measured| transcoder.convert(measured))
@@ -11122,6 +11124,9 @@ fn refresh_resident_display_pages_reading(
         input.layout.pages[page_index] = page;
     }
 
+    if selected_blocks.is_empty() {
+        return Ok(());
+    }
     let current_indices: HashMap<String, usize> = input
         .measured
         .iter()
@@ -11130,14 +11135,17 @@ fn refresh_resident_display_pages_reading(
         .collect();
     let mut pending_blocks = selected_blocks;
     for measured in &pagination.measured {
+        if pending_blocks.is_empty() {
+            break;
+        }
         let Some(key) = resident_block_key(&measured.block) else {
             continue;
         };
-        if !pending_blocks.remove(&key) {
+        if !pending_blocks.remove(key.as_ref()) {
             continue;
         }
         let block = convert_resident_value(measured, "resident display measured block")?;
-        match current_indices.get(&key) {
+        match current_indices.get(key.as_ref()) {
             Some(&index) => input.measured[index] = block,
             None => input.measured.push(block),
         }
@@ -11159,7 +11167,7 @@ fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
 
 /// [`measured_block_key`] of `block` once transcoded: none for the breaks and
 /// unsupported blocks the display input does not render.
-fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<String> {
+fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<Cow<'_, str>> {
     use crate::types::LayoutBlock;
     match block {
         LayoutBlock::Paragraph(value) => Some(resident_block_id_key(&value.id)),
@@ -11177,11 +11185,18 @@ fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<String> {
 
 /// [`block_key`] of `id` once transcoded, which reads an integral number back
 /// as an integer.
-fn resident_block_id_key(id: &crate::types::BlockId) -> String {
+fn resident_block_id_key(id: &crate::types::BlockId) -> Cow<'_, str> {
     match id {
-        crate::types::BlockId::Str(value) => value.clone(),
-        crate::types::BlockId::Num(value) => crate::transcode::transcode::<_, Value>(value)
-            .map_or_else(|_| value.to_string(), |value| block_key(&value)),
+        crate::types::BlockId::Str(value) => Cow::Borrowed(value),
+        crate::types::BlockId::Num(value)
+            if value.fract() == 0.0 && *value >= i64::MIN as f64 && *value <= i64::MAX as f64 =>
+        {
+            Cow::Owned((*value as i64).to_string())
+        }
+        crate::types::BlockId::Num(value) => Cow::Owned(
+            serde_json::Number::from_f64(*value)
+                .map_or_else(|| "null".to_owned(), |n| n.to_string()),
+        ),
     }
 }
 
