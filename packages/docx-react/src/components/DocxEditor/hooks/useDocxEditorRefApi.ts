@@ -24,7 +24,13 @@ import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { createComment } from '../commentFactories';
-import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '../editorBatches';
+import {
+  applyEditBatch,
+  applyProposalCall,
+  flushEditorInput,
+  flushedSession,
+  modeRefusal,
+} from '../editorBatches';
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
@@ -36,6 +42,7 @@ import {
   requestOnDemandWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaOnDemand,
+  workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
 import {
   handedOverRequest,
@@ -46,6 +53,7 @@ import {
 export const DOCX_REF_REPLICA_ACCESS = {
   commands: 'commands',
   getDocument: 'sync',
+  readDocument: 'await',
   getEditorRef: 'sync',
   flushPendingInput: 'await',
   save: 'await',
@@ -76,21 +84,37 @@ export const DOCX_REF_REPLICA_ACCESS = {
   getProposals: 'await',
   exportStructuredWithPages: 'await',
   getPositionAtPoint: 'sync',
+  readPositionAtPoint: 'await',
   addComment: 'sync',
+  insertComment: 'await',
   replyToComment: 'independent',
+  insertCommentReply: 'independent',
   resolveComment: 'independent',
+  markCommentResolved: 'independent',
   proposeChange: 'sync',
+  suggestChange: 'await',
   applyFormatting: 'sync',
+  formatText: 'await',
   setParagraphStyle: 'sync',
+  applyParagraphStyle: 'await',
   insertBreak: 'sync',
+  insertBreakAfter: 'await',
   getPageContent: 'sync',
+  readPageContent: 'await',
   scrollToParaId: 'sync',
+  scrollToParagraph: 'await',
   scrollToCommentId: 'sync',
+  scrollToComment: 'await',
   scrollToChangeId: 'sync',
+  scrollToChange: 'await',
   highlightRange: 'sync',
+  selectRange: 'await',
   findInDocument: 'sync',
+  findParagraphs: 'await',
   getSelectionInfo: 'sync',
+  readSelectionInfo: 'await',
   getComments: 'independent',
+  readComments: 'independent',
   search: 'await',
   searchNext: 'independent',
   searchPrevious: 'independent',
@@ -101,6 +125,57 @@ export const DOCX_REF_REPLICA_ACCESS = {
   onContentChange: 'independent',
   onSelectionChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
+
+/** Each synchronous member deprecated for an async twin, and its twin. */
+export const DOCX_REF_ASYNC_TWINS = {
+  getDocument: 'readDocument',
+  getPositionAtPoint: 'readPositionAtPoint',
+  scrollToParaId: 'scrollToParagraph',
+  scrollToCommentId: 'scrollToComment',
+  scrollToChangeId: 'scrollToChange',
+  highlightRange: 'selectRange',
+  addComment: 'insertComment',
+  replyToComment: 'insertCommentReply',
+  resolveComment: 'markCommentResolved',
+  proposeChange: 'suggestChange',
+  findInDocument: 'findParagraphs',
+  applyFormatting: 'formatText',
+  setParagraphStyle: 'applyParagraphStyle',
+  insertBreak: 'insertBreakAfter',
+  getPageContent: 'readPageContent',
+  getSelectionInfo: 'readSelectionInfo',
+  getComments: 'readComments',
+} as const satisfies Partial<Record<keyof DocxEditorRef, keyof DocxEditorRef>>;
+
+type DocxRefAsyncTwin = (typeof DOCX_REF_ASYNC_TWINS)[keyof typeof DOCX_REF_ASYNC_TWINS];
+
+/** Twins of members that read host state only, which need no input flushed first. */
+const HOST_STATE_TWINS: ReadonlySet<DocxRefAsyncTwin> = new Set([
+  'insertCommentReply',
+  'markCommentResolved',
+  'readComments',
+]);
+
+/** Twins that answer null without loading an on-demand replica nothing has asked for. */
+const UNSELECTED_TWINS: ReadonlySet<keyof DocxEditorRef> = new Set(['readSelectionInfo']);
+
+/** Adds each async twin: it flushes pending input, then answers as its synchronous member. */
+function withAsyncTwins(
+  api: Omit<DocxEditorRef, DocxRefAsyncTwin>,
+  flush: () => Promise<void>
+): DocxEditorRef {
+  const twins: Partial<Record<DocxRefAsyncTwin, unknown>> = {};
+  for (const [member, twin] of Object.entries(DOCX_REF_ASYNC_TWINS) as Array<
+    [keyof typeof DOCX_REF_ASYNC_TWINS, DocxRefAsyncTwin]
+  >) {
+    const call = api[member] as (...args: unknown[]) => unknown;
+    twins[twin] = async (...args: unknown[]) => {
+      if (!HOST_STATE_TWINS.has(twin)) await flush();
+      return Reflect.apply(call, api, args);
+    };
+  }
+  return { ...api, ...twins } as DocxEditorRef;
+}
 
 /**
  * Synchronous APIs that an on-demand replica still loading answers without loading it at once:
@@ -177,6 +252,13 @@ function gateReplicaAccess(
           } else {
             if (key === 'whenLayoutComplete' && workerOpenReplicaOnDemand(session)) {
               return Reflect.apply(call, api, args);
+            }
+            if (
+              UNSELECTED_TWINS.has(key) &&
+              workerOpenReplicaOnDemand(session) &&
+              !workerOpenReplicaStarted(session)
+            ) {
+              return Promise.resolve(null);
             }
             const ready = awaitWorkerOpenReplica(session);
             if (ready) {
@@ -471,9 +553,13 @@ export function useDocxEditorRefApi({
     }
     return onWorker(authority, main);
   };
+  const flushForTwin = async () => {
+    const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
+    if (!flushed.ok && flushed.code !== 'editor-unavailable') throw flushed.error;
+  };
   useImperativeHandle(
     ref,
-    () => gateReplicaAccess({
+    () => gateReplicaAccess(withAsyncTwins({
       commands,
       getDocument: () =>
         opening() ? null : (pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document),
@@ -780,7 +866,7 @@ export function useDocxEditorRefApi({
         return () => selectionChangeSubscribersRef.current.delete(listener);
       },
       ...hostSearch,
-    }, pagedEditorRef, experimentalWorkerOpen),
+    }, flushForTwin), pagedEditorRef, experimentalWorkerOpen),
     [
       document,
       documentFromYrs,

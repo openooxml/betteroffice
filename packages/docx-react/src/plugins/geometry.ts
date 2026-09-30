@@ -229,7 +229,7 @@ export function createPluginGeometry(
     const end = lastUnitEnd(from, to);
     return end === null ? null : caretAt(end, true);
   };
-  return {
+  const geometry: Omit<DocxPluginGeometry, 'readPositionAtPoint' | 'readAnchorGeometry'> = {
     layout,
     dom,
     toOverlayRect: (rect) =>
@@ -358,5 +358,10 @@ export function createPluginGeometry(
         pageRect: toOverlayRect(dom.pagesContainer, layer, dom.zoom, page),
       };
     },
+  };
+  return {
+    ...geometry,
+    readPositionAtPoint: async (clientX, clientY) => geometry.getPositionAtPoint(clientX, clientY),
+    readAnchorGeometry: async (target) => geometry.getAnchorGeometry(target),
   };
 }

@@ -25,6 +25,13 @@ export {
   type DocxEditorRef,
   type DocxEditorCollaborationOptions,
   type EditorMode,
+  type DocxBreakInsertion,
+  type DocxCommentInsertion,
+  type DocxPageContent,
+  type DocxParagraphMatch,
+  type DocxSelectionInfo,
+  type DocxSuggestedChange,
+  type DocxTextFormatting,
 } from './components/DocxEditor';
 
 // Commands: one authority for built-in and host chrome

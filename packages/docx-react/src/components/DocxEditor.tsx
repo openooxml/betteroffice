@@ -429,6 +429,69 @@ export interface DocxEditorProps extends DocxEditorPluginProps {
   measurementFontProvider?: BundledFontProvider;
 }
 
+/** A paragraph {@link DocxEditorRef.findParagraphs} matched, with the handle the paragraph helpers take. */
+export interface DocxParagraphMatch {
+  paraId: string;
+  match: string;
+  before: string;
+  after: string;
+}
+
+/** One page's text and paragraphs, from {@link DocxEditorRef.readPageContent}. */
+export interface DocxPageContent {
+  pageNumber: number;
+  text: string;
+  paragraphs: Array<{ paraId: string; text: string; styleId?: string }>;
+}
+
+/** The selection and the text around it, from {@link DocxEditorRef.readSelectionInfo}. */
+export interface DocxSelectionInfo {
+  paraId: string | null;
+  selectedText: string;
+  paragraphText: string;
+  before: string;
+  after: string;
+}
+
+/** A comment anchored by Word `w14:paraId`, optionally on a unique phrase of the paragraph. */
+export interface DocxCommentInsertion {
+  paraId: string;
+  text: string;
+  author: string;
+  /** Optional: anchor to a specific phrase within the paragraph (must be unique). */
+  search?: string;
+}
+
+/** A tracked change in one paragraph; see {@link DocxEditorRef.suggestChange}. */
+export interface DocxSuggestedChange {
+  paraId: string;
+  search: string;
+  replaceWith: string;
+  author: string;
+}
+
+/** Character formatting for a paragraph or a unique phrase in it; see {@link DocxEditorRef.formatText}. */
+export interface DocxTextFormatting {
+  paraId: string;
+  search?: string;
+  marks: {
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean | { style?: string };
+    strike?: boolean;
+    color?: { rgb?: string; themeColor?: string };
+    highlight?: string;
+    fontSize?: number;
+    fontFamily?: { ascii?: string; hAnsi?: string };
+  };
+}
+
+/** A page or section break after a paragraph; see {@link DocxEditorRef.insertBreakAfter}. */
+export interface DocxBreakInsertion {
+  paraId: string;
+  type: 'page' | 'sectionNextPage' | 'sectionContinuous';
+}
+
 /**
  * DocxEditor ref interface
  */
@@ -438,9 +501,17 @@ export interface DocxEditorRef {
    * @experimental
    */
   readonly commands: DocxCommandStore;
-  /** Get the current document */
+  /**
+   * Get the current document
+   * @deprecated Use {@link readDocument}.
+   */
   getDocument: () => Document | null;
-  /** Get the editor ref */
+  /** Flushes pending input, then reads the document model; null while a document opens. */
+  readDocument: () => Promise<Document | null>;
+  /**
+   * Get the editor ref
+   * @deprecated Use the editor ref's own methods; the paged editor is internal.
+   */
   getEditorRef: () => PagedEditorRef | null;
   /** Commits accepted input and selection; waits for active IME composition. */
   flushPendingInput: () => Promise<void>;
@@ -516,8 +587,15 @@ export interface DocxEditorRef {
    * an edit batch step's target and `expectVersion`. Null outside text (margins, images, page
    * gaps), while typed or composed input is pending, and until the painted pages show the current
    * version; retry after {@link flushPendingInput} or on the next frame.
+   * @deprecated Use {@link readPositionAtPoint}.
    */
   getPositionAtPoint: (clientX: number, clientY: number) => DocxPointPosition | null;
+  /**
+   * Flushes pending input, then reads the text under a client point, as
+   * {@link getPositionAtPoint} does, without moving selection or focus. Null outside text and
+   * until the painted pages show the current version.
+   */
+  readPositionAtPoint: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */
@@ -555,8 +633,14 @@ export interface DocxEditorRef {
    * Pass `options.highlight` to briefly flash it in a custom color.
    * @returns whether a matching paragraph exists in the live document
    * @example ref.current?.scrollToParaId('1A2B3C4D', { highlight: { color: 'rgba(255, 235, 59, 0.55)' } })
+   * @deprecated Use {@link scrollToParagraph}.
    */
   scrollToParaId: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
+  /**
+   * Flushes pending input, then scrolls to the paragraph with the given Word `w14:paraId`, as
+   * {@link scrollToParaId} does. Resolves whether a matching paragraph exists.
+   */
+  scrollToParagraph: (paraId: string, options?: ScrollToParaIdOptions) => Promise<boolean>;
   /**
    * Scroll the paginated view to a specific display position.
    * For Word `w14:paraId` use
@@ -573,8 +657,14 @@ export interface DocxEditorRef {
    *   can surface a "location no longer exists" affordance rather than
    *   silently no-op'ing.
    * @example ref.current?.scrollToCommentId(3)
+   * @deprecated Use {@link scrollToComment}.
    */
   scrollToCommentId: (commentId: number) => boolean;
+  /**
+   * Flushes pending input, then scrolls to the comment and selects its range, as
+   * {@link scrollToCommentId} does. Resolves false when the id no longer resolves.
+   */
+  scrollToComment: (commentId: number) => Promise<boolean>;
   /**
    * Scroll the paginated view to the tracked change with the given Word
    * revision `w:id` and select its range so the selection overlay highlights
@@ -583,8 +673,15 @@ export interface DocxEditorRef {
    * @returns `false` when the id no longer resolves (the change was
    *   accepted, rejected, or deleted between render and click).
    * @example ref.current?.scrollToChangeId(42)
+   * @deprecated Use {@link scrollToChange}.
    */
   scrollToChangeId: (revisionId: number) => boolean;
+  /**
+   * Flushes pending input, then scrolls to the tracked change with the given Word revision
+   * `w:id` and selects its range, as {@link scrollToChangeId} does. Resolves false when the id no
+   * longer resolves.
+   */
+  scrollToChange: (revisionId: number) => Promise<boolean>;
   /**
    * Select the display-position range `[from, to]` so the selection
    * overlay highlights it, and scroll its start into view. The selection
@@ -592,8 +689,14 @@ export interface DocxEditorRef {
    * for a malformed range or a `from` past the document end; `to` is clamped
    * to the document size.
    * @example ref.current?.highlightRange(10, 24)
+   * @deprecated Use {@link selectRange}.
    */
   highlightRange: (from: number, to: number) => void;
+  /**
+   * Flushes pending input, then selects the display-position range `[from, to]` and scrolls its
+   * start into view, as {@link highlightRange} does.
+   */
+  selectRange: (from: number, to: number) => Promise<void>;
   /** Open print preview */
   openPrintPreview: () => void;
   /** Print the document directly */
@@ -602,92 +705,108 @@ export interface DocxEditorRef {
   loadDocument: (doc: Document) => void;
   /** Load a DOCX buffer programmatically (ArrayBuffer, Uint8Array, Blob, or File) */
   loadDocumentBuffer: (buffer: DocxInput) => Promise<void>;
-  /** Add a comment programmatically. Anchored by Word `w14:paraId` so
+  /**
+   * Add a comment programmatically. Anchored by Word `w14:paraId` so
    * it survives unrelated edits. Returns the comment ID, or null if
-   * the paraId is unknown or the search text isn't found / is ambiguous. */
-  addComment: (options: {
-    paraId: string;
-    text: string;
-    author: string;
-    /** Optional: anchor to a specific phrase within the paragraph (must be unique). */
-    search?: string;
-  }) => number | null;
-  /** Reply to an existing comment. Returns the reply comment ID. */
+   * the paraId is unknown or the search text isn't found / is ambiguous.
+   * @deprecated Use {@link insertComment}.
+   */
+  addComment: (options: DocxCommentInsertion) => number | null;
+  /** Flushes pending input, then adds a comment as {@link addComment} does, resolving its id or null. */
+  insertComment: (options: DocxCommentInsertion) => Promise<number | null>;
+  /**
+   * Reply to an existing comment. Returns the reply comment ID.
+   * @deprecated Use {@link insertCommentReply}.
+   */
   replyToComment: (commentId: number, text: string, author: string) => number | null;
-  /** Resolve (mark as done) a comment. */
+  /** Replies to a comment as {@link replyToComment} does, resolving the reply's id or null. */
+  insertCommentReply: (commentId: number, text: string, author: string) => Promise<number | null>;
+  /**
+   * Resolve (mark as done) a comment.
+   * @deprecated Use {@link markCommentResolved}.
+   */
   resolveComment: (commentId: number) => void;
-  /** Suggest a tracked change. Pass `replaceWith: ''` to delete the matched text;
+  /** Marks a comment done, as {@link resolveComment} does. */
+  markCommentResolved: (commentId: number) => Promise<void>;
+  /**
+   * Suggest a tracked change. Pass `replaceWith: ''` to delete the matched text;
    * pass `search: ''` to insert at paragraph end. Returns false on missing paraId,
-   * missing/ambiguous search, or attempt to layer on an existing tracked change. */
-  proposeChange: (options: {
-    paraId: string;
-    search: string;
-    replaceWith: string;
-    author: string;
-  }) => boolean;
-  /** Locate every paragraph containing `query` (case-insensitive substring).
+   * missing/ambiguous search, or attempt to layer on an existing tracked change.
+   * @deprecated Use {@link suggestChange}.
+   */
+  proposeChange: (options: DocxSuggestedChange) => boolean;
+  /** Flushes pending input, then suggests a tracked change as {@link proposeChange} does. */
+  suggestChange: (options: DocxSuggestedChange) => Promise<boolean>;
+  /**
+   * Locate every paragraph containing `query` (case-insensitive substring).
    * Returns a stable handle (paraId + the matched phrase) the agent can pass
-   * back to `addComment` / `proposeChange`. */
+   * back to `addComment` / `proposeChange`.
+   * @deprecated Use {@link findParagraphs}.
+   */
   findInDocument: (
     query: string,
     options?: { caseSensitive?: boolean; limit?: number }
-  ) => Array<{ paraId: string; match: string; before: string; after: string }>;
+  ) => DocxParagraphMatch[];
+  /** Flushes pending input, then finds paragraphs containing `query` as {@link findInDocument} does. */
+  findParagraphs: (
+    query: string,
+    options?: { caseSensitive?: boolean; limit?: number }
+  ) => Promise<DocxParagraphMatch[]>;
   /**
    * Apply character formatting (bold / italic / color / size / font / etc.)
    * to a paragraph or to a unique phrase within it. This is a direct edit,
    * not a tracked change. Returns false on missing paraId or ambiguous search.
+   * @deprecated Use {@link formatText}.
    */
-  applyFormatting: (options: {
-    paraId: string;
-    search?: string;
-    marks: {
-      bold?: boolean;
-      italic?: boolean;
-      underline?: boolean | { style?: string };
-      strike?: boolean;
-      color?: { rgb?: string; themeColor?: string };
-      highlight?: string;
-      fontSize?: number;
-      fontFamily?: { ascii?: string; hAnsi?: string };
-    };
-  }) => boolean;
+  applyFormatting: (options: DocxTextFormatting) => boolean;
+  /** Flushes pending input, then applies character formatting as {@link applyFormatting} does. */
+  formatText: (options: DocxTextFormatting) => Promise<boolean>;
   /**
    * Apply a paragraph style by styleId (e.g. `'Heading1'`, `'Quote'`).
    * Direct edit, not a tracked change. Returns false if paraId is unknown.
+   * @deprecated Use {@link applyParagraphStyle}.
    */
   setParagraphStyle: (options: { paraId: string; styleId: string }) => boolean;
+  /** Flushes pending input, then applies a paragraph style as {@link setParagraphStyle} does. */
+  applyParagraphStyle: (options: { paraId: string; styleId: string }) => Promise<boolean>;
   /**
    * Insert a page or section break after the paragraph identified by `paraId`.
    * `'page'` adds a page break; `'sectionNextPage'` / `'sectionContinuous'`
    * start a new section on a new page / the same page. Direct edit, not a
    * tracked change. Returns false if paraId is unknown.
+   * @deprecated Use {@link insertBreakAfter}.
    */
-  insertBreak: (options: {
-    paraId: string;
-    type: 'page' | 'sectionNextPage' | 'sectionContinuous';
-  }) => boolean;
+  insertBreak: (options: DocxBreakInsertion) => boolean;
+  /** Flushes pending input, then inserts a page or section break as {@link insertBreak} does. */
+  insertBreakAfter: (options: DocxBreakInsertion) => Promise<boolean>;
   /**
    * Read the contents of a single page. 1-indexed; returns null if the page
    * does not exist or the document is not laid out in full yet (its first
    * pages paint before the rest). Each paragraph is returned with its stable
    * paraId so the agent can comment on or modify it without an extra
    * round-trip.
+   * @deprecated Use {@link readPageContent}.
    */
-  getPageContent: (pageNumber: number) => {
-    pageNumber: number;
-    text: string;
-    paragraphs: Array<{ paraId: string; text: string; styleId?: string }>;
-  } | null;
-  /** Read the user's current cursor / selection — what's highlighted right now. */
-  getSelectionInfo: () => {
-    paraId: string | null;
-    selectedText: string;
-    paragraphText: string;
-    before: string;
-    after: string;
-  } | null;
-  /** Get all comments. */
+  getPageContent: (pageNumber: number) => DocxPageContent | null;
+  /** Flushes pending input, then reads one page's contents as {@link getPageContent} does. */
+  readPageContent: (pageNumber: number) => Promise<DocxPageContent | null>;
+  /**
+   * Read the user's current cursor / selection — what's highlighted right now.
+   * @deprecated Use {@link readSelectionInfo}.
+   */
+  getSelectionInfo: () => DocxSelectionInfo | null;
+  /**
+   * Flushes pending input, then reads the current selection as {@link getSelectionInfo} does.
+   * Null when nothing is selected.
+   */
+  readSelectionInfo: () => Promise<DocxSelectionInfo | null>;
+  /**
+   * Get all comments.
+   * @deprecated Use {@link readComments}.
+   */
   getComments: () => Comment[];
+  /** Reads all comments, as {@link getComments} does. */
+  readComments: () => Promise<Comment[]>;
   /** Subscribe to document changes. Fires after every committed edit. Returns unsubscribe. */
   onContentChange: (listener: (document: Document) => void) => () => void;
   /** Subscribe to selection changes (cursor moves / selection changes). Returns unsubscribe. */

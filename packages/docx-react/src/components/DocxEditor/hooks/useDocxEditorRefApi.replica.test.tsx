@@ -21,7 +21,7 @@ import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
 import { deferWorkerOpenReplica, workerOpenReplicaOnDemand } from '../internals/workerOpenReplica';
 import type { EditorMode } from '../internals/editing-modes';
-import { DOCX_REF_REPLICA_ACCESS, useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DOCX_REF_ASYNC_TWINS, DOCX_REF_REPLICA_ACCESS, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -187,7 +187,49 @@ test('every public ref API is classified for replica access', async () => {
     'scrollToChangeId', 'scrollToCommentId', 'scrollToPage', 'scrollToParaId', 'scrollToPosition',
     'setParagraphStyle', 'setProposalStates', 'setZoom', 'validateEdits', 'whenLayoutComplete',
     'withdrawProposals',
+    ...Object.values(DOCX_REF_ASYNC_TWINS),
   ].sort());
+});
+
+test('only deprecated members and host-state members answer synchronously from the document', () => {
+  const syncDocumentMembers = Object.entries(DOCX_REF_REPLICA_ACCESS)
+    .filter(([, access]) => access === 'sync')
+    .map(([member]) => member)
+    .filter((member) => !Object.hasOwn(DOCX_REF_ASYNC_TWINS, member));
+  expect(syncDocumentMembers.sort()).toEqual(
+    ['focus', 'getEditorRef', 'openPrintPreview', 'print', 'scrollToPosition'].sort()
+  );
+  for (const twin of Object.values(DOCX_REF_ASYNC_TWINS)) {
+    expect(DOCX_REF_REPLICA_ACCESS[twin]).not.toBe('sync');
+  }
+});
+
+test('async twins wait for the replica without loading it at once, then answer as their members', async () => {
+  const { api, session, replica, release, opens } = await pendingReplica();
+  const pending = Promise.all([api.findParagraphs('Page'), api.readPageContent(1), api.readDocument()]);
+  const completed = { value: false };
+  void pending.then(() => { completed.value = true; });
+  expect(await api.readComments()).toEqual([]);
+  replica.start();
+  await act(async () => {});
+  expect(completed.value).toBe(false);
+  expect(session.storyIds()).toEqual([]);
+  let values!: Awaited<typeof pending>;
+  await act(async () => {
+    release();
+    values = await pending;
+  });
+  expect(opens).toEqual([false]);
+  expect(values[0].length).toBeGreaterThan(0);
+  expect(values[0]).toEqual(api.findInDocument('Page'));
+  expect(values[1]).toEqual(api.getPageContent(1));
+  expect(values[2]).toEqual(api.getDocument());
+});
+
+test('an on-demand replica nothing asked for has no selection to read', async () => {
+  const { api, opens } = await pendingReplica('viewing', false, true);
+  expect(await api.readSelectionInfo()).toBeNull();
+  expect(opens).toEqual([]);
 });
 
 test('async reads, save, exports and write refusals wait for the main replica', async () => {

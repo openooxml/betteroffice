@@ -203,14 +203,26 @@ export interface DocxPluginGeometry {
    * Client coordinates to the text under them, with an edit batch target at `layout.version`;
    * null outside text, while input is pending and until the pages show this layout. Selection
    * and focus stay where they are.
+   * @deprecated Use {@link readPositionAtPoint}.
    */
   getPositionAtPoint(clientX: number, clientY: number): DocxPluginPointPosition | null;
+  /**
+   * {@link getPositionAtPoint} once pending input is flushed, without loading the editor's
+   * document copy when the worker holds the document.
+   */
+  readPositionAtPoint(clientX: number, clientY: number): Promise<DocxPluginPointPosition | null>;
   /**
    * Every visible fragment in overlay-layer pixels. The anchor is the collapsed end of the
    * last fragment, a wholly hidden target's boundary, or its paragraph; pageRect is its page.
    * Refuses stale or unrendered layouts.
+   * @deprecated Use {@link readAnchorGeometry}.
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
+  /**
+   * {@link getAnchorGeometry} for any target, without loading the editor's document copy when the
+   * worker holds the document. Refuses stale or unrendered layouts.
+   */
+  readAnchorGeometry(target: DocxGeometryTarget): Promise<DocxAnchorGeometryResult>;
 }
 
 export type DocxPluginNavigationFailureCode =
