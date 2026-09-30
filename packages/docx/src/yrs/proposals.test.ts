@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
+import { createProposalRegistry } from './proposals';
 import {
   createYrsSession,
   proposalRevisionPreview,
@@ -835,24 +836,48 @@ describe('YrsSession host proposals', () => {
 
   it('settles a revision two withdrawn proposals share as the preview shows it', async () => {
     const session = await open();
-    const original = texts(session, 'original');
-    const [first] = snapshotOf(propose(session, insert('first', '00000001', 'end', '!'))).proposals;
-    const second = snapshotOf(propose(session, insert('second', '00000001', 'end', '?')))
-      .proposals[1]!;
-    expect(second.revisionIds).toEqual(first!.revisionIds);
+    const settled: (readonly string[])[][] = [];
+    const registry = createProposalRegistry({
+      version: () => session.version(),
+      resolveParagraphAnchor: (anchor) => session.resolveParagraphAnchor(anchor),
+      findText: (request) => session.findText(request),
+      readParagraphs: (request) => session.readParagraphs(request),
+      applyEdits: (request) => {
+        const result = session.applyEdits(request);
+        if (!result.ok) return result;
+        return {
+          ...result,
+          receipts: result.receipts.map((receipt) => ({ ...receipt, revisionIds: ['shared'] })),
+        };
+      },
+      listRevisions: () => [],
+      settleRevisions: (accept, reject) => settled.push([accept, reject]),
+    });
+    for (const [id, paraId] of [
+      ['first', '00000003'],
+      ['second', '00000006'],
+    ] as const) {
+      snapshotOf(
+        registry.propose({
+          expectVersion: session.version(),
+          proposals: [insert(id, paraId, 'end', '!')],
+        })
+      );
+    }
     const decided = snapshotOf(
-      decide(session, [
-        { id: 'first', state: 'accepted' },
-        { id: 'second', state: 'rejected' },
-      ])
+      registry.setStates({
+        expectVersion: session.version(),
+        expectPreviewVersion: registry.snapshot().previewVersion,
+        changes: [
+          { id: 'first', state: 'accepted' },
+          { id: 'second', state: 'rejected' },
+        ],
+      })
     );
-    expect(proposalRevisionPreview(decided)).toEqual({ [first!.revisionIds[0]!]: 'rejected' });
+    expect(proposalRevisionPreview(decided)).toEqual({ shared: 'rejected' });
 
-    snapshotOf(
-      session.withdrawProposals({ expectVersion: session.version(), ids: ['first', 'second'] })
-    );
-    expect(texts(session, 'accepted')).toEqual(original);
-    expect(session.listRevisions()).toEqual([]);
+    snapshotOf(registry.withdraw({ expectVersion: session.version(), ids: ['first', 'second'] }));
+    expect(settled).toEqual([[[], ['shared']]]);
   });
 
   it('forgets proposals when the session opens another document', async () => {
