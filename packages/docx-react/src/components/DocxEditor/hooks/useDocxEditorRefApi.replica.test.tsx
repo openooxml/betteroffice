@@ -185,6 +185,7 @@ test('every public ref API is classified for replica access', async () => {
     'search', 'searchGoTo', 'searchNext', 'searchPrevious',
     'scrollToChangeId', 'scrollToCommentId', 'scrollToPage', 'scrollToParaId', 'scrollToPosition',
     'setParagraphStyle', 'setProposalStates', 'setZoom', 'validateEdits', 'whenLayoutComplete',
+    'withdrawProposals',
   ].sort());
 });
 
@@ -194,6 +195,7 @@ test('async reads, save, exports and write refusals wait for the main replica', 
   const edits = { expectVersion: 'before-ready', steps: [] };
   const proposals = { expectVersion: 'before-ready', proposals: [] };
   const states = { expectVersion: 'before-ready', expectPreviewVersion: 0, changes: [] };
+  const withdrawal = { expectVersion: 'before-ready', ids: [] };
   const pending = Promise.all([
     api.readParagraphs({ view: 'accepted' }),
     api.listContentControls(),
@@ -204,6 +206,7 @@ test('async reads, save, exports and write refusals wait for the main replica', 
     api.applyEdits(edits),
     api.proposeChanges(proposals),
     api.setProposalStates(states),
+    api.withdrawProposals(withdrawal),
     api.save(),
     api.flushPendingInput(),
     api.exportStructuredWithPages({ revisionView: 'markup', expectLayoutVersion: 'before-ready' }),
@@ -228,12 +231,12 @@ test('async reads, save, exports and write refusals wait for the main replica', 
   expect(values[2]).toEqual(session.findContentControls({ kind: 'tag', tag: 'missing' }));
   expect(values[3]).toEqual(session.findText(search));
   expect(values[4]).toEqual(session.getProposals());
-  for (const result of values.slice(5, 9)) {
+  for (const result of values.slice(5, 10)) {
     expect(result).toMatchObject({ ok: false, version: session.version(), failure: { code: 'read-only' } });
   }
-  expect(new TextDecoder().decode(values[9]!)).toBe(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n'));
-  expect(values[11]).toMatchObject({ ok: false, version: session.version(), failure: { code: 'layout-unavailable' } });
-  expect(values[12]).toBe(0);
+  expect(new TextDecoder().decode(values[10]!)).toBe(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n'));
+  expect(values[12]).toMatchObject({ ok: false, version: session.version(), failure: { code: 'layout-unavailable' } });
+  expect(values[13]).toBe(0);
 });
 
 test('synchronous reads finish the main open without changing their return types', async () => {
