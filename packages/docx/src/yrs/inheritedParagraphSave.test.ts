@@ -197,15 +197,15 @@ for (const seeder of ['native', 'projected'] as const) {
       let bytes = fixture();
       for (let cycle = 0; cycle < 3; cycle += 1) {
         bytes = await saveOnce(bytes, seeder, save, cycle === 0 ? (session) => {
-          const first = session.paragraphs('body')[0]!;
-          const position = { paraId: first.paraId, offset: 0 };
+          const second = session.paragraphs('body')[1]!;
+          const position = { paraId: second.paraId, offset: 0 };
           session.setParagraphAttrs({ story: 'body', start: position, end: position }, {
             spaceAfter: 0,
             alignment: 'right',
             indentLeft: 720,
           });
         } : undefined);
-        const [edited, untouched] = paragraphs(documentXml(bytes));
+        const [untouched, edited] = paragraphs(documentXml(bytes));
         expect(edited).toContain('w:after="0"');
         expect(edited).not.toContain('w:line=');
         expect(edited).toContain('<w:jc w:val="right"/>');
