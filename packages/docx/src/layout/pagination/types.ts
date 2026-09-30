@@ -1466,6 +1466,7 @@ export type Page = {
   /** Page margins. */
   margins: PageMargins;
   bodyMargins?: PageMargins;
+  bodyAnchorMargins?: PageMargins;
   /** Page size (width, height). */
   size: { w: number; h: number };
   /** Page orientation. */

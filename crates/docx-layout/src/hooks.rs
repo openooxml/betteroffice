@@ -476,6 +476,7 @@ pub fn layout_floating_table(
     let state_idx = paginator.get_current();
     let state = paginator.state(state_idx);
     let page = &paginator.pages[state.page_index];
+    let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
     let column_x = paginator.get_column_x(state.column_index);
     let column_width = paginator.column_width();
     let horizontal = floating.horz_anchor.as_deref().unwrap_or("margin");
@@ -483,22 +484,22 @@ pub fn layout_floating_table(
     let h_start = match horizontal {
         "page" => 0.0,
         "text" => column_x,
-        _ => page.margins.left,
+        _ => margins.left,
     };
     let h_end = match horizontal {
         "page" => page.size.w,
         "text" => column_x + column_width,
-        _ => page.size.w - page.margins.right,
+        _ => page.size.w - margins.right,
     };
     let v_start = match vertical {
         "page" => 0.0,
         "text" => state.pen_y,
-        _ => page.margins.top,
+        _ => margins.top,
     };
     let v_end = if vertical == "page" {
         page.size.h
     } else {
-        page.size.h - page.margins.bottom
+        page.size.h - margins.bottom
     };
     let inside_is_start = page.number % 2 == 1;
 

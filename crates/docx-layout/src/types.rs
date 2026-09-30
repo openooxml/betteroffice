@@ -2281,6 +2281,9 @@ pub struct Page {
     /// Body flow margins when they differ from the anchor frame.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_margins: Option<PageMargins>,
+    /// Effective body anchor margins before float exclusions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_anchor_margins: Option<PageMargins>,
     pub size: Size,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orientation: Option<String>,

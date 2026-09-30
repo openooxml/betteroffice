@@ -1712,7 +1712,7 @@ struct ImageRunIn {
     css_float: Option<String>,
     /// anchor position for a floating image run (`wp:positionH`/`wp:positionV`),
     /// resolved to a page rect by [`resolve_anchored_position`]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_anchor_position")]
     position: Option<crate::types::ImageRunPosition>,
     #[serde(default)]
     crop_top: Option<f64>,
@@ -1771,6 +1771,37 @@ pub(crate) struct RotationBoundsIn {
     offset_x: Option<f64>,
     #[serde(default)]
     offset_y: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnchorPosIn {
+    #[serde(default)]
+    horizontal: Option<crate::types::AxisPosition>,
+    #[serde(default)]
+    vertical: Option<crate::types::AxisPosition>,
+    #[serde(default)]
+    relative_height: Option<u64>,
+}
+
+fn deserialize_anchor_position<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::types::ImageRunPosition>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<AnchorPosIn>::deserialize(deserializer)?.map(|position| {
+            crate::types::ImageRunPosition {
+                horizontal: position.horizontal,
+                vertical: position.vertical,
+                relative_height: position.relative_height,
+                use_simple_pos: None,
+                simple_pos: None,
+                behind_doc: None,
+            }
+        }),
+    )
 }
 
 #[derive(Deserialize, Clone)]
@@ -2507,7 +2538,7 @@ pub(crate) struct TextBoxBlockIn {
     css_float: Option<String>,
     #[serde(default)]
     wrap_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_anchor_position")]
     position: Option<crate::types::ImageRunPosition>,
     #[serde(default)]
     pm_start: Option<i64>,
@@ -2735,6 +2766,8 @@ pub(crate) struct PageIn {
     pub(crate) margins: MarginsIn,
     #[serde(default)]
     body_margins: Option<MarginsIn>,
+    #[serde(default)]
+    body_anchor_margins: Option<MarginsIn>,
     /// 1-based page number (canonical layouts carry it; falls back to index+1)
     #[serde(default)]
     pub(crate) number: Option<u64>,
@@ -4984,19 +5017,24 @@ fn build_display_list_selected(
         }
 
         // Page coordinate frame for anchored-float resolution.
+        let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
         let float_geom = PageFloatGeom {
             page_width: page.size.w,
             page_height: page.size.h,
-            margin_left: page.margins.left,
-            margin_top: page.margins.top,
-            content_width: page.size.w - page.margins.left - page.margins.right,
-            content_height: page.size.h - page.margins.top - page.margins.bottom,
+            margin_left: margins.left,
+            margin_top: margins.top,
+            content_width: page.size.w - margins.left - margins.right,
+            content_height: page.size.h - margins.top - margins.bottom,
         };
 
+        let mut float_paragraphs = HashSet::new();
         let mut behind_objects = Vec::new();
         for fragment in &page.fragments {
             match fragment {
                 FragmentIn::Paragraph(fragment) => {
+                    if !float_paragraphs.insert(block_key(&fragment.block_id)) {
+                        continue;
+                    }
                     let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
                         continue;
                     };
@@ -5178,8 +5216,10 @@ fn build_display_list_selected(
         }
 
         // Front floating images paint after body content.
+        float_paragraphs.clear();
         for frag in &page.fragments {
             if let FragmentIn::Paragraph(pf) = frag
+                && float_paragraphs.insert(block_key(&pf.block_id))
                 && let Some(mb) = by_id.get(&block_key(&pf.block_id))
                 && let BlockIn::Paragraph(block) = &mb.block
             {
@@ -11329,6 +11369,79 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_and_text_box_positions_ignore_legacy_metadata() {
+        let position = serde_json::json!({
+            "horizontal": {"relativeTo": "page", "posOffset": 914400},
+            "vertical": {"relativeTo": "margin", "posOffset": 0},
+            "relativeHeight": 7,
+        });
+        let measured = serde_json::json!([
+            {
+                "block": {"kind": "paragraph", "id": "image-anchor", "runs": [{
+                    "kind": "image", "src": "image", "width": 20, "height": 20,
+                    "displayMode": "float", "position": position,
+                }]},
+                "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [{
+                    "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+                    "width": 0, "ascent": 15, "descent": 5, "lineHeight": 20,
+                }]},
+            },
+            {
+                "block": {"kind": "textBox", "id": "box", "width": 20, "height": 20,
+                          "displayMode": "float", "fillColor": "#eeeeee",
+                          "position": position, "content": []},
+                "measure": {"kind": "textBox", "width": 20, "height": 20,
+                            "innerMeasures": []},
+            },
+        ]);
+        let input = serde_json::json!({
+            "measured": measured,
+            "options": {},
+            "headersFooters": {"variants": [{
+                "rId": "header", "kind": "header", "type": "default",
+                "height": 20, "flowHeight": 20, "measured": measured,
+            }]},
+            "layout": {"pages": [{
+                "size": {"w": 500, "h": 500},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "fragments": [
+                    {"kind": "paragraph", "blockId": "image-anchor", "x": 96, "y": 96,
+                     "width": 308, "height": 20, "fromLine": 0, "toLine": 1},
+                    {"kind": "textBox", "blockId": "box", "x": 96, "y": 96,
+                     "width": 20, "height": 20},
+                ],
+            }]},
+        });
+        let expected = build_display_list_json(&input.to_string()).unwrap();
+        for metadata in [
+            serde_json::json!({"useSimplePos": 0}),
+            serde_json::json!({"behindDoc": "0"}),
+            serde_json::json!({"useSimplePos": [], "behindDoc": {}, "simplePos": false,
+                               "unknown": [1, 2]}),
+        ] {
+            let mut input = input.clone();
+            for path in ["/measured", "/headersFooters/variants/0/measured"] {
+                for measured in input.pointer_mut(path).unwrap().as_array_mut().unwrap() {
+                    let block = &mut measured["block"];
+                    let position = if block["kind"] == "paragraph" {
+                        &mut block["runs"][0]["position"]
+                    } else {
+                        &mut block["position"]
+                    };
+                    position
+                        .as_object_mut()
+                        .unwrap()
+                        .extend(metadata.as_object().unwrap().clone());
+                }
+            }
+            assert_eq!(
+                build_display_list_json(&input.to_string()).unwrap(),
+                expected
+            );
+        }
+    }
 
     /// Every retained primitive carries its attributes inline, so rarely set
     /// metadata stays boxed: 270k primitives cost 1.9 KB each before it was.

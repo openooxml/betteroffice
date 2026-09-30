@@ -1223,6 +1223,7 @@ fn resolve_object_position(
     let state_idx = paginator.get_current();
     let state = paginator.state(state_idx);
     let page = &paginator.pages[state.page_index];
+    let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
     let column_x = paginator.get_column_x(state.column_index);
     crate::anchor::resolve_position(
         position,
@@ -1231,10 +1232,10 @@ fn resolve_object_position(
         &crate::anchor::AnchorFrame {
             page_width: page.size.w,
             page_height: page.size.h,
-            margin_left: page.margins.left,
-            margin_right: page.margins.right,
-            margin_top: page.margins.top,
-            margin_bottom: page.margins.bottom,
+            margin_left: margins.left,
+            margin_right: margins.right,
+            margin_top: margins.top,
+            margin_bottom: margins.bottom,
             flow_x: column_x,
             flow_y: state.pen_y,
             flow_width: paginator.column_width(),
@@ -1410,6 +1411,66 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn internal_float_bands_emit_paragraph_images_once_per_page_in_both_passes() {
+        for wrap in ["square", "behind"] {
+            let mut value: Input = serde_json::from_value(json!({
+                "measured": [{
+                    "block": {"kind": "paragraph", "id": "body", "runs": [
+                        {"kind": "text", "text": "abcdefghij"},
+                        {"kind": "image", "src": "float", "width": 20, "height": 20,
+                         "displayMode": "float", "wrapType": wrap,
+                         "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 0}}},
+                    ]},
+                    "measure": {"kind": "paragraph", "totalHeight": 200,
+                                "lines": (0..10).map(|index| json!({
+                                    "headRun": 0, "headChar": index, "tailRun": 0,
+                                    "tailChar": index + 1, "width": 10, "ascent": 15,
+                                    "descent": 5, "lineHeight": 20,
+                                })).collect::<Vec<_>>()},
+                }],
+                "options": {
+                    "pageSize": {"w": 500, "h": 500},
+                    "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                    "sectionPageFloatBands": [{"default": [{"top": 200, "bottom": 240}]}],
+                },
+            }))
+            .unwrap();
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 1);
+            let fragments = &result.pages[0].fragments;
+            assert_eq!(fragments.len(), 2);
+            for (fragment, expected_y) in fragments.iter().zip([96.0, 240.0]) {
+                let Fragment::Paragraph(fragment) = fragment else {
+                    panic!("paragraph expected");
+                };
+                assert_eq!(fragment.y, expected_y);
+            }
+            let display: serde_json::Value = serde_json::from_str(
+                &crate::display_list::build_display_list_json(
+                    &json!({"measured": value.measured, "options": value.options,
+                            "layout": result})
+                    .to_string(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+            let images: Vec<_> = primitives
+                .iter()
+                .enumerate()
+                .filter(|(_, primitive)| primitive["kind"] == "image")
+                .collect();
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].1["y"], 96);
+            for (index, primitive) in primitives.iter().enumerate() {
+                if primitive["kind"] == "text" {
+                    assert_eq!(images[0].0 < index, wrap == "behind");
+                }
+            }
+        }
     }
 
     #[test]

@@ -229,7 +229,7 @@ impl Paginator {
             0
         } else {
             let mut hasher = DefaultHasher::new();
-            serde_json::to_vec(&bands)
+            serde_json::to_value(&bands)
                 .expect("float bands serialize")
                 .hash(&mut hasher);
             hasher.finish()
@@ -428,7 +428,7 @@ impl Paginator {
         &self,
         opens_section: bool,
         page_number: u32,
-    ) -> (PageMargins, Option<PageMargins>) {
+    ) -> (PageMargins, Option<PageMargins>, Option<PageMargins>) {
         let mut body_margins = self.page_margins(opens_section, page_number);
         let margins = self
             .section_page_float_bands
@@ -437,9 +437,10 @@ impl Paginator {
             .and_then(|bands| bands.anchor_margins.clone())
             .map(effective_margins)
             .unwrap_or_else(|| body_margins.clone());
+        let body_anchor_margins = (body_margins != margins).then(|| body_margins.clone());
         self.fold_edge_float_bands(&mut body_margins, opens_section, page_number);
         let body_margins = (body_margins != margins).then_some(body_margins);
-        (margins, body_margins)
+        (margins, body_margins, body_anchor_margins)
     }
 
     /// Moves a page's body edge past float bands that cover it, so a band at
@@ -538,7 +539,8 @@ impl Paginator {
         };
         let page_index = self.states[idx].page_index;
         let number = self.pages[page_index].number;
-        let (margins, body_margins) = self.page_geometry(self.opens_section[idx], number);
+        let (margins, body_margins, body_anchor_margins) =
+            self.page_geometry(self.opens_section[idx], number);
         let flow_margins = body_margins.as_ref().unwrap_or(&margins);
         let content_top = flow_margins.top;
         let content_limit =
@@ -547,6 +549,7 @@ impl Paginator {
         self.pages[page_index].size = self.page_size.clone();
         self.pages[page_index].margins = margins;
         self.pages[page_index].body_margins = body_margins;
+        self.pages[page_index].body_anchor_margins = body_anchor_margins;
         self.pages[page_index].columns = (self.columns.count > 1.0).then(|| self.columns.clone());
         self.pages[page_index].region_section_index = self.section_index;
         let state = &mut self.states[idx];
@@ -590,7 +593,11 @@ impl Paginator {
         };
         let page = &self.pages[self.states[idx].page_index];
         if self.page_geometry(self.opens_section[idx], page.number)
-            != (page.margins.clone(), page.body_margins.clone())
+            != (
+                page.margins.clone(),
+                page.body_margins.clone(),
+                page.body_anchor_margins.clone(),
+            )
             || self.page_float_bands(self.opens_section[idx], page.number) != self.float_bands[idx]
         {
             self.restamp_pristine_page();
@@ -606,7 +613,8 @@ impl Paginator {
         self.section_started = true;
         self.continued_parity_offset = self.displayed_parity_offset;
         self.displayed_parity_offset = self.page_parity_offset(opens_section, page_number);
-        let (margins, body_margins) = self.page_geometry(opens_section, page_number);
+        let (margins, body_margins, body_anchor_margins) =
+            self.page_geometry(opens_section, page_number);
         let float_bands = self.page_float_bands(opens_section, page_number);
         let flow_margins = body_margins.as_ref().unwrap_or(&margins);
         let content_top = flow_margins.top;
@@ -618,6 +626,7 @@ impl Paginator {
             fragments: Vec::new(),
             margins,
             body_margins,
+            body_anchor_margins,
             size: self.page_size.clone(),
             orientation: None,
             section_index: None,
@@ -1139,6 +1148,38 @@ mod tests {
     }
 
     #[test]
+    fn float_band_fingerprints_normalize_signed_zero() {
+        let mut paginator = Paginator::new(
+            Size { w: 500.0, h: 500.0 },
+            margins(96.0, 96.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        let mut bands = vec![SectionPageFloatBands {
+            default: vec![PageFloatBand {
+                top: -0.0,
+                bottom: 100.0,
+                odd_page: None,
+            }],
+            first: Some(vec![PageFloatBand {
+                top: -100.0,
+                bottom: -0.0,
+                odd_page: None,
+            }]),
+            anchor_margins: Some(margins(-0.0, -0.0)),
+            ..Default::default()
+        }];
+        paginator.set_section_page_float_bands(bands.clone());
+        let negative_zero = paginator.section_page_float_bands.clone();
+        bands[0].default[0].top = 0.0;
+        bands[0].first.as_mut().unwrap()[0].bottom = 0.0;
+        bands[0].anchor_margins = Some(margins(0.0, 0.0));
+        paginator.set_section_page_float_bands(bands);
+        assert_eq!(paginator.section_page_float_bands, negative_zero);
+    }
+
+    #[test]
     fn checkpoints_share_float_bands_across_one_page_sections() {
         for section_count in [1, 32, 128] {
             let size = Size { w: 500.0, h: 500.0 };
@@ -1151,8 +1192,7 @@ mod tests {
                 bottom: 196.0,
                 odd_page: None,
             });
-            let mut paginator =
-                Paginator::new(size, margins(96.0, 96.0), columns(), None).unwrap();
+            let mut paginator = Paginator::new(size, margins(96.0, 96.0), columns(), None).unwrap();
             paginator.set_section_page_float_bands(bands.clone());
             let mut checkpoints = Vec::new();
             for section_index in 0..section_count {

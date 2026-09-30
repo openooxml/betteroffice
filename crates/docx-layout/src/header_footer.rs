@@ -924,6 +924,126 @@ mod tests {
     }
 
     #[test]
+    fn another_sections_header_float_preserves_effective_body_anchor_margins() {
+        let (mut header, size, margins) = header_footer_with_blocks(
+            HeaderFooterKind::Header,
+            vec![json!({
+                "kind": "paragraph", "id": "tall-header",
+                "attrs": {"spacing": {"line": 152, "lineRule": "exact"}},
+                "runs": [{"kind": "text", "text": "Header"}],
+            })],
+        );
+        header.r_id = "tall-header".to_owned();
+        assert_eq!(header.flow_height, 152.0);
+        let effective = extend_body_margins(&size, &margins, header.flow_height, 0.0);
+        assert_eq!(effective.top, 200.0);
+        let (mut float_header, _, _) = header_with_image("margin", 0.0, false);
+        float_header.r_id = "float-header".to_owned();
+        float_header.section_index = 1;
+        let bands = header_footer_float_bands(
+            &float_header,
+            HeaderFooterMetrics {
+                kind: HeaderFooterKind::Header,
+                page_size: &size,
+                margins: &margins,
+            },
+        );
+        let position = json!({
+            "horizontal": {"relativeTo": "margin", "posOffset": 0},
+            "vertical": {"relativeTo": "margin", "posOffset": 0},
+        });
+        let mut input: crate::types::Input = serde_json::from_value(json!({
+            "measured": [
+                {
+                    "block": {"kind": "paragraph", "id": "body", "runs": [
+                        {"kind": "text", "text": "Body"},
+                        {"kind": "image", "src": "body-image", "width": 20, "height": 20,
+                         "displayMode": "float", "wrapType": "square", "position": position},
+                    ]},
+                    "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                        "width": 40, "ascent": 15, "descent": 5, "lineHeight": 20,
+                    }]},
+                },
+                {
+                    "block": {"kind": "textBox", "id": "body-box", "width": 20,
+                              "height": 20, "displayMode": "float", "position": position,
+                              "fillColor": "#eeeeee", "content": []},
+                    "measure": {"kind": "textBox", "width": 20, "height": 20,
+                                "innerMeasures": []},
+                },
+                {"block": {"kind": "sectionBreak", "id": "break", "type": "nextPage",
+                           "margins": effective}, "measure": {"kind": "sectionBreak"}},
+                {
+                    "block": {"kind": "paragraph", "id": "tail",
+                              "runs": [{"kind": "text", "text": "Tail"}]},
+                    "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                        "width": 40, "ascent": 15, "descent": 5, "lineHeight": 20,
+                    }]},
+                },
+            ],
+            "options": {"pageSize": size, "margins": effective, "finalMargins": margins,
+                        "bodyBreakType": "nextPage", "sectionPageFloatBands": [
+                            {"default": [], "anchorMargins": margins},
+                            {"default": bands, "anchorMargins": margins},
+                        ]},
+        }))
+        .unwrap();
+        let regions = serde_json::from_value(json!({"sections": [
+            {"headerFooterRefs": {"headerDefault": header.r_id}},
+            {"headerFooterRefs": {"headerDefault": float_header.r_id}},
+        ]}))
+        .unwrap();
+        let mut layout = crate::place::layout_document(&mut input).unwrap();
+        crate::regions::apply_document_regions(&mut layout, &regions);
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(
+            layout.pages[0].body_anchor_margins.as_ref(),
+            Some(&effective)
+        );
+        let body_box = layout.pages[0]
+            .fragments
+            .iter()
+            .find_map(|fragment| match fragment {
+                crate::types::Fragment::TextBox(fragment) => Some(fragment),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((body_box.x, body_box.y), (96.0, 200.0));
+        let display: DisplayList = serde_json::from_str(
+            &build_display_list_json(
+                &json!({"measured": input.measured, "options": input.options, "layout": layout,
+                        "headersFooters": {"variants": [header, float_header]}})
+                .to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let body_image = display.pages[0]
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Image(image) => Some(image),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(body_image.y.as_f64(), Some(200.0));
+        let header_image = display.pages[1]
+            .header
+            .as_ref()
+            .unwrap()
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Image(image) => Some(image),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(header_image.y.as_f64(), Some(96.0));
+    }
+
+    #[test]
     fn folded_body_margins_preserve_the_header_image_anchor() {
         let (variant, size, margins) = header_with_image("margin", 0.0, false);
         let regions = serde_json::from_value(json!({
@@ -1004,7 +1124,7 @@ mod tests {
                     _ => None,
                 })
                 .unwrap();
-            assert_eq!(body_image.y.as_f64(), Some(96.0));
+            assert_eq!(body_image.y.as_f64(), Some(body_top));
         }
     }
 
