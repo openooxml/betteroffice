@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
+import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
+import type { LayoutBlock } from '../layout/pagination/types';
 import type { ComplexField, Document, Run, SimpleField } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from './index';
@@ -11,6 +13,19 @@ import { documentToYrs } from './documentToYrs';
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.docx');
 const EXISTING_ROOM_SEED = resolve(import.meta.dir, '../../../../apps/demo/public/seeds/docx.bin');
+
+function sequenceHyperlinkPackage(instruction: string): Uint8Array<ArrayBuffer> {
+  const hyperlink = `<w:hyperlink w:anchor="top"><w:r><w:fldChar w:fldCharType="begin" w:fldLock="true"/></w:r>${instruction}<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink>`;
+  const body = `<w:p><w:fldSimple w:instr="QUOTE">${hyperlink}</w:fldSimple></w:p><w:p><w:fldSimple w:instr="SEQ Figure"><w:r><w:t>2</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr="SEQ Table"><w:r><w:t>7</w:t></w:r></w:fldSimple></w:p>`;
+  const parts = new Map([
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
+    ['_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'],
+    ['word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr/></w:body></w:document>`],
+  ]);
+  return new Uint8Array(
+    rezipPartsToArrayBuffer(new Map([...parts].map(([name, xml]) => [name, toBytes(xml)])))
+  );
+}
 
 /** The model without the source occurrences a parse for an editing session records. */
 function withoutSourceOrdinals(value: unknown): unknown {
@@ -133,6 +148,37 @@ describe('DOCX engine seeding', () => {
       ]);
     } finally {
       session.destroy();
+    }
+  });
+
+  it.each(['run', 'sdt', 'nested hyperlink'])('seeds and hydrates raw hyperlink SEQs nested in a simple field (%s)', async (wrapper) => {
+    const instruction = '<w:r><w:instrText> SEQ Figure </w:instrText></w:r>';
+    const content = wrapper === 'nested hyperlink'
+      ? `<w:hyperlink w:anchor="top">${instruction}</w:hyperlink>`
+      : instruction;
+    const bytes = sequenceHyperlinkPackage(wrapper === 'run'
+      ? content
+      : `<w:sdt><w:sdtPr/><w:sdtContent>${content}</w:sdtContent></w:sdt>`);
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const projected = await createYrsSession({ clientId: 47009 });
+    const hydrated = await createYrsSession({ clientId: 47010 });
+    try {
+      documentToYrs(projected, parsed);
+      const quote = projected.storySegments('body').find((segment) =>
+        segment.kind === 'embed' &&
+        segment.embedKind === 'field' &&
+        segment.payload.fieldType === 'QUOTE'
+      );
+      expect(quote?.kind === 'embed' && quote.payload.nestedSequences).toEqual(['figure']);
+      hydrated.openDocx(bytes, false);
+      hydrated.loadState(projected.encodeState());
+      const blocks = hydrated.yrsBlocksForStory('body', {}) as LayoutBlock[];
+      const results = blocks.flatMap((block) => block.kind === 'paragraph' ? block.runs : [])
+        .flatMap((run) => run.kind === 'field' && run.rawType === 'SEQ' ? [run.fallback] : []);
+      expect(results).toEqual(['2', '1']);
+    } finally {
+      projected.destroy();
+      hydrated.destroy();
     }
   });
 

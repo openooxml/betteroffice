@@ -1563,15 +1563,49 @@ pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
 }
 
 pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
-    let children =
-        field(Some(hyperlink), "structuredChildren").or_else(|| field(Some(hyperlink), "children"));
+    let mut pending = vec![hyperlink];
     let mut instructions: Vec<Option<String>> = Vec::new();
     let mut names = Vec::new();
-    for run in array(children) {
-        if string(field(Some(run), "type")) != Some("run") {
+    while let Some(node) = pending.pop() {
+        let kind = string(field(Some(node), "type"));
+        match kind {
+            Some("hyperlink") => {
+                let children = field(Some(node), "structuredChildren")
+                    .or_else(|| field(Some(node), "children"));
+                pending.extend(array(children).iter().rev());
+            }
+            Some("inlineSdt") => {
+                pending.extend(array(field(Some(node), "content")).iter().rev());
+            }
+            Some("simpleField" | "complexField") => {
+                let tree = field(Some(node), "fieldTree");
+                let result = field(field(Some(node), "structuredResult"), "inline")
+                    .or_else(|| field(field(tree, "result"), "inline"))
+                    .or_else(|| {
+                        field(
+                            Some(node),
+                            if kind == Some("simpleField") {
+                                "content"
+                            } else {
+                                "fieldResult"
+                            },
+                        )
+                    });
+                pending.extend(array(result).iter().rev());
+                if kind == Some("complexField") {
+                    let code = field(field(Some(node), "structuredCode"), "inline")
+                        .or_else(|| field(field(tree, "code"), "inline"))
+                        .or_else(|| field(Some(node), "fieldCode"));
+                    pending.extend(array(code).iter().rev());
+                }
+            }
+            Some("run") => {}
+            _ => continue,
+        }
+        if kind != Some("run") {
             continue;
         }
-        for content in array(field(Some(run), "content")) {
+        for content in array(field(Some(node), "content")) {
             let instruction = match string(field(Some(content), "type")) {
                 Some("fieldChar") => match string(field(Some(content), "charType")) {
                     Some("begin") => {
@@ -1880,6 +1914,11 @@ fn field_to_units(
         })
     {
         let (payload, marks) = field_payload(value, style_formatting, source);
+        opaque_sequences.extend(
+            array(payload.get("nestedSequences"))
+                .iter()
+                .filter_map(|name| string(Some(name)).map(str::to_owned)),
+        );
         return vec![embed_unit("field", payload, &marks, None, 1)];
     }
     let mut units = Vec::new();
@@ -5450,6 +5489,68 @@ mod tests {
             {"type": "simpleField", "instruction": "SEQ Other"}
         ]}});
         assert_eq!(nested_sequence_names(&field), ["figure", "table", "other"]);
+    }
+
+    #[test]
+    fn hyperlink_sequence_names_follow_inline_containers_in_order() {
+        let hyperlink = json!({"type": "hyperlink", "children": [], "structuredChildren": [
+            {"type": "run", "content": [{"type": "fieldChar", "charType": "begin"}]},
+            {"type": "inlineSdt", "content": [
+                {"type": "hyperlink", "children": [
+                    {"type": "run", "content": [{"type": "instrText", "text": " sEq \"Fig"}]}
+                ]},
+                {"type": "simpleField", "instruction": "QUOTE", "content": [],
+                    "structuredResult": {"inline": [
+                        {"type": "run", "content": [{"type": "instrText", "text": "ure\" "}]}
+                    ]}
+                }
+            ]},
+            {"type": "complexField", "instruction": "QUOTE", "fieldCode": [], "fieldResult": [],
+                "structuredCode": {"inline": [
+                    {"type": "run", "content": [
+                        {"type": "fieldChar", "charType": "begin"},
+                        {"type": "instrText", "text": "SEQ Table"}
+                    ]}
+                ]},
+                "structuredResult": {"inline": [
+                    {"type": "run", "content": [{"type": "fieldChar", "charType": "end"}]}
+                ]}
+            },
+            {"type": "run", "content": [
+                {"type": "fieldChar", "charType": "separate"},
+                {"type": "instrText", "text": "SEQ Ignored"},
+                {"type": "fieldChar", "charType": "end"}
+            ]}
+        ]});
+        assert_eq!(hyperlink_sequence_names(&hyperlink), ["table", "figure"]);
+    }
+
+    #[test]
+    fn a_nonprojected_field_keeps_nested_hyperlink_sequences_opaque() {
+        let package = json!({"document": {"content": [{"type": "paragraph", "content": [
+            {"type": "simpleField", "instruction": "QUOTE", "fieldType": "QUOTE", "content": [],
+                "structuredResult": {"inline": [
+                    {"type": "hyperlink", "children": [], "structuredChildren": [
+                        {"type": "run", "content": [{"type": "fieldChar", "charType": "begin"}]},
+                        {"type": "run", "content": [{"type": "instrText", "text": " SEQ Figure "}]},
+                        {"type": "run", "content": [{"type": "fieldChar", "charType": "separate"}]},
+                        {"type": "simpleField", "instruction": "PAGE", "fieldType": "PAGE", "content": [
+                            {"type": "run", "content": [{"type": "text", "text": "1"}]}
+                        ]},
+                        {"type": "run", "content": [{"type": "fieldChar", "charType": "end"}]}
+                    ]}
+                ]}
+            }
+        ]}]}});
+        let (context, _) = lower_package(&package, BTreeMap::new());
+        assert_eq!(context.opaque_sequences, ["figure"]);
+        let unit = &context.plans[0].units[0];
+        let UnitContent::Embed { kind, payload } = &unit.content else {
+            panic!("expected a field");
+        };
+        assert_eq!(kind, "field");
+        assert_eq!(payload["nestedSequences"], json!(["figure"]));
+        assert!(!payload.contains_key("resultProjection"));
     }
 
     #[test]

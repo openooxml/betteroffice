@@ -22,6 +22,14 @@ fn hyperlink_sequence() -> String {
     )
 }
 
+fn hyperlink_sequence_with_sdt_instruction() -> String {
+    hyperlink_sequence().replacen(
+        "<w:r><w:instrText> SEQ Figure </w:instrText></w:r>",
+        "<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:instrText> SEQ Figure </w:instrText></w:r></w:sdtContent></w:sdt>",
+        1,
+    )
+}
+
 fn paragraph(content: &str) -> String {
     format!("<w:p>{}{content}</w:p>", run("Caption "))
 }
@@ -213,6 +221,33 @@ fn a_text_box_with_a_hyperlink_sequence_keeps_cached_results() {
 fn a_body_hyperlink_sequence_keeps_cached_results() {
     let body = [
         paragraph(&hyperlink_sequence()),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
+    ]
+    .concat();
+    assert_eq!(sequence_results(&body), ["2"]);
+}
+
+#[test]
+fn a_text_box_with_a_hyperlink_sequence_instruction_in_an_sdt_keeps_cached_results() {
+    let body = [
+        format!(
+            "<w:p>{}</w:p>",
+            text_box(&hyperlink_sequence_with_sdt_instruction())
+        ),
+        paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
+        paragraph(&field("SEQ Table")),
+    ]
+    .concat();
+    assert_eq!(
+        boxed_sequence_results(&body),
+        [(false, "2"), (false, "1")].map(|(boxed, result)| (boxed, result.to_owned()))
+    );
+}
+
+#[test]
+fn a_body_hyperlink_sequence_instruction_in_an_sdt_keeps_cached_results() {
+    let body = [
+        paragraph(&hyperlink_sequence_with_sdt_instruction()),
         paragraph(&field("SEQ Figure").replacen("<w:t>7</w:t>", "<w:t>2</w:t>", 1)),
     ]
     .concat();

@@ -524,10 +524,58 @@ function nestedSequenceNames(field: SimpleField | ComplexField): string[] {
         const name = sequenceName(node.instruction);
         if (name !== undefined) names.add(name);
       }
+      if (node.type === 'hyperlink') {
+        for (const name of hyperlinkSequenceNames(value as Hyperlink)) names.add(name);
+      }
       for (const key of Object.keys(node).sort().reverse()) pending.push(node[key]);
     }
   }
   return [...names];
+}
+
+function hyperlinkSequenceNames(hyperlink: Hyperlink): string[] {
+  const pending: ParagraphContent[] = [hyperlink];
+  const instructions: Array<string | undefined> = [];
+  const names: string[] = [];
+  const push = (children: readonly ParagraphContent[]): void => {
+    for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
+  };
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    switch (node.type) {
+      case 'hyperlink':
+        push(node.structuredChildren ?? node.children);
+        break;
+      case 'inlineSdt':
+        push(node.content);
+        break;
+      case 'simpleField':
+        push(node.structuredResult?.inline ?? node.fieldTree?.result?.inline ?? node.content);
+        break;
+      case 'complexField':
+        push(node.structuredResult?.inline ?? node.fieldTree?.result?.inline ?? node.fieldResult);
+        push(node.structuredCode?.inline ?? node.fieldTree?.code?.inline ?? node.fieldCode);
+        break;
+      case 'run':
+        for (const content of node.content) {
+          let instruction: string | undefined;
+          if (content.type === 'fieldChar') {
+            if (content.charType === 'begin') instructions.push('');
+            else if (content.charType === 'separate' && instructions.length > 0) {
+              instruction = instructions[instructions.length - 1];
+              instructions[instructions.length - 1] = undefined;
+            } else if (content.charType === 'end') instruction = instructions.pop();
+          } else if (content.type === 'instrText') {
+            const index = instructions.length - 1;
+            if (instructions[index] !== undefined) instructions[index] += content.text;
+          }
+          const name = instruction === undefined ? undefined : sequenceName(instruction);
+          if (name !== undefined) names.push(name);
+        }
+        break;
+    }
+  }
+  return names;
 }
 
 function sequenceName(instruction: string): string | undefined {
