@@ -481,13 +481,14 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             // Only a queued worker pass follows it at once; until then it is
             // the newest layout there is, so it paints but settles no wait.
             // A queued pass supersedes it even at the same version, such as a
-            // revision preview change.
+            // revision preview change, and lays out in its place when it failed.
+            const queued = queuedBehindWorkerRef.current;
             const stale = readSessionVersion(session) !== sourceVersion;
-            if (!computation || (stale && !queuedBehindWorkerRef.current)) {
-              layOutHere();
+            if (!computation || (stale && !queued)) {
+              if (!queued) layOutHere();
               return;
             }
-            if (stale || queuedBehindWorkerRef.current) markSupersededLayout(computation.layout);
+            if (stale || queued) markSupersededLayout(computation.layout);
             applyComputation(computation);
             // The first pages paint now; the full layout replaces them.
             void computation.complete?.then(
@@ -497,7 +498,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                   if (queuedBehindWorkerRef.current) markSupersededLayout(complete.layout);
                   // Nothing the user did changed: keep their viewport.
                   applyComputation(complete, 'remote');
-                } else {
+                } else if (!queuedBehindWorkerRef.current) {
                   layOutHere();
                 }
               },

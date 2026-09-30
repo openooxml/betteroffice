@@ -19,6 +19,7 @@ interface WorkerPass {
   /** The document version the pass was asked for. */
   at: number;
   answer(): void;
+  fail(): void;
 }
 
 function fakeDocument() {
@@ -62,6 +63,7 @@ async function opened() {
                 at: Number(asked.version()),
                 answer: () =>
                   resolve({ layout: { pages: [] } as unknown as Layout, notesConverged: true }),
+                fail: () => resolve(null),
               });
             })
           : null,
@@ -192,6 +194,28 @@ test('a pass no change asked to run here waits for the worker pass in flight', a
   await answer(2);
   expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
   expect(doc.laidOutHere).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test('a worker pass that fails with a pass queued behind it leaves the layout to that pass', async () => {
+  const { doc, worker, errors, hook, frame, shown } = await opened();
+
+  doc.version = 2;
+  act(() => hook.result.current.scheduleLayout('local', true));
+  await frame();
+  act(() => hook.result.current.runLayoutPipeline());
+  await frame();
+  await act(async () => {
+    worker[1]!.fail();
+    await new Promise((done) => setTimeout(done, 0));
+  });
+  expect(doc.laidOutHere).toEqual([]);
+  expect(shown()).toBe('1');
+
+  await frame();
+  expect(doc.laidOutHere).toEqual([2]);
+  expect(shown()).toBe('2');
+  expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
   expect(errors).toEqual([]);
 });
 
