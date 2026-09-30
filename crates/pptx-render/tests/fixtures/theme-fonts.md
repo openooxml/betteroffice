@@ -13,16 +13,16 @@ The widths below assume these registered families:
 | Calibri | Carlito |
 | Times New Roman | LiberationSerif |
 
-The public fixture changes only the two major-font text boxes. The heading's width changes from 482.8828125 px to 437.0625 px. Its color remains `#17365D`. The 400 px body box still occupies three lines, with these breaks:
+The two major-font text boxes use the major face. The heading is 437.0625 px wide and `#17365D`. The 400 px body box occupies three lines, with these breaks:
 
-| Main | Fixed |
-| --- | --- |
-| `Theme major font chooses ` | `Theme major font chooses the ` |
-| `the heading face and its ` | `heading face and its own ` |
-| `own wrapping metrics.` | `wrapping metrics.` |
+| Line |
+| --- |
+| `Theme major font chooses the ` |
+| `heading face and its own ` |
+| `wrapping metrics.` |
 
-The minor text remains `#008080`; the explicit Arial text remains `#7F3F00`. Slide 2's first three line widths remain 690.15625, 754.171875, and 725.6875 px.
+The minor text is `#008080`; the explicit Arial text is `#7F3F00`. Slide 2's first three line widths are 690.15625, 754.171875, and 725.6875 px.
 
-The only other changed slide is `shape-style.pptx`, slide 5, object 2. Its inherited title style requests `+mj-lt`. The theme's major font is Calibri Light, which is absent from the registry above. Main incorrectly uses Calibri/Carlito Bold (249.65625 px); the fixed build uses the configured Arial/Liberation Sans Bold fallback (281 px). The text remains `layout title 0070C0`, colored `#0070C0`. Registering the major face, as the public fixture does, selects that face directly.
+In `shape-style.pptx`, slide 5, object 2 inherits a title style that requests `+mj-lt`. The theme's major font is Calibri Light, which is absent from the registry above, so the text uses the configured Arial/Liberation Sans Bold fallback (281 px), not Calibri/Carlito Bold. The text is `layout title 0070C0`, colored `#0070C0`. Registering the major face, as the public fixture does, selects that face directly.
 
 Regression tests: `cargo test -p betteroffice-drawingml theme::tests` and `cargo test -p betteroffice-pptx-render --test theme_fonts`.

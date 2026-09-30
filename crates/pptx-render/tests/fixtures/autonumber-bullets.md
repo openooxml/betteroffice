@@ -4,7 +4,7 @@
 | --- | --- | --- |
 | 1 | Mixed outline levels, ten items, explicit and inherited starts, alphabetic and Roman formats | 29 automatic markers, alongside seven character bullets |
 | 2 | Wrapped lists with `normAutofit` and `spAutoFit` | Two independent sequences `1.`–`5.`, without double-counting |
-| 3 | Unnumbered text and a character bullet | Display list byte-identical to main |
+| 3 | Unnumbered text and a character bullet | No automatic markers |
 
 With Liberation Sans registered as Arial and Liberation Mono as Courier New, slide 1's ten-item list draws `1.` and `10.` at x=320 px. Numbers use Courier New, 18 px, `#D02020`; the text stays at x=356 px, Arial, 24 px, `#147D40`. The first column resumes `2.` after six nested character bullets. The third column draws explicit `7. 8. 1. 2.` and inherited `7. 8.` sequences. The right column restarts after unnumbered paragraphs and new bullet parents.
 

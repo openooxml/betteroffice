@@ -39,3 +39,9 @@ interpreting `@V` using its `@U` display unit before comparison. Numeric agreeme
 requires both equal canonical magnitudes and equal dimensions. Those cache values
 may be stale; the reported agreement rate is an imperfect compatibility signal,
 not proof of exact Visio compatibility.
+
+The oracle excludes only nine demonstrated stale cache encodings, pinned to their
+corpus source parts and shapes: four `LineWeight` `F="Inh"` values from a prior
+inheritance context, and five `LineWeight` `THEMEVAL("LineWeight",0.24PT)` values
+whose raw `@V` was retained across a display-unit conversion. All other mismatches
+remain disagreements.
