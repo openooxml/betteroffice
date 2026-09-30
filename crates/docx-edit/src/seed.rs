@@ -5806,6 +5806,13 @@ mod tests {
         extent.column_widths
     }
 
+    fn no_preference() -> docx_layout::types::PreferredWidth {
+        docx_layout::types::PreferredWidth {
+            value: None,
+            r#type: Some("auto".to_owned()),
+        }
+    }
+
     #[test]
     fn seeded_grid_percentages_do_not_become_cell_width_preferences() {
         for formatting in [Value::Null, json!({}), json!({"verticalAlign": "center"})] {
@@ -5833,8 +5840,7 @@ mod tests {
             };
             for cell in &table.rows[0].cells {
                 assert_eq!(cell.width, None);
-                assert_eq!(cell.width_value, None);
-                assert_eq!(cell.preferred_width, None);
+                assert_eq!(cell.preferred_width, Some(no_preference()));
             }
             assert_eq!(measured_table_column_widths(table), vec![150.0, 450.0]);
             document
@@ -5920,8 +5926,11 @@ mod tests {
         assert_eq!(table.rows[0].cells[0].row_span, Some(2.0));
         assert_eq!(table.rows[1].cells.len(), 1);
         for cell in table.rows.iter().flat_map(|row| &row.cells) {
-            assert_eq!(cell.width_value, None);
-            assert_eq!(cell.preferred_width, None);
+            assert!(
+                cell.preferred_width
+                    .as_ref()
+                    .is_none_or(|width| *width == no_preference())
+            );
         }
         assert_eq!(
             measured_table_column_widths(table),

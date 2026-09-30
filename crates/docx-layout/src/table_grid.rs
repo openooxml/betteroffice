@@ -613,6 +613,29 @@ fn legacy_autofit_column_widths(
         .collect()
 }
 
+/// Whether any cell's known minimum content width exceeds the columns it spans.
+fn clips_known_minimum(
+    table_block: &TableBlock,
+    widths: &[f64],
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+) -> bool {
+    resolve_cell_grid(table_block).into_iter().any(|grid_cell| {
+        let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
+        let minimum = cell.min_content_width.or(content_widths
+            .and_then(|rows| rows.get(grid_cell.row_index))
+            .and_then(|cells| cells.get(grid_cell.cell_index))
+            .copied()
+            .flatten()
+            .map(|widths| widths.0));
+        let width: f64 = widths
+            .iter()
+            .skip(grid_cell.column_index)
+            .take(grid_cell.col_span)
+            .sum();
+        minimum.is_some_and(|minimum| width < minimum)
+    })
+}
+
 fn autofit_column_widths(
     table_block: &TableBlock,
     content_width: f64,
@@ -640,22 +663,8 @@ fn autofit_column_widths(
     if target < min_total {
         let scale = target / min_total;
         let widths: Vec<f64> = minimums.into_iter().map(|width| width * scale).collect();
-        for grid_cell in resolve_cell_grid(table_block) {
-            let cell = &table_block.rows[grid_cell.row_index].cells[grid_cell.cell_index];
-            let minimum = cell.min_content_width.or(content_widths
-                .and_then(|rows| rows.get(grid_cell.row_index))
-                .and_then(|cells| cells.get(grid_cell.cell_index))
-                .copied()
-                .flatten()
-                .map(|widths| widths.0));
-            let width: f64 = widths
-                .iter()
-                .skip(grid_cell.column_index)
-                .take(grid_cell.col_span)
-                .sum();
-            if minimum.is_some_and(|minimum| width < minimum) {
-                return None;
-            }
+        if clips_known_minimum(table_block, &widths, content_widths) {
+            return None;
         }
         return Some(widths);
     }
@@ -919,10 +928,16 @@ pub(crate) fn resolve_content_fitted_column_widths(
         .or(table_block.table_layout.as_deref())
         .unwrap_or("legacy");
     if !table_block.rows.is_empty() && algorithm == "fixed" {
-        return (
-            resolve_fixed_column_widths(table_block, content_width, col_count, explicit_width_px),
-            true,
-        );
+        let widths =
+            resolve_fixed_column_widths(table_block, content_width, col_count, explicit_width_px);
+        // Fixed widths that would clip known content keep main's sizing.
+        if clips_known_minimum(table_block, &widths, content_widths) {
+            return (
+                legacy_table_column_widths(table_block, content_width),
+                false,
+            );
+        }
+        return (widths, true);
     }
     if !table_block.rows.is_empty() && algorithm == "autofit" {
         if let Some(widths) = autofit_column_widths(
@@ -1278,6 +1293,22 @@ mod tests {
             resolve_table_column_widths(&block, 600.0),
             vec![50.0, 50.0, 500.0]
         );
+    }
+
+    #[test]
+    fn fixed_widths_that_would_clip_known_content_keep_mains_grid() {
+        for (minimum, expected) in [(200.0, 300.0), (80.0, 100.0)] {
+            let block: TableBlock = serde_json::from_value(json!({
+                "id": 0, "tableLayout": "fixed", "columnWidths": [300],
+                "rows": [{"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "minContentWidth": minimum, "maxContentWidth": minimum,
+                     "widthValue": 1500, "widthType": "dxa",
+                     "preferredWidth": {"value": 1500, "type": "dxa"}}
+                ]}]
+            }))
+            .unwrap();
+            assert_eq!(resolve_table_column_widths(&block, 600.0), vec![expected]);
+        }
     }
 
     #[test]
