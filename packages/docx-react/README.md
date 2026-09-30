@@ -330,6 +330,11 @@ if (round.ok) {
 }
 ```
 
+The input, result and refusal-code types (`DocxProposalRequest`, `DocxProposalResult`,
+`DocxProposalStateRequest`, `DocxProposalSnapshot`, `DocxProposalFailure`, and related
+types) are re-exported from `@betteroffice/docx-react` -- no need to import
+`@betteroffice/docx/yrs` directly just to type host proposal code.
+
 ## Host search
 
 `DocxEditorRef.search(query, options?)` drives the editor's find from a host's own
