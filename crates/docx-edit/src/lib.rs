@@ -713,24 +713,62 @@ impl EditingDoc {
     /// reads and edits as fully seeded from then on. Runs at the first operation that needs
     /// the whole document and is a no-op once it has run.
     pub fn materialize_pending_seed(&self) -> bool {
-        let Some(pending) = self.pending_seed.lock().unwrap().take() else {
+        self.materialize_seed_through(u32::MAX)
+    }
+
+    /// Applies pending seed ops through the paragraph holding story `index`, so
+    /// a bounded read pays only the window it covers instead of the whole tail.
+    /// The window extends to the closing paragraph mark of `index`'s paragraph.
+    /// Returns whether ops applied.
+    pub fn materialize_seed_through(&self, index: u32) -> bool {
+        let Some((story, ops, next, at_paragraph_end)) = ({
+            let guard = self.pending_seed.lock().unwrap();
+            guard.as_ref().map(|pending| {
+                let (end, boundary) = pending.window_end(index);
+                (
+                    pending.story.clone(),
+                    pending.ops[pending.next..end].to_vec(),
+                    end,
+                    boundary,
+                )
+            })
+        }) else {
             return false;
         };
-        let applied = self
-            .apply_raw_story_batches(
-                pending.batches,
-                &EditCtx::local(String::new(), String::new()),
-            )
-            .is_ok();
-        if applied {
-            seed::seed_opaque_sequences(self, &pending.opaque_sequences);
-            if let Some(source) = self.source_metadata() {
-                source.read().pin(self);
-                source.read().comment_writes.arm();
-            }
-            seed::embed_safety_inventory(self);
+        if ops.is_empty() {
+            return false;
         }
-        applied
+        if self.apply_raw_seed_window(&story, ops).is_err() {
+            return false;
+        }
+        let pending = {
+            let mut guard = self.pending_seed.lock().unwrap();
+            let Some(pending) = guard.as_mut() else {
+                return true;
+            };
+            pending.next = next;
+            pending.at_paragraph_end = at_paragraph_end;
+            if pending.next < pending.ops.len() {
+                return true;
+            }
+            guard.take().unwrap()
+        };
+        seed::seed_opaque_sequences(self, &pending.opaque_sequences);
+        if let Some(source) = self.source_metadata() {
+            source.read().pin(self);
+            source.read().comment_writes.arm();
+        }
+        seed::embed_safety_inventory(self);
+        true
+    }
+
+    /// Seed ops still deferred; `0` once materialized.
+    pub fn pending_seed_len(&self) -> usize {
+        self.pending_seed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |pending| pending.ops.len() - pending.next)
     }
 
     /// Retains the package the stories were, or will be, seeded from.

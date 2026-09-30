@@ -206,7 +206,7 @@ fn collect_table_cell_stories<T: ReadTxn>(
 impl EditingDoc {
     /// Aggregates text-unit marks and start-paragraph state over a story range.
     pub fn selection_context(&self, range: &StoryRange) -> OpResult<SelectionContextInfo> {
-        self.materialize_pending_seed();
+        self.materialize_seed_through(range.end);
         if range.end < range.start {
             return Err(OpError::InvalidRange {
                 start: range.start,
