@@ -124,6 +124,49 @@ describe('useRustMeasurement default fonts', () => {
     expect(result.current.residentMeasurementConfig([regular])).toEqual(both);
   });
 
+  test('a font an earlier pass is still loading holds back no later pass', async () => {
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: (family: string) => () =>
+              family === 'Pending'
+                ? new Promise<ArrayBuffer>(() => {})
+                : Promise.resolve(bytesOf(family)),
+          }),
+        }),
+    });
+    let registered = 0;
+    const engine: RustTextEngine = {
+      registerFont() {
+        registered += 1;
+        return registered;
+      },
+      clearFonts() {},
+    };
+    const regular: ResidentFontRequirement = {
+      key: 'regular',
+      family: 'Calibri',
+      bold: false,
+      italic: false,
+    };
+    const pending: ResidentFontRequirement = {
+      key: 'pending',
+      family: 'Pending',
+      bold: false,
+      italic: false,
+    };
+    const { result } = renderHook(() =>
+      useRustMeasurement({ document: null, textEngine: engine })
+    );
+    await waitFor(() => expect(result.current.deferLayoutPass()).toBe(false));
+    await waitFor(() => expect(result.current.residentMeasurementConfig([regular])).not.toBeNull());
+    expect(result.current.residentMeasurementConfig([regular, pending])).toBeNull();
+    expect(result.current.residentMeasurementConfig([regular])?.fontChains).toEqual({
+      regular: [1],
+    });
+  });
+
   test('a font that loads after the editor let go of its engine registers nothing on it', async () => {
     let finishLoad: (() => void) | undefined;
     configureDefaultFonts({
